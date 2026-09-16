@@ -127,7 +127,7 @@ pub(crate) struct DeferredForeignKeyUnit {
     /// keys are inlined into `CREATE TABLE` and there is no unit to emit. Such an
     /// entry rides this list purely so that the end-of-lowering drain proves the
     /// target is created somewhere in the envelope - the check PostgreSQL and
-    /// MySQL get for free and SQLite previously had no equivalent of (F673).
+    /// MySQL get for free and SQLite has no equivalent of (F673).
     pub(crate) unit: Option<LoweredUnit>,
 }
 
@@ -260,13 +260,9 @@ pub struct FieldDescriptor {
     /// `ColType::String { length }` and `ColType::Text` as `"string"`, because the
     /// shared SDK `FieldDef` kernel has one string token, so the token alone cannot
     /// tell a bounded column from an unbounded one. `render::fold::token_to_col_type`
-    /// therefore reads this value on the way back in. It used to ignore it, and the
-    /// cost was measured against a live PostgreSQL in
-    /// `crates/zeroship-migrate/tests/fold_live/pg_bounded_string_producer_live.rs`: a
-    /// `t.string({ maxLength: 64 })` column authored through the descriptor producer
-    /// reached the server as an unbounded `text` that STORED a 200-character value,
-    /// and re-importing an exported schema authored `ALTER COLUMN ... TYPE text`
-    /// against a table nobody had changed.
+    /// therefore reads this value on the way back in; ignoring it would round-trip a
+    /// bounded `t.string({ length })` column as unbounded `text`, so re-exporting the
+    /// schema would emit `ALTER COLUMN ... TYPE text` against a column nobody changed.
     ///
     /// `None` => a genuine unbounded `t.text()` column.
     #[serde(rename = "maxLength", default)]
@@ -313,8 +309,7 @@ pub struct FieldDescriptor {
     /// float from a fixed-precision decimal, and the SQLite emitter answered `REAL`
     /// for both - re-declaring a `t.numeric(20, 4)` column REAL inside the 12-step
     /// rebuild and pushing every stored decimal string through a binary double on
-    /// the way across. Measured against a live database in
-    /// `crates/zeroship-migrate/tests/fold_live/sqlite_decimal_rebuild_live.rs`.
+    /// the way across.
     ///
     /// Carrying the parameters BESIDE the token is the same shape `charLen` and
     /// `maxLength` already use to narrow `char`/`string`: a consumer that ignores
@@ -424,14 +419,12 @@ pub struct RenameHint {
 // ---------------------------------------------------------------------------
 // Descriptor -> information_schema.data_type mapping.
 //
-// Schema-authority: the engine's own earlier-subset type table was DELETED and the
-// column-type resolution now DELEGATES to the shared `crate::schema` kernel
-// (`query::def_to_column_type_for_dialect`). That is what gives the differ FULL
-// capability - `vector(N)` / `geography(POINT,4326)` (geoPoint) / `BYTEA`
-// (encrypted) / `literal`-primitive are now first-class, where the earlier subset
-// rejected them. The fail-closed guarantee is preserved on top of the shared
-// map (an unknown token mapping to the shared `TEXT` fallback is still rejected,
-// never silently degraded).
+// Schema-authority: column-type resolution DELEGATES to the shared `crate::schema`
+// kernel (`query::def_to_column_type_for_dialect`). That is what gives the differ
+// FULL capability - `vector(N)` / `geography(POINT,4326)` (geoPoint) / `BYTEA`
+// (encrypted) / `literal`-primitive are first-class. The fail-closed guarantee is
+// preserved on top of the shared map (an unknown token mapping to the shared `TEXT`
+// fallback is still rejected, never silently degraded).
 // ---------------------------------------------------------------------------
 
 /// Build the SDK `FieldDef` JSON (`{ type, encrypted?, vectorDims?, vectorMetric?,
@@ -1153,9 +1146,7 @@ fn rerender_generated(
 ///
 /// The single implementation both replays that own a `TableSnapshot` call: the
 /// offline fold's `Op::RenameColumn` arm, and the SQLite rename rebuild, which
-/// derives its post-rename table from the live one by changing column NAMES. Before
-/// this existed they disagreed with each other and with the descriptor fold, which
-/// has followed renames into the AST all along.
+/// derives its post-rename table from the live one by changing column NAMES.
 ///
 /// The rewrite matches `colRef` nodes on the SERIALIZED expression, never the
 /// rendered text, so a string literal that spells the old column name is left alone.
@@ -1267,17 +1258,13 @@ fn rename_quoted_column_in_sql(
 /// Follow a COLUMN rename into the two RENDERED-SQL sites an index carries: the
 /// partial-index `predicate` and the body of an [`IndexElementSnapshot::Expr`] key.
 ///
-/// # Why this is now sound, when the arm's own comment used to say it was not
+/// # Why this is sound
 ///
-/// Both sites were left STALE on purpose for as long as the only tool on offer was
-/// NAIVE SUBSTITUTION, and the reason recorded in `render::fold`'s `Op::RenameColumn`
-/// arm was correct as far as it went: "swapping the name inside the text ...
-/// `WHERE (note <> 'a')` would become `WHERE (note <> 'b')`". What changed is that
-/// [`rename_quoted_column_in_sql`] exists. It is not a substitution - it walks the
-/// fragment as QUOTED RUNS, so a `'...'` string literal is copied through WHOLE and can
-/// never be mistaken for a column reference, which is precisely the false positive that
-/// ruled the rewrite out. The reason survived the tool that invalidated it; this is the
-/// sweep that noticed.
+/// [`rename_quoted_column_in_sql`] is not a substitution - it walks the fragment as
+/// QUOTED RUNS, so a `'...'` string literal is copied through WHOLE and can never be
+/// mistaken for a column reference, which is precisely the false positive that rules
+/// NAIVE SUBSTITUTION out ("swapping the name inside the text ... `WHERE (note <>
+/// 'a')` would become `WHERE (note <> 'b')`").
 ///
 /// The match is EXACT on the decoded identifier and carries a round-trip guard, and
 /// every body these two fields hold on the fold's side was rendered by
@@ -1537,24 +1524,6 @@ pub(crate) fn column_snapshot_for_field(
     // recoverable (Postgres `citext`, SQLite `COLLATE NOCASE`, and MySQL
     // `information_schema.COLUMNS.COLLATION_NAME`)", and `diff_snapshots` compares it
     // with no dialect test at all.
-    //
-    // It used to be suppressed on MySQL by an identity match,
-    // which was true when it was written and stopped being true later: MySQL had NO
-    // live introspection at the time, so nothing could disagree with the folded
-    // `None`. `mysql/drift_sql.rs` later learned to recover the intent from
-    // `COLLATION_NAME` through `case_sensitive_from_collation`, and from that point
-    // the two halves of the same fact disagreed by construction - the fold said
-    // `None`, the catalog said `Some(false)`, and every MySQL table with a
-    // case-insensitive text column reported drift from the instant it was created and
-    // for as long as it existed.
-    //
-    // Nothing could see it. MySQL had no live Rust coverage of any kind, so the only
-    // comparison that puts the two producers side by side did not exist until
-    // `fold_roundtrip_mysql.rs`, which found this on its first green run of the
-    // preceding stages:
-    //
-    //     AlteredObject { table: "tags", object: "column email",
-    //                     field: "case_sensitive", expected: "", actual: "false" }
     //
     // The facet is NOT double-counted by removing the exclusion.
     // `text_storage` carries the exact character set and collation name, but
@@ -1839,14 +1808,9 @@ impl DesiredSchema {
 ///   with the project schema; SQLite definitions leave it unqualified because its
 ///   `REFERENCES` grammar does not accept a database/schema qualifier.
 ///
-/// This list used to open with two FTS bullets, in the present tense: that a
-/// `.fts()` field folded into a `__fts` GENERATED `tsvector` column plus a GIN
-/// index on PostgreSQL, and into an FTS5 virtual table mirrored by AFTER triggers
-/// on SQLite. **Full-text support was removed from this engine**, down to the
-/// `IndexMethod` variant, on the grounds that FTS is not an atomic type and should
-/// be composed from smaller primitives - see `docs/proposals/fts-macro.md`. There
-/// is no `.fts()` facet to fold: the authoring surface has none, and no code path
-/// here produces either shape.
+/// Full-text search is not folded here: FTS is not an atomic type and is composed
+/// from smaller primitives instead (see `docs/proposals/fts-macro.md`). There is no
+/// `.fts()` facet, so no code path produces an FTS shape.
 pub fn desired_snapshot_for_dialect(
     vendors: VendorSet,
     project_schema: &str,
@@ -2508,12 +2472,11 @@ fn is_injected_index(table: &str, index_name: &str, inject: &ResolvedInject) -> 
 /// index-naming convention, which is a decision core makes rather than a spelling
 /// a vendor is asked for. So core answers it once, here, and hands over the answer.
 ///
-/// EXACTLY equivalent to the per-index predicate the SQLite emitter used to run
-/// itself, not merely close to it: within one `create_table` both `table` and
-/// `inject` are fixed, so the predicate is a pure function of the index NAME. A
-/// name-keyed set therefore admits the same indexes for every input, including two
-/// entries of `t.indexes` sharing a name - where the old predicate was likewise
-/// obliged to answer the same for both.
+/// EXACTLY equivalent to a per-index predicate, not merely close to it: within one
+/// `create_table` both `table` and `inject` are fixed, so the predicate is a pure
+/// function of the index NAME. A name-keyed set therefore admits the same indexes
+/// for every input, including two entries of `t.indexes` sharing a name, which a
+/// per-index predicate would also have to answer the same for.
 fn injected_index_names(
     table: &str,
     t: &TableSnapshot,
@@ -2875,8 +2838,8 @@ pub(crate) fn ensure_fk_supporting_index(
     }
 
     // A same-named FK may legitimately change tuple/order on SQLite through a
-    // rebuild. Its previously planned `<fk>_idx` is a remaining schema object and
-    // must not be silently dropped, but it no longer supports the new tuple. Pick
+    // rebuild. Its already-planned `<fk>_idx` is a remaining schema object and
+    // must not be silently dropped, though it does not support the new tuple. Pick
     // the first deterministic free suffix so both lowering and offline folding
     // converge on the same additional index while preserving the old one.
     let mut ordinal = 1_u32;
@@ -3008,16 +2971,6 @@ fn geo_index_snapshot(
 /// Emitted SQL is unchanged either way. NEITHER `MysqlEmitter::create_index` NOR
 /// `SqliteEmitter::create_index` reads `access_method` or `opclass` at all, so
 /// clearing them below cannot move a byte on either leg.
-///
-/// That last sentence used to read differently, and the difference is worth
-/// keeping. It claimed `SqliteEmitter::create_index` DID read `access_method`, "but
-/// only to route the `fts5` sentinel to a virtual-table CREATE", and used that to
-/// argue the sentinel could not be folded away. **Full-text support has since been
-/// removed from the engine entirely** - there is no `fts5` sentinel, no `.fts()`
-/// facet, and `SqliteEmitter::create_index` reads `access_method` ZERO times. The
-/// code was already correct; only its stated reason had gone false, which is the
-/// more dangerous half - a future reader could have restored a routing path for a
-/// sentinel that no longer exists.
 fn fold_ann_index_for_dialect(
     vendors: VendorSet,
     mut idx: IndexSnapshot,
@@ -3346,14 +3299,11 @@ fn foreign_key_targets_column(constraint: &ConstraintSnapshot, table: &str, colu
 /// later deploy.
 /// # No `Default`, and that is the point
 ///
-/// It used to derive one. A defaulted plan is a plan whose BACKEND was picked by
-/// omission, and [`DialectId`] deliberately has no `Default` for exactly that
-/// reason - an open backend id has no natural zero value, and manufacturing one
-/// would silently elect a vendor.
-///
-/// Nothing replaced it, because nothing used it: the derive was measured to have
-/// zero callers in the workspace before it was dropped. Do not add one back to make
-/// a test fixture shorter; write the dialect the fixture is for.
+/// A defaulted plan is a plan whose BACKEND was picked by omission, and
+/// [`DialectId`] deliberately has no `Default` for exactly that reason - an open
+/// backend id has no natural zero value, and manufacturing one would silently
+/// elect a vendor. Do not add one back to make a test fixture shorter; write the
+/// dialect the fixture is for.
 #[derive(Debug, Clone)]
 pub struct DeclarativePlan {
     /// The plain additive / destructive migrations (CREATE TABLE, ADD/DROP
@@ -3472,11 +3422,8 @@ impl DeclarativePlan {
     ///
     /// # A backend with no analyzer is reported, not silently omitted
     ///
-    /// This used to call the `libpg_query` analyzers directly, on every dialect. A
-    /// MySQL or SQLite plan therefore had every statement fail to parse and came
-    /// back with NO entries at all - a report that read as "clean" and meant "none
-    /// of this was read". Now the backend answers, and a backend that ships no
-    /// analyzer says so: every migration in the plan is returned carrying the single
+    /// The backend answers: one that ships no analyzer says so, and every migration
+    /// in the plan is returned carrying the single
     /// [`rule::ANALYZER_DIALECT_UNSUPPORTED`] notice.
     ///
     /// The repetition is deliberate. This return shape is PER MIGRATION, and a
@@ -4687,9 +4634,7 @@ impl DeclarativeAuthor {
                         // reads `character varying(191)` against a live `text` and every
                         // such column looks like a type change. Same idiom as
                         // `existence_probe`'s `dtypes_match`, which canonicalises both
-                        // sides before asking whether they differ. The RAW comparison
-                        // this replaces refused a live MySQL re-deploy of every bounded
-                        // string column.
+                        // sides before asking whether they differ.
                         let live_ct = self.schema_renderer().canonical_type(&lc.data_type);
                         let desired_ct = self.schema_renderer().canonical_type(&c.data_type);
                         if matches!(column_change_strategy, ExistingColumnChangeStrategy::Refuse)
@@ -4787,18 +4732,17 @@ impl DeclarativeAuthor {
                     Some(li) => {
                         // Paired index on both sides: any shape difference is an
                         // in-place redefinition (DROP+CREATE), which the differ does
-                        // not synthesize. Surface it EXPLICITLY (5-idx) - never
-                        // silently skip (the old loop only checked name presence, so a
-                        // uniqueness flip emitted 0 migrations and left the wrong index
-                        // in place).
+                        // not synthesize. Surface it EXPLICITLY - never silently skip:
+                        // a name-presence check alone lets a uniqueness flip leave the
+                        // wrong index in place.
                         //
                         // Ask `same_definition_except_name`, the SAME question the
                         // alias arm asks, so one pairing has one answer for what makes
                         // an index the same index. Hand-picking `unique` and `columns`
-                        // here let an access-method flip, a changed predicate, a changed
+                        // would let an access-method flip, a changed predicate, a changed
                         // INCLUDE payload, changed storage parameters, ONLY and a
-                        // changed comment through: an exact-name pair returned a clean
-                        // plan while the live index was a different index.
+                        // changed comment through: an exact-name pair could return a
+                        // clean plan while the live index was a different index.
                         //
                         // Refuse rather than emit the rebuild. `render_drop_index`
                         // classifies a DROP as destructive + approval-requiring only
@@ -5826,9 +5770,7 @@ impl DeclarativeAuthor {
     /// owner of the table, NOT the deploying app. This keeps the differ's cross-app
     /// guards honest: if `live_owner != self.owner_app`, the rename is a structural
     /// change to a FOREIGN table and `enforce_ownership` refuses it with
-    /// `NotTableOwner`. (Previously both maps were fabricated as the deploying app,
-    /// which would let app B silently rebuild app A's table once this leg is
-    /// deploy-wired.)
+    /// `NotTableOwner`.
     // Wide by design (the SQLite arm of the cross-subsystem rename bridge): it needs
     // the rename triple, the full live snapshot + SDK Value to author the rebuild,
     // and the real owner for the cross-app guard. See `lower_ir_rename`.
@@ -6413,12 +6355,11 @@ impl DeclarativeAuthor {
     /// posture walk in `check_ir_data_security_policy` acts on that classification -
     /// under `data_security.destructive_ops = forbid` it refuses BOTH.
     ///
-    /// This used to pass `MigrationFlags::default()`, the only member of the drop family
-    /// that did. The flags are the OTHER gate: `PlanStep::approval_scope_version` fires
-    /// on `destructive || requires_approval`, so a detach carrying neither was ungated on
-    /// the approval path while every sibling drop was gated. Two gates disagreeing about
-    /// one operation is the defect, whichever way it is resolved; it is resolved toward
-    /// the classifier because the classifier is the one already being enforced.
+    /// The flags are the OTHER gate: `PlanStep::approval_scope_version` fires on
+    /// `destructive || requires_approval`, so a detach carrying neither would be
+    /// ungated on the approval path while every sibling drop is gated. Two gates
+    /// must agree about one operation, and the classifier is the one already being
+    /// enforced.
     ///
     /// Detaching does not delete rows - the partition survives as a standalone table -
     /// so this is not "destructive" in the narrow data-loss sense. It is destructive in
@@ -6661,8 +6602,8 @@ impl DeclarativeAuthor {
             // SatisfiedNoop case (the within-text-affinity facet blind spot is a
             // documented SQLite divergence the differ also accepts). The decider folds
             // the PG-spelled snapshot data_type to the SQLite affinity at compare time,
-            // so a `timestamp with time zone`/`jsonb`/`text` snapshot no longer
-            // false-drifts against a live `text` affinity.
+            // so a `timestamp with time zone`/`jsonb`/`text` snapshot does not
+            // false-drift against a live `text` affinity.
             mig.existence_guard = Some(crate::model::probe::GuardProbe::Table {
                 schema: self.project_schema.clone(),
                 table: table.to_string(),
@@ -6851,8 +6792,7 @@ impl DeclarativeAuthor {
 
     /// The `(table, constraint)` references every stand-alone
     /// `ALTER TABLE ... {ADD|DROP} CONSTRAINT` statement needs. Both identifiers are
-    /// already delegated to the selected backend; the former dialect-match arms
-    /// were byte-identical.
+    /// already delegated to the selected backend.
     fn constraint_refs(&self, table: &str, name: &str) -> (String, String) {
         (self.qualified(table), self.quote_ident(name))
     }
@@ -7571,9 +7511,7 @@ columns = [
     /// for the already-injected system PK), so a column-level modifier on it would be
     /// SILENTLY LOST. Because `ir_column_to_field` remaps ANY `id`-named uuid column
     /// to type `"id"`, a hand-authored `id: t.uuid().unique()` reaches this fold; pin
-    /// that the discarded `unique` is now a HARD REJECT, never a silent drop.
-    /// RED pre-fix: the fold `continue`d, swallowing `unique`, and the snapshot built
-    /// a single bare `id` PK with no error.
+    /// that the discarded `unique` is a HARD REJECT, never a silent drop.
     #[test]
     fn id_field_with_unique_is_rejected_not_silently_folded() {
         let d = id_descriptor(true, /* unique */ true, None);
@@ -7617,9 +7555,9 @@ columns = [
     /// legacy internal ID descriptor legitimately leaves `required` at its
     /// `false` default (the NOT NULL comes from the resolved inject shape). So a
     /// folded `id` field with `required:false` and no `unique`/`default` must STILL
-    /// fold cleanly - the reject must NOT over-fire on nullability. (Guards the fix
-    /// against the regression that briefly broke a re-declared prefixed `id`
-    /// folding into the system PK without emitting a second column.)
+    /// fold cleanly - the reject must NOT over-fire on nullability, and a
+    /// re-declared prefixed `id` must fold into the system PK without emitting a
+    /// second column.
     #[test]
     fn id_field_with_default_required_flag_still_folds() {
         let d = id_descriptor(/* required */ false, false, None);
@@ -8108,12 +8046,11 @@ mod fk_referenced_table_quoting_tests {
         );
     }
 
-    /// **RED before the conditional-quote fix.** A RESERVED-WORD target table
-    /// (`order` - passes `validate_collection`'s `[A-Za-z0-9_]` gate but is a PG
-    /// reserved keyword) must render QUOTED, matching `pg_get_constraintdef`
-    /// (`REFERENCES app."order"(id)`). The pre-fix unconditional-unquoted body
-    /// (`app.order(id)`) would phantom-diff against the live catalog (which quotes
-    /// it) AND mis-resolve as the `ORDER` keyword.
+    /// A RESERVED-WORD target table (`order` - passes `validate_collection`'s
+    /// `[A-Za-z0-9_]` gate but is a PG reserved keyword) must render QUOTED,
+    /// matching `pg_get_constraintdef` (`REFERENCES app."order"(id)`). An
+    /// unconditional-unquoted body (`app.order(id)`) would phantom-diff against the
+    /// live catalog (which quotes it) AND mis-resolve as the `ORDER` keyword.
     #[test]
     fn reserved_word_target_renders_quoted() {
         let def = fk_definition_pg("oid", "app", "order", None, None, true, true);
@@ -8123,13 +8060,12 @@ mod fk_referenced_table_quoting_tests {
         );
     }
 
-    /// **RED before quoting the LOCAL FK column.** A reserved-word LOCAL FK
-    /// column (`order`) must render QUOTED in the `FOREIGN KEY (...)` body,
-    /// matching `pg_get_constraintdef` (`FOREIGN KEY ("order")`). The pre-fix raw
-    /// interpolation emitted `FOREIGN KEY (order)`, phantom-diffing the catalog
-    /// (which quotes it) - the fold REUSES this `definition` and
-    /// `ConstraintSnapshot` has FULL Eq, so the round-trip oracle would mismatch
-    /// (and the bare `order` mis-resolves as the `ORDER` keyword).
+    /// A reserved-word LOCAL FK column (`order`) must render QUOTED in the
+    /// `FOREIGN KEY (...)` body, matching `pg_get_constraintdef`
+    /// (`FOREIGN KEY ("order")`). Raw interpolation emits `FOREIGN KEY (order)`,
+    /// phantom-diffing the catalog (which quotes it) - the fold REUSES this
+    /// `definition` and `ConstraintSnapshot` has FULL Eq, so the round-trip oracle
+    /// would mismatch (and the bare `order` mis-resolves as the `ORDER` keyword).
     #[test]
     fn reserved_word_local_fk_column_renders_quoted() {
         let def = fk_definition_pg("order", "app", "orders", None, None, true, true);
@@ -8184,10 +8120,9 @@ mod fk_referenced_table_quoting_tests {
 #[cfg(test)]
 mod numeric_default_literal_tests {
     //! Lock the int / `>2^53` bigint / decimal-string column DEFAULT
-    //! literal rendering against regression. Pre-fix, the `int` arm was missing
-    //! and an integer DEFAULT (and any decimal/bigint carried as a numeric string)
-    //! silently dropped. The string arm is gated by `is_decimal_string` so raw text
-    //! cannot be injected into the DDL.
+    //! literal rendering. An integer DEFAULT (and any decimal/bigint carried as a
+    //! numeric string) must not silently drop. The string arm is gated by
+    //! `is_decimal_string` so raw text cannot be injected into the DDL.
     use super::numeric_default_literal;
     use serde_json::json;
 
@@ -8381,8 +8316,7 @@ mod mysql_storage_agreement_tests {
     /// This test is that invariant's guard on the MySQL side. If the rule is ever
     /// relaxed - to let a bounded string be case-insensitive, which MySQL itself is
     /// perfectly happy to store - then the renderer must stop reading the
-    /// facet first, or the bound silently disappears. Measured on MySQL 8.4.11
-    /// (`@@collation_server = utf8mb4_0900_ai_ci`), the two spellings are not
+    /// facet first, or the bound silently disappears. The two spellings are not
     /// equivalent and the difference is not cosmetic:
     ///
     ///   - `text CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci` - what this
@@ -8920,26 +8854,14 @@ mod derived_index_alias_tests {
 
 #[cfg(test)]
 mod bare_identifier_tests {
-    //! `validate_ident` is the live refusal of a dot-qualified name, and until
-    //! 2026-09-02 nothing asserted it.
+    //! `validate_ident` is the live refusal of a dot-qualified name.
     //!
     //! **Why it is worth pinning here specifically.** A creator's FK target is
-    //! meant to stay inside the calling app, and the platform used to carry a
-    //! dedicated 235-line validator for exactly that
-    //! (`zeroship-data-v8/src/cross_app_fk.rs`, error code
-    //! `cross_app_fk_forbidden`). That module had ZERO production callers - its
-    //! own rustdoc said "in a default build, nobody" - because decision 10
-    //! removed all DDL from plugin-db, so no plugin-db path sees a `refTarget`
-    //! before DDL any more. It was deleted rather than wired, since there is no
-    //! longer a place in that crate to wire it TO.
-    //!
-    //! What actually refuses `other_app.users` today is the charset rule below:
-    //! a dot is neither ASCII-alphanumeric nor `_`, and `validate_desired` runs
-    //! `validate_ident` over every desired table name before any SQL is
-    //! rendered. Deleting the old module therefore removed a redundant checker,
-    //! but it would ALSO have removed the only test evidence that the property
-    //! holds at all - eleven tests, all of them exercising the dead function.
-    //! These two cases are that evidence, moved onto the path that runs.
+    //! meant to stay inside the calling app. What refuses `other_app.users` is the
+    //! charset rule below: a dot is neither ASCII-alphanumeric nor `_`, and
+    //! `validate_desired` runs `validate_ident` over every desired table name
+    //! before any SQL is rendered. These two cases pin that property on the path
+    //! that runs.
     //!
     //! NOT the same rule as `validate_cross_app_fk_targets` in this file, which
     //! is a dangling-target check and explicitly PERMITS a target owned by

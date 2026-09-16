@@ -333,10 +333,9 @@ pub enum RollbackEngineError {
 pub struct MigrationEngine {
     /// The backends this build ships.
     ///
-    /// The engine used to be a unit struct, and every question it asked about a
-    /// dialect resolved through a registry it reached for by name. This field is
-    /// that reach made explicit: the composition hands the set in, and the engine
-    /// carries it the way it already carries nothing else.
+    /// The composition hands the set in, so every dialect question resolves through
+    /// the vendors the engine actually carries rather than a registry reached for by
+    /// name.
     vendors: VendorSet,
 }
 
@@ -530,13 +529,9 @@ impl MigrationEngine {
         // Lock BEFORE bootstrapping, so the project lock serializes the journal
         // bootstrap as well. Bootstrapping first leaves the one window nothing
         // serializes: on a first deploy the journal objects do not exist yet, so two
-        // callers both find them absent and both try to create them.
-        //
-        // The same ordering on the addon's deploy verbs raced a real PostgreSQL
-        // server three times out of three, surfacing raw catalog errors that read
-        // like corruption. This entry point is not reachable from the CLI on
-        // PostgreSQL - the only napi caller is the SQLite one - so the fix here is
-        // for parity and for Rust callers driving a server backend directly.
+        // callers both find them absent and both try to create them. The same
+        // ordering matters for any caller that reaches this entry point directly,
+        // including Rust callers driving a server backend.
         backend.acquire_project_lock(exec_cfg).await?;
 
         let result = async {
@@ -857,15 +852,14 @@ impl MigrationEngine {
         effective: &zeroship_migrate_policy::EffectivePolicy,
     ) -> Result<DeclarativeDeployPlan, crate::render::declarative::DeclarativeError> {
         let diff = author.diff(desired, live, live_ownership, hints, effective)?;
-        // CARRY `diff.rebuilds` into the plan (the fail-close is gone). The
-        // SQLite 12-step table rebuilds are no longer dropped/refused: the generic
-        // [`apply_declarative`](Self::apply_declarative) drives each through
+        // CARRY `diff.rebuilds` into the plan. The generic
+        // [`apply_declarative`](Self::apply_declarative) drives each SQLite table
+        // rebuild through
         // [`MigrationBackend::rebuild_one`](crate::apply::backend::MigrationBackend::rebuild_one)
         // within the same locked/journaled apply, under the destructive/approval gate
         // (a rebuild's journal migration carries `destructive + requires_approval`).
         // `diff.rebuilds` is ALWAYS empty on the PG path (PG uses native `ALTER` /
-        // expand-contract), so the PG `DeclarativeDeployPlan` is byte-identical to
-        // before; only the SQLite leg gains a non-empty `rebuilds`.
+        // expand-contract), so only the SQLite leg ever carries a non-empty `rebuilds`.
         let policy_guard_cfg = cfg.clone().with_effective_policy(effective.clone());
         // `safety.require_rls` is a final-state obligation over every table a
         // migration creates, and its check - `check_ir_data_security_policy` - runs on
@@ -1110,11 +1104,9 @@ impl MigrationEngine {
     /// The body of [`apply_declarative`](Self::apply_declarative), run while the
     /// outer project advisory lock is held.
     ///
-    /// **Re-pointed onto the single shared [`apply_plan`](Self::apply_plan)
-    /// via the thin shape-adapter.** This function no longer *contains* the
-    /// interleave/journal/`pending_contract` orchestration; it is now a
-    /// shape-adapter that lowers the declarative [`DeclarativeDeployPlan`] into the
-    /// neutral ordered [`PlanStep`] list - its `plain.items` -> [`PlanStep::Ddl`],
+    /// **A thin shape-adapter onto the single shared [`apply_plan`](Self::apply_plan).**
+    /// It lowers the declarative [`DeclarativeDeployPlan`] into the neutral ordered
+    /// [`PlanStep`] list - its `plain.items` -> [`PlanStep::Ddl`],
     /// its `rebuilds` -> [`PlanStep::OnlineRename`]`(`[`RenameStep::TableRebuild`]`)`,
     /// its `renames` -> [`PlanStep::OnlineRename`]`(`[`RenameStep::ExpandContract`]`)`,
     /// preserving the historical order plain -> rebuilds -> renames - then feeds it
@@ -1123,8 +1115,7 @@ impl MigrationEngine {
     ///
     /// The plain set's denial / approval **gate** (the
     /// [`apply_inner`](Self::apply_inner) gate) still runs here, before lowering -
-    /// a denied or un-approved-destructive plain set is refused exactly as before,
-    /// untouched by the convergence.
+    /// a denied or un-approved-destructive plain set is refused before any step runs.
     async fn apply_declarative_locked<B: MigrationBackend>(
         &self,
         plan: &DeclarativeDeployPlan,
@@ -1180,26 +1171,20 @@ impl MigrationEngine {
             )));
         }
 
-        // **Empty-plain-set session hygiene - intentional, state-neutral
-        // simplification.** Previously,
-        // `apply_declarative_locked` ALWAYS called `apply_inner(&plan.plain, ...)` ->
-        // `apply_with_lock_backend` first, which ran one
-        // `snapshot_session`/`reset_role_best_effort`/`restore_session` hygiene cycle
-        // up front - even for an empty `plain.items`. Now the coalesce loop only
-        // calls `apply_with_lock_backend` when there is at least one `Ddl` step, so a
-        // rebuild-only or rename-only declarative deploy (empty plain set) skips that
-        // *initial* hygiene cycle. This is a deliberate simplification, NOT a leak:
+        // **Empty-plain-set session hygiene - intentional, state-neutral.** The
+        // coalesce loop only calls `apply_with_lock_backend` when there is at least one
+        // `Ddl` step, so a rebuild-only or rename-only declarative deploy (empty plain
+        // set) skips the *initial* hygiene cycle. This is deliberate, NOT a leak:
         // every step kind that can run with an empty plain set manages its OWN session
         // hygiene - an online rename's expand steps go through their own
         // `apply_with_lock_backend` batch, which snapshots+restores the session
         // around the dual-write trigger / `SET ROLE` DDL, and a SQLite `rebuild_one`
         // owns its single actor - so the connection is left with the admin role and an
-        // un-pinned `search_path` regardless. The redundant empty up-front cycle bought
-        // nothing but an extra round-trip; dropping it is state-neutral. The invariant
-        // (a rename-only / rebuild-only deploy leaves the session role + search_path
-        // clean) rests on that per-step ownership and on nothing else: no test in this
-        // tree reads the session state back after such a deploy, so the argument above
-        // is the whole of the evidence.
+        // un-pinned `search_path` regardless. The invariant (a rename-only /
+        // rebuild-only deploy leaves the session role + search_path clean) rests on
+        // that per-step ownership and on nothing else: no test in this tree reads the
+        // session state back after such a deploy, so the argument above is the whole
+        // of the evidence.
 
         // The single shared orchestrator. The outer project lock is already held,
         // so every inner sub-batch re-enters it with `LockMode::AlreadyHeld`.
@@ -2071,9 +2056,8 @@ impl MigrationEngine {
         // plan that would have succeeded, never by admitting one.
         //
         // Which preconditions those are is decided by `apply::plan_precondition`,
-        // not by variant and not by taste. This replaces the single-variant retype
-        // preflight that stood here, which asked the pre-plan database with no
-        // reading of what the plan itself does and therefore refused
+        // not by variant and not by taste. Asking unconditionally, with no reading of
+        // what the plan itself does, would wrongly refuse
         // `[dropView, setColumnType]` - a plan that removes its own blocker one
         // step earlier and that every step of succeeds when run.
         self.preflight_plan_preconditions(steps, backend, exec_cfg)
@@ -2654,10 +2638,9 @@ impl MigrationEngine {
                     // so before the FIRST step committed - which is the whole point,
                     // because an `ExpandContract` is rarely a plan's first step and
                     // everything ahead of it commits in its own transaction. This
-                    // used to be the only place the question was asked, phrased as
-                    // an assertion about an unreachable state ("a routing bug").
-                    // Nothing makes it unreachable: `apply_plan` is public API and
-                    // takes the steps it is handed. So it stays, as a GATE and for
+                    // The step can also be reached by a caller other than the
+                    // plan-wide preflight: `apply_plan` is public API and takes the
+                    // steps it is handed. So it stays, as a GATE and for
                     // the same reason the rebuild's scope gate re-checks itself -
                     // it holds the line for a caller that reaches this loop by some
                     // other route - and it re-runs the preflight over this one step
@@ -2707,17 +2690,18 @@ impl MigrationEngine {
                     } else {
                         scope
                     };
-                    // **Drive the expand's phases HERE.** This used to be one call
-                    // down to the backend, which took the whole authored expand
-                    // sequence and drove it - and applied E1/E2 by calling
-                    // `apply_with_lock_backend`, this crate's orchestrator, back
-                    // across the backend boundary. That is mutual recursion across
-                    // the layer boundary the crate split exists to create: a vendor
-                    // crate cannot depend on the engine, so a vendor that re-enters
-                    // the orchestrator can never move out of it, and widening the
-                    // backend contract cannot help because the thing being called
-                    // IS the orchestrator. Every phase below is neutral - approval,
-                    // scope, splitting the marker off the chain, applying the
+                    // **Drive the expand's phases HERE.** The engine owns this
+                    // sequence and asks the backend only for the phases it alone can
+                    // answer. Routing the drive down to the backend instead - the
+                    // backend taking the whole authored expand sequence and applying
+                    // E1/E2 by calling `apply_with_lock_backend`, this crate's
+                    // orchestrator, back across the backend boundary - would be mutual
+                    // recursion across the layer boundary the crate split exists to
+                    // create: a vendor crate cannot depend on the engine, so a vendor
+                    // that re-enters the orchestrator can never move out of it, and
+                    // widening the backend contract cannot help because the thing
+                    // being called IS the orchestrator. Every phase below is neutral -
+                    // approval, scope, splitting the marker off the chain, applying the
                     // structural steps, the journal read that decides resume vs
                     // skip - so the engine drives them and asks the backend only
                     // for the one phase it alone can answer: mirroring the rows.
@@ -3117,8 +3101,8 @@ impl MigrationEngine {
     /// database will not satisfy AND that no earlier step of this plan can
     /// satisfy, before the authored loop can commit anything.
     ///
-    /// The general phase the four bespoke plan-level preflights above were each
-    /// approximating for one case. It reads the assertions the LOWER already
+    /// A general plan-level phase over the plan's live-database assertions. It reads
+    /// the assertions the LOWER already
     /// stamped rather than re-deriving which steps are drops or retypes from
     /// their SQL, so it cannot come to a different conclusion than the
     /// per-migration evaluator does about the same step, and it evaluates them
@@ -3226,8 +3210,8 @@ impl MigrationEngine {
     /// it exists for the same reason: the answer is a property of the PLAN and of
     /// the TARGET, never of live state, so discovering it at the step that needs the
     /// capability buys nothing and costs a half-migrated database. A plan shaped
-    /// `[addColumn, addColumn, rename]` against a backend with no online path used
-    /// to commit both columns and then refuse the rename - a schema that is neither
+    /// `[addColumn, addColumn, rename]` against a backend with no online path would
+    /// commit both columns and then refuse the rename - a schema that is neither
     /// the old shape nor the new one, and one no retry repairs, because the same
     /// plan meets the same refusal every time.
     ///
@@ -3957,8 +3941,8 @@ fn enforce_online_scope_if_pending(
 /// Build one transactional resolver migration from the trusted cleanup
 /// templates. The first three statements acquire a table lock through `ALTER
 /// TABLE` and prove both columns still contain identical values. Cleanup and
-/// the destructive column drop then commit with one journal row, eliminating
-/// the old gap between separate C1 and C2 transactions.
+/// the destructive column drop then commit with one journal row, so there is
+/// no gap between separate C1 and C2 transactions.
 fn atomic_pending_resolution_migration(
     vendors: VendorSet,
     project_schema: &str,

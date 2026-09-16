@@ -27,10 +27,10 @@
 //! structured expression defaults (`now`/exact UUID generators) are overlaid after the
 //! descriptor bridge because descriptors cannot carry apply-time functions.
 // `IrLowerError` is the cold deploy-failure error nearly every lowering path in this
-// module returns, and it sits over the 128-byte heuristic. Boxing it would churn the
+// module returns, and it sits over the size heuristic. Boxing it would churn the
 // `#[from]` / `?` ergonomics across the whole lower pipeline for no real-world win
 // (see `load_and_lower` below), so the lint is allowed module-wide rather than
-// repeated on ninety-odd signatures.
+// repeated on every signature.
 #![allow(clippy::result_large_err)]
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -79,11 +79,10 @@ use zeroship_migrate_backend::ddl::{ExclusionConstraintRequest, ExclusionElement
 use zeroship_migrate_backend::fold::{
     AuthorTypeOverride, FoldCursorComparison, FoldCursorScalarType, FoldDatabaseFeature,
 };
-// `POSTGRES` is deliberately NOT imported here. Lowering no longer names a vendor
-// at all: the five partition branches that used to read `self.dialect != POSTGRES`
-// now ask `Capability::PartitionRelationDdl`, and they were the last of them. The
+// `POSTGRES` is deliberately NOT imported here: lowering does not name a vendor.
+// The partition branches ask `Capability::PartitionRelationDdl` instead. The
 // constant is imported by the test module below, which legitimately targets named
-// dialects; re-adding it up here would be the first step back.
+// dialects; re-adding it at module scope would reintroduce the vendor name.
 use zeroship_migrate_ir::dialect::DialectId;
 use zeroship_migrate_policy::EffectivePolicy;
 
@@ -145,11 +144,6 @@ enum LoweredOp {
 /// index units have been emitted. The originating op metadata travels with it so
 /// guard failures, fragments, and the eventual non-contiguous op span remain
 /// attributed to the child `createTable`, not to the target op that unblocks it.
-///
-/// The op ITSELF used to travel too. `guard_lowered_unit` took it in order to ask
-/// whether it was one of the two IR raw-island shapes, which decided whether the
-/// narrower raw-island backstop ran ahead of the belt for a belt-off config. Nothing
-/// asks that now, and the index and kind are what attribution actually reads.
 struct PendingGuardedForeignKey {
     deferred: DeferredForeignKeyUnit,
     op_index: usize,
@@ -298,21 +292,11 @@ pub struct LiveSchema {
     /// the engine attempting a lossy SQL rewrite of them. Re-keying this map on
     /// rename would destroy the exact property the value-copy reads from.
     ///
-    /// THIS DOC USED TO MAKE THREE CLAIMS, ALL FALSE. Recorded so the correction is
-    /// not re-derived, and because each one inverts a real design decision:
-    /// - *"SQLite has no native online rename."* It has had `RENAME COLUMN` since
-    ///   3.25; `render::declarative` says so in as many words and emits the
-    ///   statement, and `zeroship_migrate_sqlite::backend`'s `SQLITE_VERSION_FLOOR`
-    ///   refuses to run against a server old enough to lack it. The rebuild
-    ///   DELEGATES to that statement - it is not a workaround for its absence.
-    /// - *"Needed ONLY on the SQLite leg"* / *"the PG leg never reads this map."*
-    ///   It has dialect-NEUTRAL readers: the `CatalogColumnEvidence` format proof,
-    ///   foreign-key and typed-reference target resolution, owner resolution. None
-    ///   is gated to one dialect. (Its sibling `sdk_schemas` genuinely does have the
-    ///   single SQLite reader this field was wrongly given.)
-    /// - That it is a pure pre-deploy read. The `addConstraint`-fk rebuild path
-    ///   INSERTS the rebuilt shape back into this map as it lowers, so later ops in
-    ///   the same envelope see the new shape.
+    /// It has dialect-NEUTRAL readers: the `CatalogColumnEvidence` format proof,
+    /// foreign-key and typed-reference target resolution, owner resolution. None
+    /// is gated to one dialect. It is also not a pure pre-deploy read - the
+    /// `addConstraint`-fk rebuild path INSERTS the rebuilt shape back into this
+    /// map as it lowers, so later ops in the same envelope see the new shape.
     ///
     /// Empty => a SQLite `renameColumn` whose table's structure is absent fails
     /// closed ([`IrLowerError::RenameNeedsLiveTable`]), never silently emitting a
@@ -405,16 +389,15 @@ pub struct LiveSchema {
     /// `(table, column)` - the half of [`Self::column_generation`] no catalog can
     /// answer yet.
     ///
-    /// WHAT THIS ADDS OVER [`Self::table_snapshots`], measured rather than assumed,
-    /// because the two overlap and the overlap is not the point. The lower's
+    /// WHAT THIS ADDS OVER [`Self::table_snapshots`], because the two overlap and
+    /// the overlap is not the point. The lower's
     /// `createTable` arm ALREADY publishes the whole desired `TableSnapshot` into
     /// `table_snapshots` as it lowers, so a create-then-retype envelope is answered
     /// by the live map even with no live database. `addColumn` publishes NOTHING -
     /// and neither do `dropColumn`, `renameColumn`, `renameTable` or `dropTable`,
     /// each of which leaves `table_snapshots` describing a shape the envelope has
-    /// already moved past. Neutering this map alone leaves every create-then-retype
-    /// test passing and fails exactly one: an identity column ADDED and then
-    /// retyped, which lowered an `ALTER` PostgreSQL refuses.
+    /// already moved past. Without this map a create-then-retype of an identity
+    /// column would lower an `ALTER` PostgreSQL refuses.
     ///
     /// So the redundancy for `createTable` is real and deliberate: both sources
     /// derive the same two bits from the same authored `IrColumn`, and keeping the
@@ -448,7 +431,7 @@ pub struct ColumnGeneration {
     /// `GENERATED { ALWAYS | BY DEFAULT } AS IDENTITY`. PostgreSQL confines such a
     /// column to `smallint` / `integer` / `bigint` and refuses any other target
     /// outright (`identity column type must be smallint, integer, or bigint`) - a
-    /// domain over `integer` included, measured.
+    /// domain over `integer` included.
     pub identity: bool,
     /// `GENERATED ALWAYS AS (expr) { STORED | VIRTUAL }`, carrying the STORAGE the
     /// producer reported. PostgreSQL retypes such a column happily but refuses a
@@ -628,9 +611,9 @@ impl LiveSchema {
     /// under its own declarations would leave them keyed on a name nothing refers
     /// to any more, and a dropped table's would answer for a table that has to be
     /// re-created before it can be retyped. `setColumnType` itself deliberately
-    /// records NOTHING: measured on PostgreSQL 18.4, a retype leaves both
-    /// `attidentity` and `attgenerated` exactly as they were, so the contract in
-    /// force after it is the one that was in force before it.
+    /// records NOTHING: a retype leaves both `attidentity` and `attgenerated`
+    /// exactly as they were, so the contract in force after it is the one that was
+    /// in force before it.
     ///
     /// `dialect` selects which `dialectal` leg is descended, through the fold's own
     /// selector rather than a second own-then-default rule written here. A leg that
@@ -686,9 +669,8 @@ impl LiveSchema {
                     .declared_column_generation
                     .remove(&(table.clone(), from.clone()));
                 // Only a DECLARED contract moves. A live column's contract stays
-                // where `table_snapshots` holds it, under its old name - which is
-                // the pre-existing behaviour of every other live fact across a
-                // rename in this lane, not a new gap this facet opens.
+                // where `table_snapshots` holds it, under its old name, matching
+                // how every other live fact is handled across a rename in this lane.
                 if let Some(moved) = moved {
                     self.declared_column_generation
                         .insert((table.clone(), to.clone()), moved);
@@ -2565,10 +2547,10 @@ impl IrAuthor {
     ///   (malformed, future ir_version, structural reject incl. the fail-closed
     ///   bare-name DropIndex, ownership violation, or checksum-hint mismatch).
     /// - [`LoadAndLowerError::Lower`] - lowering a validated op failed.
-    // The `Err` variant transitively embeds a load/declarative error (~128 bytes).
-    // This is the cold deploy-failure path; boxing the variants to satisfy the
-    // size heuristic would churn the `#[from]`/`?` ergonomics across the lower
-    // pipeline for no real-world win, so the lint is allowed narrowly here.
+    // The `Err` variant transitively embeds a load/declarative error and sits over
+    // the size heuristic. This is the cold deploy-failure path; boxing the variants
+    // to satisfy the heuristic would churn the `#[from]`/`?` ergonomics across the
+    // lower pipeline for no real-world win, so the lint is allowed narrowly here.
     #[allow(clippy::result_large_err)]
     pub fn load_and_lower(
         &self,
@@ -2611,8 +2593,8 @@ impl IrAuthor {
     /// - [`LoadAndLowerGuardedError::Load`] - the load gate refused the artifact.
     /// - [`LoadAndLowerGuardedError::Lower`] - a lower failure, a guard-denied
     ///   fragment (op-index attributed), or a reassembly-invariant break.
-    // Cold deploy-failure path; the `Err` variant is ~128 bytes. See
-    // `load_and_lower` for why the large error variants stay unboxed.
+    // Cold deploy-failure path. See `load_and_lower` for why the large error
+    // variants stay unboxed.
     #[allow(clippy::result_large_err)]
     pub fn load_and_lower_guarded(
         &self,
@@ -2718,9 +2700,9 @@ impl IrAuthor {
     /// `MigrationIr::touched_tables` under-reports a bare-name `dropIndex` (it has
     /// no structured table - [`Op::touched_table`](crate::model::ir::Op::touched_table)
     /// returns `None`), which would let a `op.dropIndex("idx_on_pending_table")`
-    /// with no hint slip the refusal (fail-OPEN). Here we union in the
-    /// owner resolved from `live.table_snapshots` (the same introspection the
-    /// unique-gate uses) so the index's table enters the touched-set.
+    /// with no hint slip the refusal (fail-OPEN). The owner resolved from
+    /// `live.table_snapshots` (the same introspection the unique-gate uses) is
+    /// unioned in so the index's table enters the touched-set.
     ///
     /// FAIL CLOSED on an unresolvable owner: fold in `crate::engine::TOUCHES_UNKNOWN` so the
     /// engine refuses the deploy if ANY obligation is outstanding (the obligation
@@ -3990,8 +3972,8 @@ impl IrAuthor {
         // the existence guard is HONORED via an executor-side
         // catalog probe (probe -> shape-verify-or-fail -> run/skip under the held
         // advisory lock), not a native `IF [NOT] EXISTS` clause. The guard's
-        // DIRECTION was already checked legal at validate-time. Here we build a
-        // dialect-neutral [`crate::model::probe::GuardProbe`] from the op (the arms
+        // DIRECTION was already checked legal at validate-time. A dialect-neutral
+        // [`crate::model::probe::GuardProbe`] is built from the op (the arms
         // below have the columns/type/nullable in hand via the SAME shared snapshot
         // builders the lowering uses) and STAMP it onto each lowered `Migration`
         // unit; the executor reads the live catalog and `decide`s. A guard whose
@@ -4516,7 +4498,7 @@ impl IrAuthor {
                 )?;
                 // SAME NAME, DIFFERENT SHAPE, ALREADY LIVE - refuse here rather
                 // than emit a `CREATE INDEX IF NOT EXISTS` the server silently
-                // SKIPS. Measured: with `ix` live as a non-unique index on (v),
+                // SKIPS. With `ix` live as a non-unique index on (v),
                 // `CREATE UNIQUE INDEX IF NOT EXISTS "ix" ... ("w")` succeeds with
                 // a NOTICE, journals green, and leaves the old index in place -
                 // so an author who added a UNIQUE index to enforce an invariant
@@ -4787,10 +4769,10 @@ impl IrAuthor {
                 // value. One authored op creates the pair - `addColumn` lowers the
                 // second unit just above, and `createTable` reconciles it through
                 // `ensure_create_table_masked_siblings` - so one authored op removes
-                // it. Dropping only the named column left an orphan behind, and after
-                // the storage flip that orphan is the column holding the REAL VALUE of
-                // a field that no longer exists: unreadable by any query surface,
-                // uncollected by anything in this engine, and still on disk.
+                // it. Dropping only the named column would orphan the `__zs_raw__`
+                // sibling holding the REAL VALUE of a field that no longer exists:
+                // unreadable by any query surface, uncollected by anything in this
+                // engine, and still on disk.
                 //
                 // The sibling is read from the LIVE schema rather than the op, because
                 // a drop names only the column and carries no mask facet. A column
@@ -5122,8 +5104,8 @@ impl IrAuthor {
                 // when a view, a rule, a generated column, an RLS policy, a trigger
                 // or a publication reads the column, when the column is part of the
                 // table's partition key, or when it is inherited from a parent -
-                // each one measured, each one a plan that cleared validate, the
-                // guard and preview and then died PART WAY THROUGH apply, leaving an
+                // each a plan that cleared validate, the guard and preview and then
+                // died PART WAY THROUGH apply, leaving an
                 // earlier op in the same envelope committed against a schema that is
                 // neither the old shape nor the new one.
                 //
@@ -5739,8 +5721,7 @@ impl IrAuthor {
         // recorded HERE because this is the only place that holds an op and the
         // units it produced at the same time. Everything downstream sees
         // `&[PlanStep]` and nothing else, which is why the plan-wide precondition
-        // preflight used to reach for a SQL parser: it had rendered statements and
-        // no ops. It now reads this field instead.
+        // preflight reads this field rather than the rendered statements.
         //
         // Every unit of one op shares the op's effect. An op that lowers to several
         // units (a masked `addColumn`, a `createTable` and its index units) does the
@@ -5761,9 +5742,9 @@ impl IrAuthor {
         // using the change it is itself about to make. `createTable` advances inside
         // its own arm for the same reason plus an ordering one (see there).
         //
-        // Until this existed only `createTable` moved these sets, so a stream that
-        // dropped, renamed or detached a table went on referencing the old name.
-        // Both failure directions were real and are pinned in
+        // Every op that adds, drops, renames or detaches a table must move both
+        // sets, not only `createTable`, or a later op goes on referencing the old
+        // name; both directions are pinned in
         // `crates/zeroship-migrate/tests/ir_contract/preview_fold_table_presence.rs`.
         crate::render::fold::advance_referenceable_tables(
             op,
@@ -6046,8 +6027,7 @@ impl IrAuthor {
     ///    remain the backstop.
     ///
     /// A **batched** `backfill` is PORTABLE on BOTH backends
-    /// (PG `backfill.rs`, SQLite `zeroship_migrate_sqlite::backend::backfill_sql`) - it is
-    /// no longer a SQLite hard error.
+    /// (PG `backfill.rs`, SQLite `zeroship_migrate_sqlite::backend::backfill_sql`).
     ///
     /// # Errors
     /// - [`IrLowerError::DmlValidate`] - the structural validator (a)/(b)/(d) OR the
@@ -6278,9 +6258,9 @@ impl IrAuthor {
     /// `concatWs`, etc. differ per dialect) - but both legs consume the same
     /// `BackfillSpec` shape, so the plan step is uniform.
     ///
-    /// The backfill EXECUTOR ([`crate::model::backfill::BackfillSpec`]) now
-    /// carries a per-spec `schema`, so a schema-qualified batched backfill
-    /// RUNS (it no longer fails closed at lower). The spec's `schema` is set from
+    /// The backfill EXECUTOR ([`crate::model::backfill::BackfillSpec`])
+    /// carries a per-spec `schema`, so a schema-qualified batched backfill RUNS.
+    /// The spec's `schema` is set from
     /// `eff_schema`, which the cross-schema scope gate (`permits`) has
     /// ALREADY vetted: under Confined `eff == project_schema` (a foreign qualifier
     /// is refused upstream), so the executor qualifies into the project schema
@@ -6292,11 +6272,10 @@ impl IrAuthor {
     /// The SQLite leg is unaffected: a non-`main` schema is refused EARLIER
     /// ([`IrLowerError::SchemaQualifierUnsupported`]) before `lower_backfill`, and
     /// SQLite's single `main` db renders the table unqualified.
-    // Eight cohesive lowering parameters destructured straight out of the
+    // Eight cohesive lowering parameters are destructured straight out of the
     // `Op::Backfill` IR variant (schema/table/cursor/batch/set/filter/name); a
-    // params struct would just re-wrap the variant's own fields with no gain and
-    // risks the behavior change this hygiene pass forbids. Private method, 2
-    // in-crate caller.
+    // params struct would just re-wrap the variant's own fields with no gain.
+    // Private method; its callers are in this crate.
     #[allow(clippy::too_many_arguments)]
     fn lower_backfill(
         &self,
@@ -6436,8 +6415,8 @@ impl IrAuthor {
     /// - [`IrGuardedLowerError::Denied`] - a rendered fragment was guard-denied.
     /// - [`IrGuardedLowerError::ReassemblyMismatch`] - the fragment split did not
     ///   round-trip (engine bug; fail closed).
-    // Cold lower-failure path; the `Err` variant is ~128 bytes. See
-    // `load_and_lower` for why the large error variants stay unboxed.
+    // Cold lower-failure path. See `load_and_lower` for why the large error
+    // variants stay unboxed.
     #[allow(clippy::result_large_err)]
     pub fn lower_guarded(
         &self,
@@ -6568,13 +6547,8 @@ impl IrAuthor {
         // Guard EACH true statement individually so a denial is attributed to
         // the originating op even when this is a forward FK emitted later.
         //
-        // One `check` per statement is the whole gate. There used to be a second
-        // arm here, taken when the config's root/host-set mode had turned the static
-        // belt off: it ran `check_raw_island_sql` / `check_raw_island_body` FIRST for
-        // the two IR raw islands, so an `Op::Raw` or a `createFunction` body could not
-        // host-reach through a posture that had waved the belt away. That posture is
-        // gone, `check` runs the full belt for every config the engine can build, and
-        // the arm went with the mode that selected it.
+        // One `check` per statement is the whole gate: `check` runs the full belt
+        // for every config the engine can build.
         for statement in &statements {
             let mut advisories = Vec::new();
             let outcome = guard
@@ -7580,10 +7554,10 @@ impl IrAuthor {
                     None,
                     None,
                 )?;
-                // A PostgreSQL DOMAIN base historically uses the canonical catalog
-                // type, not the column-use-site modifier override (for example
-                // `numeric`, not `numeric(p, s)`). Preserve those bytes while asking
-                // the PostgreSQL renderer to spell that canonical token.
+                // A PostgreSQL DOMAIN base uses the canonical catalog type, not the
+                // column-use-site modifier override (for example `numeric`, not
+                // `numeric(p, s)`). Preserve those bytes while asking the PostgreSQL
+                // renderer to spell that canonical token.
                 col.ddl_type_override = None;
                 Ok(
                     crate::render::backends::schema_renderer(self.vendors, &self.dialect)
@@ -7891,14 +7865,12 @@ impl IrAuthor {
     /// and MySQL's spelling needs the whole column definition restated, which the
     /// op does not carry.
     ///
-    /// `setColumnType` NO LONGER PASSES THROUGH HERE, and how it left is the
-    /// instruction for its two remaining siblings. "The op does not carry the
-    /// definition" was true and was never the whole question: the SERVER carries it,
-    /// in `SHOW CREATE TABLE`, and a retype now lowers to a `PlanStep::AlterColumnType`
-    /// that reads it under the apply lock. `setColumnNotNull` and `dropColumnNotNull`
-    /// are the same shape - `MODIFY COLUMN` with one facet changed instead of the
-    /// type - and are still refused here only because no one has driven one end to
-    /// end against a live server, which is the bar the retype had to clear.
+    /// `setColumnType` does not pass through here: it lowers to a
+    /// `PlanStep::AlterColumnType` that reads the definition from the SERVER
+    /// (`SHOW CREATE TABLE`) under the apply lock. `setColumnNotNull` and
+    /// `dropColumnNotNull` are the same shape - `MODIFY COLUMN` with one facet
+    /// changed instead of the type - and are still refused here only because no one
+    /// has driven one end to end against a live server.
     ///
     /// Keeping the two apart matters because they answer different questions and
     /// a reader who merges them concludes the capability table is lying about
@@ -7909,8 +7881,7 @@ impl IrAuthor {
     /// `dialect-support.toml`: `setColumnNotNull` and `dropColumnNotNull` are
     /// `unsupported` on MySQL and SQLite, `dropColumnDefault` on SQLite only,
     /// because that file describes what this engine renders rather than what the
-    /// database could do (F674 - those cells said `portable` while this gate
-    /// refused them, so the gate accepted work the lowerer then rejected).
+    /// database could do.
     ///
     /// One definition, called from every alter-column arm, so the rule cannot be
     /// added to one op and missed on its siblings.
@@ -8067,25 +8038,16 @@ impl IrAuthor {
                     // VALID` adoption path)" - and a NOT VALID constraint nobody can
                     // ever VALIDATE is a permanently unenforced constraint, not a
                     // spelling difference. That makes it a claim about the DATABASE
-                    // rather than about our renderer, which is the distinction
-                    // `require_capability_for` argues for at length two thousand
-                    // lines up, and therefore a capability question.
+                    // rather than about our renderer, and therefore a capability
+                    // question.
                     //
                     // `Op::ValidateConstraint` already gates on this exact capability
                     // (see `require_capability_for` above); NOT VALID is the half
-                    // that creates the work VALIDATE finishes, so the two agreeing is
-                    // the consistent state and the vendor test here was the odd one.
+                    // that creates the work VALIDATE finishes, so the two must agree.
                     //
                     // A fourth backend that adopts constraints online passes on its
                     // own answer instead of inheriting PostgreSQL's by falling into
-                    // the else. Today the capability sits in `POSTGRES_CAPABILITIES`
-                    // and in neither other descriptor, so this is byte-identical to
-                    // the vendor test it replaces on all three shipping dialects.
-                    //
-                    // The message used to say "non-Postgres" - a pinned diagnostic
-                    // string that outlived the predicate beside it, and said so.
-                    // It now states the capability that is absent, which is what
-                    // the branch actually tested.
+                    // the else.
                     return Err(IrLowerError::UnsupportedOp(
                         "validated addConstraint(fk) NOT VALID reached lower on a target that declares no online constraint adoption",
                     ));
@@ -8223,9 +8185,9 @@ impl IrAuthor {
 /// **Test-only** textual `;\n` split, retained for the reassembly assertions in
 /// migrations whose `up` carries NO interior `;\n` (a plain column, an encrypted
 /// column -> `CREATE;\nCOMMENT`). The PRODUCTION guarded path
-/// ([`IrAuthor::lower_guarded`]) NO LONGER splits textually - it carries the
-/// renderer's STRUCTURAL per-statement list ([`crate::render::declarative::LoweredUnit`])
-/// instead, so a string-literal column DEFAULT whose value itself contains `;\n`
+/// ([`IrAuthor::lower_guarded`]) splits structurally instead, carrying the
+/// renderer's per-statement list ([`crate::render::declarative::LoweredUnit`]),
+/// so a string-literal column DEFAULT whose value itself contains `;\n`
 /// (e.g. `DEFAULT 'a;\nb'`) is never broken mid-statement. This helper would
 /// over-split such an `up`; it is kept only for tests that do not exercise that
 /// case.
@@ -8303,12 +8265,9 @@ fn trigger_inverse_from_history(
 /// would report every guarded drop as unguarded and re-create an object that may
 /// never have been dropped.
 ///
-/// Takes the resolved `backend` rather than reaching for one, which is what its
-/// sibling [`trigger_inverse_from_history`] has always done. Both re-render a
-/// recovered CREATE to recover its SQL, and the renderer is the caller's to choose:
-/// this function used to call `crate::render::vendor::render_vendor_op` - the
-/// engine naming one vendor crate - while the trigger side already asked whichever
-/// vendor the lowering had resolved.
+/// Takes the resolved `backend` rather than reaching for one, matching its sibling
+/// [`trigger_inverse_from_history`]. Both re-render a recovered CREATE to recover
+/// its SQL, and the renderer is the caller's to choose.
 fn vendor_inverse_from_history(
     op: &Op,
     live_schema: &LiveSchema,
@@ -8440,22 +8399,17 @@ fn vendor_inverse_from_history(
 ///
 /// THIS IS NOT A SPELLING, so it does not live on [`DmlRenderer`]. It emits no
 /// SQL: it reads a capability bit and constructs a CORE error type
-/// ([`IrLowerError::ViewUnsupported`]). It used to be a `DmlRenderer` method, and
-/// all three impls were byte-identical modulo their own `DIALECT` const -
-/// `if materialized && !DIALECT.supports(Capability::MaterializedView)`. That is a
-/// vendor being asked a question about ITSELF whose answer core already holds, so
-/// resolving a renderer to ask it was a tautology: core has the registered backend,
-/// which reads the same
-/// [`BackendDescriptor`](zeroship_migrate_ir::backend::BackendDescriptor) the vendor
-/// would have read. The vendor added nothing between the question and the answer.
+/// ([`IrLowerError::ViewUnsupported`]). The answer lives in core's registered
+/// backend, which reads the same
+/// [`BackendDescriptor`](zeroship_migrate_ir::backend::BackendDescriptor) a
+/// vendor would have read, so asking a vendor about its own descriptor would add
+/// nothing between the question and the answer.
 ///
-/// It is a cycle edge deleted rather than inverted, which matters for
-/// `docs/proposals/pluggable-backends.md`: a backend crate does not have to
-/// export this at all, and core does not have to reach a registry to run it.
+/// A backend crate does not have to export this at all, and core does not have
+/// to reach a registry to run it.
 ///
 /// The `dialect` in the error is PROVENANCE and travels with the decision - core
-/// now supplies it from the same value it used to look the renderer up with, so
-/// the rendered message is unchanged.
+/// supplies it from the same value it resolves the backend with.
 fn validate_view_materialized(
     vendors: VendorSet,
     dialect: &DialectId,
@@ -8512,9 +8466,8 @@ fn render_view_op(
                 "DROP VIEW"
             };
             // A create that BROUGHT THE VIEW INTO BEING is undone by dropping it. A
-            // REPLACE is not that: the view predates the migration, so dropping it would
-            // destroy an object this migration never created, which is what rolling one
-            // back used to do.
+            // REPLACE is not that: the view predates the migration, so dropping it
+            // would destroy an object this migration never created.
             //
             // The faithful inverse is the PREVIOUS body, and rendering it needs more than
             // this slot holds: `down` is one statement, and SQLite has no
@@ -8819,14 +8772,11 @@ fn render_col_ref(
 
 /// A private leaf that forwards to the vendor's own `render_table_ref`.
 ///
-/// It used to take a closed dialect enum and resolve the registry itself, and it was
-/// counted as one of the crate's dialect boundaries on that basis. It never was one:
-/// both its callers ([`render_select_ast`] and [`render_join`]) are private, in this
-/// file, and were already several frames deep in a walk that had a `dialect` threaded
-/// through it. So the lookup was a POINT-OF-USE resolution in the middle of a walk -
-/// the one shape that does not survive
-/// the per-vendor crate split of `docs/proposals/pluggable-backends.md`. The
-/// resolution moved up to the
+/// Both its callers ([`render_select_ast`] and [`render_join`]) are private, in this
+/// file, and several frames deep in a walk that has a `dialect` threaded through it.
+/// A POINT-OF-USE registry resolution in the middle of a walk is the one shape that
+/// does not survive the per-vendor crate split of
+/// `docs/proposals/pluggable-backends.md`, so the resolution happens at the
 /// `render_view_query` door instead, where the walk enters.
 fn render_table_ref(
     table: &TableRef,
@@ -9585,7 +9535,7 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
     // shared `FieldDef` vocabulary has no decimal token to grow. Threading them here
     // is what lets the field-def carrier reach the same answer `author_type_override`
     // reaches on the snapshot carrier - the SQLite emitter read the bare `number` and
-    // declared a `t.numeric(20, 4)` column REAL, so a 12-step rebuild copied its rows
+    // declared a `t.numeric(20, 4)` column REAL, so a table rebuild copied its rows
     // through a binary double. See `FieldDescriptor::precision`.
     let (precision, scale) = match &c.ty {
         ColType::Decimal { precision, scale } => {
@@ -9666,13 +9616,9 @@ pub(crate) fn ir_column_to_field_resolved_create(c: &IrColumn) -> FieldDescripto
 /// difference between a float column and a decimal one.
 ///
 /// Extracted so the sites that re-derive a column's shape from a new type cannot
-/// drift. Its one caller today is the fold's named-domain lift
+/// drift. Its one caller is the fold's named-domain lift
 /// (`render::fold::lift_named_domain_base_type` - a column whose declared type NAMES
-/// a domain whose base type is `T`). The `setColumnType` side was the second, through
-/// a retype helper in this module; that helper is gone and the fold
-/// traversal's `Op::SetColumnType` arm states the same rule in snapshot terms
-/// instead. The difference between them is what they additionally CLEAR, not what
-/// they derive, so only the retype clears.
+/// a domain whose base type is `T`).
 pub(crate) fn apply_col_type_to_field_descriptor(field: &mut FieldDescriptor, ty: &ColType) {
     // Build the target column's descriptor through the SAME translation a
     // `createTable` column goes through, so a retype to `T`, a domain over `T`
@@ -9792,9 +9738,8 @@ pub(crate) fn rendered_column_default(
 /// rather than defensive.
 ///
 /// Lives here, next to [`NamedTypeRegistry`], because BOTH the DDL lower and the
-/// offline fold resolve against it. It was originally private to the fold; the
-/// encrypted-column fix needed the same walk on the lower's side, and a second walk
-/// is exactly how the two producers would drift apart again.
+/// offline fold resolve against it; a second walk is exactly how the two producers
+/// would drift apart again.
 pub(crate) fn resolve_domain_base_type<'a>(
     name: &str,
     named_types: &'a NamedTypeRegistry,
@@ -10173,7 +10118,7 @@ pub(crate) fn render_exclusion_constraint_body(
 }
 
 /// Render one element's TARGET only - the quoted column, or the parenthesised
-/// expression. The `WITH <operator>` half used to live here and is now the backend's.
+/// expression. The `WITH <operator>` half is the backend's.
 fn render_exclusion_element_target(
     vendors: VendorSet,
     element: &ExclusionElement,
@@ -10498,7 +10443,7 @@ mod dialect_scope_wire_spellings {
         );
     }
 
-    /// THE SKIP, measured. An `Op::Dialectal` leg is per-backend WORK, not a
+    /// THE SKIP. An `Op::Dialectal` leg is per-backend WORK, not a
     /// portability claim - its own wire doc says an absent leg emits nothing - so
     /// nothing inside one may narrow the plan's reach.
     #[test]
@@ -11546,11 +11491,10 @@ mod tests {
                 // BOUNDED, not `text`. This fixture is about the explicit FK
                 // CONSTRAINT NAME, and the key/reference columns are incidental to
                 // that - but an unbounded `text` primary key is a table MySQL will
-                // not create (error 1170), and the backend storage validator has
-                // always refused it. The fixture only rendered because it calls
-                // `lower` directly and so skipped validate; once the same rule ran
-                // at lower time it stopped rendering. `varchar(255)` is what the
-                // engine's own policy-injected `id` uses, for exactly this reason.
+                // not create (error 1170), and the backend storage validator refuses
+                // it, so `lower` called directly here must still not render one.
+                // `varchar(255)` is what the engine's own policy-injected `id` uses,
+                // for exactly this reason.
                 {
                     "op": "createTable",
                     "name": "accounts",
@@ -11868,14 +11812,13 @@ mod tests {
         ));
     }
 
-    /// REGRESSION (int/decimal DEFAULT drop): the lower's createTable
-    /// table-level UNIQUE `definition` is spelled via the SHARED
-    /// [`crate::render::declarative::constraintdef_cols`] - the SAME helper the offline fold
-    /// uses - so the lower's snapshot half and the fold cannot drift on the body. The
-    /// CREATE DDL inlines that definition (`CONSTRAINT <name> UNIQUE (cols)`), so a
-    /// safe lowercase column renders BARE (`UNIQUE (handle)`), matching live
-    /// `pg_get_constraintdef`. RED before the fix: the lower quoted unconditionally ->
-    /// `UNIQUE ("handle")`, phantom-diffing the catalog AND disagreeing with the fold.
+    /// The lower's createTable table-level UNIQUE `definition` is spelled via the
+    /// SHARED [`crate::render::declarative::constraintdef_cols`] - the SAME helper
+    /// the offline fold uses - so the lower's snapshot half and the fold cannot
+    /// drift on the body. The CREATE DDL inlines that definition
+    /// (`CONSTRAINT <name> UNIQUE (cols)`), so a safe lowercase column renders BARE
+    /// (`UNIQUE (handle)`), matching live `pg_get_constraintdef`; quoting it would
+    /// phantom-diff the catalog and disagree with the fold.
     #[test]
     fn create_table_level_unique_definition_spelling_matches_fold_pg() {
         let mut ir = create_table_ir(
@@ -12216,10 +12159,9 @@ mod tests {
 
     // -- schema-qualifier render + existence-guard fail-closed -------------------
 
-    /// an op carrying an explicit `schema` renders qualified into THAT
+    /// An op carrying an explicit `schema` renders qualified into THAT
     /// schema on PG, not the bound project schema. The render seam reads the
-    /// resolved schema, so `createTable` lands in `"app2"."t"`. RED before the
-    /// `effective_schema` -> `with_project_schema` threading.
+    /// resolved schema, so `createTable` lands in `"app2"."t"`.
     #[test]
     fn explicit_schema_renders_qualified_into_resolved_schema_pg() {
         let mut ir = create_table_ir(
@@ -12272,9 +12214,8 @@ mod tests {
     /// project `'app1'` (case-INsensitive `permits`), but the render seam is
     /// byte-verbatim - so the op must NOT land in `"APP1"."t"` (a different,
     /// case-sensitive Postgres schema than `app1`). `effective_schema` canonicalizes
-    /// a case-folding match back to the project casing, so the render is `"app1"."t"`.
-    /// RED before the canonicalization (the verbatim `"APP1"` would render and split
-    /// the gate from the DB).
+    /// a case-folding match back to the project casing, so the render is `"app1"."t"`;
+    /// rendering the verbatim casing would split the gate from the DB.
     #[test]
     fn confined_case_variant_schema_canonicalizes_to_project_casing_pg() {
         let mut ir = create_table_ir(
@@ -12319,19 +12260,12 @@ mod tests {
         );
     }
 
-    /// REGRESSION (int/decimal DEFAULT drop): an integer column's
-    /// `DEFAULT n`, an out-of-f64-range bigint default, and a decimal column's
-    /// `DEFAULT 0.5` MUST all appear in the rendered CREATE TABLE DDL.
-    /// `field_default_expr` had only a `"number"` arm matching via `as_f64()`:
-    ///   - an `int`-token column (`t.int()`/`t.bigInt()`) fell through to
-    ///     `None` -> its `DEFAULT` was silently dropped;
-    ///   - a decimal default is carried as a validated numeric STRING by
-    ///     `IrScalar::Decimal`; an exact bigint default >= 2^53 is carried by
-    ///     `IrScalar::Int64`. Neither may be narrowed through `as_f64()`.
-    ///
-    /// So `render_create_table` emitted NO `DEFAULT` clause for any of them (a
-    /// real apply bug, losing the creator's default). RED before the unified
-    /// precision-preserving numeric-default helper in `field_default_expr`.
+    /// An integer column's `DEFAULT n`, an out-of-f64-range bigint default, and a
+    /// decimal column's `DEFAULT 0.5` MUST all appear in the rendered CREATE TABLE
+    /// DDL. A decimal default is carried as a validated numeric STRING by
+    /// `IrScalar::Decimal`; an exact bigint default >= 2^53 is carried by
+    /// `IrScalar::Int64`. Neither may be narrowed through `as_f64()`, which would
+    /// silently drop the `DEFAULT` clause and lose the creator's default.
     #[test]
     fn create_table_int_bigint_and_decimal_column_defaults_render_pg() {
         use crate::model::ir::IrScalar;
@@ -12488,10 +12422,9 @@ mod tests {
         );
     }
 
-    /// the connection DEFAULT schema applies when an op omits its own
-    /// qualifier. RED before `with_default_schema`/`effective_schema`. The
-    /// default scope is now the Confined `Single(project_schema)`, so a foreign
-    /// `default_schema` (`"dflt"` != `"app1"`) must be admitted by an explicit
+    /// The connection DEFAULT schema applies when an op omits its own
+    /// qualifier. The default scope is the Confined `Single(project_schema)`, so a
+    /// foreign `default_schema` (`"dflt"` != `"app1"`) must be admitted by an explicit
     /// `with_schema_scope` widen - the operator CLI posture.
     #[test]
     fn default_schema_applies_when_op_omits_qualifier_pg() {
@@ -12532,15 +12465,14 @@ mod tests {
         );
     }
 
-    /// a CONFINED author whose connection `default_schema`
+    /// A CONFINED author whose connection `default_schema`
     /// points at a FOREIGN schema (`"other"` != project `"app1"`) must be REFUSED
     /// fail-closed at lower, NOT rendered into `"other"."t"`. The friendly op-level
     /// cross-schema VALIDATE gate inspects ONLY the op's own `schema()` qualifier
-    /// (absent here), never the connection default - so without this lower-time scope
-    /// check the foreign default would silently render every guard-less op into the
-    /// foreign schema. The default scope is `Single(project_schema)` (Confined), so no
-    /// `with_schema_scope` widen => a foreign default is out of scope. RED before the
-    /// `DefaultSchemaOutOfScope` lower check (it would have emitted `"other"."t"`).
+    /// (absent here), never the connection default - so the lower-time scope check is
+    /// what stops the foreign default rendering every guard-less op into the foreign
+    /// schema. The default scope is `Single(project_schema)` (Confined), so no
+    /// `with_schema_scope` widen => a foreign default is out of scope.
     #[test]
     fn confined_foreign_default_schema_is_refused_fail_closed_at_lower() {
         let ir = create_table_ir(
@@ -12576,17 +12508,15 @@ mod tests {
         }
     }
 
-    /// a CONFINED author whose
+    /// A CONFINED author whose
     /// op carries an EXPLICIT FOREIGN `schema()` qualifier (`"other"` != project
     /// `"app1"`) must be REFUSED fail-closed at lower, NOT rendered into `"other"."t"`,
     /// EVEN when `lower()` is invoked DIRECTLY (bypassing the load gate's
     /// `validate_ir_scoped` cross-schema check). The public lower entries do not
-    /// re-validate; before this arm the only lower-time scope check covered the
-    /// `default_schema` (op.schema().is_none()) case, so a bare `lower()` with an
-    /// explicit foreign qualifier would have rendered `"other"."t"`. The default scope
+    /// re-validate, so the lower-time scope check must cover an explicit foreign
+    /// qualifier as well as the `default_schema`. The default scope
     /// is `Single("app1")` (Confined, no `with_schema_scope` widen) => "other" is out of
-    /// scope. RED before the `LowerCrossSchema` lower check (it would have emitted
-    /// `"other"."t"`).
+    /// scope.
     #[test]
     fn confined_explicit_foreign_op_schema_is_refused_fail_closed_at_lower() {
         let mut ir = create_table_ir(
@@ -12677,8 +12607,7 @@ mod tests {
     /// The SQLite emitter performs no auto-ATTACH, so honoring `schema:'reporting'`
     /// would otherwise silently drop the qualifier and land the op in `main` (a
     /// silent-WRONG-target). The general operator CLI is the exposed surface (no
-    /// confinement gate pins the schema). RED before the lower-time fail-closed check
-    /// (it would have silently emitted unqualified `main` DDL).
+    /// confinement gate pins the schema).
     #[test]
     fn sqlite_non_main_schema_is_refused_fail_closed_at_lower() {
         let mut ir = create_table_ir(
@@ -12774,16 +12703,16 @@ mod tests {
         serde_json::from_str(&json).expect("backfill IR parses")
     }
 
-    /// a schema-qualified `backfill` whose effective
-    /// schema is a gate-APPROVED foreign schema now LOWERS to a `PlanStep::Backfill`
-    /// whose `spec.schema` is that foreign schema (it no longer fails closed). The
+    /// A schema-qualified `backfill` whose effective
+    /// schema is a gate-APPROVED foreign schema LOWERS to a `PlanStep::Backfill`
+    /// whose `spec.schema` is that foreign schema. The
     /// resumable backfill executor threads the per-spec schema, so the windowed
-    /// UPDATE qualifies into `app2`, NOT silently into `app1`. There is no lower-time
-    /// refusal on a foreign schema any more - confinement is the scope gate's job.
+    /// UPDATE qualifies into `app2`, NOT silently into `app1`. Confinement is the
+    /// scope gate's job, so there is no lower-time refusal on a foreign schema.
     ///
     /// A widened scope: the foreign schema "app2" is ADMITTED by the scope
     /// (a Confined creator could never name it - the cross-schema confinement gate
-    /// refuses it first), so the test reaches the now-enabled cross-schema backfill,
+    /// refuses it first), so the test reaches the cross-schema backfill,
     /// not the confinement gate.
     #[test]
     fn schema_qualified_backfill_runs_cross_schema_pg() {
@@ -13466,17 +13395,15 @@ mod tests {
         }
     }
 
-    // Regression: a LEGITIMATE portable string-literal column DEFAULT whose
+    // A LEGITIMATE portable string-literal column DEFAULT whose
     // value CONTAINS the substring `;\n` must lower CLEANLY through the production
     // `lower_guarded` path - the fragment split MUST NOT break the single
     // CREATE/ADD statement on the interior `;\n` of the quoted literal. `sql_str`
     // escapes ONLY `'` (never a newline/semicolon), so `DEFAULT 'a;\nb'` renders an
-    // `up` with an interior `;\n`. Pre-fix the TEXTUAL `split_up_fragments(";\n")`
-    // over-split this single statement into two malformed fragments, tripping
-    // `ReassemblyMismatch` (or a guard denial on a syntactically-broken half) - so a
-    // valid default was non-deployable via the IR deploy path. Post-fix the
-    // fragments are carried STRUCTURALLY (one fragment per TRUE statement), the
-    // interior `;\n` stays inside its statement, and `join(";\n") == up` holds.
+    // `up` with an interior `;\n`. The fragments are carried STRUCTURALLY (one
+    // fragment per TRUE statement), so the interior `;\n` stays inside its
+    // statement and `join(";\n") == up` holds - a textual `;\n` split would
+    // over-split it into two malformed fragments.
     #[test]
     fn string_default_with_embedded_semicolon_newline_lowers_clean_pg() {
         // The portable default value literally contains `;\n` (and a bare `;`).
@@ -13553,12 +13480,11 @@ mod tests {
         );
     }
 
-    // Regression: an IR dropIndex of a UNIQUE index must lower
+    // An IR dropIndex of a UNIQUE index must lower
     // `destructive + requires_approval` - exactly like the differ's
     // `render_drop_index` gates a unique-index drop - so it is REFUSED under
     // `Approval::None` and never applies silently. A plain (non-unique) index drop
-    // stays ungated. Pre-fix, IrAuthor hardcoded `unique:false`, so a unique drop
-    // lowered ungated (the regression this pins).
+    // stays ungated.
     #[test]
     fn drop_unique_index_lowers_destructive_and_approval_gated() {
         let author = test_ir_author("app", "app_a", POSTGRES);
@@ -14111,9 +14037,9 @@ columns = [
         }
     }
 
-    // Regression: a JSON string containing a quote carries a JSON backslash. The
+    // A JSON string containing a quote carries a JSON backslash. The
     // MySQL CAST input is UTF-8 hex, so neither inherited sql_mode nor the pinned
-    // NO_BACKSLASH_ESCAPES setting can reinterpret that byte. PG stays unchanged.
+    // NO_BACKSLASH_ESCAPES setting can reinterpret that byte. PG is unaffected.
     #[test]
     fn json_value_string_with_backslash_is_mysql_mode_independent() {
         let value = IrJsonValue::Object(
@@ -14437,10 +14363,6 @@ columns = [
     // (or omits it) on a drop of an actually-unique index must STILL lower
     // `destructive + requires_approval`, so the drop is refused under
     // `Approval::None` rather than silently removing a data-integrity guarantee.
-    //
-    // RED before the fix: pre-fix the gate read `unique.unwrap_or(false)` ONLY, so a
-    // `unique:false`/absent drop of a live-unique index lowered UNGATED (the
-    // approval-gate bypass this pins).
     #[test]
     fn drop_index_uniqueness_resolved_from_live_overrides_understated_hint() {
         let author = test_ir_author("app", "app_a", POSTGRES);
@@ -14537,30 +14459,23 @@ columns = [
     // the rename-to-EXISTING-column collision guard must run UNCONDITIONALLY against
     // the live snapshot bound by the from-check - NOT inside a second `if let Some`
     // wrapper around a fresh fallible `table_snapshots` lookup, whose None arm implies
-    // (and could silently take) a path that skips the guard. Pre-fix the guard was
-    // wrapped in exactly that conditional; if the preceding from-check were ever
-    // reordered/removed, a missing snapshot would silently SKIP the collision check (a
-    // data-loss-class gap on the SQLite rebuild).
+    // (and could silently take) a path that skips the guard; if the preceding
+    // from-check were ever reordered/removed, a missing snapshot would silently SKIP
+    // the collision check (a data-loss-class gap on the SQLite rebuild).
     //
-    // RED before the fix: this source-shape assertion FAILS against the pre-fix code
-    // (an `if let Some` wrapper around a fresh `table_snapshots` lookup around the
-    // collision check). Post-fix the guard reuses the single fail-closed
-    // `live_snapshot` binding, so no such conditional exists. Pairs with the ONE
-    // behavioural collision test the tree has,
+    // Pairs with the behavioural collision test
     // `renamecolumn_sqlite_rejects_rename_to_existing_column`. The guard itself takes no
     // dialect, so that test exercises it for every target - but only the SQLite leg is
     // driven end to end, and no test asks a PostgreSQL rename to collide.
     #[test]
     fn rename_collision_guard_is_unconditional_not_if_let_some_snapshot() {
         let src = include_str!("lower.rs");
-        // The pre-fix shape wrapped the to-collision check in a SECOND fallible lookup
-        // whose None arm could silently skip the guard. Assembled from fragments so this
+        // The guard must never sit behind a SECOND fallible lookup whose None arm
+        // could silently skip it. The pattern is assembled from fragments so this
         // test's own source does not self-trip the scan.
         let prohibited = format!("if let Some(snap) = live.{}.get", "table_snapshots");
-        // The implementation of `lower_rename` is the only place this shape could live;
-        // the guard now reuses the fail-closed `live_snapshot` binding instead. The scan
-        // is over the whole module (the impl + tests); the only `if let Some(.. =
-        // live.table_snapshots.get` occurrence pre-fix was the guard, which is gone.
+        // `lower_rename` is the only place this shape could live; the scan covers the
+        // whole module (the impl + tests).
         let hits = src.matches(prohibited.as_str()).count();
         assert_eq!(
             hits, 0,
@@ -14622,7 +14537,7 @@ columns = [
         }
     }
 
-    // Regression: the PRODUCTION IR envelope deploy entry
+    // The PRODUCTION IR envelope deploy entry
     // (`load_and_lower_guarded`, the door a host deploy takes) carries
     // the op-index attribution on a guard denial - proving the attribution
     // reaches the REAL deploy path, not only the `lower_guarded` unit tests. We
@@ -14865,13 +14780,12 @@ columns = [
             .expect("later-file structural attach passes after registry update");
     }
 
-    // Regression: the drift anchor on the IR path is the
-    // DIALECT-NEUTRAL `Checksum::of_ir` over the canonical op list,
-    // NOT the per-statement rendered-SQL `Checksum::of`. `lower_plan` stamps that
-    // anchor onto BOTH the AppliedPlan and every `Ddl` step's journaled
-    // `Migration.checksum` - so the journal records the op-list anchor and a
-    // re-deploy compares against it. This test would FAIL pre-fix (the lowered
-    // Migrations carried `Checksum::of(up,down)` - a PG-specific rendered-SQL hash).
+    // The drift anchor on the IR path is the DIALECT-NEUTRAL `Checksum::of_ir`
+    // over the canonical op list, NOT the per-statement rendered-SQL `Checksum::of`.
+    // `lower_plan` stamps that anchor onto BOTH the AppliedPlan and every `Ddl`
+    // step's journaled `Migration.checksum` - so the journal records the op-list
+    // anchor and a re-deploy compares against it; a per-dialect rendered-SQL hash
+    // would be PG-specific.
     #[test]
     fn ir_plan_anchor_is_of_ir_not_rendered_sql() {
         let ir = create_table_ir(
@@ -14944,11 +14858,11 @@ columns = [
         );
     }
 
-    // Regression: the op-list drift anchor is DIALECT-NEUTRAL - the SAME IR envelope
+    // The op-list drift anchor is DIALECT-NEUTRAL - the SAME IR envelope
     // lowered for PG and for SQLite journals the SAME checksum (so a re-deploy on
     // either backend compares against one anchor; the single-checksum
-    // invariant). Pre-fix the anchor was the per-dialect rendered SQL, which
-    // DIVERGES (PG `CREATE TABLE app.widgets` vs SQLite `CREATE TABLE "widgets"`).
+    // invariant). A per-dialect rendered-SQL anchor would DIVERGE
+    // (PG `CREATE TABLE app.widgets` vs SQLite `CREATE TABLE "widgets"`).
     #[test]
     fn ir_plan_anchor_is_dialect_neutral_pg_eq_sqlite() {
         let ir = create_table_ir(
@@ -14996,7 +14910,7 @@ columns = [
         );
     }
 
-    // Regression: editing the authoring op list (a `.ts` edit) changes the op list
+    // Editing the authoring op list (a `.ts` edit) changes the op list
     // => changes the journaled anchor => the executor's net-applied drift gate would
     // abort on re-deploy. Two IRs differing only in a column type produce different
     // plan anchors.
@@ -16118,7 +16032,7 @@ columns = [
     /// on the PG leg - schema-qualified SOURCE, BARE target - with the inverse
     /// rename as `down`, and is `requires_approval` but NOT data-loss `destructive`.
     /// It must NOT route through the online expand-contract path (no ADD COLUMN /
-    /// trigger / backfill). RED before the op existed (`Op::RenameTable` absent).
+    /// trigger / backfill).
     #[test]
     fn rename_table_lowers_to_direct_alter_pg() {
         let author = test_ir_author("app", "app_a", POSTGRES);
@@ -16158,7 +16072,7 @@ columns = [
     }
 
     /// The SQLite leg: native `ALTER TABLE <old> RENAME TO <new>`, both names
-    /// UNqualified `main`, inverse `down`. RED before the op existed.
+    /// UNqualified `main`, inverse `down`.
     #[test]
     fn rename_table_lowers_to_direct_alter_sqlite() {
         let author = test_ir_author("app", "app_a", SQLITE);
