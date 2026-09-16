@@ -30,12 +30,10 @@ use zeroship_core::AppId;
 pub mod meter;
 pub mod outbox;
 
-// This crate declared an env consumer (`MeteringConsumer`) until 2026-08-20,
-// solely for `UsageStreamSettings::from_env`. That constructor is gone: the two
-// producers declare `metering.brokers` and its three siblings as generated
-// settings, so the reads happen in each binary's own resolver under its own
-// registered name. A library consumer with nothing left to read would be a
-// registry entry claiming reads that no longer exist.
+// No env consumer is declared here, and that is deliberate: the reads happen in
+// each binary's own resolver under its own registered name (`metering.brokers`
+// and its three siblings are generated settings). A library consumer with nothing
+// left to read would be a registry entry claiming reads that do not exist.
 
 pub use meter::Meter;
 pub use outbox::{
