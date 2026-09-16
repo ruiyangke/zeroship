@@ -737,10 +737,9 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
         );
     }
 
-    // POPULATED, and it was a real defect rather than a latent one. This map used to be
-    // empty, with a comment here claiming nothing read it. The fold reads it: a
-    // `dropView` naming a view an ALREADY-APPLIED migration created found nothing in the
-    // projection and failed the deploy with `fold: view <name> does not exist`
+    // POPULATED, and the map must stay populated: the fold reads it. A `dropView`
+    // naming a view an ALREADY-APPLIED migration created finds nothing in the
+    // projection and fails the deploy with `fold: view <name> does not exist`
     // (`FoldError::MissingView`), because an applied migration's create carries journal
     // evidence and so is absent from `pending_ops` too. PostgreSQL and SQLite never had
     // it because both populate their views.

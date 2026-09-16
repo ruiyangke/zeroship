@@ -70,9 +70,9 @@ impl StoreUrl {
 
 /// Everything an S3-backed blob store needs that a process resolves for it.
 ///
-/// This crate used to read `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
-/// `AWS_SESSION_TOKEN` and `ZEROSHIP_BLOB_UPLOAD_CONCURRENCY` itself. It cannot
-/// any more, and for a STRUCTURAL reason rather than a stylistic one:
+/// This crate must NOT read `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+/// `AWS_SESSION_TOKEN` or `ZEROSHIP_BLOB_UPLOAD_CONCURRENCY` itself, and that is
+/// a STRUCTURAL reason rather than a stylistic one:
 /// `zeroship-core` depends on `zeroship-bundle`, so bundle cannot use the typed
 /// environment keys that make a read enumerable, and a raw read here would be
 /// exactly the invisible read Step 4 of
