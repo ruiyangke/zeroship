@@ -679,19 +679,10 @@ impl ExpandContractAuthor {
     }
 }
 
-// `pub(crate) use zeroship_migrate_backend::capability::dual_write_function_body;` and
-// `fn build_dual_write_sql(..)` USED TO LIVE HERE, and between them they made the
-// neutral engine spell four PostgreSQL statements: `CREATE OR REPLACE FUNCTION ...
-// LANGUAGE plpgsql`, `CREATE TRIGGER ... BEFORE INSERT OR UPDATE ... EXECUTE FUNCTION`,
-// and twice `DROP TRIGGER <t> ON <table>; DROP FUNCTION <f>()` - the last of which is
-// not portable syntax in either direction.
-//
-// Only `plpgsql` was a name a census could see. The engine asks
-// `SchemaRenderer::dual_write_trigger` now, which is a REQUIRED method, so the three
+// The engine asks `SchemaRenderer::dual_write_trigger`, a REQUIRED method, so the three
 // backends that do not resolve a rename this way say so at their own definition sites
-// rather than being papered over by a fallthrough here. See
-// `zeroship-migrate-postgres/src/dual_write.rs` for the whole of it, including the body
-// that had been sitting in the CONTRACT crate.
+// rather than being papered over by a fallthrough here. The PostgreSQL implementation
+// lives in `zeroship-migrate-postgres/src/dual_write.rs`.
 fn dual_write_sql(
     vendors: VendorSet,
     dialect: &DialectId,
@@ -950,13 +941,12 @@ mod tests {
     #[test]
     fn expand_sql_is_byte_stable_across_reauthoring() {
         // Re-authoring the same intent yields identical Expand/Contract SQL AND
-        // identical sub-step ids + checksums: the E1..C2
-        // versions are now DETERMINISTICALLY derived from the rename's stable seed
-        // (schema+owner+table+from+to+ty) plus the step index, not minted fresh
-        // per run. Because the checksum folds `depends_on` and `depends_on` now
-        // holds deterministic sibling ids, the FULL checksum is stable too - the
-        // pre-fix "dependency-free only" carve-out is gone. This is the property a
-        // re-lower of the identical IR envelope on every deploy relies on.
+        // identical sub-step ids + checksums: the E1..C2 versions are
+        // DETERMINISTICALLY derived from the rename's stable seed
+        // (schema+owner+table+from+to+ty) plus the step index. The checksum folds
+        // `depends_on`, which holds deterministic sibling ids, so the FULL
+        // checksum is stable too. This is the property a re-lower of the
+        // identical IR envelope on every deploy relies on.
         let p1 = author().author(&rename()).expect("author 1");
         let p2 = author().author(&rename()).expect("author 2");
         assert_eq!(

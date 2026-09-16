@@ -1,6 +1,6 @@
-//! Phase F Stage 1 smoke test — proves the monorepo consumes the published
-//! `zero-migrate` engine AND that the platform's native `compio-postgres` driver
-//! applies a real IR envelope END-TO-END through the [`SqlSession`] seam.
+//! Smoke test — proves the monorepo consumes the published `zero-migrate` engine
+//! AND that the platform's native `compio-postgres` driver applies a real IR
+//! envelope END-TO-END through the [`SqlSession`] seam.
 //!
 //! The flow, over a REAL Postgres on :5440:
 //!   1. open a live `compio_postgres::Client` and wrap it in [`CompioPgSession`]
@@ -37,21 +37,12 @@ const VENDORS: zeroship_migrate_backend::registry::VendorSet = zeroship_migrate:
 /// The confined table-shape ceiling (the seven system columns + three indexes +
 /// `["id"]` PK + `author_primary_key = "forbid"`) — a `RootCharter` document composed
 /// into an `EffectivePolicy` via the engine's `effective_policy_from_charter_toml`.
-/// (The old `PolicyProfile::confined()` is gone; the confined shape is now policy data.)
 ///
 /// Only the GRANTS are written here, because only the grants are this fixture's
 /// own: it pins `schema.cross_schema` to its throwaway project schema, which no
 /// shipped ceiling does. The `[[inject]]` rule is the platform-wide fragment in
 /// `policies/`, concatenated in at compile time, so this fixture cannot describe
 /// a table shape the deployed server does not produce.
-///
-/// It could, and did. Until 2026-08-20 the rule was inlined here: `ddf636140`
-/// added the created_at/updated_at/version DDL defaults to the two ceilings the
-/// mirror gate then compared, and this fixture -- which its own doc comment calls
-/// "the confined table-shape ceiling" -- kept the pre-fix shape for eleven days.
-/// This test never inserts a row, so nothing went red; it simply stopped
-/// exercising the shape a creator actually gets, which is the one thing a fixture
-/// calling itself the confined ceiling is for.
 const CONFINED_CEILING_TOML: &str = concat!(
     r#"policy_version = 1
 

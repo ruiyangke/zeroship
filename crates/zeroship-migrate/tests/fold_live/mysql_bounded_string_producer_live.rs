@@ -1,30 +1,22 @@
-//! **The MySQL half of the bounded-string producer: the bound goes, and so does the
-//! storage family.**
+//! **The MySQL half of the bounded-string producer: the descriptor producer must carry
+//! the declared width into the DDL.**
 //!
 //! `pg_bounded_string_producer_live.rs` is the primary oracle and this is its companion
-//! on the one other dialect whose DDL the fix CHANGES. It exists because a changed
-//! emitter arm with no live coverage is exactly what the decimal fix had to declare
-//! untested, and because the consequence here was not the one predicted.
+//! on the one other dialect whose DDL the descriptor producer changes. The MySQL
+//! backend's `mysql_base_column_type_for_def` answers `VARCHAR(191)` for a widthless
+//! `string`, so a `t.string({ maxLength: 500 })` column whose facet is dropped does not
+//! merely narrow to 191: `render::fold::token_to_col_type` answers `ColType::Text`
+//! without the `maxLength` facet, `ir_column_to_field` sets `unbounded_text` from that
+//! same `ColType`, and `MysqlSchemaRenderer::column_type` reads that marker BEFORE it
+//! consults the type map, so the column answers a bare `TEXT`.
 //!
-//! **What was predicted and is WRONG.** The MySQL backend's
-//! `mysql_base_column_type_for_def` answers `VARCHAR(191)` for a widthless `string`, so
-//! the guess was that dropping `maxLength` would NARROW a `t.string({ maxLength: 500 })`
-//! column to 191 and cost the author a legal write. Measured against MySQL 8, it does
-//! not: `render::fold::token_to_col_type` produced `ColType::Text`, `ir_column_to_field`
-//! then set `unbounded_text` from that very `ColType`, and
-//! `MysqlSchemaRenderer::column_type` reads that marker BEFORE it ever consults the
-//! type map, so it answers a bare `TEXT`. The column came out `TEXT`, `CHARACTER_MAXIMUM_LENGTH`
-//! 65535. The prediction was refuted by the server, which is why it is written down
-//! here rather than quietly corrected.
-//!
-//! **What actually happens** is the same shape PostgreSQL showed, with a ceiling on it:
-//! the declared bound is gone, MySQL accepts values the author forbade, and the column
-//! additionally changes STORAGE FAMILY. `TEXT` is not a wide `VARCHAR` on MySQL — it
-//! takes no bare literal `DEFAULT` (error 1101), an index over it needs a prefix length
-//! (error 1170), and the MySQL backend's `MysqlStorage` classifies it separately for
-//! exactly those reasons - it is what `literal_default_storage_refusal` and
-//! `unprefixed_key_storage_refusal` consult. So the producer did not merely lose a
-//! number; it moved the column into the family whose DDL rules are different.
+//! Getting there loses the declared bound AND changes STORAGE FAMILY. `TEXT` is not a
+//! wide `VARCHAR` on MySQL — it takes no bare literal `DEFAULT` (error 1101), an index
+//! over it needs a prefix length (error 1170), and the MySQL backend's `MysqlStorage`
+//! classifies it separately for exactly those reasons - it is what
+//! `literal_default_storage_refusal` and `unprefixed_key_storage_refusal` consult. A
+//! dropped facet therefore does not merely lose a number; it moves the column into the
+//! family whose DDL rules are different.
 //!
 //! # The oracle is the server
 //!
@@ -37,8 +29,8 @@
 //! both "the value is not in the database", and a test that asserted on the error alone
 //! would pass on one server and fail on the other.
 //!
-//! REQUIRES `ZERO_MIGRATE_MYSQL_URL` through `require_live_mysql!`: with no DSN the
-//! pass count cannot be mistaken for coverage, because there is none to read.
+//! REQUIRES `ZERO_MIGRATE_MYSQL_URL` through `require_live_mysql!`; with no DSN there
+//! is no coverage to read.
 
 use crate::support;
 
@@ -297,16 +289,16 @@ async fn a_bounded_string_authored_as_ops_is_a_varchar_mysql_enforces() {
     );
 }
 
-/// **The defect's MySQL face: the bound is gone and the storage family changed with
-/// it.**
+/// **The MySQL face: the descriptor producer must carry the declared width, and a
+/// dropped facet costs more than a number - it changes the storage family.**
 ///
 /// The same width, declared as a descriptor facet and run through the shipped
-/// `descriptors_to_create_ops`. `token_to_col_type` mapped the `"string"` token to
-/// `ColType::Text` without consulting `max_length`; `ir_column_to_field` derived
-/// `unbounded_text` from that same `ColType`; and `MysqlSchemaRenderer::column_type`
-/// reads the marker ahead of the type map and emits a bare `TEXT`. Measured before the fix:
-/// `DATA_TYPE = "text"`, `CHARACTER_MAXIMUM_LENGTH = 65535`, and the 1000-character
-/// value stored in full.
+/// `descriptors_to_create_ops`. `token_to_col_type` must map the `"string"` token to
+/// `ColType::String { length }` when `max_length` is present; collapsing it to
+/// `ColType::Text` makes `ir_column_to_field` derive `unbounded_text` from that same
+/// `ColType`, and `MysqlSchemaRenderer::column_type` reads the marker ahead of the type
+/// map and emits a bare `TEXT` - which takes no bare literal `DEFAULT` and needs a
+/// prefix length to be indexed.
 #[compio::test]
 async fn a_bounded_string_through_the_descriptor_producer_loses_its_bound_and_its_family() {
     let _url = require_live_mysql!();
