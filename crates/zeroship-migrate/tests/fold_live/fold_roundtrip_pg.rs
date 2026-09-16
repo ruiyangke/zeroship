@@ -11,8 +11,7 @@
 //! A clean drift result is strictly narrower than saying that the snapshots agree.
 //! `IndexSnapshot` equality excludes `opclass`, `nulls_not_distinct` and `only`, so
 //! this file does not claim `fold_ops == snapshot_schema`. `only` joined that list
-//! because the case below authored it and measured the guaranteed false red this
-//! comment used to merely predict.
+//! because the case below authors it against the live server.
 //!
 //! The lifecycle cases cover the index facets equality does compare (a partial
 //! predicate, an expression key, an INCLUDE payload, a DESC unique key), catalog
@@ -1018,10 +1017,9 @@ async fn view_lifecycle() {
 ///     IS NOT NULL))` - it must not be compared at all, and a change that started
 ///     comparing it would turn this stage permanently red.
 ///
-/// Measured rather than assumed: blinding the fold's trigger derivation makes the
+/// The comparison is live: blinding the fold's trigger derivation makes the
 /// `create trigger` checkpoint fail with `unexpected_objects: ["trigger
-/// trigger_rows_audit_trg on <schema>.trigger_rows"]`, which is the proof that the
-/// comparison is live and this test is no longer vacuous.
+/// trigger_rows_audit_trg on <schema>.trigger_rows"]`.
 #[compio::test]
 async fn trigger_and_function_lifecycle() {
     let source = r#"{
@@ -1167,10 +1165,10 @@ async fn identity_and_primary_key_replacement_lifecycle() {
 
 #[compio::test]
 async fn partitioned_parent_index_only_lifecycle() {
-    // Authoring `only: true` used to be a guaranteed false red: introspection reports
-    // `only: false` for every index, and equality compared the field. The module doc
-    // predicted that and nothing pinned it. This case authors the shape against the
-    // live server, so the exclusion that fixed it cannot be reverted silently.
+    // Introspection reports `only: false` for every index, so comparing the field
+    // would make this shape a guaranteed false red; the exclusion that omits it
+    // must not be reverted silently. This case authors the shape against the live
+    // server to pin that.
     let source = r#"{
       "ir_version": 1,
       "name": "partitioned_parent_index_only_lifecycle",
