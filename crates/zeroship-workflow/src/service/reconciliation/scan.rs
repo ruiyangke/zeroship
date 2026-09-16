@@ -1,5 +1,5 @@
 use super::{invalid, Transaction, WorkflowServiceError};
-use crate::service::models::{deployment_holds, job_publications, reconciliation_scans};
+use crate::service::models::{app_state, deployment_holds, job_publications};
 use serde::{Deserialize, Serialize};
 use zeroship_data_orm::orm::{FindOptions, FromRow};
 
@@ -84,12 +84,12 @@ impl Plan {
     }
 
     pub(super) fn check_scan(&self, current: &Scan) -> Result<(), WorkflowServiceError> {
-        let phase = Phase::parse(&current.phase)?;
-        if current.revision < self.revision
-            || (current.revision == self.revision
+        let phase = Phase::parse(&current.reconciliation_phase)?;
+        if current.reconciliation_revision < self.revision
+            || (current.reconciliation_revision == self.revision
                 && (phase != self.phase
-                    || current.after_id != self.after
-                    || current.upper_id != self.previous_upper))
+                    || current.reconciliation_after_id != self.after
+                    || current.reconciliation_upper_id != self.previous_upper))
         {
             return Err(invalid());
         }
@@ -97,24 +97,26 @@ impl Plan {
     }
 }
 
+/// The app's reconciliation sweep, held on its locked `app_state` row.
 #[derive(FromRow)]
-#[orm(entity = reconciliation_scans)]
+#[orm(entity = app_state)]
 pub(super) struct Scan {
-    pub revision: i64,
-    pub phase: String,
-    pub after_id: Option<String>,
-    pub upper_id: Option<String>,
+    pub app_id: String,
+    pub reconciliation_revision: i64,
+    pub reconciliation_phase: String,
+    pub reconciliation_after_id: Option<String>,
+    pub reconciliation_upper_id: Option<String>,
 }
 
-pub(super) async fn scan(
-    tx: &Transaction,
-    app: &str,
-) -> Result<Option<Scan>, WorkflowServiceError> {
-    Ok(tx
+/// Read the sweep from the app's locked state row. Registration creates that
+/// row, and every caller locks it first, so its absence is a damaged journal.
+/// One schema holds many apps, so the row names the app it was read for.
+pub(super) async fn scan(tx: &Transaction, app: &str) -> Result<Scan, WorkflowServiceError> {
+    let row = tx
         .database()
-        .entity::<reconciliation_scans::Entity>()?
+        .entity::<app_state::Entity>()?
         .find::<Scan>(
-            reconciliation_scans::id.eq(app)?,
+            app_state::app_id.eq(app)?,
             FindOptions {
                 limit: Some(1),
                 ..Default::default()
@@ -122,7 +124,12 @@ pub(super) async fn scan(
         )
         .await?
         .into_iter()
-        .next())
+        .next()
+        .ok_or_else(invalid)?;
+    if row.app_id != app {
+        return Err(invalid());
+    }
+    Ok(row)
 }
 
 pub(super) async fn pending_ids(
