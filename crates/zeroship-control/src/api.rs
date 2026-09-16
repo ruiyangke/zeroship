@@ -449,7 +449,7 @@ pub async fn create_app(
     //
     // An app is created INSIDE a project, so `apps:write` is authorized at
     // `Resource::Project` and never at `Resource::Any` - the self-service
-    // baseline deliberately no longer carries `apps:write`, because a permit
+    // baseline deliberately does not carry `apps:write`, because a permit
     // there would let any authenticated principal create an app with no
     // organization behind it.
     //
@@ -657,8 +657,8 @@ pub async fn archive_app(
 
 /// Restore an archived app. Normally the retained name and manifest let the
 /// route-sync and workflow polling paths restore service without reconstruction.
-/// An app whose manifest keyspace was already removed by the former partial
-/// hard-delete path needs a staged redeploy; restore contains no repair shim.
+/// An app whose manifest keyspace is gone needs a staged redeploy; restore
+/// contains no repair shim.
 pub async fn unarchive_app(
     req: web::HttpRequest,
     id: Path<String>,
@@ -1244,18 +1244,16 @@ pub async fn set_plan(
         }
     };
 
-    // MAJOR-4: assigning a plan needs `BillingWrite` on the app AND a target
+    // Assigning a plan needs `BillingWrite` on the app AND a target
     // plan flagged `assignable_by_creator = true`. Without the second gate a
     // creator could PUT a cheaper operator-only tier (unlimited/console) and
     // underpay - the asymmetry the reduction-only spend-limit override already
     // closes for caps.
     //
-    // This used to probe `BillingWrite` on `Resource::Any` first and skip the
-    // assignability gate for an "operator". That arm was satisfiable only by
-    // the deleted universal-allow policy - `enforce` intersects a bearer's
-    // wrapper with the static set, so no token could reach it either - and it
-    // is gone with it. Operator-only tiers are now assigned by editing the
-    // catalog row, not by holding a cross-tenant grant.
+    // There is no operator bypass of the assignability gate: `enforce`
+    // intersects a bearer's wrapper with the static set, so no token carries a
+    // cross-tenant `BillingWrite`. Operator-only tiers are assigned by editing
+    // the catalog row, not by holding a cross-tenant grant.
     let billing_scope = match billing_resource(&state, &uid).await {
         Ok(scope) => scope,
         Err(resp) => return resp,
@@ -1546,16 +1544,15 @@ pub struct InvoiceListQuery {
 /// operator (`Resource::Any`); a non-operator caller is always forced to self.
 #[derive(Debug, Deserialize)]
 pub struct OrganizationScopeQuery {
-    /// REQUIRED. It was optional while the billing subject was the caller, and
-    /// absent meant "me" - one user, one bill, one defensible default. A user
-    /// holds seats at several organizations, so "me" no longer names a subject
-    /// and the parameter has to be supplied.
+    /// REQUIRED. A user holds seats at several organizations, so no single
+    /// billing subject can be defaulted from the caller; the parameter has to
+    /// be supplied.
     pub organization_id: String,
 }
 
 /// The resource a BILLING action on `app_id` must name.
 ///
-/// # Why an app-scoped billing gate cannot work any more
+/// # Why an app-scoped billing gate cannot work
 ///
 /// The ORGANIZATION is the billing subject, so both statements in
 /// `deploy/policies/creator/organization_billing.cedar` are scoped
@@ -1810,10 +1807,9 @@ pub async fn get_billing_status(
 /// least one owned app, and a `organization_id` naming ANOTHER creator is 403. A
 /// caller with no billing capability anywhere is 403.
 ///
-/// The `?organization_id=` parameter therefore now only confirms or contradicts the
-/// caller's own id. It is kept rather than removed because the contradiction is
-/// worth answering with a 403 instead of silently reading the caller's own
-/// data under someone else's name.
+/// The `?organization_id=` parameter only confirms or contradicts the caller's
+/// own id. It exists because the contradiction is worth answering with a 403
+/// instead of silently reading the caller's own data under someone else's name.
 async fn resolve_billing_organization(
     authz: &AuthzGuard,
     state: &AppState,
@@ -1960,11 +1956,10 @@ fn worker_logs_url(worker_url: &str, app_id: &AppId) -> String {
 /// The `Authorization` header control presents to a worker for the log read.
 ///
 /// A service assertion under control's OWN ed25519 key, minted fresh per fan-out
-/// leg. It used to be the shared `worker_key` bearer - the same secret that keyed
-/// the gateway's identity envelope - so a worker that could read this header
-/// could forge an end-user identity. That secret is gone; the worker's allowlist
-/// grants the log read to `svc/control` and to nothing else, which is a
-/// separation a shared bearer could not express at all.
+/// leg. A shared bearer here would let a worker that can read this header forge
+/// whatever else that bearer keys; the worker's allowlist grants the log read
+/// to `svc/control` and to nothing else, which is a separation a shared bearer
+/// could not express at all.
 fn worker_authorization(state: &AppState) -> Option<String> {
     let worker = zeroship_core::service_peers::service_issuer(
         zeroship_core::service_peers::WORKER_SERVICE_NAME,
@@ -2100,8 +2095,8 @@ where
         }
         // compio File::write_all_at takes ownership of the buffer.
         // The chunk is a refcounted slice; copy into an owned Vec so
-        // we can hand it to write_all_at. The to_vec() costs a single
-        // chunk-sized alloc per chunk (typically 16-256 KiB).
+        // we can hand it to write_all_at. The to_vec() costs one
+        // chunk-sized alloc per chunk.
         let owned: Vec<u8> = chunk_slice.to_vec();
         let compio::BufResult(res, _returned) = (&file).write_all_at(owned, written).await;
         if let Err(e) = res {
