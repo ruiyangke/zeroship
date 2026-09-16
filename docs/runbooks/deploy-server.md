@@ -145,13 +145,15 @@ docker run --rm \
 
 The explicit paths are necessary because the CLI's repository-local defaults
 are `deploy/compose/secrets` and `deploy/compose/.env`. The command creates
-exactly eight files:
-
-`gateway-signing.pem` `auth-signing.pem` `broker-secret`
-`pairwise-salt` `refresh-hash-key` `refresh-idem-key`
+the private files listed in `docs/runbooks/docker-compose.md` ("Local secret
+provisioning") - among them this host's operator join signer credential,
+`join-signer.json` - plus the public `service-peers.json` and
+`join-signers.json`. Control mints its own zone's join tokens from that
+credential; workers never hold it. Minting a token for a separate worker host
+or fleet is `docs/runbooks/worker-join-signers.md`.
 
 It also appends the generated scalar values described below to `.env`. The
-directory is mode 0700 and the files are mode 0600 on Unix. Rerunning is safe:
+directory is mode 0700 and the private files are mode 0600 on Unix. Rerunning is safe:
 existing valid material is kept byte-for-byte, missing entries are created, and
 invalid or conflicting material causes an error instead of an implicit rotation.
 

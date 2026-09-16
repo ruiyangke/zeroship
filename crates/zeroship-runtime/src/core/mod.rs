@@ -20,8 +20,9 @@ pub mod plugin;
 pub(crate) mod plugin_modules;
 pub mod runtime;
 pub mod serve;
-pub mod state;
 pub(crate) mod startup;
+pub mod state;
+pub(crate) mod tasks;
 mod zeroship_module;
 
 #[cfg(target_os = "linux")]

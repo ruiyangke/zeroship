@@ -1,0 +1,24 @@
+[package]
+name = "zeroship-workflow-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Authenticated workflow coordination metadata clients"
+
+[dependencies]
+compio = { workspace = true }
+cyper = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+url = { workspace = true }
+zeroship-core = { workspace = true }
+
+[dev-dependencies]
+compio-tls = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
+rcgen = "0.14"
+
+[lints]
+workspace = true

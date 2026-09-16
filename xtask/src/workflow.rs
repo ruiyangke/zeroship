@@ -2,6 +2,19 @@ use crate::{cargo, checked, root, Result};
 use std::process::Command;
 
 pub fn run() -> Result<()> {
+    for schema in [
+        "crates/zeroship-workflow-schema/schema",
+        "crates/zeroship-workflow-manager/schema",
+        "crates/zeroship-workflow-manager/schema/deployments",
+    ] {
+        checked(
+            Command::new("node")
+                .current_dir(root())
+                .arg(format!("{schema}/generate.mjs"))
+                .arg("--check"),
+            "workflow migration compiler artifacts",
+        )?;
+    }
     checked(
         cargo().args([
             "test",
@@ -18,11 +31,36 @@ pub fn run() -> Result<()> {
             "-p",
             "zeroship-workflow",
             "-p",
-            "zeroship-workflow-v8",
+            "zeroship-workflow-calendar",
             "-p",
-            "zeroship-workflow-scheduler",
+            "zeroship-workflow-client",
+            "-p",
+            "zeroship-workflow-manager",
+            "-p",
+            "zeroship-workflow-schema",
+            "-p",
+            "zeroship-workflow-v8",
         ]),
-        "workflow engine, binding and scheduler tests",
+        "workflow engine, schema artifacts, metadata client, manager and binding tests",
+    )?;
+    checked(
+        cargo().args(["test", "-p", "zeroship-workflow-server"]),
+        "workflow coordinator store, HTTP and platform authority contracts",
+    )?;
+    checked(
+        cargo().args([
+            "test",
+            "-p",
+            "zeroship-cli",
+            "--bin",
+            "zeroship",
+            "workflow::",
+        ]),
+        "local workflow identity, retained code and background worker contracts",
+    )?;
+    checked(
+        cargo().args(["test", "-p", "zeroship-cli", "--test", "workflow_local"]),
+        "CLI workflow binding and process recovery",
     )?;
     checked(
         cargo().args([
@@ -39,10 +77,6 @@ pub fn run() -> Result<()> {
             "test",
             "-p",
             "zeroship-control",
-            "--test",
-            "workflow_api",
-            "--test",
-            "workflow_engine_test",
             "--test",
             "workflow_e2e",
         ]),

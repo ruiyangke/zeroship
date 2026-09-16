@@ -6,7 +6,7 @@ use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use crate::workflow_postgres::{self, Database};
@@ -14,10 +14,8 @@ use ed25519_dalek::pkcs8::EncodePrivateKey;
 use serde_json::{json, Value};
 use testcontainers::{core::WaitFor, runners::SyncRunner, Container, GenericImage, ImageExt};
 use uuid::Uuid;
-use zeroship_core::service_assertion::{
-    ServiceSigningKey, ServiceTrustBundle, TransportAssertionVerifier,
-};
-use zeroship_core::service_peers::{service_issuer, ServiceAuth, ServiceKeyring};
+use zeroship_core::service_assertion::ServiceSigningKey;
+use zeroship_core::service_peers::service_issuer;
 use zeroship_core::AppId;
 use zeroship_core::UserId;
 
@@ -28,7 +26,10 @@ fn key(service: &str) -> ed25519_dalek::SigningKey {
     let seed = match service {
         "control" => 31,
         "gateway" => 32,
-        "worker" => 33,
+        "join-signer" => 34,
+        // The workflow manager is an ordinary peer: it holds a role key and
+        // verifies joined worker instances from the platform registry.
+        "workflow" => 35,
         _ => panic!("unknown fixture service"),
     };
     ed25519_dalek::SigningKey::from_bytes(&[seed; 32])
@@ -38,31 +39,21 @@ fn signing_key(service: &str) -> ServiceSigningKey {
     ServiceSigningKey::from_pkcs8_der(key(service).to_pkcs8_der().unwrap().as_bytes()).unwrap()
 }
 
-fn trust_bundle() -> ServiceTrustBundle {
-    let mut peers = ServiceTrustBundle::new();
-    for name in ["control", "gateway", "worker"] {
-        let key = signing_key(name);
-        peers
-            .trust_signing_key(
-                &service_issuer(&format!("svc/{name}")).unwrap(),
-                key.key_id(),
-                &key,
-            )
-            .unwrap();
-    }
-    peers
-}
-
-pub fn service_auth(service: &str) -> Arc<ServiceAuth> {
-    Arc::new(ServiceAuth::new(
-        ServiceKeyring::from_parts(
-            service_issuer(&format!("svc/{service}")).unwrap(),
-            signing_key(service),
-            trust_bundle(),
-        )
-        .unwrap(),
-        Arc::new(TransportAssertionVerifier::new(trust_bundle())),
-    ))
+/// The credential a gateway mints for a worker dispatch, from the same key the
+/// fleet's gateway process holds. A test that has to reach the worker without
+/// the gateway's route table mints the identical assertion rather than a
+/// weaker stand-in.
+pub fn worker_dispatch_authorization() -> String {
+    use zeroship_core::service_assertion::ServiceTrustBundle;
+    use zeroship_core::service_peers::{service_issuer, ServiceKeyring};
+    let gateway = ServiceKeyring::from_parts(
+        service_issuer("svc/gateway").unwrap(),
+        signing_key("gateway"),
+        ServiceTrustBundle::new(),
+    )
+    .unwrap();
+    let worker = service_issuer(zeroship_core::service_peers::WORKER_SERVICE_NAME).unwrap();
+    format!("Bearer {}", gateway.mint_for(&worker).unwrap())
 }
 
 fn binaries() -> &'static BTreeMap<String, PathBuf> {
@@ -82,6 +73,8 @@ fn binaries() -> &'static BTreeMap<String, PathBuf> {
                 "zeroship-gateway",
                 "-p",
                 "zeroship-data-cdc-server",
+                "-p",
+                "zeroship-workflow-server",
             ])
             .current_dir(workflow_postgres::root())
             .output()
@@ -108,12 +101,31 @@ fn binaries() -> &'static BTreeMap<String, PathBuf> {
     })
 }
 
+/// Run one fixture statement on the fleet's platform database.
+async fn execute(url: &str, sql: &str) {
+    let (client, connection) = compio_postgres::connect(url, compio_postgres::NoTls)
+        .await
+        .expect("fleet database connection");
+    let driver = compio::runtime::spawn(connection.run());
+    client.batch_execute(sql).await.expect("fleet fixture DDL");
+    drop(client);
+    driver.await.expect("fleet database task").expect("driver");
+}
+
 pub fn port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
         .unwrap()
         .port()
+}
+
+/// What this fleet runs beyond the always-present services.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FleetOptions {
+    /// Run a workflow manager, point Control's lifecycle publisher at it, and
+    /// give the worker a workflow host registered with it.
+    pub workflow_manager: bool,
 }
 
 #[derive(Debug)]
@@ -127,27 +139,38 @@ pub struct Fleet {
     pub control_url: String,
     pub gateway_url: String,
     pub worker_url: String,
+    /// Present only when [`FleetOptions::workflow_manager`] asked for one.
+    pub manager_url: Option<String>,
     pub app_id: AppId,
     pub deploy_id: String,
     pub blob_root: PathBuf,
 }
 
 impl Fleet {
+    /// A fleet with no workflow manager: nothing places an app, so no host
+    /// serves the workflow namespace.
     pub fn start() -> Self {
-        Self::with_advance(true)
+        Self::with(FleetOptions::default())
     }
 
-    pub fn with_advance(advance: bool) -> Self {
+    /// A fleet whose worker runs a workflow host against a real manager.
+    pub fn with_workflow_manager() -> Self {
+        Self::with(FleetOptions {
+            workflow_manager: true,
+        })
+    }
+
+    pub fn with(options: FleetOptions) -> Self {
         std::thread::spawn(move || {
             compio::runtime::Runtime::new()
                 .expect("fleet runtime")
-                .block_on(Self::launch(advance))
+                .block_on(Self::launch(options))
         })
         .join()
         .unwrap_or_else(|error| std::panic::resume_unwind(error))
     }
 
-    async fn launch(advance: bool) -> Self {
+    async fn launch(options: FleetOptions) -> Self {
         let binaries = binaries();
         let database = Database::new();
         let work = tempfile::tempdir().expect("workflow fleet directory");
@@ -182,12 +205,18 @@ impl Fleet {
             control_url: format!("http://127.0.0.1:{}", port()),
             gateway_url: format!("http://127.0.0.1:{}", port()),
             worker_url: format!("http://127.0.0.1:{}", port()),
+            manager_url: options
+                .workflow_manager
+                .then(|| format!("http://127.0.0.1:{}", port())),
             app_id: AppId::mint(),
             deploy_id: String::new(),
         };
         fs::create_dir_all(&fleet.blob_root).unwrap();
         let mut peer_keys = vec![];
-        for name in ["control", "gateway", "worker"] {
+        // The worker is not a peer with a key of its own: it joins with a
+        // TOKEN and mints under an instance key it draws in memory at boot, so
+        // the document publishes no `svc/worker` key.
+        for name in ["control", "gateway", "workflow"] {
             fleet.secret(
                 &format!("{name}.pem"),
                 key(name)
@@ -200,6 +229,29 @@ impl Fleet {
         fleet.secret(
             "peers.json",
             &serde_json::to_vec(&json!({"keys":peer_keys})).unwrap(),
+        );
+        // The fleet's trusted signer, and Control's import file naming its
+        // public half. Control is also the MINTER here, exactly as a
+        // single-host deployment configures it: it rotates a token into a file
+        // the worker reads at boot, so this fixture exercises the real minting
+        // path rather than a token written by the test.
+        let signer_id = zeroship_core::typed_id::new_join_signer_id();
+        fleet.secret(
+            "join-signer.json",
+            &serde_json::to_vec(&json!({
+                "signer_id": signer_id,
+                "private_key": key("join-signer").to_pkcs8_pem(Default::default()).unwrap().as_str(),
+            }))
+            .unwrap(),
+        );
+        fleet.secret(
+            "join-signers.json",
+            &serde_json::to_vec(&json!({"signers": [{
+                "id": signer_id,
+                "zones": ["default"],
+                "public_key": signing_key("join-signer").public_jwk_x(),
+            }]}))
+            .unwrap(),
         );
         fleet.secret("broker", b"workflow-fixture-broker-secret-for-gateway");
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
@@ -253,6 +305,65 @@ impl Fleet {
             .unwrap()
             .to_string();
         let blobs = fleet.blob_root.to_str().unwrap().to_owned();
+        // The manager owns no creator database: it reads the platform metadata
+        // under its own login and verifies enrolled instances from the same
+        // registry Control writes at enrolment.
+        if let Some(manager_url) = fleet.manager_url.clone() {
+            // The platform migration creates this login role without a
+            // password, so a fixture that authenticates by password has to
+            // supply one. Every other service role here carries a development
+            // password from the migration itself.
+            execute(
+                &fleet.database.url(),
+                "ALTER ROLE zeroship_workflow WITH PASSWORD 'zeroship_workflow'",
+            )
+            .await;
+            let listen = format!(
+                "127.0.0.1:{}",
+                url::Url::parse(&manager_url).unwrap().port().unwrap()
+            );
+            fleet.spawn(
+                "workflow",
+                &binaries["zeroship-workflow-server"],
+                &["--no-config".into(), "--listen".into(), listen],
+                &[
+                    (
+                        "ZEROSHIP_WORKFLOW_DATABASE_URL",
+                        fleet.role_url("zeroship_workflow"),
+                    ),
+                    ("ZEROSHIP_WORKFLOW_CONTROL_URL", fleet.control_url.clone()),
+                ],
+            );
+        }
+        let mut control_env = vec![
+            ("ZEROSHIP_CONTROL_DATABASE_URL", fleet.database.url()),
+            ("ZEROSHIP_CONTROL_MASTER_KEY", MASTER_KEY.into()),
+            ("ZEROSHIP_CONTROL_ALLOW_UNSUPPORTED_BILLING", "true".into()),
+            (
+                "ZEROSHIP_CONTROL_WORKER_ENROLMENT_NETWORKS",
+                "127.0.0.1/32".into(),
+            ),
+            (
+                "ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS",
+                worker_port.clone(),
+            ),
+            (
+                "ZEROSHIP_CONTROL_JOIN_SIGNERS_FILE",
+                fleet.path("join-signers.json"),
+            ),
+            (
+                "ZEROSHIP_CONTROL_JOIN_TOKEN_SIGNER_FILE",
+                fleet.path("join-signer.json"),
+            ),
+            ("ZEROSHIP_CONTROL_JOIN_TOKEN_FILE", fleet.path("join-token")),
+            ("ZEROSHIP_CONTROL_JOIN_TOKEN_ZONE", "default".into()),
+        ];
+        if let Some(manager_url) = fleet.manager_url.clone() {
+            control_env.push((
+                "ZEROSHIP_CONTROL_WORKFLOW_COORDINATOR_URL",
+                manager_url,
+            ));
+        }
         fleet.spawn(
             "control",
             &binaries["zeroship-control"],
@@ -262,27 +373,46 @@ impl Fleet {
                 control_port,
                 "--blob-store".into(),
                 blobs.clone(),
-                "--gateway-url".into(),
-                fleet.gateway_url.clone(),
                 "--worker-urls".into(),
                 fleet.worker_url.clone(),
-                "--disable-workflow-engine".into(),
             ],
-            &[
-                ("ZEROSHIP_CONTROL_DATABASE_URL", fleet.database.url()),
-                ("ZEROSHIP_CONTROL_MASTER_KEY", MASTER_KEY.into()),
-                ("ZEROSHIP_CONTROL_ALLOW_UNSUPPORTED_BILLING", "true".into()),
-                (
-                    "ZEROSHIP_CONTROL_WORKER_ENROLMENT_NETWORKS",
-                    "127.0.0.1/32".into(),
-                ),
-                (
-                    "ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS",
-                    worker_port.clone(),
-                ),
-            ],
+            &control_env,
         );
         fleet.ready(fleet.control_url.clone()).await;
+        if let Some(manager_url) = fleet.manager_url.clone() {
+            fleet.ready(manager_url).await;
+        }
+        let mut worker_env = vec![
+            (
+                "ZEROSHIP_WORKER_DATABASE_URL",
+                fleet.creator_role_url("zeroship_worker"),
+            ),
+            (
+                "ZEROSHIP_WORKER_CDC_RELAY_URL",
+                format!("wss://localhost:{relay_port}/internal/v1/cdc/subscribe"),
+            ),
+            (
+                "ZEROSHIP_WORKER_CDC_RELAY_CA_FILE",
+                fleet.path("relay-cert.pem"),
+            ),
+            // Control mints this before it binds, and `fleet.ready` above
+            // waited for that bind, so the file is there by the time the
+            // worker reads it.
+            ("ZEROSHIP_WORKER_JOIN_TOKEN_FILE", fleet.path("join-token")),
+        ];
+        if let Some(manager_url) = fleet.manager_url.clone() {
+            // A workflow host stages payloads in the app object store and keeps
+            // creator journals in the app database, so the worker needs both.
+            let payloads = fleet.work.path().join("objects");
+            fs::create_dir_all(&payloads).unwrap();
+            worker_env.push(("ZEROSHIP_WORKER_WORKFLOW_MANAGER_URL", manager_url));
+            worker_env.push(("ZEROSHIP_WORKER_WORKFLOW_CAPACITY", "8".into()));
+            worker_env.push(("ZEROSHIP_WORKER_WORKFLOW_SLOTS", "2".into()));
+            worker_env.push((
+                "ZEROSHIP_WORKER_STORAGE_URL",
+                payloads.to_str().unwrap().to_owned(),
+            ));
+        }
         fleet.spawn(
             "worker",
             &binaries["zeroship-worker"],
@@ -297,26 +427,8 @@ impl Fleet {
                 blobs.clone(),
                 "--poll-interval".into(),
                 "1".into(),
-                "--max-step-blob-bytes".into(),
-                "2097152".into(),
-            ]
-            .into_iter()
-            .chain(advance.then(|| "--workflow-advance-unsigned".to_string()))
-            .collect::<Vec<_>>(),
-            &[
-                (
-                    "ZEROSHIP_WORKER_DATABASE_URL",
-                    fleet.role_url("zeroship_worker"),
-                ),
-                (
-                    "ZEROSHIP_WORKER_CDC_RELAY_URL",
-                    format!("wss://localhost:{relay_port}/internal/v1/cdc/subscribe"),
-                ),
-                (
-                    "ZEROSHIP_WORKER_CDC_RELAY_CA_FILE",
-                    fleet.path("relay-cert.pem"),
-                ),
             ],
+            &worker_env,
         );
         fleet.ready(fleet.worker_url.clone()).await;
         fleet.spawn(
@@ -399,9 +511,28 @@ impl Fleet {
                 .await
                 .unwrap();
         let driver = compio::runtime::spawn(connection.run());
-        zeroship_migrate_server::provisioning::provision_database(&pg, fleet.app_id.as_str())
+        // THE CREATOR ZONE. Every schema statement below runs on the creator
+        // database, which has no platform schema;  above stays on the
+        // platform one and is used only for platform catalog rows.
+        let (creator_pg, creator_connection) =
+            compio_postgres::connect(&fleet.database.creator_url(), compio_postgres::NoTls)
+                .await
+                .unwrap();
+        let creator_driver = compio::runtime::spawn(creator_connection.run());
+        zeroship_migrate_server::provisioning::provision_database(&creator_pg, fleet.app_id.as_str())
             .await
             .unwrap();
+        if fleet.manager_url.is_some() {
+            // The creator journal is migration-path DDL: the worker's host
+            // never creates it. Installing it before the apply below leaves it
+            // inside the apply's schema-wide runtime-role grant, so the worker
+            // reaches it exactly as it reaches the creator's own tables.
+            let schema = zeroship_workflow::service::store::SchemaName::new(fleet.app_id.as_str())
+                .expect("the app's schema name");
+            creator_pg.batch_execute(&zeroship_workflow::service::schema::postgres_sql(&schema))
+                .await
+                .expect("install the creator workflow journal");
+        }
         let request = serde_json::from_slice(
             &fs::read(schema_work.join("generated/migrations.ir.json")).unwrap(),
         )
@@ -414,8 +545,11 @@ impl Fleet {
         let ledger = zeroship_migrate_server::schema_apply_store::SchemaApplyStore::new(
             fleet.database.url(),
         );
+        // The DDL lands in the creator database; the apply LEDGER stays a
+        // platform table, which is the same split the migration service runs
+        // under in production.
         zeroship_migrate_server::apply::apply_ir_documents(
-            &fleet.database.url(),
+            &fleet.database.creator_url(),
             &schema_work,
             &fleet.app_id,
             &request,
@@ -452,9 +586,21 @@ impl Fleet {
         )
         .await
         .unwrap();
-        pg.batch_execute("UPDATE zeroship.plans SET workflows_allowed = true; INSERT INTO zeroship.workflow_rollout_config (id, dispatch_paused, ingress_disabled, updated_by) VALUES ('global', false, false, 'workflow-fixture') ON CONFLICT (id) DO UPDATE SET dispatch_paused = false, ingress_disabled = false").await.unwrap();
+        // A plan carries the workflow policy the manager grants an app's host
+        // under. Control's startup seeding leaves the column null, and a null
+        // one refuses every policy lease, so the fixture publishes the catalog
+        // default the way an operator does.
+        pg.execute(
+            "UPDATE zeroship.plans SET workflows_allowed = true, workflow_policy_json = $1",
+            &[&serde_json::to_value(zeroship_core::workflow_policy::AppPolicy::default()).unwrap()],
+        )
+        .await
+        .unwrap();
+        pg.batch_execute("INSERT INTO zeroship.workflow_rollout_config (id, dispatch_paused, ingress_disabled, source_validity_ms, updated_by) VALUES ('global', false, false, 30000, 'workflow-fixture') ON CONFLICT (id) DO UPDATE SET dispatch_paused = false, ingress_disabled = false").await.unwrap();
         fleet.deploy_id = pg.query_one("SELECT id FROM zeroship.app_deploys WHERE app_id = $1 ORDER BY activated_at DESC, created_at DESC, id DESC LIMIT 1", &[&fleet.app_id.as_str()]).await.unwrap().get(0);
         drop(pg);
+        drop(creator_pg);
+        creator_driver.await.unwrap().unwrap();
         driver.await.unwrap().unwrap();
         fleet
     }
@@ -463,14 +609,25 @@ impl Fleet {
         self.work.path().join(name).to_str().unwrap().into()
     }
 
+    /// The app name every fleet provisions, and so the ingress subdomain.
+    pub const APP_NAME: &'static str = "workflow-fixture";
+
     fn secret(&self, name: &str, contents: &[u8]) {
         let path = self.work.path().join(name);
         fs::write(&path, contents).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
     }
 
-    fn role_url(&self, role: &str) -> String {
+    pub fn role_url(&self, role: &str) -> String {
         let mut url = url::Url::parse(&self.database.url()).unwrap();
+        url.set_username(role).unwrap();
+        url.set_password(Some(role)).unwrap();
+        url.into()
+    }
+
+    /// The same login against the CREATOR zone. Only the worker takes one.
+    pub fn creator_role_url(&self, role: &str) -> String {
+        let mut url = url::Url::parse(&self.database.creator_url()).unwrap();
         url.set_username(role).unwrap();
         url.set_password(Some(role)).unwrap();
         url.into()
@@ -514,17 +671,53 @@ impl Fleet {
             .env("ZEROSHIP_AUTH_PLATFORM_ISSUER", &self.issuer_url)
             .env("ZEROSHIP_OBSERVABILITY_LOG_FORMAT", "json");
         if name != "relay" {
+            // The worker holds no key of its own: it reads a join token, set
+            // by its spawn, and draws its instance key in memory. Every other
+            // service holds a role key of its own.
+            if name != "worker" {
+                cmd.env(
+                    format!("ZEROSHIP_{}_SERVICE_KEY_FILE", name.to_uppercase()),
+                    self.path(&format!("{name}.pem")),
+                );
+            }
             cmd.env(
-                format!("ZEROSHIP_{}_SERVICE_KEY_FILE", name.to_uppercase()),
-                self.path(&format!("{name}.pem")),
-            )
-            .env(
                 format!("ZEROSHIP_{}_SERVICE_PEERS_FILE", name.to_uppercase()),
                 self.path("peers.json"),
             );
         }
         self.children
             .push((name.into(), cmd.spawn().expect("start workflow service")));
+    }
+
+    /// Stop one service the way an orchestrator does - SIGTERM, then wait for
+    /// it to exit on its own - and return how it exited.
+    ///
+    /// `Drop` uses SIGKILL, which is the crash path; this is the graceful one,
+    /// and a service that has not exited within the deadline is a failure
+    /// rather than something to escalate past.
+    pub fn terminate(&mut self, name: &str) -> std::process::ExitStatus {
+        let (_, child) = self
+            .children
+            .iter_mut()
+            .find(|(child_name, _)| child_name == name)
+            .unwrap_or_else(|| panic!("no fleet service named {name}"));
+        let signalled = Command::new("kill")
+            .args(["-TERM", &child.id().to_string()])
+            .status()
+            .expect("run kill -TERM");
+        assert!(signalled.success(), "kill -TERM {name} failed: {signalled}");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            if let Some(status) = child.try_wait().expect("poll the terminating service") {
+                return status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{name} did not exit after SIGTERM; see {}",
+                self.logs.display()
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 
     pub fn assert_alive(&mut self) {

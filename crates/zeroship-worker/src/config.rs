@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 
 use zeroship_core::config::{
-    zeroship_config, BootstrapControl, CheckFormat, CommandControl, ObservabilityControls,
+    zeroship_config, CheckFormat, CommandControl, ObservabilityControls,
     Operational, OverlaySelector, Secret,
 };
 use zeroship_core::observability::LogFormat;
@@ -60,20 +60,32 @@ pub struct WorkerSettings {
     #[config(shared = CONTROL_KEY)]
     pub control_key: Secret<String>,
 
-    /// PKCS#8 PEM/DER FILE holding this process's own ed25519 service key.
+    /// FILE holding the JOIN TOKEN this worker presents at boot.
     ///
-    /// A PATH, not a `Secret<String>`: the loader sniffs PEM against DER and
-    /// refuses a group- or world-readable file, and neither is possible once
-    /// the material has become an in-memory `String`.
+    /// The one thing a worker carries, and it is not a signing key: it is a JWT
+    /// a trusted signer minted, naming a zone, an expiry and a use budget. The
+    /// worker cannot mint anything with it, and presenting it without the
+    /// keypair this process draws in memory registers nothing - the join request
+    /// is signed by that key. Every assertion after the join is minted under
+    /// that instance key. No worker holds a `svc/worker` role key.
+    /// `crates/zeroship-core/src/worker_join.rs` carries the token and proof
+    /// formats, and `docs/runbooks/worker-join-signers.md` the operator
+    /// procedure.
     ///
-    /// Empty (the default) REFUSES THE BOOT. A worker that came up without it
-    /// could neither mint an assertion nor verify a peer's, so it would bind
-    /// its port, pass a liveness probe and turn away every request that reached
-    /// it - a failure first visible to an end user. Absence never admits and no
-    /// longer defers: that is the difference between this and the shared
-    /// dispatch secret it replaced, whose empty value disabled the check.
-    #[config(name = "worker.service_key_file", default = PathBuf::new())]
-    pub service_key_file: Operational<PathBuf>,
+    /// The token is read FRESH AT EVERY BOOT, so a single-host deployment can
+    /// have its control plane rotate the file and a container restarted days
+    /// later still gets a token minted minutes ago.
+    ///
+    /// A PATH, not a `Secret<String>`: the loader refuses a group- or
+    /// world-readable file, which is not possible once the material has become
+    /// an in-memory `String`.
+    ///
+    /// Empty (the default) REFUSES THE BOOT. A worker that cannot join has no
+    /// identity to verify dispatch or read an app's environment with, so it
+    /// would bind its port, pass a liveness probe and turn away every request
+    /// that reached it - a failure first visible to an end user.
+    #[config(name = "worker.join_token_file", default = PathBuf::new())]
+    pub join_token_file: Operational<PathBuf>,
 
     /// JWKS-shaped FILE holding the public key of every peer service.
     ///
@@ -103,19 +115,6 @@ pub struct WorkerSettings {
     /// Tracing output format; `auto` picks pretty on a TTY and json otherwise.
     #[config(shared = OBSERVABILITY_LOG_FORMAT, default = LogFormat::Auto)]
     pub log_format: Operational<LogFormat>,
-
-    /// Enable the unsigned durable-workflow replay ingress, which performs NO
-    /// signature or nonce verification. Hidden because signed advance is the
-    /// production transport; this exercises the real replay path.
-    ///
-    /// The handler itself always ships - this control is what refuses it at
-    /// runtime, so the default here IS the production protection. `env = false`
-    /// is load-bearing: a stray environment variable must not be able to turn
-    /// signature verification off, and a bootstrap control also has no overlay
-    /// tier that could persist it.
-    #[arg(hide = true)]
-    #[config(name = "worker.workflow_advance_unsigned", env = false)]
-    pub workflow_advance_unsigned: BootstrapControl<bool>,
 
     /// TLS endpoint of the PostgreSQL CDC relay.
     #[config(name = "worker.cdc_relay_url", default = String::new())]
@@ -157,10 +156,6 @@ pub struct WorkerSettings {
     #[config(name = "worker.max_isolates", default = 200)]
     pub max_isolates: Operational<usize>,
 
-    /// Maximum deploy-pinned workflow replay isolates kept per app.
-    #[config(name = "worker.max_pinned_isolates_per_app", default = 4)]
-    pub max_pinned_isolates_per_app: Operational<usize>,
-
     /// Shutdown drain timeout in seconds.
     ///
     /// Zero does NOT mean wait forever. ntex takes its ungraceful branch when the
@@ -183,9 +178,25 @@ pub struct WorkerSettings {
     #[config(name = "worker.storage_url", default = String::new())]
     pub storage_url: Operational<String>,
 
-    /// Maximum persisted bytes for one workflow step output blob.
-    #[config(name = "worker.max_step_blob_bytes", default = 67_108_864)]
-    pub max_step_blob_bytes: Operational<u64>,
+    /// Origin of the workflow manager (`zeroship-workflow-server`) this
+    /// worker registers with and consumes delivered jobs from.
+    ///
+    /// Empty (the default) runs no workflow host: every app's `env.workflows`
+    /// call is refused as retryable, and nothing falls back to Control. When
+    /// set, the worker also requires `worker.database_url` for creator
+    /// journals and `worker.storage_url` for workflow payloads, and refuses
+    /// to start without them. Remote managers must use HTTPS; plain HTTP is
+    /// accepted only for literal loopback addresses.
+    #[config(name = "worker.workflow_manager_url", default = String::new())]
+    pub workflow_manager_url: Operational<String>,
+
+    /// App placements this worker advertises to the workflow manager.
+    #[config(name = "worker.workflow_capacity", default = 64)]
+    pub workflow_capacity: Operational<usize>,
+
+    /// Delivered workflow jobs this worker executes at once.
+    #[config(name = "worker.workflow_slots", default = 4)]
+    pub workflow_slots: Operational<usize>,
 
     /// Kafka-wire brokers for the usage-event stream, e.g. `redpanda:9092`.
     ///
@@ -295,49 +306,6 @@ mod tests {
             WorkerSettingsSources::try_parse_from(["zeroship-worker"]).expect("bare parse");
         assert!(sources.overlay_path().is_none());
         assert!(!sources.allow_discovery());
-    }
-
-    #[test]
-    fn unsigned_workflow_advance_has_no_environment_or_overlay_source() {
-        // The pre-conversion comment on this flag says a stray environment
-        // variable must not be able to turn signature verification off. The
-        // conversion keeps that by DECLARATION (`env = false`) rather than by
-        // remembering to omit an attribute, and a bootstrap control has no TOML
-        // tier at all, so a persisted overlay cannot supply it either.
-        let arg = WorkerSettingsSources::command()
-            .get_arguments()
-            .find(|arg| arg.get_id() == "workflow_advance_unsigned")
-            .cloned()
-            .expect("workflow_advance_unsigned argument");
-        assert_eq!(arg.get_long(), Some("workflow-advance-unsigned"));
-        assert_eq!(arg.get_env(), None);
-
-        let overlay: toml::Value =
-            toml::from_str("[worker]\nworkflow_advance_unsigned = true\n").expect("overlay");
-        let resolved = WorkerSettings::resolve_config(
-            WorkerSettingsSources::try_parse_from(["zeroship-worker"]).expect("bare parse"),
-            Some(&overlay),
-        )
-        .expect("settings resolve");
-        assert!(
-            !*resolved.workflow_advance_unsigned.get(),
-            "an overlay entry must not enable the unsigned replay ingress"
-        );
-
-        // The one-variable control: the same parse WITH the flag.
-        let flagged = WorkerSettings::resolve_config(
-            WorkerSettingsSources::try_parse_from([
-                "zeroship-worker",
-                "--workflow-advance-unsigned",
-            ])
-            .expect("flag parse"),
-            None,
-        )
-        .expect("settings resolve");
-        assert!(*flagged.workflow_advance_unsigned.get());
-
-        // Does not cover: whether the handler honours the resolved value. That
-        // is the worker's dispatch path, asserted in its own tests.
     }
 
     #[test]

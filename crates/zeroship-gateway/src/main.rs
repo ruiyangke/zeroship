@@ -18,7 +18,7 @@ use zeroship_bundle::{build_blob_store, BlobStore, StoreUrl};
 use zeroship_gateway::config::{GateSettings, GateSettingsSources};
 use zeroship_gateway::{
     auth_token, backchannel_logout, blob_cache, browser_auth, enforce, health, idempotency,
-    oidc_rp, proxy, router, session_token, signal_ingress, signing, sync, GateConfig, GateState,
+    oidc_rp, proxy, router, session_token, signing, sync, GateConfig, GateState,
 };
 
 #[global_allocator]
@@ -144,10 +144,10 @@ fn enforce_gateway_credentials(
 /// gateway's per-worker-thread Postgres pool.
 ///
 /// The gateway is a callee on exactly one internal edge -
-/// `/__zeroship/internal/workflow-advance` - and that edge takes the FULL
-/// profile, so the `jti` must be claimed in a store every gateway replica
-/// shares. The gateway's `Pool` is `!Send` and lives in a thread-local, so the
-/// checkout happens inside `claim` rather than being held on the store.
+/// `/oidc/backchannel-logout` - and that edge takes the FULL profile, so the
+/// `jti` must be claimed in a store every gateway replica shares. The
+/// gateway's `Pool` is `!Send` and lives in a thread-local, so the checkout
+/// happens inside `claim` rather than being held on the store.
 ///
 /// **This is the one consumer of the gateway's database credential that the
 /// auth redesign's step 6 does NOT delete along with the anchor and RP paths.**
@@ -183,8 +183,8 @@ impl zeroship_core::service_assertion::ReplayStore for PoolReplayStore {
 /// THERE IS NO UNCONFIGURED ARM, and its absence is the whole of fence F4 in
 /// `docs/proposals/2026-09-05-auth-foundation-redesign.md`. This function used
 /// to return `ServiceAuth::unconfigured()` when neither file was configured, on
-/// the reasoning that the advance edge would then refuse and every dispatch
-/// would carry no credential. Both halves of that were true and it was still
+/// the reasoning that every inbound internal edge would then refuse and every
+/// dispatch would carry no credential. Both halves of that were true and it was still
 /// the wrong answer: a gateway in that state binds its port, answers a liveness
 /// probe and looks healthy to an orchestrator, and the first thing that notices
 /// is an end user whose request the worker turns away. Refusing here moves the
@@ -198,7 +198,7 @@ impl zeroship_core::service_assertion::ReplayStore for PoolReplayStore {
 ///
 /// The database requirement is checked AFTER the key material, so a deployment
 /// missing both is told about the key material first: that is the one an
-/// operator must fix whatever they decide about the advance edge.
+/// operator must fix whatever they decide about the inbound edges.
 fn build_service_auth(
     key_file: &std::path::Path,
     peers_file: &std::path::Path,
@@ -228,7 +228,8 @@ fn build_service_auth(
     let Some(db) = db else {
         tracing::error!(
             "gateway: refusing to start - service key material is configured but no database \
-             is, and the inbound advance edge's single-use claim needs the shared store"
+             is, and the inbound backchannel-logout edge's single-use claim needs the \
+             shared store"
         );
         std::process::exit(1);
     };
@@ -757,24 +758,6 @@ fn main() -> std::io::Result<()> {
                     .route(web::route().to(router::handle)),
             )
             .configure(health::configure)
-            .service(
-                web::resource("/__zeroship/internal/workflow-advance")
-                    .route(web::post().to(router::workflow_advance_internal)),
-            )
-            .service(
-                web::resource("/__zeroship/v1/signal")
-                    .state(web::types::PayloadConfig::new(
-                        signal_ingress::SIGNAL_INGRESS_BODY_BYTES,
-                    ))
-                    .route(web::post().to(signal_ingress::public_signal_ingress)),
-            )
-            .service(
-                web::resource("/__zeroship/signals/v1")
-                    .state(web::types::PayloadConfig::new(
-                        signal_ingress::SIGNAL_INGRESS_BODY_BYTES,
-                    ))
-                    .route(web::post().to(signal_ingress::public_signal_ingress)),
-            )
             // The ONE identity-session
             // resource. `/token` is GONE (merged here); both methods live on
             // `/__zeroship/auth/session`:

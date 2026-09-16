@@ -1250,9 +1250,15 @@ importers:
       '@types/node':
         specifier: 'catalog:'
         version: 22.19.17
+      '@zeroship/server':
+        specifier: workspace:*
+        version: link:../../packages/server
       '@zeroship/types':
         specifier: workspace:*
         version: link:../../packages/types
+      '@zeroship/vite-plugin':
+        specifier: workspace:*
+        version: link:../../packages/vite-plugin
       playwright:
         specifier: 1.58.2
         version: 1.58.2

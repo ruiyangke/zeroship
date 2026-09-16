@@ -121,10 +121,10 @@ const _zsFetch = typeof _zsUserFetch === "function"
   ? Function.prototype.bind.call(_zsUserFetch, _zsUserDefault)
   : (typeof _zsTopLevelFetch === "function" ? _zsTopLevelFetch : undefined);
 
-export default {
-  fetch: _zsFetch,
-  rpc: _zsRpc,
-};
+const _zsEntryDescriptors = Object.getOwnPropertyDescriptors(_zsUserDefault);
+_zsEntryDescriptors.fetch = { value: _zsFetch, enumerable: true, configurable: true, writable: true };
+_zsEntryDescriptors.rpc = { value: _zsRpc, enumerable: true, configurable: true, writable: true };
+export default Object.defineProperties({}, _zsEntryDescriptors);
 `;
 
 /**
@@ -132,7 +132,8 @@ export default {
  * procedures or { load: () => Promise<Procedure> } records. The native runtime
  * retains their metadata and dispatches requests. Default fetch keeps its
  * original receiver through a bound function. Named creator exports pass
- * through without framework classification.
+ * through without framework classification. Other own default properties retain
+ * their descriptors, so unrelated getters are not evaluated during normalization.
  */
 export function buildServerEntrySource(opts: {
   userEntryRel: string;

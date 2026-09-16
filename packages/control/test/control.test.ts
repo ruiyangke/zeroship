@@ -4,9 +4,15 @@ import test from "node:test";
 import {
   ControlError,
   createControlClient,
+  createDeployCommand,
+  DeployOutcomeUnknownError,
   isAppId,
+  isDeployCommandId,
+  mintDeployCommandId,
   type AppId,
   type ControlClientOptions,
+  type DeployCommand,
+  type DeployCommandId,
   type UserId,
 } from "../src/index.ts";
 
@@ -122,77 +128,167 @@ test("env mutations treat 204 as void", async () => {
   ]);
 });
 
-test("deploy sends binary artifact as application/x-zship", async () => {
-  const artifact = new Uint8Array([1, 2, 3]);
+const DEPLOYMENT = "dep_0000000002e4nenowz3qmamtd";
+
+/** Control's acceptance of `command`, as the deploy route answers it. */
+function acceptance(command: string, replayed = false): Response {
+  return json(
+    {
+      command_id: command,
+      deploy_id: DEPLOYMENT,
+      deploy_hash: "sha256:abc",
+      blobs_uploaded: 1,
+      blobs_deduped: 2,
+      lifecycle_revision: 3,
+    },
+    200,
+    replayed ? { "idempotent-replayed": "true" } : {},
+  );
+}
+
+test("deploy command ids are canonical, fresh and UUIDv7-shaped", async () => {
+  const first = mintDeployCommandId();
+  const second = mintDeployCommandId();
+  assert.notEqual(first, second);
+  for (const id of [first, second]) {
+    assert.equal(isDeployCommandId(id), true, id);
+    const value = [...id.slice(4)].reduce(
+      (acc, digit) => acc * 36n + BigInt(Number.parseInt(digit, 36)),
+      0n,
+    );
+    assert.equal((value >> 76n) & 0xfn, 7n, "version nibble");
+    assert.equal((value >> 62n) & 0x3n, 2n, "variant bits");
+  }
+  assert.equal(isDeployCommandId(APP_ID), false);
+  assert.equal(isDeployCommandId(first.toUpperCase()), false);
+  assert.equal(isDeployCommandId("dcm_zzzzzzzzzzzzzzzzzzzzzzzzz"), false);
+  assert.equal(isAppId(first), false);
+
+  await assert.rejects(
+    createDeployCommand(new Uint8Array([1]), APP_ID as unknown as DeployCommandId),
+    TypeError,
+  );
+  const resumed = await createDeployCommand(new Uint8Array([1]), first);
+  assert.equal(resumed.id, first);
+  assert.equal(Object.isFrozen(resumed), true);
+});
+
+test("deploy sends the command's snapshot as application/x-zship under its id", async () => {
+  const artifact = new Uint8Array([1, 2, 3, 4]);
+  const command = await createDeployCommand(artifact.subarray(1, 3));
+  // Later writes to the caller's buffer do not reach the command.
+  artifact.fill(9);
   let request: Request | undefined;
   const client = createControlClient({
     baseUrl: "http://control.local",
+    headers: { "content-type": "application/json" },
     fetch: async (input, init) => {
       request = new Request(input, init);
-      return json({ deploy_hash: "sha256:abc", blobs_uploaded: 1 }, 200);
+      return acceptance(command.id);
     },
   });
 
-  const result = await client.apps.deploy(APP_ID, artifact);
+  const result = await client.apps.deploy(APP_ID, command);
 
-  assert.equal(result.deploy_hash, "sha256:abc");
+  assert.deepEqual(result, {
+    command_id: command.id,
+    deploy_id: DEPLOYMENT,
+    deploy_hash: "sha256:abc",
+    blobs_uploaded: 1,
+    blobs_deduped: 2,
+    lifecycle_revision: 3,
+    replayed: false,
+  });
   assert.equal(request?.method, "POST");
+  assert.equal(new URL(request!.url).pathname, `/api/apps/${APP_ID}/deploy`);
   assert.equal(request?.headers.get("content-type"), "application/x-zship");
-  assert.deepEqual(new Uint8Array(await request!.arrayBuffer()), artifact);
+  assert.equal(request?.headers.get("idempotency-key"), command.id);
+  assert.deepEqual(new Uint8Array(await request!.arrayBuffer()), new Uint8Array([2, 3]));
 });
 
-test("workflow helpers send app scope headers and JSON bodies", async () => {
-  const requests: Request[] = [];
+test("an unanswered deploy is resent with the same id and bytes", async () => {
+  const command = await createDeployCommand(new Blob([new Uint8Array([7, 8])]));
+  const sent: Array<{ key: string | null; bytes: number[] }> = [];
+  const answers: Array<() => Response> = [
+    () => {
+      throw new TypeError("fetch failed");
+    },
+    () => json({ error: "internal error" }, 503),
+    () => acceptance(command.id, true),
+  ];
   const client = createControlClient({
     baseUrl: "http://control.local",
     fetch: async (input, init) => {
-      requests.push(new Request(input, init));
-      const path = new URL(String(input)).pathname;
-      if (path.endsWith("/broadcast")) {
-        return json({ id: "wbc_1", topic: "approvals" }, 202);
-      }
-      return json({ token: "wst_claim.sig", expiresAt: "2026-07-06T00:00:00Z" });
+      const request = new Request(input, init);
+      sent.push({
+        key: request.headers.get("idempotency-key"),
+        bytes: [...new Uint8Array(await request.arrayBuffer())],
+      });
+      return answers.shift()!();
     },
   });
 
-  await client.workflows.createSignalToken("run_1", {
-    appId: APP_ID,
-    types: ["approved"],
-    ttl: "PT5M",
-  });
-  await client.workflows.createTopicSignalToken("approvals", {
-    appId: APP_ID,
-    types: ["approved"],
-    ttl: "PT5M",
-  });
-  await client.workflows.publishTopic("approvals", {
-    appId: APP_ID,
-    type: "approved",
-    payload: { ok: true },
-    idempotencyKey: "idem-1",
+  for (const cause of [TypeError, ControlError]) {
+    await assert.rejects(client.apps.deploy(APP_ID, command), (error: unknown) => {
+      assert.ok(error instanceof DeployOutcomeUnknownError);
+      assert.equal(error.commandId, command.id);
+      assert.ok(error.cause instanceof cause);
+      assert.match(error.message, new RegExp(command.id));
+      return true;
+    });
+  }
+  const result = await client.apps.deploy(APP_ID, command);
+
+  assert.equal(result.replayed, true);
+  assert.equal(result.command_id, command.id);
+  assert.deepEqual(sent, Array(3).fill({ key: command.id, bytes: [7, 8] }));
+});
+
+test("a deploy refusal is a ControlError and a foreign acceptance is not a success", async () => {
+  const command = await createDeployCommand(new Uint8Array([1]));
+  const other = mintDeployCommandId();
+  const answers = [
+    () => json({ error: "idempotency_key_conflict" }, 409),
+    () => acceptance(other),
+  ];
+  const client = createControlClient({
+    baseUrl: "http://control.local",
+    fetch: async () => answers.shift()!(),
   });
 
-  assert.deepEqual(
-    requests.map((req) => `${req.method} ${new URL(req.url).pathname}`),
-    [
-      "POST /internal/workflows/runs/run_1/signal-token",
-      "POST /internal/workflows/topics/approvals/signal-token",
-      "POST /internal/workflows/topics/approvals/broadcast",
-    ],
+  await assert.rejects(client.apps.deploy(APP_ID, command), (error: unknown) => {
+    assert.ok(error instanceof ControlError);
+    assert.ok(!(error instanceof DeployOutcomeUnknownError));
+    assert.equal(error.status, 409);
+    assert.equal(error.message, "idempotency_key_conflict");
+    return true;
+  });
+  await assert.rejects(client.apps.deploy(APP_ID, command), (error: unknown) => {
+    assert.ok(error instanceof DeployOutcomeUnknownError);
+    assert.equal(error.commandId, command.id);
+    return true;
+  });
+});
+
+test("deploy refuses a raw artifact without sending it", async () => {
+  let calls = 0;
+  const client = createControlClient({
+    baseUrl: "http://control.local",
+    fetch: async () => {
+      calls += 1;
+      return acceptance(mintDeployCommandId());
+    },
+  });
+
+  await assert.rejects(
+    client.apps.deploy(APP_ID, new Uint8Array([1]) as unknown as DeployCommand),
+    TypeError,
   );
-  for (const req of requests) {
-    assert.equal(req.headers.get("x-zeroship-app-id"), APP_ID);
-    assert.equal(req.headers.get("content-type"), "application/json");
-  }
-  assert.deepEqual(await requests[0]!.json(), {
-    types: ["approved"],
-    ttl: "PT5M",
-  });
-  assert.deepEqual(await requests[2]!.json(), {
-    type: "approved",
-    payload: { ok: true },
-    idempotencyKey: "idem-1",
-  });
+  await assert.rejects(
+    client.apps.deploy(APP_ID, { id: "dcm_bad", archive: new Blob([]) } as unknown as DeployCommand),
+    TypeError,
+  );
+  assert.equal(calls, 0);
 });
 
 test("request builds query strings and supports raw text", async () => {

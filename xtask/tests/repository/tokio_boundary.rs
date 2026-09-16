@@ -18,6 +18,7 @@ const ENTRYPOINTS: &[&str] = &[
     "zeroship-runtime",
     "zeroship-worker",
     "zeroship-workflow",
+    "zeroship-workflow-client",
 ];
 
 fn is_tokio(name: &str) -> bool {

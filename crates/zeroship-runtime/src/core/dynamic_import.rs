@@ -1,9 +1,9 @@
 //! V8 host callback for dynamic imports.
 //!
-//! Imports resolve against the compiled module registry, then native module
-//! factories. Resolved modules are cached so
-//! static and dynamic imports share identity. Arbitrary missing creator modules
-//! are rejected; this callback does not fetch source code.
+//! Imports resolve relative to the importing module against retained bundle
+//! sources, plugin adapters and native factories. Dependency graphs compile on
+//! demand and share cached module identity with static imports. This callback
+//! does not fetch source code.
 //!
 //! Evaluation runs in a promise continuation, and the import resolves only
 //! after V8's cached evaluation promise settles. Linking and evaluation errors
@@ -16,27 +16,14 @@
 use crate::core::modules::{self, SharedRegistry};
 use crate::core::native_modules;
 
-/// Variants tried for an unknown specifier — same set as the static
-/// `resolve_callback` so dynamic and static specifier shapes resolve to
-/// the same compiled module.
+/// Look up the canonical name already resolved by the import callback.
 fn registry_lookup<'s>(
     scope: &v8::PinScope<'s, '_>,
     spec: &str,
 ) -> Option<v8::Local<'s, v8::Module>> {
     let registry = scope.get_slot::<SharedRegistry>()?.clone();
     let reg = registry.borrow();
-    let candidates = [
-        spec.to_string(),
-        spec.strip_prefix("./").unwrap_or(spec).to_string(),
-        format!("{spec}.js"),
-        format!("{}.js", spec.strip_prefix("./").unwrap_or(spec)),
-    ];
-    for candidate in &candidates {
-        if let Some(g) = reg.get(candidate) {
-            return Some(v8::Local::new(scope, g));
-        }
-    }
-    None
+    reg.get(spec).map(|module| v8::Local::new(scope, module))
 }
 
 /// Cache a freshly-minted native synthetic into the registry under its
@@ -133,9 +120,9 @@ fn reject_typeerror<'s>(
     promise
 }
 
-/// `set_host_import_module_dynamically_callback` target. Returns
-/// `None` only on `PromiseResolver::new` failure (stack overflow, OOM)
-/// — resolution and evaluation otherwise settle the returned promise.
+/// Compile dynamic bundle imports through the static resolver, then defer
+/// evaluation to a promise continuation. V8 compilation exceptions reject the
+/// import without poisoning subsequent module resolution.
 pub(crate) fn host_import_module_dynamically_callback<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     _host_defined_options: v8::Local<'s, v8::Data>,
@@ -145,37 +132,21 @@ pub(crate) fn host_import_module_dynamically_callback<'s>(
 ) -> Option<v8::Local<'s, v8::Promise>> {
     let resolver = v8::PromiseResolver::new(scope)?;
     let spec = specifier.to_rust_string_lossy(scope);
-    let importer = resource_name.to_rust_string_lossy(scope);
-
-    if let Some(registry) = scope.get_slot::<SharedRegistry>().cloned() {
-        let registry = registry.borrow();
-        if registry.is_host_only(&spec) && !registry.is_host_only(&importer) {
-            return Some(reject_typeerror(
-                scope,
-                resolver,
-                &format!("Cannot find module '{spec}'"),
-            ));
+    let referrer = resource_name.to_rust_string_lossy(scope);
+    v8::tc_scope!(let scope, scope);
+    match modules::dynamic_module(scope, &spec, &referrer) {
+        Ok(Some(canonical_name)) => {
+            let canonical_name = v8::String::new(scope, &canonical_name)?;
+            return import_registered(scope, resolver, canonical_name);
         }
-    }
-
-    if registry_lookup(scope, &spec).is_some() {
-        return import_registered(scope, resolver, specifier);
-    }
-
-    {
-        v8::tc_scope!(let tc, scope);
-        match modules::compile_dynamic_module(tc, &spec) {
-            Ok(Some(_)) => return import_registered(tc, resolver, specifier),
-            Ok(None) => {},
-            Err(message) => {
-                let error = tc.exception().unwrap_or_else(|| {
-                    let message = v8::String::new(tc, &message).unwrap();
-                    v8::Exception::type_error(tc, message)
-                });
-                tc.reset();
-                resolver.reject(tc, error);
-                return Some(resolver.get_promise(tc));
+        Ok(None) => {}
+        Err(error) => {
+            if let Some(exception) = scope.exception() {
+                scope.reset();
+                resolver.reject(scope, exception);
+                return Some(resolver.get_promise(scope));
             }
+            return Some(reject_typeerror(scope, resolver, &error));
         }
     }
 

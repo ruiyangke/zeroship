@@ -70,7 +70,7 @@ impl DeployedApp {
         let env = get_env(&case.worker.envs, &case.worker.app_id).unwrap();
         cache::load_app(
             case.worker.app_id.clone(),
-            source,
+            cache::test_modules(source),
             case.version.runtime.clone(),
             case.version.net_policy.clone(),
             case.version.deploy_hash.as_deref(),

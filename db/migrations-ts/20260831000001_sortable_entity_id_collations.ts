@@ -8,7 +8,7 @@ import { raw } from "@zeroship/migrate";
 // against the collated entity id cannot use the copy's ordinary index.
 //
 // This map is semantic, not name-based. It deliberately excludes raw UUID
-// domains; app_deploys.id (dep_ plus UUIDv4 hex) and its deploy_id copies;
+// domains;
 // pricing_config.id and workflow_rollout_config.id (the constant "global");
 // OAuth client ids, provider ids, hashes, idempotency keys, boot ids, snapshot
 // and worker ids, the URL-safe share token id, and arbitrary text. Some included
@@ -34,7 +34,7 @@ const typedIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
   // usable from a join.
   apps: ["id", "plan_id"],
   app_audit: ["app_id", "actor_user_id", "creator_id"],
-  app_deploys: ["app_id"],
+  app_deploys: ["app_id", "id"],
   app_egress_rules: ["app_id", "created_by"],
   app_env_expose: ["app_id"],
   app_members: ["app_id", "user_id", "added_by"],
@@ -101,22 +101,9 @@ const typedIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
   gateway_sessions: ["user_id"],
   oauth_refresh_tokens: ["refresh_family_id", "user_id"],
 
-  // Durable workflows.
-  workflow_broadcasts: ["app_id", "id"],
-  workflow_runs: ["app_id", "id", "dispatch_nonce", "parent_run_id"],
-  workflow_schedules: ["app_id", "id"],
-  workflow_scheduler_inflight: ["app_id", "run_id"],
-  workflow_scheduler_timers: ["app_id", "run_id"],
-  workflow_signal_keys: ["app_id", "id", "kid"],
-  workflow_signals: ["id", "run_id", "broadcast_id"],
-  workflow_steps: [
-    "run_id",
-    "consumed_signal_id",
-    "child_run_id",
-    "batch_id",
-    "compensation_batch_id",
-  ],
-  workflow_subscriptions: ["app_id", "id", "run_id"],
+  // Workflow identities and immutable deployment references.
+  app_deploy_holds: ["app_id", "deploy_id", "holder_id"],
+  workflow_policy_ledger: ["id"],
 
   // Sandbox typed-id world. Partition children inherit the sandbox_events
   // column collations from the partitioned parent.

@@ -970,6 +970,19 @@ impl FoldedSchema {
                 assignments: table.assignments.clone(),
                 primary_key: table.core.primary_key.clone().unwrap_or_default(),
             };
+            // Native identity generation is a property of the final column,
+            // including tables whose author supplies the complete schema.
+            for column in table.core.columns.values() {
+                if column.identity.is_some() {
+                    metadata.assignments.insert(
+                        column.name.clone(),
+                        zeroship_migrate_policy::Assignment {
+                            by: zeroship_migrate_policy::AssignmentGenerator::Identity,
+                            on: zeroship_migrate_policy::AssignmentEvent::Insert,
+                        },
+                    );
+                }
+            }
             for index in &table.implicit_unique_indexes {
                 add_runtime_index(
                     &mut metadata.indexes,

@@ -500,6 +500,8 @@ pub struct RuntimeState {
 
     /// Futures for in-flight async ops (fetch, kv, ...).
     pub spawned_ops: Vec<Pin<Box<dyn Future<Output = OpResult>>>>,
+    /// Native task lifetime boundary used when an isolate is quarantined.
+    pub(crate) tasks: crate::core::tasks::RuntimeTasks,
     /// Timers queued to be armed on the next event-loop iteration.
     pub spawned_timers: Vec<SpawnedTimer>,
     /// Timer IDs ready to fire immediately (delay == 0).
@@ -767,6 +769,7 @@ impl RuntimeState {
             startup_declarations_open: false,
 
             spawned_ops: Vec::new(),
+            tasks: crate::core::tasks::RuntimeTasks::default(),
             spawned_timers: Vec::new(),
             ready_timers: VecDeque::new(),
             in_flight_fetches: 0,

@@ -170,7 +170,7 @@ const fn is_issuer_char(c: char) -> bool {
 }
 
 /// Characters admitted in a `jti`.
-const fn is_jti_char(c: char) -> bool {
+pub(crate) const fn is_jti_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '-' | '_')
 }
 
@@ -357,12 +357,12 @@ impl ServiceIssuer {
 
     /// Return the instance segment, when this identifier names one.
     ///
-    /// A DISTINGUISHER and not a boundary. Enrolment authenticates with the
-    /// shared ROLE key, so whoever holds that key can enrol as many instances
-    /// as they like and each is as genuine as the last; what this buys is
-    /// attribution, per-instance revocation and a countable event. Nothing here
-    /// narrows what an instance may do, and a caller must not treat a distinct
-    /// instance segment as evidence of a distinct holder.
+    /// A BOUNDARY as well as a distinguisher, for the one role that uses it: a
+    /// worker's instance private half exists in that process's memory and
+    /// nowhere else, so retiring one instance takes a capability away. What the
+    /// segment does NOT establish is what the holder may do - that is the
+    /// allowlist's job - so a caller must not read a distinct segment as a
+    /// distinct authorization.
     #[must_use]
     pub fn instance(&self) -> Option<&str> {
         self.instance.as_deref()
@@ -451,7 +451,7 @@ impl ServiceSigningKey {
         self.inner.sign(message).to_bytes()
     }
 
-    fn encoding_key(&self) -> Result<EncodingKey, AssertionError> {
+    pub(crate) fn encoding_key(&self) -> Result<EncodingKey, AssertionError> {
         use ed25519_dalek::pkcs8::EncodePrivateKey as _;
         let der = self
             .inner
@@ -612,6 +612,7 @@ fn unix_seconds(at: SystemTime) -> Option<i64> {
 
 // ─── The trust bundle ────────────────────────────────────────────────────
 
+#[derive(Clone)]
 struct TrustedServiceKey {
     key_id: String,
     public: [u8; 32],
@@ -653,7 +654,7 @@ struct TrustedServiceKey {
 /// binding for free: it is keyed on a single URL and `keys()` returns a flat
 /// `Vec<CachedKey>` with no issuer attached, so a JWKS design would have needed
 /// one cache instance per issuer anyway.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ServiceTrustBundle {
     issuers: BTreeMap<String, Vec<TrustedServiceKey>>,
 }

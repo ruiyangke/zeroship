@@ -77,8 +77,13 @@ export interface ManifestExtrasInput {
   schedules?: DiscoveredSchedule[];
   /**
    * Export names of the durable workflow classes the server graph declares.
-   * Emitted verbatim as `manifest.workflows`; the control plane matches a
-   * `start` request's workflow name against this list before creating a run.
+   * Emitted verbatim as `manifest.workflows`.
+   *
+   * THIS NAMED THE CONTROL PLANE AS THE CONSUMER until the legacy path was
+   * removed: Control's workflow instance API is gone, and the declarations are
+   * now read by the durable engine itself, in
+   * `crates/zeroship-workflow/src/service/bundle.rs`, alongside the schedules.
+   * The list and its purpose are unchanged; only the reader moved.
    */
   workflowNames?: string[];
   /** Production: throw on validation errors. Development: warn. */
@@ -585,9 +590,7 @@ async function compileSchedules(
           `in ${registration.filePath}: ${message}`,
       );
     }
-    const schedule = JSON.parse(JSON.stringify(compiled)) as Record<string, unknown>;
-    const overlap = schedule.overlap;
-    const catchUp = schedule.catchUp;
+    const { overlap, catchUp, ...schedule } = JSON.parse(JSON.stringify(compiled)) as Record<string, unknown>;
     if (overlap !== "allow" && overlap !== "skipIfRunning") {
       throw new Error(
         `[zeroship:manifest] invalid workflow schedule ${JSON.stringify(registration.name)}: ` +

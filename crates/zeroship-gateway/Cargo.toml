@@ -29,7 +29,7 @@ zeroship-bundle = { workspace = true }
 # JWT path checks revocation on every request.
 zeroship-authz = { workspace = true }
 # The service-assertion replay statement. The gateway is a callee on ONE
-# internal edge (workflow-advance) and that edge takes the full profile, so
+# internal edge (backchannel-logout) and that edge takes the full profile, so
 # it must claim a `jti` in the store every replica shares. The statement lives
 # in zeroship-authn because it needs compio-postgres; a second copy here is the
 # defect this dependency exists to avoid.

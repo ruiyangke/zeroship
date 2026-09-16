@@ -57,7 +57,7 @@ pub use bootstrap::{
 pub use env::{env_is_exact, env_is_truthy, parse_bool_flag};
 pub use file::{
     AuthSection, CdcServerSection, ConfigError, ControlSection, FileConfig, GatewaySection,
-    MigrateServerSection, OauthClientRegistration, ObsSection, SchedulerSection, WorkerSection,
+    MigrateServerSection, OauthClientRegistration, ObsSection, WorkerSection,
 };
 pub use names::{
     BootstrapControl, CanonicalName, CanonicalNameError, CliEnv, CommandControl, CommandEnv,

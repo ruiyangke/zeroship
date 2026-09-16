@@ -35,29 +35,17 @@ impl Worker {
         let blob_store: Arc<dyn BlobStore> = Arc::new(
             LocalDiskBlobStore::new(storage.path().to_owned()).expect("worker blob store"),
         );
-        let workflow_blob_store = Arc::new(
-            zeroship_bundle::LocalWorkflowBlobStore::new(storage.path().to_owned())
-                .expect("worker workflow blob store"),
-        );
         let meter = kernel.meter.clone();
         let config = Arc::new(crate::WorkerConfig {
             service_auth: service_auth(),
-            control_url: kernel.control_url.clone(),
-            control_key: kernel.control_key.clone(),
-            db_url: kernel
-                .db_service
-                .as_ref()
-                .and_then(|service| service.connection().url().map(str::to_owned)),
+            control_url: "http://127.0.0.1:1".into(),
+            control_key: String::new(),
             kv_store: kernel.kv_store.clone(),
             storage_backend: kernel.storage_backend.clone(),
             max_isolates: max_size,
-            max_pinned_isolates_per_app: 4,
             poll_interval_secs: 60,
             shutdown_timeout_secs: 0,
             blob_store,
-            workflow_blob_store,
-            max_step_blob_bytes: 64 * 1024 * 1024,
-            workflow_advance_unsigned: false,
         });
         let app_id = AppId::mint();
         let envs = SharedEnvs::default();
@@ -69,7 +57,7 @@ impl Worker {
         )
         .expect("seed worker environment");
         Self {
-            _kernel: Kernel::install(max_size, 4, kernel),
+            _kernel: Kernel::install(max_size, kernel),
             app_id,
             config,
             envs,
@@ -82,7 +70,7 @@ impl Worker {
     pub async fn load(&self, source: &[u8], limits: AppRuntimeLimits, manifest: &Manifest) {
         crate::cache::load_app(
             self.app_id.clone(),
-            source,
+            crate::cache::test_modules(source),
             limits,
             Default::default(),
             None,
@@ -137,8 +125,7 @@ pub struct Response {
 
 pub fn empty_kernel(meter: Arc<zeroship_metering::Meter>) -> KernelConfig {
     KernelConfig {
-        control_url: "http://127.0.0.1:1".into(),
-        control_key: String::new(),
+        workflows: Default::default(),
         db_service: None,
         kv_store: None,
         storage_backend: None,

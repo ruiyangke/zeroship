@@ -139,9 +139,38 @@ pub const SERVICE_TRUST_DOMAIN: &str = "zeroship.ai";
 /// The hierarchical name of the gateway's service identity.
 pub const GATEWAY_SERVICE_NAME: &str = "svc/gateway";
 /// The hierarchical name of the worker's service identity.
+///
+/// Callers ADDRESS every worker by this name, and every worker MINTS under an
+/// instance of it (`svc/worker/<wkr_id>`) after enrolling. Nothing mints under
+/// the bare name: no process holds a `svc/worker` role key, the peer document
+/// publishes none, and Control refuses a role-arity assertion naming it.
 pub const WORKER_SERVICE_NAME: &str = "svc/worker";
+/// The hierarchical name of a trusted join signer.
+///
+/// A join signer is the authority that decides a worker should exist: one
+/// Ed25519 keypair whose PRIVATE half stays with the operator (or, on a single
+/// host, with the control plane that mints for its own zone) and whose public
+/// half and permitted execution zones Control records in advance. It appears
+/// here because a join token's `iss` is an INSTANCE identifier of this role
+/// (`svc/worker-join-signer/<wjs_id>`), which is what
+/// `crate::worker_join::unverified_join_signer_id` reads to select the recorded
+/// key a token is verified under.
+///
+/// IT HOLDS NO ENDPOINT GRANT, and that is deliberate rather than an omission.
+/// A join token is not a service assertion: it carries its own `typ`, it is
+/// verified by `crates/zeroship-control/src/worker_join.rs` against Control's
+/// signer registry, and the endpoint it reaches is not in the allowlist at all.
+/// A signer therefore cannot present its key anywhere else in the platform.
+pub const WORKER_JOIN_SIGNER_SERVICE_NAME: &str = "svc/worker-join-signer";
 /// The hierarchical name of the control plane's service identity.
 pub const CONTROL_SERVICE_NAME: &str = "svc/control";
+/// The hierarchical name of the workflow manager's service identity.
+pub const WORKFLOW_SERVICE_NAME: &str = "svc/workflow";
+/// The hierarchical name of the migration service's identity.
+///
+/// It holds no endpoint grant of its own: the migration service is a
+/// DESTINATION, never a caller. The name exists so a caller can address it.
+pub const MIGRATE_SERVICE_NAME: &str = "svc/migrate-server";
 /// The hierarchical name of the auth service's identity.
 pub const AUTH_SERVICE_NAME: &str = "svc/auth";
 
@@ -308,6 +337,49 @@ impl PeerKeyError {
     }
 }
 
+/// The issuer a trusted join signer mints under:
+/// `svc/worker-join-signer/<signer_id>`.
+///
+/// # Errors
+///
+/// Returns [`AssertionError::MalformedIssuer`] when `signer_id` is not a `wjs_`
+/// typed id. The id reaches this from an operator's file or from an unverified
+/// token payload, and an id Control could not have recorded must not become an
+/// issuer at all.
+pub fn join_signer_issuer(signer_id: &str) -> Result<ServiceIssuer, AssertionError> {
+    crate::typed_id::parse_with_prefix(signer_id, crate::typed_id::JOIN_SIGNER_PREFIX)
+        .map_err(|_| AssertionError::MalformedIssuer)?;
+    service_issuer(&format!("{WORKER_JOIN_SIGNER_SERVICE_NAME}/{signer_id}"))
+}
+
+/// Read a join signer's credential document from disk, refusing a file other
+/// local users can read.
+///
+/// The parse lives in [`crate::worker_join::parse_join_signer_credential`] so
+/// the writer and the reader are one definition; this adds the two things a
+/// path has that bytes do not - the empty-setting refusal and the permission
+/// check - so every reader of a PRIVATE key file in this tree is held to the
+/// same rule.
+///
+/// # Errors
+///
+/// Returns [`PeerKeyError::NotConfigured`] when the path is empty, and
+/// [`PeerKeyError`] otherwise when the file is unreadable, insecurely
+/// permissioned, or does not hold a signer credential.
+pub fn load_join_signer_credential(
+    credential_path: &Path,
+) -> Result<(String, ServiceSigningKey), PeerKeyError> {
+    require_configured(credential_path, "join signer credential file")?;
+    let bytes = read_file(credential_path)?;
+    reject_insecure_permissions(credential_path)?;
+    crate::worker_join::parse_join_signer_credential(&bytes).map_err(|reason| {
+        PeerKeyError::Document {
+            path: credential_path.display().to_string(),
+            reason,
+        }
+    })
+}
+
 /// One published peer key.
 #[derive(Debug, Deserialize)]
 struct PeerKeyEntry {
@@ -335,6 +407,7 @@ struct PeerKeyDocument {
 pub struct ServiceKeyring {
     issuer: ServiceIssuer,
     audience: ServiceIssuer,
+    signing_key: Arc<ServiceSigningKey>,
     minter: ServiceAssertionMinter,
     envelope: UserEnvelopeSigner,
     bundle: Option<ServiceTrustBundle>,
@@ -419,6 +492,7 @@ impl ServiceKeyring {
         signing_key: ServiceSigningKey,
         bundle: ServiceTrustBundle,
     ) -> Result<Self, PeerKeyError> {
+        let signing_key = Arc::new(signing_key);
         // Derived from the PRIVATE half, which is what makes this a comparison
         // of the two documents rather than of the bundle against itself.
         let own_public = signing_key.verifying_key_bytes();
@@ -435,15 +509,13 @@ impl ServiceKeyring {
         }
         let minter =
             ServiceAssertionMinter::new(issuer.clone(), signing_key.key_id(), &signing_key)?;
-        // The key is MOVED in rather than borrowed, because this process signs
-        // two different things with it: service assertions (the minter) and, at
-        // the gateway, the `ZeroShip-User` identity envelope. Loading the file
-        // twice to get two owners is how the two would drift onto different
-        // key material after a rotation.
-        let envelope = UserEnvelopeSigner::new(signing_key)?;
+        // Every signing protocol uses the same immutable loaded key snapshot.
+        // Reloading its file to compose another signer could cross a rotation.
+        let envelope = UserEnvelopeSigner::new(signing_key.clone())?;
         Ok(Self {
             audience: issuer.clone(),
             issuer,
+            signing_key,
             minter,
             envelope,
             bundle: Some(bundle),
@@ -552,13 +624,15 @@ mod instance_key {
     /// [`InstanceSigningKey::into_keyring`] consumes it, and is the one thing
     /// that can.
     ///
-    /// # Per-instance identity is a DISTINGUISHER, not a boundary
+    /// # Per-instance identity is a BOUNDARY here, not only a distinguisher
     ///
-    /// A process minting under a name of its own is attributable, individually
-    /// revocable, and countable. It is not contained: enrolment authenticates
-    /// with the SHARED role key, so whoever holds that key can enrol as many
-    /// instances as they like and each one is as genuine as the last. Nothing
-    /// here narrows what an instance may do.
+    /// The private half exists in one process's memory and nowhere else, so
+    /// retiring one instance takes a capability away rather than only removing
+    /// an attribution. What a JOIN TOKEN buys its holder is bounded separately
+    /// and differently: the uses it was minted with, until its expiry, in the
+    /// one zone it names - and a captured token admits only workers whose keys
+    /// the captor holds, because `crate::worker_join::verify_join_proof` is
+    /// what Control registers a key on.
     pub struct InstanceSigningKey {
         key: ServiceSigningKey,
         /// Kept beside the key rather than re-derived, so the bytes the check
@@ -592,6 +666,21 @@ mod instance_key {
         #[must_use]
         pub const fn public_key(&self) -> &[u8; 32] {
             &self.public
+        }
+
+        /// Sign the JOIN PROOF with the key being registered.
+        ///
+        /// The one thing this key does BEFORE it becomes a keyring, and the
+        /// reason it can: at join time there is no instance id yet, so there is
+        /// no issuer to mint a JWT under and nothing but a detached signature
+        /// will do. `crate::worker_join::join_proof_message` is the only caller
+        /// and it domain-separates what it hands over, so this cannot be turned
+        /// into a signing oracle for another protocol by passing it other
+        /// bytes - the verifier reconstructs the message rather than trusting
+        /// one.
+        #[must_use]
+        pub fn sign_join_proof(&self, message: &[u8]) -> [u8; 64] {
+            self.key.sign_detached(message)
         }
 
         /// Spend this key on the keyring it exists to become.
@@ -700,12 +789,18 @@ impl fmt::Debug for ServiceAuth {
 }
 
 impl ServiceAuth {
+    /// The verified local issuer and its loaded key for protocol-specific
+    /// capability codecs. Sharing this snapshot does not reload key files.
+    #[must_use]
+    pub fn signing_identity(&self) -> Option<(&ServiceIssuer, &ServiceSigningKey)> {
+        self.keyring
+            .as_ref()
+            .map(|keyring| (&keyring.issuer, keyring.signing_key.as_ref()))
+    }
+
     /// Build a capability from a loaded keyring and the verifier for its tier.
     #[must_use]
-    pub fn new(
-        keyring: ServiceKeyring,
-        verifier: Arc<dyn IdentityVerifier + Send + Sync>,
-    ) -> Self {
+    pub fn new(keyring: ServiceKeyring, verifier: Arc<dyn IdentityVerifier + Send + Sync>) -> Self {
         Self {
             keyring: Some(keyring),
             verifier: Some(verifier),
@@ -769,7 +864,9 @@ impl ServiceAuth {
     /// [`ServiceAuth::authorization_for`], for the same reason.
     #[must_use]
     pub fn user_envelope_signer(&self) -> Option<&UserEnvelopeSigner> {
-        self.keyring.as_ref().map(ServiceKeyring::user_envelope_signer)
+        self.keyring
+            .as_ref()
+            .map(ServiceKeyring::user_envelope_signer)
     }
 
     /// The verifier for inbound `ZeroShip-User` identity envelopes, or `None`
@@ -858,11 +955,11 @@ pub fn load_signing_key(path: &Path) -> Result<ServiceSigningKey, PeerKeyError> 
 /// a fresh, empty entry every time.
 ///
 /// The realistic producer is not a hand-edited file. `SERVICE_KEY_FILES` in
-/// `crates/zeroship-cli/src/dev.rs` states the rule in its own rustdoc - four
-/// keys, not one shared file - and a secret manager or compose override mapping
-/// one secret onto the four `*_SERVICE_KEY_FILE` mounts satisfies every check
-/// the generator makes. The document it then publishes has one key under all
-/// four issuers, which is a shared bearer secret with no shared secret visible
+/// `crates/zeroship-cli/src/dev.rs` states the rule in its own rustdoc - one
+/// key per service, not one shared file - and a secret manager or compose
+/// override mapping one secret onto every `*_SERVICE_KEY_FILE` mount would
+/// satisfy any per-file check. The document it then publishes has one key under
+/// every issuer, which is a shared bearer secret with no shared secret visible
 /// to notice: possession of any one private half becomes the ability to present
 /// as every service, because the assertion verifier resolves its key from the
 /// issuer parsed out of the assertion it was handed.
@@ -1009,12 +1106,14 @@ mod tests {
         let names = [
             GATEWAY_SERVICE_NAME,
             WORKER_SERVICE_NAME,
+            WORKER_JOIN_SIGNER_SERVICE_NAME,
             CONTROL_SERVICE_NAME,
+            WORKFLOW_SERVICE_NAME,
             AUTH_SERVICE_NAME,
         ];
         // The floor is the whole constant list, not a sample: a name added
         // without an issuer that parses would be an edge nobody can address.
-        assert_eq!(names.len(), 4);
+        assert_eq!(names.len(), 6);
         for name in names {
             let issuer = service_issuer(name).expect("named service issuer parses");
             assert_eq!(issuer.as_str(), format!("spiffe://zeroship.ai/{name}"));

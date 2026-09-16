@@ -177,6 +177,7 @@ mod node_zlib;
 mod pump_cleanup;
 mod pump_eviction_leak;
 mod request_init_enums;
+mod runtime_shutdown;
 mod rpc_ctx;
 mod rpc_dispatch;
 mod rpc_error;

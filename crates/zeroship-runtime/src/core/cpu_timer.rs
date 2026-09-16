@@ -1,15 +1,18 @@
 //! POSIX CPU timer — per-thread CPU time enforcement for V8 isolates (Linux only).
 //!
 //! Architecture:
-//! - One `CpuTimerSystem` per process: shared pipe + watchdog thread
-//! - One `CpuTimer` per V8 actor thread: POSIX timer on CLOCK_THREAD_CPUTIME_ID
+//! - Process-wide `CpuTimerSystem`: shared pipe + watchdog thread
+//! - Isolate-owned `CpuTimer`: POSIX timer on CLOCK_THREAD_CPUTIME_ID
 //! - Signal handler (SIGRTMIN+1): async-signal-safe write to pipe
 //! - Watchdog thread: reads pipe, calls v8::IsolateHandle::terminate_execution()
 //!
 //! The signal handler never calls V8 directly (V8's TerminateExecution acquires a
 //! mutex, which would deadlock if the signal fires while V8 holds it). Instead,
-//! it writes the app_id to a pipe; a separate watchdog thread reads the pipe and
+//! it writes a unique registration token to a pipe; the watchdog reads it and
 //! calls terminate_execution() in normal (non-signal) context.
+
+#[cfg(test)]
+mod tests;
 
 use std::collections::HashMap;
 use std::os::unix::io::RawFd;
@@ -30,9 +33,24 @@ static TIMER_SIGNAL: AtomicI32 = AtomicI32::new(0);
 /// Global singleton for the CPU timer system.
 static CPU_TIMER_SYSTEM: OnceLock<CpuTimerSystem> = OnceLock::new();
 
-/// Registered isolate handles, keyed by app_id hash, alongside the flag the
-/// watchdog sets when it terminates that isolate.
-type IsolateHandles = Arc<Mutex<HashMap<u64, (v8::IsolateHandle, Arc<AtomicBool>)>>>;
+#[derive(Default)]
+struct Registry {
+    next: u64,
+    handles: HashMap<u64, (v8::IsolateHandle, Arc<AtomicBool>)>,
+}
+type IsolateHandles = Arc<Mutex<Registry>>;
+
+/// Dropped or failed timers release their registration metadata. Tokens are
+/// never reused, including after the V8 address is reused.
+struct Registration {
+    id: u64,
+    system: &'static CpuTimerSystem,
+}
+impl Drop for Registration {
+    fn drop(&mut self) {
+        self.system.handles.lock().unwrap().handles.remove(&self.id);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Signal handler — MUST be async-signal-safe
@@ -49,14 +67,14 @@ extern "C" fn cpu_timeout_handler(
     info: *mut libc::siginfo_t,
     _ctx: *mut libc::c_void,
 ) {
-    // Extract app_id from sigval (set during timer_create via sival_ptr)
-    let app_id: u64 = unsafe { (*info).si_value().sival_ptr as u64 };
+    // Extract the registration token installed during timer_create.
+    let registration_id: u64 = unsafe { (*info).si_value().sival_ptr as u64 };
 
-    // Write app_id to pipe (write() is async-signal-safe per POSIX)
+    // write() is async-signal-safe per POSIX.
     let fd = PIPE_WRITE_FD.load(Ordering::Relaxed);
     if fd >= 0 {
         unsafe {
-            libc::write(fd, &app_id as *const u64 as *const libc::c_void, 8);
+            libc::write(fd, &registration_id as *const u64 as *const libc::c_void, 8);
         }
     }
 }
@@ -131,7 +149,7 @@ impl CpuTimerSystem {
             }
         }
 
-        let handles: IsolateHandles = Arc::new(Mutex::new(HashMap::new()));
+        let handles: IsolateHandles = Arc::new(Mutex::new(Registry::default()));
         let handles_clone = handles.clone();
 
         let watchdog = std::thread::Builder::new()
@@ -147,23 +165,25 @@ impl CpuTimerSystem {
         }
     }
 
-    /// Register an isolate's V8 handle for termination by app_id hash.
-    /// Register an isolate for termination, along with the flag the watchdog
-    /// sets when it fires.
+    /// Register an isolate with a token owned by its timer.
     ///
     /// The flag is necessary because `is_execution_terminating` reads FALSE by
     /// the time the dispatch path regains control - V8 clears the terminating
     /// state once the exception unwinds out of JS. Without a note left behind,
     /// a terminated dispatch is indistinguishable from one that simply has no
     /// result yet, and the request hangs.
-    pub fn register(&self, app_id: u64, handle: v8::IsolateHandle, terminated: Arc<AtomicBool>) {
-        self.handles.lock().unwrap().insert(app_id, (handle, terminated));
-    }
-
-    /// Unregister an isolate by app_id hash.
-    #[allow(dead_code)]
-    pub fn unregister(&self, app_id: u64) {
-        self.handles.lock().unwrap().remove(&app_id);
+    fn register(
+        &'static self,
+        handle: v8::IsolateHandle,
+        terminated: Arc<AtomicBool>,
+    ) -> Result<Registration, String> {
+        let mut registry = self.handles.lock().unwrap();
+        let id = registry.next;
+        registry.next = id
+            .checked_add(1)
+            .ok_or("CPU timer registration identifiers exhausted")?;
+        registry.handles.insert(id, (handle, terminated));
+        Ok(Registration { id, system: self })
     }
 }
 
@@ -180,11 +200,11 @@ impl CpuTimerSystem {
 #[allow(unsafe_code)]
 fn watchdog_loop(pipe_read: RawFd, handles: IsolateHandles) {
     loop {
-        let mut app_id: u64 = 0;
+        let mut registration_id: u64 = 0;
         let n = unsafe {
             libc::read(
                 pipe_read,
-                &mut app_id as *mut u64 as *mut libc::c_void,
+                &mut registration_id as *mut u64 as *mut libc::c_void,
                 8,
             )
         };
@@ -197,14 +217,18 @@ fn watchdog_loop(pipe_read: RawFd, handles: IsolateHandles) {
             continue;
         }
 
-        let handles = handles.lock().unwrap();
-        if let Some((handle, terminated)) = handles.get(&app_id) {
-            // Set the note BEFORE terminating, so the dispatch path cannot
-            // observe the termination without also seeing the cause.
-            terminated.store(true, Ordering::Relaxed);
-            handle.terminate_execution();
-            tracing::warn!(app_id = format!("{app_id:#x}"), "cpu-timer terminated isolate: CPU limit exceeded");
-        }
+        terminate_registered(&handles, registration_id);
+    }
+}
+
+fn terminate_registered(handles: &IsolateHandles, registration_id: u64) {
+    let registry = handles.lock().unwrap();
+    if let Some((handle, terminated)) = registry.handles.get(&registration_id) {
+        // Keep unregistration serialized with termination, and publish the note
+        // before V8 can unwind back to its owner.
+        terminated.store(true, Ordering::Relaxed);
+        handle.terminate_execution();
+        tracing::warn!(registration_id, "CPU timer terminated isolate");
     }
 }
 
@@ -218,8 +242,7 @@ fn watchdog_loop(pipe_read: RawFd, handles: IsolateHandles) {
 /// Armed/disarmed around active request periods.
 pub struct CpuTimer {
     timer_id: libc::timer_t,
-    #[allow(dead_code)]
-    app_id: u64,
+    registration: Option<Registration>,
 }
 
 // Safety: CpuTimer is only used on the thread that created it (the V8 actor thread).
@@ -232,7 +255,11 @@ impl CpuTimer {
     ///
     /// MUST be called from the V8 actor thread.
     #[allow(unsafe_code)]
-    pub fn new(app_id: u64) -> Result<Self, String> {
+    pub fn new(
+        handle: v8::IsolateHandle,
+        terminated: Arc<AtomicBool>,
+    ) -> Result<Self, String> {
+        let registration = CpuTimerSystem::get_or_init().register(handle, terminated)?;
         let tid = unsafe { libc::syscall(libc::SYS_gettid) } as libc::c_int;
 
         let sig = TIMER_SIGNAL.load(Ordering::Relaxed);
@@ -244,7 +271,7 @@ impl CpuTimer {
         sev.sigev_notify = libc::SIGEV_THREAD_ID;
         sev.sigev_signo = sig;
         sev.sigev_value = libc::sigval {
-            sival_ptr: app_id as *mut libc::c_void,
+            sival_ptr: registration.id as *mut libc::c_void,
         };
         // sigev_notify_thread_id is a non-standard Linux extension.
         // In glibc, it shares storage with sigev_notify_function via a union.
@@ -265,13 +292,10 @@ impl CpuTimer {
             ));
         }
 
-        Ok(Self { timer_id, app_id })
-    }
-
-    /// Get the app_id hash this timer is associated with.
-    #[allow(dead_code)]
-    pub fn app_id(&self) -> u64 {
-        self.app_id
+        Ok(Self {
+            timer_id,
+            registration: Some(registration),
+        })
     }
 
     /// Arm the timer with a CPU time limit (one-shot).
@@ -319,18 +343,6 @@ impl Drop for CpuTimer {
         unsafe {
             libc::timer_delete(self.timer_id);
         }
+        drop(self.registration.take());
     }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Hash a string app_id to a u64 for use as the POSIX timer sigval.
-#[allow(dead_code)]
-pub fn app_id_hash(app_id: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    app_id.hash(&mut hasher);
-    hasher.finish()
 }

@@ -65,26 +65,47 @@ impl ModuleRegistry {
         self.compiled.insert(specifier, module)
     }
 
-    pub(crate) fn is_host_only(&self, specifier: &str) -> bool {
-        resolve_specifier(specifier, &self.sources)
-            .is_some_and(|resolved| self.host_only_names.contains(&resolved))
+    fn check_source_import(&self, referrer: &str, resolved: &str) -> Result<(), String> {
+        if !self.host_only_names.contains(referrer) && self.host_only_names.contains(resolved) {
+            return Err(format!(
+                "Module {referrer:?} cannot import host-only module {resolved:?}"
+            ));
+        }
+        if self.host_names.contains(referrer) && !self.host_names.contains(resolved) {
+            return Err(format!(
+                "Plugin module {referrer:?} cannot import creator module {resolved:?}"
+            ));
+        }
+        Ok(())
     }
 }
 
-/// Resolve a specifier against the source map, trying common variants.
-fn resolve_specifier(specifier: &str, sources: &HashMap<String, String>) -> Option<String> {
-    let candidates = [
-        specifier.to_string(),
-        specifier.strip_prefix("./").unwrap_or(specifier).to_string(),
-        format!("{specifier}.js"),
-        format!("{}.js", specifier.strip_prefix("./").unwrap_or(specifier)),
-    ];
-    for candidate in &candidates {
-        if sources.contains_key(candidate) {
-            return Some(candidate.clone());
+/// Resolve relative paths against their importing module, with no root fallback.
+fn resolve_specifier(
+    specifier: &str,
+    referrer: &str,
+    exists: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let resolved = if specifier.starts_with("./") || specifier.starts_with("../") {
+        let base = referrer.rsplit_once('/').map_or("", |(base, _)| base);
+        let mut parts = Vec::new();
+        for part in base.split('/').chain(specifier.split('/')) {
+            match part {
+                "" | "." => {}
+                ".." => {
+                    parts.pop()?;
+                }
+                part => parts.push(part),
+            }
         }
-    }
-    None
+        let prefix = if referrer.starts_with('/') { "/" } else { "" };
+        format!("{prefix}{}", parts.join("/"))
+    } else {
+        specifier.to_owned()
+    };
+    [resolved.clone(), format!("{resolved}.js")]
+        .into_iter()
+        .find(|candidate| exists(candidate))
 }
 
 /// Compile a single module from source.
@@ -169,15 +190,50 @@ pub(crate) fn compile_modules(
     Ok(entry)
 }
 
-/// Compile an artifact-resident dynamic import without evaluating its graph.
-/// Missing source remains distinct from a compilation failure.
-pub(crate) fn compile_dynamic_module(
+/// Look up a module the compiled graph already holds, by entry specifier.
+///
+/// Callers use this to reach a module the registry owns instead of compiling
+/// or evaluating a second copy of it under another specifier.
+pub(crate) fn registered_module(
+    scope: &mut v8::PinScope,
+    entry: Option<&ModuleEntry>,
+) -> Option<v8::Global<v8::Module>> {
+    let specifier = &entry?.specifier;
+    let registry = scope.get_slot::<SharedRegistry>().cloned()?;
+    let registry = registry.borrow();
+    registry.get(specifier).cloned()
+}
+
+/// Prepare a dynamic dependency and return its canonical registry name.
+/// Evaluation is deferred until the importing module leaves its sync frame.
+pub(crate) fn dynamic_module(
     scope: &mut v8::PinScope,
     specifier: &str,
-) -> Result<Option<v8::Global<v8::Module>>, String> {
-    let Some(registry) = scope.get_slot::<SharedRegistry>().cloned() else { return Ok(None); };
-    let resolved = resolve_specifier(specifier, &registry.borrow().sources);
-    resolved.map(|resolved| compile_registered_graph(scope, &registry, &resolved)).transpose()
+    referrer: &str,
+) -> Result<Option<String>, String> {
+    let Some(registry) = scope.get_slot::<SharedRegistry>().cloned() else {
+        return Ok(None);
+    };
+    let resolved = {
+        let registry = registry.borrow();
+        resolve_specifier(specifier, referrer, |name| {
+            registry.sources.contains_key(name) || registry.compiled.contains_key(name)
+        })
+    };
+    let Some(root) = resolved else {
+        return Ok(None);
+    };
+    {
+        let registry = registry.borrow();
+        if registry.host_only_names.contains(&root) && !registry.host_only_names.contains(referrer) {
+            return Err(format!("Cannot find module '{specifier}'"));
+        }
+    }
+    if !super::native_modules::is_native(scope, &root) {
+        registry.borrow().check_source_import(referrer, &root)?;
+    }
+    compile_registered_graph(scope, &registry, &root)?;
+    Ok(Some(root))
 }
 
 fn compile_registered_graph(
@@ -209,19 +265,11 @@ fn compile_registered_graph(
             }
             let (resolved, source) = {
                 let registry = registry.borrow();
-                let resolved = resolve_specifier(&import, &registry.sources)
-                    .ok_or_else(|| format!("Cannot resolve import '{import}' from '{specifier}'"))?;
-                let importer_is_host = registry.host_names.contains(&specifier);
-                let importer_is_host_only = registry.host_only_names.contains(&specifier);
-                let import_is_host = registry.host_names.contains(&resolved);
-                if !importer_is_host_only && registry.host_only_names.contains(&resolved) {
-                    return Err(format!(
-                        "Module {specifier:?} cannot import host-only module {resolved:?}"
-                    ));
-                }
-                if importer_is_host && !import_is_host {
-                    return Err(format!("Plugin module {specifier:?} cannot import creator module {resolved:?}"));
-                }
+                let resolved = resolve_specifier(&import, &specifier, |name| {
+                    registry.sources.contains_key(name)
+                })
+                .ok_or_else(|| format!("Cannot resolve import '{import}' from '{specifier}'"))?;
+                registry.check_source_import(&specifier, &resolved)?;
                 if registry.get(&resolved).is_some() || !scheduled.insert(resolved.clone()) { continue; }
                 let source = registry.sources.get(&resolved).expect("resolved module source").clone();
                 (resolved, source)
@@ -384,7 +432,7 @@ pub(crate) fn resolve_callback<'a>(
     context: v8::Local<'a, v8::Context>,
     specifier: v8::Local<'a, v8::String>,
     _import_attributes: v8::Local<'a, v8::FixedArray>,
-    _referrer: v8::Local<'a, v8::Module>,
+    referrer: v8::Local<'a, v8::Module>,
 ) -> Option<v8::Local<'a, v8::Module>> {
     v8::callback_scope!(unsafe scope, context);
 
@@ -398,18 +446,17 @@ pub(crate) fn resolve_callback<'a>(
     {
         let reg = registry.borrow();
 
-        // Try exact, then variants
-        let candidates = [
-            spec.clone(),
-            spec.strip_prefix("./").unwrap_or(&spec).to_string(),
-            format!("{spec}.js"),
-            format!("{}.js", spec.strip_prefix("./").unwrap_or(&spec)),
-        ];
-
-        for candidate in &candidates {
-            if let Some(module_global) = reg.compiled.get(candidate) {
-                return Some(v8::Local::new(scope, module_global));
-            }
+        let referrer_name = reg
+            .compiled
+            .iter()
+            .find(|(_, module)| v8::Local::new(scope, *module) == referrer)
+            .map(|(name, _)| name.as_str())?;
+        if let Some(resolved) =
+            resolve_specifier(&spec, referrer_name, |name| reg.compiled.contains_key(name))
+        {
+            return reg
+                .get(&resolved)
+                .map(|module| v8::Local::new(scope, module));
         }
     }
 

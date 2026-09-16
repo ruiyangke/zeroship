@@ -198,6 +198,96 @@ fn the_retired_platform_spelling_is_rejected_by_the_overlay() {
 }
 
 #[test]
+fn the_join_signer_import_file_resolves_from_every_tier() {
+    // The control for the three tiers below: with nothing supplying the file
+    // the report says so, so a report that always said `true` fails here.
+    const KEY: &str = "join_signers_file_configured";
+    assert_eq!(field(&report(None, &[], &[]), KEY), "false");
+
+    // The overlay half needs `[control] join_signers_file` to be a leaf the
+    // overlay schema accepts; an unknown key there refuses the boot.
+    let scratch = Scratch::new("join_signers_file");
+    let overlay = scratch.write(
+        "control.toml",
+        "[control]\njoin_signers_file = \"/overlay/join-signers.json\"\n",
+    );
+    assert_eq!(field(&report(Some(&overlay), &[], &[]), KEY), "true");
+
+    let from_env = report(
+        None,
+        &[(
+            "ZEROSHIP_CONTROL_JOIN_SIGNERS_FILE",
+            "/env/join-signers.json",
+        )],
+        &[],
+    );
+    assert_eq!(field(&from_env, KEY), "true");
+
+    let from_flag = report(None, &[], &["--join-signers-file", "/flag/join-signers.json"]);
+    assert_eq!(field(&from_flag, KEY), "true");
+}
+
+/// The MINTER is configured as a pair, and the dry run reports the pair rather
+/// than either half.
+///
+/// A signer key with nowhere to write mints for nobody and a destination with no
+/// key is never filled, so each on its own is a half-configured deployment that
+/// would look configured. The boot refuses that outright; this arm rules on what
+/// `--check-config` says about it, which is the only thing an operator sees
+/// before starting.
+#[test]
+fn the_join_token_minter_is_reported_only_when_both_halves_are_set() {
+    const KEY: &str = "join_token_minter_configured";
+    assert_eq!(field(&report(None, &[], &[]), KEY), "false");
+    assert_eq!(
+        field(
+            &report(
+                None,
+                &[(
+                    "ZEROSHIP_CONTROL_JOIN_TOKEN_SIGNER_FILE",
+                    "/env/join-signer.json"
+                )],
+                &[]
+            ),
+            KEY
+        ),
+        "false",
+        "a signer key with nowhere to write is not a configured minter"
+    );
+    assert_eq!(
+        field(
+            &report(
+                None,
+                &[("ZEROSHIP_CONTROL_JOIN_TOKEN_FILE", "/env/join-token")],
+                &[]
+            ),
+            KEY
+        ),
+        "false",
+        "a destination with no key is not a configured minter"
+    );
+    // THE CONTROL: both halves together, one variable away from each refusal
+    // above.
+    assert_eq!(
+        field(
+            &report(
+                None,
+                &[
+                    (
+                        "ZEROSHIP_CONTROL_JOIN_TOKEN_SIGNER_FILE",
+                        "/env/join-signer.json"
+                    ),
+                    ("ZEROSHIP_CONTROL_JOIN_TOKEN_FILE", "/env/join-token"),
+                ],
+                &[]
+            ),
+            KEY
+        ),
+        "true"
+    );
+}
+
+#[test]
 fn a_valid_overlay_provider_still_resolves() {
     // The one-variable partner to the refusal above: same key, same table,
     // only the VALUE differs. Without it, a resolver that rejected every

@@ -75,10 +75,6 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
     let stripe_store = StripeStore::new(registry.clone());
     let blob_store: Arc<dyn BlobStore> =
         Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
-    let workflow_blob_store: Arc<dyn zeroship_bundle::WorkflowBlobStore> = Arc::new(
-        zeroship_bundle::LocalWorkflowBlobStore::new(blob_root.clone())
-            .expect("workflow blob store"),
-    );
 
     let state = Arc::new(AppState {
         service_auth: std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured()),
@@ -86,19 +82,17 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
         env_store,
         stripe_store,
         blob_store,
-        workflow_blob_store,
         control_key: SecretString::new("test-control-key".to_string()),
         master_key: SecretString::new(TEST_MASTER_KEY.to_string()),
         stripe_webhook_secret: SecretString::new(String::new()),
         stripe_secret_key: SecretString::new(String::new()),
         stripe_base_url: "https://api.stripe.com".to_string(),
-        gateway_url: "http://127.0.0.1:9".to_string(),
         worker_urls: Vec::new(),
         admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
         webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
         origin_scheme: zeroship_core::config::OriginScheme::Https,
         trust_proxy: false,
-        worker_enrolment: zeroship_control::worker_enrolment::EnrolmentEnvelope::closed(),
+        worker_enrolment: zeroship_control::worker_join::EnrolmentEnvelope::closed(),
         deploy_tmp_dir: deploy_tmp_dir.clone(),
         control_pg: Arc::new(control_pg_client),
         app_base_domain: "zeroship.localhost".to_string(),
@@ -244,6 +238,7 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
             &format!("setplan-{}", Uuid::new_v4().simple()),
             &start.id,
             &owner,
+            None,
             None,
         )
         .await
@@ -418,6 +413,7 @@ async fn assigning_an_archived_plan_is_refused_and_not_reported_as_a_missing_app
             &format!("setplan-arch-{}", Uuid::new_v4().simple()),
             &start.id,
             &owner,
+            None,
             None,
         )
         .await

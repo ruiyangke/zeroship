@@ -1,0 +1,224 @@
+use super::{count, Coordinator, Error};
+use crate::{
+    deployments::latest::{LatestDeployment, LatestDeploymentSource},
+    management as commands,
+    models::{management, management_scopes, queue_scopes, Scope},
+    queue, retention,
+};
+use zeroship_core::{
+    app_id::AppId,
+    service_assertion::ServiceIssuer,
+    service_peers::{service_issuer, CONTROL_SERVICE_NAME},
+    typed_id,
+    workflow_coordination::{
+        ManageRun, ManagementOperation, ManagementReceipt, RequestId, RestartDeploy,
+    },
+    workflow_jobs::{JobId, JobOperation, JobSpec, ManagementCommand},
+};
+use zeroship_data_orm::{orm::Database, value};
+
+enum Acceptance {
+    Ready(ManagementReceipt),
+    Observe,
+    Retain,
+}
+
+impl Coordinator {
+    /// Accept a Control command and its ordered delivery atomically. Latest is
+    /// observed once outside queue locks; exact raw retries use the retained job.
+    ///
+    /// # Errors
+    /// Rejects unauthorized issuers, changed requests, unavailable deployments,
+    /// exhausted capacity and malformed or unavailable storage.
+    pub async fn manage(
+        &self,
+        actor: &ServiceIssuer,
+        request: &ManageRun,
+        latest: &LatestDeploymentSource,
+    ) -> Result<ManagementReceipt, Error> {
+        let control = service_issuer(CONTROL_SERVICE_NAME).map_err(|_| Error::Storage)?;
+        if actor.principal() != control.principal() {
+            return Err(Error::Denied);
+        }
+        commands::validate_request(request)?;
+        self.queue.encode(&(actor.as_str(), request))?;
+        let budget = self.budget();
+        let mut selected = None;
+        loop {
+            let result = self
+                .queue
+                .transact_for(budget.clone(), |tx| {
+                    let selected = selected.as_ref();
+                    async move { self.accept(&tx, actor, request, selected).await }
+                })
+                .await?;
+            match result {
+                Acceptance::Ready(receipt) => return Ok(receipt),
+                Acceptance::Observe => {
+                    selected = Some(
+                        queue::bounded(budget.clone(), latest.observe(&request.app_id)).await??,
+                    );
+                }
+                Acceptance::Retain => {
+                    let target = selected.as_ref().ok_or(Error::Storage)?;
+                    self.queue
+                        .ensure_deployment_for(
+                            &request.app_id,
+                            &target.deployment_id,
+                            budget.clone(),
+                        )
+                        .await?;
+                }
+            }
+        }
+    }
+
+    async fn accept(
+        &self,
+        tx: &Database,
+        actor: &ServiceIssuer,
+        request: &ManageRun,
+        selected: Option<&LatestDeployment>,
+    ) -> Result<Acceptance, Error> {
+        self.scope(tx, &request.app_id, true).await?;
+        if let Some(row) = commands::record(tx, &request.app_id, &request.request_id).await? {
+            commands::linked(tx, &row).await?;
+            if row.request_digest != commands::request_digest(actor.as_str(), request)? {
+                return Err(Error::Conflict);
+            }
+            return Ok(Acceptance::Ready(commands::receipt(&row)?));
+        }
+        commands::validate_pending(tx, &request.app_id).await?;
+        let pending = count::<management::Entity>(
+            tx,
+            management::app_id
+                .eq(request.app_id.as_str())?
+                .and(management::outcome.is_null()),
+        )
+        .await?;
+        if pending
+            >= i64::try_from(self.options.max_pending_management).map_err(|_| Error::Invalid)?
+        {
+            return Err(Error::Capacity);
+        }
+        let command = match &request.command {
+            ManagementOperation::Transition { operation } => ManagementCommand::Transition {
+                operation: *operation,
+            },
+            ManagementOperation::Restart { options } => {
+                match options.effective_deploy().map_err(|_| Error::Invalid)? {
+                    RestartDeploy::Started => ManagementCommand::RestartStarted {
+                        from: options.from.clone(),
+                    },
+                    RestartDeploy::Latest => {
+                        let Some(target) = selected else {
+                            return Ok(Acceptance::Observe);
+                        };
+                        if target.app_id != request.app_id {
+                            return Err(Error::Storage);
+                        }
+                        if !retention::prepared(tx, &request.app_id, &target.deployment_id).await? {
+                            return Ok(Acceptance::Retain);
+                        }
+                        let held =
+                            retention::require_held(tx, &request.app_id, &target.deployment_id)
+                                .await?;
+                        if held.deploy_hash != target.deploy_hash {
+                            return Err(Error::Conflict);
+                        }
+                        ManagementCommand::RestartLatest {
+                            deployment_id: target.deployment_id.clone(),
+                        }
+                    }
+                }
+            }
+        };
+        self.insert_command(tx, actor, request, command)
+            .await
+            .map(Acceptance::Ready)
+    }
+
+    async fn insert_command(
+        &self,
+        tx: &Database,
+        actor: &ServiceIssuer,
+        request: &ManageRun,
+        command: ManagementCommand,
+    ) -> Result<ManagementReceipt, Error> {
+        let order = commands::scope(tx, &request.app_id, &request.run_id).await?;
+        let (scope_id, revision) = if let Some(order) = order {
+            (
+                order.id,
+                order
+                    .accepted_revision
+                    .checked_add(1)
+                    .ok_or(Error::Capacity)?,
+            )
+        } else {
+            let id = typed_id::generate("wmo");
+            tx.collection("management_scopes")?.insert(value!({"id":id,"app_id":request.app_id.as_str(),"run_id":request.run_id.as_str(),"accepted_revision":0,"settled_revision":0})).await?;
+            (id, 1)
+        };
+        let now = self.queue.clock.now().await?;
+        let blocks_execution = commands::blocks_execution(&command);
+        let job = JobSpec {
+            id: JobId::mint(),
+            app_id: request.app_id.clone(),
+            available_at: now.try_into().map_err(|_| Error::Storage)?,
+            operation: JobOperation::Management {
+                request_id: request.request_id.clone(),
+                run_id: request.run_id.clone(),
+                revision: revision.try_into().map_err(|_| Error::Capacity)?,
+                command,
+            },
+        };
+        self.queue.insert(tx, &job, now).await?;
+        tx.collection("management")?.insert(value!({
+            "id":job.id.as_str(),"app_id":request.app_id.as_str(),"request_id":request.request_id.as_str(),"run_id":request.run_id.as_str(),
+            "revision":revision,"actor":actor.as_str(),"request":serde_json::to_string(request).map_err(|_| Error::Invalid)?,
+            "request_digest":commands::request_digest(actor.as_str(), request)?,"blocks_execution":blocks_execution,"created_at":now
+        })).await?;
+        let _: crate::models::ManagementScope = tx
+            .entity::<management_scopes::Entity>()?
+            .update(
+                management_scopes::id.eq(scope_id.as_str())?,
+                management_scopes::accepted_revision.set(revision)?,
+            )
+            .await?
+            .ok_or(Error::Storage)?;
+        Ok(ManagementReceipt {
+            app_id: request.app_id.clone(),
+            request_id: request.request_id.clone(),
+            outcome: None,
+        })
+    }
+
+    /// # Errors
+    /// Rejects malformed command/job linkage or unavailable receipt metadata.
+    pub async fn management_receipt(
+        &self,
+        app: &AppId,
+        request: &RequestId,
+    ) -> Result<Option<ManagementReceipt>, Error> {
+        self.queue
+            .transact(|tx| async move {
+                if tx
+                    .entity::<queue_scopes::Entity>()?
+                    .query()
+                    .filter(queue_scopes::id.eq(app.as_str())?)
+                    .first::<Scope>()
+                    .await?
+                    .is_none()
+                {
+                    return Ok(None);
+                }
+                self.scope(&tx, app, false).await?;
+                let Some(row) = commands::record(&tx, app, request).await? else {
+                    return Ok(None);
+                };
+                commands::linked(&tx, &row).await?;
+                commands::receipt(&row).map(Some)
+            })
+            .await
+    }
+}

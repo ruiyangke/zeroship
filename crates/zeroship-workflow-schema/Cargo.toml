@@ -1,0 +1,12 @@
+[package]
+name = "zeroship-workflow-schema"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Generated workflow journal schema artifacts, their version and their stamp"
+
+[dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

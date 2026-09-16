@@ -313,6 +313,7 @@ WORKDIR /app
 COPY --from=js-packages /build/node_modules /app/node_modules
 COPY --from=js-packages /build/packages /app/packages
 COPY --from=js-packages /build/crates/zeroship-migrate-node /app/crates/zeroship-migrate-node
+COPY --from=js-packages /build/crates/zeroship-workflow-manager/schema /app/crates/zeroship-workflow-manager/schema
 COPY --from=js-packages /build/package.json /build/pnpm-workspace.yaml /app/
 # The corpus, from the `js-packages` stage rather than the build context, so its
 # `node_modules/@zeroship/migrate` link comes with it. Copying it from the context

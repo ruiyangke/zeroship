@@ -1,6 +1,7 @@
 //! Admin API handlers — app CRUD, deploy, plan, usage.
 
 use std::path::Path as StdPath;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,14 +10,20 @@ use ntex::http::StatusCode;
 use ntex::web;
 use ntex::web::types::{Json, Path, State};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zeroship_authz::{Action, Resource};
 use zeroship_core::app_id::AppId;
 use zeroship_core::organization_id::OrganizationId;
+use zeroship_core::DeployCommandId;
 
 use crate::app_oauth_client;
 use crate::authz_guard::AuthzGuard;
 use crate::deploy::{self, IngestError};
+use crate::publication::{
+    self, AcceptanceResult, CatalogError, CommandBinding, DeployCommand, DeploymentRejected,
+    DeployJournal, VerifiedDeployment,
+};
 use crate::registry::RegistryError;
 use crate::AppState;
 
@@ -44,6 +51,15 @@ pub struct CreateAppBody {
     /// creator who has outgrown that names a project explicitly.
     #[serde(default)]
     pub project_id: Option<String>,
+    /// The NAME of the execution zone the app runs in, fixed at creation.
+    ///
+    /// OPTIONAL, and the absence is the single-zone path: a deployment that
+    /// declares one zone puts the app in it. A deployment that declares
+    /// several refuses rather than choose, because the zone is frozen with
+    /// the app and moving it afterwards is a data migration of its creator
+    /// storage rather than a metadata edit.
+    #[serde(default)]
+    pub execution_zone: Option<String>,
 }
 
 /// Default plan for a `create_app` with no explicit `plan_id`: the built-in
@@ -491,6 +507,7 @@ pub async fn create_app(
             &body.plan_id,
             &authz.principal_id,
             Some(project_id.as_str()),
+            body.execution_zone.as_deref(),
         )
         .await
     {
@@ -732,16 +749,25 @@ pub async fn delete_app(
     }
 }
 
-/// Streaming `.zship` ingest. Replaces the legacy raw-bundle path —
-/// deploy bundles now arrive as zstd-compressed tar archives carrying
-/// `manifest.json` + `blobs/<sha256>` entries. See
-/// `docs/reference/zship.md` for the wire format and ingestion
-/// algorithm.
+/// Streaming `.zship` ingest under a stable deploy command identity.
+///
+/// Deploy bundles arrive as zstd-compressed tar archives carrying
+/// `manifest.json` + `blobs/<sha256>` entries; see `docs/reference/zship.md`
+/// for the wire format and ingestion algorithm.
+///
+/// The request names its deploy command in one `Idempotency-Key` header. An
+/// exact retry - same app, actor, content type and archive bytes under the same
+/// command id - returns the original acceptance without ingesting, admitting or
+/// publishing again. Acceptance commits the app pointer, the command receipt and,
+/// for an active app, an activation intent at the next lifecycle revision in one
+/// catalog transaction (`crate::publication::catalog::accept`); the workflow
+/// manager learns of it later through the lifecycle publisher.
 pub async fn deploy(
     req: web::HttpRequest,
     id: Path<String>,
     authz: AuthzGuard,
     state: State<Arc<AppState>>,
+    journal: State<Rc<DeployJournal>>,
     mut body: web::types::Payload,
 ) -> web::HttpResponse {
     // Deploy is the most expensive endpoint here - it streams a body to disk,
@@ -758,8 +784,8 @@ pub async fn deploy(
         return resp;
     }
 
-    // Authz + app-id + content-type rejections happen BEFORE any body byte
-    // is consumed, so rejected callers cannot tie up tmp file slots.
+    // Authz, app-id, content-type and command-id rejections happen BEFORE any
+    // body byte is consumed, so rejected callers cannot tie up tmp file slots.
     let uid = match AppId::parse(&id) {
         Ok(u) => u,
         Err(_) => {
@@ -784,32 +810,37 @@ pub async fn deploy(
         .headers()
         .get("content-type")
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    if !is_zship_content_type(content_type) {
+        .and_then(publication::normalize_content_type);
+    let Some(content_type) = content_type else {
         return web::HttpResponse::UnsupportedMediaType().json(&serde_json::json!({
             "error": "unsupported content type",
             "detail": "expected application/x-zship",
         }));
-    }
+    };
     if has_legacy_deploy_migration_query(req.query_string()) {
         return web::HttpResponse::BadRequest().json(&serde_json::json!({
             "error": "migration_approval_removed",
             "detail": "deploy no longer applies migrations; run zeroship migrate against /v1/apps/{id}/migrations/apply",
         }));
     }
+    let command_id = match deploy_command_id(&req) {
+        Ok(command_id) => command_id,
+        Err(resp) => return resp,
+    };
 
-    // The app has to exist before we take the upload. `ingest` below persists
-    // every blob in the bundle, and it runs before the lookup that produces the
-    // deploy record - so without this gate a bundle aimed at an app that was
-    // never created is written to the blob store and then answered 404, leaving
-    // blobs nothing will reference, bill, or collect.
+    // The app has to exist, undeleted, before we take the upload. `ingest`
+    // below persists every blob in the bundle before the catalog transaction
+    // runs, so without this gate a bundle aimed at an app that was never
+    // created is written to the blob store and then answered 404, leaving
+    // blobs nothing will reference, bill, or collect. The catalog transaction
+    // repeats the check under the app lock.
     //
     // Authz alone does not cover it: a caller holding a fleet-wide grant is
     // authorized for an app id whether or not a row exists behind it. This
     // joins the rejections above that all resolve before a body byte is read.
-    match state.registry.get_app(&uid).await {
-        Ok(Some(_)) => {}
-        Ok(None) => {
+    match state.registry.live_app_exists(&uid).await {
+        Ok(true) => {}
+        Ok(false) => {
             return web::HttpResponse::NotFound()
                 .json(&serde_json::json!({"error":"app not found"}))
         }
@@ -825,14 +856,6 @@ pub async fn deploy(
     // This admits every deploy - it measures concurrency, it does not limit it.
     // The per-deploy take is bounded but the aggregate is not, and sizing a
     // limit needs the peak a real deployment reaches rather than a guess.
-    //
-    // The placement is measured, not assumed: panicking here fails exactly the
-    // five `deploy_http_test` cases that stream an artifact (happy path, both
-    // scope cases, manifest-not-first, legacy-manifest) and leaves the five
-    // rejection cases passing - missing auth, wrong content type, unknown app,
-    // legacy migration query, rate limited. That pins the boundary and nothing
-    // more: no test drives two deploys at once, so the peak arithmetic is
-    // covered only by the unit tests in `deploy_inflight`.
     let inflight = crate::deploy_inflight::DEPLOY_INFLIGHT.enter();
     if inflight.is_new_peak() {
         tracing::info!(
@@ -916,7 +939,20 @@ pub async fn deploy(
         }
     };
 
-    let result = deploy::ingest(&state.blob_store, &uid, &mmap[..]).await;
+    // The receipt binds the digest of the bytes this handler consumed, never a
+    // hash the caller claims. An exact retry is answered here, before ingest.
+    let binding = CommandBinding {
+        id: command_id,
+        app: uid.clone(),
+        actor: authz.principal_id.clone(),
+        content_type,
+        archive_sha256: hex::encode(Sha256::digest(&mmap[..])),
+    };
+    let result = match state.registry.deploy_receipt(&binding).await {
+        Ok(None) => Ok(deploy::ingest(&state.blob_store, &uid, &mmap[..]).await),
+        Ok(Some(result)) => Err(accepted_response(&result, true)),
+        Err(error) => Err(catalog_error_response(&uid, error)),
+    };
 
     // Drop mmap + file before unlinking. On Linux unlink-while-mapped
     // is fine, but explicit drop avoids edge cases on other platforms.
@@ -924,127 +960,223 @@ pub async fn deploy(
     drop(file);
     let _ = compio::fs::remove_file(&tmp_path).await;
 
-    match result {
-        Ok(success) => {
-            // Reconcile the per-app OAuth client before the manifest commit.
-            // When reconciliation succeeds, the gateway's next 5s route-sync
-            // pull sees the client through `get_routes`' LEFT JOIN on
-            // `zeroship.app_oauth_clients`. Reconcile is idempotent and
-            // best-effort relative to the deploy response: a DB
-            // hiccup is logged and the next deploy retries, so deploy 200 does
-            // NOT imply provisioning succeeded. The SDK handles that rare
-            // window with a retryable 503 `client_not_provisioned` response.
-            // Re-parse the ingested manifest to extract its declared
-            // `auth.scopes`. `ingest` only enforces scope-id FORMAT
-            // (ScopeDef::validate_id_format inside Manifest::validate), NOT the
-            // platform-vocabulary collision rule — so the deploy handler MUST run
-            // the full `validate_app_scopes` guard here and HARD-FAIL the deploy
-            // before anything is provisioned or committed. A re-parse failure is a
-            // control-side programming error (ingest already parsed+validated the
-            // same bytes), but we still abort the deploy rather than silently drop
-            // declared scopes (which would wipe the app_scope_defs registry on the
-            // next provision).
-            // The SAME re-parse also yields the runtime schema descriptor the
-            // artifact carries. It is read here rather than re-parsed later so
-            // there is exactly one interpretation of these bytes on this path.
-            let (declared_scopes, descriptor_sha256) =
-                match serde_json::from_str::<zeroship_bundle::Manifest>(&success.manifest_json) {
-                    Ok(m) => (m.auth.scopes, m.runtime_descriptor.map(|entry| entry.hash)),
-                    Err(e) => {
-                        tracing::error!(
-                            app_id = %uid.as_str(),
-                            error = %e,
-                            "control: could not re-parse ingested manifest for declared scopes"
-                        );
-                        return web::HttpResponse::InternalServerError().json(&serde_json::json!({
-                            "error": "manifest reparse failed",
-                            "detail": e.to_string(),
-                        }));
-                    }
-                };
+    let success = match result {
+        Ok(Ok(success)) => success,
+        Ok(Err(e)) => return ingest_error_to_response(e),
+        Err(resp) => return resp,
+    };
 
-            // Reject a colliding/reserved/malformed declared scope (e.g.
-            // `billing:read`) with a 400 BEFORE the manifest is committed or the
-            // route published — the creator gets a real error instead of a
-            // silently un-provisioned scope set.
-            if let Err(e) = app_oauth_client::validate_app_scopes(&declared_scopes) {
-                let (id, reason) = match &e {
-                    app_oauth_client::AppOauthClientError::InvalidScope { id, reason } => {
-                        (id.clone(), reason.clone())
-                    }
-                    other => (String::new(), other.to_string()),
-                };
-                return web::HttpResponse::BadRequest().json(&serde_json::json!({
-                    "error": "invalid_scope",
-                    "scope": id,
-                    "detail": reason,
-                }));
-            }
-
-            // Attempt OAuth-client reconciliation BEFORE the manifest commit.
-            // Scopes are already validated above, so `ensure_app_client`'s
-            // internal `validate_app_scopes` cannot reject; a DB error is logged
-            // and the deploy proceeds with the documented retryable-503 window.
-            match state.registry.get_app(&uid).await {
-                Ok(Some(app)) => {
-                    if let Err(e) = state
-                        .provision_app_oauth_client(&uid, &app.name, &declared_scopes)
-                        .await
-                    {
-                        tracing::error!(
-                            app_id = %uid.as_str(),
-                            error = %e,
-                            "control: per-app OAuth client reconcile failed on deploy"
-                        );
-                    }
-                }
-                Ok(None) => {}
-                Err(e) => tracing::error!(
+    // Re-parse the ingested manifest to extract its declared `auth.scopes`.
+    // `ingest` only enforces scope-id FORMAT (ScopeDef::validate_id_format
+    // inside Manifest::validate), NOT the platform-vocabulary collision rule -
+    // so the deploy handler MUST run the full `validate_app_scopes` guard here
+    // and HARD-FAIL the deploy before anything is provisioned or committed. A
+    // re-parse failure is a control-side programming error (ingest already
+    // parsed+validated the same bytes), but we still abort the deploy rather
+    // than silently drop declared scopes (which would wipe the app_scope_defs
+    // registry on the next provision).
+    let declared_scopes =
+        match serde_json::from_str::<zeroship_bundle::Manifest>(&success.manifest_json) {
+            Ok(m) => m.auth.scopes,
+            Err(e) => {
+                tracing::error!(
                     app_id = %uid.as_str(),
                     error = %e,
-                    "control: deploy could not load app for OAuth client reconcile"
-                ),
+                    "control: could not re-parse ingested manifest for declared scopes"
+                );
+                return web::HttpResponse::InternalServerError().json(&serde_json::json!({
+                    "error": "manifest reparse failed",
+                    "detail": e.to_string(),
+                }));
             }
+        };
 
-            // Atomic UPDATE: deploy_hash + manifest_json land together
-            // so the gateway never sees half-applied state. Deploy only ships
-            // code/assets/route metadata; database migrations are applied through
-            // the migration service as a separate operation.
-            match state
-                .registry
-                .set_deploy_with_manifest(
-                    &uid,
-                    &success.deploy_hash,
-                    &success.manifest_json,
-                    descriptor_sha256.as_deref(),
-                )
+    // Reject a colliding/reserved/malformed declared scope (e.g.
+    // `billing:read`) with a 400 BEFORE the manifest is committed or the
+    // route published — the creator gets a real error instead of a
+    // silently un-provisioned scope set.
+    if let Err(e) = app_oauth_client::validate_app_scopes(&declared_scopes) {
+        let (id, reason) = match &e {
+            app_oauth_client::AppOauthClientError::InvalidScope { id, reason } => {
+                (id.clone(), reason.clone())
+            }
+            other => (String::new(), other.to_string()),
+        };
+        return web::HttpResponse::BadRequest().json(&serde_json::json!({
+            "error": "invalid_scope",
+            "scope": id,
+            "detail": reason,
+        }));
+    }
+
+    // The manager receives only the allowlisted schedule projection, read by
+    // the creator engine's declaration parser and checked against the
+    // manager's bounds. A projection the manager would refuse fails here,
+    // before acceptance, so a committed publication is never refused for its
+    // content. The same bytes carry the runtime descriptor schema admission
+    // compares, so there is one interpretation of the manifest on this path.
+    let deployment = match VerifiedDeployment::verify(success.manifest_json, success.deploy_hash) {
+        Ok(deployment) => deployment,
+        Err(DeploymentRejected::Schedules(detail)) => {
+            return web::HttpResponse::BadRequest().json(&serde_json::json!({
+                "error": "invalid_workflow_schedules",
+                "detail": detail,
+            }));
+        }
+        Err(error @ DeploymentRejected::Manifest) => {
+            return infrastructure_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "ingested manifest failed verification",
+                error,
+            );
+        }
+    };
+
+    // An app that declares workflows gets its journal brought to the current
+    // version HERE, before the catalog transaction below commits the activation
+    // intent - because that intent is what tells the manager the deployment
+    // exists, and therefore what makes a run reachable. Provisioning after it
+    // would leave a window where a run is accepted against a journal that is
+    // absent or behind.
+    //
+    // It fails the deploy rather than being recorded for retry. The creator is
+    // waiting on this response and can send the same command again; a deploy
+    // that answered 200 and left the journal for a background sweep would hand
+    // back an app whose first workflow run fails, with nothing in the answer
+    // saying why. Nothing has been committed at this point, so an exact retry
+    // under the same `Idempotency-Key` repeats the whole path, and the manager's
+    // ensure is idempotent, so repeating it costs a stamp read.
+    //
+    // An app declaring no workflows provisions nothing.
+    if deployment.declares_workflows() {
+        if let Err(error) = journal.ensure(&uid).await {
+            tracing::error!(
+                app_id = %uid.as_str(),
+                %error,
+                "control: deploy refused - the app's workflow journal could not be provisioned"
+            );
+            return web::HttpResponse::ServiceUnavailable().json(&serde_json::json!({
+                "error": "workflow_journal_unavailable",
+                "detail": error.to_string(),
+            }));
+        }
+    }
+
+    // Attempt OAuth-client reconciliation BEFORE the manifest commit. When
+    // reconciliation succeeds, the gateway's next route-sync pull sees the
+    // client through `get_routes`' LEFT JOIN on `zeroship.app_oauth_clients`.
+    // Reconcile is idempotent and best-effort relative to the deploy response:
+    // a DB hiccup is logged and the next deploy retries, so deploy 200 does NOT
+    // imply provisioning succeeded. The SDK handles that rare window with a
+    // retryable 503 `client_not_provisioned` response. Scopes are already
+    // validated above, so `ensure_app_client`'s internal `validate_app_scopes`
+    // cannot reject.
+    match state.registry.get_app(&uid).await {
+        Ok(Some(app)) => {
+            if let Err(e) = state
+                .provision_app_oauth_client(&uid, &app.name, &declared_scopes)
                 .await
             {
-                Ok(true) => web::HttpResponse::Ok().json(&serde_json::json!({
-                    "deploy_hash": success.deploy_hash,
-                    "blobs_uploaded": success.blobs_uploaded,
-                    "blobs_deduped": success.blobs_deduped,
-                })),
-                Ok(false) => web::HttpResponse::NotFound()
-                    .json(&serde_json::json!({"error": "app not found"})),
-                Err(RegistryError::SchemaNotApplied {
-                    descriptor_sha256,
-                    applied_sha256,
-                }) => schema_precondition_response(&uid, &descriptor_sha256, &applied_sha256),
-                Err(e) => error_response(e),
+                tracing::error!(
+                    app_id = %uid.as_str(),
+                    error = %e,
+                    "control: per-app OAuth client reconcile failed on deploy"
+                );
             }
         }
-        Err(e) => ingest_error_to_response(e),
+        Ok(None) => {}
+        Err(e) => tracing::error!(
+            app_id = %uid.as_str(),
+            error = %e,
+            "control: deploy could not load app for OAuth client reconcile"
+        ),
+    }
+
+    // One catalog transaction: deploy_hash + manifest_json land together so
+    // the gateway never sees half-applied state, together with the receipt
+    // and the lifecycle intent. Deploy only ships code/assets/route metadata;
+    // database migrations are applied through the migration service as a
+    // separate operation.
+    let command = DeployCommand {
+        binding,
+        deployment,
+        blobs_uploaded: success.blobs_uploaded,
+        blobs_deduped: success.blobs_deduped,
+    };
+    match state.registry.deploy(command).await {
+        Ok(acceptance) => accepted_response(acceptance.result(), acceptance.replayed()),
+        Err(error) => catalog_error_response(&uid, error),
     }
 }
 
-/// Permissive content-type check. We accept the canonical
-/// `application/x-zship` plus parameterised variants like
-/// `application/x-zship; charset=utf-8` (some clients add charset
-/// even on binary uploads).
-fn is_zship_content_type(value: &str) -> bool {
-    let primary = value.split(';').next().unwrap_or("").trim();
-    primary.eq_ignore_ascii_case("application/x-zship")
+/// The request's deploy command id: exactly one `Idempotency-Key` header
+/// carrying a canonical `dcm_` typed id. Checked before any body byte is read.
+fn deploy_command_id(req: &web::HttpRequest) -> Result<DeployCommandId, web::HttpResponse> {
+    let refuse = |detail: &str| {
+        web::HttpResponse::BadRequest().json(&serde_json::json!({
+            "error": "invalid_idempotency_key",
+            "detail": detail,
+        }))
+    };
+    let mut values = req.headers().get_all("idempotency-key");
+    let Some(value) = values.next() else {
+        return Err(refuse(
+            "a deploy requires one Idempotency-Key header naming its deploy command id",
+        ));
+    };
+    if values.next().is_some() {
+        return Err(refuse("send exactly one Idempotency-Key header"));
+    }
+    value
+        .to_str()
+        .ok()
+        .and_then(|text| DeployCommandId::parse(text).ok())
+        .ok_or_else(|| refuse("the Idempotency-Key must be a canonical dcm_ deploy command id"))
+}
+
+/// The immutable acceptance, marked when it answers a retry.
+fn accepted_response(result: &AcceptanceResult, replayed: bool) -> web::HttpResponse {
+    let mut response = web::HttpResponse::Ok();
+    if replayed {
+        response.header("idempotent-replayed", "true");
+    }
+    response.json(result)
+}
+
+/// Map a catalog refusal to the deploy API's responses. A command conflict
+/// says nothing about the receipt it collided with.
+fn catalog_error_response(app: &AppId, error: CatalogError) -> web::HttpResponse {
+    match error {
+        CatalogError::AppAbsent => {
+            web::HttpResponse::NotFound().json(&serde_json::json!({"error": "app not found"}))
+        }
+        CatalogError::CommandConflict => web::HttpResponse::Conflict().json(&serde_json::json!({
+            "error": "idempotency_key_conflict",
+            "detail": "this deploy command id was already used for a different deploy; \
+                       mint a new command id for a new deploy",
+        })),
+        CatalogError::SchemaNotApplied {
+            descriptor_sha256,
+            applied_sha256,
+        } => schema_precondition_response(app, &descriptor_sha256, &applied_sha256),
+        CatalogError::DeploymentReclaimed => {
+            web::HttpResponse::Conflict().json(&serde_json::json!({
+                "error": "deployment_reclaimed",
+                "detail": "deployment retention has closed activation of this artifact; \
+                           rebuild and deploy it again",
+            }))
+        }
+        CatalogError::RevisionExhausted => web::HttpResponse::Conflict()
+            .json(&serde_json::json!({"error": "lifecycle revision exhausted"})),
+        CatalogError::ApplyInProgress
+        | CatalogError::InvalidRetained(_)
+        | CatalogError::Storage(_)
+        | CatalogError::Database(_) => infrastructure_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "deploy catalog error",
+            error,
+        ),
+    }
 }
 
 fn has_legacy_deploy_migration_query(query: &str) -> bool {

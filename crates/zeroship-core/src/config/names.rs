@@ -1397,20 +1397,6 @@ database_url = "postgres://operator-mounted-secret"
         assert_eq!(command.sources(), [SourceKind::Cli]);
         assert_eq!(command.env_name(), None);
         assert_eq!(
-            ConfigSpec::bootstrap(
-                CanonicalName::from_static("worker.workflow_advance_unsigned"),
-                CONSUMERS,
-                false,
-                "workflow_advance_unsigned",
-                "workflow_advance_unsigned",
-                "bool",
-                None,
-            )
-            .sources(),
-            [SourceKind::Cli],
-            "a safety control that refuses the environment declares no Env source"
-        );
-        assert_eq!(
             command.flag_name(CONSUMERS[0]).as_deref(),
             Some("check-config")
         );

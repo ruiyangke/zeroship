@@ -144,12 +144,19 @@ for (const { name, bindings } of variants) {
               },
               get schema() { throw Error('schema is supplied by the host'); },
             };
+            export { def as original };
             export default def;
           `,
         },
       });
-      const entry = (await fixture.load()).default;
-      assert.deepEqual(Object.keys(entry).sort(), ["fetch", "rpc"]);
+      const loaded = await fixture.load();
+      const entry = loaded.default;
+      assert.deepEqual(Object.keys(entry).sort(), ["fetch", "label", "rpc", "schema"]);
+      assert.equal(entry.label, "original receiver");
+      assert.deepEqual(
+        Object.getOwnPropertyDescriptor(entry, "schema"),
+        Object.getOwnPropertyDescriptor(loaded.original, "schema"),
+      );
       const response = await entry.fetch.call(
         { label: "wrong receiver" },
         new Request("http://app/__zeroship/v1/ping"),
@@ -215,13 +222,15 @@ for (const { name, bindings } of variants) {
           "user.mjs": `
             export class Task { run() { throw Error('must not execute'); } }
             class Declared { run() { throw Error('must not execute'); } }
-            export default { workflows: { declared: Declared } };
+            export const declaredData = Object.freeze({ declared: Declared });
+            export default { workflows: declaredData };
           `,
         },
       });
       const loaded = await fixture.load();
       assert.equal(loaded.Task.name, "Task");
-      assert.equal(Object.hasOwn(loaded.default, "workflows"), false);
+      assert.equal(loaded.default.workflows, loaded.declaredData);
+      assert.equal(Object.hasOwn(loaded.default.workflows, "Task"), false);
       assert.equal(Object.hasOwn(loaded.default.rpc, "Task"), false);
     });
   });

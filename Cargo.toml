@@ -240,6 +240,10 @@ zeroship-storage-v8 = { path = "crates/zeroship-storage-v8" }
 zeroship-kv = { path = "crates/zeroship-kv", default-features = false }
 zeroship-kv-v8 = { path = "crates/zeroship-kv-v8" }
 zeroship-workflow = { path = "crates/zeroship-workflow" }
+zeroship-workflow-calendar = { path = "crates/zeroship-workflow-calendar" }
+zeroship-workflow-client = { path = "crates/zeroship-workflow-client" }
+zeroship-workflow-manager = { path = "crates/zeroship-workflow-manager" }
+zeroship-workflow-schema = { path = "crates/zeroship-workflow-schema" }
 zeroship-workflow-v8 = { path = "crates/zeroship-workflow-v8" }
 zeroship-metering = { path = "crates/zeroship-metering" }
 zeroship-stream = { path = "crates/zeroship-stream" }
@@ -247,7 +251,7 @@ zeroship-runtime = { path = "crates/zeroship-runtime" }
 zeroship-runtime-macros = { path = "crates/zeroship-runtime-macros" }
 zeroship-config-macros = { path = "crates/zeroship-config-macros" }
 zeroship-config-contract = { path = "crates/zeroship-config-contract" }
-zeroship-workflow-scheduler = { path = "crates/zeroship-workflow-scheduler" }
+zeroship-workflow-server = { path = "crates/zeroship-workflow-server" }
 # The five server libraries, listed here so the non-shipped
 # `zeroship-config-contract` checker can LINK their generated registries rather
 # than re-parse their source. Nothing shipped depends on these entries.

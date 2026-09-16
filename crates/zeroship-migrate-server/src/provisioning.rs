@@ -45,14 +45,6 @@ use zeroship_migrate_postgres::role::migrator_role_name;
 
 use crate::policy::confined_guard_policy_for_schema;
 
-/// The precreated role granted workflow provisioning access to creator schemas.
-///
-/// The platform migration creates it
-/// (`db/migrations-ts/20260818000200_worker_database_authority.ts`); nothing in
-/// this service, and nothing in the worker, may create the role. Provisioning
-/// preserves the creator migrator's ownership of an existing schema.
-pub const WORKFLOW_OWNER_ROLE: &str = "zeroship_workflow_owner";
-
 /// Error provisioning a migrator role.
 #[derive(Debug, thiserror::Error)]
 pub enum ProvisionRoleError {
@@ -103,10 +95,13 @@ pub(crate) fn migrator_executor_config(
     Ok((config, role))
 }
 
-/// Idempotently create one database's data schema and migrator role.
+/// Idempotently create one schema and the least-privilege migrator role that
+/// owns it.
 ///
-/// This is the complete create verb. Runtime roles, audit tables, workflow
-/// grants, publications, and apply-ledger rows remain apply-time concerns.
+/// Schema-addressed, so it serves both the app create verb
+/// ([`provision_app_database`], which adds the app's runtime role) and the
+/// schema-bundle path, which has no app to derive one from. Audit tables,
+/// publications and apply-ledger rows remain apply-time concerns.
 pub async fn provision_database(
     admin: &Client,
     schema: &str,
@@ -267,60 +262,47 @@ pub async fn provision_migrator(
     Ok(())
 }
 
-/// The schema an app's durable-workflow journal tables live in.
+/// Provision an app's creator database: its schema, the least-privilege migrator
+/// role that owns it, and the per-app RUNTIME role the worker opens it under.
 ///
-/// Workflow journals share the creator's data schema. The canonical app
-/// derivation keeps migration provisioning and runtime storage aligned.
-#[must_use]
-pub fn workflow_journal_schema_name(app_id: &AppId) -> String {
-    app_derivation::schema_name(app_id)
-}
-
-/// Grant workflow provisioning access within an app's shared creator schema.
+/// THE RUNTIME ROLE IS PART OF CREATING THE DATABASE, and it was not always. It
+/// used to be provisioned only by the apply path and by a domain-specific entry
+/// point beside it, so an app that never applied a creator migration had a
+/// database it could not open. The create verb now establishes every identity
+/// the database needs, and the apply path still repeats the role provisioning
+/// afterwards so tables an apply CREATED receive its grants.
 ///
-/// Guarded on the role existing rather than creating it: the migration identity
-/// creates no platform role, it only delegates to roles the platform migration
-/// precreated. An existing schema keeps its owner so creator migrations retain
-/// their authority after runtime provisioning.
-pub(crate) fn workflow_journal_schema_sql(app_schema: &str) -> String {
-    let schema_q = quote_ident(app_schema);
-    let owner_q = quote_ident(WORKFLOW_OWNER_ROLE);
-    format!(
-        "DO $workflow_journal$ BEGIN
-            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{owner_lit}') THEN
-                CREATE SCHEMA IF NOT EXISTS {schema_q} AUTHORIZATION {owner_q};
-                GRANT CREATE, USAGE ON SCHEMA {schema_q} TO {owner_q};
-            END IF;
-         END $workflow_journal$",
-        owner_lit = quote_lit(WORKFLOW_OWNER_ROLE),
-    )
-}
-
-/// Idempotently provision workflow access to an app's shared creator schema.
-///
-/// Runs [`workflow_journal_schema_sql`], the one generator for this DDL; the
-/// apply path embeds the same text through its runtime role provisioning plan.
-/// Creator database provisioning owns the schema lifecycle. This helper can
-/// create a missing schema for privileged provisioning callers, but never
-/// transfers ownership of an existing creator schema to the workflow role.
-///
-/// Exported because callers outside the apply path need a deployed app's
-/// schema and grants to exist without running a creator migration. Callers must
-/// hold the provisioning principal. Runtime app roles retain data privileges
-/// without schema creation authority.
+/// Every step is idempotent, so a repeated create changes nothing.
 ///
 /// # Errors
-/// Any database error from the DDL - including a permission failure, when the
-/// connection is not the admin principal this expects.
-pub async fn provision_workflow_journal_schema(
+/// Reports schema, migrator-role and runtime-role provisioning failures.
+pub async fn provision_app_database(
     admin: &Client,
     app_id: &AppId,
-) -> Result<(), compio_postgres::Error> {
-    exec_retry(
-        admin,
-        &workflow_journal_schema_sql(&workflow_journal_schema_name(app_id)),
-    )
-    .await
+) -> Result<(), ProvisionAppDatabaseError> {
+    let schema = app_derivation::schema_name(app_id);
+    provision_database(admin, &schema).await?;
+    let (_, migrator) = migrator_executor_config(&schema)?;
+    let bound = zeroship_core::schema_name::SchemaName::new(&schema)
+        .map_err(|_| ProvisionRoleError::BadRoleName(schema.clone()))?;
+    crate::apply::provision_runtime_app_role(admin, app_id, &bound, &migrator)
+        .await
+        .map_err(|error| ProvisionAppDatabaseError::RuntimeRole(error.to_string()))?;
+    Ok(())
+}
+
+/// Error creating an app's creator database and its identities.
+#[derive(Debug, thiserror::Error)]
+pub enum ProvisionAppDatabaseError {
+    /// The app schema or its migrator role could not be provisioned.
+    #[error(transparent)]
+    Database(#[from] ProvisionDatabaseError),
+    /// The migrator role name could not be derived.
+    #[error(transparent)]
+    Role(#[from] ProvisionRoleError),
+    /// The per-app runtime role could not be provisioned.
+    #[error("runtime app role: {0}")]
+    RuntimeRole(String),
 }
 
 /// The unqualified name of the per-app unmask audit table.
@@ -399,11 +381,10 @@ pub fn audit_unmask_table_sql(app_schema: &str) -> String {
 
 /// Idempotently establish an app's unmask audit table, as an admin principal.
 ///
-/// Runs [`audit_unmask_table_sql`], the one generator for this DDL. Exported for
-/// the same reason [`provision_workflow_journal_schema`] is: a caller that needs
-/// a deployed app's audit table to exist must get it from the production
-/// statement rather than a `CREATE TABLE` of its own, or the test proves the
-/// shape of its own fixture instead of the shape production builds.
+/// Runs [`audit_unmask_table_sql`], the one generator for this DDL. Exported so a
+/// caller that needs the table reaches this statement rather than writing a
+/// `CREATE TABLE` of its own - otherwise a test proves the shape of its own
+/// fixture instead of the shape production builds.
 ///
 /// # Errors
 /// Any database error from the DDL, including a permission failure when the

@@ -5,7 +5,18 @@ edition = "2021"
 description = "Durable workflow engine, journal, and Rust client"
 
 [dependencies]
+bytes = { workspace = true }
+base64 = { workspace = true }
+ed25519-dalek = { workspace = true }
+futures = { workspace = true }
+flume = { workspace = true }
 zeroship-core = { workspace = true }
+zeroship-workflow-calendar = { workspace = true }
+zeroship-workflow-client = { workspace = true }
+zeroship-workflow-schema = { workspace = true }
+zeroship-bundle = { workspace = true }
+zeroship-data-orm = { workspace = true }
+zeroship-storage = { workspace = true }
 async-trait = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
 compio = { workspace = true }
@@ -15,12 +26,17 @@ percent-encoding = { workspace = true }
 rusqlite = { workspace = true, features = ["bundled"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
 sha2 = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+tempfile = { workspace = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }
+zeroship-workflow-manager = { workspace = true }
+zeroship-storage = { workspace = true, features = ["s3"] }
+compio-s3 = { workspace = true }
+testcontainers = { version = "0.28", features = ["blocking"] }
 
 [lints]
 workspace = true

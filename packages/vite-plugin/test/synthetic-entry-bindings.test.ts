@@ -77,3 +77,58 @@ test("empty bindings preserve named exports without treating them as procedures"
   assert.deepEqual(Object.keys(namespace.default.rpc), []);
   assert.equal(namespace.named(), "discovered");
 });
+
+test("retained entries preserve creator default data without evaluating unrelated getters", async (t) => {
+  for (const bindings of [new Map(), bindingMap([
+    { sourceFile: "./actions.mjs", exportName: "selected", wireId: "selected" },
+  ])]) {
+    const fixture = await buildEntryFixture(t, {
+      bindings,
+      files: {
+        "actions.mjs": "export const selected = () => 'selected';",
+        "user.mjs": `
+          export const Task = Object.freeze(class { run() { return 'done'; } });
+          export const metadata = Object.freeze({ label: 'creator-data' });
+          export const marker = Symbol('creator-marker');
+          let reads = 0;
+          export const getterReads = () => reads;
+          export const original = Object.create({ inherited: 'not-an-own-property' });
+          Object.defineProperties(original, {
+            fetch: { value() { return this === original ? 'original-receiver' : 'wrong-receiver'; } },
+            rpc: { value: Object.freeze({ declared: () => 'declared' }) },
+            workflows: { value: Object.freeze({ Task }) },
+            metadata: { value: metadata, enumerable: true },
+            lazy: { get() { reads += 1; return metadata; }, enumerable: true },
+          });
+          Object.defineProperty(original, marker, { value: metadata });
+          Object.defineProperty(original, '__proto__', { value: metadata });
+          export default original;
+        `,
+      },
+    });
+    const namespace = await fixture.load();
+    const entry = namespace.default;
+    assert.equal(namespace.getterReads(), 0);
+    assert.equal(entry.workflows, namespace.original.workflows);
+    assert.equal(entry.workflows.Task, namespace.Task);
+    assert.equal(entry.metadata, namespace.metadata);
+    assert.equal(entry[namespace.marker], namespace.metadata);
+    assert.equal(entry.__proto__, namespace.metadata);
+    assert.equal(Object.getPrototypeOf(entry), Object.prototype);
+    assert.equal(Object.hasOwn(entry, "inherited"), false);
+    for (const key of ["workflows", "metadata", "lazy", "__proto__", namespace.marker]) {
+      assert.deepEqual(
+        Object.getOwnPropertyDescriptor(entry, key),
+        Object.getOwnPropertyDescriptor(namespace.original, key),
+      );
+    }
+    assert.equal(entry.lazy, namespace.metadata);
+    assert.equal(namespace.getterReads(), 1);
+    assert.equal(entry.fetch(), "original-receiver");
+    assert.notEqual(entry.rpc, namespace.original.rpc);
+    assert.equal(Object.getPrototypeOf(entry.rpc), null);
+    assert.equal(entry.rpc.declared(), "declared");
+    if (bindings.size > 0) assert.equal(entry.rpc.selected(), "selected");
+    else assert.equal(Object.hasOwn(entry.rpc, "selected"), false);
+  }
+});

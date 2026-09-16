@@ -14,6 +14,18 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use zeroship_core::app_id::AppId;
+
+pub(crate) struct RuntimeAppIdentity(pub Option<AppId>);
+
+/// Read the immutable app identity supplied by `RuntimeBuilder::app_id`.
+/// Environment variables and app code cannot replace this host-owned identity.
+#[must_use]
+pub fn runtime_app_identity(scope: &v8::PinScope<'_, '_>) -> Option<AppId> {
+    scope
+        .get_slot::<RuntimeAppIdentity>()
+        .and_then(|identity| identity.0.clone())
+}
 
 /// JavaScript adapter source supplied by a native plugin.
 /// Specifiers belong to the plugin's `zeroship:<namespace>/` prefix.

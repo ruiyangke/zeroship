@@ -104,7 +104,7 @@ pub struct ErrorExtras<'a> {
 /// `stack`, `code`, `details`, `retryable`.
 ///
 /// The FIELD SET matches the JS-side `errorResponse()` in
-/// `init.rs::HOST_ENTRY_JS`. The BEHAVIOUR does not, and this comment used to
+/// `init.rs::host_entry_js`. The BEHAVIOUR does not, and this comment used to
 /// say it did — "so a procedure throw produces the same body whether the
 /// kernel's RPC fast path caught the exception or the slow path's JS handler
 /// did". That is false at 5xx and the difference is the whole point of this
@@ -214,7 +214,7 @@ pub fn build_error_body(
     // Measured leaking to an anonymous caller through a real gateway before
     // this strip (tests/e2e_dev_vs_deployed_errors.sh): the app's internal
     // module layout, the dispatcher frame names, and the
-    // `__zs_kind_bridge_<hash>` build fingerprint plus byte offsets into the
+    // `__zs_host_entry_<uuid>` build fingerprint plus byte offsets into the
     // minified server bundle.
     //
     // Only `stack` is removed. `message`, `code`, `details` and `retryable`
@@ -915,7 +915,7 @@ mod tests {
     /// (`requireUser()`'s 401 and native procedure resolution's `NOT_FOUND`
     /// and `INVALID_ARGUMENT`). The measured deployed body carried the
     /// internal module layout, the dispatcher frame names, and the
-    /// `__zs_kind_bridge_<hash>` build fingerprint.
+    /// `__zs_host_entry_<uuid>` build fingerprint.
     ///
     /// WHAT THIS TEST DOES NOT CATCH: it pins the `stack` key only. It says
     /// nothing about `message`, which is deliberately still forwarded at 4xx

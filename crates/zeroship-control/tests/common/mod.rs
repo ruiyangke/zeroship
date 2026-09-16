@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 pub mod authz_fixture;
+pub mod deployments;
 pub mod stripe_mock;
 
 use std::sync::mpsc;
@@ -21,6 +22,9 @@ use zeroship_core::auth_provider::{AuthProvider, PlatformConfig, PlatformProvide
 use zeroship_core::{AppId, UserId};
 
 pub const PLATFORM_ISSUER: &str = "https://auth.zeroship.test/oauth2";
+/// The single execution zone these migrations seed
+/// (`db/migrations-ts/20260914000450_execution_zones_default_zone.ts`).
+pub const DEFAULT_EXECUTION_ZONE_ID: &str = "ezn_default000000000000000000";
 const PLATFORM_KID: &str = "platform-control-test-kid";
 const PLATFORM_KEY_SEED: u8 = 47;
 
@@ -242,31 +246,6 @@ fn platform_jwks_body() -> String {
     .to_string()
 }
 
-/// Give a test-seeded app the workflow journal schema a deployed app has.
-///
-/// A test seeds an app by INSERTing a row into `zeroship.apps`. Production gets
-/// an app that way only as the first half of a deploy: the second half is the
-/// migration apply, and that is what creates the app's `app_<uuid>` journal
-/// schema and hands it to the narrow `zeroship_workflow_owner` role. So a
-/// seeded app has no journal schema, and `PgStore::provision` - which
-/// deliberately holds no CREATE and creates no schema of its own (2a44ea8ef,
-/// pinned by `worker_provisioning_uses_a_precreated_narrow_owner_role`) - fails
-/// with `schema "app_<uuid>" does not exist` until this runs.
-///
-/// Calls the migration service's own provisioning function rather than issuing
-/// a CREATE SCHEMA here. A hand-rolled one in test code would make the same
-/// tests pass over a schema owned by whoever the test connected as, which is a
-/// privilege shape production never has - the tests would then be green about a
-/// journal nothing in production could have created.
-///
-/// Call it AFTER inserting the app row and BEFORE `PgStore::provision`.
-#[allow(dead_code)]
-pub async fn provision_app_workflow_schema(pg: &compio_postgres::Client, app_id: &AppId) {
-    zeroship_migrate_server::provisioning::provision_workflow_journal_schema(pg, app_id)
-        .await
-        .expect("provision app workflow journal schema");
-}
-
 /// Idempotently seed the built-in plan tiers (free/pro/unlimited) into the test
 /// DB's plan catalog so `create_app`/`set_plan` (which validate `plan_id`
 /// against `zeroship.plans`) accept the built-in ids. A no-op on a
@@ -411,13 +390,56 @@ pub async fn seed_app_in_organization(
 ) -> AppId {
     let project_id = unowned_project_in(pg, organization_id).await;
     let app_id = AppId::mint();
+    // The zone is named, not defaulted: the column carries no default, the
+    // way Control names one when it creates an app.
     pg.execute(
-        "INSERT INTO zeroship.apps (id, name, plan_id, project_id, organization_id) \
-             VALUES ($1, $2, $3, $4, $5)",
-        &[&app_id.as_str(), &name, &plan_id, &project_id, &organization_id],
+        "INSERT INTO zeroship.apps \
+             (id, name, plan_id, project_id, organization_id, execution_zone_id) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        &[
+            &app_id.as_str(),
+            &name,
+            &plan_id,
+            &project_id,
+            &organization_id,
+            &DEFAULT_EXECUTION_ZONE_ID,
+        ],
     )
     .await
     .expect("seed fixture app");
+    app_id
+}
+
+/// A fixture app in a named execution zone.
+///
+/// An app's zone is frozen by trigger once written, so it can only be chosen
+/// at creation: a test that needs an app outside the deployment's default zone
+/// has to say so here rather than update the row afterwards.
+#[allow(dead_code)]
+pub async fn seed_app_in_zone(
+    pg: &compio_postgres::Client,
+    name: &str,
+    plan_id: &str,
+    execution_zone_id: &str,
+) -> AppId {
+    let organization_id = seed_organization(pg).await;
+    let project_id = unowned_project_in(pg, &organization_id).await;
+    let app_id = AppId::mint();
+    pg.execute(
+        "INSERT INTO zeroship.apps \
+             (id, name, plan_id, project_id, organization_id, execution_zone_id) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        &[
+            &app_id.as_str(),
+            &name,
+            &plan_id,
+            &project_id,
+            &organization_id,
+            &execution_zone_id,
+        ],
+    )
+    .await
+    .expect("seed fixture app in a named zone");
     app_id
 }
 

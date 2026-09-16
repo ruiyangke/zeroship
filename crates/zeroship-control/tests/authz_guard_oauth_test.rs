@@ -171,10 +171,6 @@ async fn fixture_with_auth_provider(
     let stripe_store = StripeStore::new(registry.clone());
     let blob_store: Arc<dyn BlobStore> =
         Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
-    let workflow_blob_store: Arc<dyn zeroship_bundle::WorkflowBlobStore> = Arc::new(
-        zeroship_bundle::LocalWorkflowBlobStore::new(blob_root.clone())
-            .expect("workflow blob store"),
-    );
 
     let state = Arc::new(AppState {
         service_auth: std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured()),
@@ -182,19 +178,17 @@ async fn fixture_with_auth_provider(
         env_store,
         stripe_store,
         blob_store,
-        workflow_blob_store,
         control_key: SecretString::new("test-control-key".to_string()),
         master_key: SecretString::new(TEST_MASTER_KEY.to_string()),
         stripe_webhook_secret: SecretString::new(String::new()),
         stripe_secret_key: SecretString::new(String::new()),
         stripe_base_url: "https://api.stripe.com".to_string(),
-        gateway_url: "http://127.0.0.1:9".to_string(),
         worker_urls: Vec::new(),
         admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
         webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
         origin_scheme: zeroship_core::config::OriginScheme::Https,
         trust_proxy: false,
-        worker_enrolment: zeroship_control::worker_enrolment::EnrolmentEnvelope::closed(),
+        worker_enrolment: zeroship_control::worker_join::EnrolmentEnvelope::closed(),
         deploy_tmp_dir: deploy_tmp_dir.clone(),
         control_pg: Arc::new(control_pg_client),
         app_base_domain: "zeroship.localhost".to_string(),
@@ -269,6 +263,7 @@ async fn create_app_owned_by(fx: &mut Fixture, label: &str, owner_id: &UserId) -
             &zeroship_control::plan_catalog::free_plan_id(),
             owner_id,
             None,
+            None,
         )
         .await
         .expect("create app");
@@ -309,11 +304,28 @@ async fn grant_organization_member(
         .expect("seat organization member");
 }
 
+/// The deploy path's journal client. These cases are about authorization, and
+/// none of their artifacts declares a workflow, so it refuses every call: a
+/// deploy that provisioned one unasked answers 503 here instead of passing.
+fn refusing_journal() -> std::rc::Rc<zeroship_control::publication::DeployJournal> {
+    use zeroship_control::publication::{publisher::Exchange, DeployJournal, JournalManager};
+    use zeroship_core::schema_bundle::SchemaBundleOutcome;
+
+    struct Refusing;
+    impl JournalManager for Refusing {
+        fn ensure<'a>(&'a self, _schema: &'a str) -> Exchange<'a, SchemaBundleOutcome> {
+            Box::pin(async { Err(zeroship_workflow_client::Error::Unavailable) })
+        }
+    }
+    std::rc::Rc::new(DeployJournal::new(std::rc::Rc::new(Refusing)))
+}
+
 macro_rules! init_control {
     ($fx:expr) => {{
         test::init_service(
             web::App::new()
                 .state($fx.state.clone())
+                .state(refusing_journal())
                 .service(
                     web::resource("/api/apps")
                         .route(web::post().to(api::create_app))
@@ -1244,6 +1256,7 @@ async fn creator_self_service_creates_and_lists_only_own_apps() {
             &format!("otherapp-{}", Uuid::new_v4().simple()),
             &zeroship_control::plan_catalog::free_plan_id(),
             &other_owner,
+            None,
             None,
         )
         .await

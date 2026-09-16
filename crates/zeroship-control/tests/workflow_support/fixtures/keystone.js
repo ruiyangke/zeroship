@@ -349,11 +349,70 @@ export class CompensableCarryWorkflow {
   }
 }
 
+// Reaches nothing outside its own journal, so a completed run proves the host
+// delivered and executed it rather than that the app database also worked.
+export class HostIngressWorkflow {
+  async run(trigger, step) {
+    const echoed = await step.run("echo", () => ({ via: trigger.input.via }));
+    return { echoed };
+  }
+}
+
+// A handle the app CLONED out of `env.workflows` during one request and kept
+// across the next. The host retires a backend by withdrawing its generation,
+// and a handle taken before that must not outlive it; keeping it in module
+// scope is how a request isolate proves whether it did.
+let retainedHandle = null;
+
 export default {
-  async fetch() {
+  // Ordinary app ingress. `/__host/start/<Workflow>` and
+  // `/__host/status/<Workflow>/<run>` exercise `env.workflows` from a request
+  // isolate, which reaches whatever backend the process made ready for this
+  // app - and nothing else.
+  async fetch(request, env) {
+    const path = new URL(request.url).pathname;
+    const retain = path.match(/^\/__host\/retain\/([A-Za-z]+)\/([A-Za-z0-9_]+)$/);
+    if (retain) {
+      try {
+        retainedHandle = env.workflows[retain[1]].get(retain[2]);
+        return Response.json({ retained: true });
+      } catch (error) {
+        return Response.json({ code: error.code, message: error.message }, { status: 503 });
+      }
+    }
+    if (path === "/__host/retained") {
+      if (!retainedHandle) {
+        return Response.json({ code: "no_retained_handle" }, { status: 409 });
+      }
+      try {
+        const state = await retainedHandle.status();
+        return Response.json({ state: state.state });
+      } catch (error) {
+        return Response.json({ code: error.code, message: error.message }, { status: 503 });
+      }
+    }
+    const start = path.match(/^\/__host\/start\/([A-Za-z]+)$/);
+    if (start) {
+      try {
+        const run = await env.workflows[start[1]].start({ input: { via: "ingress" } });
+        return Response.json({ id: run.id });
+      } catch (error) {
+        return Response.json({ code: error.code, message: error.message }, { status: 503 });
+      }
+    }
+    const status = path.match(/^\/__host\/status\/([A-Za-z]+)\/([A-Za-z0-9_]+)$/);
+    if (status) {
+      try {
+        const state = await env.workflows[status[1]].get(status[2]).status();
+        return Response.json({ state: state.state, output: state.output ?? null });
+      } catch (error) {
+        return Response.json({ code: error.code, message: error.message }, { status: 503 });
+      }
+    }
     return new Response("dw07-ok");
   },
   workflows: {
+    HostIngressWorkflow,
     KeystoneWorkflow,
     SignalWorkflow,
     TopicSignalWorkflow,

@@ -431,18 +431,8 @@ pub mod endpoints {
 
     pub const GATEWAY_BACKCHANNEL_LOGOUT: ServiceEndpoint =
         ServiceEndpoint::new("gateway", "POST", "/oidc/backchannel-logout");
-    pub const GATEWAY_WORKFLOW_ADVANCE: ServiceEndpoint = ServiceEndpoint::new(
-        "gateway",
-        "POST",
-        "/__zeroship/internal/workflow-advance",
-    );
     pub const CONTROL_ROUTES: ServiceEndpoint =
         ServiceEndpoint::new("control", "GET", "/internal/routes");
-    pub const CONTROL_WORKFLOW_SIGNAL_INGRESS: ServiceEndpoint = ServiceEndpoint::new(
-        "control",
-        "POST",
-        "/internal/workflows/signals/ingress",
-    );
     pub const CONTROL_VERSIONS: ServiceEndpoint =
         ServiceEndpoint::new("control", "GET", "/internal/versions");
     pub const CONTROL_APP: ServiceEndpoint =
@@ -451,26 +441,94 @@ pub mod endpoints {
         ServiceEndpoint::new("control", "GET", "/internal/apps/{app_id}/env");
     pub const CONTROL_APP_DATA_KEY: ServiceEndpoint =
         ServiceEndpoint::new("control", "GET", "/internal/apps/{app_id}/data-key");
+    pub const CONTROL_DEPLOYMENT_HOLD_ACQUIRE: ServiceEndpoint =
+        ServiceEndpoint::new("control", "POST", "/v1/deployment-holds/acquire");
+    pub const CONTROL_DEPLOYMENT_HOLD_RELEASE: ServiceEndpoint =
+        ServiceEndpoint::new("control", "POST", "/v1/deployment-holds/release");
+    pub const CONTROL_QUEUE_DEPLOYMENT_HOLD_ACQUIRE: ServiceEndpoint =
+        ServiceEndpoint::new("control", "POST", "/v1/deployment-holds/queue/acquire");
+    pub const CONTROL_QUEUE_DEPLOYMENT_HOLD_RELEASE: ServiceEndpoint =
+        ServiceEndpoint::new("control", "POST", "/v1/deployment-holds/queue/release");
     pub const CONTROL_BILLING_RECONCILE: ServiceEndpoint =
         ServiceEndpoint::new("control", "POST", "/internal/billing/reconcile");
     pub const CONTROL_SPEND_RECONCILE: ServiceEndpoint =
         ServiceEndpoint::new("control", "POST", "/internal/spend/reconcile");
-    pub const CONTROL_WORKER_ENROL: ServiceEndpoint =
-        ServiceEndpoint::new("control", "POST", "/internal/workers/enrol");
+    pub const CONTROL_WORKER_RETIRE: ServiceEndpoint =
+        ServiceEndpoint::new("control", "POST", "/internal/workers/retire");
+    pub const CONTROL_WORKER_RENEW: ServiceEndpoint =
+        ServiceEndpoint::new("control", "POST", "/internal/workers/renew");
     pub const CONTROL_ERASURE_PREFLIGHT: ServiceEndpoint = ServiceEndpoint::new(
         "control",
         "GET",
         "/internal/principals/{principal_id}/erasure-preflight",
     );
+    pub const WORKFLOW_VERIFY_ASSIGNMENT: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/assignments/verify");
+    pub const WORKFLOW_MANAGE: ServiceEndpoint = ServiceEndpoint::new(
+        "workflow",
+        "POST",
+        "/v1/management/enqueue",
+    );
+    pub const WORKFLOW_MANAGEMENT_STATUS: ServiceEndpoint = ServiceEndpoint::new(
+        "workflow",
+        "POST",
+        "/v1/management/status",
+    );
+    pub const WORKFLOW_SCHEDULE_REGISTER: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/schedules/register");
+    pub const WORKFLOW_SCHEDULE_ACTIVATE: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/schedules/activate");
+    pub const WORKFLOW_SCHEDULE_DISABLE: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/schedules/disable");
+    pub const WORKFLOW_REGISTER: ServiceEndpoint = ServiceEndpoint::new(
+        "workflow",
+        "POST",
+        "/v1/workers/register",
+    );
+    pub const WORKFLOW_ASSIGNMENTS: ServiceEndpoint = ServiceEndpoint::new(
+        "workflow",
+        "POST",
+        "/v1/assignments/list",
+    );
+    pub const WORKFLOW_RENEW: ServiceEndpoint = ServiceEndpoint::new(
+        "workflow",
+        "POST",
+        "/v1/assignments/renew",
+    );
+    pub const WORKFLOW_RELEASE: ServiceEndpoint = ServiceEndpoint::new(
+        "workflow",
+        "POST",
+        "/v1/assignments/release",
+    );
+    pub const WORKFLOW_POLICY_LEASE: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/policy/lease");
+    pub const WORKFLOW_JOB_SUBMIT: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/jobs/submit");
+    pub const WORKFLOW_JOB_CLAIM: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/jobs/claim");
+    pub const WORKFLOW_JOB_HEARTBEAT: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/jobs/heartbeat");
+    pub const WORKFLOW_JOB_SETTLE: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/jobs/settle");
     pub const WORKER_DISPATCH: ServiceEndpoint =
         ServiceEndpoint::new("worker", "POST", "/dispatch/{app_id}");
-    pub const WORKER_WORKFLOW_ADVANCE: ServiceEndpoint = ServiceEndpoint::new(
-        "worker",
-        "POST",
-        "/workflow-advance-unsigned/{app_id}",
-    );
     pub const WORKER_APP_LOGS: ServiceEndpoint =
         ServiceEndpoint::new("worker", "GET", "/logs/{app_id}");
+    /// Install or upgrade a platform-owned schema inside a creator database.
+    ///
+    /// Addressed by SCHEMA, carried in the body, because a creator database
+    /// holds many apps and the schema is not derivable from an app id. The
+    /// migration service authorizes this on the service identity alone - there
+    /// is no creator principal in a platform provisioning call.
+    pub const MIGRATE_SCHEMA_BUNDLE: ServiceEndpoint =
+        ServiceEndpoint::new("migrate-server", "POST", "/v1/schema-bundles/apply");
+    /// Ensure an app's workflow journal is at the current version.
+    ///
+    /// Two callers, one capability: Control when an app registers, and a worker
+    /// whose host REFUSED the journal it found. The second is what turns a
+    /// refusal into a repair rather than a dead end.
+    pub const WORKFLOW_JOURNAL_ENSURE: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/journal/ensure");
 }
 
 /// One individual principal and its machine-identity endpoint grants.
@@ -508,7 +566,7 @@ impl ServiceAuthorization {
 /// Return the measured service-to-service machine-identity table.
 #[must_use]
 pub fn service_allowlist() -> &'static [ServiceAuthorization] {
-    static ALLOWLIST: OnceLock<[ServiceAuthorization; 5]> = OnceLock::new();
+    static ALLOWLIST: OnceLock<[ServiceAuthorization; 6]> = OnceLock::new();
 
     ALLOWLIST.get_or_init(|| {
         let principal = |name| {
@@ -518,8 +576,17 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
             ServiceAuthorization::new(
                 principal("svc/control"),
                 &[
-                    endpoints::GATEWAY_WORKFLOW_ADVANCE,
+                    endpoints::WORKFLOW_VERIFY_ASSIGNMENT,
+                    endpoints::WORKFLOW_MANAGE,
+                    endpoints::WORKFLOW_MANAGEMENT_STATUS,
+                    endpoints::WORKFLOW_SCHEDULE_REGISTER,
+                    endpoints::WORKFLOW_SCHEDULE_ACTIVATE,
+                    endpoints::WORKFLOW_SCHEDULE_DISABLE,
                     endpoints::WORKER_APP_LOGS,
+                    // Control learns an app registered, so Control is what asks
+                    // the manager to bring that app's journal up to date. The
+                    // manager, not Control, holds the journal artifacts.
+                    endpoints::WORKFLOW_JOURNAL_ENSURE,
                 ],
             ),
             ServiceAuthorization::new(
@@ -540,34 +607,76 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
             ),
             ServiceAuthorization::new(principal("svc/migrate-server"), &[]),
             ServiceAuthorization::new(
+                principal("svc/workflow"),
+                &[
+                    endpoints::CONTROL_QUEUE_DEPLOYMENT_HOLD_ACQUIRE,
+                    endpoints::CONTROL_QUEUE_DEPLOYMENT_HOLD_RELEASE,
+                    // The manager owns WHEN a journal must exist, so it is the
+                    // one principal that may send a schema bundle. Routing this
+                    // through Control would move the workflow artifacts into
+                    // Control, which is the leak the bundle path removes.
+                    endpoints::MIGRATE_SCHEMA_BUNDLE,
+                ],
+            ),
+            ServiceAuthorization::new(
                 principal("svc/gateway"),
                 &[
                     endpoints::CONTROL_ROUTES,
-                    endpoints::CONTROL_WORKFLOW_SIGNAL_INGRESS,
                     endpoints::WORKER_DISPATCH,
-                    endpoints::WORKER_WORKFLOW_ADVANCE,
                 ],
             ),
             ServiceAuthorization::new(
                 principal("svc/worker"),
                 &[
                     endpoints::CONTROL_VERSIONS,
+                    endpoints::CONTROL_DEPLOYMENT_HOLD_ACQUIRE,
+                    endpoints::CONTROL_DEPLOYMENT_HOLD_RELEASE,
+                    endpoints::WORKFLOW_REGISTER,
+                    endpoints::WORKFLOW_ASSIGNMENTS,
+                    endpoints::WORKFLOW_RENEW,
+                    endpoints::WORKFLOW_RELEASE,
+                    endpoints::WORKFLOW_POLICY_LEASE,
+                    endpoints::WORKFLOW_JOB_SUBMIT,
+                    endpoints::WORKFLOW_JOB_CLAIM,
+                    endpoints::WORKFLOW_JOB_HEARTBEAT,
+                    endpoints::WORKFLOW_JOB_SETTLE,
                     endpoints::CDC_SUBSCRIBE,
                     // Host app reads are role-scoped: an authenticated worker
                     // may request any app's version, environment, and project
-                    // data key. Instance enrolment provides attribution and
-                    // revocation; it does not establish app assignment.
+                    // data key. The instance identity provides attribution,
+                    // revocation and expiry; it does not establish app
+                    // assignment.
                     endpoints::CONTROL_APP,
                     endpoints::CONTROL_APP_ENV,
                     endpoints::CONTROL_APP_DATA_KEY,
-                    // Enrolment authenticates with THIS SHARED ROLE KEY, so a
-                    // holder of it can enrol many instances. That is a
-                    // DISTINGUISHER, not a boundary: what it buys is
-                    // attribution, per-instance revocation and a countable
-                    // event, and it is what makes the narrowing above writable
-                    // at all. Do not read this grant as a fence against a
-                    // role-key holder.
-                    endpoints::CONTROL_WORKER_ENROL,
+                    // A worker leaving gracefully declares its OWN instance
+                    // gone. The endpoint takes no instance selector: Control
+                    // retires exactly the instance whose key verified the call.
+                    endpoints::CONTROL_WORKER_RETIRE,
+                    // A joined worker extends its own instance lease. Also
+                    // selector-free, for the same reason: Control renews the
+                    // instance whose key verified the call, so no worker can
+                    // hold another's identity open. Renewal takes NO join
+                    // token - the possession proof was given at join, and
+                    // demanding a fresh token to renew would defeat a
+                    // use-capped one.
+                    endpoints::CONTROL_WORKER_RENEW,
+                    // A host that REFUSES the journal it found reports it, and
+                    // the manager repairs. The worker holds no DDL authority of
+                    // its own - privilege follows the process - so all it can do
+                    // is name the schema and ask.
+                    endpoints::WORKFLOW_JOURNAL_ENSURE,
+                    // JOINING IS NOT AN ENDPOINT IN THIS TABLE. A joining
+                    // process has no service identity yet: it presents a join
+                    // token a trusted signer minted, verified by
+                    // `crates/zeroship-control/src/worker_join.rs` against
+                    // Control's own signer registry, under its own `typ`. No
+                    // process holds a bare `svc/worker` role signing key
+                    // either - Control refuses a role-arity `svc/worker`
+                    // assertion outright
+                    // (`crates/zeroship-control/src/internal.rs`,
+                    // `verify_service_caller`) - so every grant in this row is
+                    // reachable only by a joined, live INSTANCE.
                 ],
             ),
         ]

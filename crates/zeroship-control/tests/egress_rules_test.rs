@@ -87,10 +87,6 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
     let stripe_store = StripeStore::new(registry.clone());
     let blob_store: Arc<dyn BlobStore> =
         Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
-    let workflow_blob_store: Arc<dyn zeroship_bundle::WorkflowBlobStore> = Arc::new(
-        zeroship_bundle::LocalWorkflowBlobStore::new(blob_root.clone())
-            .expect("workflow blob store"),
-    );
 
     let state = Arc::new(AppState {
         service_auth: std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured()),
@@ -98,19 +94,17 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
         env_store,
         stripe_store,
         blob_store,
-        workflow_blob_store,
         control_key: SecretString::new("test-control-key".to_string()),
         master_key: SecretString::new(TEST_MASTER_KEY.to_string()),
         stripe_webhook_secret: SecretString::new(String::new()),
         stripe_secret_key: SecretString::new(String::new()),
         stripe_base_url: "https://api.stripe.com".to_string(),
-        gateway_url: "http://127.0.0.1:9".to_string(),
         worker_urls: Vec::new(),
         admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
         webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
         origin_scheme: zeroship_core::config::OriginScheme::Https,
         trust_proxy: false,
-        worker_enrolment: zeroship_control::worker_enrolment::EnrolmentEnvelope::closed(),
+        worker_enrolment: zeroship_control::worker_join::EnrolmentEnvelope::closed(),
         deploy_tmp_dir: deploy_tmp_dir.clone(),
         control_pg: Arc::new(control_pg_client),
         app_base_domain: "zeroship.localhost".to_string(),
@@ -219,6 +213,7 @@ async fn owner_can_write_list_and_delete_rules_of_both_forms() {
             &format!("egress-owner-{}", Uuid::new_v4().simple()),
             &zeroship_control::plan_catalog::free_plan_id(),
             &owner.user_id,
+            None,
             None,
         )
         .await
@@ -363,6 +358,7 @@ async fn a_creator_cannot_touch_another_creators_app() {
             &zeroship_control::plan_catalog::free_plan_id(),
             &owner.user_id,
             None,
+            None,
         )
         .await
         .expect("create app");
@@ -462,6 +458,7 @@ async fn the_grammar_refuses_and_accepts_in_pairs() {
             &format!("egress-grammar-{}", Uuid::new_v4().simple()),
             &zeroship_control::plan_catalog::free_plan_id(),
             &owner.user_id,
+            None,
             None,
         )
         .await
@@ -586,6 +583,7 @@ async fn the_plan_cap_counts_accept_rules_and_not_reject_rules() {
             &plan.id,
             &owner.user_id,
             None,
+            None,
         )
         .await
         .expect("create app");
@@ -692,6 +690,7 @@ async fn the_first_range_accept_rule_says_the_app_now_resolves_before_refusing()
             &zeroship_control::plan_catalog::free_plan_id(),
             &owner.user_id,
             None,
+            None,
         )
         .await
         .expect("create app");
@@ -797,6 +796,7 @@ async fn a_dead_accept_reports_the_effective_verdict() {
             &format!("egress-eff-{}", Uuid::new_v4().simple()),
             &zeroship_control::plan_catalog::free_plan_id(),
             &owner.user_id,
+            None,
             None,
         )
         .await

@@ -1,18 +1,18 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
 
 use zeroship_bundle::compiled::CompiledManifest;
 use zeroship_bundle::Manifest;
 use zeroship_core::app_id::AppId;
-use zeroship_core::types::{AppNetPolicy, AppRuntimeLimits};
-use zeroship_storage::StorageBackendConfig;
 use zeroship_core::net_policy::{EgressRule, Verdict};
-use zeroship_runtime::{EnvSnapshot, ModuleEntry, NetPolicy};
+use zeroship_core::types::{AppNetPolicy, AppRuntimeLimits};
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::{Runtime, RuntimeLimits};
+use zeroship_runtime::{EnvSnapshot, ModuleEntry, NetPolicy};
+use zeroship_storage::StorageBackendConfig;
+use zeroship_workflow::service::runner::ready::ReadyApps;
 
 #[cfg(test)]
 pub(crate) mod fixture;
@@ -36,37 +36,7 @@ struct IsolateEntry {
 
 struct AppCache {
     isolates: HashMap<AppId, IsolateEntry>,
-    workflow_isolates: HashMap<PinnedWorkflowKey, IsolateEntry>,
     max_size: usize,
-    max_pinned_isolates_per_app: usize,
-}
-
-#[derive(Clone, Debug, Eq)]
-pub struct PinnedWorkflowKey {
-    app_id: AppId,
-    deploy_hash: String,
-}
-
-impl PinnedWorkflowKey {
-    fn new(app_id: AppId, deploy_hash: impl Into<String>) -> Self {
-        Self {
-            app_id,
-            deploy_hash: deploy_hash.into(),
-        }
-    }
-}
-
-impl PartialEq for PinnedWorkflowKey {
-    fn eq(&self, other: &Self) -> bool {
-        self.app_id == other.app_id && self.deploy_hash == other.deploy_hash
-    }
-}
-
-impl Hash for PinnedWorkflowKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.app_id.hash(state);
-        self.deploy_hash.hash(state);
-    }
 }
 
 thread_local! {
@@ -95,11 +65,10 @@ thread_local! {
     /// or `S3` (S3/R2/MinIO — inherently shared). When `None`, the `storage`
     /// namespace is absent.
     static STORAGE_BACKEND: RefCell<Option<StorageBackendConfig>> = const { RefCell::new(None) };
-    /// Control-plane endpoint and raw control key used only to derive
-    /// app-scoped workflow tokens in `WorkflowBinding::build_instance`.
-    /// The raw key stays in Rust process memory and is never exposed to V8.
-    static CONTROL_URL: RefCell<Option<String>> = const { RefCell::new(None) };
-    static CONTROL_KEY: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// The app backends the process's workflow host has made ready. Every
+    /// isolate's `env.workflows` resolves its own app here on each call, so an
+    /// unknown or unready app is refused and nothing reaches Control.
+    static WORKFLOWS: RefCell<Option<ReadyApps>> = const { RefCell::new(None) };
     /// The PROCESS-WIDE usage meter, cloned into every ntex worker thread's
     /// thread-local on `init_cache`. Metering is INFRASTRUCTURE: there is no
     /// creator-facing `env.meter` namespace. Instead `create_plugins` binds
@@ -120,8 +89,9 @@ thread_local! {
 /// The real multi-node stack SHOULD set all of them so deployed apps get
 /// the complete `env.{db,kv,storage,auth}` kernel.
 pub struct KernelConfig {
-    pub control_url: String,
-    pub control_key: String,
+    /// Ready app backends published by the process's workflow host. With no
+    /// host the registry stays empty and every `env.workflows` call is refused.
+    pub workflows: ReadyApps,
     /// The ONE process-wide `env.db` service, built in `main` before any
     /// worker thread exists. `None` when no database is configured, in which
     /// case the `db` namespace is simply absent.
@@ -138,7 +108,6 @@ pub struct KernelConfig {
 impl std::fmt::Debug for KernelConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KernelConfig")
-            .field("control_key", &"[REDACTED]")
             .field("db_configured", &self.db_service.is_some())
             .field("kv_configured", &self.kv_store.is_some())
             .field("storage_configured", &self.storage_backend.is_some())
@@ -151,13 +120,11 @@ impl std::fmt::Debug for KernelConfig {
 /// Replacing the kernel also replaces its DB and KV stores. Passing no KV
 /// store removes the previous binding and invalidates cached plugin prototypes.
 /// Storage retains its existing installation behavior.
-pub fn init_cache(max_size: usize, max_pinned_isolates_per_app: usize, kernel: KernelConfig) {
+pub fn init_cache(max_size: usize, kernel: KernelConfig) {
     CACHE.with(|c| {
         *c.borrow_mut() = Some(AppCache {
             isolates: HashMap::new(),
             max_size,
-            workflow_isolates: HashMap::new(),
-            max_pinned_isolates_per_app,
         });
     });
     DB_SERVICE.with(|s| *s.borrow_mut() = kernel.db_service);
@@ -165,8 +132,7 @@ pub fn init_cache(max_size: usize, max_pinned_isolates_per_app: usize, kernel: K
     if let Some(backend) = kernel.storage_backend {
         STORAGE_BACKEND.with(|s| *s.borrow_mut() = Some(backend));
     }
-    CONTROL_URL.with(|u| *u.borrow_mut() = Some(kernel.control_url));
-    CONTROL_KEY.with(|k| *k.borrow_mut() = Some(kernel.control_key));
+    WORKFLOWS.with(|w| *w.borrow_mut() = Some(kernel.workflows));
     METER.with(|m| *m.borrow_mut() = Some(kernel.meter));
     // Every input `plugin_set` builds from was just replaced, so any cached
     // prototype set is now stale. Clearing here rather than trusting
@@ -175,19 +141,13 @@ pub fn init_cache(max_size: usize, max_pinned_isolates_per_app: usize, kernel: K
     PLUGIN_SET.with(|p| *p.borrow_mut() = None);
 }
 
-pub fn db_url() -> Option<String> {
+/// Project material held by the installed database service for this host.
+pub fn project_keys() -> Option<Arc<zeroship_data_orm::encryption::SuppliedProjectKeys>> {
     DB_SERVICE.with(|service| {
         service
             .borrow()
             .as_ref()
-            .and_then(|service| service.connection().url().map(str::to_owned))
-    })
-}
-
-/// Project material held by the installed database service for this host.
-pub fn project_keys() -> Option<Arc<zeroship_data_orm::encryption::SuppliedProjectKeys>> {
-    DB_SERVICE.with(|service| {
-        service.borrow().as_ref().map(|service| service.project_keys().clone())
+            .map(|service| service.project_keys().clone())
     })
 }
 
@@ -196,10 +156,10 @@ thread_local! {
     ///
     /// SC-5 of the runtime-db-binding design requires `build_runtime` to
     /// perform no backend selection and clone an `Arc` rather than minting a
-    /// plugin set, so that current and deploy-pinned isolates on one OS thread
-    /// share one backend and one cache instead of each resolving their own.
-    /// This is the first, behaviour-neutral half of that: the plugins are the
-    /// same values, constructed once.
+    /// plugin set, so that the isolates on one OS thread share one backend and
+    /// one cache instead of each resolving their own. This is the first,
+    /// behaviour-neutral half of that: the plugins are the same values,
+    /// constructed once.
     ///
     /// Cleared by [`init_cache`], which is the single writer of every
     /// thread-local this set is built from. Without that invalidation a second
@@ -271,12 +231,10 @@ fn create_plugins() -> Vec<Arc<dyn NativePlugin>> {
     }
     if let Some(cfg) = STORAGE_BACKEND.with(|s| s.borrow().clone()) {
         match zeroship_storage::StorageStore::open(&cfg) {
-            Ok(backend) => plugins.push(Arc::new(
-                zeroship_storage_v8::StorageBinding::new(
-                    backend,
-                    meter.clone(),
-                ),
-            )),
+            Ok(backend) => plugins.push(Arc::new(zeroship_storage_v8::StorageBinding::new(
+                backend,
+                meter.clone(),
+            ))),
             Err(e) => {
                 // Credentials were validated at boot (see worker main); a
                 // failure here means the env changed under us. Degrade the
@@ -285,12 +243,8 @@ fn create_plugins() -> Vec<Arc<dyn NativePlugin>> {
             }
         }
     }
-    if let Some(control_url) = CONTROL_URL.with(|u| u.borrow().clone()) {
-        let control_key = CONTROL_KEY.with(|k| k.borrow().clone()).unwrap_or_default();
-        plugins.push(Arc::new(zeroship_workflow_v8::WorkflowBinding::new(
-            control_url,
-            control_key,
-        )));
+    if let Some(apps) = WORKFLOWS.with(|w| w.borrow().clone()) {
+        plugins.push(Arc::new(zeroship_workflow_v8::WorkflowBinding::ready(apps)));
     }
     plugins.push(Arc::new(zeroship_runtime::auth::AuthPlugin));
     plugins
@@ -334,29 +288,6 @@ pub fn record_request(
             if !recorded {
                 meter.record_request(app_id, cpu_us, wall_us, egress_bytes, ingress_bytes);
             }
-        }
-    });
-}
-
-/// Observability-only durable-workflow step volume. Billing parity rides the
-/// fixed `requests` counter from `record_request`; this custom metric lets
-/// operators inspect workflow replay volume without double-counting it.
-pub fn record_workflow_step(app_id: &AppId) {
-    METER.with(|m| {
-        if let Some(meter) = m.borrow().as_ref() {
-            meter.increment(app_id, "workflow_steps", 1);
-        }
-    });
-}
-
-/// Record a successful workflow output blob write. The workflow blob store is
-/// a trusted platform storage path, so it uses the same storage usage counters
-/// as the native storage primitive.
-pub fn record_workflow_blob_write(app_id: &AppId, bytes: u64) {
-    METER.with(|m| {
-        if let Some(meter) = m.borrow().as_ref() {
-            meter.increment(app_id, "storage_ops", 1);
-            meter.increment(app_id, "storage_bytes", bytes);
         }
     });
 }
@@ -423,21 +354,10 @@ pub fn get_limits(app_id: &AppId) -> Option<RuntimeLimits> {
 
 /// The read above, over a borrowed cache so the no-touch property is testable.
 fn limits_without_touching_recency(cache: &AppCache, app_id: &AppId) -> Option<RuntimeLimits> {
-    cache.isolates.get(app_id).map(|entry| entry.runtime.limits())
-}
-
-pub fn get_workflow_runtime(app_id: &AppId, deploy_hash: &str) -> Option<Runtime> {
-    let key = PinnedWorkflowKey::new(app_id.clone(), deploy_hash);
-    CACHE.with(|c| {
-        let mut cache = c.borrow_mut();
-        let cache = cache.as_mut()?;
-        if let Some(entry) = cache.workflow_isolates.get_mut(&key) {
-            entry.last_used = std::time::Instant::now();
-            Some(entry.runtime.clone())
-        } else {
-            None
-        }
-    })
+    cache
+        .isolates
+        .get(app_id)
+        .map(|entry| entry.runtime.limits())
 }
 
 /// The worker-internal environment handed to an isolate.
@@ -477,27 +397,16 @@ fn app_visible_env_vars(app_id: &str, deploy_hash: Option<&str>) -> HashMap<Stri
     env_vars
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn build_runtime(
     app_id: &AppId,
-    bundle_bytes: &[u8],
+    modules: Vec<ModuleEntry>,
     app_limits: AppRuntimeLimits,
     app_net_policy: AppNetPolicy,
     deploy_hash: Option<&str>,
     runtime_descriptor: Option<&str>,
     env: &EnvSnapshot,
 ) -> Result<Runtime, String> {
-    let source = match std::str::from_utf8(bundle_bytes) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(app_id = app_id.as_str(), error = %e, "worker: bundle is not UTF-8");
-            return Err(format!("bundle is not UTF-8: {e}"));
-        }
-    };
-    let modules: Vec<ModuleEntry> = vec![ModuleEntry {
-        specifier: "index.js".to_string(),
-        source: source.to_string(),
-    }];
-
     let plugins = plugin_set();
     let meter = METER.with(|m| m.borrow().clone());
     let env_vars = app_visible_env_vars(app_id.as_str(), deploy_hash);
@@ -535,15 +444,8 @@ async fn build_runtime(
     Ok(runtime)
 }
 
-/// Load an app from bundle bytes. Creates V8 runtime + starts pump task.
-///
-/// Bundle bytes are the raw ES module source (UTF-8). The caller
-/// (`sync::reconcile_once` or `handler::load_on_demand`) resolves the
-/// worker-entry blob hash from the manifest and reads it via
-/// `BlobStore::get_blob` before calling here. Single-module bundles
-/// (today's only shape) become a one-element `modules` vector tagged
-/// `index.js`; multi-module deploys will pass a richer slice once the
-/// V8 module-resolve callback lands.
+/// Load an app from its verified module graph, with the entry module first.
+/// Creates the V8 runtime and starts its pump after initialization succeeds.
 ///
 /// `manifest` is the deploy's own manifest, and it is what makes the worker a
 /// real enforcer of the declared route policy rather than a tier that trusts
@@ -551,14 +453,10 @@ async fn build_runtime(
 /// consulted per dispatch by `crate::policy::enforce`. Callers that hold no
 /// manifest pass `&Manifest::default()`, whose empty resource tree declares
 /// nothing and therefore refuses nothing.
-// Eight arguments. Bundling them into a params struct would touch every
-// caller and every test fixture for no behaviour, and the eighth is the one
-// this crate exists to start honouring - so it is named here rather than
-// smuggled in through a struct nobody reads.
 #[allow(clippy::too_many_arguments)]
 pub async fn load_app(
     app_id: AppId,
-    bundle_bytes: &[u8],
+    modules: Vec<ModuleEntry>,
     app_limits: AppRuntimeLimits,
     app_net_policy: AppNetPolicy,
     deploy_hash: Option<&str>,
@@ -568,7 +466,7 @@ pub async fn load_app(
 ) -> Result<(), String> {
     let runtime = build_runtime(
         &app_id,
-        bundle_bytes,
+        modules,
         app_limits,
         app_net_policy,
         deploy_hash,
@@ -623,75 +521,6 @@ pub fn get_declared_policy(app_id: &AppId) -> Option<Rc<CompiledManifest>> {
     CACHE.with(|c| {
         let cache = c.borrow();
         Some(cache.as_ref()?.isolates.get(app_id)?.policy.clone())
-    })
-}
-
-/// Load the deploy-pinned isolate a durable workflow replays against.
-///
-/// `manifest` is the PINNED deploy's manifest - the one fetched by deploy hash
-/// in `handler::load_pinned_workflow_on_demand`, not the app's current one -
-/// so the entry carries the policy of the code it actually runs. Nothing
-/// consults it yet: workflow replay arrives over
-/// `/workflow-advance-unsigned/{app_id}`, which is not a creator route and
-/// carries no `RequiredPrincipal`. It is compiled anyway so the two isolate
-/// maps hold the same shape; an entry whose policy could be absent invites a
-/// future dispatch path to reach for one and find `None`.
-#[allow(clippy::too_many_arguments)]
-pub async fn load_pinned_workflow_app(
-    app_id: AppId,
-    deploy_hash: &str,
-    bundle_bytes: &[u8],
-    app_limits: AppRuntimeLimits,
-    app_net_policy: AppNetPolicy,
-    runtime_descriptor: Option<&str>,
-    manifest: &Manifest,
-    env: &EnvSnapshot,
-) -> Result<(), String> {
-    let key = PinnedWorkflowKey::new(app_id.clone(), deploy_hash);
-    let runtime = build_runtime(
-        &app_id,
-        bundle_bytes,
-        app_limits,
-        app_net_policy,
-        Some(deploy_hash),
-        runtime_descriptor,
-        env,
-    ).await?;
-    let policy = Rc::new(CompiledManifest::compile(manifest));
-
-    CACHE.with(|c| {
-        let mut cache = c.borrow_mut();
-        let cache = cache.as_mut().unwrap();
-        if cache.max_pinned_isolates_per_app == 0 {
-            return Err("pinned workflow isolate cache is disabled".to_string());
-        }
-
-        if !cache.workflow_isolates.contains_key(&key) {
-            while pinned_count_for_app(cache, &app_id) >= cache.max_pinned_isolates_per_app {
-                if !evict_pinned_lru_for_app(cache, &app_id) {
-                    tracing::warn!(
-                        app_id = app_id.as_str(),
-                        deploy_hash = %deploy_hash,
-                        max_pinned_isolates_per_app = cache.max_pinned_isolates_per_app,
-                        "worker: pinned workflow isolate cache full and every isolate is leased"
-                    );
-                    return Err("pinned workflow isolate cache full and every isolate is leased".into());
-                }
-            }
-        }
-
-        runtime.start_pump();
-        cache.workflow_isolates.insert(
-            key,
-            IsolateEntry {
-                runtime,
-                last_used: std::time::Instant::now(),
-                app_id,
-                policy,
-            },
-        );
-
-        Ok(())
     })
 }
 
@@ -769,7 +598,6 @@ pub fn evict_app(app_id: &AppId) {
         let mut cache = c.borrow_mut();
         if let Some(cache) = cache.as_mut() {
             cache.isolates.remove(app_id);
-            cache.workflow_isolates.retain(|key, _| &key.app_id != app_id);
         }
     });
 }
@@ -880,66 +708,14 @@ fn evict_lru(cache: &mut AppCache) -> bool {
         }
 
         cache.isolates.remove(&oldest_id);
-        LOADED_META.with(|m| { m.borrow_mut().remove(&oldest_id); });
+        LOADED_META.with(|m| {
+            m.borrow_mut().remove(&oldest_id);
+        });
         // Env in `SharedEnvs` is process-wide and may still be needed
         // by other threads — DON'T evict it here. The version_poll_loop
         // GCs SharedEnvs against the known-app set every cycle, so an
         // app deleted from control plane gets cleaned up there.
     }
-    true
-}
-
-fn pinned_count_for_app(cache: &AppCache, app_id: &AppId) -> usize {
-    cache
-        .workflow_isolates
-        .keys()
-        .filter(|key| &key.app_id == app_id)
-        .count()
-}
-
-fn evict_pinned_lru_for_app(cache: &mut AppCache, app_id: &AppId) -> bool {
-    refresh_socket_activity(cache);
-
-    let Some(oldest_key) = cache
-        .workflow_isolates
-        .iter()
-        .filter(|(key, entry)| &key.app_id == app_id && !entry.runtime.is_isolate_leased())
-        .min_by_key(|(_, entry)| {
-            (
-                entry.runtime.active_native_socket_count() > 0,
-                entry.last_used,
-            )
-        })
-        .map(|(key, _)| key.clone())
-    else {
-        return false;
-    };
-
-    tracing::info!(
-        app_id = oldest_key.app_id.as_str(),
-        deploy_hash = %oldest_key.deploy_hash,
-        "worker: evicting pinned workflow LRU isolate"
-    );
-    crate::metrics::inc(&crate::metrics::LRU_EVICTIONS_TOTAL);
-
-    if let Some(entry) = cache.workflow_isolates.get(&oldest_key) {
-        let active_sockets = entry.runtime.active_native_socket_count();
-        if active_sockets > 0 {
-            let closed = entry.runtime.close_native_sockets_for_eviction();
-            tracing::info!(
-                app_id = oldest_key.app_id.as_str(),
-                deploy_hash = %oldest_key.deploy_hash,
-                active_sockets,
-                closed,
-                "worker: closing native sockets before pinned workflow isolate eviction"
-            );
-        }
-        entry.runtime.with_scope(|scope| {
-            zeroship_runtime::rpc::entered_for_eviction(scope, &oldest_key.app_id);
-        });
-    }
-
-    cache.workflow_isolates.remove(&oldest_key);
     true
 }
 
@@ -951,13 +727,14 @@ fn refresh_socket_activity(cache: &mut AppCache) {
             }
         }
     }
-    for entry in cache.workflow_isolates.values_mut() {
-        if let Some(activity) = entry.runtime.last_native_socket_activity() {
-            if activity > entry.last_used {
-                entry.last_used = activity;
-            }
-        }
-    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_modules(source: &[u8]) -> Vec<ModuleEntry> {
+    vec![ModuleEntry {
+        specifier: "index.js".into(),
+        source: std::str::from_utf8(source).unwrap().into(),
+    }]
 }
 
 #[cfg(test)]
@@ -1040,8 +817,7 @@ mod tests {
         let env = EnvSnapshot::empty();
         let ctx = zeroship_runtime::RequestCtx::new(zeroship_runtime::CancelFlag::new());
         runtime.enter_isolate();
-        let outcome =
-            runtime.call_fetch_handler("GET", "http://localhost/", &[], "", &env, ctx);
+        let outcome = runtime.call_fetch_handler("GET", "http://localhost/", &[], "", &env, ctx);
         runtime.exit_isolate();
 
         match outcome {
@@ -1068,7 +844,7 @@ mod tests {
     /// carry the `auth` namespace so `env.auth.getUser()` resolves for
     /// production end-user apps. The faithful e2e drives `env.auth`
     /// through this very vector — assert it's present here so a future
-    /// edit that drops `AuthPlugin` from `create_plugins()` fails loudly,
+    /// edit that drops `AuthPlugin` from `create_plugins` fails loudly,
     /// not just under `zeroship serve` (the CLI vector). `AuthPlugin` is
     /// stateless, so it is pushed even when no DB URL is configured.
     #[test]
@@ -1076,7 +852,7 @@ mod tests {
         let plugins = create_plugins();
         assert!(
             plugins.iter().any(|p| p.namespace() == "auth"),
-            "worker create_plugins() must include the auth namespace; got: {:?}",
+            "worker create_plugins must include the auth namespace; got: {:?}",
             plugins.iter().map(|p| p.namespace()).collect::<Vec<_>>()
         );
     }
@@ -1097,10 +873,8 @@ mod tests {
 
             init_cache(
                 4,
-                4,
                 KernelConfig {
-                    control_url: "http://127.0.0.1:1".to_string(),
-                    control_key: "test-control-key".to_string(),
+                    workflows: ReadyApps::default(),
                     db_service: Some(service),
                     kv_store: None,
                     storage_backend: None,
@@ -1132,7 +906,9 @@ mod tests {
                 .block_on(async {
                     let runtime = build_runtime(
                         &AppId::mint(),
-                        br#"export default { fetch() { return new Response("ok"); } }"#,
+                        crate::cache::test_modules(
+                            br#"export default { fetch() { return new Response("ok"); } }"#,
+                        ),
                         AppRuntimeLimits::default(),
                         AppNetPolicy::default(),
                         Some("deploy_build_runtime_guard"),
@@ -1202,8 +978,7 @@ mod tests {
         }
         let service = fixture::database_service("postgres://localhost/zs_unused_shared");
         let kernel = |service: Arc<zeroship_data_v8::service::DbService>| KernelConfig {
-            control_url: "http://127.0.0.1:1".to_string(),
-            control_key: "test-control-key".to_string(),
+            workflows: ReadyApps::default(),
             db_service: Some(service),
             kv_store: None,
             storage_backend: None,
@@ -1212,7 +987,7 @@ mod tests {
 
         let one = Arc::clone(&service);
         let first = std::thread::spawn(move || {
-            init_cache(4, 4, kernel(one));
+            init_cache(4, kernel(one));
             db_plugin()
         })
         .join()
@@ -1220,7 +995,7 @@ mod tests {
 
         let two = Arc::clone(&service);
         let second = std::thread::spawn(move || {
-            init_cache(4, 4, kernel(two));
+            init_cache(4, kernel(two));
             db_plugin()
         })
         .join()
@@ -1240,7 +1015,7 @@ mod tests {
     /// SC-5: two runtimes built on one OS thread must SHARE plugin
     /// instances, not each mint their own.
     ///
-    /// `build_runtime` used to call `create_plugins()` on every build, so a
+    /// `build_runtime` used to call `create_plugins` on every build, so a
     /// current isolate and a deploy-pinned isolate on the same thread each
     /// constructed their own `DbPlugin` - and would each resolve their own
     /// backend and their own caches once the service lands. The design's arm
@@ -1259,15 +1034,14 @@ mod tests {
     fn plugin_set_is_shared_per_thread_and_invalidated_by_init_cache() {
         std::thread::spawn(|| {
             let kernel = || KernelConfig {
-                control_url: "http://127.0.0.1:1".to_string(),
-                control_key: "test-control-key".to_string(),
+                workflows: ReadyApps::default(),
                 db_service: Some(fixture::database_service("postgres://localhost/zs_unused")),
                 kv_store: None,
                 storage_backend: None,
                 meter: Arc::new(zeroship_metering::Meter::new()),
             };
 
-            init_cache(4, 4, kernel());
+            init_cache(4, kernel());
             let a = plugin_set();
             let b = plugin_set();
             assert_eq!(a.len(), b.len(), "the set must be stable across calls");
@@ -1282,7 +1056,7 @@ mod tests {
             }
 
             // Re-installing the kernel must drop the cached prototypes.
-            init_cache(4, 4, kernel());
+            init_cache(4, kernel());
             let c = plugin_set();
             assert_eq!(c.len(), a.len());
             assert!(
@@ -1311,23 +1085,24 @@ mod tests {
     fn re_installing_the_kernel_without_a_database_clears_the_db_namespace() {
         std::thread::spawn(|| {
             let with_db = || KernelConfig {
-                control_url: "http://127.0.0.1:1".to_string(),
-                control_key: "test-control-key".to_string(),
+                workflows: ReadyApps::default(),
                 db_service: Some(fixture::database_service("postgres://localhost/zs_unused_sticky")),
                 kv_store: None,
                 storage_backend: None,
                 meter: Arc::new(zeroship_metering::Meter::new()),
             };
 
-            init_cache(4, 4, with_db());
+            init_cache(4, with_db());
             assert!(
                 plugin_set().iter().any(|p| p.namespace() == "db"),
                 "the fixture must start from a kernel that HAS the db namespace",
             );
-            assert!(db_url().is_some(), "the fixture must start from a bound db");
+            assert!(
+                DB_SERVICE.with(|service| service.borrow().is_some()),
+                "the fixture must start from a bound database service",
+            );
 
             init_cache(
-                4,
                 4,
                 KernelConfig {
                     db_service: None,
@@ -1344,8 +1119,8 @@ mod tests {
                     .collect::<Vec<_>>(),
             );
             assert!(
-                db_url().is_none(),
-                "the previous DSN must not survive a kernel that carries none",
+                DB_SERVICE.with(|service| service.borrow().is_none()),
+                "the previous database service must not survive a kernel that carries none",
             );
         })
         .join()
@@ -1354,13 +1129,13 @@ mod tests {
 
     /// Phase-2 structural guard (no external services): when the kernel
     /// config carries a DB URL, a KV URL, and a storage root, the SAME
-    /// `create_plugins()` a deployed app boots against installs all four
+    /// `create_plugins` a deployed app boots against installs all four
     /// `env.{db,kv,storage,auth}` namespaces. This is the always-runnable
     /// complement to the redis-gated faithful dispatch test in
     /// `handler.rs` — it asserts the plugin VECTOR, the latter asserts the
     /// JS namespaces resolve + round-trip end-to-end.
     ///
-    /// Pre-Phase-2 this FAILS: `create_plugins()` ignored kv/storage
+    /// Pre-Phase-2 this FAILS: `create_plugins` ignored kv/storage
     /// entirely, so `kv` and `storage` were never in the vector. Runs on a
     /// fresh thread so the kernel thread-locals don't leak into other
     /// tests sharing this thread.
@@ -1369,10 +1144,8 @@ mod tests {
         std::thread::spawn(|| {
             init_cache(
                 4,
-                4,
                 KernelConfig {
-                    control_url: "http://127.0.0.1:1".to_string(),
-                    control_key: "test-control-key".to_string(),
+                    workflows: ReadyApps::default(),
                     db_service: Some(fixture::database_service("postgres://localhost/zs_unused")),
                     kv_store: Some(
                         zeroship_kv::KvStore::open(&zeroship_kv::KvConfig::Redis {
@@ -1395,7 +1168,7 @@ mod tests {
             for expected in ["db", "kv", "storage", "workflows", "auth"] {
                 assert!(
                     namespaces.iter().any(|n| n == expected),
-                    "create_plugins() must register the '{expected}' namespace when configured; got: {namespaces:?}"
+                    "create_plugins must register the '{expected}' namespace when configured; got: {namespaces:?}"
                 );
             }
             assert!(
@@ -1411,8 +1184,7 @@ mod tests {
     fn replacing_kernel_without_kv_removes_its_cached_binding() {
         std::thread::spawn(|| {
             let kernel = |kv_store| KernelConfig {
-                control_url: "http://127.0.0.1:1".to_string(),
-                control_key: String::new(),
+                workflows: ReadyApps::default(),
                 db_service: None,
                 kv_store,
                 storage_backend: None,
@@ -1424,9 +1196,9 @@ mod tests {
                 }),
             })
             .unwrap();
-            init_cache(4, 4, kernel(Some(store)));
+            init_cache(4, kernel(Some(store)));
             assert!(plugin_set().iter().any(|plugin| plugin.namespace() == "kv"));
-            init_cache(4, 4, kernel(None));
+            init_cache(4, kernel(None));
             assert!(!plugin_set().iter().any(|plugin| plugin.namespace() == "kv"));
         })
         .join()
@@ -1434,7 +1206,7 @@ mod tests {
     }
 
     /// Degrade-don't-panic: with no kv/storage configured (only db), the
-    /// kv + storage namespaces are simply absent — `create_plugins()`
+    /// kv + storage namespaces are simply absent — `create_plugins`
     /// never panics. Mirrors the long-standing DB behaviour. Fresh thread
     /// keeps the empty kernel thread-locals isolated.
     #[test]
@@ -1442,10 +1214,8 @@ mod tests {
         std::thread::spawn(|| {
             init_cache(
                 4,
-                4,
                 KernelConfig {
-                    control_url: "http://127.0.0.1:1".to_string(),
-                    control_key: String::new(),
+                    workflows: ReadyApps::default(),
                     db_service: None,
                     kv_store: None,
                     storage_backend: None,
@@ -1464,7 +1234,10 @@ mod tests {
             // and there is NO `meter` namespace (metering is infrastructure).
             assert!(has("auth"));
             assert!(has("workflows"));
-            assert!(!has("meter"), "metering is infrastructure: no env.meter namespace");
+            assert!(
+                !has("meter"),
+                "metering is infrastructure: no env.meter namespace"
+            );
             assert!(!has("kv"), "kv absent when unconfigured");
             assert!(!has("storage"), "storage absent when unconfigured");
             assert!(!has("db"), "db absent when unconfigured");
@@ -1507,7 +1280,9 @@ mod tests {
                 // the case are gone and one destination is one rule.
                 assert_eq!(
                     rules.name_phase("db.example.com", 5432),
-                    zeroship_core::net_policy::NamePhase::Resolve { name_accepted: true }
+                    zeroship_core::net_policy::NamePhase::Resolve {
+                        name_accepted: true
+                    }
                 );
                 assert_eq!(
                     rules.name_phase("other.example.com", 5432),
@@ -1545,7 +1320,9 @@ mod tests {
         };
         assert_eq!(
             rules.name_phase("smtp.example.com", 587),
-            zeroship_core::net_policy::NamePhase::Resolve { name_accepted: true },
+            zeroship_core::net_policy::NamePhase::Resolve {
+                name_accepted: true
+            },
             "one malformed ACCEPT row must not brick the other valid rules"
         );
         assert_eq!(
@@ -1703,10 +1480,8 @@ mod tests {
                 let app_id = AppId::mint();
                 init_cache(
                     4,
-                    4,
                     KernelConfig {
-                        control_url: "http://127.0.0.1:1".to_string(),
-                        control_key: String::new(),
+                        workflows: ReadyApps::default(),
                         db_service: None,
                         kv_store: None,
                         storage_backend: None,
@@ -1715,7 +1490,9 @@ mod tests {
                 );
                 load_app(
                     app_id.clone(),
-                    br#"export default { fetch() { return new Response("ok"); } }"#,
+                    crate::cache::test_modules(
+                        br#"export default { fetch() { return new Response("ok"); } }"#,
+                    ),
                     AppRuntimeLimits::default(),
                     AppNetPolicy {
                         egress: vec![zeroship_core::types::NetEgressEntry {
@@ -1740,7 +1517,9 @@ mod tests {
                 };
                 assert_eq!(
                     rules.name_phase("db.example.com", 5432),
-                    zeroship_core::net_policy::NamePhase::Resolve { name_accepted: true }
+                    zeroship_core::net_policy::NamePhase::Resolve {
+                        name_accepted: true
+                    }
                 );
                 // The port is part of the rule, so the same host on another
                 // port is refused before DNS.
@@ -1756,6 +1535,56 @@ mod tests {
     }
 
     #[test]
+    fn an_active_isolate_loads_its_complete_module_graph() {
+        std::thread::spawn(|| {
+            let runtime = compio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                use zeroship_bundle::{BlobStore, LocalDiskBlobStore, RuntimeDescriptorEntry, WorkerCode};
+
+                zeroship_runtime::init::init_v8();
+                let app_id = AppId::mint();
+                init_cache(4, KernelConfig {
+                    workflows: ReadyApps::default(),
+                    db_service: None,
+                    kv_store: None,
+                    storage_backend: None,
+                    meter: Arc::new(zeroship_metering::Meter::new()),
+                });
+                let directory = tempfile::tempdir().unwrap();
+                let blobs: Arc<dyn BlobStore> = Arc::new(LocalDiskBlobStore::new(directory.path().into()).unwrap());
+                let descriptor = r#"{"version":2,"collections":{}}"#;
+                let descriptor_hash = zeroship_bundle::sha256_hex(descriptor.as_bytes());
+                blobs.put_blob(&descriptor_hash, descriptor.as_bytes()).await.unwrap();
+                for deployment in ["original", "replacement"] {
+                    let mut modules = HashMap::new();
+                    for (name, source) in [
+                        ("app/z-entry.js", "import value from './a-part.js'; export default { async fetch() { const { tail } = await import('./lazy.js'); return new Response(value + tail); } };".to_owned()),
+                        ("app/a-part.js", format!("export default '{deployment}';")),
+                        ("app/lazy.js", "export const tail = ':dynamic';".to_owned()),
+                    ] {
+                        let hash = zeroship_bundle::sha256_hex(source.as_bytes());
+                        blobs.put_blob(&hash, source.as_bytes()).await.unwrap();
+                        modules.insert(name.into(), hash);
+                    }
+                    let manifest = Manifest {
+                        worker: Some(WorkerCode { entry: "app/z-entry.js".into(), modules }),
+                        runtime_descriptor: Some(RuntimeDescriptorEntry { hash: descriptor_hash.clone() }),
+                        ..Manifest::default()
+                    };
+                    let executable = crate::executable::load_executable(&manifest, &blobs).await.unwrap();
+                    assert_eq!(executable.modules[0].specifier, "app/z-entry.js");
+                    assert_eq!(serde_json::from_str::<serde_json::Value>(executable.descriptor.as_deref().unwrap()).unwrap(), serde_json::from_str::<serde_json::Value>(descriptor).unwrap());
+                    load_app(app_id.clone(), executable.modules, AppRuntimeLimits::default(),
+                        AppNetPolicy::default(), Some(deployment), executable.descriptor.as_deref(),
+                        &manifest, &EnvSnapshot::empty()).await.unwrap();
+                }
+                let active = get_runtime(&app_id).unwrap();
+                assert_eq!(fetch_body(&active).await, (200, "replacement:dynamic".into()));
+            });
+        }).join().unwrap();
+    }
+
+    #[test]
     fn load_app_preserves_last_good_isolate_when_descriptor_validation_fails() {
         std::thread::spawn(|| {
             let runtime = compio::runtime::Runtime::new().expect("compio runtime");
@@ -1765,10 +1594,8 @@ mod tests {
                 let app_id = AppId::mint();
                 init_cache(
                     4,
-                    4,
                     KernelConfig {
-                        control_url: "http://127.0.0.1:1".to_string(),
-                        control_key: String::new(),
+                        workflows: ReadyApps::default(),
                         db_service: None,
                         kv_store: None,
                         storage_backend: None,
@@ -1778,7 +1605,7 @@ mod tests {
 
                 load_app(
                     app_id.clone(),
-                    br#"export default { fetch() { return new Response("last-good"); } }"#,
+                    crate::cache::test_modules(br#"export default { fetch() { return new Response("last-good"); } }"#),
                     AppRuntimeLimits::default(),
                     AppNetPolicy::default(),
                     Some("deploy-good"),
@@ -1793,7 +1620,7 @@ mod tests {
 
                 let err = load_app(
                     app_id.clone(),
-                    br#"export default { fetch() { return new Response("bad-new"); } }"#,
+                    crate::cache::test_modules(br#"export default { fetch() { return new Response("bad-new"); } }"#),
                     AppRuntimeLimits::default(),
                     AppNetPolicy::default(),
                     Some("deploy-bad"),
@@ -1832,9 +1659,8 @@ mod tests {
         std::thread::spawn(|| {
             use futures::FutureExt;
             compio::runtime::Runtime::new().unwrap().block_on(async {
-                init_cache(4, 4, KernelConfig {
-                    control_url: "http://127.0.0.1:1".into(),
-                    control_key: String::new(),
+                init_cache(4, KernelConfig {
+                    workflows: ReadyApps::default(),
                     db_service: None,
                     kv_store: None,
                     storage_backend: None,
@@ -1845,8 +1671,8 @@ mod tests {
                 let env = EnvSnapshot::empty();
                 let mut loading = Box::pin(load_app(
                     app_id.clone(),
-                    br#"await new Promise(resolve => setTimeout(resolve, 10));
-                        export default { fetch() { return new Response("ready"); } }"#,
+                    test_modules(br#"await new Promise(resolve => setTimeout(resolve, 10));
+                        export default { fetch() { return new Response("ready"); } }"#),
                     AppRuntimeLimits::default(), AppNetPolicy::default(),
                     Some("ready-deploy"), None, &manifest, &env,
                 ));
@@ -1857,8 +1683,8 @@ mod tests {
 
                 let mut reloading = Box::pin(load_app(
                     app_id.clone(),
-                    br#"await new Promise(resolve => setTimeout(resolve, 10));
-                        throw new Error("candidate startup rejected");"#,
+                    test_modules(br#"await new Promise(resolve => setTimeout(resolve, 10));
+                        throw new Error("candidate startup rejected");"#),
                     AppRuntimeLimits::default(), AppNetPolicy::default(),
                     Some("failed-deploy"), None, &manifest, &env,
                 ));
@@ -1881,10 +1707,8 @@ mod tests {
                 let app_id = AppId::mint();
                 init_cache(
                     4,
-                    4,
                     KernelConfig {
-                        control_url: "http://127.0.0.1:1".to_string(),
-                        control_key: String::new(),
+                        workflows: ReadyApps::default(),
                         db_service: None,
                         kv_store: None,
                         storage_backend: None,
@@ -1894,7 +1718,7 @@ mod tests {
 
                 let err = load_app(
                     app_id.clone(),
-                    br#"export default { fetch() { return new Response("bad-first"); } }"#,
+                    crate::cache::test_modules(br#"export default { fetch() { return new Response("bad-first"); } }"#),
                     AppRuntimeLimits::default(),
                     AppNetPolicy::default(),
                     Some("deploy-bad"),
@@ -1933,10 +1757,8 @@ mod tests {
                 let app_id = AppId::mint();
                 init_cache(
                     4,
-                    4,
                     KernelConfig {
-                        control_url: "http://127.0.0.1:1".to_string(),
-                        control_key: String::new(),
+                        workflows: ReadyApps::default(),
                         db_service: None,
                         kv_store: None,
                         storage_backend: None,
@@ -1945,7 +1767,9 @@ mod tests {
                 );
                 load_app(
                     app_id.clone(),
-                    br#"export default { fetch() { return new Response("ok"); } }"#,
+                    crate::cache::test_modules(
+                        br#"export default { fetch() { return new Response("ok"); } }"#,
+                    ),
                     AppRuntimeLimits::default(),
                     AppNetPolicy::default(),
                     None,
@@ -1959,14 +1783,29 @@ mod tests {
                 let stamped = Instant::now() - Duration::from_secs(600);
                 CACHE.with(|c| {
                     let mut cache = c.borrow_mut();
-                    cache.as_mut().unwrap().isolates.get_mut(&app_id).unwrap().last_used = stamped;
+                    cache
+                        .as_mut()
+                        .unwrap()
+                        .isolates
+                        .get_mut(&app_id)
+                        .unwrap()
+                        .last_used = stamped;
                 });
 
-                assert!(get_limits(&app_id).is_some(), "the limits read must find the app");
+                assert!(
+                    get_limits(&app_id).is_some(),
+                    "the limits read must find the app"
+                );
 
                 let after = CACHE.with(|c| {
                     let cache = c.borrow();
-                    cache.as_ref().unwrap().isolates.get(&app_id).unwrap().last_used
+                    cache
+                        .as_ref()
+                        .unwrap()
+                        .isolates
+                        .get(&app_id)
+                        .unwrap()
+                        .last_used
                 });
                 assert_eq!(
                     after, stamped,
@@ -1996,17 +1835,23 @@ mod tests {
             let socketless = test_runtime();
             let mut cache = AppCache {
                 isolates: HashMap::new(),
-                workflow_isolates: HashMap::new(),
                 max_size: 2,
-                max_pinned_isolates_per_app: 4,
             };
             cache.isolates.insert(
                 socketed_id.clone(),
-                entry(socketed_id.clone(), socketed, now - Duration::from_secs(600)),
+                entry(
+                    socketed_id.clone(),
+                    socketed,
+                    now - Duration::from_secs(600),
+                ),
             );
             cache.isolates.insert(
                 socketless_id.clone(),
-                entry(socketless_id.clone(), socketless, now - Duration::from_secs(1)),
+                entry(
+                    socketless_id.clone(),
+                    socketless,
+                    now - Duration::from_secs(1),
+                ),
             );
 
             assert!(evict_lru(&mut cache));
@@ -2039,15 +1884,19 @@ mod tests {
             let victim = test_runtime();
             let mut cache = AppCache {
                 isolates: HashMap::new(),
-                workflow_isolates: HashMap::new(),
                 max_size: 2,
-                max_pinned_isolates_per_app: 4,
             };
             cache.isolates.insert(
                 leased_id.clone(),
-                entry(leased_id.clone(), leased.clone(), now - Duration::from_secs(600)),
+                entry(
+                    leased_id.clone(),
+                    leased.clone(),
+                    now - Duration::from_secs(600),
+                ),
             );
-            cache.isolates.insert(victim_id.clone(), entry(victim_id.clone(), victim, now));
+            cache
+                .isolates
+                .insert(victim_id.clone(), entry(victim_id.clone(), victim, now));
 
             assert!(evict_lru(&mut cache));
             assert!(
@@ -2080,13 +1929,15 @@ mod tests {
 
             let mut cache = AppCache {
                 isolates: HashMap::new(),
-                workflow_isolates: HashMap::new(),
                 max_size: 1,
-                max_pinned_isolates_per_app: 4,
             };
             cache.isolates.insert(
                 app_id.clone(),
-                entry(app_id.clone(), runtime.clone(), now - Duration::from_secs(60)),
+                entry(
+                    app_id.clone(),
+                    runtime.clone(),
+                    now - Duration::from_secs(60),
+                ),
             );
 
             assert!(evict_lru(&mut cache));

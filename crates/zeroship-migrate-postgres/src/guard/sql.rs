@@ -1520,10 +1520,9 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
             }
             NodeEnum::AlterTableStmt(at) => {
                 // ALTER TABLE is safe ONLY for the enumerated subcommand set;
-                // OWNER TO / INHERIT / REPLICA IDENTITY / generic-options are
-                // out of remit and denied. Under Platform the four RLS subtypes
-                // (ENABLE/FORCE/NO FORCE/DISABLE ROW LEVEL SECURITY) are also
-                // admitted.
+                // Role ownership and RLS changes need their respective charter
+                // grants. Reparenting, replica identity and generic options
+                // remain outside the safe migration set.
                 self.check_alter_table_cmds(at, raw)?;
             }
             NodeEnum::DropStmt(d) => {
@@ -1726,8 +1725,8 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
         Ok(())
     }
 
-    /// Reject `ALTER TABLE` subcommands outside the safe migration set. Under
-    /// Platform the four RLS subtypes are additionally admitted.
+    /// Reject `ALTER TABLE` subcommands outside the safe migration set or the
+    /// capabilities explicitly granted by the author-owned charter.
     fn check_alter_table_cmds(
         &self,
         at: &protobuf::AlterTableStmt,
@@ -1741,8 +1740,16 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
             .grants_object_bool(policy_registry::KEY_ACCESS_RLS, target.as_ref());
         for cmd in &at.cmds {
             if let Some(NodeEnum::AlterTableCmd(c)) = cmd.node.as_ref() {
+                let ownership = c.subtype == AlterTableType::AtChangeOwner as i32;
+                if ownership && c.newowner.as_ref().is_none_or(|role| {
+                    role.roletype != protobuf::RoleSpecType::RolespecCstring as i32
+                        || role.rolename.is_empty() || role_spec_names_privileged_role(role)
+                }) {
+                    return Err(denied(rule::PRIVILEGED_ROLE_GRANT, raw));
+                }
                 let subtype_allowed = is_safe_alter_table_subtype(c.subtype)
-                    || (allow_rls && is_platform_alter_table_subtype(c.subtype));
+                    || (allow_rls && is_platform_alter_table_subtype(c.subtype))
+                    || (ownership && self.cfg.grants_global_bool(policy_registry::KEY_ACCESS_ROLE));
                 if !subtype_allowed {
                     return Err(denied(rule::UNSAFE_ALTER_TABLE_CMD, raw));
                 }
