@@ -4,7 +4,6 @@ use super::{
 use crate::service::{
     app::{decode, encode},
     models::{job_receipts, management_receipts as receipts},
-    types::digest,
 };
 use zeroship_core::{
     app_id::AppId, workflow_coordination::ManagementOutcome, workflow_jobs::JobOutcome,
@@ -19,7 +18,6 @@ struct History {
     run_id: String,
     request_id: String,
     revision: i64,
-    digest: String,
     outcome: String,
     created_at: i64,
 }
@@ -145,6 +143,9 @@ async fn applied(
     Ok(Some(head.revision))
 }
 
+/// Re-derive a retained command from the immutable specification its receipt
+/// holds, and require the history row's projections and outcome to be the ones
+/// that specification and its settled receipt carry.
 async fn validate_saved(tx: &Transaction, history: &History) -> Result<(), WorkflowServiceError> {
     let saved = tx
         .database()
@@ -186,7 +187,6 @@ fn check_history(
         || history.run_id != command.run_id.as_str()
         || history.request_id != command.request_id.as_str()
         || history.revision != command.revision
-        || history.digest != digest(command.job)?
         || receipt.outcome != (JobOutcome::Management { outcome })
     {
         return Err(invalid());
@@ -222,7 +222,6 @@ pub(super) async fn finish(
             run_id: command.run_id.as_str().to_owned(),
             request_id: command.request_id.as_str().to_owned(),
             revision: command.revision,
-            digest: digest(command.job)?,
             outcome: encode(&outcome)?,
             created_at: now,
         })

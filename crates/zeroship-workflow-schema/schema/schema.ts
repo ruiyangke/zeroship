@@ -294,7 +294,7 @@ export function workflowSchema(namespace) {
   // applied management revisions are unique per app, so the highest of them is
   // an index-ordered first row rather than a scan.
   create("management_receipts", {
-    ...runIdentity(), request_id: text(), revision: integer(), digest: text(), outcome: text(), created_at: integer(),
+    ...runIdentity(), request_id: text(), revision: integer(), outcome: text(), created_at: integer(),
   }, ["app_id", "request_id"], [
     appFk("management_receipts"),
     fk("management_job_receipt", ["app_id", "id"], "job_receipts", ["app_id", "id"]),
