@@ -21,7 +21,6 @@ publish_packages=(
   "packages/rpc"
   "packages/server"
   "packages/react"
-  "packages/ui"
   "packages/payments"
   "packages/eslint-config"
   "packages/vite-plugin"
