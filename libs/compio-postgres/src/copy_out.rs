@@ -61,16 +61,14 @@ async fn copy_out_inner(
                 // `copy_in.rs` and `bind.rs` carry no such comment, though both
                 // are bound by name.
                 //
-                // Nothing bound this line until 2026-09-02: replacing the condition
-                // with `if false` left all 1694 tests green across every target.
-                // The first version of this comment concluded that no test SHOULD
-                // exist, on the grounds that one would assert a redundant call
-                // rather than behaviour. That was wrong. `bind.rs` asserts the same
-                // call on both of its paths, so the effect is observable from the
-                // statement cache and this crate already treats it as worth
-                // asserting; being a second check does not make it unassertable.
+                // The condition is load-bearing and MUST be asserted: replacing it
+                // with `if false` would otherwise leave the whole suite green.
+                // `bind.rs` asserts the same call on both of its paths, so the effect
+                // is observable from the statement cache and this crate already treats
+                // it as worth asserting; being a second check does not make it
+                // unassertable.
                 // `a_stale_bind_error_invalidates_the_cached_copy_out_statement`
-                // now binds it, and `copy_in.rs` has the twin.
+                // binds it, and `copy_in.rs` has the twin.
                 if matches!(&error, ExecutionError::BeforeBindComplete(_)) {
                     statement.invalidate_cache_on_error(error.error());
                 }
@@ -258,9 +256,8 @@ mod tests {
     /// The COPY OUT twin of `bind.rs`'s two
     /// `..._invalidates_cached_statement` tests and `copy_in.rs`'s.
     ///
-    /// The comment on the call used to say a test here would only assert that
-    /// a redundant call happened. That was wrong: `bind.rs` asserts exactly
-    /// this on both of its paths, so the behaviour is observable and this
+    /// A test here is not merely asserting a redundant call: `bind.rs` asserts
+    /// exactly this on both of its paths, so the behaviour is observable and this
     /// crate already treats it as worth asserting. Being a second check after
     /// the connection dispatcher does not make it unassertable.
     #[compio::test]
