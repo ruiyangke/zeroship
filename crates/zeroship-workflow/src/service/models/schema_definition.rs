@@ -179,7 +179,6 @@ zeroship_data_orm::orm::schema! {
             run_id: Text,
             request_id: Text,
             revision: BigInt,
-            digest: Text,
             outcome: Text,
             created_at: BigInt,
         }
