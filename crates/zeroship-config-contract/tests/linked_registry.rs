@@ -77,16 +77,13 @@ fn read_sites_declared_in_another_crate_are_linked_and_enumerable() {
     // entries are emitted in the library crate and read here, which is the
     // property a five-service registry needs.
     //
-    // What this does NOT measure, despite an earlier version of this comment
-    // claiming it did: that the ATTRIBUTE registered them. Path 2 (see the
-    // module header) supplies an Env site for each secret field on its own, so
-    // deleting every path-1 static leaves this test green. Measured, not
-    // assumed: mutation M20/M30 does exactly that and this test still passes.
-    // The path-1 claim is
+    // What this does NOT cover: that the ATTRIBUTE registered them. Path 2 (see
+    // the module header) supplies an Env site for each secret field on its own, so
+    // deleting every path-1 static leaves this test green. The path-1 claim is
     // `the_attribute_registers_the_sources_no_env_read_can_supply` below.
     //
     // Does not cover: retention under `--release`, LTO, `-C linker-plugin-lto`,
-    // or a cdylib/staticlib target. Only the dev-profile rlib path is measured.
+    // or a cdylib/staticlib target. Only the dev-profile rlib path is exercised.
     let sites = fixture_sites();
     assert!(
         !sites.is_empty(),
@@ -530,9 +527,9 @@ fn a_dry_run_resolves_a_secret_file_reference_without_opening_it() {
 
 #[test]
 fn a_secret_source_outside_the_supply_set_is_refused_in_both_modes() {
-    // The deleted schemes, through the GENERATED resolver rather than through
+    // Schemes outside the supply set, through the GENERATED resolver rather than
     // the parser directly: an env-to-env alias, a Vault URN and an AWS ARN are
-    // no longer expressible, so they fail source policy in a dry run instead of
+    // not expressible, so they fail source policy in a dry run instead of
     // passing it and failing at boot.
     // Does not cover: the same values appearing in a deployment file nothing
     // reads. That is a tracked-tree search, and Step 6 owns it.
