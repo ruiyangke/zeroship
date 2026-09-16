@@ -229,17 +229,10 @@ impl GcmState {
         };
         let _ = UnboundCipherKey::new(alg, key_bytes)
             .map_err(|_| OpError::dom("OperationError", "AES-GCM ECB init"))?;
-        // Compute H = AES_K(0^128). aws-lc-rs's high-level cipher API
-        // doesn't expose raw single-block ECB easily, but we can use
-        // ECB-of-zeros via the lower-level API. Take the simplest
-        // route: invoke ECB-encrypt of a zero block via OpenSSL/aws-lc
-        // through aws_lc_rs::cipher::EncryptingKey::new(...) with
-        // PaddingStrategy::None and a single-block input.
-        //
-        // Instead we use aes-lc-rs's `aead::AES_*_GCM` only for the
-        // 12-byte path; for variable IV we hand-roll AES-ECB via
-        // openssl-style block cipher. aws-lc-rs exposes
-        // `aws_lc_rs::cipher::EncryptingKey::ecb` (no padding).
+        // Compute H = AES_K(0^128) for GHASH. aws-lc-rs's high-level aead
+        // API does not expose raw single-block ECB, so the zero block goes
+        // through the lower-level `aws_lc_rs::cipher::EncryptingKey::ecb`
+        // (no padding).
         let h = aes_ecb_encrypt_block(key_bytes, &[0u8; 16])?;
         // Construct an unused UnboundCipherKey solely as a token (we
         // never use it past the fact-of-construction here).
@@ -410,7 +403,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 // =============================================================================
-// AES-CBC — §29 (well, §28; spec §28 is AES-CBC)
+// AES-CBC — spec §28
 // =============================================================================
 
 pub fn encrypt_cbc<'s>(

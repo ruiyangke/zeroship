@@ -1,6 +1,4 @@
-//! HKDF + PBKDF2 — deriveBits + importKey. See
-//! `docs/archive/webcrypto-native.md` §IV.9 for the
-//! `[EnforceRange]` iteration handling and SHA-1 variants.
+//! HKDF + PBKDF2 — deriveBits + importKey.
 
 #![allow(dead_code)]
 

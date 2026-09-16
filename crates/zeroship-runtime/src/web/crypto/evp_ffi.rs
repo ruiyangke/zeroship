@@ -1,7 +1,7 @@
 //! Low-level RSA EVP_DigestSign / EVP_DigestVerify wrappers.
 //!
-//! The `aws_lc_rs::signature::RSA_PSS_*` / `RSA_PKCS1_SHA*` paths used
-//! to be sufficient, but two cases need lower-level access:
+//! Two cases need lower-level access than the
+//! `aws_lc_rs::signature::RSA_PSS_*` / `RSA_PKCS1_SHA*` paths provide:
 //!
 //! 1. **RSA-PSS variable saltLength** — aws-lc-rs hard-codes salt =
 //!    digest length. The WebCrypto `RsaPssParams.saltLength` lets
@@ -11,8 +11,6 @@
 //!    exposes `RSA_PKCS1_*_SHA1_FOR_LEGACY_USE_ONLY` for *verify*; no
 //!    SHA-1 path for *sign*. The WebCrypto spec still requires SHA-1
 //!    for RSASSA-PKCS1-v1_5 (§22) and RSA-PSS (§24).
-//!
-//! See `docs/archive/webcrypto-native.md`.
 //!
 //! Surface kept minimal: a few safe entry points, all convert FFI
 //! failures to `OpError::dom("OperationError", _)`.

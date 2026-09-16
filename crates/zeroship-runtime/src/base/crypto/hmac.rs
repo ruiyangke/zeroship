@@ -1,17 +1,15 @@
 //! Streaming HMAC.
 //!
-//! See `docs/archive/node-crypto-native.md` §V.3. Wraps
-//! `aws_lc_rs::hmac::Context` for incremental update; `hmac_one_shot`
-//! is the WebCrypto path.
+//! Wraps `aws_lc_rs::hmac::Context` for incremental update;
+//! `hmac_one_shot` is the WebCrypto path.
 //!
-//! Note: Node silently accepts empty
-//! HMAC keys (special-cases `key_len == 0` by re-binding `key = ""`
-//! and forwards to HMAC_Init_ex per `crypto_hmac.cc:78-91`). We match
-//! Node — empty key is permitted here. The defense-in-depth check
-//! at the WebCrypto surface (`hmac::validate_hmac_usages`) is
-//! intentionally NOT applied to node:crypto's surface (XVII.13b — a
-//! zeroship-vs-Node divergence we deliberately avoid in the
-//! node:crypto path for npm parity).
+//! Note: Node silently accepts empty HMAC keys (special-cases
+//! `key_len == 0` by re-binding `key = ""` and forwards to
+//! HMAC_Init_ex per `crypto_hmac.cc`). We match Node — empty key is
+//! permitted here. The defense-in-depth check at the WebCrypto surface
+//! (`hmac::validate_hmac_usages`) is intentionally NOT applied to
+//! node:crypto's surface (a zeroship-vs-Node divergence we
+//! deliberately avoid in the node:crypto path for npm parity).
 
 #![allow(dead_code)]
 
@@ -48,8 +46,8 @@ pub struct HmacContext {
 impl HmacContext {
     pub fn new(algo: KernelHashAlgo, key: &[u8]) -> Result<Self, KernelError> {
         let alg = aws_alg(algo)?;
-        // aws-lc-rs's hmac::Key::new accepts empty keys; matches Node
-        // Match Node's empty-key behavior.
+        // aws-lc-rs's hmac::Key::new accepts empty keys, matching
+        // Node's empty-key behavior.
         let key = lc_hmac::Key::new(alg, key);
         let inner = lc_hmac::Context::with_key(&key);
         Ok(Self {

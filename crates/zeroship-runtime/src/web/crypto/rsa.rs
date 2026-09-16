@@ -1,6 +1,5 @@
 //! RSA-OAEP / RSASSA-PKCS1-v1_5 / RSA-PSS — sign/verify/encrypt/decrypt
 //! plus key generation, import/export, and variable PSS salt lengths.
-//! Per `docs/archive/webcrypto-native.md` §IV.7.
 
 #![allow(dead_code)]
 

@@ -9,7 +9,7 @@
 //!    long`), throw `TypeError`.
 //! 3. Otherwise integer-truncate towards zero and return the value mod 2^64.
 //!
-//! Streams uses this for two arguments per the design (§XIV.8):
+//! Streams uses this for two arguments:
 //! - `ReadableStreamBYOBReaderReadOptions.min` (default 1, must be ≥ 1)
 //! - `ReadableStreamBYOBRequest.respond(bytesWritten)`
 //!
@@ -51,7 +51,7 @@ impl From<EnforceRangeU64> for u64 {
 ///
 /// Used by the WebCrypto IDL surface (`Pbkdf2Params.iterations`,
 /// `RsaKeyGenParams.modulusLength`, `subtle.deriveBits.length`,
-/// `AesCtrParams.length`). See `docs/archive/webcrypto-native.md`.
+/// `AesCtrParams.length`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnforceRangeU32(pub u32);
 

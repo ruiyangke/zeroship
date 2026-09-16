@@ -1,13 +1,12 @@
 //! Node.js error code → JS exception class mapping.
 //!
-//! Per `docs/archive/node-crypto-native.md` §VII.3a — every
-//! `ERR_CRYPTO_*`, `ERR_INVALID_*`, `ERR_OUT_OF_RANGE`, etc., that we
-//! emit from `crate::node::crypto` is in this table with the right
-//! exception class (Error vs TypeError vs RangeError).
+//! Every `ERR_CRYPTO_*`, `ERR_INVALID_*`, `ERR_OUT_OF_RANGE`, etc.,
+//! that we emit from `crate::node::crypto` is in this table with the
+//! right exception class (Error vs TypeError vs RangeError).
 //!
 //! The map is a `match` rather than a phf::Map because the call site
 //! is in the macro-emitted throw arm — phf adds a runtime hashmap and
-//! a build-time crate dep we don't need for ~30 string keys.
+//! a build-time crate dep we don't need for a table this small.
 
 /// Three JS exception classes Node attaches to an `e.code` payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,9 +20,8 @@ pub enum NodeErrorClass {
 }
 
 /// Look up the exception class for a Node error code. Default is
-/// `Error`. Per §VII.3a — verified against `lib/internal/errors.js`
-/// and `src/node_errors.h` from upstream Node (see provenance column
-/// in the design doc).
+/// `Error`. Class assignments are verified against upstream Node's
+/// `lib/internal/errors.js` and `src/node_errors.h`.
 pub const fn class_for(code: &str) -> NodeErrorClass {
     match code.as_bytes() {
         // -- TypeError class (per upstream errors.js / node_errors.h) --

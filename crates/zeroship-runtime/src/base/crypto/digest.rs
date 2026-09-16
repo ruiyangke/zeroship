@@ -1,12 +1,10 @@
 //! Streaming + one-shot digest contexts.
 //!
-//! See `docs/archive/node-crypto-native.md` §I.5. The kernel's
-//! `DigestContext` wraps `aws_lc_rs::digest::Context`
+//! The kernel's `DigestContext` wraps `aws_lc_rs::digest::Context`
 //! incrementally; the one-shot helper is what WebCrypto's
-//! `subtle.digest()` calls. Stage A: SHA-1/256/384/512 (the four
+//! `subtle.digest()` calls. Supports SHA-1/256/384/512 (the four
 //! hashes in WebCrypto), plus the broader Node hash family
 //! (SHA-224, SHA-512/256, SHA-3-256/384/512) for `createHash()`.
-//! MD5 + SHA-512/224 ship via FFI under §III.2a in a follow-up.
 
 #![allow(dead_code)]
 
@@ -14,10 +12,10 @@ use super::error::KernelError;
 use aws_lc_rs::digest as lc_digest;
 
 /// All hash algorithms node:crypto exposes via `createHash` that we
-/// support natively in Stage B (no FFI required).
+/// support natively (no FFI required).
 ///
-/// MD5 + SHA-512/224 are in the design for Stage B but require
-/// aws-lc-sys raw FFI per §III.2a; not yet wired here.
+/// MD5 + SHA-512/224 require aws-lc-sys raw FFI and are not wired
+/// here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum KernelHashAlgo {
     Sha1,
@@ -97,9 +95,8 @@ impl KernelHashAlgo {
 
 /// Static list of every algorithm name `getHashes()` returns. Includes
 /// the canonical Node-style spellings that npm packages pass to
-/// `createHash`. Per the design doc §IX.1 (algorithm registry). The
-/// caller can layer aliases (e.g. "sha-256") on top by passing
-/// through `KernelHashAlgo::from_str`.
+/// `createHash`. The caller can layer aliases (e.g. "sha-256") on top
+/// by passing through `KernelHashAlgo::from_str`.
 pub const HASH_NAMES: &[&str] = &[
     "sha1",
     "sha224",
@@ -150,8 +147,8 @@ impl DigestContext {
         }
         self.finalised = true;
         // aws_lc_rs::digest::Context::finish consumes self. We hold a
-        // mutable ref, so clone the in-progress state first (mirror's
-        // workerd's pattern). The clone cost is negligible (~50 ns).
+        // mutable ref, so clone the in-progress state first (mirrors
+        // workerd's pattern). The clone cost is negligible.
         let snapshot = self.inner.clone();
         Ok(snapshot.finish().as_ref().to_vec())
     }

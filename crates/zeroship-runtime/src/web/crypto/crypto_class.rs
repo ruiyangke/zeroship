@@ -1,5 +1,5 @@
 //! `Crypto` (the global `crypto`) — `getRandomValues`, `randomUUID`,
-//! `subtle` getter. Per `docs/archive/webcrypto-native.md` §II.
+//! `subtle` getter.
 
 #![allow(unsafe_code)]
 
@@ -89,7 +89,7 @@ impl Crypto {
             buf[p] = HEX[(byte & 0x0f) as usize];
             p += 1;
         }
-        // SAFETY: buf is ASCII (hex digits + hyphens). (Critic #34.)
+        // SAFETY: buf is ASCII (hex digits + hyphens).
         unsafe { String::from_utf8_unchecked(buf.to_vec()) }
     }
 
@@ -153,9 +153,9 @@ pub fn install_global<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     global: v8::Local<v8::Object>,
 ) {
-    // The `subtle` getter is now wired via `#[v8_getter(same_object)]`
+    // The `subtle` getter is wired via `#[v8_getter(same_object)]`
     // on the impl block — the macro emits a private-symbol-cached
-    // accessor, so we no longer need a hand-rolled callback here.
+    // accessor.
     let tmpl = Crypto::install(scope);
 
     let class_fn = tmpl.get_function(scope).unwrap();

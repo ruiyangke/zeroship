@@ -1,10 +1,9 @@
 //! `KernelError` — the kernel's surface-agnostic error enum.
 //!
-//! See `docs/archive/node-crypto-native.md` §VII. The kernel returns
-//! these; the surface adapter maps them to `OpError::dom(...)`
-//! (WebCrypto) or `OpError::node(...)` (node:crypto). The kernel can't
-//! decide that itself; only the surface knows which exception flavour
-//! the spec asks for.
+//! The kernel returns these; the surface adapter maps them to
+//! `OpError::dom(...)` (WebCrypto) or `OpError::node(...)`
+//! (node:crypto). The kernel can't decide that itself; only the
+//! surface knows which exception flavour the spec asks for.
 
 /// Kernel-side error flavours. One variant per "thing went wrong"
 /// category; the surface adapter maps to JS spec error names.
