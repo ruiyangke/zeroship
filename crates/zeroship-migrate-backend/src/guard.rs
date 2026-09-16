@@ -24,14 +24,12 @@
 //! reports in the same vocabulary, so the seam is genuinely neutral and belongs below
 //! every vendor.
 //!
-//! [`check_ir_data_security_policy`] lives here too, and getting it here is what
-//! dissolved the old `zero-migrate-guard` crate. The obstacle was real and is worth
-//! recording, because the shape recurs:
+//! [`check_ir_data_security_policy`] lives here too, and placing it neutrally
+//! had one real obstacle, worth recording because the shape recurs:
 //!
-//! - It is the ONLY `destructive_ops = forbid` enforcement SQLite and MySQL have. Its
-//!   gate is literally `if cfg.dialect() != &POSTGRES`, because the descriptor guard
-//!   those two dialects run is constructed without the policy and cannot read the
-//!   knob at all.
+//! - It is the ONLY `destructive_ops = forbid` enforcement SQLite and MySQL have,
+//!   because the descriptor guard those two dialects run is constructed without
+//!   the policy and cannot read the knob at all.
 //! - Yet it reached `pg_query::parse` for `Op::Raw` islands, because a raw island's
 //!   net table state is not enumerable without a parser.
 //!
@@ -58,12 +56,12 @@
 //! trusting one. Trusting the input is still allowed, but only by WRITING
 //! `Ok(GuardOutcome::default())`, which is a decision a reviewer can see in the diff.
 //!
-//! This is what replaces the old `guard_for(cfg) -> Box<dyn MigrationGuard>` dispatch,
-//! whose closed three-way match handed BOTH descriptor-only dialects one shared
-//! one shared descriptor-only guard type. That match was exhaustive, so a fourth dialect broke it -
-//! but a `_ =>` arm added in haste would have granted every future backend the
-//! trusting path silently. The required field removes the arm the mistake could be
-//! made in. `BackendVendor` therefore derives no `Default`, has no `Default` impl, is
+//! The required field is what makes that hold: there is no closed dialect match
+//! handing several vendors one shared guard type. A closed match would be
+//! exhaustive, so a fourth dialect breaks it - but a `_ =>` arm added in haste
+//! would grant every future backend the trusting path silently. The required
+//! field removes the arm the mistake could be made in. `BackendVendor` therefore
+//! derives no `Default`, has no `Default` impl, is
 //! not `#[non_exhaustive]`, and its `guard` field is not an `Option` - each of those
 //! would reintroduce exactly the silent grant of trust this removes.
 
@@ -231,12 +229,6 @@ impl GuardConfig {
     }
 
     /// Select a target dialect without changing the caller-composed policy.
-    ///
-    /// This used to double as a fail-safe: it compared the incoming id against
-    /// PostgreSQL's and reset any host-selected belt-off mode to `Enforced` for every
-    /// other id, so that a posture built for the one backend with a parser could not
-    /// follow a config onto a backend with no belt to skip. There is no belt-off mode
-    /// to reset now, and the comparison went with it.
     #[must_use]
     pub fn for_dialect(mut self, dialect: DialectId) -> Self {
         self.dialect = dialect;
@@ -369,13 +361,12 @@ impl GuardConfig {
     ///
     /// # There is deliberately no scalar "holds the extension capability" beside this
     ///
-    /// There used to be one, reading only whether this list was non-empty, and the
-    /// drop side of the guard asked it instead of asking about a name. `code.extension`
-    /// is the one capability knob whose value is a SET OF NAMES rather than a Bool, so
-    /// collapsing it to "non-empty" throws away the entire grant: a charter permitting
-    /// one extension answered yes for every other extension in the database. Any
-    /// caller deciding a statement has a name in hand and must match it against this
-    /// list; a caller that has no name has no question this can answer.
+    /// `code.extension` is the one capability knob whose value is a SET OF NAMES
+    /// rather than a Bool, so a scalar "is the list non-empty" check throws away
+    /// the entire grant: a charter permitting one extension would answer yes for
+    /// every other extension in the database. Any caller deciding a statement has
+    /// a name in hand and must match it against this list; a caller that has no
+    /// name has no question this can answer.
     pub fn granted_extension_allowlist(&self) -> Vec<String> {
         let Some(k) = KnobKey::parse(policy_registry::KEY_CODE_EXTENSION).ok() else {
             return Vec::new();
@@ -547,17 +538,16 @@ impl GuardConfig {
     }
 }
 
-/// T8 - the EXTERNAL trust boundary, pinned as `compile_fail` doctests. A doctest
+/// The EXTERNAL trust boundary, pinned as `compile_fail` doctests. A doctest
 /// is compiled as a SEPARATE crate that `use`s `zeroship_migrate_backend`, so it
 /// exercises exactly the boundary an external consumer of this crate sits behind.
 ///
 /// KEEP THE FIELD LISTS BELOW EXACT. A `compile_fail` doctest passes when the code
 /// fails to compile for ANY reason, so a literal naming a field that no longer
-/// exists passes on the typo and stops testing privacy at all. Both of these did
-/// exactly that until the lists were corrected: they would have passed unchanged
-/// with every field made `pub`. When a field is added or renamed, update these and
-/// re-check them the only way that means anything - make the fields `pub`, confirm
-/// the doctests FAIL, then put the visibility back.
+/// exists passes on the typo and stops testing privacy at all. When a field is
+/// added or renamed, update these and re-check them the only way that means
+/// anything - make the fields `pub`, confirm the doctests FAIL, then put the
+/// visibility back.
 ///
 /// (1) An external crate cannot write a `GuardConfig { .. }` struct literal - the
 /// fields (`dialect`, `effective`, `project_schema`) are private, so a privileged
@@ -700,8 +690,7 @@ pub struct GuardOutcome {
 /// - **`SQLite`** and **`MySQL`** - the descriptor-diff path is trusted by
 ///   construction (validated at the author boundary, line-2 enforced by the backend's
 ///   runtime authorizer at apply), so `check` returns the **empty/clean** outcome.
-///   Each vendor writes its OWN trusting impl; they no longer share one type named
-///   after only one of them.
+///   Each vendor writes its OWN trusting impl rather than sharing one type.
 /// - A future non-PostgreSQL engine brings its own parser/allowlist impl. It has to
 ///   bring SOMETHING: this method has no default body, so a vendor cannot inherit a
 ///   trusting guard by omission.
@@ -778,20 +767,18 @@ pub trait MigrationGuard {
     /// second, EARLIER denial and change a refusal existing assertions pin, for no
     /// behavioural gain. For a guard that does NOT read it, the neutral walk is the
     /// only enforcement that knob has: a guard constructed without the policy cannot
-    /// see it at all, and before the walk existed the posture was silently inert -
-    /// a `DROP TABLE` applied under the default `forbid` while the policy registry
-    /// classified the knob as enforced.
+    /// see it at all.
     ///
     /// So `false` is the SAFE answer and it is the one a guard should give unless it
     /// can point at where it refuses. Required with no default body, like every other
     /// method here, so a new backend cannot acquire `true` by omission.
     ///
-    /// # It replaced a vendor comparison, and that is the point
+    /// # The guard answers, not a vendor comparison
     ///
-    /// The walk's gate was literally `if cfg.dialect() != &POSTGRES` - core deciding a
-    /// SECURITY posture by naming one vendor, and a fourth backend inheriting the
+    /// Core must not decide a SECURITY posture by naming one vendor: a gate like
+    /// `if cfg.dialect() != &POSTGRES` would have a fourth backend inherit the
     /// answer from not being that vendor rather than from anything about its guard.
-    /// This module's own header states the general move it now follows: when neutral
+    /// This module's own header states the general move: when neutral
     /// code seems to need a vendor's tool, find the single question it is using the
     /// tool to answer and make THAT the vendor's method.
     fn refuses_destructive_ops_itself(&self) -> bool;
@@ -935,32 +922,27 @@ pub fn check_ir_data_security_policy(
     // A guard that reads the same knob in its own text guard and refuses there is
     // skipped, because a second, earlier denial would change a refusal that existing
     // assertions pin, for no behavioural gain. A guard constructed WITHOUT the policy
-    // cannot read the knob at all, and for those this walk is the only enforcement it
-    // has: before the walk existed the posture was silently inert on both such
-    // backends - a `DROP TABLE` applied under the default `forbid`, while the registry
-    // classified the knob `Enforcement::Enforced` ("a guard, executor or validator
-    // path reads them and they do what they say"). `Enforcement` has no dialect
-    // dimension, so the load-time refusal that protects `DeclaredOnly` knobs could
-    // not fire either.
+    // cannot read the knob at all, and for those this walk is the only enforcement
+    // the posture has.
     //
     // WHICH of the two a guard is is the GUARD's answer
-    // ([`MigrationGuard::refuses_destructive_ops_itself`]), not a dialect comparison.
-    // The gate here was `cfg.dialect() != &POSTGRES` - core deciding a security
-    // posture by naming a vendor.
+    // ([`MigrationGuard::refuses_destructive_ops_itself`]), not a dialect comparison:
+    // core must not decide a security posture by naming a vendor.
     //
     // `policy_ops` is used rather than `ir.ops` so a `Dialectal` op is judged by
     // the leg THIS dialect will actually run.
     // NOT `Op::is_destructive` on its own. That is the APPROVAL notion, and it is
     // wider on purpose: `safety.require_approval = on_destructive` reasonably wants
     // a human to look at row-affecting DML. The POSTURE must match what PostgreSQL
-    // actually denies, which was measured rather than read off the classifier -
-    // `destructive_update_operation` returns `Some("UPDATE")` unconditionally, yet
-    // PostgreSQL applies a bounded `update` under the default `forbid`, because DML
-    // lowers to a bound `PlanStep::Dml` that the SQL-text guard never inspects.
+    // actually denies, which is observed server behavior rather than the
+    // classifier's answer - `destructive_update_operation` returns
+    // `Some("UPDATE")` unconditionally, yet PostgreSQL applies a bounded `update`
+    // under the default `forbid`, because DML lowers to a bound `PlanStep::Dml`
+    // that the SQL-text guard never inspects.
     //
-    // Enforcing the wider notion here made MySQL and SQLite STRICTER than
-    // PostgreSQL - an `update` that PostgreSQL applies was refused - which is a
-    // regression, not parity. Row DML is therefore excluded, leaving the
+    // Enforcing the wider notion here would make MySQL and SQLite STRICTER than
+    // PostgreSQL - an `update` that PostgreSQL applies would be refused - which
+    // is a regression, not parity. Row DML is therefore excluded, leaving the
     // object-drop and lossy-DDL family that PostgreSQL's guard does deny.
     //
     // `Raw` is excluded because it cannot reach a guard that answers `false` above:

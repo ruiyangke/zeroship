@@ -1,20 +1,14 @@
-//! **The differential corpus.** The falsifiability floor under
-//! `docs/proposals/single-fold-and-effects.md`.
+//! **The differential corpus.** The falsifiability floor under the single fold.
 //!
 //! One op stream is replayed through all four independent answers -
 //! [`fold_ops`], the wire `FieldDef` map, the authoring tables and the runtime
 //! collection metadata - and what each one produces is recorded.
 //!
-//! TWO of the four no longer have a private walker behind them. The runtime metadata
-//! and the authoring tables each had one of their own in `super`; both walkers are
-//! deleted and their entry points
-//! are now
+//! The runtime metadata and the authoring tables answers come from
 //! `FoldedSchema::project_runtime_metadata` and
-//! `FoldedSchema::project_authoring_tables`. So this corpus keeps cross-checking the
-//! same four QUESTIONS, two of them against a different producer. It fixes nothing. It
-//! makes every later move of that proposal falsifiable, and it turns into a suite the
-//! comparison the review log has been running BY HAND for every row of the proposal's
-//! section B.
+//! `FoldedSchema::project_authoring_tables`. So this corpus cross-checks four
+//! QUESTIONS, not four implementations. It fixes nothing; it makes every later
+//! move falsifiable.
 //!
 //! **This records CURRENT behaviour, and current behaviour includes shipped
 //! defects.** A corpus that only says "the walkers still do what they did" is a
@@ -26,7 +20,7 @@
 //!   With [`Status::Consistent`] this is safe to lock in.
 //! - [`Verdict::Divergent`] - they disagree. Each walker's actual answer is
 //!   listed, and the row is either [`Status::ByDesign`] with a stated reason or
-//!   [`Status::Defect`] with a `docs/review-log.md` pointer. A `Defect` row says
+//!   [`Status::Defect`] with its evidence. A `Defect` row says
 //!   THIS IS WHAT HAPPENS TODAY AND IT IS WRONG; the single fold must not be
 //!   held to it.
 //! - [`Verdict::Sole`] / [`Verdict::NoAuthority`] - fewer than two walkers can
@@ -37,25 +31,20 @@
 //!
 //! `Status::Defect` is also reachable from an AGREED verdict, because all four
 //! walkers agreeing does not make them right: the encrypted-domain sentinel
-//! (`docs/review-log.md:29590-29606`) was a case where two producers agreed and
-//! were both wrong, and the reviewer's "disagreement" was a scaffold artifact.
+//! case had two producers agree and both be wrong.
 //!
 //! # What is measured, and what is not
 //!
 //! Part 1 is a REACH matrix: for every `Op` variant and every dialect, whether
 //! appending that op moved each walker's answer, measured by prefix sweep over
-//! the whole corpus. It is a behavioural measurement, not an arm count. Section
-//! A of the proposal counted `match` arms and reported that each of
-//! the runtime-metadata and authoring-table walkers handled a small
-//! fraction of the `Op` variants; [`REACH`] is the measured answer to the same
-//! question, and where the two differ the measurement wins. Both of those arm counts
-//! are now HISTORICAL: the two answers come from `AuthoredState::advance`, whose match
-//! is exhaustive over every variant, so their columns of [`REACH`] moved when the walkers
-//! went - upward where the exhaustive traversal interprets an op the walker
-//! swallowed, and to `refused` where the fold fails closed and the walker did not.
+//! the whole corpus. It is a behavioural measurement, not an arm count. The
+//! runtime-metadata and authoring-table answers come from
+//! `AuthoredState::advance`, whose match is exhaustive over every variant, so
+//! their columns of [`REACH`] read `R` where the exhaustive traversal interprets
+//! an op, and `refused` where the fold fails closed.
 //!
-//! Part 2 is the differential cases: one stream per divergence the review log
-//! recorded, plus the multi-op shapes that only misbehave in sequence, each
+//! Part 2 is the differential cases: one stream per recorded divergence, plus
+//! the multi-op shapes that only misbehave in sequence, each
 //! asked a small set of questions the four vocabularies can all answer.
 //!
 //! **Deliberately not asked: "what type is this column".** `ColumnSnapshot`
@@ -64,8 +53,7 @@
 //! written here would be a FIFTH interpreter of what an op means, which is the
 //! thing this corpus exists to stop growing. The questions that survive
 //! translation are which objects a walker names, and whether a stated fact
-//! still appears in what it says about them - which is exactly what the log
-//! compared by hand.
+//! still appears in what it says about them.
 //!
 //! # Where this lives, and why
 //!
@@ -75,8 +63,7 @@
 //! This module is `cfg(test)` and ships in nothing.
 //!
 //! Offline throughout. These are fold and replay functions; no database is
-//! opened, so there is no skip that could read as a pass. Runtime is under two
-//! seconds for the whole sweep.
+//! opened, so there is no skip that could read as a pass.
 //!
 //! # Blessing
 //!
@@ -147,7 +134,7 @@ pub(super) fn read_golden(stem: &str) -> MigrationIr {
 
 /// The recorded op fixtures, reused rather than re-authored. These are real
 /// drained envelopes, already policy-resolved, and between them they construct
-/// every one of the 56 `Op` variants - so the reach matrix is measured against
+/// every `Op` variant - so the reach matrix is measured against
 /// production-shaped streams and not only against streams written to please it.
 /// The list is the same one `crates/zeroship-migrate/tests/ir_contract/op_fixture_goldens.rs` owns.
 pub(super) const STEMS: [&str; 27] = [
@@ -314,12 +301,10 @@ pub(super) const STREAMS: &[Stream] = &[
 /// plus the multi-op shapes that only misbehave in sequence.
 pub(super) const CASES: &[Stream] = &[
     Stream {
-        // Section B rows 7 and 8 in one stream: a table that exists ONLY inside
-        // an `Op::Dialectal` leg, whose PostgreSQL leg alone declares a runtime
-        // option and a plain index. Row 7 (docs/review-log.md:18536-18539) was
-        // the runtime-metadata walker not descending into the leg; row 8
-        // (docs/review-log.md:2931-2942) was two artifact walkers hard-coding
-        // Postgres regardless of target.
+        // A table that exists ONLY inside an `Op::Dialectal` leg, whose
+        // PostgreSQL leg alone declares a runtime option and a plain index:
+        // the runtime-metadata answer must descend into the selected leg, and
+        // leg selection must follow the target rather than hard-code Postgres.
         name: "c_dialectal_leg_selection",
         ops: r#"[
   {"op":"dialectal","legs":{"postgres":[{"op":"createTable","name":"docs","columns":[{"name":"id","type":"text","nullable":false},{"name":"postgres_leg","type":"text"}],"primaryKey":["id"],"runtimeOptions":{"softDelete":true,"versioning":false},"indexes":[{"name":"docs_pg_idx","columns":[{"kind":"column","name":"postgres_leg"}]}]}],"sqlite":[{"op":"createTable","name":"docs","columns":[{"name":"id","type":"text","nullable":false},{"name":"embedded_leg","type":"text"}],"primaryKey":["id"]}],"mysql":[{"op":"createTable","name":"docs","columns":[{"name":"id","type":"text","nullable":false},{"name":"mysql_leg","type":"text"}],"primaryKey":["id"]}]}}
@@ -1177,12 +1162,11 @@ enum Status {
     /// records WHAT HAPPENS TODAY AND IT IS WRONG. It is not a specification,
     /// and the single fold must NOT be held to it.
     ///
-    /// Currently UNCONSTRUCTED: the rename carrier sweep re-measured the last
-    /// three defect rows to `AGREED`. The variant stays because the corpus's
+    /// Currently UNCONSTRUCTED. The variant stays because the corpus's
     /// job is to have somewhere honest to put the next one - deleting the
     /// vocabulary the moment the count reaches zero is how a corpus stops being
     /// able to record bad news. `the_corpus_has_the_shape_it_claims` counts it,
-    /// and the module header's rule still governs how one is written: a defect
+    /// and the module header's rule governs how one is written: a defect
     /// row carries its own evidence, not an inherited verdict.
     #[expect(
         dead_code,
@@ -1215,8 +1199,8 @@ const PK_IS_AN_INDEX_ONLY_IN_A_CATALOG: &str =
      constraint and not an index";
 
 /// The three walkers that can describe a column say three different true things
-/// about a named type, each in its own vocabulary. `docs/review-log.md:29149-29156`
-/// tabulates exactly this and calls the three-way spread correct.
+/// about a named type, each in its own vocabulary, and the three-way spread is
+/// correct.
 const A_NAMED_TYPE_HAS_THREE_TRUE_SPELLINGS: &str =
     "the three column-describing answers speak three vocabularies about a named \
      type: fold_ops reports the STORAGE the dialect gives it, the authoring tables \
@@ -1232,67 +1216,28 @@ const A_TEXT_PROBE_CANNOT_SEE_AN_EMPTY_VOCABULARY: &str =
      carries only plain indexes, so their 'no' is the absence of a vocabulary \
      rather than a contradiction; the two answers that DO name constraints agree";
 
-// EVERY ANSWER IN THIS CORPUS NOW FAILS CLOSED, and THIRTEEN rows changed shape
-// because of it. Recorded here because the three constants that named those rows are
-// gone with them, and a reader diffing this file deserves to know why rather than
-// finding thirteen verdicts silently rewritten.
+// EVERY ANSWER IN THIS CORPUS NOW FAILS CLOSED. The rows that read
+// `AGREED refused` / `Consistent` are streams the structural catalog replay
+// refuses: the authoring-table and runtime-metadata answers are projections of
+// the fold, and the fold fails closed.
 //
-// The rows read `AGREED refused` / `Consistent` where they used to read
-// `DIVERGENT FO=refused FFD=refused ATO={...} RMO=refused` under one of:
+// BE HONEST ABOUT WHAT THIS COSTS. An `AGREED refused` row cross-checks NOTHING
+// about content - four refusals agreeing is four walkers declining to answer.
+// What the corpus keeps for those streams is the refusal itself, which is the
+// answer `render_artifacts` acts on: it returns the fold's error and emits
+// NEITHER file for exactly these streams, so no artifact consumes a refused
+// stream's answer.
 //
-//   ONLY_THE_FOLD_BACKED_WALKERS_FAIL_CLOSED (3 rows)
-//     -- c_retype_of_a_value_format_column|{Postgres,Sqlite,Mysql}|tables
-//   PG_ONLY_TABLE_LEVEL_CHECK (8 rows)
-//     -- c_rename_column_inline_check_body|{Sqlite,Mysql}|{columns(issues),carries(state_token)}
-//     -- c_drop_column_cascade_dialectal_expr|{Sqlite,Mysql}|{columns(legs),carries(legs_leg_ck)}
-//   MYSQL_HAS_NO_EXPRESSION_OR_PARTIAL_INDEX (2 rows)
-//     -- c_rename_column_index_expression|Mysql|carries(legacy_qty)
-//     -- c_rename_column_index_include_and_predicate|Mysql|carries(legacy_qty)
+// The rendered-SQL rename carriers are rewritten, not left stale: a table-level
+// CHECK's `ConstraintSnapshot::definition`, `IndexElementSnapshot::Expr` and
+// `IndexSnapshot::predicate` all follow a column rename. The objection that
+// kept them stale - substituting a column name inside rendered SQL could
+// corrupt a string literal spelling the same word
+// (`WHERE (note <> 'a')` becoming `WHERE (note <> 'b')`) - is structurally
+// unreachable: `render::declarative::rename_quoted_column_in_sql`
+// walks the fragment as QUOTED RUNS, so a literal is copied through whole.
 //
-// The mechanism is one line: the authoring-table walker applied no coherence gate
-// and answered about streams the structural catalog replay refuses; it is deleted, and
-// `FoldedSchema::project_authoring_tables` reads a fold that fails closed. The runtime
-// metadata made the same move earlier, which is what turned those rows' `RMO=` cells
-// into `refused`.
-//
-// BE HONEST ABOUT WHAT THIS COST. An `AGREED refused` row cross-checks NOTHING about
-// content - four refusals agreeing is four walkers declining to answer, and the ATO
-// answer these rows used to carry was the only content evidence the corpus had on
-// those streams off PostgreSQL. That evidence is gone.
-//
-// It was evidence about an answer no artifact ever used. `render_artifacts` returned
-// the fold's error and emitted NEITHER file for exactly these streams, both before
-// and after; the walker's answer was reachable only from this corpus. So the corpus
-// lost a measurement of dead output, not of shipped behaviour - which is a real loss
-// of cross-check and a defensible one, and both halves are stated so the next reader
-// can disagree with the second half.
-// THE THREE RENDERED-SQL RENAME CARRIERS THIS CORPUS FOUND ARE NOW CLOSED, and
-// their rows below read `AGREED no` / `Consistent` rather than
-// `DIVERGENT FO=yes` / `Defect`. Recorded here because the constants that named
-// them are gone and a reader diffing this file deserves to know why.
-//
-//   c_rename_column_inline_check_body|Postgres|carries(state_token)
-//     -- a table-level CHECK's `ConstraintSnapshot::definition`. This corpus
-//        found it; `docs/review-log.md:6837-6847` had listed four carriers and
-//        this was a fifth of the same kind, and the field IS compared by
-//        `ConstraintSnapshot`'s hand-written `PartialEq`.
-//   c_rename_column_index_expression|{Postgres,Sqlite}|carries(legacy_qty)
-//     -- `IndexElementSnapshot::Expr`, one of that list's four.
-//   c_rename_column_index_include_and_predicate|{Postgres,Sqlite}|carries(legacy_qty)
-//     -- `IndexSnapshot::predicate`, another of them.
-//
-// What changed is the TOOL, not the appetite for risk. Every one of them was
-// left stale on the stated grounds that substituting a column name inside
-// rendered SQL would corrupt a string literal spelling the same word
-// (`WHERE (note <> 'a')` becoming `WHERE (note <> 'b')`). That reason outlived
-// the objection it answered: `render::declarative::rename_quoted_column_in_sql`
-// walks the fragment as QUOTED RUNS, so a literal is copied through whole and
-// the trap is structurally unreachable. It was written for `inline_checks` and
-// nobody went back to the three siblings it also solved - which is the F113
-// pattern (fixing one instance suppresses the search for its class) with the
-// tool, rather than the fix, as the thing not carried across.
-//
-// Measured end to end against live PostgreSQL 18.4 and real SQLite by
+// Pinned end to end against live PostgreSQL and real SQLite by
 // `rename_carrier_sweep_pg` / `rename_carrier_sweep_sqlite`, which also pin the
 // literal's SURVIVAL - a rewrite that corrupts it is worse than the staleness.
 
@@ -1309,12 +1254,11 @@ const A_VIEW_HAS_ONE_AUTHORITY: &str =
 // separate lines and make a moved verdict look like four changes.
 #[rustfmt::skip]
 const ROWS: &[Row] = &[
-    // --- Op::Dialectal, section B rows 7 and 8 ------------------------------
+    // --- Op::Dialectal leg selection ---------------------------------------
     //
-    // Both FIXED. Leg selection now follows the target on every walker (row 8,
-    // docs/review-log.md:2931-2942), and the PostgreSQL leg's runtime option and
-    // plain index reach the runtime-metadata answer (row 7,
-    // docs/review-log.md:18536-18539) -- which is what the `indexes(docs)` row
+    // Leg selection follows the target on every walker, and the PostgreSQL
+    // leg's runtime option and plain index reach the runtime-metadata answer --
+    // which is what the `indexes(docs)` row
     // shows on Postgres and does not show on the other two.
     Row { key: "c_dialectal_leg_selection|Postgres|columns(docs)", verdict: "AGREED {id,postgres_leg}", status: Status::Consistent },
     Row { key: "c_dialectal_leg_selection|Sqlite|columns(docs)", verdict: "AGREED {embedded_leg,id}", status: Status::Consistent },
@@ -1334,10 +1278,10 @@ const ROWS: &[Row] = &[
     Row { key: "c_view_is_seen_by_one_walker|Sqlite|views", verdict: "SOLE FO={active_people}", status: Status::Uncorroborated(A_VIEW_HAS_ONE_AUTHORITY) },
     Row { key: "c_view_is_seen_by_one_walker|Mysql|views", verdict: "SOLE FO={active_people}", status: Status::Uncorroborated(A_VIEW_HAS_ONE_AUTHORITY) },
 
-    // --- the shipped section B divergences, re-measured ---------------------
+    // --- the recorded divergences, now agreeing ------------------------------
     //
-    // Row 1 of section B (`renameColumn` + generated expression,
-    // docs/review-log.md:26342-26360): FIXED, and it reproduces as agreement.
+    // `renameColumn` + a generated expression: the rename is followed into the
+    // expression, and it reproduces as agreement.
     Row { key: "c_rename_column_generated_expr|Postgres|columns(line_items)", verdict: "AGREED {id,quantity,total_cents}", status: Status::Consistent },
     Row { key: "c_rename_column_generated_expr|Sqlite|columns(line_items)", verdict: "AGREED {id,quantity,total_cents}", status: Status::Consistent },
     Row { key: "c_rename_column_generated_expr|Mysql|columns(line_items)", verdict: "AGREED {id,quantity,total_cents}", status: Status::Consistent },
@@ -1345,9 +1289,8 @@ const ROWS: &[Row] = &[
     Row { key: "c_rename_column_generated_expr|Sqlite|carries(qty_on_hand)", verdict: "AGREED no", status: Status::Consistent },
     Row { key: "c_rename_column_generated_expr|Mysql|carries(qty_on_hand)", verdict: "AGREED no", status: Status::Consistent },
 
-    // Row 2 (`renameTable` inside a generated expression,
-    // docs/review-log.md:26370-26374, the row where ONE renderArtifacts call
-    // produced THREE answers): FIXED, and it reproduces as agreement.
+    // `renameTable` inside a generated expression: the rename is followed into
+    // the expression, and it reproduces as agreement.
     Row { key: "c_rename_table_in_generated_expr|Postgres|tables", verdict: "AGREED {line_items}", status: Status::Consistent },
     Row { key: "c_rename_table_in_generated_expr|Sqlite|tables", verdict: "AGREED {line_items}", status: Status::Consistent },
     Row { key: "c_rename_table_in_generated_expr|Mysql|tables", verdict: "AGREED {line_items}", status: Status::Consistent },
@@ -1355,21 +1298,16 @@ const ROWS: &[Row] = &[
     Row { key: "c_rename_table_in_generated_expr|Sqlite|carries(order_lines)", verdict: "AGREED no", status: Status::Consistent },
     Row { key: "c_rename_table_in_generated_expr|Mysql|carries(order_lines)", verdict: "AGREED no", status: Status::Consistent },
 
-    // Rows 3 and 6 (`setColumnType` facet residue, docs/review-log.md:26375-26382
-    // and 26717-26733): FIXED on all three dialects.
+    // `setColumnType` facet residue: cleared on all three dialects.
     Row { key: "c_retype_drops_case_sensitivity|Postgres|column_carries(labels.tag ~ case_sensitive: Some(|\"caseSensitive\")", verdict: "AGREED no", status: Status::Consistent },
     Row { key: "c_retype_drops_case_sensitivity|Sqlite|column_carries(labels.tag ~ case_sensitive: Some(|\"caseSensitive\")", verdict: "AGREED no", status: Status::Consistent },
     Row { key: "c_retype_drops_case_sensitivity|Mysql|column_carries(labels.tag ~ case_sensitive: Some(|\"caseSensitive\")", verdict: "AGREED no", status: Status::Consistent },
 
-    // Row 4 (`setColumnType` losing a parameter going in and keeping it coming
-    // out, docs/review-log.md:26632-26654): FIXED on Postgres and SQLite when that
-    // row shipped, and FIXED on MySQL afterwards - the MySQL half rode on that
-    // backend's parsed physical contract, which that row never looked at, and the fold
-    // now re-derives the contract from the column the replay finished with rather than
-    // from the type it briefly had. (The contract was a named field on the neutral
-    // snapshot then; it is a `ColumnSnapshot::vendor` leg owned by `zeroship-migrate-mysql`
-    // now.) The three walkers needed no matching change:
-    // FFD and ATO already answered `no` here, and only FO was wrong.
+    // `setColumnType` losing a parameter going in and keeping it coming
+    // out: the fold re-derives MySQL's parsed physical contract from the column
+    // the replay finished with rather than
+    // from the type it briefly had. (The contract is a `ColumnSnapshot::vendor`
+    // leg owned by `zeroship-migrate-mysql`.)
     Row { key: "c_retype_type_parameters|Postgres|column_carries(shapes.narrow ~ 24)", verdict: "AGREED no", status: Status::Consistent },
     Row { key: "c_retype_type_parameters|Sqlite|column_carries(shapes.narrow ~ 24)", verdict: "AGREED no", status: Status::Consistent },
     Row { key: "c_retype_type_parameters|Mysql|column_carries(shapes.narrow ~ 24)", verdict: "AGREED no", status: Status::Consistent },
@@ -1380,12 +1318,9 @@ const ROWS: &[Row] = &[
     Row { key: "c_retype_type_parameters|Sqlite|column_carries(shapes.embedding ~ 3)", verdict: "AGREED no", status: Status::Consistent },
     Row { key: "c_retype_type_parameters|Mysql|column_carries(shapes.embedding ~ 3)", verdict: "AGREED no", status: Status::Consistent },
 
-    // Row 5 (`setColumnType` on a `value_format` column,
-    // docs/review-log.md:26663-26715): the verdict there was REFUSE, and the two
-    // fold-backed walkers now do. The other two do not, which is what this row
-    // is really recording.
-    // ALL FOUR REFUSE. See EVERY_ANSWER_NOW_FAILS_CLOSED above `ROWS` for what an
-    // `AGREED refused` row is worth and what it stopped being worth.
+    // `setColumnType` on a `value_format` column: REFUSED by all four answers.
+    // See EVERY_ANSWER_NOW_FAILS_CLOSED above `ROWS` for what an
+    // `AGREED refused` row is worth.
     Row { key: "c_retype_of_a_value_format_column|Postgres|tables", verdict: "AGREED refused", status: Status::Consistent },
     Row { key: "c_retype_of_a_value_format_column|Sqlite|tables", verdict: "AGREED refused", status: Status::Consistent },
     Row { key: "c_retype_of_a_value_format_column|Mysql|tables", verdict: "AGREED refused", status: Status::Consistent },
