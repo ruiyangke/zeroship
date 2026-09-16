@@ -150,7 +150,10 @@ export function workflowSchema(namespace) {
     fk("run_parent", ["app_id", "parent_id"], "runs", ["app_id", "id"]),
     fk("run_schedule", ["app_id", "schedule_id"], "schedules", ["app_id", "id"]),
   ], [{ name: "live_workflow_key", columns: ["app_id", "workflow_name", "key"] }]);
-  index("runs", "due", ["due_at", "app_id", "id"]);
+  // The manager delivers work per app, so polling range-scans one app's due
+  // frontier in run identity order. One schema holds many apps; app identity
+  // leads every journal index.
+  index("runs", "due", ["app_id", "due_at", "id"]);
   // Cascade propagation pages range-scan one generation's cascading children
   // in run identity order.
   index("runs", "parent", ["app_id", "parent_id", "parent_generation", "cascade", "id"]);
@@ -314,7 +317,6 @@ export function workflowSchema(namespace) {
     fk("payload_task", ["app_id", "run_id", "generation", "task_id"], "tasks", ["app_id", "run_id", "generation", "id"]),
   ]);
   table("payloads", { schema: namespace }).index(owned("payload_upload_request")).add({ on: ["app_id", "task_id", "request_id"], unique: true });
-  index("payloads", "expiry", ["state", "expires_at"]);
   create("payload_refs", {
     ...generation(), slot: text(), ordinal: integer(), payload_id: text(),
   }, ["app_id", "run_id", "generation", "slot", "ordinal"], [
@@ -324,7 +326,6 @@ export function workflowSchema(namespace) {
   create("outbox", {
     ...identity(), id: text(), kind: text(), payload: text(), created_at: integer(), delivered_at: t.bigInt(),
   }, ["app_id", "id"], [appFk("outbox")]);
-  index("outbox", "delivery", ["delivered_at", "created_at"]);
   // Only Advance, Fanout and Propagate are ever published, and this row holds
   // what the sweep that has not yet read the specification needs: the intent's
   // identity, the specification itself, and whether a manager receipt confirmed
