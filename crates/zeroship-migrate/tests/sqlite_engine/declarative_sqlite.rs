@@ -324,21 +324,11 @@ async fn descriptor_to_sqlite_apply_roundtrips_foreign_key() {
 
 #[compio::test]
 async fn sqlite_deferred_fk_is_typed_error() {
-    // `posts` references `users`, but `users` is NOT declared and NOT live → the
-    // FK target is missing. The cross-app-FK guard catches a truly-dangling target;
-    // here we make `users` exist in the UNION so it passes that guard, but force the
-    // deferred case by NOT creating it earlier in the batch is impossible with topo
-    // order — so instead we assert the typed error surfaces for a target outside the
-    // live + in-batch set by diffing a single-table batch whose FK points at a live-
-    // absent, union-absent table is rejected upstream. The reachable deferred case:
-    // a 2-table batch where the child's FK target is declared (union) so topo order
-    // puts the parent first; that INLINES fine (covered above). To exercise the
-    // `DeferredForeignKeyUnsupported` arm directly we diff `posts` alone against an
-    // empty live with `users` present in the union but filtered — simplest faithful
-    // trigger: a self-batch where the target is neither live nor created (a union
-    // that declares only `posts`, whose FK names a table the cross-app guard treats
-    // as live). We rely on the cross-app guard rejecting the dangling target, which
-    // is the engine's fail-closed behaviour, OR the SQLite-specific arm.
+    // `posts` references `ghost_users`, which is NOT declared and NOT live → the
+    // FK target is missing. A target declared in the union cannot reach the
+    // deferred arm here: topo order puts the parent first and the FK INLINES
+    // (covered above). So the trigger is a single-table batch whose FK points
+    // outside the live + in-batch set, which must be rejected fail-closed.
     let posts = CollectionDescriptor {
         name: "posts".into(),
         owner_app: APP.into(),
@@ -460,17 +450,14 @@ fn platform_fails_closed_to_confined_on_sqlite() {
 }
 
 // ---------------------------------------------------------------------------
-// FINDING 4 — the EXISTING-TABLE (second-deploy / incremental) declarative path
-// on SQLite. Before the fix, every existing-table render method emitted PG-shaped
-// schema-qualified DDL + PG-only syntax on the SQLite leg (every prior SQLite
-// declarative test used an EMPTY live snapshot, so only the new-table CREATE path
-// was ever exercised). On a real second deploy where a table exists in BOTH live
-// and desired, the differ emitted:
-//   - `ALTER TABLE "prj"."t" ADD COLUMN …` → "no such table" on SQLite;
-//   - `COMMENT ON COLUMN …` → syntax error (no such statement on SQLite);
-//   - `DROP INDEX "prj"."ix"` → SILENTLY no-ops (qualified name never resolves) —
-//     silent drift, the dangerous one;
-//   - `ALTER COLUMN … TYPE` / nullability → no such SQLite statement.
+// The EXISTING-TABLE (second-deploy / incremental) declarative path
+// on SQLite. Existing-table renders must be SQLite-legal on the SQLite leg:
+//   - `ALTER TABLE "prj"."t" ADD COLUMN …` answers "no such table" on SQLite —
+//     the name must be UNqualified;
+//   - `COMMENT ON COLUMN …` is a syntax error (no such statement on SQLite);
+//   - `DROP INDEX "prj"."ix"` SILENTLY no-ops (a qualified name never
+//     resolves) — silent drift, the dangerous one;
+//   - `ALTER COLUMN … TYPE` / nullability have no such SQLite statement.
 //
 // These tests build a NON-EMPTY live snapshot (the first deploy, compiled through
 // the same dialect-aware desired snapshot so the data_type spellings match — no spurious type
@@ -494,8 +481,8 @@ fn live_from(descs: &[CollectionDescriptor]) -> (SchemaSnapshot, HashMap<String,
 
 /// (a) Second-deploy ADD COLUMN on `SQLite` emits `UNqualified`, SQLite-legal DDL AND
 /// APPLIES through the real hardened backend (the table persists, the column is
-/// added). Pre-fix the `up` was `ALTER TABLE "prj_demo"."accounts" ADD COLUMN …`,
-/// which fails "no such table" on `SQLite`.
+/// added). A schema-qualified `ALTER TABLE "prj_demo"."accounts" ADD COLUMN …`
+/// fails "no such table" on `SQLite`.
 #[compio::test]
 async fn second_deploy_add_column_is_sqlite_legal_and_applies() {
     // First deploy: accounts(title). Second deploy: accounts(title, note).
@@ -580,8 +567,9 @@ async fn second_deploy_add_column_is_sqlite_legal_and_applies() {
     );
 }
 
-/// (b) A second-deploy DROP INDEX on `SQLite` ACTUALLY drops the index. Pre-fix the
-/// `up` was `DROP INDEX "prj_demo"."accounts_handle_idx"`, which SILENTLY no-ops on
+/// (b) A second-deploy DROP INDEX on `SQLite` ACTUALLY drops the index. A
+/// schema-qualified `DROP INDEX "prj_demo"."accounts_handle_idx"` SILENTLY
+/// no-ops on
 /// `SQLite` (the qualified name never resolves) — reporting success while the index
 /// survives. We assert the index is GONE via PRAGMA (we do NOT trust IF EXISTS).
 #[compio::test]
@@ -657,7 +645,7 @@ async fn second_deploy_drop_index_actually_drops_on_sqlite() {
     );
 
     // APPLY it and assert via PRAGMA the index is ACTUALLY gone (not trusting the
-    // statement's success — the pre-fix qualified form "succeeded" too).
+    // statement's success — a qualified form would "succeed" while no-op'ing).
     be.apply_one_additive(&drop, "deployer")
         .await
         .unwrap_or_else(|e| panic!("DROP INDEX must apply on SQLite: {e:?}"));
@@ -674,8 +662,8 @@ async fn second_deploy_drop_index_actually_drops_on_sqlite() {
     );
 }
 
-/// (c) P3b — a rebuild-needing existing-table op (ALTER COLUMN TYPE) now GENERATES
-/// a 12-step table rebuild on `SQLite` (it no longer fails closed). The plan carries
+/// (c) A rebuild-needing existing-table op (ALTER COLUMN TYPE) GENERATES
+/// a table rebuild on `SQLite`. The plan carries
 /// ONE `TableRebuild` naming the op; it is NOT dangling `ALTER COLUMN … TYPE` PG
 /// DDL (a non-existent statement on `SQLite`) and NOT a silent pass.
 #[compio::test]
@@ -736,15 +724,15 @@ async fn second_deploy_type_change_generates_rebuild_on_sqlite() {
 }
 
 // ---------------------------------------------------------------------------
-// FAITHFUL real-introspected-live drift (the dialect-aware data_type fix).
+// FAITHFUL real-introspected-live drift (dialect-aware data_type comparison).
 //
 // The tests above build their LIVE snapshot through `live_from` (= the SAME
-// dialect-aware snapshot machinery, PG-spelled `data_type`), which sidesteps the
-// real bug: a second-deploy SQLite diff in production compares the DESIRED
-// snapshot (PG spellings: `bytea` / `double precision` / `timestamp with time
-// zone`) against a LIVE snapshot REAL-introspected from the app file (SQLite
-// declared types: `blob` / `real` / `text`). Pre-fix the raw-spelling compare
-// flagged a spurious rebuild refusal on every encrypted / number /
+// dialect-aware snapshot machinery, PG-spelled `data_type`), which sidesteps
+// the spelling gap a production second-deploy diff must cross: the DESIRED
+// snapshot carries PG spellings (`bytea` / `double precision` / `timestamp
+// with time zone`) while the LIVE snapshot is REAL-introspected from the app
+// file (SQLite declared types: `blob` / `real` / `text`). A raw-spelling
+// compare flags a spurious rebuild refusal on every encrypted / number /
 // timestamp column even when the schema is UNCHANGED.
 //
 // These tests use the REAL introspected live snapshot (`snapshot_schema_sqlite`)
@@ -793,16 +781,15 @@ fn spelling_gap_desc() -> CollectionDescriptor {
     }
 }
 
-/// (FIX B) A second deploy of an UNCHANGED schema, diffed against the REAL
+/// A second deploy of an UNCHANGED schema, diffed against the REAL
 /// SQLite-introspected live snapshot, produces ZERO spurious drift — no
 /// rebuild refusal for the encrypted (`bytea`→`blob`), number
 /// (`double precision`→`real`), or timestamp (`… with time zone`→`text`)
 /// columns whose PG and `SQLite` spellings differ.
 ///
-/// This is RED before the dialect-aware normalisation: the raw-spelling compare
-/// (`lc.data_type != c.data_type`) sees `blob != bytea` (etc.) and returns
-/// that refusal. It is GREEN after `sqlite_canonical_type` folds both
-/// sides to the same affinity token.
+/// A raw-spelling compare (`lc.data_type != c.data_type`) would see
+/// `blob != bytea` (etc.) and return that refusal; `sqlite_canonical_type`
+/// folds both sides to the same affinity token.
 #[compio::test]
 async fn second_deploy_unchanged_real_introspected_live_has_no_spurious_drift() {
     let desc = spelling_gap_desc();
@@ -898,7 +885,7 @@ async fn second_deploy_unchanged_real_introspected_live_has_no_spurious_drift() 
         spurious.is_empty(),
         "an unchanged schema must emit no column ALTER/ADD/DROP migrations: {spurious:?}"
     );
-    // P3b: an unchanged schema must ALSO emit no spurious table rebuild — the
+    // An unchanged schema must ALSO emit no spurious table rebuild — the
     // dialect-aware fold must not flag a phantom type/nullability change.
     assert!(
         plan.rebuilds.is_empty(),
@@ -910,11 +897,11 @@ async fn second_deploy_unchanged_real_introspected_live_has_no_spurious_drift() 
     );
 }
 
-/// (FIX B, the other half) A GENUINE type change against the REAL introspected
+/// A GENUINE type change against the REAL introspected
 /// live snapshot is STILL detected — the normalisation must not be so lossy it
 /// swallows a real change. `amount: number` (`real`) re-typed to `string`
-/// (`text`) maps to two DISTINCT canonical tokens, so it still triggers a rebuild
-/// (P3b: now a generated rebuild, no longer a typed error).
+/// (`text`) maps to two DISTINCT canonical tokens, so it still triggers a
+/// rebuild.
 #[compio::test]
 async fn second_deploy_real_type_change_still_detected_against_introspected_live() {
     let v1 = spelling_gap_desc();
@@ -972,17 +959,12 @@ async fn second_deploy_real_type_change_still_detected_against_introspected_live
 }
 
 // ---------------------------------------------------------------------------
-// (P6a) `plan_declarative` now CARRIES a SQLite rebuild into the plan — the fail-close
-//      is gone. `MigrationEngine` is generic over `MigrationBackend`, and
+// `plan_declarative` CARRIES a SQLite rebuild into the plan.
+//      `MigrationEngine` is generic over `MigrationBackend`, and
 //      `apply_declarative` drives `plan.rebuilds` through `SqliteBackend::rebuild_one`
-//      under the destructive/approval gate. The old behavior refused the whole
-//      deploy with a typed declarative error naming the required rebuild; P6a
-//      replaced that with carrying the rebuild so the engine can apply it.
-//      This pins the new contract: the plan
-//      exposes the rebuild (with its destructive/approval flags) instead of refusing
-//      the whole deploy.
-//      That error variant has since been DELETED: it kept zero constructors for as
-//      long as P6a has held, so the enum was carrying an arm nothing could reach.
+//      under the destructive/approval gate. This pins the contract: the plan
+//      exposes the rebuild (with its destructive/approval flags) instead of
+//      refusing the whole deploy.
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn plan_declarative_carries_sqlite_rebuild_into_the_plan() {

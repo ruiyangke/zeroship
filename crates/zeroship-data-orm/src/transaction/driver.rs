@@ -161,7 +161,7 @@ pub struct StepConfig {
 /// **DBR-11 closes here.** The reducer's `settle_now` emits
 /// [`Action::ReleaseAdmission`] on *every* path to `Settled`, including the ones
 /// that never sent a `BEGIN`, so a cancelled admission cannot leave the claim
-/// held. The orchestrator no longer has to remember to release it per-arm.
+/// held; the orchestrator relies on that emission rather than releasing per-arm.
 pub async fn begin_top_level(
     app_id: &str,
     schema: crate::sql::SchemaName,
@@ -927,15 +927,13 @@ pub const CANCEL_RECLAIM_GRACE: Duration = Duration::from_secs(1);
 
 /// Which cleanup, of which session, a resumed future belongs to.
 ///
-/// **Cancellation made this necessary.** Cleanup used to be a straight line with
-/// no await between reading the slot and writing it back, so "the session in the
-/// slot" could only ever be the one being cleaned up. Now cleanup waits, and the
-/// wait can outlive the transaction: the `CancellationSql` deadline fires in its
-/// own task, settles `Indeterminate`, withdraws, and releases the admission - at
-/// which point the next transaction is admitted, clears the withdrawal tombstone
-/// and installs ITS session in this very slot. A resumed cleanup that took
-/// whatever it found there would issue `ROLLBACK` on a healthy, unrelated
-/// transaction.
+/// **Cancellation made this necessary.** Cleanup awaits between reading the
+/// slot and writing it back, and the wait can outlive the transaction: the
+/// `CancellationSql` deadline fires in its own task, settles `Indeterminate`,
+/// withdraws, and releases the admission - at which point the next transaction
+/// is admitted, clears the withdrawal tombstone and installs ITS session in
+/// this very slot. A resumed cleanup that took whatever it found there would
+/// issue `ROLLBACK` on a healthy, unrelated transaction.
 ///
 /// Both halves are load-bearing. The token alone is not enough: tokens restart
 /// at 1 in every reducer, so a later transaction forced from `Preparing` mints
@@ -1165,15 +1163,13 @@ fn budgets() -> TxBudgets {
 /// with transaction RATE rather than with concurrency, which is the shape that
 /// bites a busy worker.
 ///
-/// The fix is not cheap and does not belong in a change about cancellation.
-/// Cancelling the sleep needs a signal, and the signal has to be owned by
-/// whoever disarms the deadline. That is
+/// The fix is not cheap. Cancelling the sleep needs a signal, and the signal
+/// has to be owned by whoever disarms the deadline. That is
 /// [`super::reducer::deadline::DeadlineSlot`], which lives in the PURE reducer
 /// and may not own an I/O handle. So it needs a new `Action` for "cancel the
 /// timer you scheduled", a driver-side registry keyed the same way the slot is,
 /// and arms proving a cancelled timer cannot take a live `(kind, generation)`
-/// with it. That is a self-contained change with its own tests, not a rider on
-/// this one.
+/// with it. That is a self-contained change with its own tests.
 fn schedule_timer(
     app_id: &str,
     scheduled: super::reducer::deadline::ScheduleTimer,
@@ -1276,11 +1272,10 @@ mod tests {
     /// against a later session by arithmetic coincidence, which is exactly what
     /// SC-1's guard order step 4 exists to refuse.
     ///
-    /// It reads the REAL thread-local rather than a private counter, which the
-    /// version on `ThreadDbContext` could not: that one built its own struct, so
-    /// it proved the arithmetic and never touched the store the driver uses.
-    /// Safe because libtest gives every `#[test]` its own OS thread even under
-    /// `--test-threads=1`, so no other test shares this sequence.
+    /// It reads the REAL thread-local rather than a private counter: a private
+    /// counter would prove the arithmetic and never touch the store the driver
+    /// uses. Safe because libtest gives every `#[test]` its own OS thread even
+    /// under `--test-threads=1`, so no other test shares this sequence.
     #[test]
     fn backend_generations_are_monotonic() {
         let first = next_backend_generation();
@@ -1294,10 +1289,8 @@ mod tests {
 
     /// `reset_context_for_tests` must NOT restart the sequence.
     ///
-    /// The counter used to live on `ThreadDbContext`, where that helper rebuilt
-    /// the whole struct and silently returned it to 0 - contradicting the
-    /// "never reset" the field's own doc claimed. This pins the corrected
-    /// behaviour, and would fail against the pre-2026-09-02 placement.
+    /// A reset that rebuilt the counter would silently return it to 0,
+    /// contradicting the "never reset" the field's own doc claims.
     #[test]
     fn a_context_reset_does_not_restart_the_generation_sequence() {
         let before = next_backend_generation();

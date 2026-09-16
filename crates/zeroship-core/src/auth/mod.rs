@@ -1,11 +1,11 @@
 //! Auth utilities: constant-time secret comparison, API key hashing, bearer
 //! extraction, broker-secret derivation and the pairwise-subject derivation.
 //!
-//! It no longer carries cross-service IDENTITY propagation. The `ZeroShip-User`
-//! envelope the gateway forwards to the worker used to be an HMAC signed here
-//! under `worker_key` - the same shared secret that bearer-authenticated the
-//! hop, so verifying it and forging it were one capability. It is ed25519 now
-//! and lives in [`crate::user_envelope`], keyed by the gateway alone.
+//! Cross-service IDENTITY propagation is not here: the `ZeroShip-User` envelope
+//! the gateway forwards to the worker is ed25519-signed in
+//! [`crate::user_envelope`], keyed by the gateway alone. Signing it with an
+//! HMAC under the `worker_key` shared secret would make verifying the envelope
+//! and forging it one capability.
 
 pub mod trusted_clients;
 
@@ -145,10 +145,9 @@ pub fn extract_bearer(header: &str) -> Option<&str> {
 ///
 /// Used by the federation stash cookie (auth: `ui::oauth_stash`),
 /// the pending-link token (auth: `identity::linker`), and the
-/// gateway-side RP-callback stash (gateway: `oidc_rp`). Each
-/// previously inlined the same three lines — keep it in one place so
-/// the constant-time-compare wrappers above stay co-located with the
-/// MAC primitive.
+/// gateway-side RP-callback stash (gateway: `oidc_rp`). Keep it in one
+/// place so the constant-time-compare wrappers above stay co-located
+/// with the MAC primitive.
 #[must_use]
 pub fn hmac_sha256(key: &[u8], payload: &[u8]) -> [u8; 32] {
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
@@ -203,7 +202,7 @@ pub const PAIRWISE_SUB_PREFIX: &str = "pws_";
 /// it MUST NOT carry the global user id in any claim; a `sub` that survives
 /// this predicate can never be the unprojected `usr_` identity.
 ///
-/// ## This is a SHAPE inverse, NOT a forgery/trust gate (security-review I8)
+/// ## This is a SHAPE inverse, NOT a forgery/trust gate
 ///
 /// The predicate proves only that a string is shaped like a `derive_pairwise`
 /// output — it does NOT prove the string was actually derived for any real
@@ -392,14 +391,14 @@ mod tests {
         assert!(!is_pairwise_subject("pws_"));
         // A `pws_…` whose body is a UUID's 32-char no-dash form is NOT a real
         // `derive_pairwise` output (which is exactly PAIRWISE_SUB_BODY_LEN
-        // chars), so the tightened shape inverse rejects it (security-review I8).
+        // chars), so the tightened shape inverse rejects it.
         assert!(
             !is_pairwise_subject(&format!("pws_{}", uid.as_str())),
             "an over-length typed-id body is not a derivable subject"
         );
     }
 
-    /// I8 (security-review 2026-06-02): `is_pairwise_subject` must be the EXACT
+    /// `is_pairwise_subject` must be the EXACT
     /// inverse of [`derive_pairwise`]'s output shape — `pws_` + exactly
     /// [`PAIRWISE_SUB_BODY_LEN`] base36 chars — so a `pws_`-shaped string that
     /// `derive_pairwise` could never have minted (wrong length, or a non-base36
@@ -527,22 +526,14 @@ mod tests {
         );
     }
 
-    /// The successor to a test that asserted invariance to inbound UUID
-    /// spelling. That property is no longer expressible, and its absence is the
-    /// point: [`derive_pairwise`] takes a [`UserId`], which has exactly one
-    /// printed form, so there is no second spelling for a writer and a reader to
-    /// disagree about.
+    /// [`derive_pairwise`] takes a [`UserId`], which has exactly one printed
+    /// form, so there is no second spelling for a writer and a reader to
+    /// disagree about: a `/token` write and a `/signout` lookup cannot land on
+    /// different `pws_` subjects, which would make a revocation silently miss
+    /// the live wrapper.
     ///
-    /// What the old shape protected against was real. `/token` passed the raw
-    /// provider `sub` while `/signout` passed a re-rendered id, and if the two
-    /// ever differed the signout wrote a family marker under one `pws_` while
-    /// the live wrapper carried another - a revocation that silently does
-    /// nothing. Canonicalizing inside the derive fixed that for UUIDs and then
-    /// broke when a second id format arrived: control hashed `usr_<base36>`
-    /// verbatim while the gateway hashed a hyphenated uuid canonically.
-    ///
-    /// A type cannot drift that way, so what is left to test is that distinct
-    /// users and distinct sectors still separate.
+    /// What is left to test is that distinct users and distinct sectors still
+    /// separate.
     #[test]
     fn pairwise_accepts_only_canonical_user_identity() {
         let salt = b"platform-pairwise-salt";
@@ -568,15 +559,11 @@ mod tests {
         assert!(!constant_time_eq("secretextra", "secret"));
     }
 
-    /// I10 regression: the comparison must iterate a FIXED number of times —
+    /// The comparison must iterate a FIXED number of times —
     /// always `expected.len()` — regardless of `provided`'s length, so the
     /// timing cannot leak the expected secret's length via a min-length /
-    /// early-exit iteration bound. The pre-fix implementation iterated
-    /// `min(provided.len(), expected.len())`, so a short provided input did
-    /// fewer iterations (and a long one did `expected.len()` only because the
-    /// bound clamped) — making the iteration count depend on the attacker's
-    /// input. This asserts the count is constant across short / exact / long /
-    /// empty provided inputs.
+    /// early-exit iteration bound. This asserts the count is constant across
+    /// short / exact / long / empty provided inputs.
     #[test]
     fn comparison_iteration_count_is_independent_of_provided_length() {
         let expected = b"secret-of-known-length";
@@ -603,7 +590,7 @@ mod tests {
         }
     }
 
-    /// I10 correctness: the constant-time comparison still accepts the exact
+    /// The constant-time comparison still accepts the exact
     /// key and rejects every wrong / wrong-length input.
     #[test]
     fn constant_time_comparison_preserves_correctness() {
@@ -666,10 +653,9 @@ mod tests {
     }
 
     /// Raw 32-byte HMAC tag matches the hex-encoded form bit-for-bit.
-    /// Regression test for the dedupe in
-    /// `auth: ui::oauth_stash`/`identity::linker` and `gateway: oidc_rp`
-    /// — if `hmac_sha256` ever drifts from `hmac_sha256_hex`, every
-    /// federation cookie + pending-link token signed under one and
+    /// If `hmac_sha256` ever drifts from `hmac_sha256_hex`, every
+    /// federation cookie + pending-link token (auth: `ui::oauth_stash`,
+    /// `identity::linker`; gateway: `oidc_rp`) signed under one and
     /// verified under the other would silently reject. The fixture is a
     /// known-answer test from RFC 4231 §4.2 (HMAC-SHA-256, key 20×0x0b,
     /// data "Hi There").

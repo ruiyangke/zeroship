@@ -506,9 +506,9 @@ fn comparable_nextval_default(expr: Option<&str>) -> Option<String> {
 /// default on a column that
 /// carries no ID facet at all. Those columns never populate
 /// [`ColumnSnapshot::id_default`], so the raw SQL text in
-/// [`ColumnSnapshot::default`] is the only evidence either side holds, and until
-/// this existed nothing compared it: an out-of-band `ALTER COLUMN ... SET DEFAULT`
-/// changed what every silent write stores and no drift line said so.
+/// [`ColumnSnapshot::default`] is the only evidence either side holds: without
+/// this comparison an out-of-band `ALTER COLUMN ... SET DEFAULT` changes what
+/// every silent write stores and no drift line says so.
 ///
 /// WHAT PostgreSQL NORMALISES. `pg_get_expr` deparses from the parse tree rather
 /// than replaying the authored text. Measured on PostgreSQL 18.4:
@@ -560,11 +560,10 @@ fn comparable_nextval_default(expr: Option<&str>) -> Option<String> {
 /// [`comparable_column_default`] and [`comparable_function_body`] belong to,
 /// answering the same question - is this
 /// worth comparing across an offline render and a live catalog read? - for a column
-/// the engine computes rather than the application writing it. Until this existed
-/// nothing compared any part of it: an out-of-band
-/// `ALTER COLUMN ... DROP EXPRESSION` turned a computed column into an ordinary
-/// writable one, left its name, type and nullability untouched, and no drift line
-/// said so.
+/// the engine computes rather than the application writing it. Without this
+/// comparison an out-of-band `ALTER COLUMN ... DROP EXPRESSION` turns a computed
+/// column into an ordinary writable one, leaves its name, type and nullability
+/// untouched, and no drift line says so.
 ///
 /// WHAT IS COMPARED, and why it is immune to the deparse problem. Only
 /// [`ColumnSnapshot::generated_kind`] - `pg_attribute.attgenerated`, ONE CHAR per
@@ -854,11 +853,10 @@ fn format_collation(collation: Option<&ColumnCollationSnapshot>) -> String {
 
 /// The `identity` drift attribute's operator-facing spelling.
 ///
-/// The two row-identifier-alias arms used to read "sqlite rowid" and "sqlite
-/// autoincrement" -- core naming a vendor in a report line it prints for whichever
-/// backend produced the snapshot. They name the CONTRACT now: an alias with no
-/// identity is a plain row-identifier alias, and one carrying a by-default identity
-/// is that alias plus an always-increasing allocator.
+/// The two row-identifier-alias arms name the CONTRACT, never a vendor: this
+/// report line is printed for whichever backend produced the snapshot. An alias
+/// with no identity is a plain row-identifier alias, and one carrying a
+/// by-default identity is that alias plus an always-increasing allocator.
 fn format_identity(column: &ColumnSnapshot) -> &'static str {
     match (column.rowid_alias, column.identity) {
         (true, Some(identity)) if !identity.always => "rowid alias, auto increment",
@@ -1013,10 +1011,9 @@ fn diff_attrs(
             .collect::<Vec<_>>()
             .join(",")
     };
-    // NAMES NO VENDOR. This used to spell `pages_per_range=` and `fillfactor=` -- two
-    // PostgreSQL reloptions -- inside the crate whose governing rule is to name none. The
-    // keys now arrive already namespaced from whichever backend introspected them, so the
-    // comparison is a walk over a sorted map and the vendor half stays in the vendor.
+    // NAMES NO VENDOR. The keys arrive already namespaced from whichever backend
+    // introspected them, so the comparison is a walk over a sorted map and the
+    // vendor half stays in the vendor.
     let format_index_attributes = |attributes: &Attributes| {
         attributes
             .iter()
@@ -1321,9 +1318,8 @@ fn diff_attrs(
 /// Verified on PostgreSQL 18.4: `WHERE (note <> 'a')` reads back as
 /// `(note <> 'a'::text)`, and `WHERE (true)` is dropped entirely. An offline renderer
 /// quotes every column unconditionally and knows no column types, so it cannot
-/// reproduce that - the comparison reported drift on partial indexes that had never
-/// been touched, which is why `fold_drop_column_index_cascade_pg` had to weaken two of
-/// its assertions to index SURVIVAL.
+/// reproduce that - comparing the text reports drift on partial indexes that have
+/// never been touched.
 ///
 /// A column rename makes it permanent rather than merely noisy. `pg_index.indpred` and
 /// `indexprs` are parse trees over attribute NUMBERS, so PostgreSQL deparses the NEW
@@ -1343,7 +1339,7 @@ fn diff_attrs(
 /// through one semantic key instead of declining, which works because `pg_get_expr` is
 /// idempotent. Run on these bodies, that technique gets most of the way and then stops
 /// dead. The shared fingerprint already collapses everything the catalog INJECTS -
-/// measured on the four bodies this file's fixtures produce, `("note" <> 'a')` and
+/// measured on this file's fixtures, `("note" <> 'a')` and
 /// `(note <> 'a'::text)` differ only in the QUOTING of the identifier, the `::text` and
 /// the parentheses having normalised away - so a rule that unquotes an identifier
 /// PostgreSQL would not have quoted would land them on one key.
@@ -1351,9 +1347,8 @@ fn diff_attrs(
 /// The RENAME is what cannot be reduced. Measured on PostgreSQL 18.4, after
 /// `RENAME COLUMN qty_on_hand TO amount_on_hand` the fold projects
 /// `("qty_on_hand" > 0)` where the catalog deparses `(amount_on_hand > 0)`
-/// (`fold_rename_column_index_body_pg` measures both sides against a live server, and
-/// its header is where this measurement now stands - read it before leaning on the
-/// sentence above). Those are two
+/// (`fold_rename_column_index_body_pg` measures both sides against a live server;
+/// read its header before leaning on the sentence above). Those are two
 /// different COLUMN NAMES, not two spellings of one thing; normalisation reduces
 /// spellings. The fold cannot repair its side either, because
 /// [`IndexSnapshot::predicate`] is rendered TEXT and substituting a name inside it
@@ -1597,11 +1592,10 @@ fn constraint_definition_is_comparable(kind: &str) -> bool {
 /// foreign keys get: parse the catalog text back to the closed AST and compare
 /// structurally rather than comparing spellings.
 ///
-/// A FUNCTION BODY IS NO LONGER ON THAT LIST. It was, on the assumption that it
-/// deparsed like the predicates do; it does not. `pg_proc.prosrc` is the authored
-/// text byte for byte, so [`comparable_function_body`] compares it directly and
-/// [`VendorObjectIdentities::functions`] carries it. The predicates are genuinely
-/// irreducible here and the body never was.
+/// A function body is NOT on that list: `pg_proc.prosrc` is the authored text
+/// byte for byte rather than a deparse, so [`comparable_function_body`] compares
+/// it directly and [`VendorObjectIdentities::functions`] carries it. The
+/// predicates are genuinely irreducible here; the body is not.
 fn comparable_vendor_objects<'a>(
     expected: &'a SchemaSnapshot,
     actual: &'a SchemaSnapshot,
