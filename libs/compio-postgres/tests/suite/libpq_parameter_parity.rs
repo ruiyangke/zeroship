@@ -116,9 +116,9 @@ fn a_cause_names(error: &compio_postgres::Error, key: &str) -> bool {
 /// nothing goes red - a DSN libpq accepts would simply fail here, which is the
 /// same shape as the `gssencmode=disable` defect.
 ///
-/// These sets were enumerated by probing libpq 18 on 2026-08-25, value by
-/// value, not copied from documentation. Each list is exactly what libpq
-/// ACCEPTED; each `bogus` control is what it REJECTED.
+/// These sets are exactly what libpq ACCEPTS, derived by probing it value by
+/// value rather than copied from documentation. Each `bogus` control is a
+/// value libpq REJECTED.
 #[test]
 fn every_enum_parameter_accepts_exactly_the_values_libpq_does() {
     const ENUMS: &[(&str, &[&str])] = &[
@@ -240,33 +240,17 @@ fn the_parity_table_covers_every_parameter_libpq_18_accepts() {
 /// another and it still reads 50, so the table can drift to a different set of
 /// keys while its floor stays green. This pins the set itself.
 ///
-/// The list was not copied from the documentation. It was derived on
-/// 2026-08-23 by probing the libpq the test server actually ships
-/// (`libpq.so.5.18`, PostgreSQL 18) with a URL whose host does not resolve:
-/// libpq validates parameter NAMES before it does any network I/O, so an
-/// unknown key answers `invalid URI query parameter` while a known key gets as
-/// far as `could not translate host name`. Two different messages, therefore a
-/// probe that discriminates. Candidates came from the strings in that binary,
-/// plus every underscore-delimited tail of each -- without the tails the sweep
-/// missed `application_name`, `host` and `password`, because a C compiler
-/// stores a literal that is a suffix of another as a pointer into it, so
-/// `application_name` never appears standalone inside
-/// `fallback_application_name`.
-///
-/// RE-VERIFIED 2026-08-26 against the same `libpq.so.5.18`, independently:
-/// 463 candidates (345 whole strings plus their underscore tails), 413 of them
-/// not already in the table, every one probed. NONE was a valid option, so the
-/// table still covers the whole surface. The control ran first and matters -
-/// the loop prints nothing both when there is nothing missing and when the
-/// probe is broken, so `sslmode`, `connect_timeout`, `application_name`,
-/// `oauth_issuer` and `min_protocol_version` were each confirmed to come back
-/// VALID, and `zz_not_an_option` to come back rejected.
-///
-/// THE TAILS ARE NOT OPTIONAL. The re-verification was first run on whole
-/// strings only, which is a sweep that cannot see any option that happens to
-/// be a suffix of another literal - precisely the case the paragraph above
-/// describes. It reported a clean result, and that result was worth nothing
-/// until the tails were added and the candidate count went from 345 to 463.
+/// The list is derived by probing the libpq the test server actually ships
+/// (`libpq.so.5.18`, PostgreSQL 18), not from the documentation: libpq
+/// validates parameter NAMES before it does any network I/O, so an unknown key
+/// answers `invalid URI query parameter` while a known key gets as far as
+/// `could not translate host name`. Two different messages, therefore a probe
+/// that discriminates. Candidates come from the strings in that binary plus
+/// every underscore-delimited tail of each -- the tails are not optional,
+/// because a C compiler stores a literal that is a suffix of another as a
+/// pointer into it, so `application_name` never appears standalone inside
+/// `fallback_application_name`. A sweep without the tails cannot see an option
+/// that happens to be a suffix of another literal.
 ///
 /// To re-derive after a libpq upgrade, repeat that sweep rather than reading a
 /// release note; `host` is the one accepted key deliberately absent here, for
@@ -514,10 +498,9 @@ fn a_repeated_key_replaces_rather_than_appending() {
 /// OURS. `application_name= user=u` does not mean "empty, then user"; the
 /// value is the next whitespace-delimited token, so it means
 /// `application_name` is literally `user=u` and `user` is never set. Verified
-/// against psql twice: once as `... application_name= connect_timeout=2`,
-/// which reports `[app=connect_timeout=2]`, and once as `application_name=
-/// user=postgres`, which fails as role "root" because the user was consumed.
-/// I first read our matching behaviour as a defect; it is parity.
+/// against psql: `... application_name= connect_timeout=2` reports
+/// `[app=connect_timeout=2]`, and `application_name= user=postgres` fails as
+/// role "root" because the user was consumed. This is parity, not a defect.
 ///
 /// The one genuine divergence is a TRAILING empty value, which libpq accepts
 /// as the empty string and we refuse. We differ LOUDLY there, which is the
@@ -557,11 +540,8 @@ fn the_value_lexer_matches_libpq() {
         wrong.join("\n  ")
     );
 
-    // This block pinned a KNOWN divergence -- a trailing empty value was
-    // refused here and accepted by libpq -- and said to update it if the
-    // divergence was ever closed. It was closed on 2026-08-25, so it now says
-    // so: both of these parse, and `Config::param` decides what an empty value
-    // MEANS per key.
+    // A trailing empty value parses, as in libpq; `Config::param` decides what
+    // an empty value MEANS per key.
     let named = "host=h application_name="
         .parse::<Config>()
         .expect("libpq accepts a trailing empty value");
@@ -625,16 +605,11 @@ fn a_url_authority_keeps_a_port_per_host() {
 
 /// A URL authority APPENDS its hosts, and that holds on every target.
 ///
-/// The port half of this was a live regression; the host half was the same
-/// defect confined to `#[cfg(not(unix))]`, where `host_param` routed through
-/// the clearing `param("host", ..)` and a multi-host URL kept only the last.
-/// It could not fail here, which is exactly why it survived: the two
-/// definitions had drifted and only the untestable one was wrong.
-///
-/// The fix collapsed them into one function whose append is compiled
-/// everywhere, so this test now covers the Windows path by construction rather
-/// than by inspection. That is the only claim it can honestly make -- no test
-/// in this suite EXECUTES a non-Unix target.
+/// The append is compiled everywhere, so a multi-host URL keeps every host on
+/// every target rather than only the last on `#[cfg(not(unix))]`. That is the
+/// only claim this test can make -- no test in this suite EXECUTES a non-Unix
+/// target, so this covers the Windows path by construction rather than by
+/// inspection.
 #[test]
 fn a_url_authority_appends_every_host() {
     let listed = "postgres://a,b,c/db"
@@ -663,11 +638,8 @@ fn a_url_authority_appends_every_host() {
 /// parts MEAN: percent-decoding, bracketed IPv6, and which of the authority
 /// and the query string wins.
 ///
-/// Every row was measured against psql 16.14 on 2026-08-25 and this crate
-/// already agreed with all of them - the test exists because nothing pinned
-/// them, and this file records two regressions in exactly this area (the
-/// per-host port, below). A rule nothing asserts is one a refactor may quietly
-/// change.
+/// Every row was measured against psql, and a rule nothing asserts is one a
+/// refactor may quietly change -- which is why these are pinned.
 #[test]
 fn uri_components_are_decoded_and_the_query_string_wins() {
     fn parsed(url: &str) -> Config {
@@ -750,13 +722,11 @@ fn uri_components_are_decoded_and_the_query_string_wins() {
 /// URL SHAPES libpq accepts, all of which parse here too -- and the one place
 /// the two then behave differently.
 ///
-/// Every shape below was handed to psql first; all five connect or parse
-/// there. The interesting one is `postgres:///db`, which parses to NO host in
-/// both implementations. libpq then connects over a compiled-in default socket
+/// The interesting one is `postgres:///db`, which parses to NO host in both
+/// implementations. libpq then connects over a compiled-in default socket
 /// directory; this refuses with "both host and hostaddr are missing", because
 /// half of libpq's answer there is `PGHOST` and this crate reads no process
-/// configuration. That is now stated at the check in `connect.rs` rather than
-/// being incidental.
+/// configuration.
 #[compio::test]
 async fn url_shapes_parse_like_libpq_and_an_empty_host_is_refused_at_connect() {
     // Accepted by libpq; must parse here.
@@ -845,10 +815,8 @@ fn keepalives_zero_means_off_and_the_default_is_on() {
 /// A NEGATIVE `keepalives` is accepted by libpq and means ON.
 ///
 /// libpq parses this with `strtol` into a signed long and then tests it against
-/// zero, so `keepalives=-1` is simply non-zero, i.e. enabled. Measured against
-/// the live server on 2026-08-26: `keepalives=-1` connects, exactly as `1`,
-/// `2` and `10` do, while `yes` and the empty string are refused with
-/// `invalid integer value`.
+/// zero, so `keepalives=-1` is simply non-zero, i.e. enabled, while `yes` and
+/// the empty string are refused with `invalid integer value`.
 ///
 /// Parsing into an UNSIGNED integer instead silently turns that acceptance
 /// into a refusal, so a connection string psql accepts fails here. The
@@ -874,7 +842,7 @@ fn negative_keepalives_is_accepted_and_means_on() {
 
 /// An EMPTY ssl file path is refused here and accepted by libpq.
 ///
-/// MEASURED against the live server on 2026-08-23: `sslcert=`, `sslkey=`,
+/// `sslcert=`, `sslkey=`,
 /// `sslrootcert=` and `sslcrl=` with empty values all CONNECT under psql.
 /// libpq treats an empty path as unset and falls back to its defaults
 /// (`~/.postgresql/postgresql.crt` and friends).
@@ -895,19 +863,15 @@ fn negative_keepalives_is_accepted_and_means_on() {
 ///   this -- and a config error naming the option beats a TLS failure several
 ///   steps later, or silently no client authentication at all.
 ///
-/// So this is a divergence taken on purpose. It was previously UNTESTED: a
-/// mutation sweep on 2026-08-23 removed the `sslcert` guard and the entire
-/// config test set stayed green (268 passed, 0 failed), including the
-/// feature-gated `tls_live` target. Whichever way a future reader decides, it
-/// should be by changing this test rather than by discovering the guard is
-/// load-bearing for nothing.
+/// So this is a divergence taken on purpose. Whichever way a future reader
+/// decides, it should be by changing this test rather than by discovering the
+/// guard is load-bearing for nothing.
 #[test]
 fn an_empty_ssl_path_is_refused_even_though_libpq_accepts_it() {
     // NOTE THE QUOTES, they are load-bearing. In keyword syntax a bare
     // trailing "key=" at end of string is rejected by the LEXER with
     // "unexpected EOF" before any option arm runs, so that spelling tests the
-    // tokeniser and never reaches this guard at all -- the first version of
-    // this test used it and failed for that reason. "key=''" and the URL form
+    // tokeniser and never reaches this guard at all. "key=''" and the URL form
     // "?key=" are what actually deliver an empty value to the arm; both were
     // measured against libpq, which accepts all of them.
     for key in ["sslcert", "sslkey", "sslrootcert"] {

@@ -16,7 +16,7 @@ pub(crate) fn parse_redirect(server_msg: &str) -> Option<Error> {
     let mut it = server_msg.splitn(3, ' ');
     let kind = it.next()?;
     let slot = it.next()?.parse::<u16>().ok()?;
-    // CR-CLUSTER-1: the slot must be a real cluster slot. A bare u16 admits
+    // The slot must be a real cluster slot. A bare u16 admits
     // 0..=65535, but the slot map is exactly NUM_SLOTS (16384) long, so an
     // out-of-range value like 40000 would later index-panic in `set_slot`.
     // Reject it here so an out-of-range MOVED/ASK is treated as a
@@ -89,11 +89,10 @@ mod redirect_tests {
 
     #[test]
     fn parse_slot_in_u16_but_out_of_cluster_range_returns_none() {
-        // CR-CLUSTER-1: 40000 is a valid u16 but >= NUM_SLOTS (16384). A
-        // bare u16 parse would accept it and the MOVED arm would then do a
-        // RAW index into the 16384-long slot Vec → out-of-bounds panic. The
-        // parser MUST reject any slot >= NUM_SLOTS so an out-of-range
-        // redirect never becomes an Error::Moved/Ask.
+        // 40000 is a valid u16 but >= NUM_SLOTS (16384). The parser MUST
+        // reject any slot >= NUM_SLOTS so an out-of-range redirect never
+        // becomes an Error::Moved/Ask, which would index the 16384-long
+        // slot Vec out of bounds.
         assert!(parse_redirect("MOVED 40000 6.6.6.6:6379").is_none());
         assert!(parse_redirect("ASK 40000 6.6.6.6:6379").is_none());
         // Boundary: NUM_SLOTS itself (16384) is out of range; the last
@@ -455,7 +454,7 @@ struct Inner {
     /// Authentication, TLS and timeout settings inherited by discovered nodes.
     connection: ConnectionConfig,
     seeds: Vec<ConnectionConfig>,
-    /// CR-CLUSTER-2 / REDIS-SSRF-1: the set of operator-trusted node
+    /// The set of operator-trusted node
     /// addresses (normalized `host:port`) we are willing to connect to
     /// with the cluster credentials. Seeded from the configured seed URLs
     /// and extended with the addresses in any authoritative `CLUSTER
@@ -584,7 +583,7 @@ impl ClusterClient {
         if let Some(p) = self.inner.borrow().pools.get(addr).cloned() {
             return Ok(p);
         }
-        // CR-CLUSTER-2 / REDIS-SSRF-1: never open a credentialed connection
+        // Never open a credentialed connection
         // to an address the cluster merely *claimed* (via MOVED/ASK or a
         // topology entry) unless it's an operator-trusted node. This stops
         // SSRF to internal services / the cloud metadata endpoint and
@@ -1082,7 +1081,7 @@ fn normalize_node_addr(addr: &str) -> NodeAddr {
     addr.to_ascii_lowercase()
 }
 
-/// CR-CLUSTER-2 / REDIS-SSRF-1: is `addr` an operator-trusted cluster
+/// Is `addr` an operator-trusted cluster
 /// node? Only addresses derived from the configured seeds or learned from
 /// an authoritative `CLUSTER SLOTS` topology are trusted; a
 /// server-supplied MOVED/ASK or topology entry pointing anywhere else
@@ -1110,7 +1109,7 @@ mod known_node_tests {
 
     #[test]
     fn attacker_addr_not_in_set_is_rejected() {
-        // CR-CLUSTER-2 / REDIS-SSRF-1: a server-supplied MOVED/topology addr
+        // A server-supplied MOVED/topology addr
         // pointing at the cloud metadata endpoint (or any host not derived
         // from operator seeds / verified topology) must NOT be a known node.
         let k = known(&["127.0.0.1:7000"]);
@@ -1170,10 +1169,9 @@ mod set_slot_tests {
 
     #[test]
     fn set_slot_out_of_range_does_not_panic() {
-        // CR-CLUSTER-1: a MOVED with slot 40000 reaches `set_slot(40000, …)`.
-        // Pre-fix the raw index `slots[40000] = …` into a 16384-long Vec
-        // panics: "index out of bounds: the len is 16384 but the index is
-        // 40000". Post-fix the checked write silently ignores it.
+        // A MOVED with slot 40000 reaches `set_slot(40000, …)`. The checked
+        // write must silently ignore it rather than index the 16384-long Vec
+        // out of bounds.
         let cc = ClusterClient::for_test(ClusterTopology::empty());
         cc.set_slot(40000, "6.6.6.6:6379"); // must NOT panic
         // The out-of-range write is dropped; no in-range slot is corrupted.
@@ -1204,11 +1202,9 @@ mod ssrf_allowlist_tests {
 
     #[compio::test]
     async fn pool_for_unknown_addr_is_rejected_without_connecting() {
-        // CR-CLUSTER-2 / REDIS-SSRF-1: pool_for must REFUSE to connect (and
-        // thus refuse to replay the cluster password) to a server-supplied
-        // address that isn't an operator-trusted node. We point it at the
-        // cloud metadata endpoint; pre-fix it would TCP-connect there with
-        // creds, post-fix it returns an Err with no connection attempt.
+        // `pool_for` must REFUSE to connect (and thus refuse to replay the
+        // cluster password) to a server-supplied address that isn't an
+        // operator-trusted node. We point it at the cloud metadata endpoint.
         //
         // The addr is unroutable/blackholed in CI, so a *missing* guard
         // would also eventually fail — but with a connect/timeout Error,
@@ -1315,17 +1311,14 @@ mod moved_poisoning_tests {
         format!("{}:{}", addr.ip(), addr.port())
     }
 
-    /// Regression: a MOVED whose target `pool_for` REFUSES must not be
-    /// committed to the cached slot map.
-    ///
-    /// Pre-fix `send_to_slot` called `set_slot(s, &new_addr)` before
-    /// anything validated `new_addr`, so the refused address became the
-    /// cached owner of the slot for the life of the client (and, via
-    /// zeroship-kv's thread-local `ClusterClient` cache, for the life of the
-    /// worker thread). The first command fails either way, and that alone
-    /// proves nothing. The load-bearing assertion is the SECOND command:
-    /// the mock redirects only once, so no redirect is in play, and the
-    /// command can only fail if the slot map itself was poisoned.
+    /// A MOVED whose target `pool_for` refuses must not be committed to the
+    /// cached slot map: committing it would make the refused address the
+    /// slot's owner for the life of the client (and, via zeroship-kv's
+    /// thread-local `ClusterClient` cache, the life of the worker thread).
+    /// The first command fails either way, and that alone proves nothing.
+    /// The load-bearing assertion is the SECOND command: the mock redirects
+    /// only once, so no redirect is in play, and it can only fail if the
+    /// slot map itself was poisoned.
     ///
     /// What this does NOT catch: it exercises exactly one rejection reason
     /// (the SSRF allowlist). A MOVED target that is allowlisted but whose
@@ -1345,7 +1338,7 @@ mod moved_poisoning_tests {
         let cc = ClusterClient::for_test_with_known(topo, known);
 
         // Command 1: the node answers MOVED -> untrusted, and the allowlist
-        // refuses to follow it. This command fails both pre- and post-fix.
+        // refuses to follow it.
         let err1 = match cc.get(KEY).await {
             Ok(v) => panic!("first command should be refused by the allowlist, got {v:?}"),
             Err(e) => e,
@@ -1356,8 +1349,7 @@ mod moved_poisoning_tests {
         );
 
         // Command 2, SAME slot, no redirect in play: must reach the
-        // original owner. Pre-fix this fails with the allowlist rejection
-        // because the cached owner is now the refused address.
+        // original owner, not the refused address cached from command 1.
         match cc.get(KEY).await {
             Ok(v) => assert_eq!(v.as_deref(), Some(b"hello".as_ref())),
             Err(e) => panic!(
@@ -1377,21 +1369,19 @@ mod moved_poisoning_tests {
 }
 
 // =====================================================================
-// FIX 3 — CR-CLUSTER-5: confirm R2's automatic dirty barrier covers
-// CLUSTER NODE connections.
+// The R2 dirty barrier covers CLUSTER NODE connections.
 //
-// Audit result (documented by these regression tests): every cluster
-// command runs through `send_to_slot`, which acquires a `PooledConn`
-// from a per-node `Pool` (`pool_for(addr).acquire()`) and issues both
-// the optional `ASKING` and the command via `Client::send_recv`. R2 sets
-// `dirty=true` at the start of `send_recv` (before the write) and clears
-// it only after a full clean frame; `PooledConn::drop` then refuses to
-// return any conn that is dirty or has a non-empty rx. So a timed-out /
+// Every cluster command runs through `send_to_slot`, which acquires a
+// `PooledConn` from a per-node `Pool` (`pool_for(addr).acquire()`) and
+// issues both the optional `ASKING` and the command via `Client::send_recv`.
+// R2 sets `dirty=true` at the start of `send_recv` (before the write) and
+// clears it only after a full clean frame; `PooledConn::drop` then refuses
+// to return any conn that is dirty or has a non-empty rx. So a timed-out /
 // errored / cancelled cluster-node command leaves NO reusable dirty conn
-// in that node's pool — the cross-tenant desync is closed for the
-// cluster path exactly as for the single-node path. The bootstrap
-// `probe` is a one-shot local `Client` that is never pooled or reused,
-// so it has no desync surface. NO cluster-specific fix was needed.
+// in that node's pool — the cross-tenant desync is closed for the cluster
+// path exactly as for the single-node path. The bootstrap `probe` is a
+// one-shot local `Client` that is never pooled or reused, so it has no
+// desync surface.
 // =====================================================================
 #[cfg(test)]
 mod cluster_dirty_barrier_tests {
@@ -1462,11 +1452,10 @@ mod cluster_dirty_barrier_tests {
         ClusterClient::for_test_with_known(topo, known)
     }
 
-    /// CR-CLUSTER-5 regression: a cluster-node command that TIMES OUT must
-    /// leave no reusable (dirty) connection in that node's pool. This
-    /// drives the exact `pool_for(addr).acquire()` → `send_recv` sequence
-    /// `send_to_slot` uses (lines 627-640), then asserts the R2 barrier
-    /// dropped the dirty conn.
+    /// A cluster-node command that TIMES OUT must leave no reusable (dirty)
+    /// connection in that node's pool. This drives the exact
+    /// `pool_for(addr).acquire()` → `send_recv` sequence `send_to_slot` uses,
+    /// then asserts the R2 barrier dropped the dirty conn.
     #[compio::test]
     async fn timed_out_cluster_node_command_leaves_no_reusable_conn() {
         let node = spawn_silent_node().await;

@@ -581,11 +581,10 @@ fn non_v2_runtime_descriptor_fails_isolate_init() {
 
 #[test]
 fn host_entry_lacks_legacy_schema_init_symbols() {
-    // Stage 4 cleanup: the synthetic SSR entry no longer publishes
-    // `__zsSchemaInit`. The runtime host does not either: native plugins
-    // receive the descriptor before module evaluation and the JavaScript
-    // installer plants wrappers directly. Verify the legacy global stays
-    // undefined throughout host entry evaluation.
+    // Neither the synthetic SSR entry nor the runtime host publishes
+    // `__zsSchemaInit`: native plugins receive the descriptor before module
+    // evaluation and the JavaScript installer plants wrappers directly. Verify
+    // the global stays undefined throughout host entry evaluation.
     let body = dispatch_probe(
         r#"
         export function readInit() {
@@ -611,12 +610,9 @@ fn host_entry_lacks_legacy_schema_init_symbols() {
 
 #[test]
 fn manifest_schema_path_global_no_longer_set() {
-    // Stage 5c removed the `__zsManifestSchemaPath` injection from
-    // init.rs. Verify the global stays undefined: user code (and the
-    // legacy `db_init.js` gate before it was rewritten) saw it set
-    // when the build passed `manifest_schema_path`. Now nobody sets
-    // it. A regression that re-adds the injection would surface
-    // here as a string typeof.
+    // `__zsManifestSchemaPath` must stay undefined: nothing injects it. A
+    // regression that re-adds the injection would surface here as a string
+    // typeof.
     let body = dispatch_probe(
         r#"
         export function readSchemaPath() {

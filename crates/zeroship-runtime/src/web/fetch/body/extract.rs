@@ -5,32 +5,25 @@
 //! ONLY if the user didn't already provide one (per Fetch §5.4 step 36
 //! / §5.5 step 12).
 //!
-//! ## v2 fixes from the design
+//! ## Dispatch order and conversions
 //!
-//! - **C-10 dispatch order**: Blob, byte sequence (BufferSource), then
-//!   FormData, URLSearchParams, scalar value string, ReadableStream.
-//!   Explicit type-test predicates BEFORE `to_rust_string_lossy` so a
-//!   user-typed-array body doesn't accidentally turn into the literal
-//!   string `"[object Uint8Array]"`. v1 has no native Blob class, so the
-//!   "Blob" arm is a duck-type fallback (an object whose
-//!   `Symbol.toStringTag` is "Blob") plus the `arrayBuffer()` /
-//!   `bytes()` / `text()` methods — but for v1 we just skip the Blob
-//!   arm and document it as deferred (the polyfill Blob lives in
-//!   `embed/blob.js`; the native Blob ships in a later chunk).
+//! - Blob, byte sequence (BufferSource), then FormData, URLSearchParams,
+//!   scalar value string, ReadableStream. Explicit type-test predicates
+//!   BEFORE `to_rust_string_lossy` so a user-typed-array body doesn't
+//!   accidentally turn into the literal string `"[object Uint8Array]"`.
 //!
-//! - **C-11 USVString conversion**: a string body must be UTF-8-encoded
-//!   per the spec's USVString → bytes step. Lone surrogates are
-//!   replaced with U+FFFD. NOT `to_rust_string_lossy` directly because
-//!   that quietly mishandles strings with embedded U+0000 boundaries
-//!   in some V8 versions. We use `String::write_v2` against a Vec and
-//!   then re-encode replacing lone surrogates.
+//! - A string body must be UTF-8-encoded per the spec's USVString →
+//!   bytes step. Lone surrogates are replaced with U+FFFD. NOT
+//!   `to_rust_string_lossy` directly because that quietly mishandles
+//!   strings with embedded U+0000 boundaries in some V8 versions. We use
+//!   `String::write_v2` against a Vec and then re-encode replacing lone
+//!   surrogates.
 //!
-//! - **ReadableStream + keepalive**: per Fetch §3.2 step 11.10, throws
+//! - ReadableStream + keepalive: per Fetch §3.2 step 11.10, throws
 //!   TypeError if the body is a stream and `keepalive: true`.
 //!
-//! - **Disturbed/locked stream**: per Fetch §3.2 step 11.11 and the
-//!   Body model, a disturbed or locked stream throws TypeError on
-//!   extract.
+//! - Disturbed/locked stream: per Fetch §3.2 step 11.11 and the Body
+//!   model, a disturbed or locked stream throws TypeError on extract.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -69,7 +62,7 @@ pub fn extract_body(
         });
     }
 
-    // C-10 dispatch order. We check explicit type predicates so a user
+    // Dispatch order. We check explicit type predicates so a user
     // body doesn't accidentally fall into the string arm.
 
     // ReadableStream branch (step 11.11).
@@ -102,7 +95,7 @@ pub fn extract_body(
         let length = Some(bytes.len() as u64);
         let content_type = if type_.is_empty() { None } else { Some(type_.clone()) };
         let bytes_rc = Rc::new(bytes);
-        // Defer stream materialization (Fix B): consumers can drain
+        // Defer stream materialization: consumers can drain
         // the source bytes directly without ever constructing a
         // ReadableStream when they know they'll fully consume.
         return Ok(Extracted {
@@ -122,7 +115,7 @@ pub fn extract_body(
         let (bytes, boundary, mime) = fd_bytes;
         let length = Some(bytes.len() as u64);
         let bytes_rc = Rc::new(bytes);
-        // FIX B: defer stream construction — body getter materializes
+        // Defer stream construction — body getter materializes
         // it lazily on first access. Saves a JS ReadableStream alloc
         // when the body is consumed via text/json/arrayBuffer/bytes.
         return Ok(Extracted {
@@ -265,7 +258,7 @@ fn extract_from_buffer_source(
 
 /// Copy bytes out of an ArrayBuffer or ArrayBufferView. SharedArrayBuffer
 /// is rejected (Fetch §3.2 step 11.4 says BufferSource is `[AllowShared]`-
-/// excluded for body extract; v2 fix lines up with WebIDL §3.2.21).
+/// excluded for body extract; matches WebIDL §3.2.21).
 fn read_buffer_source_bytes(
     scope: &mut v8::PinScope,
     value: v8::Local<v8::Value>,

@@ -1,8 +1,11 @@
-//! Cross-class brand-check regression for `<Class>Iterator.prototype
+//! Cross-class brand-check coverage for `<Class>Iterator.prototype
 //! .next()`.
 //!
-//! Pre-fix, the macro emitted a bare External-recovery prologue at the
-//! top of the iterator's `next()` callback:
+//! Every `#[v8_class]` wrapper stores `internal_field(0) = External(Box<X>)`,
+//! so a caller can lift `<Class>Iterator.prototype.next` and `.call` it on a
+//! different wrapper. Without a brand check, the macro's External-recovery
+//! prologue at the top of the iterator's `next()` callback reads that foreign
+//! wrapper's box:
 //!
 //! ```ignore
 //! let __this = args.this();
@@ -14,32 +17,26 @@
 //!     unsafe { &mut *(__ext.value() as *mut <Class>Iterator) };
 //! ```
 //!
-//! The comment was wrong. EVERY `#[v8_class]` wrapper has
-//! `internal_field(0) = External(Box<X>)`, so a caller could lift
-//! `<Class>Iterator.prototype.next` and `.call(otherWrapper)` it. The
-//! recovery `__ext.value() as *mut <Class>Iterator` then reinterpreted
-//! a `Box<Other>` as `*mut <Class>Iterator` and `&mut *`'d it — UB. In
-//! release mode, this corrupts whichever box's state happens to alias
-//! the cast; under Miri, it's an instant abort.
+//! The recovery `__ext.value() as *mut <Class>Iterator` then reinterprets a
+//! `Box<Other>` as `*mut <Class>Iterator` and `&mut *`s it — UB: in release
+//! mode it corrupts whichever box's state aliases the cast, and under Miri it
+//! is an instant abort.
 //!
-//! The fix emits a per-iterator-class brand check (private
-//! prototype-walk helper, mirrors the parent-class brand check in
-//! `v8_class/emit/brand.rs`) and calls it at the top of `next()`
-//! before the External recovery. Mismatches throw TypeError with the shape
+//! The macro emits a per-iterator-class brand check (private prototype-walk
+//! helper, mirrors the parent-class brand check in `v8_class/emit/brand.rs`)
+//! and calls it at the top of `next()` before the External recovery. Mismatches
+//! throw TypeError with the shape
 //! `"<Class>Iterator.prototype.next called on incompatible receiver"`.
 //!
 //! What this file pins:
 //!   1. **Cross-class**: `fakeMap.entries().__proto__.next.call(other)`
-//!      where `other` is a different `#[v8_class]` instance. Pre-fix:
-//!      the cast reinterprets `Box<Other>` as `*mut FakeMapIterator`
-//!      and is UB. Post-fix: throws TypeError, no UB.
+//!      where `other` is a different `#[v8_class]` instance: throws
+//!      TypeError, no UB.
 //!   2. **Cross-iterator**: `iterA.__proto__.next.call(iterBInstance)`
 //!      where `iterA` and `iterB` are iterators of two DISTINCT iterable
-//!      classes. Pre-fix: the cast reinterprets `Box<FakeMapBIterator>`
-//!      as `*mut FakeMapAIterator` and is UB. Post-fix: throws
-//!      TypeError, no UB.
-//!   3. **Self-iterator passes**: `iter.next()` on its own instance
-//!      still works (sanity check that we didn't break the happy path).
+//!      classes: throws TypeError, no UB.
+//!   3. **Self-iterator passes**: `iter.next()` on its own instance still
+//!      works.
 #![allow(unsafe_code)]
 
 use zeroship_runtime::byte_string::ByteString;
@@ -99,8 +96,7 @@ fn js_string(val: v8::Local<v8::Value>, scope: &mut v8::PinScope) -> String {
 //     would dereference at the WRONG byte offsets, surfacing UB even
 //     in release mode if the brand check were absent).
 //   - `Box`: a non-iterable `#[v8_class]` — internal field 0 holds a
-//     `Box<Box>` raw pointer, *NOT* a `Box<FakeMapAIterator>`. The
-//     classic NS6 reproducer.
+//     `Box<Box>` raw pointer, *NOT* a `Box<FakeMapAIterator>`.
 // ---------------------------------------------------------------------------
 
 // Each iterable class lives in its own submodule. The macro's per-
@@ -225,14 +221,9 @@ fn own_iterator_next_works() {
 }
 
 // ---------------------------------------------------------------------------
-// NS6 regression #1 — cross-class.
-//
-// Lift `FakeMapA`'s iterator's `next` and call it with a non-iterable
-// `BoxClass` instance as `this`. Pre-fix: bypasses the External-
-// recovery's null-check (BoxClass has internal field 0 = External of
-// Box<BoxClass>) and reinterprets `Box<BoxClass>` as `*mut
-// FakeMapAIterator` — UB. Post-fix: brand check fails, throws
-// TypeError with a clear message.
+// Cross-class: lift `FakeMapA`'s iterator's `next` and call it with a
+// non-iterable `BoxClass` instance as `this`. The brand check rejects the
+// foreign receiver and throws TypeError with a clear message.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -268,19 +259,12 @@ fn next_on_foreign_class_wrapper_throws_typeerror() {
 }
 
 // ---------------------------------------------------------------------------
-// NS6 regression #2 — cross-iterator.
-//
-// Two distinct iterable classes (`FakeMapA`, `FakeMapB`) each emit
-// their own `<Class>Iterator`. Calling A's `next` with B's iterator
-// instance as `this` would, pre-fix, reinterpret `Box<FakeMapBIterator>`
-// as `*mut FakeMapAIterator` — both have the same field layout *today*
-// (snapshot mode: `__pairs`, `__index`, `__kind`), but they're DIFFERENT
-// generic instantiations so the type system separates them. The cast
-// is UB even when the layout happens to match (and would catastrophically
-// break if either class moved to live mode, where the layout differs
-// between A and B).
-//
-// Post-fix: A's brand check rejects the B iterator; throws TypeError.
+// Cross-iterator: two distinct iterable classes (`FakeMapA`, `FakeMapB`)
+// each emit their own `<Class>Iterator`. Calling A's `next` with B's
+// iterator instance as `this` must be rejected even when the two iterator
+// layouts match (snapshot mode: `__pairs`, `__index`, `__kind`), because
+// they are DIFFERENT generic instantiations. A's brand check rejects the B
+// iterator and throws TypeError.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -317,9 +301,7 @@ fn next_on_other_iterable_class_iterator_throws_typeerror() {
 }
 
 // ---------------------------------------------------------------------------
-// NS6 regression #3 — symmetric cross-iterator.
-//
-// Same as #2 but with the OTHER direction (B's next on A's iterator).
+// Symmetric cross-iterator: the OTHER direction (B's next on A's iterator).
 // Pins that the brand check is per-iterator-class (not just per-parent-
 // class), so each iterator class's prototype is uniquely identifying.
 // ---------------------------------------------------------------------------
@@ -354,15 +336,10 @@ fn next_on_other_iterable_class_iterator_symmetric_throws_typeerror() {
 }
 
 // ---------------------------------------------------------------------------
-// NS6 regression #4 — plain {} receiver still throws (preserves the
-// pre-existing iterator-next brand check shape).
-//
-// This case worked pre-fix already (plain object has no internal field,
-// so the External-recovery returned null and threw "Illegal invocation").
-// We re-pin it under the new brand-check shape so a TypeError is still
-// the user-visible outcome — important for back-compat: the V8 built-in
-// iterators all throw TypeError on `next.call({})`, and JS frameworks
-// often try/catch around iterator protocol probes.
+// Plain {} receiver still throws a TypeError. The V8 built-in iterators all
+// throw TypeError on `next.call({})`, and JS frameworks often try/catch
+// around iterator protocol probes, so the user-visible outcome must stay a
+// TypeError regardless of the brand-check implementation.
 // ---------------------------------------------------------------------------
 
 #[test]
