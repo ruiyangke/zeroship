@@ -3426,20 +3426,18 @@ impl Client {
                 Some(name) => crate::escape::rollback_savepoint(name),
                 None => "ROLLBACK".to_string(),
             };
-            // H6: Don't panic on NUL in savepoint names. `frontend::query`
+            // Don't panic on NUL in savepoint names. `frontend::query`
             // returns Err if the SQL contains an interior NUL byte; in that
             // case we emit a log line and return an empty buffer, so no
             // ROLLBACK is queued and the connection stays dirty.
             //
-            // This used to add "and the pool's next-get barrier will still
-            // detect + evict it". IT WILL NOT, and the same wrong claim was
-            // removed from `pool.rs` on 2026-08-23. That barrier is
+            // Do not rely on the pool's next-get barrier to catch that: it is
             // `simple_query("")`, which returns Ok whenever every earlier
-            // request reached its ReadyForQuery; an empty simple query
-            // SUCCEEDS inside an open or aborted transaction, so the barrier
+            // request reached its ReadyForQuery, and an empty simple query
+            // SUCCEEDS inside an open or aborted transaction - so the barrier
             // clears `dirty` on a session it never proved idle.
             //
-            // What actually protects the next borrower is `return_client`'s
+            // What protects the next borrower is `return_client`'s
             // rollback, which is unconditional for any session that is not
             // provably `Idle`. Reaching this arm at all needs an interior NUL
             // in a savepoint name, which `SAVEPOINT` creation rejects first,
