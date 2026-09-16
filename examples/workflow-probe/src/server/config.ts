@@ -12,5 +12,6 @@ export default defineApp({
     "rpc:wf.signal": { auth: "anonymous", publiclyAccessible: true },
     "rpc:wf.trail": { auth: "anonymous", publiclyAccessible: true },
     "rpc:wf.resetTrail": { auth: "anonymous", publiclyAccessible: true },
+    "rpc:wf.compensatorRedispatches": { auth: "anonymous", publiclyAccessible: true },
   },
 });
