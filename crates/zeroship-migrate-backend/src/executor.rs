@@ -160,10 +160,8 @@ pub enum ApplyError {
     /// produces this.
     ///
     /// `clear_instruction` is the BACKEND'S OWN operator instruction for this exact
-    /// marker, from [`RollbackMarker`]. It used to be a `DELETE FROM
-    /// \`{meta_schema}\`.schema_migrations_rollback_inflight` template written here -
-    /// one backend's table name and one backend's quoting, in the neutral vocabulary,
-    /// printed at whatever target reached the arm.
+    /// marker, from [`RollbackMarker`]. The neutral vocabulary must not carry one
+    /// backend's table name and quoting, printed at whatever target reached the arm.
     #[error(
         "migration {version} has a rollback marker from an interrupted unwind; its \
          `down` auto-committed an unknown number of statements, so the live shape is not the \
@@ -271,12 +269,11 @@ pub enum ApplyError {
     /// recovery cannot prove its `up` is safe to re-run verbatim. Nothing is
     /// replayed, the marker is preserved, and the operator is handed the repair.
     ///
-    /// This is the fail-closed arm of the two-phase recovery path. The alternative,
-    /// measured against a live server: a non-transactional `CREATE TABLE` whose
-    /// `up` committed before the crash replays into `relation ... already exists`,
-    /// re-arms the marker it just cleared, and reports the identical failure on
-    /// every deploy from then on. The version never lands and nothing about
-    /// re-running the deploy changes that.
+    /// This is the fail-closed arm of the two-phase recovery path. The alternative is
+    /// worse: a non-transactional `CREATE TABLE` whose `up` committed before the crash
+    /// replays into `relation ... already exists`, re-arms the marker it just cleared,
+    /// and reports the identical failure on every deploy from then on. The version
+    /// never lands and nothing about re-running the deploy changes that.
     ///
     /// The refusal is deliberately NOT a fresh-apply gate: an `up` outside the
     /// replay-safe set still applies, and only a crash that interrupted it lands
