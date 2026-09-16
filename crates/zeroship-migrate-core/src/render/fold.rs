@@ -734,12 +734,12 @@ pub(crate) fn selected_dialectal_leg<'a>(
 /// same stream can reference.**
 ///
 /// The fold answers this question for the full [`SchemaSnapshot`]. Two other places
-/// need the same answer over a bare name set and used to each carry their own
-/// version of it: `render::lower`'s working `live_tables` (which decides whether a
-/// create-time foreign key INLINES or defers) and the offline SQL preview's
-/// per-op presence carrier. Both handled `createTable` and nothing else, so both
-/// disagreed with the fold - and with PostgreSQL - the moment a stream dropped,
-/// renamed, or detached anything. Measured on PostgreSQL 18.4:
+/// need the same answer over a bare name set - `render::lower`'s working
+/// `live_tables` (which decides whether a create-time foreign key INLINES or defers)
+/// and the offline SQL preview's per-op presence carrier - so both call THIS
+/// function rather than restating the rule. A set that handled `createTable` and
+/// nothing else would disagree with the fold - and with PostgreSQL - the moment a
+/// stream dropped, renamed, or detached anything. For example, on PostgreSQL 18.4:
 ///
 ///   - `createTable alpha; dropTable alpha; createTable gamma REFERENCES alpha` -
 ///     the stale-present `alpha` made the create-time FK INLINE, and the preview
@@ -755,7 +755,7 @@ pub(crate) fn selected_dialectal_leg<'a>(
 /// So the rule lives here, beside the fold that already had it right, and the two
 /// name-set carriers call it instead of restating it.
 ///
-/// **`attachPartition` is deliberately NOT here, and that is a measured exclusion.**
+/// **`attachPartition` is deliberately NOT here, and that is a deliberate exclusion.**
 /// The fold's arm `tables.remove`s an attached child, but only because it re-homes
 /// the snapshot into its `partitions` map - the relation itself still exists.
 /// PostgreSQL 18.4 accepts `ALTER TABLE parent ATTACH PARTITION child; CREATE TABLE
@@ -969,10 +969,9 @@ fn allocate_implicit_relation_name(
 ///
 /// Two questions, asked in order, and neither can answer the other. The backend
 /// says what the relation is CALLED; the allocator then dodges any collision that
-/// name has in the modeled relation namespace. This function used to compose the
-/// first answer itself, in one shipping backend's spelling, and hand it to the
-/// already-routed second - which is why routing the allocator had never removed the
-/// vendor from core.
+/// name has in the modeled relation namespace. The backend's answer is obtained
+/// through the routed vendor call; it is never composed here in a backend's own
+/// spelling.
 ///
 /// This covers relation kinds represented by `SchemaSnapshot`. It does not
 /// uniquify explicit constraint names or indexes adopted by `USING INDEX`.
@@ -1203,11 +1202,8 @@ pub fn fold_ops(
 
 /// The catalog half's state, seeded ONCE and advanced ONE OP AT A TIME.
 ///
-/// This is [`fold_ops_onto`]'s body turned inside out. It used to be fifteen locals and
-/// a `for` loop, so the ONLY way to put a stream through the catalog rules was to hand
-/// the whole stream to `fold_ops_onto` - which is why the single fold could compose with
-/// them only by calling out once, as an opaque block, and why its module doc recorded
-/// that call as the last thing still breaking "ONE traversal decides what an op means".
+/// Carries the state the catalog rules accumulate across a stream, so those rules can
+/// be driven one op at a time instead of only over a whole stream.
 ///
 /// # Why a per-op drive could not just call `fold_ops_onto` per op
 ///
@@ -1321,9 +1317,7 @@ impl<'a> CatalogFold<'a> {
         let project_schema = self.project_schema;
         let effective = self.effective;
         // Destructured rather than reached through `self.` so the match below is the
-        // moved body VERBATIM. That is the only reviewable form for a match this long:
-        // the diff for it is a pure move, and the three `continue`s the loop used to own
-        // are the whole of the semantic edit.
+        // moved body VERBATIM. That is the only reviewable form for a match this long.
         let Self {
             tables,
             table_rls,
@@ -2175,13 +2169,12 @@ impl<'a> CatalogFold<'a> {
                 // A generated expression READS other columns, so the rename has to
                 // follow it. PostgreSQL holds the expression as a parse tree over
                 // attribute NUMBERS, so `pg_get_expr` deparses the NEW name the
-                // instant the rename commits (measured on PG 18.4:
-                // `("qty_on_hand" + 1)` becomes `(quantity + 1)`), and the descriptor
-                // fold has rewritten it all along. This snapshot used to keep the old
-                // name, which is not merely cosmetic: on SQLite a rename is a table
-                // REBUILD, and `declarative::render_create_table_rebuild` renders the
-                // new-table CREATE FROM THIS SNAPSHOT for exactly the tables that have
-                // a generated column, so the stale body emitted
+                // instant the rename commits (`("qty_on_hand" + 1)` becomes
+                // `(quantity + 1)`), and the descriptor fold has rewritten it all
+                // along. Leaving the snapshot stale is not cosmetic: on SQLite a rename
+                // is a table REBUILD, and `declarative::render_create_table_rebuild`
+                // renders the new-table CREATE FROM THIS SNAPSHOT for exactly the
+                // tables that have a generated column, so a stale body would emit
                 // `GENERATED ALWAYS AS (("qty_on_hand" + 1))` over a table with no
                 // such column.
                 //
@@ -2301,15 +2294,14 @@ impl<'a> CatalogFold<'a> {
                 //
                 // The two RENDERED-SQL sites - `predicate` and an
                 // `IndexElementSnapshot::Expr` key - follow the rename too, applied just
-                // below. They were left stale for as long as the only tool was naive
-                // substitution, whose false positive (`WHERE (note <> 'a')` becoming
-                // `WHERE (note <> 'b')`) is real and is why the rewrite waited. It no
-                // longer has to: the quoted-run walk copies a string literal through
-                // WHOLE, so the trap is structurally unreachable, and the fold renders
-                // both bodies through `render_expr_inline`, which quotes every `ColRef`
-                // with the same speller the walk's round-trip guard re-quotes with. What
-                // stays stale is a CATALOG-derived body, whose identifiers are BARE and
-                // which carries no AST to re-render from - see
+                // below. A naive substitution would false-positive (`WHERE (note <> 'a')`
+                // becoming `WHERE (note <> 'b')`), so the rewrite uses the quoted-run
+                // walk instead: it copies a string literal through WHOLE, making that
+                // trap structurally unreachable, and the fold renders both bodies through
+                // `render_expr_inline`, which quotes every `ColRef` with the same speller
+                // the walk's round-trip guard re-quotes with. What stays stale is a
+                // CATALOG-derived body, whose identifiers are BARE and which carries no
+                // AST to re-render from - see
                 // `render::declarative::rename_column_in_index_bodies`.
                 for index in &mut snap.indexes {
                     for column in &mut index.columns {
@@ -2490,31 +2482,23 @@ impl<'a> CatalogFold<'a> {
                 // TypeID/ULID format contract would need, so the LIVE DB keeps a
                 // contract this side can no longer describe either way.
                 //
-                // MEASURED on live PostgreSQL 18.4, through the real path
-                // (`MigrationEngine::apply_plan`, not raw SQL), because the two halves
-                // fail differently and neither is fixable by folding:
+                // Neither outcome of the retype is foldable:
                 //
-                //   * To any NON-text target the SERVER REFUSES THE ALTER. The
-                //     engine's own `ALTER TABLE ... ALTER COLUMN "v" TYPE integer USING
-                //     "v"::integer` dies with `function octet_length(integer) does not
-                //     exist`, because PostgreSQL re-parses the format CHECK against the
-                //     new type. `bigint` and `uuid` fail identically; `bytea` fails with
-                //     `collations are not supported by type bytea`. The plan clears
-                //     validate AND preview and then dies mid-deploy.
+                //   * To any NON-text target PostgreSQL REFUSES THE ALTER. It re-parses
+                //     the format CHECK against the new type and dies (`integer`, `bigint`
+                //     and `uuid` all fail); `bytea` fails because collations are not
+                //     supported by it. The plan clears validate AND preview and then dies
+                //     mid-deploy.
                 //
                 //   * To a TEXT-family target (`varchar(N)`, `char(N)`, `text`) the
                 //     ALTER SUCCEEDS and the CHECK SURVIVES - but PostgreSQL re-parses
                 //     it with casts injected (`octet_length((v)::text)`), a spelling
                 //     `render::value_format::recover_format_check` does not recognise.
                 //     So introspection never projects it back onto `value_format`, and
-                //     after `typeId(usr) text -> string(50)` structural drift reported
-                //     THREE differences that do not exist, on a schema that was exactly
-                //     what had been deployed:
-                //         collation  expected "pg_catalog.C"  actual ""
-                //         format     expected "typeId(usr)"   actual ""
-                //         unexpected: constraint <table>_v_check
-                //     CLEARING `value_format` does not fix that: the engine-owned CHECK
-                //     is still in the database and still unaccounted for.
+                //     structural drift reports differences that do not exist on a schema
+                //     that was exactly what had been deployed. CLEARING `value_format`
+                //     does not fix that: the engine-owned CHECK is still in the database
+                //     and still unaccounted for.
                 //
                 // So neither keeping nor clearing is truthful. Until the apply path can
                 // drop the format CHECK alongside the type change, refuse. Detection is
@@ -2555,13 +2539,13 @@ impl<'a> CatalogFold<'a> {
                 //   * `inline_checks` - the enum / domain / UUID / format CHECKs of the
                 //     type the column HAD. Emission-only but it is DDL: the SQLite
                 //     rebuild joins it straight into the new table's column
-                //     declaration, so a SQLite `enum -> int` retype used to leave
+                //     declaration, so a stale set would leave
                 //     `CHECK ("v" IN ('ok', 'bad'))` sitting on an `integer` column -
-                //     the shape that made a SQLite rename undeployable.
-                //   * `collation` - DRIFT-COMPARED, and PostgreSQL RESETS it: measured,
-                //     `text COLLATE "C" -> character varying(40)` leaves the catalog
-                //     reporting the DEFAULT collation, never `C`. BELT-AND-BRACES
-                //     rather than the fix, and said plainly: there are now TWO
+                //     the shape that makes a SQLite rename undeployable.
+                //   * `collation` - DRIFT-COMPARED, and PostgreSQL RESETS it: a
+                //     `text COLLATE "C" -> character varying(40)` retype leaves the
+                //     catalog reporting the DEFAULT collation, never `C`. BELT-AND-BRACES
+                //     rather than the fix, and said plainly: there are TWO
                 //     fold-side writers of this field - `value_format`'s
                 //     `bytewise_column_metadata` and the `IrColumn::collation`
                 //     facet's `apply_fold_collation_metadata`, which calls the same
@@ -2574,8 +2558,9 @@ impl<'a> CatalogFold<'a> {
                 //     re-declare it, and drift says so rather than staying silent.
                 //   * `case_sensitive` - DRIFT-COMPARED. On PostgreSQL
                 //     case-insensitivity IS the `citext` type, so the retype destroys
-                //     it; measured, `citext -> character varying(40)` reported
-                //     `case_sensitive expected "false" actual ""` forever after.
+                //     it: a `citext -> character varying(40)` retype reports
+                //     `case_sensitive expected "false" actual ""` on every
+                //     introspection thereafter.
                 //
                 // The vendor carrier (`col.vendor`) is NOT copied here, and that is
                 // the point of where it IS handled: a backend's physical contract is a
@@ -2818,14 +2803,6 @@ impl<'a> CatalogFold<'a> {
                 // forbid the coexistence, so an unconditional
                 // `retain(|i| &i.name != name)` would WRONGLY phantom-drop the user
                 // index here, breaking `fold_ops == snapshot_schema(live)`.
-                //
-                // Re-verified on PostgreSQL 18.4: `ADD CONSTRAINT shared FOREIGN KEY
-                // (...)` then `CREATE INDEX shared` leaves one row in `pg_constraint`
-                // and one in `pg_class`, and `DROP CONSTRAINT shared` leaves the index
-                // intact (0 constraints, 1 index). The VERSION is recorded rather than
-                // the host and port the check ran against, because the version is what
-                // the behaviour depends on and the port named a fixture this repository
-                // no longer serves.
                 let dropped_kind = snap
                     .constraints
                     .iter()
@@ -2975,19 +2952,18 @@ impl<'a> CatalogFold<'a> {
                 if tables.contains_key(name) {
                     return Err(FoldError::DuplicateTable(name.clone()));
                 }
-                // `replace` is the authored way to change a view's body, and the fold
-                // used to discard it with the rest of the struct, so re-declaring a
-                // view any applied migration had created was refused before it ran.
-                // The insert below overwrites, which is what replacing means.
+                // `replace` is the authored way to change a view's body: the insert
+                // below overwrites, which is what replacing means. Discarding it would
+                // refuse re-declaring a view any applied migration had created.
                 let replace = replace.unwrap_or(false);
                 let declared_materialized = materialized.unwrap_or(false);
                 match views.get(name) {
                     Some(_) if !replace => return Err(FoldError::DuplicateView(name.clone())),
                     // A replace may not turn a materialized view into a plain one or the
-                    // reverse. Refusing here keeps the objection at plan time, where the
-                    // accidental duplicate-name refusal used to put it: the engines all
-                    // reject the statement, so letting it through only moves the failure
-                    // into the middle of an apply.
+                    // reverse. Refusing here keeps the objection at plan time, beside the
+                    // duplicate-name refusal: the engines all reject the statement, so
+                    // letting it through only moves the failure into the middle of an
+                    // apply.
                     Some(existing) if existing.materialized != declared_materialized => {
                         return Err(FoldError::ViewKindChanged {
                             name: name.clone(),
@@ -5072,12 +5048,10 @@ fn lift_named_enum_membership(
 
 /// Lift a NAMED domain type's BASE TYPE onto the column descriptor that only names it.
 ///
-/// # The defect
-///
-/// `ColType::Enum` and `ColType::Domain` shared one arm in `col_type_to_token`, so
-/// a column typed by a domain over `int` reported the token `"string"`. The database
-/// stores an integer on every dialect - measured, `createDomain positive_number AS int`
-/// plus a column of it renders
+/// `ColType::Enum` and `ColType::Domain` share one arm in `col_type_to_token`, and
+/// `ColType::Domain { name, schema }` carries the NAME only - the base type lives in a
+/// separate [`Op::CreateDomain`]. Left alone, a column typed by a domain over `int`
+/// reports the token `"string"`, while the database stores an integer on every dialect:
 ///
 /// ```text
 ///   postgres  CREATE DOMAIN "public"."positive_number" AS integer ...
@@ -5086,31 +5060,27 @@ fn lift_named_enum_membership(
 ///   mysql     CREATE TABLE  ... (`amount` INT NOT NULL CHECK ((`amount` > 0)), ...)
 /// ```
 ///
-/// - and only the `RuntimeSchemaDescriptor`, which is what a deployed app installs
-///   `env.db` from, called it a string. So the app validated an integer column as text.
+/// Only the `RuntimeSchemaDescriptor`, which is what a deployed app installs `env.db`
+/// from, would call it a string - and the app would validate an integer column as text.
 ///
-/// # Why this is not a line in `col_type_to_token`, either
+/// # Why this is not a line in `col_type_to_token`
 ///
-/// Same shape as the enum half: `ColType::Domain { name, schema }` carries the NAME
-/// only, and the base type lives in a separate [`Op::CreateDomain`]. No function whose
-/// whole input is one [`IrColumn`] can know it. This runs where the op stream is in
-/// scope and the registry has already seen the definition, and it re-derives the
-/// STORAGE-SHAPE facets through the SAME
+/// No function whose whole input is one [`IrColumn`] can know the base type. This runs
+/// where the op stream is in scope and the registry has already seen the definition,
+/// and it re-derives the STORAGE-SHAPE facets through the SAME
 /// [`apply_col_type_to_field_descriptor`](crate::render::lower::apply_col_type_to_field_descriptor)
 /// a `setColumnType` uses - because the token is not the whole type. A domain over
-/// `varchar(40)` must carry `maxLength: 40` beside its `"string"`, and before this it
-/// carried neither.
+/// `varchar(40)` must carry `maxLength: 40` beside its `"string"`.
 ///
 /// # Unchanged beats invented
 ///
 /// The token is not optional: something is always emitted, so the enum half's "leave
 /// the slot ABSENT" has no analogue. An unresolvable name therefore leaves the
-/// descriptor EXACTLY as `col_type_to_token` left it (`"string"`), which is the
-/// pre-fix behaviour and asserts nothing new. The case is PostgreSQL-only and exactly
-/// parallel to the enum half: a native domain reference needs only the NAME, so
-/// `apply_fold_named_type_column_metadata` folds without the definition, while SQLite
-/// and MySQL INLINE the base type into the column's storage and already fail closed
-/// with `domain "..." is not registered`.
+/// descriptor EXACTLY as `col_type_to_token` left it (`"string"`), asserting nothing
+/// new. The case is PostgreSQL-only and exactly parallel to the enum half: a native
+/// domain reference needs only the NAME, so `apply_fold_named_type_column_metadata`
+/// folds without the definition, while SQLite and MySQL INLINE the base type into the
+/// column's storage and already fail closed with `domain "..." is not registered`.
 ///
 /// # Termination
 ///
@@ -5122,19 +5092,19 @@ fn lift_named_enum_membership(
 ///
 /// A base type that is an ENUM stops the walk and is returned as itself: its token is
 /// `"string"`, the same token the domain already had, so a domain over an enum keeps
-/// today's answer. Its MEMBERS are deliberately not lifted - a domain's own `CHECK` may
-/// narrow the base enum's set, which would make the members an upper bound rather than
-/// the contract, and `field_check_constraints` renders `enum_values` as a hard
+/// the same answer. Its MEMBERS are deliberately not lifted - a domain's own `CHECK`
+/// may narrow the base enum's set, which would make the members an upper bound rather
+/// than the contract, and `field_check_constraints` renders `enum_values` as a hard
 /// `CHECK (<col> IN (...))`.
 ///
-/// # Not through `ColType::Encrypted`, and no longer because it is unfixed
+/// # Not through `ColType::Encrypted`
 ///
-/// Still no recursion into the wrapped type HERE, but the reason changed. An encrypted
-/// column's inner domain is resolved UPSTREAM of the descriptor, on the `ColType`
-/// itself, by [`crate::render::lower::resolve_encrypted_inner_domain`] - so by the time
-/// a column reaches this lift its `Encrypted { of }` already names a base type and
-/// there is nothing left to lift. The catalog sentinel and runtime codec both
-/// derive from the descriptor's logical type.
+/// No recursion into the wrapped type HERE: an encrypted column's inner domain is
+/// resolved UPSTREAM of the descriptor, on the `ColType` itself, by
+/// [`crate::render::lower::resolve_encrypted_inner_domain`] - so by the time a column
+/// reaches this lift its `Encrypted { of }` already names a base type and there is
+/// nothing left to lift. The catalog sentinel and runtime codec both derive from the
+/// descriptor's logical type.
 fn lift_named_domain_base_type(
     field: &mut crate::render::declarative::FieldDescriptor,
     ty: &ColType,
@@ -5348,20 +5318,18 @@ fn token_to_col_type(f: &crate::render::declarative::FieldDescriptor) -> Option<
             // `ColType::String { length }` and `ColType::Text` both spell it, because
             // the shared `FieldDef` vocabulary has one string token and carries the
             // width beside it as `maxLength` (the way `charLen` rides beside `char`).
-            // Collapsing every `string` to `Text` here dropped the bound on every
-            // descriptor->ops round trip, and the loss was not cosmetic: measured on
-            // live PostgreSQL in `crates/zeroship-migrate/tests/fold_live/pg_bounded_string_producer_live.rs`,
-            // a `t.string({ maxLength: 64 })` column reached the server as an
-            // unbounded `text` that STORED a 200-character value, and re-importing an
-            // exported schema authored `ALTER COLUMN ... TYPE text` against a table
-            // nobody had changed - stripping the bound off a live column.
+            // Collapsing every `string` to `Text` here drops the bound on every
+            // descriptor->ops round trip: a `t.string({ maxLength: 64 })` column would
+            // reach the server as an unbounded `text`, and re-importing the exported
+            // schema would then author `ALTER COLUMN ... TYPE text` against a column
+            // nobody changed, stripping a live bound.
             //
             // A non-positive or unrepresentable width falls back to `Text` rather than
             // refusing the descriptor. That is the same verdict `schema::query`'s
             // `max_length` helper already reaches for such a facet (it filters
             // `> 0` and lets the emitter answer the unbounded spelling), so the two
             // carriers still agree on the column; refusing here would instead turn a
-            // descriptor set the boundary accepts today into a hard
+            // descriptor set the boundary accepts into a hard
             // `ProduceError::UnknownType`.
             "string" => match f.max_length.and_then(|len| u32::try_from(len).ok()) {
                 Some(length) if length > 0 => ColType::String { length },
@@ -6620,8 +6588,8 @@ columns = [
 
     #[test]
     fn drop_column_cascades_dependent_index() {
-        // PG auto-drops an index over a dropped column; the pure fold must too.
-        // Pre-fix this RETAINED the stale `t_b_idx`, leaving fold != introspect.
+        // PG auto-drops an index over a dropped column; the pure fold must too,
+        // or the stale `t_b_idx` leaves fold != introspect.
         let with_idx = fold(&[
             create(
                 "t",
@@ -6669,7 +6637,7 @@ columns = [
     #[test]
     fn drop_column_cascades_dependent_unique_constraint_and_index() {
         // PG auto-drops a UNIQUE constraint (AND its implicit index) over a dropped
-        // column. Pre-fix the fold retained BOTH, leaving fold != introspect.
+        // column, so retaining either leaves fold != introspect.
         let dropped = fold(&[
             create(
                 "t",
@@ -7169,8 +7137,7 @@ columns = [
     /// crate refuses everywhere else - it cannot tell a relation reference from
     /// `WHERE note <> 'accounts'`. What that costs is real and is stated here so it
     /// is not mistaken for coverage: after renaming a table a raw-bodied view reads,
-    /// a later `dropView` renders an inverse naming the OLD table, exactly the defect
-    /// the structured path no longer has.
+    /// a later `dropView` renders an inverse naming the OLD table.
     #[test]
     fn a_table_rename_leaves_a_raw_view_body_stale() {
         let query = folded_view_query(
@@ -7265,11 +7232,11 @@ columns = [
 
     #[test]
     fn rename_table_rewrites_incoming_fk_definition() {
-        // REGRESSION: a table rename must re-target every INCOMING FK
-        // `definition` in OTHER tables to the new name - the offline mirror of live
-        // PG re-rendering the FK by OID after `RENAME TO`. Pre-fix the rename re-keyed
-        // only the renamed table's own entry, so `orders`'s FK kept the dead `accounts`
-        // name and `fold_ops` phantom-drifted against live for every incoming FK.
+        // A table rename must re-target every INCOMING FK `definition` in OTHER
+        // tables to the new name - the offline mirror of live PG re-rendering the FK
+        // by OID after `RENAME TO`. A rename that re-keyed only the renamed table's
+        // own entry would leave `orders`'s FK naming the dead `accounts`, and
+        // `fold_ops` would phantom-drift against live for every incoming FK.
         let fk = IrConstraint {
             name: Some("orders_account_fk".to_string()),
             kind: IrConstraintKind::Fk {
@@ -7404,11 +7371,10 @@ columns = [
 
     #[test]
     fn rename_table_rewrites_incoming_ref_target_for_gen_types() {
-        // REGRESSION (gen-types twin): the `FieldDef` projection must re-target
-        // the INCOMING `ref` column in OTHER tables to the renamed table's new name, or
-        // gen-types emits a TS `ref` to a non-existent collection. Pre-fix the arm
-        // re-keyed only the renamed table's own column map, leaving `orders.account_id`
-        // pointing at the dead `accounts`.
+        // gen-types twin of the FK re-target: the `FieldDef` projection must
+        // re-target the INCOMING `ref` column in OTHER tables to the renamed table's
+        // new name, or gen-types emits a TS `ref` to a non-existent collection.
+        // Otherwise `orders.account_id` still points at the dead `accounts`.
         let account_ref = IrColumn {
             name: "account_id".into(),
             ty: ColType::Ref {
@@ -8610,8 +8576,7 @@ columns = [
 
     /// A FRESH `t.encrypted(text)` column folds WITH an encryption sentinel (the
     /// shared builder stamps the `zero-migrate:enc:` contract gen-types reads). This is the
-    /// baseline the alter path must preserve - assert the sentinel is present so the
-    /// "alter loses it" regression below is meaningful.
+    /// baseline the alter path must preserve, so assert the sentinel is present.
     #[test]
     fn fresh_encrypted_column_carries_sentinel() {
         let snap = fold(&[create("v", vec![col("secret", encrypted_text(), true)])]).unwrap();
@@ -8626,12 +8591,12 @@ columns = [
         );
     }
 
-    /// REGRESSION: plain->encrypted via `setColumnType` is FAIL-CLOSED.
-    /// Pre-fix the fold transplanted ONLY `data_type` (bytea), keeping the OLD
-    /// `encryption_sentinel=None` - so the folded encrypted column carried NO
+    /// Plain->encrypted via `setColumnType` is FAIL-CLOSED.
+    /// The fold must not transplant ONLY `data_type` (bytea) while keeping the OLD
+    /// `encryption_sentinel=None`: the folded encrypted column would carry NO
     /// sentinel (a silently-wrong snapshot, since the oracle excludes the sentinel
     /// from Eq). The apply path likewise never emits the `COMMENT ... zero-migrate:enc`, so live
-    /// also lacks it. Until apply can re-stamp it, the fold refuses the change.
+    /// lacks it too. Until apply can re-stamp it, the fold refuses the change.
     #[test]
     fn alter_column_type_to_encrypted_is_unsupported() {
         let err = fold(&[
@@ -8645,9 +8610,10 @@ columns = [
         );
     }
 
-    /// REGRESSION (symmetric): encrypted->plain via `setColumnType` is
-    /// also FAIL-CLOSED. The SOURCE column carries the sentinel; transplanting only
-    /// `data_type` would leave the now-stale `zero-migrate:enc` sentinel on a plaintext column.
+    /// The symmetric case of the fail-closed rule: encrypted->plain via
+    /// `setColumnType` is also FAIL-CLOSED. The SOURCE column carries the sentinel;
+    /// transplanting only `data_type` would leave the stale `zero-migrate:enc`
+    /// sentinel on a plaintext column.
     #[test]
     fn alter_column_type_from_encrypted_is_unsupported() {
         let err = fold(&[
@@ -8714,8 +8680,7 @@ columns = [
         }
     }
 
-    /// REGRESSION: a createTable table-level FK validates and folds on SQLite.
-    /// Before portable composite-FK support, this witness asserted the opposite.
+    /// A createTable table-level FK validates and folds on SQLite.
     #[test]
     fn create_table_level_fk_supported_on_sqlite() {
         let ops = vec![
@@ -8764,8 +8729,7 @@ columns = [
         );
     }
 
-    /// REGRESSION: a createTable TABLE-LEVEL UNIQUE is refused at
-    /// validate-time on SQLite.
+    /// A createTable TABLE-LEVEL UNIQUE is refused at validate-time on SQLite.
     #[test]
     fn create_table_level_unique_unsupported_on_sqlite() {
         let op = create_with(
@@ -8780,8 +8744,7 @@ columns = [
         assert!(err.reason.contains("unique"));
     }
 
-    /// REGRESSION: a createTable non-btree index `using` is refused at
-    /// validate-time on SQLite.
+    /// A createTable non-btree index `using` is refused at validate-time on SQLite.
     #[test]
     fn create_table_non_btree_index_using_unsupported_on_sqlite() {
         let op = create_with(
@@ -8897,8 +8860,8 @@ columns = [
                 },
                 // An `int` column with a literal default - the snapshot's
                 // emission-only `default` IS what gen-types reads, so it MUST
-                // render (regression: int defaults were silently dropped - the
-                // shared `field_default_expr` had no `int` arm).
+                // render; the shared `field_default_expr` needs an `int` arm for
+                // this to hold.
                 IrColumn {
                     name: "rank".to_string(),
                     ty: ColType::Int,
@@ -9042,11 +9005,12 @@ columns = [
     // two copies of the createTable-spec folding cannot drift.
     // -----------------------------------------------------------------------
 
-    /// REGRESSION: the fold and the lower spell the UNIQUE `definition`
-    /// IDENTICALLY (both via the shared `constraintdef_cols`). Pre-fix the lower quoted
-    /// unconditionally -> `UNIQUE ("handle")` while the fold used the conditional-quote
-    /// helper -> `UNIQUE (handle)`; the catalog's `pg_get_constraintdef` spells it
-    /// bare, so the fold's form is correct and the lower now matches it.
+    /// The fold and the lower must spell the UNIQUE `definition`
+    /// IDENTICALLY (both via the shared `constraintdef_cols`). A lower that quoted
+    /// unconditionally would produce `UNIQUE ("handle")` while the fold's
+    /// conditional-quote helper produces `UNIQUE (handle)`; the catalog's
+    /// `pg_get_constraintdef` spells it bare, so the fold's form is correct and the
+    /// lower must match it.
     #[test]
     fn fold_and_lower_agree_on_unique_definition_spelling() {
         // The fold's spelling for a single safe lowercase column.
@@ -10023,11 +9987,10 @@ columns = [
     #[test]
     fn producer_carries_author_declared_indexes_alongside_system_indexes() {
         use crate::render::declarative::IndexDescriptor;
-        // WALL 2 regression: a `CollectionDescriptor` carrying author-declared named
-        // indexes (a plain one AND a unique one) must have BOTH survive into the
-        // produced `createTable` op - alongside the 3 injected confined system indexes
-        // - and NOT be dropped. Pre-fix `descriptors_to_create_ops` hardcoded
-        // `indexes: Vec::new()`, so the author indexes vanished.
+        // A `CollectionDescriptor` carrying author-declared named indexes (a plain one
+        // AND a unique one) must have BOTH survive into the produced `createTable` op
+        // - alongside the injected confined system indexes - and NOT be dropped.
+        // A producer that hardcodes `indexes: Vec::new()` loses the author indexes.
         let mut d = descriptor(
             "articles",
             vec![
