@@ -35,16 +35,12 @@
 //!
 //! That last sentence is ENFORCED rather than asserted. The exception file cannot
 //! record a `ServerError`: an `ALLOWANCES` entry naming one fails the const-eval
-//! guard beside the `include!` and the suite does not BUILD. It used to be prose
-//! only, and the row would have fallen through the disposition check into the
-//! allowance lookup and been excused - see that guard's own comment for why the
-//! `verdict.outcome != Outcome::ServerError` conjunct in [`judge`] never closed it.
+//! guard beside the `include!` and the suite does not BUILD.
 //!
-//! WHAT HAD TO CHANGE to make the corpus EXECUTABLE. The representatives were
-//! built to be CONSTRUCTIBLE and to select a support branch. Nothing in them
-//! assumes its referents exist, and several of them name objects that are unique
-//! per DATABASE or per CLUSTER rather than per schema. Three additions, and they
-//! are the whole of the delta:
+//! TO MAKE THE CORPUS EXECUTABLE. The representatives are built to be
+//! CONSTRUCTIBLE and to select a support branch. Nothing in them assumes its
+//! referents exist, and several of them name objects that are unique per DATABASE or
+//! per CLUSTER rather than per schema. Three additions make them runnable:
 //!
 //!   1. A PRELUDE per row ([`prelude`]), itself authored as IR and applied through
 //!      the same production path - never hand-written DDL. `dropIndex` needs the
@@ -55,24 +51,16 @@
 //!   2. A LOCALIZATION of the names that are not schema-scoped ([`localize`]).
 //!      A PostgreSQL ROLE is cluster-scoped and an EXTENSION is database-scoped,
 //!      so the corpus's `r` and `citext` would collide with any test binary cargo
-//!      happens to run in parallel - `drop_extension_rollback_pg.rs` says in its
-//!      own header that it cannot share `citext` with a second creator. Roles and
-//!      the `createSchema`/`dropSchema` name get a per-row unique suffix; the
-//!      extension becomes `pgcrypto` and is held under [`extension_claim_key`]
-//!      while a row uses it, because a name cannot isolate this one - see that
-//!      constant. This paragraph used to end "which no live test in the tree
-//!      claims", and that was FALSE when it was written: `code.extension` in
-//!      `support::operator_charter` allowlists exactly `citext` and `pgcrypto`,
-//!      and `drop_extension_rollback_pg.rs` claims BOTH - `citext` as `EXT` and
-//!      `pgcrypto` as `EXT_GUARDED`, the latter in the live
-//!      `a_guarded_extension_drop_keeps_no_inverse`. There was no unclaimed name
-//!      to pick, so the sentence was describing a choice that had not been made.
-//!      That file - and `fold_live/fold_role_extension_pg.rs`, for `unaccent` -
-//!      now takes the SAME claim, out of `support::extension_claim`, keyed by the
-//!      extension so the three binaries queue on one key instead of three.
-//!      `nextval`'s hard-coded `app` schema is retargeted at the probe schema,
-//!      because otherwise a cross-schema POLICY refusal would mask the capability
-//!      answer the row is asking about.
+//!      happens to run in parallel. Roles and the `createSchema`/`dropSchema` name
+//!      get a per-row unique suffix; the extension becomes `pgcrypto` and is held
+//!      under [`extension_claim_key`] while a row uses it, because a name cannot
+//!      isolate this one - see that constant. `code.extension` in
+//!      `support::operator_charter` allowlists exactly `citext` and `pgcrypto`, and
+//!      `drop_extension_rollback_pg.rs` claims BOTH, so the binaries take the SAME
+//!      claim out of `support::extension_claim`, keyed by the extension so they queue
+//!      on one key instead of three. `nextval`'s hard-coded `app` schema is
+//!      retargeted at the probe schema, because otherwise a cross-schema POLICY
+//!      refusal would mask the capability answer the row is asking about.
 //!   3. A LIVE SCHEMA read back from the catalog after the prelude, so the subject
 //!      op lowers against what actually exists rather than against
 //!      `LiveSchema::default()`.
@@ -97,8 +85,7 @@
 //! shared by every agent and every gate run working in this tree, so at any moment a
 //! `zmconf_%` schema or database is as
 //! likely to be a sibling run's live probe as it is to be a leak; a guard that reads
-//! the first as the second fails suites that are working, which is what it used to
-//! do. [`probe_owner`] sorts the prefix match three ways: this process's own pid is
+//! the first as the second fails suites that are working. [`probe_owner`] sorts the prefix match three ways: this process's own pid is
 //! always this run's leak; a foreign pid that is still running is a sibling
 //! mid-flight and is ignored; a foreign pid that has exited leaked its schema and
 //! still fails the run. The limits are known and measured, and each is narrow:
@@ -119,9 +106,9 @@
 //!   - PID REUSE. A leak from a dead run whose pid has since been recycled by some
 //!     unrelated live process reads as in-flight and is not reported until that
 //!     process exits. Detection is delayed, never dropped - the schema keeps
-//!     failing later runs until it is cleaned up. `/proc/sys/kernel/pid_max` is
-//!     4194304 on the machine this suite is developed against, so a wrap takes
-//!     millions of spawns. The reverse case is safe by construction: a run that
+//!     failing later runs until it is cleaned up. A pid wrap takes as many spawns
+//!     as `/proc/sys/kernel/pid_max`, in practice millions. The reverse case is safe
+//!     by construction: a run that
 //!     inherits a leaker's pid reads the leftover as its own and fails loudly.
 //!   - NON-LINUX. [`process_is_running`] reads `/proc`. On a target without it,
 //!     every foreign pid reads as running, which keeps concurrent runs green and
@@ -175,40 +162,27 @@ use zeroship_migrate_mysql::MysqlBackend;
 use zeroship_migrate_postgres::PostgresBackend;
 use zeroship_migrate_sqlite::SqliteBackend;
 
-/// What the MySQL leg needed, and where each piece of it now lives. Recorded as a
+/// What the MySQL leg needed, and where each piece of it lives. Recorded as a
 /// constant so it is in the file a MySQL author opens, not only in a doc.
 ///
-/// This list used to be a TODO, and by the time the leg was written three of its
-/// four items were already satisfied elsewhere in the tree. The stale version said
-/// `ZERO_MIGRATE_MYSQL_URL` "occurs in exactly one file in `crates/`, and it is
-/// `src/apply/backend/mysql/mod.rs` (now `zeroship-migrate-mysql/src/backend/mod.rs`),
-/// not a test". MEASURED at 9f65095a: it occurs in
-/// NINE files under `crates/`, SEVEN of them under `tests/` - six once this file's
-/// own stale sentence is discounted - and `tests/support/mysql.rs` had already
-/// shipped every piece item 1 asked for.
-///
-/// A doc that asserts a false world-state on the very constant its reader opens
-/// sends that reader off to rebuild infrastructure that exists, so the correction is
-/// part of the same change as the leg.
-///
-/// 1. DONE BEFORE THIS LEG, in `tests/support/mysql.rs`: `MYSQL_URL_ENV`,
+/// 1. Shared support, in `tests/support/mysql.rs`: `MYSQL_URL_ENV`,
 ///    `mysql_url()`, `require_live_mysql!`, and `MysqlDevSession`, which implements
 ///    `driver::SqlSession` over the blocking `mysql` crate exactly as `PgDevSession`
 ///    does over the PostgreSQL one. `DatabaseGuard` is the `SchemaGuard` sibling.
 ///    Three live MySQL suites already ride it (`tests/fold_live/*_mysql.rs`).
-/// 2. DONE HERE: [`mysql_verdict`]. MySQL has no CREATE SCHEMA that is not a
+/// 2. Here: [`mysql_verdict`]. MySQL has no CREATE SCHEMA that is not a
 ///    DATABASE, so the per-row isolation unit is a throwaway DATABASE and the
 ///    `pg_namespace` leak check becomes an `information_schema.SCHEMATA` check -
 ///    [`mysql_probe_databases`], sorted by the SAME [`probe_owner`] the PostgreSQL
 ///    leg uses, because one MySQL instance is shared by every agent and gate run in
 ///    this tree and a sibling's live probe read as a leak fails a working suite.
-/// 3. DONE HERE: the per-row prelude review, [`prelude`]'s `MYSQL` dialect
+/// 3. Here: the per-row prelude review, [`prelude`]'s `MYSQL` dialect
 ///    arms. The findings are recorded beside them.
-/// 4. NEEDED NOTHING, as predicted: `disposition_for` reads `row.mysql` from the
+/// 4. Needed nothing: `disposition_for` reads `row.mysql` from the
 ///    generated table like the other two columns.
 ///
 /// The one thing a MySQL author must NOT do is relax [`Outcome::ServerError`], and
-/// the obvious way of relaxing it - recording one in the expectations file - is now
+/// the obvious way of relaxing it - recording one in the expectations file - is
 /// refused by the compiler rather than by this sentence.
 const MYSQL_LEG: &str = "see the module doc and this constant";
 
@@ -812,8 +786,7 @@ fn prelude(
         // SQLite trigger carries a BODY, and a bare `SELECT x` is a legal SQLite
         // body. MySQL takes a body too, but MySQL forbids a trigger from returning a
         // result set (`[0A000] Not allowed to return a result set from a trigger`),
-        // so `SELECT x` cannot establish this row's referent there - MEASURED, that
-        // prelude died on the server and left the row with nothing to drop.
+        // so `SELECT x` cannot establish this row's referent there.
         //
         // A DELETE is a legal MySQL trigger statement, provided its target is NOT the
         // table the trigger is attached to, so the prelude supplies `t2` and deletes
@@ -980,20 +953,10 @@ fn probe_prefix_for(pid: u32) -> String {
 /// charter allowlists `code.extension = ["citext", "pgcrypto"]`, so a row that named
 /// anything else would be refused by POLICY and would stop asking its question, and
 /// BOTH of those two are claimed by `rollback/drop_extension_rollback_pg.rs` - as
-/// `EXT` and as `EXT_GUARDED`. `pgcrypto` is the smaller of the two collisions, and
-/// that is MEASURED rather than assumed: across `crates/zeroship-migrate/tests`, the
-/// files that CREATE `citext` against a live server are that one and
-/// `pg_engine/pg_scenarios.rs`, while the only other file that creates `pgcrypto` is
-/// that one, in the single test `a_guarded_extension_drop_keeps_no_inverse`.
+/// `EXT` and as `EXT_GUARDED`. `pgcrypto` is the smaller of the two collisions.
 ///
-/// WHAT THIS FILE'S CLAIM COVERS - AND WHAT IT USED NOT TO. The claim now hashes
-/// [`extension_claim_key`], which is `support::extension_claim`'s key and names the
-/// EXTENSION and nothing else. It used to name this suite -
-/// `zero-migrate:dialect-conformance:extension:pgcrypto` - which serialized the rows
-/// of this file against each other and against nobody else, and
-/// `drop_extension_rollback_pg.rs` took no claim at all. MEASURED at 5b24c5a4: one
-/// PostgreSQL leg of this suite, with that file's `pgcrypto` case looped beside it,
-/// went red on a row of this table -
+/// Two failures that motivate the claim, both from one run being blamed for a
+/// neighbour's installation:
 ///
 /// ```text
 ///   dropExtension/base [postgres] could not be executed and is not pinned in
@@ -1001,9 +964,11 @@ fn probe_prefix_for(pid: u32) -> String {
 ///   || subject: ServerError [42704] extension "pgcrypto" does not exist
 /// ```
 ///
-/// - which is this file being blamed for a neighbour's installation. Two locks with
-///   different keys protect nothing while looking exactly like protection, so the key
-///   belongs to the RESOURCE. `rollback/extension_claim_is_exclusive.rs` pins that.
+/// The claim hashes [`extension_claim_key`], which is `support::extension_claim`'s key
+/// and names the EXTENSION and nothing else. A key naming this suite instead would
+/// serialize the rows of this file against each other and against nobody else. Two locks
+/// with different keys protect nothing while looking exactly like protection, so the key
+/// belongs to the RESOURCE. `rollback/extension_claim_is_exclusive.rs` pins that.
 const PROBE_EXTENSION: &str = "pgcrypto";
 
 /// The advisory-lock key that makes claiming [`PROBE_EXTENSION`] safe across runs.
@@ -1016,8 +981,8 @@ const PROBE_EXTENSION: &str = "pgcrypto";
 /// isolated extension, it is `could not open extension control file`. Isolating in
 /// SPACE is unavailable, so these two rows isolate in TIME.
 ///
-/// MEASURED at 0b77b1c2 - two runs of this suite's PostgreSQL leg started together
-/// against one server, BOTH red, each holding a different half of the collision:
+/// Two runs of this suite's PostgreSQL leg started together against one server both
+/// go red, each holding a different half of the collision:
 ///
 /// ```text
 ///   createExtension/base  ServerError  [23505] duplicate key value violates
@@ -1035,13 +1000,11 @@ const PROBE_EXTENSION: &str = "pgcrypto";
 /// The extension claim deliberately remains a one-argument `hashtext` lock.
 /// Project locks use PostgreSQL's disjoint two-argument advisory-lock namespace,
 /// so a project key cannot collide with this claim. All extension claimants still
-/// hash the same resource string into the same one-key namespace.
-///
-/// NOT A CONSTANT OF THIS FILE any more. It is `support::extension_claim`'s key for
-/// [`PROBE_EXTENSION`], because the other binaries that install `pgcrypto` have to
-/// hash the same string or the claim serializes this suite against itself alone -
-/// which is what it did, and what let a neighbour's installation be reported as a
-/// defect in a row of [`DIALECT_TABLE`].
+/// hash the same resource string into the same one-key namespace. The key is
+/// `support::extension_claim`'s for [`PROBE_EXTENSION`], because the other binaries
+/// that install `pgcrypto` have to hash the same string or the claim serializes this
+/// suite against itself alone and a neighbour's installation is reported as a defect in
+/// a row of [`DIALECT_TABLE`].
 fn extension_claim_key() -> String {
     support::extension_claim::claim_key(PROBE_EXTENSION)
 }
@@ -1142,11 +1105,10 @@ async fn pg_verdict(url: &str, kind: &str, variant: &str, op: &Op) -> Verdict {
             role = probe.role
         ))
         .await;
-    // Only the two rows that CLAIMED the extension may drop it. This used to be
-    // unconditional, and that was the race's second channel: every one of the other
-    // fifty-odd rows ended by dropping a database-global object it had never
-    // created, so a sibling run reaching its `dropTable` row could remove the
-    // extension THIS run had just installed, three rows later.
+    // Only the two rows that CLAIMED the extension may drop it. An unconditional drop
+    // is the race's second channel: every other row would end by dropping a
+    // database-global object it never created, so a sibling run reaching its
+    // `dropTable` row could remove the extension THIS run had just installed.
     if claimed {
         release_the_extension(&session).await;
     }
@@ -1449,15 +1411,14 @@ const NO_REASON_SENTINEL: &str = "internal: supported cell has no refusal reason
 
 /// Rows that currently show [`NO_REASON_SENTINEL`] to the operator, pinned.
 ///
-/// This check exists because of a MEASURED limit on layer 1 as the proposal
-/// specifies it. Production support reads the selected backend policy, whose
-/// answers are pinned to the generated table by the 276-cell parity test. An
-/// `unsupported` answer makes validate refuse on that backend's own say-so: the
-/// required outcome `RefusedByCapability` is satisfied BY CONSTRUCTION, and the
-/// check cannot fail. Demonstrated by flipping `dropTable/base` on PostgreSQL - an
-/// op PostgreSQL obviously supports - to `unsupported`: the suite stayed GREEN.
+/// This check exists because of a limit on layer 1 as the proposal specifies it.
+/// Production support reads the selected backend policy, whose answers are pinned to
+/// the generated table by the cell-parity test. An `unsupported` answer makes validate
+/// refuse on that backend's own say-so: the required outcome `RefusedByCapability` is
+/// satisfied BY CONSTRUCTION, and the check cannot fail. Flipping a supported op to
+/// `unsupported` leaves the suite green.
 ///
-/// What that flip DID change is the operator's message, which became the sentinel
+/// What that flip DOES change is the operator's message, which becomes the sentinel
 /// above. So the message is the one observable that a too-conservative declaration
 /// still moves, and pinning it recovers a real check from a tautological cell.
 struct PlaceholderReason {
@@ -1846,12 +1807,10 @@ async fn every_postgres_row_of_the_dialect_table_answers_to_a_live_server() {
     let session = PgDevSession::connect(&url);
 
     // The isolation claim is VERIFIED, not asserted, and it is verified HERE rather
-    // than in its own `#[test]`. It used to be its own test, and libtest ran it
-    // concurrently with this sweep: it observed
-    // `zmconf_alterprimarykey_base_..._1` - the FIRST row's schema, mid-flight -
-    // and reported a leak that was a live probe. A check whose subject is another
-    // test's in-progress state has to be sequenced with it, so it is a step of the
-    // sweep.
+    // than in its own `#[test]`. As its own test, libtest ran it concurrently with this
+    // sweep: it observed the FIRST row's schema mid-flight and reported a leak that was
+    // a live probe. A check whose subject is another test's in-progress state has to be
+    // sequenced with it, so it is a step of the sweep.
     //
     // The census is by pid, not by prefix. `zmconf_%` alone answers "somebody on
     // this server is or was running this suite", and every agent in this tree points
@@ -2075,7 +2034,7 @@ async fn a_probe_schema_is_judged_by_the_pid_in_its_name_not_by_its_prefix() {
 ///   2. while one session holds the claim, a second session cannot take it, and once
 ///      the first releases, the second can.
 ///
-/// Part 2 uses a raw `pg_try_advisory_lock` for the contender rather than
+/// The second half uses a raw `pg_try_advisory_lock` for the contender rather than
 /// [`claim_the_extension`], because a WAIT and a REFUSAL are indistinguishable from
 /// a test that only ever waits: the try answers `false` immediately and that false
 /// is the observable. It then takes the claim the real way, which may wait for the

@@ -3,8 +3,8 @@
 //!
 //! The seam itself is `zeroship_migrate_backend::dml`, glob-re-exported below so every
 //! existing `render::dml::...` path in this crate resolves unchanged. What lives HERE
-//! is the handful of doors that used to take a closed dialect identity and resolve a
-//! renderer from it.
+//! is the handful of doors that turn a dialect identity into a renderer, through the
+//! registry.
 //!
 //! # Why they could not stay down there
 //!
@@ -299,27 +299,15 @@ mod tests {
         assert_eq!(quote_ident_checked("a\"b").unwrap(), "\"a\"\"b\"");
     }
 
-    /// The engine peer seams (`author`/`backfill`/`journal`)
-    /// now all route through `quote_ident_checked`, so they emit BYTE-IDENTICAL
-    /// output for the same quote-bearing schema (the "uniform render seam"
-    /// requirement). The peers wrap the shared helper, so comparing each to the
-    /// canonical helper proves the uniformity for all of them.
+    /// The engine peer seams (`author`/`backfill`/`journal`) all route through
+    /// `quote_ident_checked`, so they emit BYTE-IDENTICAL output for the same
+    /// quote-bearing schema (the "uniform render seam" requirement). The peers wrap
+    /// the shared helper, so comparing each to the canonical helper proves the
+    /// uniformity for all of them.
     ///
-    /// `role` USED TO BE A LEG HERE and is not one any more, because the migrator
-    /// role name derivation left this crate for the PostgreSQL backend. The leg
-    /// went WITH it - `zeroship_migrate_postgres::role::tests::
-    /// the_role_seam_renders_uniformly_and_fails_closed` asserts the same two
-    /// facts (byte-identical escape-and-quote, fail-closed on empty/NUL) against
-    /// the same shared helper. The invariant did not get dropped; it got a home
-    /// next to its subject, which is the only place it can still see it.
-    ///
-    /// `journal` went the SAME way, and for the same reason, when the PostgreSQL
-    /// execution half followed the role derivation out of this crate:
-    /// `zeroship_migrate_postgres::backend::journal_sql`'s
-    /// `the_journal_seam_renders_uniformly_and_fails_closed` is that leg now. What
-    /// is left here is the ENGINE's own seam, which is the only one this crate can
-    /// still see - and that is why this file no longer names a vendor backend
-    /// module at all.
+    /// That is why this file names no vendor backend module: the seams reachable
+    /// here are the ENGINE's own. The vendor-specific seams (`role`, `journal`) sit
+    /// with their subjects in their backend crates.
     #[test]
     fn all_engine_seams_render_uniformly() {
         let schema = "ap\"p"; // a quote-bearing engine schema
@@ -342,21 +330,10 @@ mod tests {
     /// The DDL character-stream translator has one separately named exemption for
     /// the doubled-backtick literal, but not for the primitive escape call.
     ///
-    /// WHY THIS TEST EXISTS AT ALL, given that nothing was mis-emitted before it.
-    /// The backtick spelling used to live in `schema::query::mysql_quote_ident`,
-    /// which was `pub` and in CORE, with `backends::mysql` reaching INTO core to
-    /// get its own spelling - the exact mirror image of the ANSI arrangement. No
-    /// emitted byte was wrong, because every call site named MySQL in the callee's
-    /// name, and the one-dialect-literal test passed because the reach was by
-    /// function name rather than a `DialectId` constant. The defect was
-    /// STRUCTURAL and it was a step-4 blocker: the future `zeroship-migrate-mysql`
-    /// would have needed core at runtime to spell its own identifier, which is the
-    /// core-to-backend cycle the whole backend split exists to break.
-    ///
-    /// A second home also existed where nobody was looking for one:
-    /// `zeroship_migrate_mysql::backend::journal_sql::quote_ident_mysql` carried its own copy
-    /// of the same escape. The ANSI needle has zero offenders crate-wide, so the
-    /// backtick needle having two was the asymmetry, not a difference of kind.
+    /// The defect this guards is STRUCTURAL: a backend reaching INTO core for its own
+    /// spelling is the core-to-backend cycle the whole backend split exists to break.
+    /// A spelling that is byte-correct only because every call site names its vendor in
+    /// the callee's name is still unrouted.
     ///
     /// TWO NEEDLES, AND THE SECOND ONE HAS AN EXEMPTION THAT IS ITSELF THE POINT.
     /// Needle 1 is the escape CALL. Needle 2 is the doubled-backtick string literal
@@ -365,21 +342,19 @@ mod tests {
     /// documented single translation point from the `pg_get_constraintdef` normal
     /// form into MySQL spelling. That function is a character-stream TRANSLATOR, not
     /// a spelling primitive - the MySQL counterpart of the constraint-definition
-    /// codec's
-    /// normal-form role rather than of `ansi_double_quote_ident`'s spelling role -
-    /// and it is now owned by the backend whose constraint DDL it translates. It is
-    /// exempted BY FILE rather than left unscanned, so
-    /// a second hand-rolled re-quoter appearing anywhere else goes red.
+    /// codec's normal-form role rather than of `ansi_double_quote_ident`'s spelling
+    /// role - and it is owned by the backend whose constraint DDL it translates. It is
+    /// exempted BY FILE rather than left unscanned, so a second hand-rolled re-quoter
+    /// appearing anywhere else goes red.
     ///
     /// WHAT NEITHER NEEDLE CATCHES, and the limitation is the same shape as the ANSI
     /// scan's. Both are byte-patterns, so a bare wrap with no doubling at all -
-    /// ``format!("`{ident}`")`` after a strict bare-identifier gate, which is what
-    /// `zeroship_migrate_mysql::backend::backfill_sql::quote_bare` used to be - passes both
-    /// while being an unrouted spelling. That site was routed by hand; only the
-    /// compile-time half (the primitive being unnameable outside its backend module)
-    /// generalises. The in-crate test expectations that build a backtick literal to
-    /// CHECK an emitter are deliberately left alone: a probe that derives its
-    /// expectation from the emitter it checks is not an oracle.
+    /// ``format!("`{ident}`")`` after a strict bare-identifier gate - passes both
+    /// while being an unrouted spelling. Only the compile-time half (the primitive
+    /// being unnameable outside its backend module) generalises. The in-crate test
+    /// expectations that build a backtick literal to CHECK an emitter are deliberately
+    /// left alone: a probe that derives its expectation from the emitter it checks is
+    /// not an oracle.
     #[test]
     fn no_bare_backtick_escape_seam_outside_the_mysql_backend() {
         use std::path::Path;
@@ -398,17 +373,9 @@ mod tests {
         let mut escape_home_hits = 0;
         let mut escape_literal_hits = 0;
         let mut requote_home_hits = 0;
-        // ENGINE crates only. This walk used to say "every directory under
-        // `crates/`", which meant the engine for as long as the engine owned its
-        // own workspace. Grafting it into the product workspace changed what that
-        // sentence denotes without anyone editing it: `crates/` now holds 27 more
-        // crates that were never this census's subject, and it duly went red on
-        // `zeroship-data-sql/src/compile.rs`, which spells MySQL backticks because
-        // spelling them is its job.
-        //
-        // The `-` is required rather than a bare `starts_with`, because
-        // `zeroship-migrate-server` — the policy server, no relation — extends the prefix
-        // without a separator and a prefix match would drag it in.
+        // ENGINE crates only. The `-` is required rather than a bare `starts_with`,
+        // because `zeroship-migrate-server` — the policy server, no relation — extends the
+        // prefix without a separator and a prefix match would drag it in.
         const ENGINE: &str = "zeroship-migrate";
         let is_engine = |name: &str| name == ENGINE || name.starts_with("zeroship-migrate-");
         let mut stack = std::fs::read_dir(crates_root)
@@ -496,65 +463,28 @@ mod tests {
 
     /// STRUCTURAL enforcement of the "no remaining bare
     /// `format!`/`replace` escape seam" claim. The raw `"` -> `""` escape logic
-    /// (`replace('"', "\"\"")`) must live in EXACTLY one physical home - and
-    /// nowhere else in the crate source. Every other quoting seam routes through
+    /// (`replace('"', "\"\"")`) must live in EXACTLY one physical home,
+    /// `zeroship_migrate_backend::spelling::ansi_double_quote_ident`, and
+    /// nowhere else in this crate's source. Every other quoting seam routes through
     /// it (via one of the two `dml` doors for author-validated helpers, or via
     /// [`quote_ident_checked_for_dialect`] for the fail-closed engine-identifier
-    /// surfaces).
+    /// surfaces). No core module performs the escape at all, so this scan over core's
+    /// own `src` finds it nowhere.
     ///
-    /// THE HOME MOVED TWICE, AND THE INVARIANT DID NOT WEAKEN. It used to be
-    /// `dml.rs`, then `render/backends/mod.rs::ansi_double_quote_ident` as a
-    /// `pub(in crate::render::backends)` item, and it now lives in another crate
-    /// entirely as `zeroship_migrate_backend::spelling::ansi_double_quote_ident`. Each
-    /// move made the home narrower rather than wider: no core module performs the
-    /// escape at all, so this scan over core's own `src` finds it nowhere.
-    ///
-    /// The scan's two exemptions reflect that history rather than a live escape.
-    /// `render/backends/mod.rs` no longer holds the primitive, and `dml.rs` matches
-    /// only because this test's own needle strings and the prose above spell the
-    /// pattern; no code in either file performs the escape.
-    ///
-    /// THE `schema/` EXEMPTION IS GONE, AND IT WAS LOAD-BEARING WHILE IT LASTED. The
-    /// scan used to skip the whole `schema/` subtree on the grounds that the
-    /// schema-authority DDL layer "carries its OWN identifier-quoting primitive
-    /// (`schema::query::quote_ident`)" and was a distinct module layer from the render
-    /// seam. That reasoning is exactly the shape of the defect this test exists to
-    /// catch: `schema::query::quote_ident` was `pub`, took no dialect, and both
-    /// `PostgresSchemaRenderer::foreign_key_target` AND
-    /// `SqliteSchemaRenderer::foreign_key_target` spelled identifiers through it - so
-    /// SQLite's schema renderer emitted through a `format!` in core that named no
-    /// vendor, and was byte-correct only because two of the three shipping dialects
-    /// agree on `"x"`.
-    ///
-    /// MEASURED, on the `--lib` binary, by neutering the ANSI quoting primitive with
-    /// one appended token: it reddened a large population of which almost none was
-    /// under `schema::`. Neutering `schema::query::quote_ident` instead reddened a
-    /// SECOND population that was DISJOINT from the first - a whole set of tests that
-    /// could not observe the crate's single quoting home. After routing, the one-token
-    /// neuter on the single primitive reddens both populations together.
-    ///
-    /// The exemption is deleted rather than retargeted, so `schema/` is now scanned
-    /// like every other subtree. `schema::query::mysql_quote_ident` used to survive
-    /// this scan legitimately - it spells backticks, not `"` - and an earlier version
-    /// of this note added that it was "the MySQL backend's own primitive
-    /// (`backends::mysql` delegates to it) rather than a second home for anything".
-    /// The delegation was real and the conclusion did not follow: a backend
-    /// delegating INTO core is the mirror image of the arrangement this test
-    /// enforces, not an instance of it. That function is now gone and the backtick
-    /// spelling has its own scan, `no_bare_backtick_escape_seam_outside_the_mysql_backend`
-    /// above.
+    /// The scan's two exemptions are not live escapes: `render/backends/mod.rs` holds
+    /// no primitive, and `dml.rs` matches only because this test's own needle strings
+    /// and the prose above spell the pattern; no code in either file performs the
+    /// escape.
     ///
     /// The `"` -> `""` escape logic must NOT recur inline across sites such as
     /// `executor` / `precondition` / `baseline` / `expand_contract` / `shadow` /
     /// `declarative` / `db` / `render::lower` / `zeroship_migrate_sqlite::backend`.
     ///
-    /// WHAT IT DOES NOT CATCH, MEASURED: the scan is a byte-pattern, so a
-    /// re-implementation that spells the quote differently - `char::from(34)`,
-    /// `'\u{22}'`, a `&str` const - passes it while being the identical defect.
-    /// That is not hypothetical: the spike behind this seam wrote `char::from(34)`
-    /// in a probe and evaded this guard by accident. The compile-time half (the
-    /// primitive being unnameable outside `render::backends`) is what closes that
-    /// gap, because it never looks at bytes at all.
+    /// WHAT IT DOES NOT CATCH: the scan is a byte-pattern, so a re-implementation that
+    /// spells the quote differently - `char::from(34)`, `'\u{22}'`, a `&str` const -
+    /// passes it while being the identical defect. The compile-time half (the primitive
+    /// being unnameable outside `render::backends`) is what closes that gap, because it
+    /// never looks at bytes at all.
     #[test]
     fn no_bare_escape_seam_outside_dml() {
         use std::path::Path;
@@ -577,10 +507,10 @@ mod tests {
                 if path.extension().and_then(|e| e.to_str()) != Some("rs") {
                     continue;
                 }
-                // Neither exempted file performs the escape any more: the primitive
-                // moved to `zeroship_migrate_backend::spelling`. `render/backends/mod.rs`
-                // is the primitive's former home and `render/dml.rs` matches only on
-                // this test's own needle strings and the prose that names the seam.
+                // Neither exempted file performs the escape: the primitive lives at
+                // `zeroship_migrate_backend::spelling`. `render/backends/mod.rs` and
+                // `render/dml.rs` match only on this test's own needle strings and the
+                // prose that names the seam.
                 let rel = path.strip_prefix(&src_root).unwrap().display().to_string();
                 if rel == "render/backends/mod.rs" || rel == "render/dml.rs" {
                     continue;
@@ -1059,10 +989,8 @@ mod tests {
         for dialect in [&SQLITE, &MYSQL] {
             let err =
                 render_expr_inline(crate::test_fixtures::VENDORS, &expr, dialect).unwrap_err();
-            // Stricter than the old `contains("PostgreSQL-only")`, which was one
-            // shared sentence every refusal produced: the refusal must now name
-            // the FIELD it could not render, so a backend refusing the wrong part
-            // no longer satisfies this.
+            // The refusal must name the FIELD it could not render, so a backend
+            // refusing the wrong part does not satisfy this.
             assert!(
                 err.to_string().contains("epoch"),
                 "an extract refusal must name the field it declined on {dialect:?}: {err}"
@@ -1742,13 +1670,10 @@ mod tests {
         );
     }
 
-    /// L1 self-defense: the PG `qualify_table` arm must not blindly trust
-    /// the engine-supplied `project_schema`. A NUL byte - the one char that
-    /// `"`-doubling cannot neutralise (PG rejects it inside an identifier) - is
-    /// refused fail-closed with `DmlError::InvalidIdentifier { what: "schema" }`,
-    /// not interpolated. RED before the schema qualifier was routed through the
-    /// checked quoter (the old `format!` would have emitted a statement carrying
-    /// the raw NUL).
+    /// The PG `qualify_table` arm must not blindly trust the engine-supplied
+    /// `project_schema`. A NUL byte - the one char that `"`-doubling cannot
+    /// neutralise (PG rejects it inside an identifier) - is refused fail-closed with
+    /// `DmlError::InvalidIdentifier { what: "schema" }`, not interpolated.
     #[test]
     fn rejects_nul_in_project_schema_pg() {
         let err = assemble_insert(
