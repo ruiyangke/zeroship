@@ -6,9 +6,9 @@
 // Its header argues that this makes append-only an ENFORCED property rather than a
 // convention, so a credential over-granted by mistake still cannot rewrite history.
 //
-// THAT ARGUMENT DOES NOT SURVIVE THE CROSSING TO MySQL, and nothing measured it.
+// THAT ARGUMENT DOES NOT SURVIVE THE CROSSING TO MySQL.
 // MySQL triggers do not fire on `TRUNCATE TABLE` — the server treats it as DDL
-// rather than a row operation — so no trigger can intercept it. Measured here:
+// rather than a row operation — so no trigger can intercept it. The matrix:
 //
 //   UPDATE     refused, `migration journal is append-only (no UPDATE/DELETE)`
 //   DELETE     refused, same message
@@ -24,9 +24,9 @@
 //   3. if MySQL or the engine ever gains a way to refuse it, this test FAILS and
 //      the gap can be closed deliberately — invert the arm, do not delete it.
 //
-// The operational consequence is in `docs/security-model.md`: on MySQL,
-// withholding the `TRUNCATE` grant is not defence in depth, it is the only
-// control. On PostgreSQL it is a second layer behind the trigger.
+// The operational consequence: on MySQL, withholding the `TRUNCATE` grant is
+// not defence in depth, it is the only control. On PostgreSQL it is a second
+// layer behind the trigger.
 //
 // GATE: `ZERO_MIGRATE_MYSQL_URL`.
 

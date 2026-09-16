@@ -1,19 +1,13 @@
 // SQLite apply driven through the shipped CLI binary, end to end.
 //
-// `docs/getting-started.md` and `docs/cli.md` both advertise it - "SQLite apply is
-// available through Node, the CLI, and Rust" - and `TODO.md` listed it as an open
-// capability gap, "SQLite apply from Node/CLI (currently Rust-only)". One of those
-// was stale, and nothing in this suite could say which: the only SQLite references
-// here parse DSN strings (`driverFor`, `hasInlinePassword`) and never reach a
-// database.
+// The suite's other SQLite references parse DSN strings (`driverFor`,
+// `hasInlinePassword`) and never reach a database; this arm drives a real
+// apply so support for the combination does not rest on prose.
 //
-// It works, so the TODO entry was the stale one. This arm exists so the answer stops
-// depending on which document you read.
-//
-// It also fills the gap that let the disagreement persist. The Rust side proves the
+// It also fills the coverage gap directly. The Rust side proves the
 // SQLite backend (`crates/zeroship-migrate-node/tests/rollback_sqlite.rs` and the
-// in-crate suites), and the host suite proves the CLI against PostgreSQL and MySQL,
-// but no arm ran the CLI against SQLite - the one combination both claims are about.
+// in-crate suites), and the host suite proves the CLI against PostgreSQL and
+// MySQL; this arm runs the CLI against SQLite.
 //
 // The second arm covers the one thing zero-migrate does to a SQLite database that
 // OUTLIVES the apply, and so is the one an operator has to be told about in advance.
@@ -166,8 +160,8 @@ test("the CLI applies to a SQLite file and the rows are really there", () => {
 // A WAL application database comes back from an apply in DELETE journal mode, and
 // stays there.
 //
-// `docs/security-model.md` warns about it in one sentence: "Opening an application
-// database that uses WAL changes its persistent journal mode." That is the only
+// Opening an application database that uses WAL changes its persistent
+// journal mode. That is the only
 // effect zero-migrate has on a SQLite database that OUTLIVES the migration. It is
 // not a side effect of the schema change - it is a property of the connection
 // profile, so it lands even on an apply that changes nothing, and it does not
@@ -178,10 +172,9 @@ test("the CLI applies to a SQLite file and the rows are really there", () => {
 // and OFF do not provide, so `enforce_atomic_profile_for_schema` pins DELETE and
 // `synchronous = FULL` and reads both back rather than trusting the assignment.
 //
-// Nothing measured it. `journal_mode` appeared in the whole test tree only as a
-// PRAGMA the authorizer denies. So the promise an operator plans around - "your WAL
-// database will not be WAL afterwards" - rested on one sentence of prose, and the
-// refusal path beside it ("remained {actual}") had no shape either.
+// This arm gives the promise an operator plans around - "your WAL database
+// will not be WAL afterwards" - and the refusal path beside it
+// ("remained {actual}") their shape.
 //
 // The assertions read the FILE with a separate connection after the CLI process has
 // exited. A pragma read on the engine's own connection would only be the engine
@@ -274,9 +267,9 @@ test("a WAL application database is left in DELETE journal mode, persistently", 
 // `plan` does it too, and `plan` is advertised as a dry run.
 //
 // This arm exists because the previous one made the behaviour look like a property
-// of applying, and it is not. `docs/cli.md` calls `plan` "a live dry run" that "does
-// not call the apply or resolution APIs and does not execute the rendered migration
-// SQL", and says "planning uses a read-only status path". All of that is true of the
+// of applying, and it is not. `plan` is advertised as a live dry run that does
+// not call the apply or resolution APIs, does not execute the rendered migration
+// SQL, and uses a read-only status path. All of that is true of the
 // SQL. None of it is true of the FILE: `statusIrSqlite` opens through the same
 // `SqliteBackend::open`, so `plan` gets the same hardened profile as apply and pins
 // `journal_mode = DELETE` on the application database before it reads anything. The
@@ -292,8 +285,7 @@ test("a WAL application database is left in DELETE journal mode, persistently", 
 // profile, since nothing on that path commits across `main` and `_mig` - and it is
 // deliberately not attempted here: it changes the hardened connection used by every
 // SQLite entry point, and that decision wants more than a passing test. Until then,
-// `docs/cli.md` carries the warning this measured, and this is where the current
-// behaviour is recorded rather than assumed.
+// this arm is where the current behaviour is recorded rather than assumed.
 
 test("plan, a dry run, converts a WAL application database too - the documented wart", () => {
   const work = mkdtempSync(join(HERE, "sqlite-plan-wal-"));

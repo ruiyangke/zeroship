@@ -1,23 +1,21 @@
 // The two MySQL preconditions for a structured data migration, measured against a
-// live server rather than a mock.
-//
-// `docs/security-model.md` states both:
+// live server rather than a mock:
 //
 //   "Every insert, update, delete, and backfill target must use InnoDB."
 //   "MySQL refuses structured data migrations when the target has user triggers
 //    because it cannot prove that trigger side effects stay transactionally
 //    consistent with the migration journal."
 //
-// Both guards exist (`ensure_transactional_dml_target` / `ensure_no_user_triggers`),
-// and both were covered ONLY by in-module unit tests driving a recording session.
-// A mock answers whatever column alias the code asks it for, so those tests prove
+// Both guards exist (`ensure_transactional_dml_target` / `ensure_no_user_triggers`).
+// The in-module unit tests drive a recording session, and a mock answers
+// whatever column alias the code asks it for, so those tests prove
 // the branch and not the query: they would stay green if
 // `information_schema.TABLES` never returned a row under the name the guard looks
 // it up by, and the guard would then fail open on a real server for the engine
 // check and closed-for-the-wrong-reason for the trigger check.
 //
-// This is the difference the F414 lesson names - measure the path a user takes.
-// Nothing here mocks a catalog: MySQL supplies the MyISAM table and the trigger.
+// Measure the path a user takes: nothing here mocks a catalog - MySQL
+// supplies the MyISAM table and the trigger.
 //
 // The control arm is what makes the two refusals mean anything. Without it, a
 // build that refused EVERY MySQL data migration would pass both refusal arms, and
@@ -185,7 +183,7 @@ test("MySQL refuses a data migration whose target is non-InnoDB or carries a use
       "the engine must create transactional tables to begin with",
     );
 
-    // Out-of-band changes: exactly the two states the security model names.
+    // Out-of-band changes: exactly the two preconditions from the header.
     await admin.query(
       `ALTER TABLE ${mysqlIdent(database)}.myisam_rows ENGINE = MyISAM`,
     );
