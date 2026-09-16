@@ -1,47 +1,35 @@
-//! Diagnosis for the hypothesised pull/cancel double-borrow race in
+//! Pull/cancel double-borrow hazard in
 //! `crates/zeroship-runtime/src/web/streams/readable_default_controller.rs`'s
 //! `set_up_readable_stream_default_controller_native`.
 //!
-//! The hypothesis: both the `pull` and `cancel` `AlgorithmFn` closures
-//! built there close over the *same* `Rc<RefCell<S>>` and hold a
-//! `borrow_mut()` across an `.await`. If `cancel_steps` ever fires while
-//! a `pull` future is suspended mid-poll, the cancel closure's
-//! `source_rc.borrow_mut()` should hit an already-mutably-borrowed
-//! `RefCell` and panic with `BorrowMutError`.
+//! Both the `pull` and `cancel` `AlgorithmFn` closures built there close
+//! over the *same* `Rc<RefCell<S>>` and hold a `borrow_mut()` across an
+//! `.await`. If `cancel_steps` fires while a `pull` future is suspended
+//! mid-poll, the cancel closure's `source_rc.borrow_mut()` hits an
+//! already-mutably-borrowed `RefCell` and panics with `BorrowMutError`.
 //!
-//! This file contains two tests that together settle the question:
+//! Two tests settle the question:
 //!
-//! 1. [`js_driven_read_then_cancel_never_touches_native_source`] — the
-//!    literal ask: a real `Runtime`, JS calls `.read()` then
-//!    `.cancel()` on a `NativeSource`-backed stream. **This does NOT
-//!    reproduce the panic**, and the test proves *why*: `pull()` and
-//!    `cancel()` are never invoked at all (counters stay at 0,
-//!    verified by execution, not just by reading the source). The
-//!    mechanism is `algorithm_snapshot()` in
-//!    `readable_default_controller.rs` (used by both
-//!    `invoke_pull_algorithm` and `cancel_steps`), which converts
+//! 1. [`js_driven_read_then_cancel_never_touches_native_source`] drives a
+//!    real `Runtime`: JS calls `.read()` then `.cancel()` on a
+//!    `NativeSource`-backed stream. It does NOT reproduce the panic
+//!    because `pull()` and `cancel()` are never invoked at all (counters
+//!    stay at 0, verified by execution rather than by reading the source).
+//!    `algorithm_snapshot()` in `readable_default_controller.rs` (used by
+//!    both `invoke_pull_algorithm` and `cancel_steps`) converts
 //!    `AlgorithmFn::Native` / `AlgorithmFn::NativeReason` to
-//!    `AlgorithmSnapshot::Noop` *before* either the pull or cancel
-//!    driving path ever calls the boxed closure — see
-//!    `readable_default_controller.rs:705-714` — and
-//!    `AlgorithmFn::invoke_with_controller` /
-//!    `invoke_with_reason` short-circuit the same way independently
-//!    at lines 264-266 / 313-315. So today, on this exact JS surface,
-//!    the boxed closures containing `source_rc.borrow_mut()` are
-//!    genuinely dead code: constructed and stored, never called.
+//!    `AlgorithmSnapshot::Noop` *before* either driving path calls the
+//!    boxed closure, and `AlgorithmFn::invoke_with_controller` /
+//!    `invoke_with_reason` short-circuit the same way independently. On
+//!    this JS surface the boxed closures containing `source_rc.borrow_mut()`
+//!    are dead code: constructed and stored, never called.
 //!
 //! 2. [`direct_closure_pull_then_cancel_panics_with_borrow_mut_error`]
-//!    — bypasses the (currently absent) driving mechanism and invokes
-//!    the *actual* boxed closures built by
-//!    `set_up_readable_stream_default_controller_native` directly, the
-//!    way a future runtime-loop driver would. **This DOES reproduce**
-//!    a `BorrowMutError` panic, confirming the hazard described in the
-//!    dispatch brief is real in the closures as written — it just has
-//!    no live caller yet.
-//!
-//! Established by reading (not merely guessed): the exact non-driving
-//! mechanism in (1), cited above with line numbers. Established by
-//! running: both the "never invoked" claim in (1) and the panic in (2).
+//!    bypasses that short-circuit and invokes the *actual* boxed closures
+//!    built by `set_up_readable_stream_default_controller_native`
+//!    directly, the way a runtime-loop driver would. It DOES reproduce a
+//!    `BorrowMutError` panic, confirming the hazard is real in the closures
+//!    as written; it simply has no live caller yet.
 
 #![allow(unsafe_code)]
 
@@ -61,7 +49,7 @@ use zeroship_runtime::{
 };
 
 // ---------------------------------------------------------------------------
-// Test 1 — the literal ask: drive via JS on a real Runtime.
+// Test 1 — drive via JS on a real Runtime.
 // ---------------------------------------------------------------------------
 
 thread_local! {
@@ -173,19 +161,17 @@ async fn run_js(module_src: &str) -> String {
     }
 }
 
-/// The literal ask from the dispatch brief: build a real `Runtime`,
-/// have JS start reading a `NativeSource`-backed stream (parking the
-/// read), then cancel it while "parked", and assert no panic + cancel
-/// resolves.
+/// Drives a real `Runtime`: JS starts reading a `NativeSource`-backed
+/// stream (parking the read), then cancels it while "parked", and asserts
+/// no panic + cancel resolves.
 ///
-/// **Result: GREEN, and not for a trivial reason.** The test proves via
-/// execution (thread-local counters visible to both the V8 callback and
-/// the Rust assertions) that `reader.read()` and `reader.cancel()` on a
+/// The test's point is that `reader.read()` and `reader.cancel()` on a
 /// `NativeSource`-backed stream never call into `SuspendingSource::pull`
-/// or `::cancel` AT ALL on this build — `pull` and `cancel` counts stay
-/// 0 throughout, and the `read()` promise is still unsettled after a
-/// timer well past when a real pull would have delivered a chunk. The
-/// double-borrow hazard cannot fire here because neither closure runs.
+/// or `::cancel` AT ALL on this build — the thread-local counters (visible
+/// to both the V8 callback and the Rust assertions) stay at 0 throughout,
+/// and the `read()` promise is still unsettled after a timer well past
+/// when a real pull would have delivered a chunk. The double-borrow hazard
+/// cannot fire here because neither closure runs.
 #[compio::test]
 async fn js_driven_read_then_cancel_never_touches_native_source() {
     let body = run_js(
@@ -254,8 +240,8 @@ export default {
 }
 
 // ---------------------------------------------------------------------------
-// Test 2 — bypass the (currently absent) driver and call the actual
-// boxed closures directly, the way a future runtime-loop driver would.
+// Test 2 — bypass the driver and call the actual boxed closures directly,
+// the way a future runtime-loop driver would.
 // ---------------------------------------------------------------------------
 
 /// Same suspend-forever shape as `SuspendingSource`, but independent
@@ -301,24 +287,17 @@ where
 /// `set_up_readable_stream_default_controller_native` builds — reached
 /// via the same internal-field raw-pointer technique the production
 /// code itself uses in `readable_stream_default_controller_clear_algorithms`
-/// (`readable_default_controller.rs:860-870`) — bypassing
-/// `algorithm_snapshot`'s Noop short-circuit (see test 1's doc comment)
-/// entirely. This is what a runtime-loop driver wired up to actually
-/// call `AlgorithmFn::Native`/`NativeReason` would do.
+/// — bypassing `algorithm_snapshot`'s Noop short-circuit (see test 1's
+/// doc comment) entirely. This is what a runtime-loop driver wired up to
+/// actually call `AlgorithmFn::Native`/`NativeReason` would do.
 ///
-/// **Result: RED, as predicted.** `pull_fut.poll()` suspends
-/// (confirmed `Poll::Pending`) holding `source_rc`'s `RefMut` across the
-/// await, exactly as the source comments describe. The subsequent
-/// `cancel_fut.poll()` call panics — `RefCell::borrow_mut` on an
-/// already-mutably-borrowed cell — with the standard library's
-/// `BorrowMutError` panic message. This confirms the hazard described
-/// in the dispatch brief is real *in the closures as written*; it is
-/// simply unreachable today because nothing calls them (test 1).
-///
-/// Left RED deliberately per the dispatch brief ("DO NOT FIX
-/// ANYTHING" — diagnosis only). Do not add `#[should_panic]` here
-/// without checking with whoever owns the fix; a red test is the
-/// intended deliverable of this dispatch.
+/// `pull_fut.poll()` suspends (confirmed `Poll::Pending`) holding
+/// `source_rc`'s `RefMut` across the await, exactly as the source comments
+/// describe. The subsequent `cancel_fut.poll()` call panics —
+/// `RefCell::borrow_mut` on an already-mutably-borrowed cell — with the
+/// standard library's `BorrowMutError` panic message. The hazard is real
+/// *in the closures as written*; it is simply unreachable because nothing
+/// calls them (test 1).
 ///
 /// IGNORED, and the reason matters more than the attribute. This panics — that
 /// is the finding, reproduced. It is ignored because the hazard is currently
@@ -350,11 +329,11 @@ fn direct_closure_pull_then_cancel_panics_with_borrow_mut_error() {
         assert!(!raw.is_null(), "controller's internal field must not be null");
         // SAFETY: mirrors `readable_stream_default_controller_clear_algorithms`'s
         // own raw-pointer access to the controller wrapper's internal
-        // field 0 (readable_default_controller.rs:860-870) — the External
-        // was set by `set_up_readable_stream_default_controller_native`
-        // to a live `Box<DefaultControllerState>`, dropped only by the
-        // isolate's weak finalizer, which hasn't run (the isolate is
-        // still alive and we hold `scope`).
+        // field 0 — the External was set by
+        // `set_up_readable_stream_default_controller_native` to a live
+        // `Box<DefaultControllerState>`, dropped only by the isolate's weak
+        // finalizer, which hasn't run (the isolate is still alive and we hold
+        // `scope`).
         let state: &mut DefaultControllerState = unsafe { &mut *raw };
 
         let pull_alg = std::mem::replace(&mut state.pull_algorithm, AlgorithmFn::Noop);
@@ -380,8 +359,8 @@ fn direct_closure_pull_then_cancel_panics_with_borrow_mut_error() {
         let mut cx = Context::from_waker(waker);
 
         // Step 1: poll the pull future once. It must suspend (Pending)
-        // — that's the "pull is parked" precondition the hypothesis
-        // needs. This is where `source_rc.borrow_mut()` is acquired and
+        // — that's the "pull is parked" precondition the race needs.
+        // This is where `source_rc.borrow_mut()` is acquired and
         // held live across the `std::future::pending().await` inside it.
         let poll1 = pull_fut.as_mut().poll(&mut cx);
         assert!(
@@ -392,8 +371,8 @@ fn direct_closure_pull_then_cancel_panics_with_borrow_mut_error() {
 
         // Step 2: cancel "lands" while the pull future above is still
         // alive (not dropped) and still holding its RefMut. Poll the
-        // cancel future once — this is where the brief predicts a
-        // `BorrowMutError` panic.
+        // cancel future once — this is where a `BorrowMutError` panic is
+        // predicted.
         let reason_v: v8::Local<v8::Value> = v8::undefined(scope).into();
         let reason_g = v8::Global::new(scope, reason_v);
         let mut cancel_fut = cancel_fn(Some(reason_g));

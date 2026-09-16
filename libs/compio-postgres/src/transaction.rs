@@ -123,8 +123,8 @@ impl<'a> Transaction<'a> {
     /// when the server answered the `COMMIT` with the `ROLLBACK` command tag.
     /// That is not a failed statement - PostgreSQL runs a `COMMIT` sent inside
     /// an aborted transaction block, throws every change away, and reports
-    /// success. Without the tag, this method returned `Ok(())` over discarded
-    /// writes.
+    /// success. Without the tag, this method would return `Ok(())` over
+    /// discarded writes.
     pub async fn commit(mut self) -> Result<(), Error> {
         // A savepoint release has to be spelled differently depending on whether
         // the subtransaction is aborted, and the answer must be known BEFORE the
@@ -133,21 +133,18 @@ impl<'a> Transaction<'a> {
         // the status is unsettled this barrier is what settles it: the
         // connection task decrements the in-flight count before it forwards the
         // batch carrying a `ReadyForQuery`, and requests are FIFO, so ONE empty
-        // simple query settles every request enqueued before it. Measured
-        // 2026-08-23, 40 of 40 rounds with one to four requests abandoned
-        // mid-flight: `transaction_status()` was `Some` immediately afterwards
-        // every time.
+        // simple query settles every request enqueued before it:
+        // `transaction_status()` is `Some` immediately afterwards.
         //
         // THIS AWAIT MOVES WHERE CANCELLATION LANDS, and only on this branch.
         // With the status already settled the first poll of `commit()` enqueues
         // the `RELEASE` and sets `done`, so dropping the future keeps the
         // savepoint's writes; with it unsettled the first poll parks here with
-        // `done` still false, so dropping the future rolls them back. Measured
-        // the same day, one variable apart: 1 row kept versus 0. Rolling back is
-        // the outcome `Transaction`'s drop contract documents, so the divergence
-        // is recorded rather than removed - unconditionally awaiting the barrier
-        // would make it uniform at the cost of a round trip on every nested
-        // commit.
+        // `done` still false, so dropping the future rolls them back. Rolling
+        // back is the outcome `Transaction`'s drop contract documents, so the
+        // divergence is recorded rather than removed - unconditionally awaiting
+        // the barrier would make it uniform at the cost of a round trip on every
+        // nested commit.
         if self.savepoint.is_some() && self.client.transaction_status().is_none() {
             self.client.simple_query("").await?;
         }
@@ -169,10 +166,9 @@ impl<'a> Transaction<'a> {
             crate::simple_query::start_batch_execute(self.client.inner(), "COMMIT")?
         };
         // `done` disarms the rollback-on-drop, so it must not be set until the
-        // COMMIT has actually been enqueued. Setting it first - as this did
-        // until 2026-08-21 - means anything that unwinds while the query is
-        // still being built leaves the transaction open on the server with
-        // nothing left to undo it.
+        // COMMIT has actually been enqueued. Setting it first means anything
+        // that unwinds while the query is still being built leaves the
+        // transaction open on the server with nothing left to undo it.
         self.done = true;
         if let Some(parent) = self.parent_portal_scope.take() {
             if nested_failed {
@@ -195,7 +191,7 @@ impl<'a> Transaction<'a> {
         self.client.inner().clear_dirty();
         // The test is "the server says it rolled back", NOT "the server did
         // not say COMMIT". The savepoint arm of this method sends `RELEASE`,
-        // which answers with the tag `RELEASE` (measured), so the inverted
+        // which answers with the tag `RELEASE`, so the inverted
         // spelling would reject every healthy nested commit. Nothing narrows
         // this to the top-level arm, because nothing needs to: the cleanup
         // armed on a failed subtransaction sends its `ROLLBACK TO` as a
