@@ -325,7 +325,7 @@ mod tests {
                 "invocation": {
                     "appId":self.contexts.0.borrow().app.as_str(),
                     "deployId":typed_id::generate("dep"), "deployHash":"b".repeat(64),
-                    "runId":run, "workflowName":"Example", "phase":"forward",
+                    "runId":run, "generation":1, "workflowName":"Example", "phase":"forward",
                     "trigger": {"input":null, "startedAt":"2026-01-01T00:00:00Z",
                         "runId":run, "workflowName":"Example"},
                     "journal":[]

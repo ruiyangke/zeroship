@@ -337,8 +337,10 @@ Calling another `step.*` method from inside a step body is also unsupported.
 The public `Step` type is:
 
 ```ts
+type StepBody<T> = (ctx: StepContext) => T | Promise<T>;
+
 interface WorkflowStep {
-  run<T>(name: string, fn: () => T | Promise<T>): Promise<T>;
+  run<T>(name: string, fn: StepBody<T>): Promise<T>;
   run<T>(
     name: string,
     config: StepConfig<T> & {
@@ -348,11 +350,11 @@ interface WorkflowStep {
         | "stream"
         | { as: "ref" | "blob" | "stream"; contentType?: string };
     },
-    fn: () => T | Promise<T>,
+    fn: StepBody<T>,
   ): Promise<StepOutputRef>;
-  run<T>(name: string, config: StepConfig<T>, fn: () => T | Promise<T>): Promise<T>;
+  run<T>(name: string, config: StepConfig<T>, fn: StepBody<T>): Promise<T>;
 
-  sideEffect<T>(name: string, fn: () => T | Promise<T>): Promise<T>;
+  sideEffect<T>(name: string, fn: StepBody<T>): Promise<T>;
   sleep(name: string, duration: string): Promise<void>;
   sleepUntil(name: string, when: Date | number): Promise<void>;
   waitForSignal<P = unknown>(
@@ -404,6 +406,45 @@ interface StepConfig<T = unknown> {
 }
 ```
 
+#### The step context
+
+Every step body receives a `StepContext`. Each field is a durable journal fact,
+so a body that re-executes observes exactly what the discarded execution did.
+
+```ts
+interface StepContext {
+  readonly runId: string;
+  readonly workflowName: string;
+  readonly ordinal: number;
+  readonly name: string;
+  readonly occurrence: number;
+  readonly idempotencyKey: string;
+  readonly trigger: WorkflowTrigger<unknown>;
+}
+```
+
+A step body runs *before* its journal row is committed. If the worker crashes
+or its lease expires in that window, the frontier is discarded, the run is
+reassigned, and the body runs again -- against an effect that already landed.
+`ctx.idempotencyKey` is the defence: pass it to the external system so the
+duplicate is recognised and dropped.
+
+```ts
+const charge = await step.run("charge-card", (ctx) =>
+  stripe.paymentIntents.create(
+    { amount: order.totalCents, currency: "usd" },
+    { idempotencyKey: ctx.idempotencyKey },
+  ),
+);
+```
+
+The key is stable across re-execution of the same step, and distinct for every
+step a restart re-runs: restarting from before a step gives that step a new key,
+so the re-run is not mistaken for the execution it replaces.
+
+Declaring the parameter is optional; a body that does not need the context
+omits it.
+
 Semantics:
 
 - The first miss runs `fn`, records the result or failure, and suspends the
@@ -427,6 +468,11 @@ It has no retry, timeout, output mode, child, or compensation behavior.
 
 Use it for values such as timestamps, UUIDs, random choices, and small
 configuration reads whose value must be stable across replay.
+
+Its body receives the same `StepContext` as `step.run`, on the same terms: the
+value is computed before the journal row commits, so the body can re-execute.
+The context is there for deriving a stable value, not as licence to do I/O here
+-- that belongs in `step.run`.
 
 ### `step.sleep` and `step.sleepUntil`
 
@@ -974,7 +1020,7 @@ Do:
 - Use stable step names. If a name appears in a loop, `occurrence` identifies
   which issuance restart should target.
 - Use `Promise.all` for durable fan-out over step promises.
-- Use idempotency keys in forward steps and compensators. Step bodies and
+- Use `ctx.idempotencyKey` in forward steps and compensators. Step bodies and
   compensators can run more than once even though their recorded result is used
   once.
 - Keep signal types explicit and small. Use `maxSignalAge` for buffered public

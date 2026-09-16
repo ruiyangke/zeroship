@@ -256,6 +256,7 @@ pub struct ChildWorkflowOptions {
 #[serde(rename_all = "camelCase")]
 pub struct StepRequest {
     pub run_id: String,
+    pub generation: i64,
     pub app_id: AppId,
     pub workflow_name: String,
     pub deploy_id: String,
