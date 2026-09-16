@@ -304,11 +304,28 @@ async fn grant_organization_member(
         .expect("seat organization member");
 }
 
+/// The deploy path's journal client. These cases are about authorization, and
+/// none of their artifacts declares a workflow, so it refuses every call: a
+/// deploy that provisioned one unasked answers 503 here instead of passing.
+fn refusing_journal() -> std::rc::Rc<zeroship_control::publication::DeployJournal> {
+    use zeroship_control::publication::{publisher::Exchange, DeployJournal, JournalManager};
+    use zeroship_core::schema_bundle::SchemaBundleOutcome;
+
+    struct Refusing;
+    impl JournalManager for Refusing {
+        fn ensure<'a>(&'a self, _schema: &'a str) -> Exchange<'a, SchemaBundleOutcome> {
+            Box::pin(async { Err(zeroship_workflow_client::Error::Unavailable) })
+        }
+    }
+    std::rc::Rc::new(DeployJournal::new(std::rc::Rc::new(Refusing)))
+}
+
 macro_rules! init_control {
     ($fx:expr) => {{
         test::init_service(
             web::App::new()
                 .state($fx.state.clone())
+                .state(refusing_journal())
                 .service(
                     web::resource("/api/apps")
                         .route(web::post().to(api::create_app))

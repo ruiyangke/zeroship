@@ -8,6 +8,12 @@
 //! delivers pending intents in per-app revision order and records only the
 //! exact receipt the manager returned. The deployment collector treats a
 //! pending activation as a dependency of its bundle.
+//!
+//! [`journal`] is the one manager call the deploy REQUEST makes rather than
+//! leaving to the publisher: an app that declares workflows must carry a
+//! current journal before its activation intent commits, and a failure to
+//! provision one belongs in the deploy's answer rather than in a retry queue
+//! the creator cannot see.
 
 #![expect(
     clippy::future_not_send,
@@ -16,6 +22,7 @@
 
 pub mod catalog;
 pub mod command;
+pub mod journal;
 pub mod models;
 pub mod publisher;
 pub mod shared;
@@ -23,6 +30,7 @@ pub mod shared;
 use zeroship_data_orm::orm::UtcInstant;
 
 pub use catalog::{CatalogError, Transition};
+pub use journal::{DeployJournal, JournalError, JournalManager};
 pub use shared::{Catalog, CatalogOptions, Closing};
 pub use command::{
     normalize_content_type, Acceptance, AcceptanceResult, CommandBinding, DeployCommand,
