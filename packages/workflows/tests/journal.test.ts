@@ -14,6 +14,7 @@ import {
   withWorkflowPromiseGuards,
   WorkflowMicrotaskQuiescenceBarrier,
 } from "../src/journal.ts";
+import type { StepContext } from "../src/index.ts";
 import {
   ChildCancelledError,
   ChildTimeoutError,
@@ -34,9 +35,13 @@ class EchoChildWorkflow extends Workflow<{ value: string }, { value: string }> {
   }
 }
 
-function envelope(steps: JournalEnvelope["steps"] = []): JournalEnvelope {
+function envelope(
+  steps: JournalEnvelope["steps"] = [],
+  generation = 0,
+): JournalEnvelope {
   return {
     runId: "run_0000000000000000000000001",
+    generation,
     workflowName: "Checkout",
     trigger: {
       input: { orderId: "ord_1" },
@@ -895,4 +900,85 @@ test("step.startMany emits bounded child frontier outcomes in issue order", { ti
     () => step.startMany(EchoChildWorkflow, tooMany),
     LimitExceededError,
   );
+});
+
+// A step body runs before its journal row is committed. When the committing
+// worker crashes or its lease expires, the frontier is discarded and the body
+// runs again against the same journal prefix, so the key it observes must not
+// change. These mirror the V8 dispatcher's own step-context tests.
+
+let capturedContext: StepContext | undefined;
+
+/** A step body that reports the context it was handed. */
+const record = (ctx: StepContext): string => {
+  capturedContext = ctx;
+  return ctx.idempotencyKey;
+};
+
+/**
+ * Issues a step and returns the context its body received. The issuing promise
+ * rejects with the frontier suspend signal, which is the normal outcome of a
+ * journal miss and not what these tests are about.
+ */
+async function stepContextOf(
+  issue: (step: ReturnType<typeof createJournalStep>) => Promise<unknown>,
+  steps: JournalEnvelope["steps"] = [],
+  generation = 0,
+): Promise<StepContext> {
+  capturedContext = undefined;
+  const quiescence = new WorkflowMicrotaskQuiescenceBarrier();
+  const step = createJournalStep(envelope(steps, generation), quiescence);
+  await issue(step).catch(() => {});
+  const seen = capturedContext;
+  capturedContext = undefined;
+  assert.ok(seen, "step body did not receive a context");
+  return seen;
+}
+
+test("step.run body receives a journal-derived context", { timeout: TEST_TIMEOUT_MS }, async () => {
+  const ctx = await stepContextOf((step) => step.run("charge", record), [], 7);
+  assert.deepEqual(ctx, {
+    runId: "run_0000000000000000000000001",
+    workflowName: "Checkout",
+    ordinal: 0,
+    name: "charge",
+    occurrence: 0,
+    idempotencyKey: "step:run_0000000000000000000000001:7:0:0",
+    trigger: ctx.trigger,
+  });
+});
+
+test("step idempotency key is stable across re-execution", { timeout: TEST_TIMEOUT_MS }, async () => {
+  const first = await stepContextOf((step) => step.run("charge", record), [], 7);
+  const second = await stepContextOf((step) => step.run("charge", record), [], 7);
+  assert.equal(first.idempotencyKey, second.idempotencyKey);
+  assert.ok(first.idempotencyKey.length > 0);
+});
+
+test("step idempotency key separates restart generations", { timeout: TEST_TIMEOUT_MS }, async () => {
+  const first = await stepContextOf((step) => step.run("charge", record), [], 1);
+  const restarted = await stepContextOf((step) => step.run("charge", record), [], 2);
+  assert.equal(first.ordinal, restarted.ordinal);
+  assert.notEqual(first.idempotencyKey, restarted.idempotencyKey);
+});
+
+test("step ordinal counts the replayed journal prefix", { timeout: TEST_TIMEOUT_MS }, async () => {
+  const prefix: JournalEnvelope["steps"] = [
+    { ordinal: 0, name: "reserve", nameOccurrence: 0, kind: "run", state: "completed", output: "r" },
+  ];
+  const ctx = await stepContextOf(async (step) => {
+    await step.run("reserve", () => {
+      throw new Error("replayed body ran");
+    });
+    return step.run("charge", record);
+  }, prefix, 3);
+  assert.equal(ctx.ordinal, 1);
+  assert.equal(ctx.idempotencyKey, "step:run_0000000000000000000000001:3:1:0");
+});
+
+test("step.sideEffect body receives the same context shape", { timeout: TEST_TIMEOUT_MS }, async () => {
+  const ctx = await stepContextOf((step) => step.sideEffect("stamp", record), [], 9);
+  assert.equal(ctx.name, "stamp");
+  assert.equal(ctx.ordinal, 0);
+  assert.equal(ctx.idempotencyKey, "step:run_0000000000000000000000001:9:0:0");
 });

@@ -57,16 +57,29 @@ export interface StepConfig<T = unknown> {
   compensate?: Compensator<T>;
 }
 
+/**
+ * Passed to every `step.run` and `step.sideEffect` body. Each field is a
+ * durable journal fact, so a re-executed body receives exactly what the
+ * discarded execution received.
+ */
 export interface StepContext {
   readonly runId: string;
   readonly workflowName: string;
+  /** Position in the journal. Stable across replay; replay enforces it. */
   readonly ordinal: number;
   readonly name: string;
-  readonly attempt: number;
+  /** Which issuance of `name` this is, as `RestartTarget.occurrence` counts. */
+  readonly occurrence: number;
+  /**
+   * Stable across re-execution of this step, and distinct for every step a
+   * restart re-runs. Pass it to the external system so an effect that landed
+   * before its journal row was committed is not applied twice.
+   */
   readonly idempotencyKey: string;
   readonly trigger: WorkflowTrigger<unknown>;
-  readonly cause?: unknown;
 }
+
+export type StepBody<T> = (ctx: StepContext) => T | Promise<T>;
 
 export interface SignalEnvelope<P = unknown> {
   readonly id: string;
@@ -99,14 +112,14 @@ export interface StartManyItem<P = unknown> {
 }
 
 export interface WorkflowStep {
-  run<T>(name: string, fn: () => T | Promise<T>): Promise<T>;
+  run<T>(name: string, fn: StepBody<T>): Promise<T>;
   run<T>(
     name: string,
     config: StepConfig<T> & { output: "ref" | "blob" | "stream" | { as: "ref" | "blob" | "stream"; contentType?: string } },
-    fn: () => T | Promise<T>,
+    fn: StepBody<T>,
   ): Promise<StepOutputRef>;
-  run<T>(name: string, config: StepConfig<T>, fn: () => T | Promise<T>): Promise<T>;
-  sideEffect<T>(name: string, fn: () => T | Promise<T>): Promise<T>;
+  run<T>(name: string, config: StepConfig<T>, fn: StepBody<T>): Promise<T>;
+  sideEffect<T>(name: string, fn: StepBody<T>): Promise<T>;
   sleep(name: string, duration: string): Promise<void>;
   sleepUntil(name: string, when: Date | number): Promise<void>;
   /**

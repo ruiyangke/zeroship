@@ -18,6 +18,10 @@ pub struct WorkflowInvocation {
     pub deploy_id: String,
     pub deploy_hash: String,
     pub run_id: String,
+    /// Scopes step identity to one attempt at the run. A restart copies the
+    /// retained prefix under a new generation and re-executes the rest at the
+    /// same ordinals, so step idempotency keys must carry it.
+    pub generation: i64,
     pub workflow_name: String,
     pub phase: String,
     pub trigger: WorkflowTrigger,
@@ -42,6 +46,7 @@ impl From<&StepRequest> for WorkflowInvocation {
             deploy_id: request.deploy_id.clone(),
             deploy_hash: request.deploy_hash.clone(),
             run_id: request.run_id.clone(),
+            generation: request.generation,
             workflow_name: request.workflow_name.clone(),
             phase: request.phase.clone(),
             trigger: WorkflowTrigger {
