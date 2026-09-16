@@ -217,7 +217,7 @@ struct TxFinalizer {
     /// established. Carrying the name here is how a depth-derived scheme sends
     /// a rollback to the wrong scope.
     frame: Option<reducer::frames::FrameId>,
-    /// Owning app. SEC-1: the settle path (COMMIT / ROLLBACK / RELEASE /
+    /// Owning app. The settle path (COMMIT / ROLLBACK / RELEASE /
     /// ROLLBACK TO + pending-emit drain) operates strictly on this app's
     /// slot, so one app's transaction can never settle another's.
     app_id: String,
@@ -241,7 +241,7 @@ pub fn transaction_dispatch<'s>(
 ) -> v8::Local<'s, v8::Promise> {
     let app_id = binding.app_id().to_string();
     // SCHEMA: the PostgreSQL session this BEGIN opens narrows to the role
-    // derived from it. `app_id` above stays the SC-1 admission key.
+    // derived from it. `app_id` above stays the admission key.
     let schema = binding.schema().clone();
     let state = runtime_state(scope);
 
@@ -309,12 +309,10 @@ pub fn transaction_dispatch<'s>(
         // need a claim), and the claim holder never waits on a waiter.
         //
         // **The cancellation window is closed by [`TxAdmission`], not left
-        // open.** This comment used to end "if this op is CANCELLED between
-        // taking the claim and the `BEGIN` returning, the claim leaks ...
-        // closing the window needs an RAII guard armed for exactly this window
-        // and disarmed once the client is installed; it is not here because it
-        // is unverified". That guard is now here, and it is SC-1 rule 5 - the
-        // defect labelled DBR-11.
+        // open.** An op cancelled between taking the claim and the `BEGIN`
+        // returning would leak the claim; [`TxAdmission`] is the RAII guard
+        // armed for exactly that window and disarmed once the client is
+        // installed.
         // A refusal here is the engine's re-entrant case: a claim held by the
         // very poll asking for it. A creator cannot reach it - a nested call
         // is `nested` above and needs no claim - so it rejects the outer
