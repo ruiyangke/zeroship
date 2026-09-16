@@ -560,15 +560,13 @@ fn validation_error_server() -> ValidationErrorServer {
 /// and warm-up must REFUSE it rather than seed the pool with a dead one.
 ///
 /// Two DIFFERENT rejections live side by side in warm-up: the hook returning
-/// `Err`, which had a test, and this one - the hook succeeding while the entry
-/// stops being pool-eligible - which did not. Measured 2026-09-03: disabling
-/// the warm-up `is_pool_eligible` check left the lib (771) and suite (799)
-/// suites green.
+/// `Err`, and this one - the hook succeeding while the entry stops being
+/// pool-eligible.
 ///
-/// SCOPE: this binds the WARM-UP arm only. `is_pool_eligible` has nine call
-/// sites; the twin in `get_inner` raises a different message
-/// (`after_connect left the new pool connection unusable`) and is a separate,
-/// still unmeasured arm. Do not read this test as covering them.
+/// SCOPE: this binds the WARM-UP arm only. The twin `is_pool_eligible` check
+/// in `get_inner` raises a different message
+/// (`after_connect left the new pool connection unusable`) and is a separate
+/// arm. Do not read this test as covering it.
 ///
 /// Expiry is the eligibility clause a test can drive deterministically: the
 /// entry's expiry is fixed when it is built, one line BEFORE the hook runs, so
@@ -1083,7 +1081,7 @@ async fn fresh_after_connect_eligibility_preserves_idle_fatal() {
 /// Two warm connections, not one, so both the rejected candidate and its
 /// replacement come out of the idle set. That is what keeps this a test of the
 /// recycling path: with a single warm entry the replacement would be a freshly
-/// opened connection, which `before_acquire` no longer inspects, and the second
+/// opened connection, which `before_acquire` does not inspect, and the second
 /// hook call this asserts would never happen.
 #[compio::test]
 async fn before_acquire_false_discards_and_retries() {
@@ -1314,7 +1312,7 @@ async fn after_release_false_discards_the_dirty_session() {
 
 /// The `target_session_attrs` probe runs BEFORE `after_connect`.
 ///
-/// Both landed the same day and both hook into connection setup, so the
+/// Both hook into connection setup, so the
 /// ordering is easy to invert and nothing else would notice: `connect_one`
 /// goes through `Config::connect`, which runs the probe inside `connect_raw`
 /// before the Connection is packaged, and only then does the pool run its
@@ -1344,11 +1342,11 @@ async fn the_session_attrs_probe_runs_before_after_connect() {
     // The live server is writable, so every candidate fails the read-only
     // requirement and no connection is ever produced.
     let outcome = Pool::connect_with_config(connection_config, pool_config).await;
-    // NAME THE REFUSAL. `is_err()` plus `calls == 0` was the whole assertion
-    // until 2026-08-23, and total failure satisfies both at once: an
-    // unreachable server, a URL that does not parse, a pool-construction error
-    // all produce an error AND a hook that never ran. The test would then have
-    // asserted an ordering while its evidence was "nothing happened".
+    // NAME THE REFUSAL. `is_err()` plus `calls == 0` alone would be satisfied
+    // by total failure: an unreachable server, a URL that does not parse, a
+    // pool-construction error all produce an error AND a hook that never ran.
+    // The test would then assert an ordering while its evidence was "nothing
+    // happened".
     let cause = common::error_chain(
         &outcome.expect_err("a writable server satisfied target_session_attrs=read-only"),
     );
@@ -1398,31 +1396,24 @@ async fn the_session_attrs_probe_runs_before_after_connect() {
 ///
 /// This is the contract `sqlx` states outright -- "This is _not_ invoked for
 /// new connections. Use `after_connect` for those." -- and that `deadpool`
-/// gets structurally by having `recycle` apply only to recycled objects. This
-/// driver used to consult it on both, and the difference is not cosmetic.
-///
-/// WHAT THE OLD BEHAVIOUR COST. A freshly connected client has been accepted by
-/// `after_connect` microseconds earlier, so a hook that answers from connection
-/// state cannot answer differently for it -- but `Ok(false)` still hit the
-/// acquisition loop's `continue`. With no idle entry to find, the next
-/// iteration opened ANOTHER connection, offered it, was refused again, and so
-/// on until `acquire_timeout`. Every iteration paid a full TCP connect plus
-/// startup handshake, so a single `get()` became sustained load on the server.
-/// MEASURED 2026-08-23 before the fix: 3 hook calls and 3 physical connections
-/// inside a 300ms timeout -- about 10/s, extrapolating to roughly 300
-/// connections for one `get()` at the default 30s `acquire_timeout`. That was a
-/// LOWER bound; the box sat at load ~25, which slows each connect and so
-/// lowers the count in a fixed window.
+/// gets structurally by having `recycle` apply only to recycled objects.
+/// Consulting it on a fresh connection too is not a cosmetic difference: a
+/// freshly connected client has been accepted by `after_connect` moments
+/// earlier, so a hook that answers from connection state cannot answer
+/// differently for it -- but `Ok(false)` still hits the acquisition loop's
+/// `continue`. With no idle entry to find, the next iteration opens ANOTHER
+/// connection, offers it, is refused again, and so on until
+/// `acquire_timeout`. Every iteration pays a full TCP connect plus startup
+/// handshake, so a single `get()` becomes sustained load on the server.
 ///
 /// The hook that provokes it is not exotic. "Reject if the server is in
 /// recovery" is a normal thing to write, and it is false for every connection
 /// while a failover lasts.
 ///
-/// WHY THIS TEST HAS NO TIMING IN IT. The old test could only report a RATE,
-/// and it had to bound the storm with a short `acquire_timeout` to terminate at
-/// all. The fixed contract is a deterministic statement instead: the hook is
-/// never called, and the fresh client is handed over. It fails on the old code
-/// by TIMING OUT rather than by measuring anything.
+/// WHY THIS TEST HAS NO TIMING IN IT. A rate-based assertion would have to
+/// bound the storm with a short `acquire_timeout` to terminate at all. The
+/// contract is a deterministic statement instead: the hook is never called,
+/// and the fresh client is handed over.
 #[compio::test]
 async fn before_acquire_is_not_consulted_for_a_freshly_connected_client() {
     let url = test_url();
@@ -1434,8 +1425,8 @@ async fn before_acquire_is_not_consulted_for_a_freshly_connected_client() {
     // single warm entry is the recycled candidate the hook legitimately sees
     // below; the replacement for it is the fresh one that it must not see.
     let mut config = config(2, 0);
-    // Short so that, on the pre-fix code, this test fails in under a second
-    // instead of storming for the 30s default.
+    // Short so a regression here fails fast instead of storming connections
+    // until the default `acquire_timeout`.
     config.acquire_timeout(Duration::from_millis(300));
     config.before_acquire(move |_client| {
         let hook_calls = Rc::clone(&hook_calls);

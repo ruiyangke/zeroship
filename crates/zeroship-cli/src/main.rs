@@ -84,20 +84,21 @@ fn main() {
 fn cmd_serve(args: &[String]) {
     // THE ONE PLACE THE DEV RELAXATION IS STATED. `zeroship serve` is the
     // single-process dev-tier runtime by identity - it is what
-    // `@zeroship/vite-plugin` spawns (`packages/vite-plugin/src/dev-server.ts:970`)
-    // with `ZEROSHIP_DEV=1` (`dev-server.ts:939`), and the only vector on
+    // `@zeroship/vite-plugin` spawns (`packages/vite-plugin/src/dev-server.ts`)
+    // with `ZEROSHIP_DEV=1`, and the only vector on
     // which SQLite is an accepted `env.db` backend.
     //
-    // The runtime's SSRF guard no longer reads the environment at all; it
+    // The runtime's SSRF guard does not read the environment at all; it
     // answers what this call stated (`crates/zeroship-runtime/src/transport/
     // ssrf.rs`, `dev_mode_enabled`). `zeroship-worker` makes no such call, so
     // a `ZEROSHIP_DEV=1` that leaks into a production worker's environment
-    // changes nothing there - the same standard the worker already applies to
-    // its database backend at `crates/zeroship-worker/src/main.rs:146-147`.
+    // changes nothing there - the same standard the worker applies to its
+    // database backend (`crates/zeroship-worker/src/main.rs`,
+    // `worker_rejects_db_url`).
     //
     // It runs before anything builds a `cyper::Client` or a `DevAuthSettings`,
     // both of which resolve the mode once and keep the answer
-    // (`transport/client.rs`, `core/serve.rs:1749`).
+    // (`transport/client.rs`, `core/serve.rs`).
     zeroship_runtime::set_dev_mode(zeroship_runtime::dev_mode_from_process_env());
 
     let input = args.get(2).expect(
@@ -113,9 +114,9 @@ fn cmd_serve(args: &[String]) {
     let cpu_limit = parse_flag_u64(args, "--cpu-limit").map(std::time::Duration::from_millis);
     let wall_timeout = parse_flag_u64(args, "--wall-timeout").map(std::time::Duration::from_millis);
     let dev_entry_loader = parse_flag(args, "--dev-entry-loader");
-    // Dev default: 512 MB. Single-tenant dev apps routinely load big libraries
-    // (LangChain + provider SDKs = ~100 MB by themselves). The production
-    // worker's 128 MB default is sized for multi-tenant isolation, not for
+    // The dev default is larger than the production worker's: single-tenant
+    // dev apps routinely load big libraries (LangChain + provider SDKs), while
+    // the worker's default is sized for multi-tenant isolation, not for
     // single-process dev. CLI flag or ZEROSHIP_HEAP_LIMIT_MB overrides.
     let heap_limit_bytes = parse_flag_usize(args, "--heap-limit-mb")
         .or_else(|| {
@@ -471,9 +472,9 @@ fn cmd_deploy(args: &[String]) {
 
     // BEFORE the upload, not after it. A reminder printed after a successful
     // deploy names a step the deploy has already made it too late to take in
-    // order; control now REFUSES a deploy whose migrations have not been
-    // applied, so this line is what a creator reads on the way to that 409
-    // rather than a footnote under a green result.
+    // order; control REFUSES a deploy whose migrations have not been applied,
+    // so this line is what a creator reads on the way to that 409 rather than
+    // a footnote under a green result.
     print_migrate_reminder(&app, &control_url, resolved.as_ref());
 
     eprintln!(
@@ -584,8 +585,8 @@ fn deploy_target(args: &[String]) -> Result<DeployTarget, String> {
 /// Four inputs, two kinds, and no inspection of the value in choosing between
 /// them:
 ///
-/// - `--app-name=<name>` - an explicit routing label. This is the flag the
-///   deleted `is_uuid` guess used to synthesise from a name-shaped string.
+/// - `--app-name=<name>` - an explicit routing label, taken as the label it
+///   is; the value is never inspected for an id shape.
 /// - `--app=<id>` or the file's `app` member - an identity, refused unless it
 ///   parses as one ([`app_id_or_refuse`]).
 /// - the file's `name` member, as the LAST resort and only when the file is
@@ -593,8 +594,7 @@ fn deploy_target(args: &[String]) -> Result<DeployTarget, String> {
 ///   with its own [`project_config::Source`], and it is what makes a brand-new
 ///   project deployable before it has an id to write down.
 ///
-/// The `name` fallback's original note is kept verbatim, because it records why
-/// this is a `deploy`-only affordance:
+/// Why this is a `deploy`-only affordance:
 ///
 /// > `app` FALLS BACK TO `name` HERE AND NOWHERE ELSE, and only when the file
 /// > is present. A brand-new project has no app id: `app` is
@@ -700,13 +700,12 @@ fn record_created_app(
 /// app's migrations are already applied. It cannot tell you that you FORGOT;
 /// only that there is something to run.
 ///
-/// THE EXPENSIVE HALF NOW EXISTS, which is why this prints first. The deploy
-/// handler compares the artifact's `runtime_descriptor.hash` against the
-/// descriptor recorded on the app's newest applied migration and answers 409
-/// `schema_not_applied` when they disagree
-/// (`Registry::deploy`). This line is the warning on the way
-/// in; that refusal is the guarantee. Printing it after a 200, as this used to,
-/// named a step the deploy had already made it too late to take in order.
+/// The deploy handler compares the artifact's `runtime_descriptor.hash`
+/// against the descriptor recorded on the app's newest applied migration and
+/// answers 409 `schema_not_applied` when they disagree (`Registry::deploy`).
+/// That refusal is the guarantee and this line is the warning on the way in,
+/// which is why it prints first: printed after a 200 it would name a step the
+/// deploy had already made it too late to take in order.
 fn print_migrate_reminder(
     app: &str,
     control_url: &str,
@@ -958,10 +957,9 @@ struct ResolvedApp {
 /// TWO ARMS, ONE PER KIND OF TARGET, and the kind is decided by the caller.
 /// Auto-create belongs to the NAME arm alone: creating an app is the answer to
 /// "push this code somewhere new", which is a statement about a label. An id
-/// that resolves to nothing is a wrong id, and minting an app whose name is
-/// that id - which is exactly what the id arm used to do on a 404 - deploys the
-/// creator's code to an app they have never heard of and leaves the real one
-/// untouched.
+/// that resolves to nothing is a wrong id, and minting an app named by that id
+/// would deploy the creator's code to an app they have never heard of and
+/// leave the real one untouched.
 fn deploy_archive<C: ControlClient>(
     client: &mut C,
     request: &DeployRequest<'_>,
@@ -1143,9 +1141,8 @@ fn parse_secret_names(body: &str) -> Option<std::collections::HashSet<String>> {
 
 /// Resolve a NAME to an id, creating the app on first deploy.
 ///
-/// `deploy_status` is gone with the id arm's create-on-404 retry: this is now
-/// reached only from [`AppTarget::Name`], where no deploy has been attempted
-/// yet, so there is never a prior status to report.
+/// Reached only from [`AppTarget::Name`], where no deploy has been attempted
+/// yet, so there is no prior status to report.
 fn resolve_or_create_app<C: ControlClient>(
     client: &mut C,
     control_url: &str,
@@ -1669,18 +1666,11 @@ mod tests {
         assert!(check_unknown_serve_flags(&args).is_ok());
     }
 
-    /// The same guarantee for `deploy`, which did not have it. MEASURED against
-    /// the release binary on 2026-08-11, before this check existed:
-    ///
-    ///   zeroship serve  <file> --prot=3000
-    ///     -> "unknown flag `--prot`; run `zeroship serve --help` ..."
-    ///   zeroship deploy <file> --app=a --token=t --contrl=http://my-control
-    ///     -> "Deploying ... to http://localhost:9090/api/apps/a/deploy..."
-    ///
-    /// The typo'd `--contrl` was ignored and `--control` fell back to its
-    /// default, so the deploy went to whatever listens on localhost:9090 -
-    /// a working control plane on any machine running the dev stack. That is a
-    /// deploy landing on the WRONG TARGET silently, not just a poor message.
+    /// The same guarantee for `deploy`. An unknown flag on a deploy is a
+    /// wrong-target hazard, not just a poor message: a typo'd `--contrl` would
+    /// otherwise be ignored, `--control` would fall back to its default, and
+    /// the deploy would go to whatever listens on the default control URL -
+    /// silently.
     #[test]
     fn unknown_deploy_flag_is_rejected() {
         // Typo: `--contrl` instead of `--control`. This is the one with a
@@ -1957,10 +1947,8 @@ mod tests {
     fn deploy_file_app_auto_create_preserves_configured_app() {
         let temp = tempfile::tempdir().expect("create temp project");
         let config_path = temp.path().join(project_config::CONFIG_FILENAME);
-        // The `app` member holds an ID. It read `configured-name` until the
-        // discriminator was deleted; nothing in this test depended on that
-        // value being a name, and leaving one there would document a config
-        // `resolve_deploy_app` now refuses.
+        // The `app` member holds an ID; leaving a name here would document a
+        // config `resolve_deploy_app` refuses.
         let original = r#"{
   "name": "production-app",
   "app": "app_034klb07lrb9jgma6imvmx000",

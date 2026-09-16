@@ -59,11 +59,11 @@ const SECRET_FILES: [&str; 11] = [
 const PUBLIC_FILES: [&str; 2] = ["service-peers.json", "join-signers.json"];
 
 // ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET is NOT here: only Stripe can issue a value that
-// verifies, so `dev init` no longer manufactures one. See
+// verifies, so `dev init` must not manufacture one. See
 // `dev_init_never_generates_a_stripe_webhook_secret`.
 // Sorted, and every one is a canonical `ZEROSHIP_` name that some binary
-// declares. `GATEWAY_OIDC_SECRET` was dropped rather than renamed: nothing in
-// the tree reads it, so generating it only made an unread slot look configured.
+// declares. `GATEWAY_OIDC_SECRET` is deliberately absent: nothing in the tree
+// reads it, so generating it would only make an unread slot look configured.
 const ENV_KEYS: [&str; 7] = [
     "ZEROSHIP_AUTH_STASH_SIGNING_KEY",
     "ZEROSHIP_AUTH_TOTP_ENC_KEY",
@@ -135,11 +135,11 @@ fn dev_init_generates_the_complete_private_deployment_secret_set() {
     // the two drifting apart is the failure this pins.
     //
     // Does NOT cover: that the credential is correct for any real database, or
-    // that the mode survives past the moment dev init writes it. It no longer
-    // has to be the only protection, though: since the owner-only policy landed
-    // in crates/zeroship-core/src/config/secrets.rs `read_secret_file`, a later chmod is
-    // caught at the next read rather than passing silently, and
-    // `zeroship-platform-migrate` reads this exact file through that function.
+    // that the mode survives past the moment dev init writes it. A later chmod
+    // does not pass silently, though:
+    // crates/zeroship-core/src/config/secrets.rs `read_secret_file` enforces the
+    // owner-only policy at every read, and `zeroship-platform-migrate` reads
+    // this exact file through that function.
     let migrate_dsn =
         std::fs::read_to_string(secrets_dir.join("migrate-dsn")).expect("read migrate-dsn");
     assert!(
@@ -577,15 +577,15 @@ fn dev_init_rejects_an_empty_pairwise_file_before_creating_siblings() {
 /// control: the only difference between the two halves is whether one of the
 /// service key files was overwritten with a copy of another.
 ///
-/// WHAT WENT WRONG. `SERVICE_KEY_FILES`'s own rustdoc has always said one key
+/// WHY THIS NEEDS A GUARD. `SERVICE_KEY_FILES`'s own rustdoc requires one key
 /// per service and not one shared file, "because a peer must be able to VERIFY
-/// a service without being able to IMPERSONATE it" - and nothing enforced it.
-/// `ensure_secret_file` keeps whatever exists, `validate_signing_key` asks
-/// only whether it parses, and `write_service_peers` published each path under
-/// its own issuer. So one key copied to every path - what a secret manager or a
-/// compose override produces when it maps one secret onto every
-/// `ZEROSHIP_*_SERVICE_KEY_FILE` mount - exited 0, printed "kept" for each and
-/// emitted a peer document with ONE key under EVERY issuer.
+/// a service without being able to IMPERSONATE it" - but no single function
+/// enforces it: `ensure_secret_file` keeps whatever exists,
+/// `validate_signing_key` asks only whether it parses, and
+/// `write_service_peers` publishes each path under its own issuer. So one key
+/// copied to every path - what a secret manager or a compose override produces
+/// when it maps one secret onto every `ZEROSHIP_*_SERVICE_KEY_FILE` mount -
+/// passes each check and emits a peer document with ONE key under EVERY issuer.
 ///
 /// WHY THAT DOCUMENT IS THE WHOLE ATTACK. The envelope and assertion wire
 /// formats carry a key id derived from the public bytes and no issuer, and the
@@ -597,9 +597,8 @@ fn dev_init_rejects_an_empty_pairwise_file_before_creating_siblings() {
 /// Wider still, possession of any one service key file becomes the ability to
 /// present as any service to any service.
 ///
-/// A WARNING WOULD NOT HAVE DONE. This run WRITES the credential document; a
-/// message printed beside a document with that property is how the shape
-/// arrived. So the assertions below are on the exit code and on the directory
+/// A WARNING WOULD NOT DO. This run WRITES the credential document, so the
+/// assertions below are on the exit code and on the directory
 /// being byte-for-byte untouched, not on the text alone.
 ///
 /// Does NOT cover: whether any binary refuses to LOAD such a document. That is

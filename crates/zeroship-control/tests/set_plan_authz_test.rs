@@ -8,9 +8,9 @@
 //!   * an operator bearer (BillingWrite on Resource::Any, here a platform admin)
 //!     may assign EITHER.
 //!
-//! Pre-fix `set_plan` was gated only by BillingWrite/Resource::App (which an
-//! app_owner satisfies) + an existence/archive check — so a creator could
-//! self-assign a cheaper operator plan and underpay.
+//! The assignability flag is load-bearing because BillingWrite/Resource::App
+//! alone is not a sufficient gate: an app_owner satisfies it, so without the
+//! flag a creator could self-assign a cheaper operator plan and underpay.
 //!
 //! Configure a test database (`zeroship_core::config::test_database_url_opt`;
 //! run `tests/provision_test_backends.sh` to provision one) to run; silently
@@ -156,10 +156,10 @@ async fn issue_bearer(state: &AppState, user_id: &UserId, scope: &str) -> Caller
 }
 
 // The scope vocabulary is resource-blind: a scope always lowers to
-// `Resource::Any`, so the former `billing_write_on_app`/`billing_write_any`
-// per-resource wrapper policies collapse to the SAME scope string,
-// "billing:write". The app_owner-vs-operator distinction below is carried
-// entirely by the static Cedar policy: the app_owner path is allowed because
+// `Resource::Any`, so a per-app and a fleet-wide BillingWrite check carry the
+// SAME scope string, "billing:write". The app_owner-vs-operator distinction
+// below is carried entirely by the static Cedar policy: the app_owner path is
+// allowed because
 // the creator's real `app_members` ownership row grants BillingWrite on their
 // OWN app (`set_plan`'s per-app gate), while the operator path additionally
 // needs a `platform_admin_roles` row (role "billing") for the fleet-wide
@@ -388,8 +388,7 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
 ///
 /// Uses the app OWNER, and the archived plan is seeded `assignable_by_creator`
 /// deliberately: the caller must get PAST the assignability gate so the archived
-/// check is what answers, rather than a 403 hiding the defect. This used to
-/// reach that point with an operator token, which no principal can hold now.
+/// check is what answers, rather than a 403 hiding the defect.
 #[compio::test]
 async fn assigning_an_archived_plan_is_refused_and_not_reported_as_a_missing_app() {
     let url = db_url();

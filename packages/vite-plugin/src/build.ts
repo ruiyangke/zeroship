@@ -177,7 +177,7 @@ function getCompilerId(): string {
  * bundle. The Node-globals shim (`Buffer`, `setImmediate`, etc.) is
  * installed on every isolate by the Rust runtime before any user
  * module evaluates (see `crates/zeroship-runtime/src/core/init.rs`),
- * so the vite-plugin no longer needs to prepend a prelude.
+ * so the bundle needs no prelude.
  *
  * The directive itself is just a string expression at the top of the
  * module; if we leave it in place, it is a no-op but pollutes the
@@ -273,11 +273,9 @@ export async function buildServerBundle(opts: {
  * undefined), so probing the synthetic output is meaningless — we
  * inspect the USER's source.
  *
- * Stage 5b — the new synthetic entry is a normaliser that always emits
- * `fetch:` on default. This probe used to just check for any
- * `export default`; now it tries to detect whether the user actually
- * wrote a `fetch` handler. Heuristics (kept simple — full AST analysis
- * would over-fit):
+ * The synthetic entry always emits `fetch:` on default, so this probe
+ * detects whether the user actually wrote a `fetch` handler.
+ * Heuristics (kept simple — full AST analysis would over-fit):
  *
  *   - `export default function fetch(…)`        → true
  *   - `export default { fetch …}`               → true (object short-
@@ -301,9 +299,8 @@ export async function buildServerBundle(opts: {
  *
  * Quote- and template-aware, because a `}` inside a string is not a closing
  * brace. Not a parser: it does not track regex literals, and a `}` inside one
- * would end the scan early. That is a narrower failure than the greedy regex it
- * replaces (which was wrong for every multi-statement entry) and it fails
- * toward a SHORTER block, i.e. toward the conservative `return true` below.
+ * would end the scan early. That failure direction is safe: it fails toward a
+ * SHORTER block, i.e. toward the conservative `return true` below.
  */
 /**
  * Replace everything nested deeper than the outermost object's own level with
@@ -395,34 +392,21 @@ export function probeUserDefaultExport(source: string): boolean {
   // `export default { ... }` — look for a `fetch:` or `fetch(...)` key
   // inside the object literal.
   //
-  // THIS BRACE-MATCHES, and it must. This was
-  // `stripped.match(/export\s+default\s+(\{[\s\S]*\})/)` under a comment
-  // calling the false-positive cost "negligible". It was not negligible, and
-  // the greedy `[\s\S]*` never matched the object literal at all — it ran to
-  // the LAST `}` in the file.
-  //
-  // MEASURED 2026-08-11 while deploying examples/db-todos, whose entry is
-  // `export default { schema: dbSchema };` — 20 characters, no fetch. The
-  // greedy capture was 18506 characters and matched ` fetch(` from
-  // `await fetch(webhookUrl, ...)` inside the `todos.shareToWebhook` ACTION,
-  // an unrelated outbound HTTP call hundreds of lines away. The probe therefore
-  // reported "user owns routing", the `.zship` got a Worker(SSR) catch-all
-  // instead of the static `["$path", "/index.html"]` SPA fallback, and the
-  // DEPLOYED app 404ed `/` and `/index.html` while its `/assets/*` served 200.
-  // Any entry that calls `fetch()` anywhere hit this.
-  //
-  // Lazy (`[\s\S]*?`) is NOT the fix: it stops at the FIRST `}`, so
+  // THIS BRACE-MATCHES, and it must: a regex cannot find the end of the
+  // default-export object. Greedy (`\{[\s\S]*\}`) runs to the LAST `}` in
+  // the file, so any `fetch(` call anywhere in the module (e.g. inside an
+  // unrelated outbound action) false-positives as "user owns routing" and
+  // a static app ships with a Worker(SSR) catch-all. Lazy (`[\s\S]*?`) is
+  // NOT the fix either: it stops at the FIRST `}`, so
   // `export default { a: { b: 1 }, fetch: h }` would miss the real top-level
   // `fetch` and serve a stale shell on a genuine SSR route — precisely the
   // failure the conservative default exists to avoid.
   const defaultBlock = matchDefaultObjectLiteral(stripped);
   if (defaultBlock) {
     // Depth-1 projection: nested object/array bodies are blanked out so the
-    // key regex below can only ever see the literal's OWN keys. The old code
-    // ran that regex over the raw block, which the original comment described
-    // as a "negligible" false positive for a NESTED `fetch` key. It is cheap
-    // to remove now that the block is brace-matched, and `rpc: { helpers: {
-    // fetch } }` is a realistic shape to route wrongly.
+    // key regex below can only ever see the literal's OWN keys. A nested
+    // `fetch` key (`rpc: { helpers: { fetch } }`) is a realistic shape that
+    // must NOT route the app as Worker(SSR).
     const block = blankNestedLevels(defaultBlock);
     // Top-level keys: `fetch:` (property), `fetch(` (method shorthand),
     // `fetch,` / `fetch}` (shorthand from a binding), or `"fetch":`.
@@ -468,10 +452,9 @@ export function buildPlugin(
   project: ProjectConfigHolder,
 ): Plugin {
   const { serverFunctionMap } = state;
-  // Every build shape now comes from `zeroship.jsonc` (or its schema defaults
-  // when there is no file). `mode`, `serverEntry`, `migrations.dir` and
-  // `migrations.out` used to be plugin options; three of the four were also
-  // needed by the Rust CLI, which cannot read `vite.config.ts`.
+  // Every build shape comes from `zeroship.jsonc` (or its schema defaults
+  // when there is no file). These are project config, not plugin options,
+  // because the Rust CLI also needs them and cannot read `vite.config.ts`.
   let projectConfig: ResolvedProjectConfig = defaultProjectConfig();
   let root = "";
   let isDev = false;
@@ -506,7 +489,7 @@ export function buildPlugin(
    * Invoked from BOTH `writeBundle` and `closeBundle`. `writeBundle`
    * fires per emitted client output bundle — but a SERVER-ONLY app (no
    * `index.html`, no `rollupOptions.input`) produces ZERO client output,
-   * so Vite/rolldown never calls `writeBundle` (ISS-59). `closeBundle`
+   * so Vite/rolldown never calls `writeBundle`. `closeBundle`
    * always fires, so it calls this too; the `serverBuilt` guard keeps
    * the build idempotent regardless of which hook reached it first.
    */
@@ -565,7 +548,7 @@ export function buildPlugin(
   //     has no JS entry, so Vite's "needs at least one input" check fails.
   //   - full mode, SERVER-ONLY app (no `index.html`, no `rollupOptions.input`,
   //     e.g. a pure fetch/RPC backend): the client build defaults to
-  //     resolving `index.html` and errors `UNRESOLVED_ENTRY` (ISS-59).
+  //     resolving `index.html` and errors `UNRESOLVED_ENTRY`.
   // In both cases we feed an empty virtual module so the client build
   // produces zero asset output, then delete the stub chunk in
   // `generateBundle`. The worker bundle + manifest still come from the
@@ -634,7 +617,7 @@ export function buildPlugin(
      *
      * This covers two cases:
      *   - `mode === "static"` SSG (prerendered HTML copied in by a tool).
-     *   - `mode === "full"` server-only apps (ISS-59): a `default.fetch`/
+     *   - `mode === "full"` server-only apps: a `default.fetch`/
      *     `rpc` backend with no client entry. Without the stub the client
      *     build errors `UNRESOLVED_ENTRY: Cannot resolve entry module
      *     index.html`.
@@ -753,7 +736,7 @@ export function buildPlugin(
      * runs in `writeBundle`, but a SERVER-ONLY app (no `index.html`, no
      * client inputs) emits zero client output, so Vite never fires
      * `writeBundle`. Calling it here guarantees the SSR worker bundle +
-     * `dist/` exist before `emitZship` walks them (ISS-59).
+     * `dist/` exist before `emitZship` walks them.
      */
     async closeBundle() {
       if (isDev) return;
