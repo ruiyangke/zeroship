@@ -290,6 +290,7 @@ Chainable modifiers (`packages/zero-migrate/src/ops.ts`), each returning a fresh
 | `.primaryKey()` | mark the table primary key (implies `NOT NULL`) |
 | `.unique()` | add a single-column `UNIQUE` |
 | `.references(table, column, options?)` | a typed single-column foreign key — keeps this column's storage type and adds the target `{ table, column }` (+ optional `onDelete`/`onUpdate`/`name`/`relation`) |
+| `.collation(intent)` | pin how the column compares, as a closed intent token — see [Column collation](#column-collation) |
 | `.mask({ kind, classification? })` | declare a standalone column mask (the field reads back as `MaskedValue<T>`) — see [Sensitive-data facets](#sensitive-data-facets) |
 
 ```ts
@@ -386,6 +387,38 @@ export default {
 These facets are also what the migration set carries into the generated types:
 the typed-id `prefix`, the vector `metric`, and the `mask` brand survive the op
 fold into `env.db.ts` (see [Generating types from the migration set](#generating-types-from-the-migration-set-gen-types)).
+
+## Column collation
+
+**`.collation(intent)` — pin how the column compares.** It takes a closed
+*intent* token, never a SQL collation name: a name is dialect-private, so the
+engine spells `bytewise` as PostgreSQL `COLLATE "C"`, SQLite `COLLATE BINARY`
+and MySQL `utf8mb4_0900_bin`. Reach for it where byte order is load-bearing —
+cursor ranges, identity copies, and any comparison that must not move when the
+database's default collation does.
+
+| Facet | Closed token set | Default |
+| --- | --- | --- |
+| `collation` | `bytewise` | absent (the database's own collation) |
+
+```ts
+table("job_receipts").create({
+  columns: {
+    id: t.text().collation("bytewise").primaryKey(),
+    app_id: t.text().collation("bytewise").notNull(),
+    specification: t.text().notNull(),
+  },
+});
+```
+
+It is **refused**, not dropped, in four situations: on a type that cannot carry
+a collation (anything but `t.text()` / `t.string()`); alongside
+`caseSensitive: false`, which asks for the opposite ordering; alongside a value
+format (`ids.typeId()` / `ids.ulid()`), which pins bytewise comparison as part
+of its storage contract; and outside `table(...).create({ columns })` —
+`.column().add()`, `.column().setType()`, `.column().rename()` and nested type
+positions have no slot for the facet, and refuse it rather than leave the
+migration source claiming an ordering the database does not have.
 
 ## Bridging a `@zeroship/db` field (`fromDb`)
 

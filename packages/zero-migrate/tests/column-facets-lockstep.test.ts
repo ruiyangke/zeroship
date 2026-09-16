@@ -106,6 +106,9 @@ function authorWith({ begin, drain, ids, t, table }: Rec): any[] {
       ssn: t.text().mask({ kind: "last4", classification: "pci" }),
       // a standalone mask defaulting classification → "pii"
       email: t.text().mask({ kind: "email" }),
+      // .collation(intent) → IrColumn.collation (closed bytewise)
+      cursor_key: t.text().collation("bytewise"),
+      bounded_key: t.string({ length: 40 }).collation("bytewise"),
       title: t.text(),
     },
   });
@@ -153,6 +156,11 @@ test("the recorded facets carry the exact camelCase wire form", () => {
     onUpdate: "restrict",
   });
 
+  // .collation(intent) → collation (the closed intent token, never a SQL name)
+  assert.equal(byName("cursor_key").collation, "bytewise");
+  assert.equal(byName("bounded_key").collation, "bytewise");
+  assert.deepEqual(byName("bounded_key").type, { string: { length: 40 } });
+
   // standalone .mask({ kind, classification }) → mask:{kind,classification}
   assert.deepEqual(byName("ssn").mask, { kind: "last4", classification: "pci" });
   // classification defaults to "pii"
@@ -178,6 +186,7 @@ test("the recorded facets carry the exact camelCase wire form", () => {
       !("valueFormat" in title) &&
       !("references" in title) &&
       !("vectorMetric" in title) &&
+      !("collation" in title) &&
       !("mask" in title) &&
       !("generated" in title) &&
       !("identity" in title),
@@ -254,5 +263,24 @@ test("an out-of-set mask kind/classification/metric is a structured OP_INVALID (
     );
   } finally {
     pubDrain();
+  }
+});
+
+test("both recorders refuse the same out-of-set and out-of-type collations", () => {
+  for (const { begin, drain, t } of [PUBLIC, ENGINE]) {
+    begin();
+    try {
+      // REJECTION CONTROLS: a recorder that accepted any of these would record a
+      // column the engine's validator rejects, so the two impls must agree on
+      // the refusals as well as on the accepted wire shape.
+      assert.throws(() => t.text().collation("C"), (e: any) => e.code === "OP_INVALID");
+      assert.throws(() => t.int().collation("bytewise"), (e: any) => e.code === "OP_INVALID");
+      assert.throws(
+        () => t.text({ caseSensitive: false }).collation("bytewise"),
+        (e: any) => e.code === "OP_INVALID",
+      );
+    } finally {
+      drain();
+    }
   }
 });
