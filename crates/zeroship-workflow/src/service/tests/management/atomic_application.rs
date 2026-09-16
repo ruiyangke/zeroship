@@ -60,7 +60,6 @@ pub(super) async fn persisted(service: &WorkflowService, app: &AppId) -> Snapsho
         "job_publications",
         "outbox",
         "management_receipts",
-        "management_scopes",
         "job_receipts",
         "requests",
     ] {
