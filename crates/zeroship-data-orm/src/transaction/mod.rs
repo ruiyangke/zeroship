@@ -423,8 +423,8 @@ fn frame_refusal(refusal: reducer::TxProtocolError, detail: Option<DbError>) -> 
 /// transaction in `Poisoned`, which is where PostgreSQL has already put it -
 /// every further data statement answers `25P02` until the block ends.
 ///
-/// **The savepoint statements no longer come through here.** They are frame
-/// events now, and the name they carry is the frame's.
+/// Savepoint statements do not come through here: they are frame events,
+/// and the name they carry is the frame's.
 ///
 /// See [`driver::run_operation`] for why the creator CRUD path has not moved
 /// onto this yet.
@@ -476,14 +476,11 @@ pub enum SettleOutcome {
 ///     TO SAVEPOINT` leaves the savepoint defined, and leaving it there is what
 ///     a later frame of the same name would shadow.
 ///
-/// **DBR-03 is gone from this function.** It used to read "slot already drained
-/// (e.g. a concurrent teardown). Treat as settled" and return
-/// `SettleOutcome::Ok` **without sending anything** - so an absent client was
-/// proof that terminal SQL had run. Under the reducer the only state that ends a
-/// settle early is `Settled`; a settle that arrives while an operation owns the
-/// session waits in `Quiescing` for it to come back, and a session that is
-/// genuinely unreachable when terminal SQL is due is `Indeterminate`, which
-/// withdraws and tells the creator.
+/// The only state that ends a settle early is `Settled`; a settle that
+/// arrives while an operation owns the session waits in `Quiescing` for it
+/// to come back, and a session that is genuinely unreachable when terminal
+/// SQL is due is `Indeterminate`, which withdraws and tells the creator. An
+/// absent client is never proof that terminal SQL has run.
 pub async fn exec_settle(
     app_id: &str,
     success: bool,
@@ -531,12 +528,9 @@ pub async fn exec_settle(
                 );
                 return SettleOutcome::SettleErr(error);
             };
-            // The driver's mapping already carries the RIGHT code for each
-            // outcome, so nothing here re-wraps it. Re-wrapping is how a
-            // definitively rolled-back commit came out labelled
-            // `commit_failed_indeterminate`: the outcome was known, not unknown,
-            // and the label said the opposite of what the state machine
-            // established.
+            // The driver's mapping already carries the right code for each
+            // outcome, so nothing here re-wraps it: a known outcome must
+            // never be reported as `commit_failed_indeterminate`.
             match driver::outcome_error(outcome, intent, driven.error) {
                 None => SettleOutcome::Ok,
                 Some(error) if matches!(outcome, reducer::TerminalOutcome::Indeterminate(_)) => {
@@ -590,9 +584,8 @@ pub fn is_active(app_id: &str) -> bool {
 thread_local! {
     /// The backend `install_sqlite_backend_for_test` opened, for [`test_backend`].
     ///
-    /// It used to be parked in the ADAPTER's per-isolate context and read back
-    /// out. The engine cannot name that context now, and never needed to: the
-    /// fixture opens the backend, so the fixture can hold it.
+    /// The fixture opens the backend, so the fixture holds it; the engine
+    /// cannot name the adapter's per-isolate context.
     static TEST_BACKEND: std::cell::RefCell<Option<crate::backend::BackendHandle>> =
         const { std::cell::RefCell::new(None) };
 }
@@ -680,18 +673,14 @@ mod tests {
 
     /// **Dispatch emits the reducer's monotonic names, not depth-derived ones.**
     ///
-    /// This replaced `savepoint_name_is_prefixed_and_1_based`, which asserted
-    /// `savepoint_name(1) == "zs_sp_1"` - a function whose whole contract was
-    /// the defect. Two frames opened at the SAME depth used to get the same
-    /// name, and because `ROLLBACK TO SAVEPOINT` leaves the savepoint defined
-    /// and PostgreSQL resolves a name to the most recently established one, the
-    /// leftover shadowed the enclosing frame and sent its rollback to the wrong
-    /// scope.
+    /// Savepoint names must be unique per frame: `ROLLBACK TO SAVEPOINT`
+    /// leaves the savepoint defined, and PostgreSQL resolves a name to the
+    /// most recently established one, so a reused name would send an
+    /// enclosing frame's rollback to the wrong scope.
     ///
     /// The arm drives the real dispatch entry point, not the frame stack: it
-    /// opens a frame, settles it, opens another at the same depth, and requires
-    /// the two minted names to differ. Mutating `FrameStack::open_child` back to
-    /// a depth-derived `format!("zs_sp_{}", self.frames.len())` reddens this.
+    /// opens a frame, settles it, opens another at the same depth, and
+    /// requires the two minted names to differ.
     #[test]
     fn dispatch_emits_monotonic_savepoint_names_at_the_same_depth() {
         run(async {

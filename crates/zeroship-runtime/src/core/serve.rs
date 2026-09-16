@@ -1,8 +1,7 @@
 //! Reusable compio HTTP server for zeroship.
 //!
-//! Extracted from `server.rs` (the zeroship-bench-server binary) so that both the
-//! benchmark binary and the CLI (`zeroship serve`) can share the same server
-//! logic.
+//! Shared by the benchmark binary (`zeroship-bench-server`) and the CLI
+//! (`zeroship serve`), so both run the same server logic.
 //!
 //! ## Usage
 //!
@@ -378,17 +377,16 @@ const BAD_REQUEST_RESPONSE: &[u8] =
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 
 /// Max bytes in a single request body on the STANDALONE server. Triggers 413
-/// Content Too Large. Measured: 1 048 576 is accepted, 1 048 577 is refused --
-/// the check is `>`, not `>=`.
+/// Content Too Large. The boundary check is `>`, not `>=`: a body of exactly
+/// this many bytes is accepted.
 ///
-/// This cap does NOT govern deployed traffic, and the difference is 4x. A
-/// gateway never speaks to this server: it encodes a dispatch frame
-/// (`encode_dispatch_frame`, `gateway/src/proxy.rs`) and POSTs it to the
-/// worker's `/dispatch/{app_id}` route, which is ntex with its own
-/// `PayloadConfig` (`worker/src/handler.rs`). The only caller of
-/// `serve::start_server` is `zeroship serve` (`cli/src/main.rs`). Deployed
-/// bodies are bounded by `MAX_REQUEST_BODY_BYTES` (4 MiB) at the gateway
-/// instead.
+/// This cap does NOT govern deployed traffic. A gateway never speaks to this
+/// server: it encodes a dispatch frame (`encode_dispatch_frame`,
+/// `gateway/src/proxy.rs`) and POSTs it to the worker's `/dispatch/{app_id}`
+/// route, which is ntex with its own `PayloadConfig`
+/// (`worker/src/handler.rs`). The only caller of `serve::start_server` is
+/// `zeroship serve` (`cli/src/main.rs`). Deployed bodies are bounded by the
+/// gateway's `MAX_REQUEST_BODY_BYTES` instead.
 ///
 /// So `pnpm dev` refuses bodies that production accepts, which fails in the
 /// safe direction but makes a local 413 useless as evidence about the platform.
@@ -410,7 +408,7 @@ const MAX_CONNECTION_BUFFER_BYTES: usize = MAX_HEADER_BYTES + MAX_BODY_BYTES + 4
 /// indefinitely. The cap only fires on a stream that stalls — e.g. a
 /// handler stuck in an infinite `await` that never enqueues or closes —
 /// which otherwise pins the TCP connection and its compio task forever
-/// (resource-exhaustion DoS). 5 minutes is generous: it comfortably
+/// (resource-exhaustion DoS). The value is generous: it comfortably
 /// exceeds keepalive/heartbeat intervals of every SSE client we target
 /// while still bounding a wedged stream.
 ///
@@ -604,13 +602,6 @@ async fn handle_connection(
                 // `data`. For an upgrade the loop never runs again - the stream
                 // stops being HTTP - so anything still in `data` is bytes the
                 // socket will NEVER produce again.
-                //
-                // Measured 2026-08-12 before this was threaded through: a client
-                // whose first WebSocket frame shared a segment with the upgrade
-                // request lost it silently, and the server itself reported
-                // `leftover=10` on exactly the failing probes and `leftover=0`
-                // on exactly the passing ones, 16 of 16. Forced into one
-                // segment it was 16 of 16 lost.
                 let ws_pending: Vec<u8> = if is_upgrade {
                     data.get(consumed + total_len..).unwrap_or(&[]).to_vec()
                 } else {
@@ -709,12 +700,10 @@ fn build_http_response(status: u16, headers: &[(String, String)], body: &[u8]) -
 /// have already been written. Loops until the reader reports `is_done`, then
 /// writes the `0\r\n\r\n` terminator.
 ///
-/// Allocation: one `Vec<u8>` for the whole response. Previously every chunk
-/// allocated `String` (from `format!`) + `Vec` (for framing) — one alloc pair
-/// per token on SSE/LLM-streaming endpoints. The scratch buffer is returned
-/// by `write_all` via compio's ownership-transfer model, cleared (keeping
-/// capacity) and reused for the next chunk, so after the first chunk
-/// steady-state allocation is zero.
+/// Allocation: one `Vec<u8>` for the whole response. The scratch buffer is
+/// returned by `write_all` via compio's ownership-transfer model, cleared
+/// (keeping capacity) and reused for the next chunk, so after the first
+/// chunk steady-state allocation is zero.
 /// Outcome of attempting to decode a chunked request body in place.
 enum ChunkedDecode {
     /// Body decoded successfully. `body_bytes` holds the concatenated
@@ -931,7 +920,7 @@ fn build_stream_response_headers(status: u16, headers: &[(String, String)]) -> V
 /// These five travel together by construction: they are produced at one point
 /// in `handle_connection` and consumed at one point in `handle_request`, and
 /// none of them is meaningful without the others. Passing them as a unit keeps
-/// the dispatch entry point at four arguments instead of eight.
+/// the dispatch entry point's signature small.
 struct IncomingRequest<'a> {
     method: &'a str,
     url: &'a str,
@@ -1536,15 +1525,14 @@ async fn write_kernel_event<W: compio::io::AsyncWrite + Unpin>(
 /// `impl AsyncRead/AsyncWrite for &TcpStream` issues independent
 /// io_uring submissions, so reads and writes proceed in parallel.
 ///
-/// Why this design instead of the previous `select(read, recv)`:
-/// io_uring read submissions that have already completed (kernel
-/// filled the user buffer) but haven't been polled yet still LOSE
-/// their bytes when the future is dropped. A `select` arm that
-/// returns on `recv` resolution drops the surviving `read` future,
-/// which in turn drops the buffer with already-received bytes. The
-/// next `read` then returns from the middle of the previous frame
-/// (mask byte or payload), corrupting every subsequent frame's
-/// framing.
+/// Why `join` and not `select(read, recv)`: io_uring read submissions
+/// that have already completed (kernel filled the user buffer) but
+/// haven't been polled yet still LOSE their bytes when the future is
+/// dropped. A `select` arm that returns on `recv` resolution drops the
+/// surviving `read` future, which in turn drops the buffer with
+/// already-received bytes. The next `read` then returns from the middle
+/// of the previous frame (mask byte or payload), corrupting every
+/// subsequent frame's framing.
 ///
 /// `join` polls both futures cooperatively until both complete; no
 /// future is cancelled mid-completion. The reader runs `read_ws_frame`
@@ -1652,33 +1640,22 @@ async fn native_ws_pump(
                         // hit EOF or a read error: the TCP peer is gone. There
                         // is nobody left to write to, so this half is done.
                         //
-                        // THIS SAID `continue` UNTIL 2026-08-12, and that spun.
-                        // `close_rx` is terminated once the reader drops
-                        // `close_tx`, so `next()` is `Ready(None)` on EVERY
-                        // later poll; `continue` re-entered the select, which
-                        // resolved this arm again immediately. Measured on one
-                        // abandoned socket: an idle server burns 0 CPU ticks
-                        // per 3s, this burned 297 and then 298 - a hot loop, not
-                        // a parked task. And because `join(reader, writer)`
-                        // needs BOTH halves, the writer never finishing meant
-                        // the connection task never finished and its
-                        // `TcpStream` was never dropped, so each abandoned
-                        // socket also leaked its fd (55 -> 56 per upgrade).
+                        // Returning (not `continue`) matters: `close_rx` is
+                        // terminated once the reader drops `close_tx`, so
+                        // `next()` is `Ready(None)` on every later poll and a
+                        // `continue` would re-resolve this arm immediately - a
+                        // hot loop, not a parked task. And because
+                        // `join(reader, writer)` needs BOTH halves, a writer
+                        // that never finishes keeps the connection task and its
+                        // `TcpStream` alive, leaking the fd.
                         //
-                        // The comment it replaced said the remaining drain was
-                        // from `kernel_rx`, and the intent was to keep writing
-                        // whatever JS still sends. That intent cannot be served
-                        // here: the socket the frames would go to is closed.
-                        // The mirror arm above already does the right thing in
-                        // the other direction - when `kernel_rx` ends it awaits
-                        // `close_rx` DIRECTLY rather than re-selecting.
+                        // Draining `kernel_rx` here would serve nothing: the
+                        // socket the frames would go to is closed.
                         //
-                        // NOT FIXED HERE: on EOF the reader never calls
+                        // Known gap: on EOF the reader never calls
                         // `deliver_ws_close`, so the JS `close` event does not
                         // fire on an abrupt disconnect and `kernel_outbound` is
-                        // never dropped. RFC 6455 would have this be 1006. That
-                        // is a JS-visible behaviour change and is left out of a
-                        // fix whose whole job is to stop the spin.
+                        // never dropped. RFC 6455 would have this be 1006.
                         return;
                     };
                     let mut close_payload = Vec::with_capacity(2 + reason.len());
@@ -1706,7 +1683,7 @@ enum WsEvent {
 }
 
 /// Combined future: waits for either a TCP frame OR an outgoing notification.
-/// Avoids the overhead of `Fuse` wrappers + `futures::select!` (saves ~9% CPU).
+/// Avoids the overhead of `Fuse` wrappers + `futures::select!`.
 ///
 /// SAFETY: `read_fut` is structurally pinned.
 #[cfg(not(feature = "runtime_native_websocket"))]
@@ -2167,11 +2144,9 @@ mod ws_frame_tests {
         out
     }
 
-    /// Regression for P4-B-1: a frame declaring a payload larger than the
-    /// cap must be rejected WITHOUT allocating the declared buffer, and
-    /// must surface as a 1009 ("Message Too Big") Close frame. Pre-fix the
-    /// reader did `vec![0u8; len]` with no bound, so this header would have
-    /// triggered a multi-terabyte allocation / OOM abort instead.
+    /// A frame declaring a payload larger than the cap must be rejected
+    /// WITHOUT allocating the declared buffer, and must surface as a 1009
+    /// ("Message Too Big") Close frame.
     #[test]
     fn oversized_frame_rejected_with_1009_no_alloc() {
         // Declare ~280 TB. Only the 10-byte header is provided; if the
@@ -2224,11 +2199,11 @@ mod ws_frame_tests {
 
 #[cfg(test)]
 mod stream_idle_tests {
-    //! Regression for P4-B-3 / RT-3: the SSE/chunked streaming pump must
-    //! release a stalled stream instead of pinning the connection + worker
-    //! task forever. We exercise the real idle-wait helper the pump calls on
-    //! every loop iteration (`wait_for_data_or_idle`) against a live
-    //! `StreamReader`/`StreamWriter` pair — no shim, no fake.
+    //! The SSE/chunked streaming pump must release a stalled stream instead
+    //! of pinning the connection + worker task forever. We exercise the real
+    //! idle-wait helper the pump calls on every loop iteration
+    //! (`wait_for_data_or_idle`) against a live `StreamReader`/`StreamWriter`
+    //! pair — no shim, no fake.
     use super::*;
     use crate::channel::stream_buffer;
     use std::time::Instant;
@@ -2238,9 +2213,7 @@ mod stream_idle_tests {
     }
 
     /// A stream that produces nothing and never closes must resolve to
-    /// `IdleTimeout` once the deadline elapses — not hang. Pre-fix the pump
-    /// awaited `reader.wait_for_data()` with no bound, so the equivalent wait
-    /// would block forever and this test would never return.
+    /// `IdleTimeout` once the deadline elapses — not hang.
     #[test]
     fn idle_stream_times_out() {
         let (_writer, reader) = stream_buffer();

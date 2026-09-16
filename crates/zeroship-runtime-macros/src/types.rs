@@ -79,8 +79,7 @@ pub(crate) fn is_enforce_range_u64(ty: &Type) -> bool {
 /// Check if type is the `EnforceRangeU32` newtype — companion to
 /// `EnforceRangeU64` for WebIDL `[EnforceRange] unsigned long`. Used
 /// by the WebCrypto IDL surface (Pbkdf2Params.iterations,
-/// RsaKeyGenParams.modulusLength, deriveBits.length, etc.). See
-/// `docs/archive/webcrypto-native.md`.
+/// RsaKeyGenParams.modulusLength, deriveBits.length, etc.).
 pub(crate) fn is_enforce_range_u32(ty: &Type) -> bool {
     type_ident(ty).as_deref() == Some("EnforceRangeU32")
 }

@@ -5,7 +5,7 @@
 //! the cross-class operations; class-local methods live on
 //! `WebSocketImpl` directly.
 //!
-//! Inventory (per design §IX):
+//! Inventory:
 //! - `clamp_unsigned_short` — WebIDL `[Clamp] unsigned short` for
 //!   `WebSocket.close()`'s `code` argument.
 //! - `validate_close_code_and_reason` — WHATWG §3.1 close algorithm
@@ -132,8 +132,8 @@ pub fn validate_close_code_and_reason(
 /// Per RFC 6455 §4.1 + RFC 7230 token grammar: each subprotocol must
 /// be a non-empty string of codepoints in U+0021..U+007E excluding
 /// the RFC 7230 separator characters (`"(),/:;<=>?@[\]{}` plus space
-/// and HT). The undici utility `isValidSubprotocol` (`util.js:101-141`)
-/// is the literal model.
+/// and HT). The undici utility `isValidSubprotocol` (`util.js`) is the
+/// literal model.
 fn is_valid_subprotocol(s: &str) -> bool {
     if s.is_empty() {
         return false;
@@ -160,8 +160,7 @@ fn is_valid_subprotocol(s: &str) -> bool {
 ///
 ///     Throws SyntaxError on:
 ///   - duplicates (case-insensitive, ASCII-only — RFC 6455 tokens are
-///     ASCII-only so to_ascii_lowercase is sufficient; addresses
-///     critic MINOR #34).
+///     ASCII-only so to_ascii_lowercase is sufficient).
 ///   - any element failing `is_valid_subprotocol`.
 pub fn parse_and_validate_protocols(
     scope: &mut v8::PinScope,
@@ -225,8 +224,8 @@ pub fn parse_and_validate_protocols(
 /// WHATWG spec): `signal`, `origin`, `maxMessageSize`,
 /// `maxFrameSize`, `pingIntervalMs`.
 ///
-/// `signal` is read but NOT yet wired through the connect task — that
-/// arrives in step 4 / step 7 (handshake + AbortSignal integration).
+/// `signal` is read but NOT yet wired through the connect task —
+/// handshake + AbortSignal integration is not implemented.
 pub struct ParsedWebSocketInit {
     pub origin: Option<String>,
     pub max_message_size: u32,
@@ -325,30 +324,22 @@ where
 
     // Update the EventTarget listener registry. We need the JS wrapper
     // for `add_internal_listener` / `remove_internal_listener`. If the
-    // wrapper hasn't been cached yet (no event has fired), we still
-    // need to register on the listener Rc tied to *this object* — but
-    // we don't know what `this` is at setter call time without a hop.
+    // wrapper hasn't been cached yet (no event has fired), we cannot
+    // register on the listener Rc tied to *this object* — the setter
+    // has no path to `this` except the cached wrapper. The install path
+    // therefore reads `ws_obj` from the cached_handles ONLY (the wrapper
+    // self_weak is set by mint, and for the JS-constructed path on first
+    // event).
     //
-    // The setter callback runs with `args.this()` accessible only via
-    // the macro-generated trampoline — which the macro hands us as a
-    // hidden argument. v1 handles the case by stashing `ws_obj` lazily
-    // on first interaction; here, the setter has access via the same
-    // mechanism the EventTarget hand-rolled callbacks use. We work
-    // around this in the install path by reading `ws_obj` from the
-    // cached_handles ONLY (the wrapper-self_weak is set by mint, but
-    // for the JS-constructed path we set it on first event).
-    //
-    // For step 2 (no network), the EventTarget-listener round-trip is
-    // not strictly required — `socket.onopen = f` is a no-op without
-    // an Open event ever firing. The slot is preserved correctly so
-    // the getter readback works. The full install/remove plumbing is
-    // wired in step 5 (event dispatch), where we know the wrapper.
+    // Updating the slot alone is sufficient here: `socket.onopen = f`
+    // is observable through the getter readback, and the listener
+    // install/remove only matters once events can actually fire — by
+    // which point the wrapper exists.
 
-    // For step 2, we simply update the slot. The listener installation
-    // happens lazily in `WebSocketImpl::ensure_handler_installed` on
-    // first event dispatch (step 5). If a wrapper IS already cached
-    // (e.g. by the WebSocketPair mint in step 6), we install/remove
-    // synchronously here:
+    // The listener installation happens lazily in
+    // `WebSocketImpl::ensure_handler_installed` on first event dispatch.
+    // If a wrapper IS already cached (e.g. by the WebSocketPair mint),
+    // we install/remove synchronously here:
     if let Some(wrapper) = cached_ws_obj(scope, impl_) {
         if prev_handler.is_some() {
             remove_internal_listener(scope, wrapper, event_name);

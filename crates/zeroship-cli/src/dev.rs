@@ -19,28 +19,25 @@ const COMPOSE_FILE: &str = "deploy/compose/docker-compose.yml";
 /// `ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET` is deliberately absent: the value is issued by
 /// Stripe (`whsec_...` from the dashboard endpoint or `stripe listen
 /// --print-secret`), so a locally generated one can never verify a real
-/// Stripe-Signature. Generating it produced an inert placeholder that made an
-/// unconfigured deployment look configured. Compose now defaults it to empty
-/// and control fails every webhook closed with 500 while it stays empty.
-/// EVERY name here is the canonical `ZEROSHIP_` projection of a declared
-/// setting, and compose maps each one to itself. The bare middle spellings
-/// this list used to write - the unprefixed master-key, stash and salt names -
-/// are read by nothing since Step 5 of
-/// `docs/proposals/2026-08-11-config-name-alignment.md` deleted them, so
-/// writing one would leave a dev stack that looks initialised and crash-loops.
+/// Stripe-Signature. Compose defaults it to empty and control fails every
+/// webhook closed with 500 while it stays empty.
 ///
-/// `GATEWAY_OIDC_SECRET` is gone rather than renamed: it had no Rust reader at
-/// all. Generating a secret nothing consumes is the set-but-unread shape this
-/// migration exists to remove, and it is not made better by a canonical name.
+/// EVERY name here is the canonical `ZEROSHIP_` projection of a declared
+/// setting, and compose maps each one to itself. The unprefixed spellings
+/// are read by nothing, so writing one would leave a dev stack that looks
+/// initialised and crash-loops.
+///
+/// `GATEWAY_OIDC_SECRET` is deliberately absent: nothing reads it, and
+/// generating a secret nothing consumes is the set-but-unread shape this
+/// command exists to remove.
 ///
 /// THE LIST IS NOT KEPT HERE. It is `zeroship_core::config::PLATFORM_SECRETS`,
 /// which also carries the strength rule the product enforces on each name and
-/// the validator that applies it. Keeping a second copy here is what let the
-/// generator and the enforcement disagree; the services' boot-time credential
-/// audit reads the same table, so a secret this command generates and a secret
-/// a service is handed are judged by one rule set. What compose SHIPS is
-/// judged by nothing: the gate that read the table against
-/// `deploy/compose/docker-compose.yml` was deleted on 2026-08-21.
+/// the validator that applies it. A second copy here would let the generator
+/// and the enforcement disagree; the services' boot-time credential audit
+/// reads the same table, so a secret this command generates and a secret a
+/// service is handed are judged by one rule set. What compose SHIPS is
+/// judged by nothing.
 fn env_keys() -> impl Iterator<Item = &'static str> {
     zeroship_core::config::PLATFORM_SECRETS
         .iter()
@@ -244,14 +241,11 @@ type SecretSpec = (
 /// COUPLED TO deploy/compose/docker-compose.yml: `postgres` there is reachable
 /// on the compose network as host `postgres`, and its `POSTGRES_PASSWORD` is
 /// the literal `zeroship`. Change either and this must change with it - which
-/// is the point of writing it down in one place instead of leaving it inline in
-/// the deploy file, where it also sat in the one-shot's ARGV until 2026-08-16
-/// and in `migrated`'s `environment:` block until 2026-08-21.
+/// is the point of writing it down in one place instead of leaving it inline
+/// in the deploy file.
 ///
 /// Written only when absent, so an operator who repoints this file at a real
-/// database keeps their value across re-runs - and, since 2026-08-21, moves
-/// BOTH readers together. While `migrated` carried its own inline default the
-/// repointing silently moved only the platform one-shot.
+/// database keeps their value across re-runs, and both readers move together.
 const COMPOSE_MIGRATE_DSN: &str = "postgres://postgres:zeroship@postgres:5432/zeroship\n";
 
 fn generate_migrate_dsn() -> Result<Vec<u8>, String> {
@@ -288,21 +282,19 @@ fn validate_migrate_dsn(bytes: &[u8]) -> Result<(), String> {
 /// TOKEN a trusted signer minted and mints under an instance key it draws in
 /// memory at boot, so the peer document publishes no worker key at all.
 ///
-/// THAT PARAGRAPH WAS A COMMENT AND NOTHING ELSE UNTIL 2026-09-07, and the
-/// difference was reachable with this very command. `ensure_secret_file` keeps
-/// whatever file it finds and `validate_signing_key` only asks whether it
-/// parses, so one key copied to every path - the shape a secret manager or a
-/// compose override produces when it maps one secret onto every
-/// `ZEROSHIP_*_SERVICE_KEY_FILE` mount - exited 0, printed "kept" for each and
-/// published that key under every issuer. `reject_shared_service_keys` now
-/// refuses it, before anything is created and again before the document is
-/// written, and it judges the join signer key in the same set.
+/// `ensure_secret_file` keeps whatever file it finds and
+/// `validate_signing_key` only asks whether it parses, so one key copied to
+/// every path - the shape a secret manager or a compose override produces
+/// when it maps one secret onto every `ZEROSHIP_*_SERVICE_KEY_FILE` mount -
+/// would be kept and published under every issuer.
+/// `reject_shared_service_keys` refuses it, before anything is created and
+/// again before the document is written, and it judges the join signer key
+/// in the same set.
 ///
 /// Why refuse rather than warn: the run EMITS A CREDENTIAL DOCUMENT. Under a
 /// one-key document every issuer resolves to the same key, so a peer holding
 /// any one service key can present as any service to any service, and a worker
-/// can mint the identity envelope its own verifier accepts. A warning printed
-/// beside a document with that property is how this arrived.
+/// can mint the identity envelope its own verifier accepts.
 ///
 /// The names match `zeroship_core::service_peers`, and
 /// `tests/lib/runtime_secrets.sh` writes the same set under the same names for
@@ -628,10 +620,9 @@ fn validate_env_value(name: &str, value: &str) -> Result<(), String> {
     if decoded.iter().all(|byte| *byte == 0) {
         return Err(format!("{name} must not be all zero"));
     }
-    // The name -> validator mapping used to be a `match` here, a second copy of
-    // a fact `crates/core` already owns. It is now one lookup into
-    // PLATFORM_SECRETS, so adding a secret to the table is what makes this
-    // command generate AND re-validate it.
+    // The name -> validator mapping is one lookup into PLATFORM_SECRETS
+    // (`crates/core` owns the table), so adding a secret to the table is
+    // what makes this command generate AND re-validate it.
     zeroship_core::config::platform_secret(name)
         .ok_or_else(|| format!("unknown generated environment key {name}"))?
         .validate(value)
@@ -1208,13 +1199,9 @@ mod tests {
 
     use super::open_new_private;
 
-    /// THE UNTESTED HALF of the write side. `create_private_file` set the mode
-    /// twice - once as the `O_CREAT` mode and once with `set_permissions` after
-    /// the write - and only the second was covered: mutating the `O_CREAT` mode
-    /// to 0o644 left the whole `dev_init` suite green, because the chmod reset
-    /// it before anything looked. So the creation mode could be widened
-    /// silently, and with it the window in which the secret exists world-
-    /// readable, which is the window a local attacker actually races.
+    /// The `O_CREAT` mode must be owner-only on its own: the secret exists
+    /// with the creation mode in the window before the post-write chmod,
+    /// which is the window a local attacker actually races.
     ///
     /// This asserts the mode on the DESCRIPTOR `open` returned, before any
     /// chmod can run, which is the only way to tell the two apart.
@@ -1222,7 +1209,7 @@ mod tests {
     /// It does NOT cover a run under a umask of 0o077 or tighter: the kernel
     /// masks the `O_CREAT` mode, so a widened constant would come out 0600
     /// anyway - and in that environment the widening is also not exploitable.
-    /// Measured under the 022 umask this repo's suites run with.
+    /// The expected mode reflects the 022 umask this repo's suites run with.
     #[test]
     fn a_generated_secret_is_owner_only_at_the_instant_it_is_created() {
         let dir = tempfile::tempdir().expect("tempdir");

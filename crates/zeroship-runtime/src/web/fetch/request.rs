@@ -148,8 +148,7 @@ impl Default for RequestState {
 // RequestInit — `[Dictionary]` per Fetch §5.4
 // ---------------------------------------------------------------------------
 
-/// `RequestInit` per Fetch §5.4. The typed-enum members migrate from
-/// the v1 `RefCell<String>` storage; the v8::Value passthroughs
+/// `RequestInit` per Fetch §5.4. The v8::Value passthroughs
 /// (`headers`, `body`, `signal`) stay OUTSIDE the dict because they're
 /// union types the constructor body dispatches on by V8 shape (the
 /// HeadersInit union for `headers`, the BodyInit union for `body`,
@@ -162,10 +161,7 @@ impl Default for RequestState {
 /// body reads `body` / `headers` / `signal` raw from the init object
 /// to preserve that distinction.
 ///
-/// # Behaviour change vs v1
-///
-/// Unknown enum values (`mode: "bogus"`) now throw TypeError instead
-/// of being silently stored as a string. Spec-correct per WebIDL
+/// Unknown enum values (`mode: "bogus"`) throw TypeError per WebIDL
 /// §3.13.7 step 4.
 #[derive(Default, Debug, WebIdlDict)]
 pub(crate) struct RequestInit {
@@ -788,8 +784,7 @@ impl RequestState {
     // `raw_headers` carries the unmaterialised list). V8 Globals are
     // persistent handles, so `Local::new(scope, g)` returns the same
     // Object identity on every call. The macro's Private-symbol cache
-    // would be a redundant indirection on a stable identity — measured
-    // ~6% slower on the httpGet kernel-fast-path bench.
+    // would be a redundant indirection on a stable identity.
 
     #[v8_getter]
     fn headers<'s>(
@@ -984,8 +979,7 @@ impl RequestState {
 /// Per-isolate cache of the Request prototype Object for the kernel
 /// fast-path Request builder.
 ///
-/// Replaces the v1 `RequestTemplateSlot.prototype` field. The class
-/// FunctionTemplate now lives in the macro-emitted
+/// The class FunctionTemplate lives in the macro-emitted
 /// `__InstallSlot_Request` slot; the prototype Object is not in that
 /// slot, so we cache it separately here.
 ///
@@ -1235,10 +1229,9 @@ fn is_method_token(b: u8) -> bool {
 /// if no Content-Type was already set (e.g. via `init.headers`). Spec
 /// per Fetch §5.4 step 36.6.
 ///
-/// Replaces the v1 thread-local PENDING_CT scheme. The macro path keeps
-/// the constructor body monolithic, so we pass the pending CT through
-/// the local stack rather than a thread-local table keyed by state
-/// address.
+/// The macro path keeps the constructor body monolithic, so the pending
+/// CT passes through the local stack rather than a thread-local table
+/// keyed by state address.
 fn apply_content_type_if_absent(
     scope: &mut v8::PinScope,
     headers_obj: v8::Local<v8::Object>,

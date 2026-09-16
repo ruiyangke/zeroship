@@ -8,11 +8,6 @@
 
 // Native `Blob` per WHATWG File API §3 — https://w3c.github.io/FileAPI/#blob-section.
 //
-// Replaces the JS Blob polyfill that lived in `embed/blob.js` (78 LOC).
-// The polyfill used POJO instances (no `instanceof` brand check, no
-// `@@toStringTag`), didn't validate `parts` per spec, and `Blob.stream()`
-// returned a JS-side fake instead of a native ReadableStream.
-//
 // ## Storage
 //
 // Bytes live behind an `Rc<Vec<u8>>` so `slice()` can share the
@@ -30,15 +25,14 @@
 // - `arrayBuffer`: §3.3.9
 // - `bytes`: spec PR (newer, "blob bytes()" section in current ED)
 //
-// ## Deferred from v1
+// ## Not implemented
 //
 // - **Line ending normalization** for `endings: "native"`: §3.2 step 3
 //   says replace LF/CR/CRLF with the platform's native ending. We
 //   accept the option but treat it as a no-op (the spec also says
 //   "transparent" is the default and we never match a system that
 //   isn't \n; on Unix even the "native" path is identity).
-// - **Blob URL store**: `URL.createObjectURL` / `revokeObjectURL` are
-//   out of scope per the task brief.
+// - **Blob URL store**: `URL.createObjectURL` / `revokeObjectURL`.
 
 use std::rc::Rc;
 
@@ -415,9 +409,8 @@ fn is_blob_instance(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> boo
 /// `endings` is held as `Option<String>` (rather than an enum) so
 /// the converter just does ToString — observed-but-discarded. The
 /// macro's `WebIdlEnum` derive WOULD throw TypeError on values
-/// outside `{"transparent","native"}`, but the existing
-/// hand-rolled parser is permissive, and matching that keeps WPT
-/// behaviour identical.
+/// outside `{"transparent","native"}`; keeping the permissive read
+/// preserves the WPT-observed behaviour.
 #[derive(Default, Debug, WebIdlDict)]
 pub(crate) struct BlobPropertyBag {
     // Parsed for WebIDL dictionary member access order; Blob construction
@@ -735,7 +728,7 @@ fn build_blob_stream<'s>(
     let chunk = v8::Uint8Array::new(scope, ab, 0, n).unwrap();
     let chunk_global = v8::Global::new(scope, chunk);
 
-    // Step 2: build the start callback's payload. We allocate a
+    // The start callback's payload is a
     // `Box<Option<v8::Global<v8::Uint8Array>>>`. The Option lets the
     // callback take() the Global out and drop the box's Global so the
     // backing handle can release; the finalizer on the function only
@@ -906,7 +899,7 @@ pub use file::File;
 pub fn install_globals(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     // ----- Install Blob -----
     //
-    // #198 — left as direct install/bind because File below needs the
+    // Left as direct install/bind because File below needs the
     // resolved `blob_class_fn` (for `file_class_fn.set_prototype(blob)`),
     // and `register_native_classes!` doesn't return the bound Function.
     // Re-fetching via `global.get(...)` after registration would just be
