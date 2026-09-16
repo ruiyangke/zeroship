@@ -1,17 +1,16 @@
 //! What ONE lowered step does to the catalog facts an assertion can read.
 //!
-//! Specified by `docs/proposals/single-fold-and-effects.md` section G. The governing
-//! identity is `state_at(N) = live_at_0 (+) fold(effects[0..N])`, and the proposal's
-//! point is that THE TWO TERMS ARE NOT EQUALLY KNOWABLE.
+//! The governing identity is `state_at(N) = live_at_0 (+) fold(effects[0..N])`,
+//! and THE TWO TERMS ARE NOT EQUALLY KNOWABLE.
 //!
 //! # What this type is, and what it deliberately is not
 //!
 //! This is the OBSTRUCTION PROJECTION of a step's meaning, not the step's full state
 //! delta. The full delta is what `render::fold::fold_ops_onto` already computes, and
 //! `state_at(N)` is spelled in terms of that rather than in terms of
-//! this enum. Both are derived from the SAME op vocabulary, which is the whole of
-//! decision 1: if the effect model is wrong about what an op removes, the fold is
-//! wrong about it too, and the snapshot corpus catches it.
+//! this enum. Both are derived from the SAME op vocabulary: if the effect
+//! model is wrong about what an op removes, the fold is wrong about it too,
+//! and the snapshot corpus catches it.
 //!
 //! Being exact about the identity, because it is easy to oversell: `Effect` is a
 //! two-valued classification, so `fold` of a run of `Effect`s does NOT reconstruct a
@@ -36,9 +35,8 @@
 //!
 //! A step with no op provenance - a `.sql` migration, a declarative plan, a
 //! hand-built [`crate::migration::Migration`] - carries `None` rather than an
-//! `Effect`, and every consumer reads `None` as [`Effect::MayRemove`]. That is the
-//! same direction the SQL whitelist failed in: toward the per-migration seam, i.e.
-//! toward today's behaviour, never toward a new refusal.
+//! `Effect`, and every consumer reads `None` as [`Effect::MayRemove`]: the fail
+//! direction is toward the per-migration seam, never toward a new refusal.
 
 /// What a step does to the catalog facts an obstruction assertion reads.
 ///

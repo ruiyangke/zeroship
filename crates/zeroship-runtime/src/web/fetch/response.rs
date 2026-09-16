@@ -1,8 +1,7 @@
 //! Native `Response` class per WHATWG Fetch §5.5
 //! (https://fetch.spec.whatwg.org/#response-class).
 //!
-//! Replaces the JS Response constructor that lives in `embed/fetch.js`.
-//! Per design fetch-native v2 §V the constructor walks the spec's 17
+//! The constructor walks the spec's 17
 //! steps and produces a Response whose body is a native BodyImpl.
 //!
 //! ## Storage layout
@@ -12,9 +11,9 @@
 //!   - status: u16 (default 200)
 //!   - status_text: String (default "")
 //!   - type: String — "default" / "error" / "basic" / "cors" / "opaque"
-//!     / "opaqueredirect"; v1 only emits "default" and "error".
+//!     / "opaqueredirect"; emitted values are "default" and "error".
 //!   - url: String — the LAST URL in request's URL list, fragment-
-//!     stripped. v1 ships empty by default.
+//!     stripped. Empty by default.
 //!   - redirected: bool
 //!   - ok: bool — derived (status in 200..300)
 //!   - headers: Global<Object>
@@ -47,9 +46,9 @@
 //!
 //! The three static methods (`error` / `redirect` / `json`) live on
 //! the impl block annotated with `#[v8_static_method]` — the macro
-//! installs them on the constructor FunctionTemplate (WebIDL §3.7.4)
-//! once `gen_static_callback` was fixed to dispatch through `state_ty`
-//! under `#[v8_state_marker]` (the call expression now resolves
+//! installs them on the constructor FunctionTemplate (WebIDL §3.7.4),
+//! dispatching through `state_ty`
+//! under `#[v8_state_marker]` (the call expression resolves
 //! against `ResponseState`, where the bodies live).
 
 use std::cell::{Cell, RefCell};
@@ -306,13 +305,12 @@ pub fn try_native_response_websocket(
 /// an init array, runs `extract_body`, etc).
 ///
 /// Storage: `v8::Eternal<T>` rather than `v8::Global<T>`. Both fields
-/// are set-once at install time and read on every Response build. The
-/// previous `Global` fields required `slot.field.clone()` (=
+/// are set-once at install time and read on every Response build. A
+/// `Global` field would require `slot.field.clone()` (=
 /// `v8__Global__New` — a fresh `GlobalHandles` slot) on every call to
 /// drop the slot borrow before `v8::Local::new`. Eternals are isolate-
 /// lifetime handles whose `get(scope)` returns the `Local` directly
-/// without allocating. Mirrors the `__BrandSlot_*` Eternal conversion
-/// in commit b08786a.
+/// without allocating. Mirrors the `__BrandSlot_*` Eternals.
 pub struct ResponseTemplateSlot {
     pub class_tmpl: v8::Eternal<v8::FunctionTemplate>,
     pub prototype: v8::Eternal<v8::Object>,
@@ -357,7 +355,7 @@ pub fn install_global(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
 ///   - the `globalThis.Response` lookup,
 ///   - the JS Response constructor's WebIDL init walk,
 ///   - the per-init-pair JS Array materialization (one 2-elem JS Array per
-///     header) that `build_response_object` previously used,
+///     header) that the JS-constructor path requires,
 ///   - the inner `new Headers(seq)` invocation (which iterates that
 ///     array and per-pair-validates each header),
 ///   - `extract_body` (the response bytes already exist as `Vec<u8>` —
@@ -379,7 +377,7 @@ pub fn build_kernel_response<'s>(
     // 1. Allocate the Response wrapper via the cached instance template.
     // Eternal::get materialises the Local without allocating a fresh
     // GlobalHandles slot — same access pattern as the macro brand
-    // slots (b08786a).
+    // slots.
     let (resp_tmpl, resp_proto) = {
         let slot = scope.get_slot::<ResponseTemplateSlot>()?;
         (slot.class_tmpl.get(scope)?, slot.prototype.get(scope)?)
@@ -471,7 +469,7 @@ fn build_response_json_fast<'s>(
     // 1. Allocate the Response wrapper via the cached instance template.
     // Eternal::get materialises the Local without allocating a fresh
     // GlobalHandles slot — same access pattern as the macro brand
-    // slots (b08786a).
+    // slots.
     let (resp_tmpl, resp_proto) = {
         let slot = scope
             .get_slot::<ResponseTemplateSlot>()
@@ -556,12 +554,11 @@ impl ResponseState {
     /// `new Response(body?, init?)` — Fetch §5.5 17-step constructor.
     ///
     /// Status: spec range 200..=599 PLUS workerd-style 101 carve-out for
-    /// the WebSocket upgrade path (preserved verbatim per design §7.3.3).
+    /// the WebSocket upgrade path.
     /// statusText: validated as HTTP/1.1 reason-phrase (RFC 7230 §3.2.6
     /// — HTAB / SP / VCHAR / obs-text).
-    /// `webSocket` extension preserved on `state.web_socket` so the
-    /// gateway can surface `Response.webSocket` for the upgrade dance
-    ///.
+    /// `webSocket` extension stored on `state.web_socket` so the
+    /// gateway can surface `Response.webSocket` for the upgrade dance.
     #[v8_constructor]
     fn new<'s>(
         scope: &mut v8::PinScope<'s, '_>,
@@ -589,8 +586,7 @@ impl ResponseState {
         // Step 1: status (default 200). Spec allows 200..=599; we additionally
         // allow 101 as a workerd-style extension for the WebSocket upgrade
         // path — the gateway returns `new Response(null, { status: 101,
-        // webSocket: client })` from the user's `fetch` handler. The polyfill
-        // had the same carve-out (`embed/fetch.js:246-249`).
+        // webSocket: client })` from the user's `fetch` handler.
         if let Some(n) = init_dict.status {
             let in_range = n == 101.0 || (200.0..=599.0).contains(&n);
             if n.is_nan() || !in_range {
