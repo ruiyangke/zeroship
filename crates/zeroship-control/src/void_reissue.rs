@@ -142,7 +142,7 @@ pub async fn void_and_reissue<S: StripeApi>(
     let organization_id: String = row.get("organization_id");
     let period: chrono::NaiveDate = row.get("period");
     let status: String = row.get("status");
-    // MAJOR-2: a `finalized` invoice is voided then reissued. An ALREADY-`void` invoice
+    // A `finalized` invoice is voided then reissued. An ALREADY-`void` invoice
     // is a RE-DRIVE of a crash between the Phase-1 commit and Phase 3 — we skip Phase 1
     // (it is already void + reversed) and converge the reissue + true-up tail. A `draft`
     // invoice is never voidable.
@@ -160,7 +160,7 @@ pub async fn void_and_reissue<S: StripeApi>(
         let tx = conn.transaction().await?;
         take_per_organization_lock(&tx, &organization_id).await?;
 
-        // CRITICAL-2: restore the credit the voided invoice consumed BEFORE it is voided,
+        // Restore the credit the voided invoice consumed BEFORE it is voided,
         // so the reissue re-consumes from the restored balance. One positive `void_reversal`
         // per `consumed` row the voided invoice drew (`-c.amount_cents` flips negative→positive,
         // matching the kind↔sign + grant-ref CHECKs). Idempotent: if void_reversal entries
@@ -251,7 +251,7 @@ pub async fn void_and_reissue<S: StripeApi>(
     // ── Phase 3: the true-up bridge ──
     // over = cash_paid(old) − cash_refunds_already_issued(old) − total(new), floored at 0.
     //
-    // H1: the over-collection is recomputed INSIDE `issue_true_up_refund`'s per-organization-locked
+    // The over-collection is recomputed INSIDE `issue_true_up_refund`'s per-organization-locked
     // claim txn from the live cash anchor — NOT pre-read here — so a concurrent refund/dispute
     // landing between Phase 2 and Phase 3 cannot make the claimed amount stale. We pass only the
     // immutable `reissued_total`; the bridge returns the actual cents refunded (0 if the
