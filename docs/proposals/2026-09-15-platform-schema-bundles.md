@@ -93,6 +93,23 @@ The service knows about bundles, stamps and versions. It never learns what a
 journal is. A second platform-owned per-app schema reuses this unchanged, which
 is the test of whether the boundary is real.
 
+The endpoint also establishes the IDENTITIES that schema needs, because those
+are the service's own capability rather than the bundle's domain: the schema and
+its least-privilege migrator role before the install, and the per-app RUNTIME
+role the worker opens the schema under after it. That ordering is load-bearing
+rather than a preference. The runtime role's grant set is
+`GRANT ... ON ALL TABLES IN SCHEMA`, a snapshot of what exists when it runs, and
+the bundle's own DDL executes on the service's admin session, so the migrator's
+`ALTER DEFAULT PRIVILEGES` does not reach the tables that DDL creates.
+Provisioned with the schema, the role would exist and be able to read nothing in
+it.
+
+All three names derive from the target SCHEMA, so none of this needs an app
+identity and the endpoint stays schema-addressed. A bundle aimed at a schema
+that is not a creator tenant therefore acquires a runtime role nothing uses;
+`SchemaBundle` carries no tenant flag and that cost is accepted rather than
+designed around.
+
 This does not widen the trust surface. The service already accepts creator
 drafted migrations narrowed by an operator ceiling; a bundle from an
 authenticated platform service is strictly more constrained, and it arrives as
@@ -136,6 +153,13 @@ Deleted from `zeroship-migrate-server`: the workflows route and its handler,
 the installed check, and the cross-crate `include_str!`. What remains there is
 the generic bundle path and the creator apply path.
 
+`provision_workflow_app` established four things: the app schema, the journal,
+the migrator role and the per-app runtime role. The bundle path inherits all
+four - the schema and the migrator role from `provision_database` before the
+install, the journal from the bundle's own steps, and the runtime role from a
+call placed after those steps for the ordering reason above. None of its
+responsibilities is dropped, and none of them moves to a different service.
+
 ## Alternatives considered
 
 **Put the journal in the creator's own migration stream.** Rejected. The journal
@@ -162,6 +186,11 @@ process: the worker executes creator code and must not hold DDL authority.
 - A fingerprint mismatch at the same version is refused as corruption.
 - An upgrade that fails part way leaves the stamp at the old version, because
   the whole upgrade is one transaction.
+- A bundle applied through the endpoint ALONE, with no creator migration in the
+  fixture, leaves the per-app runtime role able to SELECT and INSERT against the
+  tables it installed. The second half is what separates provisioning the role
+  after the install from provisioning it alongside the schema; a case asserting
+  only that the role exists passes under both.
 - A host that refuses a journal causes the manager to provision it, after which
   the host proceeds. This is the end-to-end repair path, and it is the one the
   examples would have caught.
