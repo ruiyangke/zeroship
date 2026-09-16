@@ -73,7 +73,7 @@ impl Fixture {
         Self::new_full(db_url, label, webhook_secret, "", "https://api.stripe.com").await
     }
 
-    /// Fixture variant that wires a Stripe secret key + base URL — so the D2
+    /// Fixture variant that wires a Stripe secret key + base URL — so the
     /// settlement-id fetch (`record_infra_payment` → `invoice_settlement_ids`) is
     /// actually exercised against a localhost mock.
     async fn new_with_stripe(
@@ -178,9 +178,8 @@ impl Drop for Fixture {
 /// Basil expanded invoice (settling pi_/ch_ under `payments.data[].payment`). The
 /// first `fail_n` GETs return HTTP 500 (a transient Stripe error → `StripeError::Api`
 /// → the handler's settlement fetch fails closed); subsequent GETs return 200. Used
-/// to exercise the D2 settlement fetch as the fallible LATER step inside
-/// `record_infra_payment` (post-D3 the payout path no longer provides that step for
-/// an infra invoice). Returns the base URL.
+/// to exercise the settlement fetch as the fallible later step inside
+/// `record_infra_payment`. Returns the base URL.
 async fn start_flaky_invoice_mock(fail_n: u32) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
     let base_url = format!("http://{}", listener.local_addr().expect("addr"));
@@ -201,7 +200,7 @@ async fn start_flaky_invoice_mock(fail_n: u32) -> String {
 
 /// A mock-Stripe that answers EVERY `GET /v1/invoices/{id}` with the SAME fixed
 /// settling `pi_`/`ch_` regardless of the invoice id — so two different internal
-/// invoices resolve to the SAME globally-unique payment object (C2: a `pi_` reused
+/// invoices resolve to the SAME globally-unique payment object (a `pi_` reused
 /// across a void+reissue). Returns the base URL.
 async fn start_fixed_settlement_mock(pi: String, ch: String) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
@@ -351,7 +350,7 @@ async fn invoice_paid_webhook_records_app_audit_row() {
                 "amount_paid": 1234,
                 "application_fee_amount": 185,
                 "currency": "usd",
-                // M4: the settling account must be the claimed organization's own account.
+                // The settling account must be the claimed organization's own account.
                 "on_behalf_of": "acct_webhookAudit1",
                 "metadata": {
                     "organization_id": organization_id.to_string(),
@@ -410,14 +409,13 @@ async fn invoice_paid_webhook_records_app_audit_row() {
     common::drain_pg().await;
 }
 
-/// PR-1 (billing-ops gap #26): a paid INFRA invoice webhook appends a `charge`
-/// `invoice_payments` row recording the cash actually collected, WITHOUT mutating
-/// the finalized invoice; cash-collected = Σ(invoice_payments) reflects it.
+/// A paid INFRA invoice webhook appends a `charge` `invoice_payments` row recording
+/// the cash actually collected, WITHOUT mutating the finalized invoice;
+/// cash-collected = Σ(invoice_payments) reflects it.
 ///
-/// FAITHFUL: drives the REAL `stripe_handlers::webhook` end to end (signature path,
-/// JSON parse, dispatch, the infra branch's `record_infra_payment` → the REAL
-/// `invoice_payments::append_charge`) against live PG. RED pre-fix: there is no
-/// `invoice_payments` table and no webhook append, so the row never appears.
+/// Drives the real `stripe_handlers::webhook` end to end (signature path, JSON
+/// parse, dispatch, the infra branch's `record_infra_payment` → the real
+/// `invoice_payments::append_charge`) against live PG.
 #[compio::test]
 async fn infra_invoice_paid_appends_charge_payment_row() {
     let db_url = db_url();
@@ -433,10 +431,10 @@ async fn infra_invoice_paid_appends_charge_payment_row() {
     )
     .await
     .expect("organization_billing");
-    // Post-D3 an INFRA `invoice.paid` is fully handled by the infra branch and
-    // returns 200 BEFORE the Stream-2 `record_payout` path — so no Connect link is
-    // needed. (Kept linked here only to keep the fixture's account state realistic;
-    // the assertion under test is the infra `invoice_payments` append, PR-1.)
+    // An INFRA `invoice.paid` is fully handled by the infra branch and returns 200
+    // BEFORE the `record_payout` path — so no Connect link is needed. (Kept linked
+    // here only to keep the fixture's account state realistic; the assertion under
+    // test is the infra `invoice_payments` append.)
     fx.state
         .stripe_store
         .link_account(organization_id, &format!("acct_{}", Uuid::new_v4().simple()))
@@ -571,7 +569,7 @@ macro_rules! post_webhook_unsigned {
     }};
 }
 
-// ─── PR-1 charge-append idempotency + fail-closed (gap #26 review) ───────────
+// ─── charge-append idempotency + fail-closed ─────────────────────────────────
 
 /// First-of-this-month, the canonical infra-invoice period.
 fn period_first_of_month() -> chrono::NaiveDate {
@@ -642,15 +640,12 @@ async fn charge_row_count(conn: &compio_postgres::Client, invoice_id: &str) -> i
         .get::<_, i64>("n")
 }
 
-/// CRITICAL-1: TWO `invoice.paid` deliveries with DISTINCT `evt_id`s for the SAME
+/// Two `invoice.paid` deliveries with DISTINCT `evt_id`s for the SAME
 /// `provider_invoice_id` (Stripe re-finalize / uncollectible-then-paid redelivery
 /// under a fresh event id) must append EXACTLY ONE `charge` row — cash_collected
 /// equals the single payment amount, NOT double. Both events are distinct so the
 /// `stripe_events_seen` gate does NOT dedup them; only the `provider_ref`
 /// idempotency index keeps cash_collected honest.
-///
-/// RED pre-fix: the unconditional INSERT appends a second row → 2 charge rows →
-/// cash_collected == 2× the amount → PR-3's over-refund cap inflates.
 #[compio::test]
 async fn distinct_events_same_invoice_append_one_charge_row() {
     let db_url = db_url();
@@ -665,8 +660,8 @@ async fn distinct_events_same_invoice_append_one_charge_row() {
     )
     .await
     .expect("organization_billing");
-    // Post-D3 the infra branch returns before the payout FK, so no Connect link is
-    // needed for these infra deliveries to 200; this test isolates the PR-1 append
+    // The infra branch returns before the payout FK, so no Connect link is
+    // needed for these infra deliveries to 200; this test isolates the charge-append
     // idempotency across two DISTINCT event ids for the same Stripe invoice.
 
     let (inv_id, provider_invoice_id) =
@@ -713,20 +708,16 @@ async fn distinct_events_same_invoice_append_one_charge_row() {
     common::drain_pg().await;
 }
 
-/// CRITICAL-1 (same-event retry leg): the charge-row append runs BEFORE the fallible
-/// D2 settlement-id FETCH, so "append committed, then a later step failed → event
+/// Same-event retry leg: the charge-row append runs BEFORE the fallible
+/// settlement-id FETCH, so "append committed, then a later step failed → event
 /// UNCLAIMED → Stripe re-dispatches the SAME event id" must STILL leave exactly one
 /// charge row across the retry.
 ///
-/// Post-D3 the infra `invoice.paid` branch RETURNS (it no longer falls through to the
-/// payout FK), so the fallible "later step" is the D2 settlement fetch
-/// (`record_infra_payment` → `invoice_settlement_ids`). A flaky mock fails the FIRST
-/// expanded `GET /v1/invoices` (HTTP 500 → `StripeError` → fail closed), then succeeds
-/// on the retry. The body inlines NO pi_/ch_, so the fetch is forced.
-///
-/// RED pre-fix (PR-1): the first pass's unconditional INSERT already committed a row;
-/// the retry's INSERT adds a SECOND → 2 charge rows → cash_collected doubles. The
-/// `(invoice_id, provider_ref)` idempotency index keeps it to one.
+/// The infra `invoice.paid` branch returns rather than falling through to the payout
+/// FK, so the fallible "later step" is the settlement fetch (`record_infra_payment` →
+/// `invoice_settlement_ids`). A flaky mock fails the FIRST expanded
+/// `GET /v1/invoices` (HTTP 500 → `StripeError` → fail closed), then succeeds on the
+/// retry. The body inlines NO pi_/ch_, so the fetch is forced.
 #[compio::test]
 async fn same_event_retry_after_later_failure_appends_one_charge_row() {
     let db_url = db_url();
@@ -804,25 +795,19 @@ async fn same_event_retry_after_later_failure_appends_one_charge_row() {
     common::drain_pg().await;
 }
 
-/// MAJOR-2: a TRANSIENT `append_charge` failure must NOT be swallowed-then-claimed
-/// (which would permanently DROP a cash row). The webhook must fail closed: the
-/// event is left UNCLAIMED so Stripe retries. Here the Stripe object carries an
-/// INVALID currency (`"USD"` — fails the `invoice_payments.currency` `^[a-z]{3}$`
-/// CHECK), so the provider-ref lookup succeeds but `append_charge`'s INSERT raises
-/// a constraint violation → `record_infra_payment` propagates the error → 500 →
-/// event unclaimed. (A real-world stand-in for any transient DB error on the
-/// append: a dropped conn, a lock timeout, etc.)
+/// A TRANSIENT `append_charge` failure must NOT be swallowed-then-claimed (which
+/// would permanently DROP a cash row). The webhook fails closed: the event is left
+/// UNCLAIMED so Stripe retries. Here the Stripe object carries an INVALID currency
+/// (`"USD"` — fails the `invoice_payments.currency` `^[a-z]{3}$` CHECK), so the
+/// provider-ref lookup succeeds but `append_charge`'s INSERT raises a constraint
+/// violation → `record_infra_payment` propagates the error → 500 → event unclaimed.
+/// (A real-world stand-in for any transient DB error on the append: a dropped conn,
+/// a lock timeout, etc.)
 ///
 /// The object carries the `invoice_kind=infra` marker (so the infra branch + its
 /// append run) but NO `metadata.organization_id` and NO `customer` — so the fall-through
-/// Stream-2 `record_payout` path returns early (`missing_organization_id`) WITHOUT
-/// touching the DB. The append is therefore the SOLE DB write, isolating its
-/// failure: pre-fix the webhook would 200/`missing_organization_id` and claim the event;
-/// post-fix the append error 500s before that.
-///
-/// RED pre-fix: `record_infra_payment` swallowed the error and returned `()`, the
-/// webhook fell through to `missing_organization_id` (200), and `mark_event_processed`
-/// CLAIMED the event — so the cash row was dropped AND never retried.
+/// payout path returns early (`missing_organization_id`) WITHOUT touching the DB. The
+/// append is therefore the SOLE DB write, isolating its failure.
 #[compio::test]
 async fn append_failure_leaves_event_unclaimed_not_silently_dropped() {
     let db_url = db_url();
@@ -893,15 +878,12 @@ async fn payout_row_count(conn: &compio_postgres::Client, organization_id: &str)
         .get::<_, i64>("n")
 }
 
-/// D3 (real-Stripe regression): an INFRA `invoice.paid` for a organization with NO
-/// `organization_accounts` (Connect) row must ACK 200 and NOT touch the Stream-2 payout
-/// path. Pre-fix `dispatch_event` did not `return` after the infra branch, so it fell
-/// through to `record_payout`, whose `payouts.organization_id → organization_accounts(organization_id)`
-/// FK an infra-only organization cannot satisfy → 500 AFTER the infra writes committed
+/// An INFRA `invoice.paid` for an organization with NO `organization_accounts`
+/// (Connect) row must ACK 200 and NOT touch the payout path. The infra branch must
+/// `return`, because falling through to `record_payout` hits the
+/// `payouts.organization_id → organization_accounts(organization_id)` FK that an
+/// infra-only organization cannot satisfy — a 500 AFTER the infra writes committed
 /// (non-atomic; the event never acked → Stripe retried forever — a poison loop).
-///
-/// RED pre-fix: HTTP 500 + the event left UNCLAIMED (poison). Post-fix: 200, the
-/// charge row committed, and ZERO payout rows (the payout FK was never reached).
 #[compio::test]
 async fn infra_invoice_paid_without_connect_account_acks_200_no_payout() {
     let db_url = db_url();
@@ -944,11 +926,10 @@ async fn infra_invoice_paid_without_connect_account_acks_200_no_payout() {
     common::drain_pg().await;
 }
 
-/// D3 (no-regression companion): a NON-infra `invoice.paid` (a real Connect-revenue
-/// event — `metadata.organization_id` present, NO `invoice_kind=infra`) MUST still route to
-/// the Stream-2 `record_payout` path and record a payout for a organization with a linked
-/// Connect account. This proves the D3 `return` is scoped to infra invoices only and
-/// did NOT break the legitimate Connect payout path.
+/// No-regression companion: a NON-infra `invoice.paid` (a real Connect-revenue event —
+/// `metadata.organization_id` present, NO `invoice_kind=infra`) MUST still route to the
+/// `record_payout` path and record a payout for an organization with a linked Connect
+/// account. The infra branch's `return` is scoped to infra invoices only.
 #[compio::test]
 async fn non_infra_invoice_paid_still_routes_to_payout() {
     let db_url = db_url();
@@ -966,7 +947,7 @@ async fn non_infra_invoice_paid_still_routes_to_payout() {
         .expect("link stripe account");
 
     // NON-infra invoice.paid: organization_id present, NO invoice_kind=infra marker.
-    // M4: the settling account (on_behalf_of) is the organization's OWN account, so
+    // The settling account (on_behalf_of) is the organization's OWN account, so
     // attribution passes and the payout is credited.
     let evt = format!("evt_connect_{}", Uuid::new_v4().simple());
     let body = json!({
@@ -1000,14 +981,10 @@ async fn non_infra_invoice_paid_still_routes_to_payout() {
     common::drain_pg().await;
 }
 
-/// M4 (payout attribution): a Connect-revenue `invoice.paid` whose settling account
+/// Payout attribution: a Connect-revenue `invoice.paid` whose settling account
 /// (`on_behalf_of`) is NOT the claimed `metadata.organization_id`'s own account must be
 /// REJECTED — no payout credited. A forged organization id cannot steal another account's
-/// revenue.
-///
-/// RED pre-fix: `record_payout` trusted `metadata.organization_id` with no ownership
-/// check, so a payout was credited to the forged organization regardless of which account
-/// actually settled the charge.
+/// revenue, so the ownership check is what makes attribution meaningful.
 #[compio::test]
 async fn payout_with_mismatched_settling_account_is_rejected() {
     let db_url = db_url();
@@ -1065,14 +1042,12 @@ async fn payout_with_mismatched_settling_account_is_rejected() {
     common::drain_pg().await;
 }
 
-/// D2 (real-Stripe regression, webhook leg): a real `invoice.paid` payload carries NO
-/// inline pi_/ch_ (Basil removed the top-level fields and the event isn't expanded).
-/// `record_infra_payment` must FETCH the settlement ids via the expanded
-/// `GET /v1/invoices` and record the `billing_provider_refs(payment_intent|charge)`
-/// linkage from the FETCHED object — so a later real dispute can resolve back to us.
-///
-/// RED pre-fix: the handler read the ids off the (un-expandable) webhook payload, so a
-/// payload WITHOUT them recorded NO linkage → a real dispute could never resolve.
+/// A real `invoice.paid` payload carries NO inline pi_/ch_ (Basil removed the
+/// top-level fields and the event isn't expanded). `record_infra_payment` must FETCH
+/// the settlement ids via the expanded `GET /v1/invoices` and record the
+/// `billing_provider_refs(payment_intent|charge)` linkage from the FETCHED object —
+/// reading them off the payload records NO linkage, so a later real dispute could
+/// never resolve back to us.
 #[compio::test]
 async fn infra_invoice_paid_fetches_settlement_linkage_when_payload_omits_it() {
     let db_url = db_url();
@@ -1130,18 +1105,14 @@ async fn infra_invoice_paid_fetches_settlement_linkage_when_payload_omits_it() {
     common::drain_pg().await;
 }
 
-/// C2 (webhook poison via the uncovered second unique): a settling `pi_`/`ch_`
-/// already linked to invoice A, then seen for a DIFFERENT internal invoice B
-/// (Stripe reuses a `pi_` across a void+reissue, which mints a new internal
-/// invoice_id), must NOT poison the webhook. The linkage insert is tolerant of the
-/// GLOBAL `UNIQUE(provider, ref_kind, external_id)`: invoice B's `invoice.paid`
-/// acks 200 (the pi_ belongs to invoice A; it is an idempotent no-op), the event is
-/// CLAIMED, and the cross-invoice ref is NOT created.
-///
-/// RED pre-fix: `record_payment_object_refs` did `ON CONFLICT (invoice_id, provider,
-/// ref_kind) DO NOTHING`, which does NOT cover the global unique — so invoice B's
-/// INSERT raised SQLSTATE 23505, propagated to a 500, left the event UNCLAIMED, and
-/// Stripe retried forever (poison).
+/// A settling `pi_`/`ch_` already linked to invoice A, then seen for a DIFFERENT
+/// internal invoice B (Stripe reuses a `pi_` across a void+reissue, which mints a new
+/// internal invoice_id), must NOT poison the webhook. The linkage insert must tolerate
+/// the GLOBAL `UNIQUE(provider, ref_kind, external_id)`, not only
+/// `(invoice_id, provider, ref_kind)`: invoice B's `invoice.paid` acks 200 (the pi_
+/// belongs to invoice A; it is an idempotent no-op), the event is CLAIMED, and the
+/// cross-invoice ref is NOT created. An insert covering only the narrower unique
+/// raises SQLSTATE 23505 → 500 → the event stays UNCLAIMED → Stripe retries forever.
 #[compio::test]
 async fn settling_pi_reused_across_invoices_does_not_poison_webhook() {
     let db_url = db_url();
@@ -1177,7 +1148,7 @@ async fn settling_pi_reused_across_invoices_does_not_poison_webhook() {
     // Invoice B: a DIFFERENT internal invoice (the reissue), whose invoice.paid
     // fetches the SAME shared pi_ from the mock. Seeded in a DISTINCT period so the
     // (organization, period) partial-unique index does not block the second invoice (the
-    // void+reissue scenario the C2 fix targets is about the SHARED pi_, not the period).
+    // void+reissue scenario is about the SHARED pi_, not the period).
     let inv_b = zeroship_core::typed_id::new_invoice_id();
     let period_b = {
         use chrono::Datelike;
@@ -1240,19 +1211,15 @@ async fn settling_pi_reused_across_invoices_does_not_poison_webhook() {
     common::drain_pg().await;
 }
 
-/// M1 (dunning must fail-closed): an error from `record_payment_failed` during an
-/// `invoice.payment_failed` webhook must FAIL CLOSED — return 5xx and leave the
-/// event UNCLAIMED so Stripe retries. Otherwise the event is marked processed,
-/// Stripe never redelivers, and the organization never enters dunning (consuming free
-/// infra on a dead card).
+/// Dunning must fail closed: an error from `record_payment_failed` during an
+/// `invoice.payment_failed` webhook must return 5xx and leave the event UNCLAIMED so
+/// Stripe retries. Otherwise the event is marked processed, Stripe never redelivers,
+/// and the organization never enters dunning (consuming free infra on a dead card).
 ///
-/// We force the error with a `metadata.organization_id` that is a well-formed UUID but
+/// The error is forced with a `metadata.organization_id` that is a well-formed UUID but
 /// NOT a real `users` row: `record_payment_failed`'s parent-first
 /// `INSERT INTO organization_billing (organization_id)` FK-violates
 /// `organizations(id)` → Err.
-///
-/// RED pre-fix: the handler logged the error and fell through to 200; the event was
-/// CLAIMED (1 ledger row) and dunning never armed.
 #[compio::test]
 async fn payment_failed_record_error_fails_closed_unclaimed() {
     let db_url = db_url();
@@ -1299,13 +1266,10 @@ async fn payment_failed_record_error_fails_closed_unclaimed() {
     common::drain_pg().await;
 }
 
-/// M2 (the money hole): an `account.updated` flipping `charges_enabled=false`
-/// (Stripe risk/KYC hold) must update the CACHED flag so the `connect_checkout`
-/// gate (which reads `organization_accounts.charges_enabled`) now blocks the account.
-///
-/// RED pre-fix: `account.updated` fell into the silent `_ => ignored` arm — the
-/// cached `charges_enabled` stayed `true`, and a disabled account kept passing the
-/// checkout gate.
+/// An `account.updated` flipping `charges_enabled=false` (Stripe risk/KYC hold) must
+/// update the CACHED flag, so the `connect_checkout` gate (which reads
+/// `organization_accounts.charges_enabled`) blocks the account. Leaving it in the
+/// silent `_ => ignored` arm would let a disabled account keep passing the gate.
 #[compio::test]
 async fn account_updated_disables_cached_charges_flag() {
     let db_url = db_url();
@@ -1362,15 +1326,12 @@ async fn account_updated_disables_cached_charges_flag() {
     common::drain_pg().await;
 }
 
-/// M2 (no double-debit): a `charge.dispute.funds_withdrawn` event must NOT append a
-/// second `dispute_debit` `invoice_payments` row — the cash movement is owned by the
-/// dispute LIFECYCLE handler (`charge.dispute.created`). The funds event is
-/// audit-only, so `Σ(invoice_payments)` is debited EXACTLY ONCE.
-///
-/// RED pre-fix: `funds_withdrawn` fell into the silent `_ => ignored` arm, which
-/// (correctly) did nothing — but there was no explicit guard / test pinning the
-/// single-source-of-truth invariant; this test makes the no-double-debit explicit
-/// and guards against a future handler being wired to BOTH rails.
+/// No double-debit: a `charge.dispute.funds_withdrawn` event must NOT append a second
+/// `dispute_debit` `invoice_payments` row — the cash movement is owned by the dispute
+/// LIFECYCLE handler (`charge.dispute.created`). The funds event is audit-only, so
+/// `Σ(invoice_payments)` is debited EXACTLY ONCE. It must stay in the silent
+/// `_ => ignored` arm, and this test guards against a future handler being wired to
+/// BOTH rails.
 #[compio::test]
 async fn dispute_funds_event_does_not_double_debit() {
     let db_url = db_url();
@@ -1470,13 +1431,11 @@ async fn dispute_debit_count(conn: &compio_postgres::Client, invoice_id: &str) -
         .get::<_, i64>("n")
 }
 
-/// M3 (dedup concurrency): `lock_event` takes a SESSION advisory lock keyed on the
-/// event id, so a SECOND connection's `pg_try_advisory_lock` on the SAME key FAILS
-/// while it is held — the same-event redeliveries serialize. Mirrors the PR-2
-/// consume-lock test (`issue_refund_takes_per_organization_advisory_lock`).
-///
-/// RED pre-fix: there was no lock around the check-then-act, so the try-lock on the
-/// same key would succeed (no serialization).
+/// Dedup concurrency: `lock_event` takes a SESSION advisory lock keyed on the event
+/// id, so a SECOND connection's `pg_try_advisory_lock` on the SAME key FAILS while
+/// it is held — the same-event redeliveries serialize. Mirrors the consume-lock test
+/// `issue_refund_takes_per_organization_advisory_lock`. Without the lock around the
+/// check-then-act, the try-lock on the same key would succeed.
 #[compio::test]
 async fn lock_event_serializes_same_event() {
     let db_url = db_url();
@@ -1805,12 +1764,10 @@ fn refund_updated_body(event_id: &str, re_id: &str, status: &str) -> String {
     .to_string()
 }
 
-/// MONEY-CRITICAL (charge.refund.updated, CASH leg): a CASH refund whose Stripe `Refund`
+/// Money-critical (charge.refund.updated, CASH leg): a CASH refund whose Stripe `Refund`
 /// later FAILS must be marked `failed` so the over-refund cap STOPS counting it — the
-/// organization can re-refund the same cash. A redelivery is a no-op.
-///
-/// RED pre-fix: the deferred arm left the refund `issued`, so the cash stayed
-/// permanently "refunded" and a re-refund was blocked by the over-refund cap.
+/// organization can re-refund the same cash. A redelivery is a no-op. Leaving the
+/// refund `issued` would keep the cash permanently "refunded" and block a re-refund.
 #[compio::test]
 async fn refund_updated_failed_cash_refund_frees_the_cap_idempotently() {
     let db_url = db_url();
@@ -2047,10 +2004,8 @@ fn payout_failed_body(event_id: &str, po_id: &str, account: &str, amount: i64) -
 }
 
 /// payout.failed (webhook follow-up): records a payout_failures row + (via the notify cron)
-/// exactly ONE payout_failed notification, idempotent on the payout id.
-///
-/// RED pre-fix: payout.failed fell into the deferred "acked but not acted on" arm — no
-/// ledger row, no organization notification.
+/// exactly ONE payout_failed notification, idempotent on the payout id. The deferred
+/// "acked but not acted on" arm would record no ledger row and send no notification.
 #[compio::test]
 async fn payout_failed_records_failure_and_notifies_once() {
     let db_url = db_url();
@@ -2072,7 +2027,7 @@ async fn payout_failed_records_failure_and_notifies_once() {
     assert_eq!(payout_failure_count(&conn, organization_id).await, 1, "one failure row");
 
     // The notify cron emits exactly one payout_failed notification for this organization. We
-    // assert off the DB send-ledger PER-CREATOR (parallel-safe per the PR-6 lesson: a
+    // assert off the DB send-ledger PER-CREATOR (parallel-safe: a
     // sibling's fleet-wide tick could deliver my organization's email into ITS recorder, but the
     // `billing_notifications` row is per-(organization,kind,transition) and immune).
     drive_notify_until_sent(&fx.state, &conn, organization_id, "payout_failed").await;
@@ -2103,7 +2058,7 @@ async fn payout_failed_records_failure_and_notifies_once() {
 }
 
 /// Count `sent` `billing_notifications` rows for a organization + kind (per-organization, immune to
-/// the fleet-wide cron's sibling-recorder race — the PR-6 parallel-safe assertion).
+/// the fleet-wide cron's sibling-recorder race).
 async fn notification_sent_count(conn: &compio_postgres::Client, organization_id: &str, kind: &str) -> i64 {
     conn.query(
         "SELECT COUNT(*)::bigint AS n FROM zeroship.billing_notifications \
@@ -2120,7 +2075,7 @@ async fn notification_sent_count(conn: &compio_postgres::Client, organization_id
 /// concurrent sibling test's sweep and win nothing — exactly the multi-node "loser skips"
 /// path. So we retry rather than assume one tick delivers. Per-organization + DB-ledger-anchored,
 /// so a sibling's tick delivering MY row (into ITS recorder) still flips MY ledger row to
-/// `sent` and satisfies this loop (the PR-6 lesson).
+/// `sent` and satisfies this loop).
 async fn drive_notify_until_sent(
     state: &std::sync::Arc<AppState>,
     conn: &compio_postgres::Client,
@@ -2174,9 +2129,8 @@ fn pi_failed_body(event_id: &str, pi_id: &str, account: &str, amount: i64) -> St
 
 /// payment_intent.payment_failed (webhook follow-up): surfaces the failure as a
 /// connect_checkout_failures row + (via the cron) exactly ONE checkout_failed
-/// notification, idempotent on the PI id. No money moved — informational.
-///
-/// RED pre-fix: it fell into the deferred "acked but not acted on" arm — silently dropped.
+/// notification, idempotent on the PI id. No money moved — informational. The deferred
+/// "acked but not acted on" arm would drop it silently.
 #[compio::test]
 async fn payment_intent_failed_surfaces_record_and_notifies_once() {
     let db_url = db_url();
