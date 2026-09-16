@@ -23,12 +23,16 @@ enum ExecutionMode {
     Complete,
     AfterRenewal,
     Pending,
+    Compensate,
 }
 struct Probe {
     events: RefCell<Vec<&'static str>>,
     mode: Cell<ExecutionMode>,
     stopped: Cell<bool>,
     gate: RefCell<Option<oneshot::Receiver<()>>>,
+    /// Thread time held after the frontier is resolved, as synchronous app code
+    /// does. The execution deadline passes while the outcome already exists.
+    overrun: Cell<Duration>,
 }
 impl Probe {
     fn record(&self, event: &'static str) {
@@ -85,6 +89,14 @@ impl TaskExecution for Execution {
             ExecutionMode::Complete => {}
             ExecutionMode::AfterRenewal => self.probe.observed("renewed").await,
             ExecutionMode::Pending => std::future::pending().await,
+            ExecutionMode::Compensate => {
+                // The compensating effect reaches the outside world here.
+                self.probe.record("compensate");
+                std::thread::sleep(self.probe.overrun.get());
+                return WorkflowExecution::from_runtime_value(json!({
+                    "outcomes":[{"kind":"CompensationCompleted","ordinal":0,"name":"reserve"}]
+                }));
+            }
         }
         WorkflowExecution::from_runtime_value(
             json!({"outcomes":[{"kind":"RunCompleted","output":{"done":true}}]}),
@@ -234,6 +246,7 @@ impl Harness {
             mode: Cell::new(ExecutionMode::Complete),
             stopped: Cell::new(true),
             gate: RefCell::new(None),
+            overrun: Cell::new(Duration::ZERO),
         });
         let tasks = Rc::new(ObservedTasks {
             inner: service.tasks(WorkerIdentity::new("local-test-worker".into()).unwrap()),
@@ -454,6 +467,83 @@ async fn runner_completion_retries_remain_bounded_while_heartbeats_succeed() {
     assert!(harness.probe.count("complete") > 1);
     assert!(harness.probe.count("heartbeat") > 0);
     assert!(harness.probe.stopped.get());
+}
+
+/// Characterizes the loss of an applied compensation: the runner resolves a
+/// frontier whose compensating effect has already landed, then discards it
+/// because the execution budget expired before it could be published. The
+/// released task is immediately reclaimable and the compensator runs again,
+/// while the journal records a single compensation attempt.
+#[compio::test]
+async fn runner_budget_expiry_discards_an_applied_compensation_and_runs_it_again() {
+    let (_dir, harness) = sqlite().await;
+    harness
+        .tasks
+        .app
+        .binding
+        .begin_refresh()
+        .unwrap()
+        .install(leased_policy(
+            3,
+            AppPolicy {
+                lease_ms: 5_000,
+                ..AppPolicy::default()
+            },
+        ))
+        .unwrap();
+    // One compensable step, then a failure: the run owes a rollback.
+    let forward = harness.tasks.inner.poll().await.unwrap().unwrap();
+    harness
+        .tasks
+        .inner
+        .complete(
+            &forward.id,
+            &forward.token,
+            execution(json!([
+                {"kind":"StepCompleted","ordinal":0,"name":"reserve","compensable":true,"output":0},
+                {"kind":"RunFailed","error":{"type":"Error","message":"intentional failure"}}
+            ])),
+        )
+        .await
+        .unwrap();
+
+    harness.probe.mode.set(ExecutionMode::Compensate);
+    harness.probe.overrun.set(Duration::from_millis(900));
+    let mut slot = harness.slot(Duration::from_millis(500));
+    assert!(matches!(
+        slot.run_once().await,
+        Err(WorkflowServiceError::Timeout)
+    ));
+    assert_eq!(harness.probe.count("compensate"), 1);
+    assert_eq!(
+        harness.probe.count("complete"),
+        0,
+        "the resolved compensation outcome is never published"
+    );
+    assert_eq!(harness.probe.count("release"), 1);
+    assert_eq!(
+        harness.tasks.app.status(&harness.run).await.unwrap().state,
+        RunState::Compensating
+    );
+
+    harness.probe.overrun.set(Duration::ZERO);
+    let mut slot = harness.slot(Duration::from_secs(5));
+    assert!(matches!(
+        slot.run_once().await.unwrap(),
+        RunnerOutcome::Completed(_)
+    ));
+    assert_eq!(
+        harness.probe.count("compensate"),
+        2,
+        "the discarded outcome re-dispatches an effect that already landed"
+    );
+    let status = harness.tasks.app.status(&harness.run).await.unwrap();
+    assert_eq!(status.state, RunState::Failed);
+    assert_eq!(
+        status.error.unwrap()["compensation"],
+        json!({"total":1, "completed":1, "failed":0, "outcome":"completed"}),
+        "the journal accounts for one compensation of the two that ran"
+    );
 }
 
 #[compio::test]
