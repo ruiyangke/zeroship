@@ -14,12 +14,13 @@
     reason = "the bundle applier and its fixtures stay on their compio runtime"
 )]
 
-use compio_postgres::Client;
+use compio_postgres::{error::SqlState, Client};
 use testcontainers::{
     core::{IntoContainerPort, WaitFor},
     runners::SyncRunner,
     Container, GenericImage, ImageExt,
 };
+use zeroship_core::database_role::per_app_role_name;
 use zeroship_core::schema_bundle::{
     SchemaBundle, SchemaBundleAction, SchemaBundleVersion, SchemaStamp,
 };
@@ -169,6 +170,15 @@ fn bundle(schema: &str, version: u32, fingerprint: &str) -> SchemaBundle {
 
 fn schema_name(suffix: &str) -> String {
     format!("bundle_{suffix}_{}", uuid::Uuid::new_v4().simple())
+}
+
+/// What the SERVER said, because `compio_postgres::Error` prints as `db error`
+/// and nothing else. A failure here is read by someone who was not present when
+/// it was written, and the refusal reason is the whole of the diagnosis.
+fn detail(error: &compio_postgres::Error) -> String {
+    error
+        .as_db_error()
+        .map_or_else(|| error.to_string(), |db| db.message().to_owned())
 }
 
 const FP1: &str = "1111111111111111111111111111111111111111111111111111111111111111";
@@ -415,6 +425,113 @@ async fn a_destructive_step_is_refused_when_the_declared_policy_forbids_it() {
         .expect("an allowed destructive step applies");
     assert_eq!(allowed.action, SchemaBundleAction::Upgraded);
     assert!(!fixture.column_exists(&schema, "extra").await);
+}
+
+/// The bundle path must leave the app's RUNTIME role able to USE what it
+/// installed - with no creator migration anywhere in this fixture.
+///
+/// # Why this calls nothing but `apply_schema_bundle`
+///
+/// It is the whole database hook the deploy path has. An app that declares
+/// workflows has its journal installed here, and the worker then opens that
+/// journal as the per-app runtime role. Every other Rust fixture that covers
+/// this territory runs a creator-migration apply afterwards, and that apply
+/// provisions the role as a side effect - which is how a deploy path that
+/// provisions no role at all stayed green everywhere but production.
+///
+/// # Why the INSERT is not decoration
+///
+/// The role's grant set is `GRANT ... ON ALL TABLES IN SCHEMA`, a SNAPSHOT of
+/// the tables that exist when it runs. A fix that created the role while
+/// creating the schema - before the bundle's own DDL - would satisfy the
+/// `SET LOCAL ROLE` below and still leave the installed tables unreachable. The
+/// INSERT and the read-back are what separate a role that exists from a role
+/// that can work.
+#[compio::test]
+async fn a_bundle_leaves_the_runtime_role_able_to_use_what_it_installed() {
+    let mut fixture = Fixture::start().await;
+    let schema = schema_name("runtime_role");
+
+    apply_schema_bundle(&fixture.dsn, &bundle(&schema, 1, FP1))
+        .await
+        .expect("install v1");
+
+    let role = per_app_role_name(&schema).expect("derive the runtime role name");
+    let transaction = fixture
+        .admin
+        .transaction()
+        .await
+        .expect("open a transaction to narrow");
+    transaction
+        .batch_execute(&format!("SET LOCAL ROLE \"{role}\""))
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "the bundle left no runtime role for the worker to open the schema with: {}",
+                detail(&error)
+            )
+        });
+    assert_eq!(
+        transaction
+            .query_one("SELECT current_user", &[])
+            .await
+            .expect("read the narrowed identity")
+            .get::<_, &str>(0),
+        role,
+        "SET LOCAL ROLE did not narrow the session, so every privilege below is the admin's"
+    );
+    transaction
+        .execute(
+            &format!("INSERT INTO \"{schema}\".\"{STATE}\" VALUES ('row', 'written as the app')"),
+            &[],
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "the runtime role cannot INSERT into a table the bundle installed: {}",
+                detail(&error)
+            )
+        });
+    let note: String = transaction
+        .query_one(
+            &format!("SELECT note FROM \"{schema}\".\"{STATE}\" WHERE id='row'"),
+            &[],
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "the runtime role cannot SELECT a table the bundle installed: {}",
+                detail(&error)
+            )
+        })
+        .get(0);
+    assert_eq!(note, "written as the app");
+    transaction.commit().await.expect("commit the app's write");
+
+    // The control, in its own transaction because the refusal aborts one. The
+    // grant is the narrow DML set: a runtime role that could also create schema
+    // objects would pass every assertion above for the wrong reason.
+    let transaction = fixture
+        .admin
+        .transaction()
+        .await
+        .expect("open a transaction for the control");
+    transaction
+        .batch_execute(&format!("SET LOCAL ROLE \"{role}\""))
+        .await
+        .expect("narrow the session again");
+    let denied = transaction
+        .batch_execute(&format!(
+            "CREATE TABLE \"{schema}\".\"runtime_role_ddl\" (id text PRIMARY KEY)"
+        ))
+        .await
+        .expect_err("the runtime role must not be able to create schema objects");
+    assert_eq!(
+        denied.code(),
+        Some(&SqlState::INSUFFICIENT_PRIVILEGE),
+        "expected the DDL to be refused for privilege, got {denied}"
+    );
+    transaction.rollback().await.expect("discard the control");
 }
 
 /// The bundle is confined to the schema it names. A step reaching another schema
