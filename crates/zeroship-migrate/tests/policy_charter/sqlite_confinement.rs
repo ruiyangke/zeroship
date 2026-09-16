@@ -416,13 +416,13 @@ async fn confine_h_cross_tenant_denied() {
 }
 
 // ---------------------------------------------------------------------------
-// (i) M1: a creator `up` READING the journal — `SELECT … FROM "_mig".
+// (i) a creator `up` READING the journal — `SELECT … FROM "_mig".
 //     schema_migrations` — is denied. A plain top-level read is an
-//     `AuthAction::Read { accessor: None }` on `_mig`; pre-fix it fell through to
-//     the `_ => Allow` catch-all (the trigger-body arm requires `accessor.is_some()`)
-//     so the creator could exfiltrate the immutable journal into an app table. The
-//     M1 backstop arm now DENIES any `_mig`-targeting action in CreatorUp, Read
-//     included. Faithful end-to-end on the REAL hardened backend.
+//     `AuthAction::Read { accessor: None }` on `_mig`, and the trigger-body arm
+//     requires `accessor.is_some()`, so the backstop arm is what must deny any
+//     `_mig`-targeting action in CreatorUp, Read included; otherwise a creator
+//     could exfiltrate the immutable journal into an app table.
+//     End-to-end on the REAL hardened backend.
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn confine_i_creator_read_of_mig_journal_denied() {
@@ -459,21 +459,19 @@ async fn confine_detach_denied() {
 }
 
 // ---------------------------------------------------------------------------
-// Regression: the authorizer now ALLOWS a write to `sqlite_master` /
-// `sqlite_temp_master` as an action (so SQLite's INTERNAL ALTER machinery can run
-// `ALTER TABLE … DROP COLUMN`). This must NOT open a DIRECT-write hole: a creator
-// `up` issuing `UPDATE main.sqlite_master ...` directly is still rejected, so
-// defense-in-depth holds - the only path that reaches the allowed action is
-// SQLite's own ALTER executor.
+// The authorizer ALLOWS a write to `sqlite_master` / `sqlite_temp_master` as an
+// action, so SQLite's INTERNAL ALTER machinery can run `ALTER TABLE … DROP
+// COLUMN`. That must NOT open a DIRECT-write hole: a creator `up` issuing
+// `UPDATE main.sqlite_master ...` directly is still rejected, and the only path
+// that reaches the allowed action is SQLite's own ALTER executor.
 //
-// WHAT REJECTS IT, measured rather than assumed. `sqlite_master` is writable only
-// while `writable_schema` is ON, and it is OFF by default on every connection; the
-// authorizer independently denies the `PRAGMA writable_schema=ON` that would turn
-// it on (proven by `confine_b_writable_schema_denied`). So the rejection here is
-// the default plus that PRAGMA deny, NOT `SQLITE_DBCONFIG_DEFENSIVE`: flipping
-// DEFENSIVE to false leaves this test green and the error text byte-identical
-// (`table sqlite_master may not be modified`). This test was previously named for
-// DEFENSIVE, which overstated what it holds. DEFENSIVE is pinned separately by
+// WHAT REJECTS IT. `sqlite_master` is writable only while `writable_schema` is
+// ON, and it is OFF by default on every connection; the authorizer independently
+// denies the `PRAGMA writable_schema=ON` that would turn it on (proven by
+// `confine_b_writable_schema_denied`). So the rejection here is the default plus
+// that PRAGMA deny, NOT `SQLITE_DBCONFIG_DEFENSIVE`: flipping DEFENSIVE to false
+// leaves this test green and the error text byte-identical
+// (`table sqlite_master may not be modified`). DEFENSIVE is pinned separately by
 // `confine_creator_write_to_a_vtable_shadow_table_denied_by_defensive`, on the
 // vector where it is the only guard.
 // ---------------------------------------------------------------------------
