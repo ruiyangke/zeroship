@@ -731,13 +731,12 @@ impl Headers {
 /// Storage: `v8::Eternal<T>` rather than `v8::Global<T>`. Both fields
 /// are set-once at install time and read on every native Headers build
 /// (every Request slow path via `build_kernel_request`, every Response
-/// build via `build_kernel_headers_owned`). The previous `Global`
-/// fields required `slot.field.clone()` (= `v8__Global__New` — a fresh
+/// build via `build_kernel_headers_owned`). A `Global` field would
+/// require `slot.field.clone()` (= `v8__Global__New` — a fresh
 /// `GlobalHandles` slot) on every call to drop the slot borrow before
 /// `v8::Local::new`. Eternals are isolate-lifetime handles whose
 /// `get(scope)` returns the `Local` directly without allocating.
-/// Mirrors the `__BrandSlot_*` Eternal conversion in commit b08786a
-/// and the `ResponseTemplateSlot` Eternal conversion in commit 6fa5422.
+/// Mirrors the `__BrandSlot_*` and `ResponseTemplateSlot` Eternals.
 pub struct HeadersTemplateSlot {
     pub class_tmpl: v8::Eternal<v8::FunctionTemplate>,
     pub prototype: v8::Eternal<v8::Object>,

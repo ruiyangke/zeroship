@@ -7,20 +7,15 @@
  * *published* install the binary ships in the package tarball, so a bare
  * `require("zeroship-migrate-node")` resolves it.
  *
- * The paragraph that stood here described dev as "this monorepo linking the
- * standalone repo via a `file:` dep", whose tarball-pack omitted the gitignored
- * `*.node` and so broke the bare require. That mechanism is GONE: e4ad10373
- * moved both engine deps to `workspace:*` (verified at package.json:64-65, and
- * no `file:` spec for them survives anywhere in the tree). pnpm resolves a
- * workspace member by SYMLINK into third_party/zero-migrate/, not by packing a
- * tarball, so dev now points at the standalone tree in place - binary included.
+ * In dev the engine dep is `workspace:*`: pnpm resolves a workspace member by
+ * SYMLINK to `crates/zeroship-migrate-node`, not by packing a tarball, so dev
+ * points at the in-tree crate in place - binary included.
  *
- * The fallback below is kept for the cases the symlink does not cover, not for
- * the one it replaced. Do not reason about dev resolution from the old premise.
+ * The fallback below is kept for the cases the symlink does not cover.
  *
  * This loader makes both cases work with no build-graph coupling: it first tries
  * the ordinary require, and on failure re-points napi's own
- * `NAPI_RS_NATIVE_LIBRARY_PATH` env hook at the `*.node` the standalone repo built
+ * `NAPI_RS_NATIVE_LIBRARY_PATH` env hook at the `*.node` the addon crate built
  * in place, then retries. When the addon is eventually extracted/published this
  * file's fallback simply never fires — a move, not an untangle.
  */
@@ -31,16 +26,14 @@ import { dirname, join } from "node:path";
 
 // The addon's own generated declarations, not a copy of them.
 //
-// These used to be hand-mirrored here, and that turned every REQUIRED field the
-// engine adds into a runtime failure at a creator's build instead of a red
-// build in CI: our TypeScript never touched the engine's types, so a source we
-// no longer satisfied still compiled. That has happened - `charterLayers`
-// became required, this file still passed `policyCeilingToml`, and every
-// gen-types call failed at run time.
+// Importing rather than mirroring turns every REQUIRED field the engine adds
+// into a red build here instead of a runtime failure at a creator's build: a
+// hand-mirrored copy would let a source this file no longer satisfies still
+// compile.
 //
 // The runtime error is worse than "it fails later", which is why importing
-// matters more than it looks. Measured by the engine's authors against the
-// built addon: a source missing BOTH `dialect` and `charterLayers` reports
+// matters more than it looks: a source missing BOTH `dialect` and
+// `charterLayers` reports
 //
 //     Missing field `dialect`
 //
@@ -53,7 +46,7 @@ import { dirname, join } from "node:path";
 // regardless of `strict` - it is ordinary assignability, not a strictness
 // feature - so a consumer who has never turned strict on still gets the whole
 // list. The engine exports these types (`types: index.d.ts`, and the file is in
-// `files`), so the mirror was a choice rather than a constraint.
+// `files`).
 import type {
   CollectionDescriptorDto,
   FieldDescriptorDto,
@@ -90,8 +83,8 @@ const require = createRequire(import.meta.url);
  * to `GenArtifactsReply` is invisible here until someone edits this line. That
  * is the one protection the type-only import does NOT buy for this type - the
  * seven types re-exported verbatim above do get it. Stated because the engine
- * told us to expect exactly that (`hasDialectalOps`, absent at pin cb1bcb59)
- * and predicted it would "appear without anyone editing anything"; it will not.
+ * adds reply keys without any consumer edit - `hasDialectalOps` arrived
+ * exactly that way and is triaged below.
  *
  * What the narrowing DOES buy, and the reason it stays: if a picked field
  * changes shape or is removed, that is a compile error rather than a runtime
@@ -108,16 +101,15 @@ export type GenArtifactsReply = Pick<AddonGenArtifactsReply, "ok" | "runtimeJson
  * consumed by the `Pick`, or deliberately dropped (`envDbTs`). A key the engine
  * ADDS belongs to neither set, so `UntriagedReplyKeys` stops being `never` and
  * the `AssertNever` instantiation below fails to compile - naming the new key in
- * the error. That is the compile-time signal ticket #68 asked for; the `Pick`
- * alone could not give it, because `Pick` enumerates what it wants rather than
+ * the error. That is the compile-time signal the `Pick`
+ * alone could not give, because `Pick` enumerates what it wants rather than
  * reacting to what arrives.
  *
  * Deleting a name from the exclusion list is what proves this load-bearing:
  * drop `"envDbTs"` and the build goes red with TS2344 naming `"envDbTs"`.
  * This is type-only and erases at compile time - it loads no addon binary.
  */
-// `hasDialectalOps` is the key this comment block predicted by name, and it has
-// now landed. Triaged as a deliberate DROP rather than added to the `Pick`: it
+// `hasDialectalOps` is triaged as a deliberate DROP rather than added to the `Pick`: it
 // reports whether the fold emitted any dialect-specific op, which is a fact
 // about the migration set, not about the types gen-types renders. gen-types
 // builds the `env.db` surface from `runtimeJson` alone and has no branch that
@@ -207,9 +199,7 @@ export function loadMigrateAddon(): MigrateAddon {
  * `zeroship-migrate-node.<platform>-<arch>[-<abi>].node`. Returns the first such file
  * found, or `null` when none is found.
  *
- * THE "PUBLISHED INSTALL" ARM DESCRIBED BELOW DOES NOT EXIST YET, and this
- * comment used to assert it as the reason `null` is safe ("published install,
- * where the bare require already succeeded"). Measured 2026-08-12:
+ * THE "PUBLISHED INSTALL" ARM DESCRIBED BELOW DOES NOT EXIST YET.
  * `zeroship-migrate-node` is NOT published and is not in `publish_packages` in
  * `deploy/scripts/publish-packages.sh`, which REFUSES to publish
  * `@zeroship/vite-plugin` for exactly that reason -
@@ -217,7 +207,7 @@ export function loadMigrateAddon(): MigrateAddon {
  *    @zeroship/vite-plugin [dependencies] zeroship-migrate-node@workspace:*"
  * So in a real registry install the bare `require` cannot succeed and this
  * fallback cannot find a binary either; the creator gets `addonLoadError`. The
- * monorepo arm below is the ONLY arm that works today. Tracked as the SDK
+ * monorepo arm below is the ONLY arm that works. Tracked as the SDK
  * distribution blocker; do not read this loader as evidence that the published
  * path is covered.
  *
@@ -226,18 +216,8 @@ export function loadMigrateAddon(): MigrateAddon {
  * where the binary WOULD ship, next to `index.js` (unverified - see above); in
  * this monorepo the
  * `workspace:*` dep makes it a symlink straight to
- * `third_party/zero-migrate/crates/zeroship-migrate-node`, where a dev `napi build`
- * leaves the freshly-built `.node` in place. Verified 2026-08-10: it resolves to
- * that dir and `zeroship-migrate-node.linux-x64-gnu.node` is present.
- *
- * There used to be a second candidate — the `file:` dep TARGET dir, recovered by
- * walking up for a `package.json` declaring `zeroship-migrate-node: file:<path>`. It
- * existed because pnpm packs `file:` deps by their `files` list, which omits the
- * gitignored `.node`, so the store copy had no binary. `e4ad10373` replaced that
- * `file:` spec with `workspace:*`, which made the fallback both DEAD (no
- * `package.json` in the tree declares a `file:` spec, so it always returned
- * null) and UNNECESSARY (the symlink points at the live build dir). Deleted
- * rather than left as an unreachable branch.
+ * `crates/zeroship-migrate-node`, where a dev `napi build`
+ * leaves the freshly-built `.node` in place.
  */
 function findStandaloneBinding(): string | null {
   return scanForBinding(resolvedAddonDir());
