@@ -120,16 +120,16 @@ pub struct AuthSettings {
     /// ONLY one it holds for that hop. One call needs it today: the erasure
     /// preflight (`crate::control_client::erasure_preflight`), which asks the
     /// control plane whether a human is the last owner of an organization -- a
-    /// question the auth service cannot answer for itself, because MEASURED
+    /// question the auth service cannot answer for itself, because
     /// `zeroship_auth` holds no privilege on any organization table.
     ///
-    /// NOT the shared control key, which is what this used to be. That key is
-    /// one identity four other processes hold, so presenting it would have made
-    /// the process that renders the login form indistinguishable from the
-    /// gateway and the worker at control's door -- and would have handed it the
-    /// route table, the version feed and both reconcile triggers along with the
-    /// one route it needs. An assertion names `svc/auth` under a key only this
-    /// process holds, and control's allowlist decides what that reaches.
+    /// NOT the shared control key: that key is one identity four other
+    /// processes hold, so presenting it would make the process that renders the
+    /// login form indistinguishable from the gateway and the worker at
+    /// control's door -- and would hand it the route table, the version feed
+    /// and both reconcile triggers along with the one route it needs. An
+    /// assertion names `svc/auth` under a key only this process holds, and
+    /// control's allowlist decides what that reaches.
     ///
     /// Empty REFUSES THE BOOT, in `ServiceKeyring::load`. An auth service that
     /// started without it would answer every liveness probe while every account
@@ -160,8 +160,8 @@ pub struct AuthSettings {
     #[config(name = "auth.stash_signing_key")]
     pub stash_signing_key: Secret<String>,
 
-    /// AES-256-GCM key material for encrypting the TOTP shared secret at rest
-    /// (ISS-11). MUST decode (hex or base64url) to >=32 bytes - validated at
+    /// AES-256-GCM key material for encrypting the TOTP shared secret at rest.
+    /// MUST decode (hex or base64url) to >=32 bytes - validated at
     /// boot by `validate_master_key_material`, identical to the bundle/master
     /// key posture. A weak or absent key means an attacker with DB read access
     /// recovers every user's TOTP seed and can mint valid codes, so production
@@ -358,8 +358,7 @@ pub struct AuthSettings {
 
     /// HTTP Basic-auth username the inbound provider (Postmark Inbound) must
     /// present on every `POST /webhooks/relay-inbound`. When empty, the handler
-    /// 401s so an unverified POST cannot drive a forward/suppression spoof
-    /// (sub-spec §4.3 step 1).
+    /// 401s so an unverified POST cannot drive a forward/suppression spoof.
     #[config(name = "auth.relay_inbound_user", default = String::new())]
     pub relay_inbound_user: Operational<String>,
 
@@ -521,10 +520,8 @@ impl ObservabilityControls for AuthSettings {
 
 /// zeroship-auth command line.
 ///
-/// `Debug` is safe to derive now: the generated carrier holds operational
-/// values and, for every secret, a file PATH - never the material in it. The
-/// hand-written redacting impl this type used to need went with the
-/// hand-spelled secret carrier.
+/// `Debug` is safe to derive: the generated carrier holds operational values
+/// and, for every secret, a file PATH - never the material in it.
 #[derive(Clone, Debug, Parser)]
 #[command(name = "zeroship-auth")]
 pub struct AuthCli {
@@ -640,13 +637,11 @@ fn is_same_site_with_issuer(origin: &str, issuer_host: &str) -> bool {
 /// `frame_ancestor_origins_are_filtered_before_any_consumer_sees_them` in this
 /// module's tests pins.
 ///
-/// `Debug` is DERIVED. It used to be hand-written with a per-field
-/// `<redacted>` list, which is a list someone has to remember to extend; now
-/// every credential-bearing field is a `Secret<T>`, and that type cannot format
-/// its material - not the value, not a prefix, not its length. The one entry
-/// that survived the deletion in spirit is `supabase_anon_key`, which is
-/// deliberately NOT redacted: it is served to every browser that loads the
-/// GoTrue login, so calling it secret would claim a protection it does not have.
+/// `Debug` is DERIVED. Every credential-bearing field is a `Secret<T>`, and
+/// that type cannot format its material - not the value, not a prefix, not its
+/// length. The one exception is `supabase_anon_key`, deliberately NOT redacted:
+/// it is served to every browser that loads the GoTrue login, so calling it
+/// secret would claim a protection it does not have.
 #[derive(Clone, Debug)]
 pub struct AuthConfig {
     /// Every resolved value: operational, secret, and command control.
@@ -961,9 +956,10 @@ mod tests {
 
     #[test]
     fn every_auth_environment_name_is_a_canonical_projection() {
-        // The failure this guards: the conversion renames the FLAG and leaves
-        // the old `AUTH_*` variable working, so a deployment that still exports
-        // AUTH_PUBLIC_URL keeps booting and nobody learns the name changed.
+        // The invariant: every environment name the settings carrier exposes is
+        // a canonical `ZEROSHIP_*` projection. A rename must not leave the old
+        // `AUTH_*` spelling working, or a deployment that still exports it keeps
+        // booting and nobody learns the name changed.
         let envs = AuthSettingsSources::command()
             .get_arguments()
             .filter_map(|arg| arg.get_env().map(|env| env.to_string_lossy().into_owned()))
@@ -984,10 +980,9 @@ mod tests {
         // gateway and worker read ONE variable for the control-plane URL.
         assert!(envs.contains(&"ZEROSHIP_CONTROL_URL".to_owned()));
 
-        // The whole command line, not just the settings carrier: after the
-        // secret conversion there is no second flatten to hide an old name in,
-        // and every pre-conversion `AUTH_*` spelling is gone rather than
-        // retained as a working alias.
+        // The whole command line, not just the settings carrier: every argument
+        // is checked, so no `AUTH_*` spelling can survive as a working alias for
+        // a retired setting.
         let all_envs = AuthCli::command()
             .get_arguments()
             .filter_map(|arg| arg.get_env().map(|env| env.to_string_lossy().into_owned()))
@@ -1234,8 +1229,7 @@ supabase_anon_key = "anon-file-key"
 
     // A `Secret<T>` cannot declare a compiled default - the macro refuses one -
     // so there is no sentinel to leak in `--help` and nothing to mistake for a
-    // configured key. An unsupplied secret exposes NO material at all, which is
-    // a stronger statement than the empty string this used to assert.
+    // configured key. An unsupplied secret exposes NO material at all.
     #[test]
     fn an_unsupplied_stash_key_exposes_no_material() {
         let cfg = test_config();
@@ -1630,12 +1624,11 @@ frame_ancestor_origins = ["http://localhost:5173", "https://console.zeroship.ai"
 
     // ---- redaction ------------------------------------------------------
 
-    // `AuthConfig` used to carry a hand-written `Debug` with a per-field
-    // `<redacted>` list, and a list is a thing someone forgets to extend: the
-    // field added in the next patch prints in full and nothing says so. The
-    // derive is safe now only because `Secret<T>` itself cannot format its
+    // The derive is safe only because `Secret<T>` itself cannot format its
     // material, so this test drives the DERIVED impl over a config whose
-    // secrets all carry a distinctive sentinel.
+    // secrets all carry a distinctive sentinel. A hand-written `Debug` with a
+    // per-field `<redacted>` list is a list someone forgets to extend: the
+    // field added in the next patch prints in full and nothing says so.
     //
     // "Redacted" is asserted three ways, because each is a different mistake a
     // future impl could make: printing the value, printing a PREFIX of it (the

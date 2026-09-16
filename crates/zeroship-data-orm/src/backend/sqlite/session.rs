@@ -290,19 +290,12 @@ impl Interrupts {
     /// reports `false` for the same reason a stale generation does: there is no
     /// connection this cancellation has any right to touch.
     ///
-    /// THIS PARAGRAPH USED TO SAY THE OPPOSITE, AND CARRIED AN
-    /// `#[allow(dead_code)]` TO MATCH: "nothing in production cancels a SQLite
-    /// command yet... until SC-1 step 9 lands the only callers are this crate's
-    /// tests". SC-1 landed. This is reachable from production in three hops -
+    /// This is reachable from production in three hops -
     /// `interrupt` <- `SqliteCancelHandle::signal` <- `SqliteCancelHandle::cancel`
     /// <- `backend::cancel::CancellationHandle::cancel` in `zeroship-data-orm`,
     /// whose SQLite arm calls `handle.cancel().await`. Two of those hops are
     /// private and the last is in ANOTHER CRATE, which is why the chain reads as
-    /// broken from here and why the prose outlived the fact.
-    ///
-    /// A rustdoc paragraph asserting that an item is dead is the most misleading
-    /// artifact in this crate: it reads as an audit that already happened, and
-    /// it is what nearly got this function deleted on 2026-09-04.
+    /// broken from here.
     fn interrupt(&self, lane: Lane, generation: u64) -> bool {
         fn fire(entry: &LaneInterrupt, generation: u64) -> bool {
             if entry.generation.load(Ordering::SeqCst) != generation {
@@ -413,9 +406,8 @@ pub(crate) struct SqliteSession {
     /// only ever compared for equality.
     next_reservation: Cell<u64>,
     /// Each app's transaction lane id and that lane's current owner, held
-    /// weakly. **Keyed by `app_id`, and that is the whole of defect L22b's
-    /// fix**: admission is per app, matching SC-1's
-    /// `(runtime_instance_id, app_id)`, where one shared entry made it
+    /// weakly. **Keyed by `app_id`**: admission is per app, matching SC-1's
+    /// `(runtime_instance_id, app_id)`, where a shared entry would make it
     /// `(runtime_instance_id, session)`.
     ///
     /// This is the **admission** authority, and it is caller-side deliberately:
@@ -429,7 +421,7 @@ pub(crate) struct SqliteSession {
     /// so a reservation's strong count stays above zero for as long as the
     /// actor is still holding the command it is replying to - which is
     /// precisely the instant after a caller's `await` returns. Keying
-    /// admission on that count made a released lease look live, and a loop
+    /// admission on that count would make a released lease look live, so a loop
     /// that takes a lease per iteration would fail intermittently. `TxLease`
     /// is never cloned into a command, so its count is exactly lease liveness.
     tx_lanes: RefCell<HashMap<String, TxLaneSlot>>,
@@ -479,11 +471,10 @@ impl TxLaneSlot {
 /// does a new app get [`TX_LANES_EXHAUSTED`] - a refusal with a code of its own
 /// so it is never confused with an app's own overlapping transaction.
 ///
-/// Eight is chosen against the vector this backend actually runs in: SQLite is
-/// the dev tier, `crates/zeroship-worker/src/main.rs:328-334` refuses to boot
-/// on a SQLite DSN, and `crates/zeroship-runtime/src/core/serve.rs:173-179`
-/// clamps `zeroship serve` to one worker thread on one, so the live case is a
-/// single app and eight is seven spare.
+/// The cap is set against the vector this backend actually runs in: SQLite is
+/// the dev tier, the worker refuses to boot on a SQLite DSN, and `zeroship
+/// serve` clamps to one worker thread on one, so the live case is a single app
+/// and the cap has room to spare.
 const MAX_TX_LANES: usize = 8;
 
 /// The cap, for the arm that rules on it.
@@ -2028,16 +2019,13 @@ impl Actor {
     ///
     /// **The two guards below are the whole safety of this method.** Cleanup
     /// here is an unqualified `ROLLBACK` on a shared connection, so reaching it
-    /// without the right to must be impossible rather than unlikely. Until
-    /// 2026-08-27 `run_cancel` was the only data-bearing command that consulted
-    /// neither the terminal claim's uniqueness nor `check_owner`, and both
-    /// omissions were reachable: a duplicate `Cancel` (`claim_cancelled` used
-    /// to grant a second claim), and - with no duplicate at all - a `Cancel`
-    /// for a reservation whose lane a later transaction had taken over. Both
-    /// rolled back a stranger's open transaction, and because that stranger's
-    /// `tx_bound` was untouched its later `COMMIT` reported
-    /// `CommitIndeterminate`: the creator told the fate was unknown for a write
-    /// that had been silently destroyed.
+    /// without the right to must be impossible rather than unlikely. The guards
+    /// establish that this cancellation owns the terminal claim and that the
+    /// reservation still owns the lane; without both, a duplicate `Cancel` or a
+    /// `Cancel` for a lane a later transaction took over would roll back a
+    /// stranger's open transaction, and that stranger's untouched `tx_bound`
+    /// would make its later `COMMIT` report `CommitIndeterminate` - the creator
+    /// told the fate was unknown for a write that had been silently destroyed.
     fn run_cancel(&mut self, reservation: &Arc<Reservation>) -> TerminalOutcome {
         if !reservation.claim_cancelled() {
             // A completion already claimed the terminal, and the winner's
@@ -2124,9 +2112,8 @@ impl Actor {
     /// **Only this app's transaction connection**, which is the point of the
     /// per-app split: another tenant's lane never learns the alias, so its
     /// transaction cannot name this app's tables even by accident. It also
-    /// narrows the failure above - it used to fire while *another* app held a
-    /// transaction open, and now only this app's own open transaction can
-    /// cause it.
+    /// narrows the failure above: only this app's own open transaction can
+    /// cause it, never another app's.
     fn run_attach_both(&mut self, app_id: &str, db_path: &str) -> Result<(), DbError> {
         run_attach(&self.op.conn, app_id, db_path)?;
         let owner = self
@@ -2241,9 +2228,8 @@ fn permits_explicit_transaction(sql: &str) -> bool {
 /// A worker-side failure that has **not** been mapped yet.
 ///
 /// SC-2 consequence 2: the raw `rusqlite` error must survive until the actor
-/// decides. Mapping inside `run_exec` / `run_query`, as this file used to,
-/// erases the reservation, ownership and cancellation-intent context the
-/// classifier needs.
+/// decides. Mapping inside `run_exec` / `run_query` would erase the
+/// reservation, ownership and cancellation-intent context the classifier needs.
 enum RunError {
     Sqlite(rusqlite::Error),
     /// A plugin-side decode failure (bad base64, non-UTF-8 TEXT) that never had
@@ -2709,9 +2695,8 @@ mod tests {
             "RELEASE SAVEPOINT zs_sp_1",
             "CREATE TABLE t (x); PRAGMA foreign_keys = OFF;",
             // Comment-prefixed. The leading token is `--` / `/*`, which trims
-            // to the empty string - and an empty leading token used to be
-            // dropped, leaving `all` vacuously true and reporting that a
-            // VACUUM was safe to wrap. These are the arms that failed.
+            // to the empty string, and an empty leading token must not read as
+            // vacuously safe: a comment-prefixed VACUUM is still a VACUUM.
             "-- note\nVACUUM",
             "/* c */ VACUUM",
             "-- leading comment\nPRAGMA journal_mode = WAL",
