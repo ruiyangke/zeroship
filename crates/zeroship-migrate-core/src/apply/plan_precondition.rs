@@ -294,10 +294,9 @@ mod tests {
 
     /// A `Ddl` step carrying the effect the lower would have stamped on it.
     ///
-    /// The `up` is now DECORATION for these tests - it is journalled and reported,
-    /// but no longer read to decide anything. That is the change under test, and it
-    /// is why several arms below pair an `up` with an effect the old SQL whitelist
-    /// would have disagreed about.
+    /// The `up` is DECORATION for these tests - journalled and reported, but not
+    /// read to decide anything. That is why several arms below pair an `up` with an
+    /// effect a SQL whitelist would disagree about.
     fn ddl(
         version: &str,
         up: &str,
