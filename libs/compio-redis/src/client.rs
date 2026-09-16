@@ -586,7 +586,7 @@ impl Client {
 }
 
 // =====================================================================
-// Red-team regression tests (R1 — REDIS-OOM-1 + dirty-flag infra).
+// Red-team regression tests (R1 + dirty-flag infra).
 //
 // These drive the REAL client against a small in-process mock Redis
 // (a `compio::net::TcpListener` speaking raw RESP bytes) so we can
@@ -677,7 +677,7 @@ mod red_team_tests {
     }
 
     // -----------------------------------------------------------------
-    // FIX A - a timed-out (cancelled) read must not brick the Client.
+    // A timed-out (cancelled) read must not brick the Client.
     //
     // `send_recv_inner` hands its reusable read buffer to compio by value
     // (`mem::take`). If the buffer is not back in the struct when the next
@@ -691,7 +691,7 @@ mod red_team_tests {
     // the buffer-reuse optimisation. Deleting the `self.read_scratch = buf`
     // refill in `send_recv_inner` leaves this test green, because
     // `take_read_scratch` would then just allocate a fresh buffer per read.
-    // That is the point of the shape - correctness no longer depends on the
+    // That is the point of the shape - correctness does not depend on the
     // restore - but it means only a benchmark, not this test, would notice
     // the reuse being lost.
     // -----------------------------------------------------------------
@@ -715,7 +715,7 @@ mod red_team_tests {
         c.set_cmd_timeout(Duration::from_secs(2));
 
         // Commands 2 and 3 run on the SAME, healthy, open socket. They must
-        // succeed. Pre-fix they fail instantly with "redis connection closed".
+        // succeed.
         for i in 2..=3 {
             let v = c
                 .get("k")
@@ -730,24 +730,23 @@ mod red_team_tests {
     }
 
     // -----------------------------------------------------------------
-    // FIX 1 — REDIS-OOM-1: oversized declared reply length is rejected
-    // promptly, WITHOUT buffering the (multi-GB) body.
+    // An oversized declared reply length is rejected promptly, WITHOUT
+    // buffering the body.
     // -----------------------------------------------------------------
     #[compio::test]
     async fn oversized_bulk_reply_is_rejected_promptly() {
         // Bulk header declaring ~2 GB, plus a few filler body bytes. The
-        // body is NEVER fully sent, so a pre-fix client buffers forever
-        // (bounded only by the 5 s cmd_timeout) waiting for 2 GB.
+        // body is NEVER fully sent, so a client that buffers the declared
+        // length waits for it (bounded only by the cmd_timeout).
         let (ip, port) = mock_server_reply(b"$2000000000\r\nABCDEFGH").await;
         let mut c = Client::connect_tcp((ip, port)).await.expect("connect mock");
 
-        // Wrap in a SHORT timeout so a pre-fix hang fails cleanly (RED)
-        // rather than blocking the test for 5 s. A correct client rejects
-        // the oversized header essentially immediately (one read).
+        // Wrap in a SHORT timeout so a client that buffers the declared
+        // length fails cleanly rather than blocking the test. A correct
+        // client rejects the oversized header essentially immediately (one
+        // read).
         let res = compio::time::timeout(Duration::from_secs(2), c.get("k")).await;
 
-        // RED (pre-fix): this `timeout` itself elapses (the inner future is
-        // stuck buffering), so `res` is Err(Elapsed) -> .expect panics.
         let inner = res.expect("client did not reject oversized reply promptly (it hung buffering)");
 
         // The inner result must be an error identifying an oversized reply.
@@ -824,9 +823,9 @@ mod red_team_tests {
     }
 
     // -----------------------------------------------------------------
-    // FIX 2 — dirty-flag infra: a timed-out command leaves the Client
-    // dirty (so the pool — R2 — can refuse to reuse it); a successful
-    // command leaves it clean.
+    // Dirty-flag infra: a timed-out command leaves the Client dirty (so
+    // the pool — R2 — can refuse to reuse it); a successful command leaves
+    // it clean.
     // -----------------------------------------------------------------
     #[compio::test]
     async fn timeout_marks_connection_dirty() {

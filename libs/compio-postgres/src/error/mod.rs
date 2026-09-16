@@ -121,9 +121,7 @@ impl DbError {
                 // the whole message, for the same reason as `V` below: these
                 // are OPTIONAL informational fields whose absence is already a
                 // supported state, so a value this parser cannot read is
-                // "unknown", not "the message is malformed". Refusing here
-                // discarded a well-formed error's SQLSTATE and text and
-                // reported a parse failure in their place.
+                // "unknown", not "the message is malformed".
                 b'P' => normal_position = value.parse::<u32>().ok(),
                 // See `P` above.
                 b'p' => internal_position = value.parse::<u32>().ok(),
@@ -142,9 +140,7 @@ impl DbError {
                 // the whole message. `V` is a non-localized copy of `S` and its
                 // absence is already a supported state - it is `None` for every
                 // pre-9.6 server - so a level this table does not know is
-                // "unknown", not "malformed". Refusing here instead discarded a
-                // well-formed error's SQLSTATE and text and reported a parse
-                // failure in their place, while `S` carries the raw string
+                // "unknown", not "malformed", while `S` carries the raw string
                 // either way.
                 b'V' => parsed_severity = Severity::from_str(&value),
                 _ => {}
@@ -986,17 +982,14 @@ mod tests {
     /// A malformed AUXILIARY field must not discard the diagnostic.
     ///
     /// `P`, `p` and `L` are optional informational fields - a character
-    /// position, an internal position, and a source line. Each was parsed with
-    /// `?`, so a non-integer in any of them failed the WHOLE `ErrorResponse`
-    /// and the caller got a parse error in place of the server's SQLSTATE and
-    /// message.
+    /// position, an internal position, and a source line. Each is parsed
+    /// leniently: a non-integer in any of them must leave the field unknown
+    /// rather than fail the WHOLE `ErrorResponse` and hand the caller a parse
+    /// error in place of the server's SQLSTATE and message.
     ///
-    /// This is the defect already fixed for `V`, whose comment in the parser
-    /// says it outright: refusing there "discarded a well-formed error's
-    /// SQLSTATE and text and reported a parse failure in their place". The
-    /// reasoning transfers unchanged - these fields are optional, their absence
-    /// is a supported state, so a value this parser cannot read is "unknown",
-    /// not "the message is malformed".
+    /// The reasoning is the same as for `V`: these fields are optional, their
+    /// absence is a supported state, so a value this parser cannot read is
+    /// "unknown", not "the message is malformed".
     #[test]
     fn a_malformed_position_field_keeps_the_sqlstate_and_message() {
         for tag in [b'P', b'p', b'L'] {

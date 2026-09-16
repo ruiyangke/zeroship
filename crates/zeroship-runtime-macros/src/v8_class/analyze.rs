@@ -1,9 +1,6 @@
 //! Analyse phase — turn a parsed `syn::ItemImpl` into a fully-validated
 //! [`ClassConfig`] that the emit phase can consume directly.
 //!
-//! Extracted from `mod.rs` when the macro was split into dedicated
-//! parse, analyse, and emit stages.
-//!
 //! Returns `Result<(ClassConfig, ItemImpl), TokenStream2>`. The `Err`
 //! variant carries pre-rendered `compile_error!` tokens (so callers
 //! pass them straight to the proc-macro driver). The `Ok` variant
@@ -72,26 +69,22 @@ pub(super) fn analyze<'a>(
         .any(|m| m.fastcall);
 
     // Impl-block-level overrides for class-wide install behaviour.
-    // These used to be six separate `&[Attribute]` walks. Now
-    // they're delivered pre-parsed by the single-scan
-    // `parse::parse_attrs` (closes F8). The fields below are taken from
-    // the already-built `ParsedAttrs`.
+    // The single-scan `parse::parse_attrs` (F8) delivers them pre-parsed,
+    // so the fields below are taken from the already-built `ParsedAttrs`.
     let to_string_tag_override = parsed_class_attrs.to_string_tag;
     let inherit_intrinsic = parsed_class_attrs.inherit_intrinsic;
     let inherit_base = parsed_class_attrs.inherit_base;
     let async_iterable_method = parsed_class_attrs.async_iterable;
     let const_decls = parsed_class_attrs.consts;
 
-    // Validate `#[v8_inherit_intrinsic = "..."]` at
-    // analyse time, NOT during emit. Previously the install fn body
-    // emitted `quote! { compile_error!(#msg); }` for unrecognised
-    // values — which DOES surface the right diagnostic but spliced
-    // INSIDE a fn body. Rustc's parser then trips on "expected
-    // expression" / "unused variable" follow-on errors that drown out
-    // the real one. Surfacing as `syn::Error::to_compile_error()` from
-    // `analyze` lets the proc-macro driver emit a single clean
-    // diagnostic with a span on the attribute, before any fn body is
-    // built. Closes NS2 from the v2 code-critic.
+    // Validate `#[v8_inherit_intrinsic = "..."]` at analyse time, NOT during
+    // emit. Emitting `quote! { compile_error!(#msg); }` from the install fn
+    // body would surface the right diagnostic but INSIDE a fn body, where
+    // Rustc's parser trips on "expected expression" / "unused variable"
+    // follow-on errors that drown out the real one. Surfacing as
+    // `syn::Error::to_compile_error()` from `analyze` lets the proc-macro
+    // driver emit a single clean diagnostic with a span on the attribute,
+    // before any fn body is built.
     if let Some(ref value) = inherit_intrinsic
         && value != "IteratorPrototype" && value != "Error"
     {
@@ -253,9 +246,7 @@ fn collect_methods(input: &ItemImpl) -> Result<Vec<ClassMethod<'_>>, TokenStream
             // WebIDL §3.7.6 attribute-setter semantics specify that
             // V8's accessor setter ABI discards whatever the
             // callback writes to `rv` — so a non-unit, non-Result
-            // return would have its value silently swallowed (the
-            // §13.1 finding from
-            // runtime-macros-architecture-critique-2026-05-05).
+            // return would have its value silently swallowed.
             // `Result<(), OpError>` IS supported because
             // `gen_setter_callback` honours it: an `Err` arm
             // routes through `gen_throw_op_error_arms` and surfaces

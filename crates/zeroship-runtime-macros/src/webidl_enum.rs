@@ -203,9 +203,8 @@ fn expand_derive(input: DeriveInput) -> TokenStream2 {
     } else {
         quote! {
             // Step 1: ToString in a tc_scope so user-thrown exceptions
-            // (custom toString, Symbol.toPrimitive) propagate verbatim.
-            // Pre-fix, value.to_string returning None forced us to
-            // fabricate a TypeError, hiding the user's original throw.
+            // (custom toString, Symbol.toPrimitive) propagate verbatim rather
+            // than being replaced by a fabricated TypeError.
             let __coerced: ::std::result::Result<::std::string::String, ::zeroship_runtime::macro_runtime::state::OpError> = {
                 ::v8::tc_scope!(let __tc, scope);
                 match value.to_string(__tc) {
@@ -377,12 +376,9 @@ fn extract_webidl_name(attrs: &[syn::Attribute]) -> Option<String> {
 ///      lowercase  (Upper→Upper-then-lower boundary; handles
 ///      `APIKey` → `api-key`, `XMLHttpRequest` → `xml-http-request`).
 ///
-/// Pre-2026-05-05 the function only implemented rule (1), so trailing
-/// initialism + word combinations like `APIKey` collapsed to `apikey`
-/// (per WHATWG conventions: should be `api-key`). Single-word
-/// initialisms like `URL` and `IP` correctly stay as `url` / `ip` —
-/// rule (2) requires a following lowercase, which a trailing
-/// uppercase or end-of-string doesn't satisfy.
+/// Single-word initialisms like `URL` and `IP` stay as `url` / `ip`:
+/// rule (2) requires a following lowercase, which a trailing uppercase
+/// or end-of-string does not satisfy.
 fn pascal_to_kebab(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 4);
     let chars: Vec<char> = s.chars().collect();

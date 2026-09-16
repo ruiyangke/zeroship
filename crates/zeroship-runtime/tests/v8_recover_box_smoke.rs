@@ -1,34 +1,27 @@
 //! Smoke + regression coverage for `gen_recover_box` honoring
 //! `ReceiverKind`/`mut_receiver`.
 //!
-//! Pre-fix, the shared `gen_recover_box` helper unconditionally emitted
+//! `gen_recover_box` gates the materialisation form on `mut_receiver`.
+//! `&mut self` callbacks emit
 //!
 //! ```ignore
 //! let __instance = unsafe { &mut *(__ext.value() as *mut #state_ty) };
 //! ```
 //!
-//! for every callback shape, including `&self` methods. The dispatch
-//! site reborrowed the `&mut Self` as `&Self`, so the user-facing call
-//! shape was correct — but a synchronous re-entry on a `&self` callback
-//! could materialise TWO `&mut Self` bindings from the same External
-//! pointer (one from the outer call's binding, one from the inner
-//! re-entry). Both would still be in scope until function return. The
-//! reborrow at the dispatch site doesn't release the underlying `&mut`
-//! borrow — only the binding ending does. Two simultaneous `&mut Self`
-//! bindings from the same allocation is UB per stacked-borrows, even
-//! when neither borrow is observably aliased at the user-visible
-//! dispatch.
-//!
-//! The fix gates the materialisation form on `mut_receiver`:
-//! `&self` callbacks emit
+//! and `&self` callbacks emit
 //!
 //! ```ignore
 //! let __instance = unsafe { &*(__ext.value() as *const #state_ty) };
 //! ```
 //!
-//! so a synchronous re-entry produces TWO `&Self` bindings from the
-//! same allocation, which is sound (multiple aliased shared borrows
-//! are allowed by stacked-borrows).
+//! so a synchronous re-entry on a `&self` callback produces TWO `&Self`
+//! bindings from the same allocation, which is sound (multiple aliased
+//! shared borrows are allowed by stacked-borrows). Materialising `&mut *`
+//! for a `&self` shape would instead create two simultaneous `&mut Self`
+//! bindings from the same External — UB per stacked-borrows even when
+//! neither borrow is observably aliased at the user-visible dispatch,
+//! because the reborrow at the dispatch site does not release the
+//! underlying `&mut` borrow — only the binding ending does.
 //!
 //! What this file pins:
 //!   - A `&self` method that synchronously re-enters itself via a JS
@@ -150,15 +143,9 @@ mod recover_box_class {
 
         /// `&self` method whose body synchronously calls into JS. The
         /// JS callback may re-enter THIS SAME `peek` on the same
-        /// instance — and on the post-NS1 codegen, that's sound:
-        /// `gen_recover_box` materialises `&*` (not `&mut *`), so two
-        /// nested bindings from the same External are two `&Self`s,
-        /// which stacked-borrows allows.
-        ///
-        /// Pre-fix, the materialisation was `&mut *(__ext.value() as
-        /// *mut Self)` even for `&self` shapes — the inner re-entry
-        /// would create a SECOND `&mut Self` from the same allocation
-        /// while the outer one was still in scope. UB latent.
+        /// instance, and that is sound: `gen_recover_box` materialises
+        /// `&*` (not `&mut *`), so two nested bindings from the same
+        /// External are two `&Self`s, which stacked-borrows allows.
         #[v8_method]
         fn peek<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> u32 {
             // Bump depth via Cell — `&self` mutates interior state via
@@ -182,17 +169,16 @@ mod recover_box_class {
 }
 
 // ---------------------------------------------------------------------------
-// NS1 regression: synchronous `&self` re-entry through a JS callback
-// returns a sane value — no panic, no exception, no abort. The post-fix
-// codegen materialises `&Self`, so both the outer and inner bindings
-// are shared references to the same allocation (sound).
+// Regression: synchronous `&self` re-entry through a JS callback
+// returns a sane value — no panic, no exception, no abort. The codegen
+// materialises `&Self`, so both the outer and inner bindings are shared
+// references to the same allocation (sound).
 //
-// Earlier versions used an unconditional
-// `&mut *`; the inner re-entry produced a second `&mut Self` while the
-// outer one was still bound. Release-mode optimisers may miscompile
-// under that aliasing, and Miri's stacked-borrows checker rejects it
-// outright. The regression here pins the post-fix behaviour: `peek`
-// returns a non-zero depth and the test runs to completion.
+// An unconditional `&mut *` would produce a second `&mut Self` while the
+// outer one was still bound: release-mode optimisers may miscompile under
+// that aliasing, and Miri's stacked-borrows checker rejects it outright.
+// The regression pins that `peek` returns a non-zero depth and the test
+// runs to completion.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -236,21 +222,18 @@ fn shared_self_synchronous_reentry_is_sound() {
     // callback → callback exited → outer's `self.depth.get()` reads 2.
     // calls == 2 confirms the re-entry actually fired (not skipped).
     //
-    // If the pre-NS1 `&mut *` materialisation had been retained, the
-    // inner re-entry would either (a) compile and miscompile in
-    // release, (b) abort under Miri, or (c) panic via a
-    // RefCell-already-mutably-borrowed error if the user wrapped state
-    // in a RefCell. The post-fix `&*` materialisation lets the two
-    // nested `&Self` bindings coexist soundly.
+    // With an unconditional `&mut *` materialisation the inner re-entry
+    // would miscompile in release, abort under Miri, or panic via a
+    // RefCell-already-mutably-borrowed error; `&*` lets the two nested
+    // `&Self` bindings coexist soundly.
     assert_eq!(s, r#"{"outer":2,"calls":2}"#);
 }
 
 // ---------------------------------------------------------------------------
 // Two `&self` callbacks on the same instance, BOTH active on the call
 // stack at the same time, do not produce a Rust borrow conflict. This
-// pins the cross-method case that the v2 critic flagged (the original
-// finding said "user code synchronously re-enters a `&self` callback"
-// — that includes re-entering a *different* `&self` method too).
+// pins the cross-method case: re-entering a *different* `&self` method
+// is covered alongside re-entering the same one.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -265,11 +248,10 @@ fn shared_self_cross_method_reentry_is_sound() {
             );
         },
         // The outer `peek` calls the callback → callback re-enters peek
-        // (which is the SAME method) — this is the cross-binding-of-
-        // same-method case. The fix covers this because the inner
-        // call manifests its OWN `&Self` from `__ext.value()`, distinct
-        // from the outer call's binding but pointing at the same
-        // allocation. Two `&Self`s on the same allocation is sound.
+        // (the SAME method): the inner call manifests its OWN `&Self`
+        // from `__ext.value()`, distinct from the outer call's binding
+        // but pointing at the same allocation. Two `&Self`s on the same
+        // allocation is sound.
         r#"
         const r = new Reader();
         let cbCalls = 0;
