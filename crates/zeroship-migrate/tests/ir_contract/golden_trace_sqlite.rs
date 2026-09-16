@@ -394,11 +394,9 @@ async fn golden_g_sqlite_pg_rename_fails_closed() {
             zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await;
-    // The refusal NAMES the gap: which step, which capability, which target. It
-    // used to be an untyped `Backend(String)` whose text called the state "a
-    // routing bug" - an assertion about something unreachable, which it is not:
-    // nothing stops a caller handing `apply_plan` this plan, and when the rename is
-    // not the plan's FIRST step the earlier steps used to commit before this fired.
+    // The refusal NAMES the gap - which step, which capability, which target - as
+    // a typed error, not free text. It must fire at apply_plan: a refusal after the
+    // first step would leave the earlier steps committed.
     match &res {
         Err(DeclarativeApplyError::Plain(EngineError::Apply(
             zeroship_migrate::apply::executor::ApplyError::UnsupportedCapability {

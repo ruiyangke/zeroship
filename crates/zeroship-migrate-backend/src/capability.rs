@@ -5,10 +5,9 @@
 //! names - the [`OnlineIntent`] it is handed, the [`OnlineError`] it refuses with,
 //! the `Migration`/`BackfillSpec`/`Approval`/`ExecutorConfig` it works from - now
 //! sits at or below this crate, so a vendor can implement it without naming the
-//! engine. That last clause used to be false in the one way that mattered: the
-//! method took the whole expand sequence and called the ENGINE'S orchestrator to
-//! apply it. The phases are inverted now (see [`OnlineSchemaChange`]), so the
-//! vendor answers one phase and drives nothing.
+//! engine. The phases are inverted (see [`OnlineSchemaChange`]): the vendor answers
+//! one phase and drives nothing, rather than taking the whole expand sequence and
+//! calling the engine's orchestrator to apply it.
 //!
 //! `ShadowDryRun` could NOT follow, and its blockers are worth naming precisely
 //! rather than deferring: `dry_run_declarative` takes a `DeclarativeDeployPlan`
@@ -20,7 +19,7 @@
 //! [`DryRunReport`]/[`MigrationResult`] out) because those parts are backend
 //! vocabulary and were never the obstacle.
 //!
-//! The engine re-exports every item here under its historical path.
+//! The engine re-exports every item here, so callers reach them at the engine's paths.
 
 use crate::advisory::Advisory;
 use crate::approval::{Approval, ApprovalScope};
@@ -343,18 +342,3 @@ fn capped_name(natural: &str, max_bytes: usize) -> String {
     }
     format!("{prefix}_{suffix}")
 }
-
-// `pub fn dual_write_function_body(from_q, to_q) -> String` USED TO LIVE HERE, and it
-// was twenty lines of PL/pgSQL - `TG_OP`, `NEW`, `OLD`, `IS DISTINCT FROM`,
-// `RETURN NEW` - in the crate whose stated rule is that "nothing here spells a
-// keyword, quotes an identifier or names a dialect".
-//
-// It passed this crate's own neutrality census the whole time, because that census
-// looks for vendor NAMES and PL/pgSQL contains none of them. The name it would have
-// caught, `LANGUAGE plpgsql`, was one crate UP, in the engine's
-// `render::expand_contract`, wrapped around this body.
-//
-// Both halves are in `zeroship-migrate-postgres` now, behind
-// `SchemaRenderer::dual_write_trigger`, next to the backfill guard that compares a
-// live trigger's source against them. The engine asks the resolved renderer and
-// spells nothing.

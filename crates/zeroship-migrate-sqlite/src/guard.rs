@@ -23,12 +23,9 @@
 //!
 //! # Why this is not shared with MySQL
 //!
-//! It used to be. Both dialects ran ONE guard type named after SQLite alone, whose own
-//! doc admitted it served BOTH descriptor-only engines - SQLite and MySQL - despite the
-//! name. Sharing a type named after one vendor made a MySQL reviewer read the
-//! dispatch as a bug at a glance. Each vendor now writes its own, which costs a dozen
-//! lines and means a change to SQLite's posture cannot silently become a change to
-//! MySQL's.
+//! Each vendor writes its own guard, so a change to SQLite's posture cannot silently
+//! become a change to MySQL's. A shared type named after one vendor makes a MySQL
+//! reviewer read the dispatch as a bug at a glance.
 
 use zeroship_migrate_backend::guard::{GuardConfig, GuardError, GuardOutcome, MigrationGuard};
 use zeroship_migrate_ir::migration::MigrationFlags;
@@ -96,9 +93,8 @@ impl MigrationGuard for SqliteGuard {
     /// The neutral posture walk in
     /// [`check_ir_data_security_policy`](zeroship_migrate_backend::guard::check_ir_data_security_policy)
     /// is consequently the ONLY enforcement that knob has on this backend. Answering
-    /// `true` would turn it off and make the knob silently inert - which is exactly
-    /// what it was before that walk existed: a `DROP TABLE` applied under the default
-    /// `forbid`.
+    /// `true` would turn it off and make the knob silently inert, so a `DROP TABLE`
+    /// would apply under the default `forbid`.
     fn refuses_destructive_ops_itself(&self) -> bool {
         false
     }
@@ -111,12 +107,12 @@ impl MigrationGuard for SqliteGuard {
     /// "not destructive, no approval needed" about text nobody inspected - this
     /// returns `requires_approval: true`.
     ///
-    /// What is NO LONGER CHECKED, stated plainly: a raw-SQL-authored SQLite migration
-    /// gets NO destructive classification, NO non-transactional detection and NO
-    /// bare-rename or `SET NOT NULL` gate. It is gated on approval instead, so a human
-    /// looks at every one. SQLite's real posture is the descriptor-diff path, the
-    /// backend's runtime authorizer, and `check_ir_data_security_policy` over the
-    /// structured IR; the raw-SQL author is not a SQLite authoring route.
+    /// A raw-SQL-authored SQLite migration gets NO destructive classification, NO
+    /// non-transactional detection and NO bare-rename or `SET NOT NULL` gate. It is
+    /// gated on approval instead, so a human looks at every one. SQLite's real posture
+    /// is the descriptor-diff path, the backend's runtime authorizer, and
+    /// `check_ir_data_security_policy` over the structured IR; the raw-SQL author is
+    /// not a SQLite authoring route.
     fn flags_for_sql(&self, _up: &str) -> Result<MigrationFlags, GuardError> {
         Ok(MigrationFlags {
             requires_approval: true,

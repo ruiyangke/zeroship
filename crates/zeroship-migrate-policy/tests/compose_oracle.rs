@@ -553,12 +553,10 @@ scope = { include = ["app_secret"] }
          have wrongly ACCEPTED), got {got:?}"
     );
 
-    // Sanity: the OLD join-materialized formula (fold the two charter rules into one
-    // scope via join, dropping the exclude) WOULD compute app_secret as covered.
-    // We assert the ground truth is a reject: at app_secret.t the charter's effective
-    // raw_sql is FALSE (app_* grants it but the exclude removes app_secret; reports is
-    // disjoint), while the draft raises it to TRUE, and TRUE is looser than FALSE,
-    // so this is an escalation.
+    // Ground truth is a reject: at app_secret.t the charter's effective
+    // raw_sql is FALSE (app_* grants it but the exclude removes app_secret;
+    // reports is disjoint), while the draft raises it to TRUE, and TRUE is
+    // looser than FALSE, so this is an escalation.
     let secret = ObjectName::table(b"app_secret".to_vec(), b"t".to_vec());
     let charter_doc = root.doc();
     let cv = value_gt(
@@ -1567,7 +1565,7 @@ impl std::fmt::Debug for Pat {
 /// `Top` is the fully-trusted raw posture, and `schema.cross_schema` at `Top` makes
 /// the schema scope `Unconfined`. The per-layer visible region is granted-minus-
 /// masked-above, and `All` minus a real mask has no glob representation, so the
-/// estimate widens back to `All` - which used to be read straight back as `Top`.
+/// estimate widens back to `All`, which must not be read back as `Top`.
 #[test]
 fn a_grant_narrowed_anywhere_is_scoped_not_top() {
     let reg = registry();

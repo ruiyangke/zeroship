@@ -18,10 +18,9 @@
 //! stated. It is a REQUIRED [`crate::registry::BackendVendor`] field, so each
 //! backend files its own answer and the engine reaches an analysis by asking the
 //! registered vendor - never by naming one. PostgreSQL's implementation delegates to
-//! its own `analysis::analyze` module, which holds the `libpg_query` analyzers. Those
-//! analyzers used to sit in a separate `zero-migrate-guard` crate that core depended
-//! on directly; this contract is what let them move into the vendor without core
-//! following them there.
+//! its own `analysis::analyze` module, which holds the `libpg_query` analyzers. This
+//! contract keeps those analyzers in the vendor crate: the engine reaches an
+//! analysis by asking the registered vendor, never by naming a parser itself.
 //!
 //! # These are ADVISORY, NEVER load-bearing for security
 //!
@@ -33,9 +32,8 @@
 //!
 //! # Every constructor below is `pub`, and that costs nothing
 //!
-//! Before the split these constructors were private / `pub(crate)`, because the
-//! analyzers that call them shared a crate with the type. They no longer do, so they
-//! are `pub`. No invariant is lost: every [`Advisory`] field is `pub`, so any
+//! The analyzers that call these constructors live in the vendor crate, so the
+//! constructors are `pub`. No invariant is lost: every [`Advisory`] field is `pub`, so any
 //! caller could always write the struct literal directly. The constructors are
 //! convenience, never a capability.
 
@@ -172,8 +170,7 @@ pub mod rule {
     ///
     /// The lower-case spelling is deliberate and is pinned by a host test
     /// (`packages/zero-migrate-cli/tests/host/locking-advisory-surface.test.ts`),
-    /// which is why it is a named const rather than a literal typed at each site:
-    /// it used to be written out in `zeroship-migrate-node`'s bridge and nowhere else.
+    /// which is why it is a named const rather than a literal typed at each site.
     pub const ANALYZER_DIALECT_UNSUPPORTED: &str = "analyzer_dialect_unsupported";
 }
 

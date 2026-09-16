@@ -25,20 +25,17 @@
 //!
 //! # Why the host states this instead of the addon reading it
 //!
-//! This used to be `std::env::var("ZERO_MIGRATE_LOG")`, read here, on the Rust side.
-//! `clippy.toml` bans that, and the ban is right on its own terms - a read that takes a
-//! `&str` is a read of a name nothing has declared, so the population of the process's
-//! configuration is not enumerable. `ZERO_MIGRATE_LOG` was the proof: it appeared in
-//! this one file and NOWHERE else in the tree - not in `docs/reference/env-vars.md`,
-//! not in any JS, not in any test.
+//! `clippy.toml` bans an ambient `std::env::var` read, and the ban is right on its own
+//! terms - a read that takes a `&str` names nothing declared, so the population of the
+//! process's configuration is not enumerable.
 //!
 //! The fix is not a suppression, because the same argument this module already makes
 //! about the SUBSCRIBER applies one level up to the SWITCH. `with_diagnostics` refuses
 //! `set_global_default` on the grounds that "this crate is a library first ... a global
 //! install would mutate process-wide logging state for anyone who merely imports it".
 //! An ambient environment read is that same defect at the decision: a process that
-//! happens to carry the variable turned on stderr diagnostics inside a caller - the Vite
-//! plugin, say - that never asked for them and cannot see why.
+//! happens to carry the variable would turn on stderr diagnostics inside a caller - the
+//! Vite plugin, say - that never asked for them and cannot see why.
 //!
 //! So the value is GIVEN to the addon rather than taken from the process. The host is a
 //! Node CLI, `process.env` is ordinary and visible there, and the raw value crosses the
