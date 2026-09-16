@@ -341,6 +341,10 @@ impl Fixture {
                 peers.trust_signing_key(issuer, key.key_id(), key).unwrap();
                 let state = Rc::new(WorkflowHttpState {
                     policy_source: None,
+                    // This fixture drives deployment holds, not journal
+                    // provisioning; a manager without a journal client simply
+                    // does not ensure schemas.
+                    journal: None,
                     service: Coordinator::connect(
                         &url,
                         CoordinatorOptions {
