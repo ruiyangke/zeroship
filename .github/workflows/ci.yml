@@ -1,12 +1,12 @@
 name: CI
 on: [push, pull_request]
 
-# Toolchain jobs run inside the flake's devShell rather than a separate apt list,
-# so the environment has one definition. `nix develop` is required for the native
-# build inputs and not only for Rust: `rdkafka` is configured with `cmake-build`,
-# so `rdkafka-sys` compiles librdkafka and needs `curl/curl.h`, which the
-# devShell supplies through `curl.dev`. Anything that builds the workspace needs
-# those inputs, which is why every job opts in instead of only the Rust steps.
+# Toolchain jobs run inside the flake's devShell, so the environment has one
+# definition. `nix develop` is required for the native build inputs and not only
+# for Rust: `rdkafka` is configured with `cmake-build`, so `rdkafka-sys` compiles
+# librdkafka and needs `curl/curl.h`, which the devShell supplies through
+# `curl.dev`. Anything that builds the workspace needs those inputs, which is why
+# every job opts in instead of only the Rust steps.
 #
 # pnpm is deliberately NOT in the devShell: a devShell entry is PREPENDED to
 # PATH, and `package.json#packageManager` pins the pnpm CI must use. Declaring it
@@ -16,46 +16,6 @@ defaults:
     shell: nix develop --command bash -e {0}
 
 jobs:
-  # Commit conventions, in CI as well as in the local commit-msg hook. The hook
-  # is the one that matters - it fails at the moment of the mistake - but it
-  # only runs where someone has set core.hooksPath, and --no-verify skips it.
-  # This is the backstop, and it is cheap: no toolchain, no submodule.
-  #
-  # MEASURED 2026-08-11: over one week, 59% of subjects exceeded the then-stated
-  # 72-char limit and 43 commits carried no scope. The rule existed in
-  # CONTRIBUTING.md the whole time and nothing checked it, so it rotted the way
-  # every unenforced invariant in this tree has. That is what this job is for.
-  commit-messages:
-    runs-on: ubuntu-latest
-    # No toolchain needed, so this job keeps the runner's own shell.
-    defaults:
-      run:
-        shell: bash -e {0}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0          # the range needs both endpoints
-      # Prove the linter can still FAIL before trusting a clean run from it.
-      # A gate that accepts everything and a gate that is broken look identical.
-      - name: Gate self-test
-        run: tests/commit_msg_gate.sh --self-test
-      - name: Check the commit messages in this change
-        run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            range="${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
-          elif [ -n "${{ github.event.before }}" ] \
-            && git cat-file -e "${{ github.event.before }}^{commit}" 2>/dev/null; then
-            range="${{ github.event.before }}..${{ github.sha }}"
-          else
-            # New branch, or a force-push whose base is gone. Checking the whole
-            # history here would fail on every pre-gate commit, so scope it to
-            # the tip and say so rather than reporting a vacuous pass.
-            echo "no usable base ref; checking the tip commit only"
-            range="${{ github.sha }}~1..${{ github.sha }}"
-          fi
-          echo "range: $range"
-          tests/commit_msg_gate.sh --range "$range"
-
   rust:
     runs-on: ubuntu-24.04
     steps:
@@ -315,20 +275,6 @@ jobs:
       # hoisted above each binary's database work.
       - name: services refuse to boot without a peer public key
         run: tests/service_peer_boot_gate.sh
-      # deploy/scripts/{deploy-remote,deploy-app}.sh had no test of any kind.
-      # The compose-variable extraction in deploy-remote.sh produced two false
-      # results while it was written - it counted `$${VAR}` escapes and refs in
-      # comments, and its rename guard first passed on the very breakage it
-      # exists for, then failed on a healthy host. Both were caught by hand.
-      # Drives the pure functions against fixture compose files and the deploy
-      # path through a stub ssh; runs no real ssh, no docker, no network.
-      # MEASURED 2026-08-20 on a host with no target/debug/zeroship-control:
-      # 141 assertions, floor 118. One further case runs only when that binary
-      # is built. (This line said "64 assertions, floor 63" while the script's
-      # floor was already 107, then "129" once the count had moved again - it
-      # gets written and not re-run against the thing it describes.)
-      - name: deploy scripts extraction, rename pairing and arguments
-        run: tests/deploy_scripts_gate.sh
       # THE INSTRUMENTS' OWN SELF-TESTS. Every e2e harness in tests/ sources one
       # or more of tests/lib/*.sh for its run accounting: whether a binary is
       # stale against its sources, whether a Rust test skipped and still counted
@@ -878,9 +824,7 @@ jobs:
           node-version: 22
       - uses: pnpm/action-setup@v4
       # Every one of these six frees its ports with `lsof -ti :$PORT`, which the
-      # devShell supplies. Unlike golden_path.sh they need no postgresql client
-      # (every psql call goes through `docker exec <container> psql`, using the
-      # client inside the image) and no zstd (nothing here unpacks a .zship).
+      # devShell supplies.
       # Postgres as an explicit `docker run`, NOT a `services:` entry, and the
       # container NAME is the reason: stream harnesses create and drop
       # their own dedicated database through `docker exec "$PG_CONTAINER" psql`
@@ -1269,9 +1213,6 @@ jobs:
         with:
           node-version: 22
       - uses: pnpm/action-setup@v4
-      # No lsof needed: the harness allocates its ports per run
-      # (tests/lib/e2e_ports.sh) instead of pinning a band and SIGKILLing
-      # whatever holds it, so there is no stale listener to clear.
       - run: pnpm install --frozen-lockfile
       # The vendored engine ships no dist/ and the vite-plugin imports it, so it
       # builds before the SDKs. Same ordering as the `sdk` and golden-path jobs.

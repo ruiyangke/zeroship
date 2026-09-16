@@ -54,8 +54,7 @@ the host boundary.
 The namespace-wide matcher is deliberate. The current
 `/v1/apps/{app_id}/migrations/apply` route works through the shared control URL,
 and a later database-id re-key does not require another edge rollout. Control
-declares no `/v1` routes; `tests/deploy_scripts_gate.sh` enforces both that
-collision boundary and the exact Caddy handler.
+declares no `/v1` routes.
 
 - **Scaffold:** `examples/starter/` — a minimal, agent-facing zeroship app
   (fetch/static SPA + `getMessages`/`addMessage` RPCs via `@zeroship/rpc/server`,

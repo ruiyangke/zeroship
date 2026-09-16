@@ -79,8 +79,7 @@
             # harness dependencies: golden_path.sh frees its ports with
             # `lsof -ti` and reads the artifact manifest with `tar --zstd`.
             # git, procps, which, netcat, net-tools and jq are invoked by
-            # tests/provision_test_backends.sh, tests/deploy_scripts_gate.sh
-            # and the e2e harnesses.
+            # tests/provision_test_backends.sh and the e2e harnesses.
             #
             # pnpm is deliberately absent. package.json#packageManager pins the
             # pnpm CI must use, and a devShell entry is PREPENDED to PATH, so a
