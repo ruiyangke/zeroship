@@ -54,14 +54,8 @@ const ADMIN_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 // fixture that never completes fails with a sentence instead of wedging the
 // run; none of them is a claim about how long the work should take. A budget
 // tight enough to be exceeded by machine load therefore buys nothing and costs
-// a false red.
-//
-// `ADMIN_STATEMENT_TIMEOUT` was 5s and a `CREATE SCHEMA` -- normally about a
-// millisecond -- blew through it on 2026-08-23 at load 16.4, with a peer
-// project's test suite as the top consumer. The same statement passed in 0.25s
-// in isolation moments later. See the load table on
-// `read_timeout::copy_input_time_is_not_charged_as_server_read_silence` for the
-// measured version of this effect; this is the same failure in a fixture.
+// a false red, so the budget sits well above the work an admin statement
+// legitimately needs.
 //
 // A genuine hang still fails, just later, and the per-test watchdogs bound the
 // run regardless.
@@ -356,18 +350,12 @@ async fn connect_with_statement_cache_threshold(
 /// THERE IS NO SKIP. A database this crate cannot reach panics here, so this
 /// returns a `TestUrl` rather than an `Option`.
 ///
-/// It used to return `Option` with every caller writing
-/// `let Some(url) = require_pg().await else { return; }`. The `None` arm became
-/// unreachable when the skip was replaced by a panic, and was left in place
-/// deliberately at the time - rewriting 93 call sites in that commit would have
-/// put what the tests ASSERT in the same diff as whether they RUN. This is that
-/// rewrite, on its own.
-///
-/// Removing the arm matters beyond tidiness: an `Option` here advertises that a
-/// test may skip, and 93 `else { return }` branches are a standing invitation to
-/// make `None` reachable again - at which point 93 tests become silent no-ops
-/// that still report green. That is the exact failure this crate's `live-tls-tests`
-/// feature exists to prevent, described in its `Cargo.toml` comment.
+/// It returns a `TestUrl` rather than an `Option` on purpose. An `Option` here
+/// advertises that a test may skip, and an `else { return }` branch is a
+/// standing invitation to make `None` reachable again - at which point those
+/// tests become silent no-ops that still report green. That is the exact
+/// failure this crate's `live-tls-tests` feature exists to prevent, described
+/// in its `Cargo.toml` comment.
 async fn require_pg() -> TestUrl {
     let url = test_url();
     let client = match compio::time::timeout(ADMIN_CONNECT_TIMEOUT, connect(&url)).await {
@@ -375,8 +363,7 @@ async fn require_pg() -> TestUrl {
         // `process::exit(0)` would have ended the WHOLE binary with a success
         // status the moment one test could not reach Postgres, discarding every
         // result already produced. A panic ends only this test, so its siblings
-        // and any failure already reported still stand - and unlike the skip
-        // that used to be here, the run goes red.
+        // and any failure already reported still stand - and the run goes red.
         Ok(Err(error)) => common::postgres_unreachable(&url, &error),
         Err(_) => panic!(
             "PostgreSQL connection exceeded the {} second test-fixture timeout",
@@ -785,11 +772,10 @@ async fn null_values() {
 #[compio::test]
 async fn wrong_password() {
     let url = test_url();
-    // Located structurally, not by a literal. This used to replace the exact
-    // string `:zeroship@`, which is right for the default plaintext DSN and
-    // matches nothing else: against any other server the "bad" DSN was the
-    // GOOD one, the connection succeeded, and the test failed claiming the
-    // server had accepted a wrong password.
+    // Located structurally, not by a literal. A literal `:zeroship@` is right
+    // only for the default plaintext DSN and matches nothing else: against any
+    // other server the "bad" DSN is the GOOD one, the connection succeeds, and
+    // the test fails claiming the server accepted a wrong password.
     let bad_url = common::with_password(&url, "wrong_password_xyz")
         .expect("the test DSN carries no password to make wrong");
     assert_ne!(
@@ -1376,8 +1362,8 @@ async fn inner_savepoint_rollback_keeps_outer_work() {
 ///
 /// `ROLLBACK TO SAVEPOINT x` undoes the work but LEAVES `x` defined - the
 /// documented behaviour, and the reason "roll back to it again later" is a
-/// thing you can do. `Transaction::rollback` issued only that, so a savepoint
-/// whose Rust value had been consumed stayed on the server's savepoint stack.
+/// thing you can do. A savepoint whose Rust value has been consumed must not
+/// stay on the server's savepoint stack.
 ///
 /// PostgreSQL resolves a savepoint name to the most recently established one,
 /// so the leftover shadows an enclosing savepoint of the same name and the
@@ -1652,21 +1638,19 @@ async fn null_in_params() {
 #[compio::test]
 async fn pool_exhaustion() {
     let url = require_pg().await;
-    // max_size=2 with a very short acquire_timeout, so the test does not
-    // wait 30 s to observe the exhaustion error.
+    // max_size=2 with a short acquire_timeout, so the test does not wait out a
+    // long budget to observe the exhaustion error.
     //
     // `min_idle: 2`, NOT 0, and that is load-bearing. `acquire_timeout`
     // bounds the WHOLE of `get()` - opening a connection as well as waiting for
-    // one - so with an empty pool the first two acquisitions had to complete a
-    // TCP connect, a startup exchange and SCRAM-SHA-256 (4096 PBKDF2 rounds, in
-    // a debug build) inside the same 200 ms budget meant for the exhaustion
-    // wait. That made a test about CAPACITY fail on a busy machine because of
-    // LATENCY: observed once at 74 s of suite time under load, and passing 3/3
-    // in isolation on the same commit.
+    // one - so with an empty pool the first two acquisitions would have to
+    // complete a TCP connect, a startup exchange and SCRAM-SHA-256 inside the
+    // same budget meant for the exhaustion wait. That makes a test about
+    // CAPACITY fail on a busy machine because of LATENCY.
     //
     // Warming both connections up front removes the unrelated variable. The two
     // acquisitions below now come from `idle` and open no sockets, so the only
-    // thing the 200 ms budget times is the third `get()`, which is what the
+    // thing the acquire budget times is the third `get()`, which is what the
     // test is named after.
     let mut config = compio_postgres::PoolConfig::new();
     config
@@ -1773,7 +1757,7 @@ async fn update_with_returning() {
 // ---------------------------------------------------------------------------
 // 24. get_cancellation_during_connect_does_not_leak_permits (POOL-1)
 //
-// Regression: `Pool::acquire` wraps `get_inner` in `compio::time::timeout`, a
+// `Pool::acquire` wraps `get_inner` in `compio::time::timeout`, a
 // `select!` that DROPS the inner future when the timer wins. On the on-demand
 // connect path the capacity permit is the hand-maintained `total` counter,
 // incremented before `connect_one().await` and decremented only by the
@@ -1783,13 +1767,14 @@ async fn update_with_returning() {
 // never fires again and every get() times out: the pool is bricked.
 //
 // Cancellation here is driven DETERMINISTICALLY by dropping the get() future
-// mid-connect (the same mechanism `timeout` uses, and what test 26 does for
-// the waiter path), NOT by racing a 1 ms timeout against a real connect. On
-// the cooperative single-threaded runtime we poll a fresh get() future until
-// it has taken the on-demand path and reserved its permit (total_count() == 2:
-// past the `total < max_size` gate, parked in `connect_one().await`), then
-// drop it. Pre-fix the reserved `+1` leaks; post-fix the `PermitGuard` Drop
-// releases it (back to 1). No timing assumption -> no flakiness on fast hosts.
+// mid-connect (the same mechanism `timeout` uses, and what the waiter-path
+// cancellation test below does), NOT by racing a timeout against a real
+// connect. On the cooperative single-threaded runtime we poll a fresh get()
+// future until it has taken the on-demand path and reserved its permit
+// (total_count() == 2: past the `total < max_size` gate, parked in
+// `connect_one().await`), then drop it. The reserved `+1` must be released by
+// the `PermitGuard` Drop (back to 1), never leaked. No timing assumption -> no
+// flakiness on fast hosts.
 // ---------------------------------------------------------------------------
 
 #[compio::test]
@@ -1872,9 +1857,9 @@ async fn get_cancellation_during_connect_does_not_leak_permits() {
         );
     }
 
-    // Primary invariant: after 100 deterministic cancellations only the
-    // genuinely-held warm connection (c1) remains counted. Pre-fix this climbs
-    // to max_size (4) and sticks.
+    // Primary invariant: after the deterministic cancellations only the
+    // genuinely-held warm connection (c1) remains counted; the total must not
+    // climb to max_size and stick.
     assert_eq!(
         pool.total_count(),
         1,
@@ -1901,12 +1886,12 @@ async fn get_cancellation_during_connect_does_not_leak_permits() {
 // ---------------------------------------------------------------------------
 // 25. freed_connection_goes_to_front_waiter_not_a_barging_fresh_caller (POOL-2)
 //
-// FIFO fairness regression. When a `PoolConnection` drops, the freed entry must
+// FIFO fairness. When a `PoolConnection` drops, the freed entry must
 // go to the connection that has been queued LONGEST (the front parked waiter),
 // not to a fresh caller that wanders in afterwards.
 //
-// Pre-fix `return_client` pushed the freed entry onto the shared `idle` vec and
-// only *advisory-woke* the front waiter. A fresh caller entering `get_inner`
+// If `return_client` pushes the freed entry onto the shared `idle` vec and
+// only *advisory-wakes* the front waiter, a fresh caller entering `get_inner`
 // between the wake and the woken waiter's re-poll pops the idle entry first -
 // barging ahead of the longer-queued waiter. Under load the parked waiter is
 // repeatedly barged -> starvation.
@@ -1917,9 +1902,9 @@ async fn get_cancellation_during_connect_does_not_leak_permits() {
 //
 // Setup: max_size=1 (a single slot). Hold c1. Spawn task A which parks as the
 // sole waiter. Drop c1 (frees the slot, targeting waiter A). BEFORE yielding to
-// A, a fresh caller C in the main task calls get(). Pre-fix C synchronously
-// pops the idle entry and wins -> order is ['C', 'A']. Post-fix the freed entry
-// went straight into A's slot (not idle), so C finds nothing, parks behind A,
+// A, a fresh caller C in the main task calls get(). If C synchronously
+// pops the idle entry it wins -> order is ['C', 'A']. If the freed entry
+// went straight into A's slot (not idle), C finds nothing, parks behind A,
 // and A acquires first -> order is ['A', 'C'].
 // ---------------------------------------------------------------------------
 
@@ -2020,13 +2005,13 @@ async fn freed_connection_goes_to_front_waiter_not_a_barging_fresh_caller() {
     assert_eq!(pool.pending_count(), 1, "exactly one parked waiter (A)");
     assert_eq!(pool.idle_count(), 0);
 
-    // Free the only slot. This targets the front waiter A. Pre-fix the entry is
-    // pushed to `idle` (and A is advisory-woken); post-fix it is deposited into
+    // Free the only slot. This targets the front waiter A: the freed entry is
+    // deposited into
     // A's slot and A is woken, with nothing left in `idle`.
     drop(c1);
 
     // CRITICAL: before yielding to A, a FRESH caller C (never parked) tries to
-    // acquire. Pre-fix this synchronously pops the idle entry and barges A.
+    // acquire. If it can pop an idle entry it synchronously barges A.
     let c = pool.acquire().await;
     order.borrow_mut().push('C');
     drop(c);
@@ -2036,8 +2021,8 @@ async fn freed_connection_goes_to_front_waiter_not_a_barging_fresh_caller() {
         .await
         .unwrap_or_else(|e| std::panic::resume_unwind(e));
 
-    // The longest-queued waiter (A) must have won the freed connection first.
-    // Pre-fix: ['C', 'A'] (fresh caller barged). Post-fix: ['A', 'C'].
+    // The longest-queued waiter (A) must have won the freed connection first,
+    // so the observed order is ['A', 'C'].
     assert_eq!(
         *order.borrow(),
         vec!['A', 'C'],
@@ -2187,10 +2172,9 @@ async fn handed_off_connection_is_reclaimed_if_waiter_is_cancelled() {
 // sends a new request; an idle listener never reads, so a NOTIFY arriving on
 // the wire sits unread in the kernel buffer forever.
 //
-// Pre-fix: the timeout fires (notification never delivered) -> RED.
-// Post-fix: the multiplexed loop carries a read future even while idle, so the
-// NotificationResponse is read and routed to the async channel promptly -> the
-// receive completes within the timeout -> GREEN.
+// The multiplexed loop must carry a read future even while idle, so the
+// NotificationResponse is read and routed to the async channel promptly, and the
+// receive completes within the timeout.
 // ---------------------------------------------------------------------------
 
 #[compio::test]
@@ -2257,9 +2241,8 @@ async fn notify_delivered_on_idle_listener() {
 // block on a full socket buffer -> permanent deadlock; the copy future never
 // returns and the connection never goes back to the pool.
 //
-// Pre-fix: the whole copy (send + finish) deadlocks -> the timeout fires -> RED.
-// Post-fix: the multiplexed loop reads the ErrorResponse concurrently with the
-// writes, so finish() returns Err(DbError) promptly -> GREEN. We assert it is
+// The multiplexed loop must read the ErrorResponse concurrently with the
+// writes, so finish() returns Err(DbError) promptly. We assert it is
 // an ERROR (not a timeout): correctness is "surface the failure", not "hang".
 // ---------------------------------------------------------------------------
 
@@ -2283,17 +2266,15 @@ async fn copy_in_error_does_not_deadlock() {
 
     // Stream a large text-COPY body that the server rejects. The first row is
     // a PARSE error ("notanint" is not valid for `n int`); the server reports
-    // it with an ErrorResponse. We then keep streaming a large volume of
-    // further rows so the client is still writing long after the server has
-    // produced its error and stopped draining - exactly the condition that
-    // wedges the serialized loop (server's send buffer fills with the
-    // ErrorResponse while the client floods; both block). PG buffers a lot of
-    // COPY input before surfacing the error, so the volume must be large
-    // (~hundreds of KB) to exceed the socket buffers.
+    // it with an ErrorResponse. Further rows keep the client writing long after
+    // the server has produced its error and stopped draining - exactly the
+    // condition that wedges the serialized loop (server's send buffer fills with
+    // the ErrorResponse while the client floods; both block). The volume must be
+    // large enough to exceed the socket buffers.
     //
     // `feed` (not `send`) is used for the bulk rows: `send` force-flushes a
-    // CopyData frame per call, while `feed` lets `CopyInSink` batch into ~4 KB
-    // frames - without it, this is hundreds of thousands of tiny io_uring
+    // CopyData frame per call, while `feed` lets `CopyInSink` batch into larger
+    // frames - without it, this is a huge number of tiny io_uring
     // writes and the test is dominated by syscall latency rather than the
     // deadlock it is meant to probe.
     let copy_fut = async {
@@ -2960,7 +2941,7 @@ async fn binary_copy_round_trips_empty_and_null_fields() {
 
 /// Binary COPY OUT of many rows of DIFFERENT widths, against the real server.
 ///
-/// `BinaryCopyOutStream` parses one tuple per `CopyData` chunk and now REFUSES
+/// `BinaryCopyOutStream` parses one tuple per `CopyData` chunk and REFUSES
 /// a chunk with bytes left over, on the protocol's guarantee that a backend
 /// sends "zero or more CopyData messages (always one per row)" in copy-out
 /// mode. That guarantee is the peer's, so this is the test that says the peer
@@ -3596,32 +3577,32 @@ async fn pipelined_failures_inside_transactions_abort_only_later_requests() {
 // ---------------------------------------------------------------------------
 // 30. concurrent_large_bidirectional_queries_do_not_deadlock (MUX-DEADLOCK-1)
 //
-// Regression for the cap-1-read-channel + blocking-flush deadlock in the
-// multiplexed loop. Many large queries are issued concurrently on ONE
-// `Client`; each sends a ~4 MB bytea param (a large WRITE that fills the
+// The cap-1-read-channel + blocking-flush deadlock in the multiplexed loop.
+// Many large queries are issued concurrently on ONE
+// `Client`; each sends a large bytea param (a large WRITE that fills the
 // kernel send buffer) and selects back a much larger result the server
 // floods concurrently (filling ITS send buffer once the client stalls
 // reading). The result is fanned out over many rows so each individual
-// DataRow frame stays well under the 64 MB MAX_MESSAGE_SIZE cap (a single
-// 64 MB+ field would be rejected as oversize, masking the deadlock behind an
+// DataRow frame stays well under the MAX_MESSAGE_SIZE cap (a single
+// oversize field would be rejected as oversize, masking the deadlock behind an
 // io error; and a single giant frame would not wedge anyway, since the read
 // task drains the socket continuously while assembling one frame).
 //
-// Pre-fix the main loop did `write_half.flush().await?` SEQUENTIALLY without
-// draining the read channel, so this cycle wedged:
+// If the main loop does `write_half.flush().await?` SEQUENTIALLY without
+// draining the read channel, this cycle wedges:
 //   flush-blocked (client send buffer full)
 //     -> server recv buffer full -> server send blocked
 //       -> client not reading -> read task's cap-1 send().await blocked
 //         -> main loop never drains the read channel -> flush never resumes.
-// Sequentially the same queries finish in a few seconds.
+// Sequentially the same queries finish.
 //
-// Post-fix the flush is interleaved with read-channel draining (a cancel-safe
+// The flush must be interleaved with read-channel draining (a cancel-safe
 // select carrying the owned flush future against the read branch), so reads
 // keep the socket draining while the large write completes -> no deadlock.
 //
-// Wrapped in a 20 s timeout so a wedged (pre-fix) loop fails fast as a
-// timeout (RED) instead of hanging the whole suite; post-fix it completes
-// well under the budget with every blob echoed back byte-for-byte (GREEN).
+// Wrapped in a timeout so a wedged loop fails fast as a
+// timeout instead of hanging the whole suite; otherwise it completes
+// well under the budget with every blob echoed back byte-for-byte.
 // ---------------------------------------------------------------------------
 
 #[compio::test]
@@ -3663,7 +3644,7 @@ async fn concurrent_large_bidirectional_queries_do_not_deadlock() {
         }
     });
 
-    // Pre-fix: deadlock -> this times out (RED). Post-fix: completes (GREEN).
+    // A deadlock would time out; completion is the pass.
     let outcome = compio::time::timeout(std::time::Duration::from_secs(20), join_all(futs)).await;
 
     let results = outcome.expect(
@@ -4565,8 +4546,8 @@ const FD_PROBE_ITERATIONS: usize = 20;
 
 /// What a torn-down runtime leaks on its own, once a single in-flight
 /// submission has stopped it being reclaimed: the `io_uring` ring and the
-/// eventfd the driver notifies through. Measured, not assumed - see the arms
-/// below and the identity table in the doc comment.
+/// eventfd the driver notifies through. See the arms below and the identity
+/// table in the doc comment.
 const LEAKED_RUNTIME_FDS: i64 = 2;
 
 #[cfg(not(feature = "suite-over-tls"))]
@@ -4577,17 +4558,15 @@ const ONE_CONNECTION_ABRUPT_FDS: i64 = 2;
 /// The descriptor half of the invariant above, which `crate::release` does NOT
 /// fix and is not trying to.
 ///
-/// Measured 2026-08-20 against the same binary with `Socket::release_handle`
-/// forced to `None`: the backend series went `[1,2,3,4,5,6]` and the fd series
-/// stayed `[10,16,22,28,34,40]` - byte for byte what it is with the release in
-/// place. The release ends the SESSION, not the descriptor.
+/// The release ends the SESSION, not the descriptor: the backend series falls
+/// to zero while the fd series stays where it was.
 ///
 /// # What actually leaks, and why it is not one descriptor
 ///
-/// Re-measured 2026-08-20 by reading `/proc/self/fd` targets rather than
-/// counting entries, over 24 create/drop cycles in a process doing nothing
-/// else. Over plaintext, one detached connection per runtime leaks exactly
-/// three, and they are not three sockets:
+/// Reading `/proc/self/fd` targets rather than counting entries, over many
+/// create/drop cycles in a process doing nothing else: over plaintext, one
+/// detached connection per runtime leaks exactly three, and they are not three
+/// sockets:
 ///
 /// ```text
 /// anon_inode:[io_uring]   the ring
@@ -4597,16 +4576,14 @@ const ONE_CONNECTION_ABRUPT_FDS: i64 = 2;
 ///
 /// So the unit that leaks is THE WHOLE RUNTIME plus one descriptor per
 /// connection that still had a submission in flight. Two connections per
-/// runtime leak four, not six - measured `[4,4,4,...]` over 24 cycles - which
-/// is why the arms below assert `connections + 2` and not a flat budget. The
-/// prior version of this asserted `<= 3`, a number that is only the truth at
-/// one connection per runtime; a two-connection test would have tripped it,
-/// and the message told the reader to raise the bound.
+/// runtime leak four, not six, which is why the arms below assert
+/// `connections + 2` and not a flat budget: a flat budget is only the truth at
+/// one connection per runtime, and a two-connection test would trip it.
 ///
 /// TLS has a different exact one-connection shape. After its synchronous
-/// `close_notify` plus socket shutdown, the measured remainder is the eventfd
-/// and socket, `[2,2,2,...]`, with no ring descriptor. Two TLS connections
-/// still measure four, and the drained arm still measures zero. The
+/// `close_notify` plus socket shutdown, the remainder is the eventfd
+/// and socket, with no ring descriptor. Two TLS connections
+/// still leak four, and the drained arm still leaks zero. The
 /// mode-specific assertion below remains exact; it is not an upper bound that
 /// can hide a new descriptor.
 ///
@@ -4617,10 +4594,8 @@ const ONE_CONNECTION_ABRUPT_FDS: i64 = 2;
 /// `Rc::strong_count > 1` and take its early return without calling
 /// `scheduler.clear()`. What is left is an Rc cycle - `RuntimeInner` ->
 /// `Scheduler` -> task -> `Submit` -> `RuntimeInner` - so the `Proactor`, and
-/// with it the ring and the eventfd, is never dropped. Confirmed by patching
-/// that drop to print the count: 2 on the leaking arm, 1 on a detached task
-/// that is pending on something other than a submission, which leaks nothing.
-/// That early return is not a bug to delete, either: forcing the clear made
+/// with it the ring and the eventfd, is never dropped.
+/// That early return is not a bug to delete, either: forcing the clear makes
 /// live queries fail, because `Runtime::drop` also runs for the transient
 /// handles `Submit` clones mid-run.
 ///
@@ -4628,20 +4603,16 @@ const ONE_CONNECTION_ABRUPT_FDS: i64 = 2;
 ///
 /// Any teardown that leaves no submission in flight leaks zero. Awaiting the
 /// driver task, cancelling it and letting the runtime reap the cancellation,
-/// and [`compio_postgres::drain_connections`] all measured `[0,0,0,...]` over
-/// 24 cycles. The drained arm below is the one this crate ships an API for, so
-/// it is the one that is guarded: without it, nothing here would notice
-/// `drain_connections` silently ceasing to drain.
+/// and [`compio_postgres::drain_connections`] all leak zero. The drained arm
+/// below is the one this crate ships an API for, so it is the one that is
+/// guarded: without it, nothing here would notice `drain_connections` silently
+/// ceasing to drain.
 ///
 /// # Why the cost is worth a guard at all
 ///
-/// It multiplies across a consolidated test binary and never comes back. This
-/// crate's own `integration` target, 98 tests in one process at
-/// `--test-threads=1`, was watched from outside on 2026-08-20: the count went
-/// `7 -> 301`, ending on 198 `anon_inode` (99 runtimes x 2) and 109 sockets.
-/// `crates/zeroship-auth/tests/main.rs` is 257 tests in one process. What the cost
-/// surfaces as, when it does, is EMFILE against a 1024 soft `RLIMIT_NOFILE` in
-/// a test unrelated to whatever raised it.
+/// It multiplies across a consolidated test binary and never comes back. What
+/// the cost surfaces as, when it does, is EMFILE against the soft
+/// `RLIMIT_NOFILE` in a test unrelated to whatever raised it.
 ///
 /// # What this does NOT catch
 ///
@@ -4656,27 +4627,16 @@ const ONE_CONNECTION_ABRUPT_FDS: i64 = 2;
 /// `/proc/self/fd` is per-PROCESS, and libtest runs this file's tests on
 /// several threads of one process by default. Sibling tests opening and
 /// closing their own connections move the count underneath the loop, so the
-/// per-drop delta measures them too. Measured 2026-08-20, same binary, same
-/// database, same box, `--test-threads` the only variable:
-///
-///   default:            fds [78,122,165,170,171,176]  deltas [44,43,5,1,5]
-///   --test-threads=1:   fds [10, 16, 22, 28, 34, 40]  deltas [6,6,6,6,6]
-///
-/// (That serial series reads six per iteration for a three-per-runtime cost
-/// because the test above tears down TWO runtimes per iteration:
-/// `tagged_backends` builds one of its own to ask the server its question.)
-///
-/// An earlier version of this asserted the budget inline and passed only
-/// because it had been run serially - and it did not merely mis-measure, it
-/// PANICKED with "attempt to subtract with overflow" when a sibling closed
-/// more descriptors than the runtime leaked and the count went DOWN.
+/// per-drop delta measures them too, and a sibling closing more descriptors
+/// than the runtime leaked can drive the count DOWN and underflow an inline
+/// budget assertion.
 ///
 /// Tagging the descriptors the way the backend count is tagged does not rescue
 /// it: the siblings connect to the same database on the same port, so nothing
 /// observable on the socket separates their descriptors from this test's.
 /// Machine load is not the contaminant either - other PROCESSES cannot appear
-/// in `/proc/self/fd` - so the fix is not to tolerate the churn but to remove
-/// it, by doing the measuring in a child process that runs this test and
+/// in `/proc/self/fd` - so the remedy is not to tolerate the churn but to
+/// remove it, by doing the measuring in a child process that runs this test and
 /// nothing else. That is isolated by construction rather than by a convention
 /// the next runner has to know.
 #[test]
@@ -4708,8 +4668,8 @@ fn a_torn_down_runtime_leaks_two_descriptors_plus_one_per_live_connection() {
     // One connection per runtime, undrained. Plaintext retains the ring,
     // eventfd, and socket; TLS retains only the eventfd and socket.
     assert_leak_per_runtime(&stdout, "one-connection", ONE_CONNECTION_ABRUPT_FDS);
-    // Two, undrained. This is the arm the old flat budget of three would have
-    // failed, and the reason the expectation is a law rather than a number.
+    // Two, undrained. The expectation is a law rather than a flat number, so
+    // this arm scales with the connection count.
     assert_leak_per_runtime(&stdout, "two-connections", 2 + LEAKED_RUNTIME_FDS);
     // Drained before the runtime goes. Nothing is in flight, so nothing is
     // stranded - including the runtime itself.
@@ -4769,8 +4729,7 @@ fn assert_leak_per_runtime(stdout: &str, arm: &str, expected: i64) {
 /// connection abandoned by an abrupt teardown is never dropped, so its guard
 /// never decrements. Run the drained arm on a thread the abrupt arms have
 /// already used and `drain_connections` waits out its whole timeout on
-/// connections that no longer exist - which is exactly how this was first
-/// written, and it failed with "the drivers did not finish". Threads run one
+/// connections that no longer exist. Threads run one
 /// at a time here; `/proc/self/fd` is per-process, so the counts still compose.
 fn measure_and_report_fd_series() {
     let url = test_url();
@@ -4880,11 +4839,11 @@ fn a_connection_is_visible_to_the_server_while_its_runtime_runs() {
 /// A server-sent refusal must reach the reader with the SQLSTATE it carried.
 ///
 /// `compio_postgres::Error`'s own `Display` renders EVERY `Kind::Db` as the
-/// literal string `"db error"`, and `postgres_unreachable` used to format only
-/// that. Measured 2026-08-20 with `crate::release` disabled against a live,
-/// healthy server at its `max_connections` ceiling: nine tests in this file
-/// failed reporting `error: db error` and told the reader to provision a
-/// database that was already up. `53300` never appeared in the output.
+/// literal string `"db error"`, and `postgres_unreachable` formatting only
+/// that hides the SQLSTATE: against a live, healthy server at its
+/// `max_connections` ceiling, tests report `error: db error` and tell the
+/// reader to provision a database that was already up, with `53300` never
+/// appearing in the output.
 ///
 /// The error here is a real one off the wire rather than a synthesised chain,
 /// because the property under test is that the `DbError` at the bottom of a
@@ -4899,7 +4858,7 @@ async fn a_server_refusal_reaches_the_reader_with_its_sqlstate() {
         .await
         .expect_err("querying a missing table must fail");
 
-    // What the old formatting produced, and all it produced.
+    // `Display` cannot carry the detail; the chain below must.
     assert_eq!(err.to_string(), "db error");
 
     let chain = common::error_chain(&err);
@@ -5035,36 +4994,35 @@ fn a_template_clone_is_not_blocked_by_the_previous_runtime() {
 /// stream, because that cap bounds ONE message and not the run of messages a
 /// query answers with.
 ///
-/// `read_backend` used to refill the socket whenever a partial message sat at
-/// the tail of the read buffer, instead of returning the complete prefix the
-/// way tokio-postgres's `decode` does. A dense run of small `DataRow`s
-/// therefore accumulated untouched until `BufStream::fill` refused a request
-/// above `MAX_MESSAGE_SIZE`, and the query died with `message too large`
-/// though its biggest single message was 16 KB. Measured before the fix: the
-/// buffer reached exactly 67108864 bytes and the next refill was refused.
+/// `read_backend` must return the complete prefix at the tail rather than
+/// refilling the socket whenever a partial message sits there, the way
+/// tokio-postgres's `decode` does. Otherwise a dense run of small `DataRow`s
+/// accumulates untouched until `BufStream::fill` refuses a request
+/// above `MAX_MESSAGE_SIZE`, and the query dies with `message too large`
+/// though its biggest single message is far under the cap.
 ///
-/// THE ROW WIDTH IS LOAD-BEARING, NOT A ROUND NUMBER. 16373 payload bytes
-/// makes each `DataRow` exactly 16384 bytes on the wire (1 tag + 4 length + 2
-/// field count + 4 field length + payload), which is `READ_CHUNK`. Rows and
+/// THE ROW WIDTH IS LOAD-BEARING, NOT A ROUND NUMBER. The payload width makes
+/// each `DataRow` exactly `READ_CHUNK` bytes on the wire (1 tag + 4 length + 2
+/// field count + 4 field length + payload). Rows and
 /// reads then advance in lockstep, so the leftover at the tail does not land in
-/// the under-5-bytes window that let the old code drain by luck. At an
-/// unaligned width it does: 4000-byte payloads drained every ~800 chunks and an
-/// earlier draft of this test PASSED against the bug, peaking at 13 MB. Change
+/// the under-5-bytes window that would let a broken decoder drain by luck. At
+/// an unaligned width it does: smaller unaligned payloads drained every so
+/// often and a broken decoder passed against the bug. Change
 /// the width and this stops exercising anything.
 ///
 /// THIS IS NOT A SCHEDULE-INDEPENDENT GUARD, and must not be read as one.
 /// `READ_CHUNK` is a MAXIMUM: `AsyncRead::read` may return any positive count,
 /// so a short read can still walk the tail into the escape window and let even
-/// the old decoder drain. The guarantee lives in
+/// a broken decoder drain. The guarantee lives in
 /// `codec::tests::a_partial_tail_does_not_hold_back_the_complete_messages_before_it`,
 /// which scripts the chunks and so removes the transport from the experiment.
 /// What this test adds is the end-to-end fact that a real PostgreSQL streaming
 /// a real result set past the cap is served.
 ///
-/// 8000 rows of 16384 bytes is 131072000 bytes, about 125 MiB against a 64 MiB
-/// cap, and PostgreSQL sends it with no async message to break the run.
-/// `query` materialises every row, so this is a framing test that costs real
-/// memory rather than a bounded-memory streaming test.
+/// The result set is many multiples of the cap, and PostgreSQL sends it with
+/// no async message to break the run. `query` materialises every row, so this
+/// is a framing test that costs real memory rather than a bounded-memory
+/// streaming test.
 #[compio::test]
 async fn a_result_set_larger_than_the_single_frame_cap_still_streams() {
     let url = require_pg().await;
@@ -5090,12 +5048,10 @@ async fn a_result_set_larger_than_the_single_frame_cap_still_streams() {
 /// connections than it.
 ///
 /// `Pool::connect(url, n)` sets `max_size` and leaves every other knob at its
-/// default, including `min_idle: 2`. Warmup opened `min_idle.max(1)`
-/// connections with no reference to `max_size`, so `Pool::connect(url, 1)`
-/// came back holding two and handed out both. Measured before the fix:
-/// `total=2 idle=2`, and a second checkout succeeded while the first was
-/// still held. A per-tenant connection budget that the pool silently doubles
-/// is not a budget.
+/// default, including `min_idle: 2`. Warmup opening `min_idle.max(1)`
+/// connections with no reference to `max_size` means `Pool::connect(url, 1)`
+/// comes back holding two and hands out both. A per-tenant connection budget
+/// that the pool silently doubles is not a budget.
 ///
 /// The convenience constructor is the only one that can produce this, because
 /// it is the only one that lets a caller set `max_size` without also seeing
@@ -5972,13 +5928,11 @@ async fn post_bind_error_keeps_copy_out_statement_cached() {
 /// The COPY IN twin of the test above: a failure arriving AFTER `BindComplete`
 /// is propagated, and the cached COPY wrapper survives it.
 ///
-/// Measured 2026-09-03, and the three facts are worth separating because they
-/// are NOT the same claim.
+/// The three facts are worth separating because they are NOT the same claim.
 ///
-/// 1. Both of `copy_in`'s error returns were unbound: replacing either left the
-///    lib (771) and suite (797) suites green.
-/// 2. This test binds the FIRST of them - the post-Bind propagation. Replacing
-///    that error fails this test and nothing else (797 others green).
+/// 1. `copy_in`'s error returns must be bound: replacing either must fail a
+///    test, not leave the lib and suite suites green.
+/// 2. This test binds the FIRST of them - the post-Bind propagation.
 /// 3. It does NOT bind the `!before_bind_complete` CONDITION, and no fixture
 ///    shaped like this one can. Disabling the condition leaves the whole suite
 ///    green, because control then falls through to
@@ -6604,12 +6558,12 @@ async fn statement_cache_knows_an_existing_transaction_is_aborted() {
 /// after_0a000`, with ONE variable changed: an unrelated request is in flight
 /// on the connection when the stale execution begins.
 ///
-/// The retry used to be gated on `transaction_status() == Some(Idle)`, read
-/// BEFORE the operation was sent. That accessor answers `None` -- "ask again
+/// The retry must not be gated on `transaction_status() == Some(Idle)`, read
+/// BEFORE the operation is sent. That accessor answers `None` -- "ask again
 /// after the next round trip" -- whenever ANY transaction-capable request has
 /// not reached its `ReadyForQuery`, so on a pipelined or concurrently used
-/// connection the gate was never satisfied and the recovery was inert. A
-/// `0A000` the sequential test proves is absorbed reached the caller instead,
+/// connection the gate is never satisfied and the recovery is inert. A
+/// `0A000` the sequential test proves is absorbed would reach the caller instead,
 /// and the two runs are indistinguishable from the outside: nothing logs, the
 /// cache still self-heals on the NEXT call, and only this one query fails.
 ///
@@ -6693,8 +6647,7 @@ async fn statement_cache_retries_stale_result_shape_while_a_peer_request_is_in_f
 ///
 /// This arm is LOAD-MEASURED, not scripted: it reports the rounds it ruled on
 /// and the peer queries that were in flight across them, and requires every
-/// round to have recovered. Measured on both instruments: 40/40 recovered with
-/// the status byte, 0/40 with the shared accessor, three consecutive runs each.
+/// round to have recovered.
 #[compio::test]
 async fn statement_cache_retries_stale_result_shape_under_sustained_concurrency() {
     const ROUNDS: usize = 20;
@@ -8022,11 +7975,8 @@ async fn abandoned_copy_in_startup_rejection_does_not_poison_the_next_operation(
 /// than fall through to `unexpected_message`, and `execute` / `execute_typed` /
 /// `execute_text_params` must report zero rows rather than an error.
 ///
-/// Measured with `cargo llvm-cov` on 2026-08-23: `query.rs` lines 305-307, 376,
-/// 381 and 464 were unexecuted by the WHOLE suite before this existed, so the
-/// claim "those arms are correct" rested on reading alone. It also pins that
-/// the session is still usable afterwards, which is the part that breaks if one
-/// of them ever stops consuming through its `ReadyForQuery`.
+/// It pins that the session is still usable afterwards, which is the part that
+/// breaks if one of them ever stops consuming through its `ReadyForQuery`.
 #[compio::test]
 async fn an_empty_query_is_accepted_by_every_extended_protocol_entry_point() {
     compio::time::timeout(PIPELINED_FAILURE_WATCHDOG, async {

@@ -368,7 +368,7 @@ where
 /// We can't reuse [`crate::connect_raw::connect_raw`] verbatim because
 /// it constructs a `Connection` (which immediately wants to be
 /// `run()`d) and consumes the stream. Re-implementing the handshake
-/// would mean duplicating ~250 LOC for a single transition; instead
+/// would mean duplicating the whole handshake for a single transition; instead
 /// we reuse the handshake state machine via a lightweight wrapper.
 ///
 /// This is one of the deliberately-not-reused paths flagged in the
@@ -524,15 +524,13 @@ where
             // A timeout cancels a possibly partial frame read. Retrying on the
             // same replication session would parse from an unknown boundary.
             //
-            // UNBINDABLE BY PEER OBSERVATION, unlike the other five
-            // `release.shutdown()` sites in this file, which each fail exactly
+            // UNBINDABLE BY PEER OBSERVATION, unlike the other `release.shutdown()`
+            // sites in this file, which each fail exactly
             // one test when removed. `ConnectionDropRelease::drop` shuts the
             // handle down unconditionally, and on THIS path there is no window
             // where the explicit call is the only thing that could have closed
             // the peer: the sibling arms shut down and then keep the connection
             // alive, so their peer observation lands strictly before `Drop`.
-            // Measured 2026-08-31 - a scripted read-timeout test stayed green
-            // with this line removed, so it was rejected rather than merged.
             self.in_flight.poison();
             if let Some(release) = &self.release {
                 release.shutdown();
@@ -559,19 +557,19 @@ where
         // parser for these - they're regular tags.
         //
         // The outcome is decided at `ReadyForQuery`, NOT at the frame that
-        // produced it. Two reasons, and each was its own defect:
+        // produced it. Two reasons:
         //
         // * `ReadyForQuery` closes a simple-query response. Returning the
-        //   moment an `ErrorResponse` arrived left it in the read buffer, and
-        //   the NEXT command on this connection read that stale frame as its
-        //   own reply - a second `IDENTIFY_SYSTEM` broke out of this loop
-        //   before the server had answered it at all.
+        //   moment an `ErrorResponse` arrived leaves it in the read buffer, and
+        //   the NEXT command on this connection reads that stale frame as its
+        //   own reply - a second `IDENTIFY_SYSTEM` can break out of this loop
+        //   before the server has answered it at all.
         // * There is no seeded "empty identity" to fall out of the loop with.
-        //   This used to start from `systemid = String::new()`, `timeline = 0`
-        //   and `xlogpos = String::new()` and return them when no `DataRow`
-        //   arrived - exactly the three sentinels `parse_identify_system_row`
+        //   Seeding `systemid = String::new()`, `timeline = 0`
+        //   and `xlogpos = String::new()` and returning them when no `DataRow`
+        //   arrives is exactly the three sentinels `parse_identify_system_row`
         //   refuses inside a row, reported as `Ok`. Combined with the stale
-        //   frame above, a retry after a refused `IDENTIFY_SYSTEM` returned a
+        //   frame above, a retry after a refused `IDENTIFY_SYSTEM` returns a
         //   successful empty identity for a command nothing had answered.
         //
         // The trade this makes is explicit: a peer that sends an
@@ -680,9 +678,9 @@ where
         // than 32 bits -- `0/100000000` reaches the slot lookup rather than
         // failing on the LSN -- while `'0/100000000'::pg_lsn` is refused as
         // invalid input. So the server can accept a position this driver's
-        // u32-per-half representation cannot hold. This used to be
-        // `parse_lsn(..).unwrap_or(0)` at the point the stream was built, and
-        // 0 is not a neutral default for an LSN: it is the start of WAL. The
+        // u32-per-half representation cannot hold. Falling back to
+        // `parse_lsn(..).unwrap_or(0)` at the point the stream was built is not
+        // safe: 0 is not a neutral default for an LSN, it is the start of WAL. The
         // server would stream from wherever it read the oversized value while
         // the tracker reported 0, so every standby status update acknowledged
         // a position the stream had never reached, silently.
@@ -860,28 +858,27 @@ pub struct StartReplicationOptions<'a> {
     ///
     /// A protocol version is not the same thing as a SERVER version, and the
     /// server is the one that refuses. Version 4 needs PostgreSQL 16 or newer:
-    /// measured 2026-08-25, `streaming 'parallel'` on 15.19 answers
+    /// `streaming 'parallel'` on an older server answers
     /// `streaming requires a Boolean value` - its pgoutput takes only a
-    /// boolean there - while 16.14 understands the word and objects instead
-    /// that the proto version is too low. Nothing here downgrades an option
-    /// the server cannot take; the request goes as written and the server's
-    /// refusal reaches the caller unchanged.
+    /// boolean there - while a newer server understands the word and objects
+    /// instead that the proto version is too low. Nothing here downgrades an
+    /// option the server cannot take; the request goes as written and the
+    /// server's refusal reaches the caller unchanged.
     pub proto_version: u32,
     /// The publications to stream, one name per element, unquoted and
     /// unescaped as the user wrote them. This driver quotes each one.
     ///
     /// A LIST, not a pre-joined string, because a comma is a legal
     /// character in a publication name and a joined string cannot say
-    /// whether one separates two names or belongs to one. It used to be
-    /// `&str`, and a publication named `eu,us` was streamed as the two
-    /// publications `eu` and `us` - neither of which existed.
+    /// whether one separates two names or belongs to one. As a `&str`, a
+    /// publication named `eu,us` is streamed as the two
+    /// publications `eu` and `us` - neither of which exists.
     pub publication_names: &'a [&'a str],
     /// Send column values in each type's BINARY format instead of text.
     ///
-    /// Values then arrive as [`pgoutput::TupleColumn::Binary`]. Until this
-    /// option existed that variant was unreachable: the decoder had an arm
-    /// for the `b` tuple kind, and no request this driver could make would
-    /// ever make a server send one.
+    /// Values then arrive as [`pgoutput::TupleColumn::Binary`]. The `b` tuple
+    /// kind has a decoder arm, and this option is the only request this driver
+    /// can make that lets a server send one.
     pub binary: bool,
     /// Deliver `pg_logical_emit_message` payloads as
     /// [`pgoutput::PgOutputMessage::Message`]. Off, the server omits them
@@ -894,10 +891,9 @@ pub struct StartReplicationOptions<'a> {
     ///
     /// This REPLACES `Begin`/`Commit` with
     /// [`pgoutput::PgOutputMessage::StreamStart`] / `StreamStop` /
-    /// `StreamCommit`, measured against 16.14: the same 4000-row transaction
-    /// decodes as `B:1 C:1 I:4000 R:1` without it and `S:21 E:21 c:1 I:4000
-    /// R:1` with it. A consumer that only handles `Commit` therefore sees a
-    /// transaction that never ends.
+    /// `StreamCommit`: the same transaction decodes as `B:1 C:1 I:n R:1` without
+    /// it and `S: E: c: I:n R:1` with it. A consumer that only handles `Commit`
+    /// therefore sees a transaction that never ends.
     ///
     /// Inside a chunk, transactional messages such as `Insert` carry
     /// `xid: Some(...)`. That value can be a SAVEPOINT's subtransaction xid,
@@ -968,7 +964,7 @@ impl Streaming {
 /// echoed straight back to it.
 ///
 /// REQUIRES PostgreSQL 16 OR NEWER. The `origin` pgoutput option does not
-/// exist before it: measured 2026-08-25, 15.19 answers `unrecognized pgoutput
+/// exist before it: an older server answers `unrecognized pgoutput
 /// option: origin` and the stream never starts. Setting this against an older
 /// server is refused by the server, not quietly ignored here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1343,8 +1339,8 @@ where
                     // PostgreSQL's sending direction. Acknowledge it, then
                     // consume the simple-query completion before reporting a
                     // clean end. Executor cleanup can still fail in that
-                    // interval, and returning here used to discard that
-                    // ErrorResponse as well as leave the server waiting for
+                    // interval; returning here without consuming it discards
+                    // that ErrorResponse and leaves the server waiting for
                     // our half-close.
                     let result = self.finish_copy_both().await;
                     self.in_flight.poison();
@@ -1378,7 +1374,7 @@ where
                     // was never validated against a shape we understand - so
                     // the body cannot be skipped on trust either. Every arm
                     // above consumes `header.body_len()` because it knows what
-                    // the frame is; here we do not.
+                    // the frame is; an unknown tag does not.
                     //
                     // Without this the next call reads its length field out of
                     // this frame's unconsumed body, and a framer reading
@@ -1632,9 +1628,8 @@ where
     loop {
         // Validate the DECLARED length before the parser is allowed to act on
         // it. When the body is short, `Message::parse` does
-        // `buf.reserve(total_len - buf.len())` before returning `None`
-        // (postgres-protocol 0.6.12, backend.rs:133), so `D ff ff ff ff` asks
-        // the allocator for about 4 GiB from a five-byte frame.
+        // `buf.reserve(total_len - buf.len())` before returning `None`, so a
+        // five-byte frame can ask the allocator for the full declared length.
         //
         // `fill` below does NOT bound that, which is the part worth stating
         // because its guard looks like it would: `fill` checks the bytes the
@@ -1769,8 +1764,8 @@ fn error_from_error_response_frame(header: &WireHeader, payload: &[u8]) -> Error
 /// Runs `postgres_protocol`'s framer over `body` so the SQLSTATE,
 /// severity, and message survive as a [`crate::error::DbError`] - the
 /// same shape the `IDENTIFY_SYSTEM` loop produces via
-/// `Message::ErrorResponse(body) => Error::db(body)`. A byte count alone
-/// (the former behaviour) made `START_REPLICATION` failures
+/// `Message::ErrorResponse(body) => Error::db(body)`. Reporting a byte count
+/// alone makes `START_REPLICATION` failures
 /// undebuggable. If the framer can't parse the bytes, fall back to a
 /// parse error rather than silently dropping the failure.
 fn error_from_error_response_body(mut body: BytesMut) -> Error {
@@ -1785,9 +1780,7 @@ fn error_from_error_response_body(mut body: BytesMut) -> Error {
         // and `Err` only when `len < 4`, and its `ERROR_RESPONSE_TAG` arm is
         // lazy (`read_all`, no field validation), so every payload parses.
         //
-        // The text used to name START_REPLICATION, which was wrong for the
-        // mid-stream caller (`next_inner`) even if it could fire. Naming no
-        // phase is the honest version: nothing here knows which one it is.
+        // Naming no phase is deliberate: nothing here knows which caller it is.
         _ => Error::parse(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "malformed ErrorResponse",
@@ -1805,11 +1798,11 @@ fn error_from_error_response_body(mut body: BytesMut) -> Error {
 /// a [`DataRowBody`] rather than a byte slice. `Message::parse` consumes the
 /// `DataRow`'s `u16` count into `DataRowBody::len` and keeps only the
 /// length-prefixed fields in `storage` - and `storage` is exactly what
-/// `buffer()` returns. This function used to take `row.buffer()` and read a
-/// `u16` count off the front of it, which landed on the top two bytes of the
+/// `buffer()` returns. Reading a
+/// `u16` count off the front of it lands on the top two bytes of the
 /// FIRST FIELD'S `i32` length. Any length below 65536 encodes as
-/// `00 00 hi lo`, so the count read as zero for every real server: the field
-/// loop never ran and `identify_system` returned an empty systemid, a zero
+/// `00 00 hi lo`, so the count reads as zero for every real server: the field
+/// loop never runs and `identify_system` returns an empty systemid, a zero
 /// timeline and an empty xlogpos while reporting success.
 ///
 /// [`DataRowBody::ranges`] is the accessor for this, and it carries the count
@@ -1834,9 +1827,9 @@ fn parse_identify_system_row(row: &DataRowBody) -> Result<IdentifySystem, Error>
         }
     }
 
-    // Refused rather than defaulted. Every one of these used to fall back to a
+    // Refused rather than defaulted. Falling back to a
     // plausible-looking value -- `""` for the two strings, `0` for the
-    // timeline -- and none of those is neutral. `systemid` is the CLUSTER
+    // timeline -- is not neutral. `systemid` is the CLUSTER
     // identity, which callers compare to notice they have been failed over
     // onto a different cluster; two empty strings compare EQUAL, so the check
     // passes silently in exactly the case it exists to catch. PostgreSQL
@@ -2060,8 +2053,8 @@ pub mod pgoutput {
         },
         /// `S` - a chunk of a not-yet-committed transaction begins.
         ///
-        /// Arrives only under [`super::Streaming`]. Layout measured on 16.14:
-        /// `53 000a8649 01` - tag, xid, then the first-segment flag, which is
+        /// Arrives only under [`super::Streaming`]. Layout: `53 <xid> <flag>` -
+        /// tag, xid, then the first-segment flag, which is
         /// `01` on the first chunk of a transaction and `00` on every later
         /// one.
         StreamStart {
@@ -2095,9 +2088,9 @@ pub mod pgoutput {
         /// aborted. Everything already delivered for `subxid` must be
         /// discarded.
         ///
-        /// Measured 9 bytes on 16.14 (`41 000a864b 000a864b`) with streaming
-        /// `on`. Parallel streaming under protocol 4 appends the abort LSN and
-        /// timestamp, making the frame 25 bytes.
+        /// With streaming `on` the frame is `41 <xid> <subxid>`. Parallel
+        /// streaming under protocol 4 appends the abort LSN and
+        /// timestamp to the frame.
         StreamAbort {
             xid: u32,
             /// The subtransaction that aborted. Equals `xid` when the whole
@@ -2193,9 +2186,8 @@ pub mod pgoutput {
         ///
         /// Sent only when the STREAM was started with
         /// [`super::StartReplicationOptions::binary`]. It is not a property
-        /// of the publication - this doc said "when the publication was
-        /// created with the `binary` option" until 2026-08-24, and no such
-        /// publication option exists; `CREATE PUBLICATION` would reject it.
+        /// of the publication - no such publication option exists, and
+        /// `CREATE PUBLICATION` would reject it.
         /// The option belongs to pgoutput, which is why it travels on
         /// `START_REPLICATION`.
         Binary(Bytes),
@@ -2383,13 +2375,13 @@ pub mod pgoutput {
     /// The count is peer-chosen and the byte budget is not, so the budget is
     /// the sound bound: it can never refuse valid input, because an item that
     /// is really there has already paid its minimum. Reserving the raw count
-    /// lets an eight-byte frame claiming 65535 columns allocate megabytes, a
-    /// ~300000x amplification repeatable per frame.
+    /// lets a tiny frame claiming a large column count allocate far more than
+    /// the frame could hold, a repeatable amplification per frame.
     ///
     /// NAMED so it can be asserted. The decode-level tests cannot see it - a
     /// malformed frame errors identically whether the capacity came from the
     /// frame or from the wire count - and `VmPeak`, the only memory instrument
-    /// available here, does not resolve megabytes. Extracting the expression
+    /// available here, cannot resolve the difference. Extracting the expression
     /// is what turns a documented "no assertion here could" into a bound one.
     pub(crate) fn reservation(
         claimed: usize,
@@ -2404,26 +2396,13 @@ pub mod pgoutput {
         // claims. Every column costs at least its one format byte, so the
         // remaining length is a sound cap that can never refuse valid input -
         // the same shape as the `nrelations.min(cur.len() / 4)` clamp on
-        // Truncate below. Unclamped, an eight-byte Insert claiming 65535
-        // columns reserved about 2.6 MB before the first column byte was even
-        // read, which is a ~300000x amplification a peer can repeat per frame.
+        // Truncate below. Unclamped, a tiny Insert claiming a large
+        // column count reserves far more memory than the frame could hold, a
+        // repeatable amplification a peer can drive per frame.
         //
-        // THIS IS NOW BOUND, by `a_reservation_is_bounded_by_the_bytes_left_not_
-        // the_claimed_count`. It was not until 2026-09-02, and the reasoning that
-        // kept it unbound is worth keeping because it was correct as far as it
-        // went:
-        // A `u16` count caps the over-reservation at ~2.6 MB where Truncate's
-        // `u32` reaches ~17 GB, and 2.6 MB is below what the only instrument
-        // available here can see: `tests/suite/pgoutput_allocation.rs` reads
-        // `VmPeak`, which its own header says "distinguishes gigabytes from
-        // nothing", and a counting `#[global_allocator]` is ruled out because
-        // the workspace sets `unsafe_code = "deny"`. A VmPeak assertion written
-        // for these two sites PASSES with the clamps deleted - checked
-        // 2026-08-26 - so shipping one would have claimed cover it does not
-        // give. What that argument missed is that the clamp does not have to be
-        // observed through memory at all: naming the expression makes it
-        // assertable directly. Deleting the clamp now fails one test and leaves
-        // the other 71 in this module green.
+        // Bound by `a_reservation_is_bounded_by_the_bytes_left_not_
+        // the_claimed_count`, which names the expression and asserts it
+        // directly rather than through any memory instrument.
         let mut columns = Vec::with_capacity(reservation(n, buf.len(), 1));
         for _ in 0..n {
             let fmt = read_u8(buf)?;
@@ -2557,9 +2536,7 @@ pub mod pgoutput {
         // Inside a chunk, every transactional message carries its own xid.
         // This is NOT necessarily the top-level xid in StreamStart: changes
         // made under a SAVEPOINT carry their subtransaction xid, which a later
-        // StreamAbort can name independently. Measured on 16.14, one streamed
-        // transaction had 21 StreamStarts carrying 000ab400 while its 4000
-        // Inserts carried both 000ab400 and 000ab401. Preserve that identity
+        // StreamAbort can name independently. Preserve that identity
         // around the decoded payload instead of comparing it to the chunk's
         // top-level xid or silently throwing it away.
         let carried_xid = if stream_xid.is_some()
@@ -3215,8 +3192,8 @@ mod tests {
     ///
     /// `/tmp` literally, not `std::env::temp_dir()`: Linux caps a
     /// `sockaddr_un` path at 108 bytes including the `.s.PGSQL.<port>` suffix,
-    /// and this repo's agent scratchpad root alone is 79 characters, which
-    /// overruns it and fails `bind` with ENAMETOOLONG on a healthy machine.
+    /// and this repo's agent scratchpad root is already long enough to
+    /// overrun it and fail `bind` with ENAMETOOLONG on a healthy machine.
     #[cfg(unix)]
     struct UnixProbe {
         dir: std::path::PathBuf,
@@ -3261,13 +3238,14 @@ mod tests {
     ///
     /// libpq: "sslmode is ignored for Unix domain socket communication." A
     /// local socket has no network to eavesdrop on and no host name to put in
-    /// a certificate. `connect_replication_addr` chose its transport from the
-    /// MODE alone, so `host=/path sslmode=require` sent an `SSLRequest` down a
-    /// Unix socket -- a configuration that connects fine as an ordinary query.
+    /// a certificate. Picking the transport from the
+    /// MODE alone sends an `SSLRequest` down a
+    /// Unix socket for `host=/path sslmode=require` -- a configuration that
+    /// connects fine as an ordinary query.
     ///
     /// Asserted on the protocol code actually written to the socket, because
-    /// that is the thing that differs; a test that only asserted "did not
-    /// succeed" would pass on both sides of the fix.
+    /// that is the thing that differs; asserting only "did not
+    /// succeed" passes either way.
     #[cfg(unix)]
     #[compio::test]
     async fn unix_socket_replication_ignores_sslmode() {
@@ -3299,13 +3277,13 @@ mod tests {
             STARTUP_V3_2_CODE,
             "expected a plaintext StartupMessage over the unix socket, got {}",
             match code {
-                // What this test sees pre-fix, because `NoTls` cannot build the
+                // `NoTls` cannot build the
                 // TLS transport that `sslmode=require` selected, so the attempt
                 // dies before a byte is written.
                 NOTHING_WRITTEN =>
                     "nothing: sslmode selected a transport this \
                                     connector cannot build over a local socket",
-                // What a real TLS connector would send pre-fix.
+                // A real TLS connector would send this.
                 SSL_REQUEST_CODE => "an SSLRequest: sslmode was applied to a local socket",
                 _ => "an unrecognised opening message",
             }
@@ -3592,10 +3570,10 @@ mod tests {
     }
 
     /// A systemid whose length happens to start with zero bytes is the exact
-    /// shape that made the old parser return nothing.
+    /// shape a `u16`-count misread fails on.
     ///
     /// Any length below 65536 encodes as `00 00 hi lo`, so reading a `u16`
-    /// off the front of the first field's `i32` length always yielded 0. That
+    /// off the front of the first field's `i32` length always yields 0. That
     /// is every real system identifier, which is why this failed against every
     /// server rather than some unusual one.
     #[test]
@@ -3664,12 +3642,7 @@ mod tests {
             "a field length exceeding the remaining bytes must be Err, not panic"
         );
 
-        // A row with no fields is REFUSED. This assertion used to say the
-        // opposite -- that an empty row "yields the empty identity rather than
-        // an error: there is nothing malformed about it, and `identify_system`
-        // reports the absence through its own values". That reasoning was
-        // wrong on its own terms, which is why it is reversed here rather than
-        // merely adjusted.
+        // A row with no fields is REFUSED.
         //
         // An empty string does not report an absence; it is a VALUE, and two
         // of them compare equal. `systemid` is the cluster identity a caller
@@ -3679,9 +3652,9 @@ mod tests {
         // specified to return four columns, so a row with none is malformed
         // for this command whatever it might mean for some other one.
         //
-        // Nothing depended on the old shape: the sole caller in the workspace
+        // Nothing in the workspace depends on the other shape: the sole caller
         // (`crates/zeroship-data-v8/src/wal_consumer.rs`) uses `identify_system` as a
-        // health check and discards the value, so this change only makes that
+        // health check and discards the value, so refusing only makes that
         // check harder to pass with a broken peer.
         let row = identify_row(&[]);
         let error = parse_identify_system_row(&row)
@@ -3817,15 +3790,15 @@ mod tests {
     // decoded from a real server somewhere in `tests/pgoutput_*.rs` /
     // `tests/replication_*.rs`.
     //
-    // AUDITED 2026-08-25: all 19 `PgOutputMessage` variants appear in a live
-    // assertion - the enum's variant list and the set of `PgOutputMessage::*`
-    // named across those suites were compared and are identical, including the
+    // Every `PgOutputMessage` variant - including the
     // two-phase (BeginPrepare, Prepare, CommitPrepared, RollbackPrepared,
-    // StreamPrepare) and streaming (StreamStart/Stop/Commit/Abort) arms.
+    // StreamPrepare) and streaming (StreamStart/Stop/Commit/Abort) arms - is
+    // asserted live.
     //
     // So: adding a variant means adding a LIVE test for it, not just a round
-    // trip here. `parse_lsn`/`format_lsn` above are the cautionary case - they
-    // had only the self-referential test until `tests/suite/lsn_server_parity.rs`.
+    // trip here. A self-referential round trip is not enough on its own:
+    // `parse_lsn`/`format_lsn` also need a live parity check
+    // (`tests/suite/lsn_server_parity.rs`).
     #[test]
     fn pgoutput_decode_begin() {
         let bytes = pgoutput::encode::begin(0x16B3750, 700_000_000_000, 42);
@@ -4399,19 +4372,14 @@ mod tests {
     /// A TRUNCATE naming more relations than any fixed cap would allow must
     /// still decode.
     ///
-    /// This fails if someone bounds the count with a constant that REJECTS -
-    /// verified by mutation: adding `if nrelations > 65535 { return Err(..) }`
+    /// This fails if someone bounds the count with a constant that REJECTS:
+    /// adding `if nrelations > 65535 { return Err(..) }`
     /// turns it red with "a large TRUNCATE is valid input: UnexpectedEof".
     /// A constant that only caps the RESERVATION (`nrelations.min(65535)`)
-    /// leaves it green, because the vector still grows; that mutation was tried
-    /// first and passed, so this test does not cover it.
-    ///
-    /// That case is covered SINCE 2026-09-02 by
+    /// leaves it green, because the vector still grows; that case is covered by
     /// `a_reservation_is_bounded_by_the_bytes_left_not_the_claimed_count`, which
-    /// asserts the clamp directly. This comment used to call it a HOLE on the
-    /// grounds that "no assertion here could" tell the two capacities apart -
-    /// true of a decode-level assertion, and the reason the expression was
-    /// given a name instead.
+    /// asserts the clamp directly rather than through a decode-level assertion
+    /// that cannot tell the two capacities apart.
     ///
     /// `TRUNCATE ... CASCADE` on a heavily partitioned table emits one id per
     /// partition and PostgreSQL enforces no ceiling, so a rejecting limit
@@ -4472,17 +4440,11 @@ mod tests {
     /// A TRUNCATE whose relation count exceeds what the frame can hold is
     /// rejected.
     ///
-    /// It does NOT rule on the reservation, and the second half of this
-    /// sentence used to say it did. The `.min(cur.len() / 4)` clamp is
+    /// It does NOT rule on the reservation. The `.min(cur.len() / 4)` clamp is
     /// invisible from here: `decode` answers `UnexpectedEof` on this frame
     /// whether the capacity came from the frame or from the claimed count,
-    /// so deleting the clamp leaves the assertion below green. The
-    /// reservation is measured in `tests/suite/pgoutput_allocation.rs`, which
-    /// watches the process's own peak address space instead - the sibling
-    /// above (`pgoutput_decode_accepts_a_truncate_larger_than_any_fixed_cap`)
-    /// already carried that exclusion; this one kept the claim.
-    ///
-    /// The clamp ITSELF is bound since 2026-09-02 by
+    /// so deleting the clamp leaves the assertion below green. The clamp
+    /// ITSELF is bound by
     /// `a_reservation_is_bounded_by_the_bytes_left_not_the_claimed_count`,
     /// which asserts `pgoutput::reservation` directly rather than through any
     /// memory instrument. This is a delegation, not a gap.
@@ -5495,7 +5457,7 @@ mod tests {
 
     /// Randomised CopyBoth frames against the bespoke replication framer.
     ///
-    /// `codec.rs` has `tests/suite/frame_fuzz.rs`; this framer has had nothing. It is
+    /// `codec.rs` has `tests/suite/frame_fuzz.rs`; this framer is
     /// a SEPARATE, hand-rolled framer -- [`read_header`] plus `next_inner` --
     /// with its own length arithmetic ([`WireHeader::body_len`] subtracts 4 and
     /// documents that underflowing it hands a `usize::MAX`-ish size to
@@ -5512,14 +5474,13 @@ mod tests {
     /// frames are legitimate and a test demanding failure would be wrong about
     /// the protocol rather than about the driver.
     ///
-    /// THE INVARIANT IS KEYED TO THE REFUSAL, NOT TO ERRORS IN GENERAL, and
-    /// getting that wrong is how this test was first written. "An error means
+    /// THE INVARIANT IS KEYED TO THE REFUSAL, NOT TO ERRORS IN GENERAL.
+    /// "An error means
     /// the framer lost sync" is false for a whole class of arms: an empty
     /// `CopyData`, an `XLogData` or `PrimaryKeepalive` under its size floor, an
     /// unknown sub-tag, and a server-sent `ErrorResponse` all return `Err`
     /// AFTER `split_to` has consumed the body, so the wire is still aligned and
-    /// the next frame legitimately decodes. The first version of this generator
-    /// failed on case 134 for exactly that, and the driver was right.
+    /// the next frame legitimately decodes.
     /// `Error::cancelled` is the only signal that means "this stream is
     /// finished", because it is the one the poison flag produces.
     #[compio::test]
@@ -5715,16 +5676,13 @@ mod tests {
         }
         // WHAT THE CORPUS RULED ON. The only assertion inside the loop is "no
         // message decodes after a refusal", which is vacuous unless BOTH a
-        // decode and a refusal actually happen - and until 2026-08-23 there was
-        // nothing after the loop, so 192 cases that all failed to produce
-        // either printed exactly what a working corpus prints. That is the
+        // decode and a refusal actually happen, so the corpus needs floors after
+        // the loop. That is the
         // failure the repo's own gate convention exists for (every arm declares
         // what it ruled on and a floor it must clear); this is that convention
         // applied to a fuzz loop in Rust.
         //
-        // Measured 2026-08-26 over these 192 cases: 6 XLogData and 4
-        // PrimaryKeepalive messages across 10 distinct cases, and 191
-        // refusals. The floors sit well under the aggregate counts so ordinary
+        // The floors sit well under the aggregate counts so ordinary
         // generator drift does not trip them, while the exact anchor counts
         // keep either legal CopyData form from disappearing silently.
         assert!(
@@ -6235,9 +6193,9 @@ mod tests {
     /// This is how a walsender reports that the slot was dropped underneath
     /// us, or that the requested WAL segment has been recycled - the two
     /// failures a consumer has to tell apart, because one is fatal and the
-    /// other means "re-create the slot and re-snapshot". The arm dropped the
-    /// payload on the floor and returned a bare io error reading
-    /// "replication stream: ErrorResponse", so both looked identical.
+    /// other means "re-create the slot and re-snapshot". Dropping the
+    /// payload on the floor and returning a bare io error reading
+    /// "replication stream: ErrorResponse" makes both look identical.
     #[compio::test]
     async fn a_mid_stream_error_response_surfaces_the_sqlstate() {
         let wire = error_response_message(&[
@@ -6419,15 +6377,15 @@ mod tests {
     ///
     /// The bytes are gone: the buffer went to the kernel with the submitted
     /// read and whatever was delivered into it is discarded when the operation
-    /// is cancelled. Nothing recorded that, so the stream stayed usable and
-    /// the next `next()` resumed mid-frame - the framer would read a payload
-    /// byte as a tag and either raise a nonsense "unexpected tag" or, worse,
-    /// accept it. This is reachable from ordinary code: the WAL consumer in
+    /// is cancelled. Nothing records that if the stream stays usable, so
+    /// the next `next()` resumes mid-frame - the framer reads a payload
+    /// byte as a tag and either raises a nonsense "unexpected tag" or, worse,
+    /// accepts it. This is reachable from ordinary code: the WAL consumer in
     /// `zeroship-data-v8` drives `next()` inside a `futures::select!`, which
     /// drops the losing branch's future every iteration.
     ///
-    /// The fix cannot un-lose the bytes. What it can do - and what this pins -
-    /// is refuse to pretend the stream is still in step.
+    /// The bytes cannot be un-lost. What this pins is the refusal to pretend
+    /// the stream is still in step.
     #[compio::test]
     async fn a_dropped_read_poisons_the_stream() {
         let (mut stream, _peer) = silent_peer().await;
@@ -6538,11 +6496,8 @@ mod tests {
     /// Every other peer in this module throws writes away: `ScriptedPeer`
     /// returns the length and discards the bytes, `WriteFailingPeer` counts
     /// calls without retaining them, and the socket-backed tests never read the
-    /// far end. So until 2026-08-23 NOTHING here asserted what a
-    /// `StandbyStatusUpdate` looks like on the wire -- measured by corrupting
-    /// `encode_standby_status_update` four ways at once (wrong `CopyData` tag,
-    /// declared length 999, wrong sub-tag, write and flush LSNs swapped) and
-    /// watching all 177 lib tests stay green.
+    /// far end. Without a capturing peer nothing here asserts what a
+    /// `StandbyStatusUpdate` looks like on the wire.
     struct CapturingPeer {
         unread: Vec<u8>,
         written: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
@@ -6663,20 +6618,12 @@ mod tests {
     /// The bytes `send_standby_status_update` puts on the wire are the bytes
     /// PostgreSQL's protocol specifies.
     ///
-    /// THIS TEST USED TO ASSERT ITS OWN LITERALS. It hand-built a 39-byte
-    /// vector and then checked that vector's length, first byte, length field
-    /// and sub-tag -- properties of the three lines above the assertions, not of
-    /// the encoder, which it never called. Its only contact with `src/` was two
-    /// constants. Its twin `xlog_data_frame_parsing_smoke` did the same in the
-    /// read direction, re-extracting fields with hand-written index arithmetic
-    /// rather than the parser; it is deleted rather than repaired, because
-    /// `a_notice_is_skipped_and_the_next_xlog_frame_decodes` already drives the
-    /// real framer over the same frame and asserts the same three fields plus
-    /// `last_received_lsn`.
+    /// The test drives the whole call rather than the free function:
+    /// hand-building a vector and checking its own literals asserts properties
+    /// of the fixture, not of the encoder.
     ///
-    /// The distinct LSNs are the point of driving the whole call rather than
-    /// the free function: `standby_lsns` returns write, flush and apply in that
-    /// order, and three equal values -- which the old fixture used -- cannot
+    /// `standby_lsns` returns write, flush and apply in that
+    /// order, so three DISTINCT values are needed to
     /// tell a correct encoder from one that emits them in any other order.
     #[compio::test]
     async fn a_standby_status_update_is_encoded_as_postgresql_specifies() {
