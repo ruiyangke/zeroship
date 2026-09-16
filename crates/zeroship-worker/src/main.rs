@@ -149,10 +149,9 @@ fn workflow_host_prerequisites(database: bool, storage: bool) -> Result<(), &'st
 ///
 /// The same peer document also supplies the GATEWAY's public key for the
 /// `ZeroShip-User` identity envelope, and a document that omits it is a HARD
-/// STOP rather than a warning. The predecessor's failure mode was exactly the
-/// opposite - an empty `worker_key` turned the envelope check off and the
-/// bearer check with it - so the missing-key branch here is the point of the
-/// change, not an edge case of it.
+/// STOP rather than a warning: an empty key would turn the envelope check off
+/// and the bearer check with it, so the missing-key branch here is the point,
+/// not an edge case.
 fn load_join_material(
     join_token_file: &std::path::Path,
     peers_file: &std::path::Path,
@@ -305,8 +304,8 @@ fn main() -> std::io::Result<()> {
 
     // THE BOOT GATE, before the bind guard below and before the
     // `--check-config` report, so a dry run over a placeholder credential exits
-    // non-zero. The credential strength check used to sit AFTER the bind guard;
-    // the two are independent refusals and only the order in which a
+    // non-zero. The credential strength check runs here, before the bind guard:
+    // the two are independent refusals, and only the order in which a
     // doubly-misconfigured launch reports changes.
     let credentials = enforce_worker_credentials(&settings, &boot.overlay.source, check_config);
 
@@ -372,9 +371,9 @@ fn main() -> std::io::Result<()> {
             CheckValue::Count(*settings.workflow_slots.get()),
         );
         // Both are reported by PRESENCE, which is all a resolved `Secret<T>`
-        // will answer. `!value.is_empty()` used to stand in for that and could
-        // not: under `--check-config` a file-sourced secret has no material, so
-        // the old test read "unset" for a correctly configured deployment.
+        // will answer: under `--check-config` a file-sourced secret has no
+        // material, so an emptiness test would read "unset" for a correctly
+        // configured deployment.
         report.field(
             "db_configured",
             CheckValue::Secret(settings.database_url.is_configured()),
@@ -407,13 +406,9 @@ fn main() -> std::io::Result<()> {
             ),
         );
         // Both from the RESOLVED settings, which is the same expression the
-        // producer boots from. They used to be two independent readings of
-        // `REDPANDA_BROKERS` / `USAGE_EVENTS_TOPIC` straight out of the
-        // environment, so the report could only agree with the producer while
-        // the environment was the sole channel; with a flag it would have
-        // reported `usage_stream_configured=false` on a worker whose outbox was
-        // running. This field is the surface a harness asserts the producer on
-        // BEFORE it launches anything, so it disagreeing is worse than useless.
+        // producer boots from, so the report cannot disagree with the producer.
+        // This field is the surface a harness asserts the producer on BEFORE it
+        // launches anything, so it disagreeing is worse than useless.
         let usage_stream = zeroship_worker::config::usage_stream_settings(&settings);
         report.field(
             "usage_stream_configured",
@@ -423,10 +418,9 @@ fn main() -> std::io::Result<()> {
             "usage_events_topic",
             CheckValue::Plain(usage_stream.effective_topic().to_string()),
         );
-        // The credential posture, plus how much of it was measured. The field
-        // above is the cautionary example: `usage_stream_configured=false` was
-        // reported truthfully for 43 days while nothing read it, which is why
-        // the posture rides the EXIT CODE as well as this report.
+        // The credential posture, plus how much of it was measured. A reported
+        // field can be truthful while nothing reads it, which is why the
+        // posture rides the EXIT CODE as well as this report.
         report.field(
             "service_credentials",
             CheckValue::Plain(credentials.summary().to_string()),
@@ -450,16 +444,14 @@ fn main() -> std::io::Result<()> {
 
     // THE KEY-MATERIAL REFUSAL, and it runs HERE - before the runtime starts and
     // before the database posture check - because fence F4 must not be
-    // conditional on an unrelated subsystem being reachable. It used to be built
-    // inside `WorkerConfig` below, which is after
-    // `db_posture::validate_database_url` CONNECTS: a worker with no peer
-    // document and no database reported the database, so the operator fixed
-    // Postgres and only then learned about the key material. Worse, it made the
-    // one fence the worker cannot serve a request without dependent on the one
-    // subsystem the tiering was chosen to keep it independent of - the dispatch
-    // hop claims no `jti` precisely so inbound authentication needs no database
-    // at all. Reading two files needs no async runtime, so nothing is lost by
-    // doing it first.
+    // conditional on an unrelated subsystem being reachable. Building it after
+    // `db_posture::validate_database_url` CONNECTS would report the database
+    // first, so the operator would fix Postgres and only then learn about the
+    // key material; worse, it would make the one fence the worker cannot serve a
+    // request without dependent on the one subsystem the tiering was chosen to
+    // keep it independent of - the dispatch hop claims no `jti` precisely so
+    // inbound authentication needs no database at all. Reading two files needs
+    // no async runtime, so nothing is lost by doing it first.
     let join_material = load_join_material(
         settings.join_token_file.get(),
         settings.service_peers_file.get(),
@@ -521,9 +513,8 @@ fn main() -> std::io::Result<()> {
     let bind_addr = format!("{bind_host}:{port}");
 
     // Shared version snapshot populated by a SINGLE process-wide poller and
-    // observed by every ntex worker thread's reconcile loop. Previously every
-    // thread made its own HTTP poll — this multiplied control-plane traffic
-    // by `workers_count` with no benefit.
+    // observed by every ntex worker thread's reconcile loop, so control-plane
+    // traffic does not multiply by `workers_count`.
     let shared_versions: SharedVersions = Arc::new(RwLock::new(None));
     // Process-wide env cache (single source of truth across all ntex
     // worker threads). Reconcile loops read+write through it, the
@@ -573,11 +564,9 @@ fn main() -> std::io::Result<()> {
     // the database is unusable.
 
     // The producer's four `metering.*` declarations, already resolved. The
-    // worker deliberately has no TOML overlay source (9b205f6ed, a credential
-    // boundary), so its tiers are flag then `ZEROSHIP_METERING_*` then the
-    // compiled default - and the flag is what nine e2e harnesses had to fake
-    // with ambient variables on the command prefix until 2026-08-20, because
-    // `UsageStreamSettings::from_env` was the only channel that existed.
+    // worker deliberately has no TOML overlay source (a credential boundary),
+    // so its tiers are flag then `ZEROSHIP_METERING_*` then the compiled
+    // default.
     let stream_settings = zeroship_worker::config::usage_stream_settings(&settings);
     // Keyed on the host, NOT on `meter_source`: the source carries a per-boot
     // uuid so two live producers never share a client id, and naming the WAL
@@ -619,11 +608,10 @@ fn main() -> std::io::Result<()> {
         // FATAL, not a warning. Brokers are configured, so the operator
         // intends this worker to bill; the common cause on a stable WAL path
         // is a co-located second producer holding the single-writer redb lock.
-        // The old behaviour degraded to `spawn_disabled_drain_task`, which
-        // drains the meter and DROPS every event for the life of the process -
-        // permanent total loss standing in for an intermittent partial one.
-        // Refusing to boot is the recoverable failure; silent free hosting is
-        // not.
+        // Degrading to a disabled drain task would drain the meter and DROP
+        // every event for the life of the process - permanent total loss
+        // standing in for an intermittent partial one. Refusing to boot is the
+        // recoverable failure; silent free hosting is not.
         Err(error) => {
             tracing::error!(
                 meter_source = %meter_source,

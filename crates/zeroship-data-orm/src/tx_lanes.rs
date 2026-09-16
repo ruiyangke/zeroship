@@ -10,9 +10,9 @@ use zeroship_data_orm::error::DbError;
 
 /// Everything true of one app's open transaction.
 ///
-/// Created by `try_claim_tx` and dropped by `release_tx_claim`, which is the
-/// bracket the old `tx_claims` set stood for. Between those two points the
-/// reducer is admitted, a session is installed and taken and returned, a
+/// Created by `try_claim_tx` and dropped by `release_tx_claim`, the bracket
+/// that scopes a transaction. Between those two points the reducer is
+/// admitted, a session is installed and taken and returned, a
 /// canceller is recorded, savepoints mark the emit queue, and the queue is
 /// drained or discarded - all of it keyed by one `app_id`, all of it ending
 /// together.
@@ -174,20 +174,13 @@ impl Drop for TxClientSlotGuard {
 ///
 /// # Why this is one owner, and its own type
 ///
-/// `docs/proposals/2026-09-02-thread-context-ownership.md` calls `context.rs`
-/// four owners wearing one struct, and this is the largest. Measured
-/// 2026-09-02: 25 methods touch `lanes` and `withdrawn_tx_sessions` and NOTHING
-/// else on `ThreadDbContext` - no pool, no descriptor cache, no generation
-/// counter. They were separable as a unit, and the separation is what lets the
+/// The lane state is separable as a unit: only `lanes` and
+/// `withdrawn_tx_sessions` are touched by the lane methods, with no pool, no
+/// descriptor cache and no generation counter. The separation is what lets the
 /// engine tier move to its own crate without dragging the adapter's
 /// per-isolate state along.
 ///
-/// The bodies below moved BYTE-FOR-BYTE. That was possible because the field
-/// names are unchanged, so every `self.lanes` / `self.withdrawn_tx_sessions`
-/// still resolves - now to this struct. Nothing was rewritten, which is the
-/// property that made it safe to do to the transaction hot path.
-///
-/// # SEC-1 is the reason for the key, and it is unchanged
+/// # SEC-1 is the reason for the key
 ///
 /// A worker OS thread multiplexes up to ~200 isolates, and a creator's
 /// `env.db.transaction(async () => await fetch(slow))` parks its session here
@@ -208,13 +201,10 @@ impl Drop for TxClientSlotGuard {
 pub struct TxLanes {
     /// Every app's open transaction, one entry each.
     ///
-    /// **The entry IS the claim.** This map replaced nine parallel
-    /// `HashMap<String, _>` on 2026-09-02 - the session, the reducer, the
-    /// canceller, the withdrawal tombstone, two waiter lists, the savepoint
-    /// emit marks, the pending-emit queue, and a `tx_claims: HashSet<String>`
-    /// that existed only to say "one of these is in flight". They were created
-    /// together, mutated together and destroyed together, so they were one
-    /// entity written nine ways.
+    /// **The entry IS the claim.** The session, the reducer, the canceller,
+    /// the withdrawal tombstone, the waiter lists, the savepoint emit marks,
+    /// the pending-emit queue and the in-flight claim are created together,
+    /// mutated together and destroyed together, so they are one entity.
     lanes: HashMap<String, TxLane>,
 
     /// Apps whose transaction session was withdrawn: anything returning to the
@@ -236,7 +226,7 @@ impl TxLanes {
     ///
     /// Named `by_app` rather than exposing the field so the call reads
     /// `lanes.by_app()` instead of `lanes.lanes` - and so the field itself
-    /// stays private, keeping the 25 forwarding methods the whole lane surface.
+    /// stays private, keeping the forwarding methods the whole lane surface.
     ///
     /// Same gate correction as [`TxLane::pending_emits`] above, for the same
     /// reason: its only reader is in the adapter crate.
@@ -266,9 +256,9 @@ impl TxLanes {
     /// [`Self::release_tx_claim`] when its transaction settles.
     ///
     /// **Claiming IS opening the lane.** The check and the set are one
-    /// `HashMap::entry`, so the window that used to exist between them cannot:
-    /// a second `transaction()` for the same app finds the entry occupied and
-    /// parks, rather than racing to fill a slot both read as free.
+    /// `HashMap::entry`, so there is no window between them: a second
+    /// `transaction()` for the same app finds the entry occupied and parks,
+    /// rather than racing to fill a slot both read as free.
     pub fn try_claim_tx(&mut self, app_id: &str) -> bool {
         match self.lanes.entry(app_id.to_string()) {
             std::collections::hash_map::Entry::Occupied(_) => false,
