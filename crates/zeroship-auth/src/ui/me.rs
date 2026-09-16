@@ -1,5 +1,5 @@
 //! `/me` GET + `/me/unlink/<provider>` POST handlers — the logged-in
-//! user's profile page (P4-U6).
+//! user's profile page.
 //!
 //! Authentication source of truth is the `__Host-zsidp_session` cookie —
 //! the `IdP` session at `auth.zeroship.ai`, not any per-app
@@ -18,14 +18,14 @@
 //! out by clicking Unlink, and there is no self-service path back (no
 //! password to reset). Mirroring Google/GitHub/Apple's own policies.
 //!
-//! ## Link-from-/me deferred
+//! ## Link-from-/me is deferred
 //!
 //! Linking a new provider FROM /me requires the federation start/callback
 //! handlers (`oauth_google`, `oauth_github`) to know they're being invoked
 //! for "add another link to the signed-in user" vs "sign in / find-or-link
 //! by email". That's a non-trivial extension to `linker::resolve_or_link`
-//! and the start-route signature — out of scope for U6. The template
-//! renders the section with a "coming soon" note. Tracked for Phase 4.5+.
+//! and the start-route signature. The template renders the section with a
+//! "coming soon" note.
 
 use std::sync::Arc;
 

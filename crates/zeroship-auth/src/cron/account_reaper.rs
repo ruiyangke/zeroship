@@ -11,37 +11,21 @@
 //!
 //! ## Erasure is a hard DELETE, and there is no second branch
 //!
-//! This module used to fork: hard-delete a user with no financial history,
-//! ANONYMIZE one that had some. Both halves of that fork are gone, for reasons
-//! that were measured rather than argued.
+//! There is no anonymize path. Financial history is an ORGANIZATION's, not a
+//! person's, and no billing edge points at `zeroship.users`. What a hard delete
+//! can still strand is the ORGANIZATION - `organization_members.user_id` is
+//! `ON DELETE CASCADE`, so the last owner's seat goes with them and nobody can
+//! be seated again. That is refused BEFORE the window opens, by the erasure
+//! preflight the request flow runs against the control plane
+//! (`crate::control_client::erasure_preflight`), and re-checked here before the
+//! delete. A blocker that reappeared during the grace window leaves the user
+//! pending and loud, never half-erased.
 //!
-//! **The predicate could not run.** `user_has_financial_history` queried
-//! `zeroship.organization_members`, `zeroship.organization_accounts` and
-//! `zeroship.invoices` on the AUTH service's connection. MEASURED against
-//! `information_schema.role_table_grants` on a database with the full corpus
-//! applied, `zeroship_auth` holds NO privilege on any of the three. Under the
-//! real role that query does not answer "retain" - it raises `42501` inside
-//! `erase_one_tx` and fails the erasure of every due user. It passed in tests
-//! only because they connect as `postgres`.
-//!
-//! **The retention it expressed belongs somewhere else.** Financial history is
-//! an ORGANIZATION's, not a person's, and no billing edge points at
-//! `zeroship.users` any more. What a hard delete can still strand is the
-//! ORGANIZATION - `organization_members.user_id` is `ON DELETE CASCADE`, so the
-//! last owner's seat goes with them and nobody can be seated again. That is now
-//! refused BEFORE the window opens, by the erasure preflight the request flow
-//! runs against the control plane (`crate::control_client::erasure_preflight`),
-//! and re-checked here before the delete. A blocker that reappeared during the
-//! grace window leaves the user pending and loud, never half-erased.
-//!
-//! **The FK list is gone too.** `ATTRIBUTION_FKS` named the users references
-//! PostgreSQL "does not clear by itself" and `SET NULL`ed them by hand. Read out
-//! of `pg_constraint`, the blocking set was FIVE constraints, of which the list
-//! named one - and three of the five were `NOT NULL`, so `SET NULL` was not a
-//! spelling they accepted. `db/migrations-ts/20260907000000_user_erasure_edges.ts`
-//! declares every users edge as CASCADE (identity) or SET NULL (attribution),
-//! so PostgreSQL clears them, under the constraint owner's privileges rather
-//! than the reaper's. Nothing here walks a list.
+//! Every users edge is declared by
+//! `db/migrations-ts/20260907000000_user_erasure_edges.ts` as CASCADE (identity)
+//! or SET NULL (attribution), so PostgreSQL clears them under the constraint
+//! owner's privileges rather than the reaper's. Nothing here walks a list of
+//! foreign keys.
 //!
 //! ## The re-check is the fence, not the request-time preflight
 //!
@@ -475,8 +459,7 @@ async fn erase_one_tx(
 /// `FOR UPDATE` does not serialize it. Locking only the owner seats therefore
 /// leaves every organization where this human is currently a developer
 /// unlocked, the promotion commits underneath the erasure, and the seat is
-/// cascaded away: an ownerless organization, by the one route the earlier
-/// argument here claimed was closed.
+/// cascaded away: an ownerless organization.
 ///
 /// So the lock is taken over every seat, and `role = 'owner'` is asked only in
 /// the re-check, which runs in a later snapshot and therefore sees a promotion

@@ -26,9 +26,9 @@
 //! (set by the user agent, not user code), so we never put them on the
 //! request in the first place.
 //!
-//! This is a deliberate spec-faithful narrowing. Earlier drafts stripped
-//! more aggressively, breaking real-world flows (S3 presigned URLs,
-//! GitHub redirects).
+//! This is a deliberate spec-faithful narrowing: stripping more than
+//! `Authorization` breaks real-world flows (S3 presigned URLs, GitHub
+//! redirects).
 
 use crate::fetch_body::BodySource;
 
