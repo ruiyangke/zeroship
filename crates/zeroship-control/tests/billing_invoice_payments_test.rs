@@ -8,17 +8,14 @@
 //! configured test database (`zeroship_core::config::test_database_url_opt`);
 //! the run refuses otherwise.
 //!
-//! These FAIL against the pre-reshape schema:
-//!   (a) `invoice_payments` UPDATE/DELETE is rejected by the immutability trigger
-//!       (no trigger pre-fix → the UPDATE would succeed).
-//!   (b) the partial unique index lets a 2nd `(organization, period)` invoice exist ONLY
-//!       when the first is `void`; two non-void are still blocked (pre-fix the
-//!       unconditional UNIQUE blocks BOTH the void-then-reissue AND the second
-//!       non-void, so the reissue assertion fails).
+//! The invariants these cases pin:
+//!   (a) `invoice_payments` UPDATE/DELETE is rejected by the immutability trigger;
+//!   (b) the partial unique index lets a 2nd `(organization, period)` invoice exist
+//!       ONLY when the first is `void`; two non-void are blocked;
 //!   (c) `cash_collected` = Σ(invoice_payments) reflects appended charges, and the
 //!       finalized invoice the charge is recorded against is NEVER mutated (a direct
-//!       finalized→finalized UPDATE still RAISEs — proving the side table sidesteps
-//!       the immutability trigger). Pre-fix there is no table to sum.
+//!       finalized→finalized UPDATE still RAISEs - proving the side table sidesteps
+//!       the immutability trigger).
 
 #![allow(clippy::future_not_send)]
 
@@ -118,7 +115,7 @@ async fn invoice_payments_is_append_only() {
         .await
         .expect("append charge");
 
-    // UPDATE is rejected by the immutability trigger (RED pre-fix: no trigger).
+    // UPDATE is rejected by the immutability trigger.
     let upd = client
         .execute(
             "UPDATE zeroship.invoice_payments SET amount_cents = 1 WHERE id = $1",
@@ -191,8 +188,7 @@ async fn partial_unique_index_releases_period_only_on_void() {
         .await
         .expect("void inv1");
 
-    // NOW a fresh invoice can take the released period slot (RED pre-fix: the
-    // unconditional UNIQUE would still block this).
+    // A fresh invoice can take the released period slot.
     let inv_reissue = claim_draft(&client, organization, period).await;
     assert_ne!(inv_reissue, inv1, "the reissue must be a NEW invoice id");
 
