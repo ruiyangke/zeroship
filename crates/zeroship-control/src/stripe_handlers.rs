@@ -141,17 +141,16 @@ fn cap_stripe_description(s: &str) -> &str {
 const CONNECT_ACCOUNT_COUNTRY: &str = "US";
 
 /// `POST /api/organizations/:id/stripe/onboard` — start (or resume) Stripe **Connect**
-/// onboarding for an organization (billing G1, Stream-2, ISS-30).
+/// onboarding for an organization.
 ///
-/// REPLACES the old placeholder `connect.stripe.com/express_login?...` URL with a
-/// REAL flow: ensure the organization has a Connect `acct_…` (create an Express
+/// Ensures the organization has a Connect `acct_…` (create an Express
 /// account once, stamping `metadata.organization_id` for ownership verification),
 /// persist it, then return a real `account_links` hosted-onboarding URL.
 ///
 /// **`:id` is bound to the principal** (self-service, like `billing_setup`): a
 /// organization onboards their OWN account, and only their own. An organization calling
-/// onboard for a DIFFERENT organization's id is denied - closing the cross-organization
-/// hole - and there is no operator-on-behalf arm behind that denial any more.
+/// onboard for a DIFFERENT organization's id is denied, closing the cross-organization
+/// hole.
 pub async fn onboard(
     req: web::HttpRequest,
     path: Path<String>,
@@ -338,17 +337,15 @@ pub struct CallbackBody {
     /// OPTIONAL hint from the dashboard's return URL. It is NEVER trusted to
     /// LINK an account: ownership is verified SERVER-SIDE against the acct_… we
     /// minted in `onboard` (stored on `organization_accounts`) + Stripe's
-    /// `metadata.organization_id`. A mismatching/forged acct_… is rejected (ISS-30).
+    /// `metadata.organization_id`. A mismatching/forged acct_… is rejected.
     #[serde(default)]
     pub stripe_account_id: Option<String>,
 }
 
 /// `POST /api/organizations/:id/stripe/callback` — refresh Connect onboarding status
-/// after the organization returns from the Stripe-hosted flow (billing G1, ISS-30).
+/// after the organization returns from the Stripe-hosted flow.
 ///
-/// **SECURITY (ISS-30 fix).** The old handler blindly `link_account`'d a POSTed
-/// `acct_…` — an organization could bind an account they don't control. This handler
-/// instead drives the verification SERVER-SIDE:
+/// **SECURITY.** Verification is driven SERVER-SIDE:
 ///   1. Load the acct_… we MINTED for this organization in `onboard` (server truth on
 ///      `organization_accounts`). No stored account ⇒ 400 (onboard first).
 ///   2. If the body carries an acct_… hint, it MUST equal the stored one — a
@@ -452,7 +449,7 @@ pub async fn callback(
 }
 
 // ----------------------------------------------------------------
-// Server-stamped Connect checkout (billing G1, ISS-29 fee-bypass fix)
+// Server-stamped Connect checkout
 // ----------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
@@ -472,8 +469,7 @@ pub struct ConnectCheckoutBody {
 }
 
 /// `POST /api/organizations/:id/connect/checkout` — create a Connect PaymentIntent
-/// with the platform's `application_fee_amount` stamped **SERVER-SIDE** (billing
-/// G1, ISS-29 fix).
+/// with the platform's `application_fee_amount` stamped **SERVER-SIDE**.
 ///
 /// **The fee is server-authoritative.** The body carries only BUSINESS params
 /// (amount, currency, end-user). The platform resolves the organization's server-held
@@ -506,7 +502,7 @@ pub async fn connect_checkout(
     if !is_valid_currency(&body.currency) {
         return err_json(400, "currency must be a 3-letter ISO code (lowercase)");
     }
-    // M2: a non-empty `cart_id` is REQUIRED. Without it every checkout for a
+    // A non-empty `cart_id` is REQUIRED. Without it every checkout for a
     // organization collapses onto one idempotency key, replaying the first
     // PaymentIntent (a different-amount charge silently returns a stale intent).
     let cart = body.cart_id.as_deref().map(str::trim).unwrap_or("");
@@ -525,7 +521,7 @@ pub async fn connect_checkout(
         Ok(None) => return err_json(400, "organization has no connected stripe account"),
         Err(e) => return stripe_err_response(e),
     };
-    // M1: the `charges_enabled` flag (verified by `callback` from Stripe's truth)
+    // The `charges_enabled` flag (verified by `callback` from Stripe's truth)
     // gates the charge path. An organization who ran `onboard` but never finished
     // Stripe onboarding has the account row but charges_enabled=false — reject
     // BEFORE any PaymentIntent POST.
@@ -550,13 +546,13 @@ pub async fn connect_checkout(
     // Deterministic idempotency key per (organization, cart, amount, currency) so an
     // at-least-once retry of the SAME cart replays the same PaymentIntent, but a
     // changed amount/currency (or a different cart) gets a DISTINCT key — Stripe
-    // can no longer replay a stale intent for a different charge (M2). `cart` is
+    // can no longer replay a stale intent for a different charge. `cart` is
     // guaranteed non-empty (validated above).
     let idempotency_key = format!(
         "connect_pi:{organization_id}:{cart}:{}:{}",
         body.amount_cents, body.currency
     );
-    // m4: cap the description before it hits the wire. Stripe's PaymentIntent
+    // Cap the description before it hits the wire. Stripe's PaymentIntent
     // `description` max is 1000 chars; a longer one is a 400 `string_too_long`.
     // Done here (not in the client) so the cap is visible at the organization-facing
     // boundary where the value originates.
@@ -588,10 +584,7 @@ pub async fn connect_checkout(
 ///
 /// **`:id` is bound to the principal** (self-service, like `billing_setup` and
 /// `onboard`): an organization reads their OWN earnings, and nobody reads anyone
-/// else's. This used to require `BillingRead` on `Resource::Any` - an operator
-/// grant - which meant an organization could not read their own earnings at all and
-/// the whole route hung off the platform staff roles. Reading your own payout
-/// history is self-service; it was mis-gated, not operator-shaped.
+/// else's.
 pub async fn earnings(
     req: web::HttpRequest,
     path: Path<String>,
@@ -637,9 +630,7 @@ pub async fn earnings(
 /// Unlink the organization's Stripe account. Cascades and deletes payouts.
 ///
 /// **`:id` is bound to the principal** (self-service, like `onboard`): an organization
-/// disconnects their OWN Stripe account. It used to require `BillingWrite` on
-/// `Resource::Any`, so the organization who linked the account could not unlink it -
-/// only platform staff could. Disconnecting your own payment account is the
+/// disconnects their OWN Stripe account. Disconnecting your own payment account is the
 /// organization's call.
 pub async fn unlink(
     req: web::HttpRequest,
@@ -817,7 +808,7 @@ struct StripeObject {
     /// level of the invoice object.
     #[serde(default)]
     subscription_details: Option<SubscriptionDetails>,
-    // ── Dispute (charge.dispute.*) fields (PR-8) ────────────────────────────
+    // ── Dispute (charge.dispute.*) fields ────────────────────────────
     /// The disputed amount (network-held), in cents. On a dispute object this is the
     /// clawback amount; on an invoice object it is unset.
     #[serde(default)]
@@ -844,19 +835,19 @@ struct StripeObject {
     /// legacy top-level `payment_intent`/`charge` fields above cover older API versions.
     #[serde(default)]
     payments: Option<InvoicePayments>,
-    // ── Connect Account (account.updated) fields (M2) ───────────────────────
+    // ── Connect Account (account.updated) fields ───────────────────────
     /// `charges_enabled` on a connected `account` object — Stripe flips this to
     /// FALSE on a risk/KYC hold. The `account.updated` handler caches it so the
     /// `connect_checkout` gate reflects reality. Unset on non-account objects.
     #[serde(default)]
     charges_enabled: Option<bool>,
-    /// `payouts_enabled` on a connected `account` object (M2).
+    /// `payouts_enabled` on a connected `account` object.
     #[serde(default)]
     payouts_enabled: Option<bool>,
-    /// `details_submitted` on a connected `account` object (M2).
+    /// `details_submitted` on a connected `account` object.
     #[serde(default)]
     details_submitted: Option<bool>,
-    // ── Connect revenue attribution (M4) ────────────────────────────────────
+    // ── Connect revenue attribution ────────────────────────────────────
     /// The connected account the charge settled ON BEHALF OF (`acct_…`). On a
     /// Connect-revenue invoice / charge this is the destination account that
     /// actually received the funds. The payout handler confirms it matches the
@@ -1052,7 +1043,7 @@ pub async fn webhook(
         }
     };
 
-    // ── Replay-dedup (billing G6) ──────────────────────────────────────────
+    // ── Replay-dedup ──────────────────────────────────────────
     // Order is load-bearing: signature verification ran FIRST (above), so a
     // forged/unsigned event never reaches the ledger or the handlers. Only a
     // VERIFIED event is checked here. Stripe re-delivers at-least-once; a
@@ -1065,7 +1056,7 @@ pub async fn webhook(
     // Stripe's retry re-processes it — exactly-once EFFECTIVE (no double-process
     // AND no lost event on handler failure).
     //
-    // M3 (dedup concurrency): `event_processed` → dispatch → `mark_event_processed`
+    // Dedup concurrency: `event_processed` → dispatch → `mark_event_processed`
     // is a check-then-act across un-serialized connections, so two CONCURRENT
     // redeliveries of the SAME event could both pass the check and both dispatch
     // (saved today only by per-handler idempotency — the ledger does nothing under
@@ -1090,7 +1081,7 @@ pub async fn webhook(
 }
 
 /// Run the dedup-checked dispatch for ONE event WHILE the per-event advisory lock
-/// is held (M3). Factored out of [`webhook`] so the lock is released on EVERY
+/// is held. Factored out of [`webhook`] so the lock is released on EVERY
 /// return path (the caller unlocks after this returns). Returns the HTTP response.
 async fn process_locked_event(
     req: &web::HttpRequest,
@@ -1143,7 +1134,7 @@ async fn dispatch_event(
 ) -> web::HttpResponse {
     let obj = &event.data.object;
 
-    // Stream-1 (infra-billing) lifecycle events. These ride the SAME verified
+    // Infra-billing lifecycle events. These ride the SAME verified
     // ingest path and resolve the organization via the same `extract_organization_id`
     // (metadata.organization_id, stamped by `create_customer`).
     match event.event_type.as_str() {
@@ -1153,7 +1144,7 @@ async fn dispatch_event(
         "invoice.payment_failed" => {
             return handle_invoice_payment_failed(req, state, event, obj).await;
         }
-        // DISPUTES / CHARGEBACKS (billing-ops PR-8, design flow I). A cardholder disputed
+        // DISPUTES / CHARGEBACKS. A cardholder disputed
         // a charge; Stripe held the funds. Record the dispute + the cash clawback (a
         // negative dispute_debit invoice_payments row), claim-after-success on
         // stripe_events_seen like every branch. `.created` opens the dispute (+ fires the
@@ -1167,7 +1158,7 @@ async fn dispatch_event(
         "charge.dispute.closed" | "charge.dispute.updated" => {
             return handle_dispute_closed_or_updated(req, state, event, obj).await;
         }
-        // M2 (the money hole): a connected account whose `charges_enabled`/
+        // A connected account whose `charges_enabled`/
         // `payouts_enabled` Stripe flips to FALSE (risk/KYC) must be observed —
         // `connect_checkout` gates on the CACHED flag, so a stale `true` would let a
         // disabled account keep taking charges. Update the cached flags for the
@@ -1175,7 +1166,7 @@ async fn dispatch_event(
         "account.updated" => {
             return handle_account_updated(req, state, event, obj).await;
         }
-        // M2 dispute FUNDS events. The cash movement has a SINGLE source of truth: the
+        // Dispute FUNDS events. The cash movement has a SINGLE source of truth: the
         // dispute LIFECYCLE handlers (`.created` debits, `.closed won` reverses). The
         // funds-flow events (`funds_withdrawn`/`funds_reinstated`) describe the SAME
         // money already accounted there, so acting on them too would DOUBLE-count. We
@@ -1191,12 +1182,12 @@ async fn dispatch_event(
             return web::HttpResponse::Ok().json(&serde_json::json!({"status": "funds_event_audited"}));
         }
         // `invoice.paid` carries TWO concerns:
-        //   * Stream-1 (infra recovery, G2): a previously-failed infra invoice
+        //   * Infra recovery: a previously-failed infra invoice
         //     was paid → recover the organization's account status (past_due/suspended
         //     → active). This is the REVERSIBILITY rail. Handled here for the
         //     infra organization (resolved by metadata OR customer reverse-resolve)
         //     regardless of whether the event also carries Connect metadata.
-        //   * Stream-2 (Connect revenue): the payout-ledger record below (only
+        //   * Connect revenue: the payout-ledger record below (only
         //     when `metadata.organization_id` is present).
         "invoice.paid" => {
             // RECOVERY GATE: only a PLATFORM INFRA invoice may
@@ -1217,33 +1208,30 @@ async fn dispatch_event(
                         }
                     }
                 }
-                // PAYMENTS (billing-ops PR-1, design CRITICAL-A): record the cash actually
+                // PAYMENTS: record the cash actually
                 // collected as an APPEND-ONLY `invoice_payments` row — NEVER a mutation of
                 // the finalized invoice (the immutability trigger forbids it; that is
                 // precisely why payment tracking is a side table). cash-collected =
-                // Σ(invoice_payments) anchors PR-3's over-refund cap. Map the Stripe invoice
+                // Σ(invoice_payments) anchors the over-refund cap. Map the Stripe invoice
                 // (`in_…`) back to the internal `zeroship.invoices.id` via
                 // `billing_provider_refs`; skip a $0 fully-credit-covered invoice (no charge
                 // ⇒ no row ⇒ cash-collected stays 0).
                 //
-                // FAIL-CLOSED (gap #26 review, MAJOR-2): a TRANSIENT append failure must
+                // FAIL-CLOSED: a TRANSIENT append failure must
                 // NOT be swallowed — that would mark the event processed (claim-after-
                 // success below) and permanently DROP a cash row (under-counting
                 // cash_collected forever, since the redelivery is acked as a duplicate).
                 // Instead propagate the error so the webhook returns non-2xx → the event is
                 // left UNCLAIMED → Stripe retries. The retry safely re-appends because the
-                // append is now idempotent on `provider_ref` (CRITICAL-1: ON CONFLICT DO
-                // NOTHING), so the duplicate-write window the old ordering opened is closed.
+                // append is idempotent on `provider_ref` (ON CONFLICT DO NOTHING).
                 if let Err(e) = record_infra_payment(state, obj).await {
                     tracing::error!(error = %e, "stripe: invoice.paid payment-row append failed — failing closed for retry");
                     return err_json(500, "internal error");
                 }
-                // D3: an INFRA `invoice.paid` is FULLY handled here — ACK 200 and
-                // RETURN. It must NOT fall through to the Stream-2 `record_payout`
+                // An INFRA `invoice.paid` is FULLY handled here — ACK 200 and
+                // RETURN. It must NOT fall through to the Connect-revenue `record_payout`
                 // path below, whose `payouts.organization_id → organization_accounts(organization_id)`
                 // FK an infra-only organization (no Connect account) cannot satisfy. The
-                // fall-through 500'd AFTER the infra writes committed (non-atomic),
-                // so the event never acked and Stripe retried forever (poison). The
                 // payout path is for Connect REVENUE events, which are NOT infra
                 // invoices and are still reached for non-infra `invoice.paid` below.
                 return web::HttpResponse::Ok().json(&serde_json::json!({"status": "infra_recorded"}));
@@ -1306,7 +1294,7 @@ async fn dispatch_event(
     };
     let organization_id = organization.as_str();
 
-    // M4 (payout attribution): `metadata.organization_id` is CLIENT-influenced — a
+    // Payout attribution: `metadata.organization_id` is CLIENT-influenced — a
     // forged or copy-pasted id could attribute ANOTHER account's revenue to a
     // different organization. Resolve the connected account the charge actually settled
     // ON BEHALF OF (`on_behalf_of`, else `transfer_data.destination`) and confirm it
@@ -1460,7 +1448,7 @@ async fn handle_setup_intent_succeeded(
     }
 }
 
-/// `account.updated` (M2, the money hole). A connected account's onboarding /
+/// `account.updated`. A connected account's onboarding /
 /// capability flags changed at Stripe — most importantly `charges_enabled` /
 /// `payouts_enabled` being flipped to FALSE on a risk / KYC hold. The
 /// `connect_checkout` gate reads the CACHED `charges_enabled`, so a stale `true`
@@ -1533,7 +1521,7 @@ async fn handle_account_updated(
 }
 
 /// `invoice.payment_failed` — a finalized infra-billing invoice could not be
-/// charged. Audit it AND (billing G2) move the organization's account status to
+/// charged. Audit it AND move the organization's account status to
 /// `past_due`, starting the dunning window. We do NOT mark the Stripe invoice
 /// uncollectible — Stripe's own retry/dunning keeps running; the platform's
 /// `max_dunning_days` timeout (the dunning cron) is the suspension deadline.
@@ -1555,7 +1543,7 @@ async fn handle_invoice_payment_failed(
         );
     }
 
-    // G2 state mutation — only with a resolved organization. The signature was already
+    // Account-state mutation — only with a resolved organization. The signature was already
     // verified by `webhook` before we got here (webhook-truth-only); a forged /
     // unsigned event never reaches this function. Order-safe: `event.created` is
     // threaded so a stale failure that predates a recovery can't re-arm past_due.
@@ -1567,7 +1555,7 @@ async fn handle_invoice_payment_failed(
             }
             Ok(None) => { /* no state change (redelivery / already past_due/suspended) */ }
             Err(e) => {
-                // M1: FAIL CLOSED. A transient error recording the dunning transition
+                // FAIL CLOSED. A transient error recording the dunning transition
                 // must NOT be swallowed-then-acked — that would mark the event processed
                 // (claim-after-success), Stripe would never redeliver, and the organization
                 // would never enter dunning (keeps consuming free infra on a dead card).
@@ -1623,14 +1611,14 @@ async fn resolve_infra_organization(state: &AppState, obj: &StripeObject) -> Opt
     None
 }
 
-/// Append a `charge` `invoice_payments` row for a paid INFRA invoice (billing-ops
-/// PR-1). Maps the Stripe invoice (`obj.id`, an `in_…`) back to the internal
+/// Append a `charge` `invoice_payments` row for a paid INFRA invoice.
+/// Maps the Stripe invoice (`obj.id`, an `in_…`) back to the internal
 /// `zeroship.invoices.id` via `billing_provider_refs`, then appends the cash
 /// actually collected (`obj.amount_paid`) WITHOUT touching the finalized invoice.
 /// A $0 invoice (fully credit-covered, or no `amount_paid`) records NO row, so
 /// cash-collected stays 0 — exactly right.
 ///
-/// FAIL-CLOSED (gap #26 review, MAJOR-2): a TRANSIENT DB failure (conn, ref lookup,
+/// FAIL-CLOSED: a TRANSIENT DB failure (conn, ref lookup,
 /// or the append itself) is PROPAGATED so the caller can return non-2xx and leave
 /// the event UNCLAIMED for Stripe to retry — never silently dropped (which would
 /// permanently lose a cash row). The retry is safe because `append_charge` is
@@ -1693,13 +1681,13 @@ async fn record_infra_payment(
         // `conn` dropped here (before the HTTP fetch).
     };
 
-    // (2) DISPUTE-RESOLUTION LINKAGE (PR-8 CRITICAL-1). A future `charge.dispute.*`
+    // (2) DISPUTE-RESOLUTION LINKAGE. A future `charge.dispute.*`
     // carries only the settling `pi_…`/`ch_…` (never the `in_…`). Capture those for THIS
     // paid invoice and persist them as
     // `billing_provider_refs(ref_kind='payment_intent'|'charge')` so the dispute handler
     // can resolve back to us.
     //
-    // D2 (real-Stripe): the delivered `invoice.paid` event payload carries NEITHER a
+    // The delivered `invoice.paid` event payload carries NEITHER a
     // top-level `payment_intent`/`charge` NOR an inline `payments` list on API
     // 2025-09-30.clover (Basil 2025-03-31+) — reading them off `obj` records NOTHING, so
     // a real dispute could never resolve. A webhook payload cannot be expanded, so FETCH
@@ -1733,7 +1721,7 @@ async fn record_infra_payment(
     Ok(())
 }
 
-/// Resolve the settling `(payment_intent, charge)` for an infra `invoice.paid` (D2).
+/// Resolve the settling `(payment_intent, charge)` for an infra `invoice.paid`.
 ///
 /// PREFER ids already inline on the webhook `obj` (the legacy top-level shape, or the
 /// faithful Basil `payments.data[].payment.{payment_intent,charge}` envelope a correct
@@ -1789,13 +1777,13 @@ fn invoice_payment_object_ids(obj: &StripeObject) -> (Option<String>, Option<Str
     (pi, ch)
 }
 
-/// `charge.dispute.created` (billing-ops PR-8, design flow I). A cardholder disputed a
+/// `charge.dispute.created`. A cardholder disputed a
 /// charge; Stripe held the funds. We:
 ///   1. resolve the disputed Stripe payment object back to our internal invoice (mirroring
 ///      `invoice.paid`'s resolution),
 ///   2. in ONE txn, UPSERT a `billing_disputes` row (`status='open'`) AND append a
 ///      NEGATIVE `dispute_debit` `invoice_payments` row (= cash clawed back). The negative
-///      row lowers `Σ(invoice_payments)`, so PR-3's over-refund cap auto-tightens — no
+/// row lowers `Σ(invoice_payments)`, so the over-refund cap auto-tightens — no
 ///      cross-table trigger.
 ///
 /// The dispute is NEVER auto-refunded (the funds already moved) and NEVER mutates the
@@ -1829,7 +1817,7 @@ async fn handle_dispute_created(
         }
     };
     // Resolve the disputed object → our invoice via the pi_/ch_ linkage recorded at
-    // invoice.paid (CRITICAL-1). A Stripe Dispute object has NO `invoice` field — only
+    // invoice.paid. A Stripe Dispute object has NO `invoice` field — only
     // `payment_intent` (pi_…) and `charge` (ch_…) — so those are the only candidates.
     let candidates: Vec<&str> = [obj.payment_intent.as_deref(), obj.charge.as_deref()]
         .into_iter()
@@ -1837,7 +1825,7 @@ async fn handle_dispute_created(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .collect();
-    // BUG-4: a dispute with NEITHER a `payment_intent` NOR a `charge` has NO settling object
+    // A dispute with NEITHER a `payment_intent` NOR a `charge` has NO settling object
     // to resolve OR to park against — `resolve_invoice_for_dispute` returns None and
     // `park_pending_dispute` would REJECT (it requires a candidate) → a 500 that Stripe
     // retries forever (poison). Stripe always sends at least one of pi_/ch_, so this is purely
@@ -1947,7 +1935,7 @@ async fn handle_dispute_created(
     }))
 }
 
-/// `charge.dispute.closed` / `charge.dispute.updated` (PR-8). Progress an existing dispute
+/// `charge.dispute.closed` / `charge.dispute.updated`. Progress an existing dispute
 /// to its terminal status: `won` appends a compensating positive `dispute_reversal` row
 /// (restoring the over-refund budget); `lost` leaves the `dispute_debit` standing. A
 /// non-terminal `.updated` (still needs_response/under_review) is a no-op ack — the dispute
@@ -1988,7 +1976,7 @@ async fn handle_dispute_closed_or_updated(
         }
     };
     // Resolve the anchor invoice from the dispute's pi_/ch_ so a CLOSE-BEFORE-CREATE
-    // (MAJOR-4) can seed a terminal row. A close-before-create with no resolvable invoice
+    // can seed a terminal row. A close-before-create with no resolvable invoice
     // (an unrecorded charge) yields ctx=None → record_dispute_closed acks with Ok(None).
     let candidates: Vec<&str> = [obj.payment_intent.as_deref(), obj.charge.as_deref()]
         .into_iter()
@@ -2065,7 +2053,7 @@ async fn handle_dispute_closed_or_updated(
 ///
 /// Idempotent: a redelivered `charge.refund.updated` for an already-failed refund is a
 /// no-op (no double-reversal / double-claw). FAIL-CLOSED: a transient DB error 5xx's so the
-/// event is left UNCLAIMED for Stripe's retry, matching the M1 discipline.
+/// event is left UNCLAIMED for Stripe's retry, matching the fail-closed discipline.
 async fn handle_refund_updated(
     req: &web::HttpRequest,
     state: &AppState,
@@ -2317,7 +2305,7 @@ async fn handle_payment_intent_failed(
     }
 }
 
-/// Audit one account-state transition (G2). The detail carries the edge + reason
+/// Audit one account-state transition. The detail carries the edge + reason
 /// so ops can answer "when/why was this organization past_due/suspended/recovered."
 async fn audit_account_transition(
     req: &web::HttpRequest,
@@ -2489,7 +2477,7 @@ mod verification_tests {
         assert!(capped.chars().all(|c| c == '😀'), "no split multi-byte char");
     }
 
-    // PR-8 CRITICAL-1: the pi_/ch_ capture must read BOTH Stripe Invoice wire shapes.
+    // The pi_/ch_ capture must read BOTH Stripe Invoice wire shapes.
     #[test]
     fn invoice_payment_object_ids_legacy_top_level() {
         // Pre-Basil: top-level invoice.payment_intent / invoice.charge.

@@ -1,9 +1,7 @@
-// Same layout-query overflow as `bin/dev_provision.rs`, and the SECOND binary in
-// this crate to hit it: "query depth increased by 130 when computing layout of
-// {async block ...main.rs:635}". `recursion_limit` is per crate ROOT and every
-// bin is its own root, so raising it on one bin does nothing for the others.
-// RELEASE ONLY - debug `cargo check` compiles both, which is how the whole
-// platform's release build stayed broken while every debug gate ran green.
+// The layout query for a deeply nested async block overflows the default
+// recursion limit in release builds. `recursion_limit` is per crate ROOT and every
+// bin is its own root, so each binary must set it; debug `cargo check` compiles
+// anyway, which is why the debug gates do not catch it.
 #![recursion_limit = "256"]
 
 //! zeroship-control — control plane binary. Thin wrapper over
@@ -160,9 +158,8 @@ fn load_join_minter(
 /// diagnostic is already reachable through the function that produces it.
 const PLATFORM_ISSUER_INPUT: &str = "--auth-platform-issuer / ZEROSHIP_AUTH_PLATFORM_ISSUER";
 /// Operator-facing spelling of the bundle master key, for a diagnostic that has
-/// to name something the operator can actually set. The bare `MASTER_KEY` this
-/// used to interpolate is not settable any more, so an operator reading the
-/// refusal had no name to act on.
+/// to name something the operator can actually set. The bare `MASTER_KEY` is not
+/// settable, so an operator reading the refusal needs the full name.
 const MASTER_KEY_LABEL: &str = "ZEROSHIP_CONTROL_MASTER_KEY";
 /// Same, for the rotation list. The index is appended per entry.
 const LEGACY_MASTER_KEYS_LABEL: &str = "ZEROSHIP_CONTROL_LEGACY_MASTER_KEYS";
@@ -187,14 +184,9 @@ const CONTROL_KEY_LABEL: &str = "ZEROSHIP_CONTROL_KEY / --control-key-file";
 /// per-subsystem rule forbids.
 /// Load this control plane's service identity, or refuse to start.
 ///
-/// ONE OUTCOME: unconfigured, unreadable and unparseable all exit. They used to
-/// be two - "neither file configured" booted with every guarded internal edge
-/// refusing, and only a wrong path exited - on the reasoning that the first is a
-/// deployment which has not adopted service identity yet. Fence F4 of
-/// `docs/proposals/2026-09-05-auth-foundation-redesign.md` retires that
-/// distinction, and the old rustdoc contained the argument against itself: it
-/// said a misconfigured process must not be allowed to look like a
-/// correct-but-unconfigured one, which is exactly as true of an ORCHESTRATOR
+/// ONE OUTCOME: unconfigured, unreadable and unparseable all exit. A
+/// misconfigured process must not be allowed to look like a
+/// correct-but-unconfigured one, and that is exactly as true of an ORCHESTRATOR
 /// looking at the unconfigured one. A control plane that boots and refuses every
 /// internal edge is a control plane whose workers cannot load an app.
 ///
@@ -485,8 +477,7 @@ fn main() -> std::io::Result<()> {
     let supabase_jwt_secret = settings.supabase_jwt_secret.expose_str().to_owned();
     let supabase_jwks_url = settings.supabase_jwks_url.get().clone();
     let supabase_jwt_issuer = settings.supabase_jwt_issuer.get().clone();
-    // The overlay tier these two used to reach by hand is now the generated
-    // resolver's: `auth.platform_issuer` and `auth.platform_jwks_url` ARE the
+    // `auth.platform_issuer` and `auth.platform_jwks_url` ARE the
     // canonical paths, so the values below already carry CLI / env / overlay
     // precedence and `resolve_overlay_string` has nothing left to add.
     let auth_platform_issuer = settings.auth_platform_issuer.get().clone();
@@ -545,14 +536,11 @@ fn main() -> std::io::Result<()> {
     let stripe_base_url = settings.stripe_base_url.get().clone();
     // Previous master keys, tried as fallbacks on decrypt failure during a
     // rotation grace period. ONE secret holding a comma-list, resolved once and
-    // split once. Each entry used to be resolvable as its OWN reference, which
-    // meant the parse depended on whether a resolved value contained a comma;
-    // now an entry is always a literal key.
+    // split once. Each entry is a literal key.
     let legacy_keys: Vec<String> = split_legacy_master_keys(&settings.legacy_master_keys);
     let deploy_tmp_dir_str = settings.deploy_tmp_dir.get().clone();
-    // Dedicated pairwise-salt secret (auth-sdk 6.2). MUST match the gateway's
-    // value: both derive the per-app `pws_`. One declaration now, so the
-    // file-wins-over-value dance is gone - the only flag IS the path flag.
+    // Dedicated pairwise-salt secret. MUST match the gateway's
+    // value: both derive the per-app `pws_`. The only flag IS the path flag.
     let pairwise_salt = settings.pairwise_salt.expose_str().to_owned();
     let expected_oauth_audience = settings.oauth_audience.get().clone();
     let app_base_domain = settings.app_base_domain.get().clone();
@@ -561,7 +549,7 @@ fn main() -> std::io::Result<()> {
     let audit_retention_check_secs = *settings.audit_retention_check_secs.get();
 
     // Pure path resolution only — the writability PROBE (create_dir_all + probe
-    // file) is deferred to the real startup path (M1) so `--check-config`
+    // file) is deferred to the real startup path so `--check-config`
     // performs NO filesystem mutation but can still report the resolved path.
     let deploy_tmp_dir: std::path::PathBuf = if deploy_tmp_dir_str.is_empty() {
         std::env::temp_dir()
@@ -569,25 +557,20 @@ fn main() -> std::io::Result<()> {
         std::path::PathBuf::from(&deploy_tmp_dir_str)
     };
 
-    // S3 / L6: control authenticates the worker admin log fan-out with the
+    // Control authenticates the worker admin log fan-out with the
     // worker key. The same key gates the worker's dispatch bearer AND keys the
     // per-request ZeroShip-User HMAC, so it carries the >=32-byte strength floor
     // (empty and present-but-weak values are rejected).
     //
     // Every strength guard below goes through `validate_secret_material`, which
-    // runs the validator on the RESOLVED material whenever this run has any. The
-    // old `if !check_config || !is_secret_ref(..)` conditional existed only
-    // because a check run held the reference TEXT in the value's place; nothing
-    // does that now, so the branch is gone rather than restated.
+    // runs the validator on the RESOLVED material whenever this run has any.
     //
-    // THE BOOT GATE replaces three separate guards here, one of which failed
-    // OPEN. `control_key` was checked with a bare `is_configured()`, and
-    // `crates/zeroship-core/src/config/env.rs` resolves `ZEROSHIP_CONTROL_KEY=` to
-    // `Secret::supplied(Env, Some(""))` - configured, empty, accepted. That is
-    // Gitaly's `if len(conf.GetToken()) == 0 { return ctx, nil }` in a different
-    // language: the credential that is ABSENT gets a branch of its own and that
-    // branch says yes. Every row now runs a validator over the MATERIAL, so
-    // empty, the sentinel and a weak value share one fate.
+    // THE BOOT GATE: every row runs a validator over the MATERIAL, so
+    // empty, the sentinel and a weak value share one fate. A bare
+    // `is_configured()` is not enough: `crates/zeroship-core/src/config/env.rs`
+    // resolves `ZEROSHIP_CONTROL_KEY=` to `Secret::supplied(Env, Some(""))` -
+    // configured, empty, accepted. The credential that is ABSENT gets a branch of
+    // its own and that branch says yes.
     let credentials =
         enforce_control_credentials(&settings, &boot.overlay.source, check_config);
     // The list is one secret, so its ENTRIES are always material by the time
@@ -642,7 +625,7 @@ fn main() -> std::io::Result<()> {
     }
 
     if check_config {
-        // M1: read-only. No filesystem mutation, no signing-key load.
+        // Read-only. No filesystem mutation, no signing-key load.
         let workers_count = workers_str
             .split(',')
             .map(str::trim)
@@ -664,10 +647,9 @@ fn main() -> std::io::Result<()> {
         report.field("supabase_url", CheckValue::Plain(supabase_url.clone()));
         report.field(
             "supabase_anon_key_configured",
-            // Presence only, unchanged. The anon key is operational by
-            // classification (Supabase publishes it to browsers), but a report
-            // that started PRINTING a value it used to withhold would be a new
-            // disclosure introduced by a refactor, which is not this step.
+            // Presence only. The anon key is operational by
+            // classification (Supabase publishes it to browsers), but the report
+            // must not PRINT a secret value.
             CheckValue::Secret(!supabase_anon_key.is_empty()),
         );
         report.field(
@@ -785,7 +767,7 @@ fn main() -> std::io::Result<()> {
         return Ok(());
     }
 
-    // M1: side-effecting preflight runs only on the real startup path, after the
+    // Side-effecting preflight runs only on the real startup path, after the
     // read-only `--check-config` early-return above.
 
     // Validate the deploy tmp dir is creatable + writable so operators don't
@@ -897,9 +879,7 @@ fn main() -> std::io::Result<()> {
     };
 
     // Single shared long-lived connection on the one physical `zeroship` DB
-    // (`--db`). There is no separate auth database any more — the former
-    // `--auth-db` was only ever a config capability that compose already
-    // pointed at this same DB. The `AuthzGuard` bearer path, audit emitter, and
+    // (`--db`). The `AuthzGuard` bearer path, audit emitter, and
     // OAuth-grant handlers pipeline onto this handle; anything needing a
     // transaction opens its own owned connection via `registry.conn()`.
     let control_pg: Arc<compio_postgres::Client> = {
@@ -916,13 +896,11 @@ fn main() -> std::io::Result<()> {
     };
 
     // The first-party relying parties of the platform OP, from the config
-    // overlay. This is what the three deleted `/admin/oauth-clients` routes
-    // became: registering an RP of your own OP is a deployment decision, so it
+    // overlay. Registering an RP of your own OP is a deployment decision, so it
     // happens once here rather than through an operator credential at runtime.
     //
-    // FATAL on failure, deliberately. The route answered a human with a 400;
-    // nobody is watching this one, and a skipped registration is a login
-    // surface that silently does not exist.
+    // FATAL on failure, deliberately: because nobody is watching a startup
+    // registration, a skipped one is a login surface that silently does not exist.
     match zeroship_control::oauth_clients::reconcile_oauth_clients(
         &control_pg,
         configured_oauth_clients.as_deref(),
@@ -1018,7 +996,7 @@ fn main() -> std::io::Result<()> {
         }
     };
 
-    // Tax provider (PR-5): parse the kind, then build it. `native` (default)
+    // Tax provider: parse the kind, then build it. `native` (default)
     // computes 0 (USD launch). An unknown value refuses to boot rather than
     // silently mis-taxing.
     let tax_provider_kind = match zeroship_control::tax::TaxProviderKind::parse(settings.tax_provider.get()) {
@@ -1048,11 +1026,9 @@ fn main() -> std::io::Result<()> {
         Arc::clone(&tax_provider),
     ));
     // Provider secrets are read straight out of `--provider-config` through the
-    // platform secret grammar: the material, or `urn:zeroship:file:<path>`. This
-    // used to be a lookup into a two-entry map built here (stripe_secret_key,
-    // stripe_webhook_secret), which meant `lago` and `openmeter` -- whose keys
-    // are neither of those -- had no value an operator could write, and
-    // `--meter-provider lago` exited 1 below on every start.
+    // platform secret grammar: the material, or `urn:zeroship:file:<path>`. A
+    // fixed two-entry map would leave `lago` and `openmeter`, whose keys are
+    // neither of the known ones, with no value an operator could write.
     let provider_ctx = zeroship_control::metering::provider::ProviderCtx::new(
         provider_config_json,
         Arc::new(zeroship_control::metering::provider::PlatformSecretResolver),
@@ -1200,7 +1176,7 @@ fn main() -> std::io::Result<()> {
         }
     };
 
-    // Billing notifier (PR-6): a `BillingNotifier` over the relocated `zeroship-mailer`
+    // Billing notifier: a `BillingNotifier` over the relocated `zeroship-mailer`
     // `Mailer` built above. Wraps the mailer + the per-message idempotency key.
     let notifier: Arc<dyn zeroship_control::notify::BillingNotifier> = Arc::new(
         zeroship_control::notify::MailerNotifier::new(Arc::clone(&mailer)),
@@ -1263,8 +1239,8 @@ fn main() -> std::io::Result<()> {
     //   - audit_retention: sanctioned deleter for the append-only
     //     `zeroship.app_audit` + `zeroship.authz_decisions` tables (peer of the
     //     auth `audit_events` sweep; shares the `zeroship.audit_retention` GUC).
-    //   - orphaned_app_reaper: purges apps left owner-less by the ISS-12
-    //     account-erase reaper (DB row + blobs), excluding the `system = true`
+    //   - orphaned_app_reaper: purges apps left owner-less by the account-erase
+    //     reaper (DB row + blobs), excluding the `system = true`
     //     platform console.
     // Both hold an `Arc<AppState>` clone (cheap) and open fresh per-tick
     // connections.
@@ -1440,7 +1416,7 @@ fn main() -> std::io::Result<()> {
                     .route(web::get().to(api::get_spend_limit))
                     .route(web::put().to(api::set_spend_limit)),
             )
-            // --- Creator billing READ APIs (PR-7, BillingRead) -------------
+            // --- Creator billing READ APIs (BillingRead) -------------
             // Creator-scoped to OWNED apps; operator (Resource::Any) reads any.
             .service(
                 web::resource("/api/apps/{id}/invoices")
@@ -1623,17 +1599,15 @@ mod tests {
     use zeroship_core::config::env_like_tokens;
     use zeroship_core::config::GeneratedConfig;
 
-    // WHAT LEFT THIS MODULE. Every test that drove the ENVIRONMENT tier of
-    // `ControlSettings` moved to `crates/zeroship-control/tests/config_env_tier.rs`.
-    // That tier is clap's `env = "ZEROSHIP_..."` attribute, so exercising it
-    // in-process meant `std::env::set_var` / `remove_var` - which mutates the
-    // environment every other test in this binary parses in, and was measured
-    // failing 1 run in 12 here before a mutex was wrapped around it. They now
-    // run the real `zeroship-control` under `--check-config` with
-    // `Command::env`, so the environment is scoped to the child and the mutex
-    // is gone with the hazard it covered.
+    // Tests that drive the ENVIRONMENT tier of `ControlSettings` live in
+    // `crates/zeroship-control/tests/config_env_tier.rs`. That tier is clap's
+    // `env = "ZEROSHIP_..."` attribute, so exercising it in-process means
+    // `std::env::set_var` / `remove_var` - which mutates the environment every
+    // other test in this binary parses in. They run the real `zeroship-control`
+    // under `--check-config` with `Command::env`, scoping the environment to the
+    // child.
     //
-    // What stayed here is everything that needs no environment at all.
+    // What lives here is everything that needs no environment at all.
 
     #[test]
     fn control_blob_store_flag_uses_unified_name() {
@@ -1864,8 +1838,7 @@ mod tests {
             supabase_config_error("https://p.supabase.co", Some(strong), None, ""),
             supabase_config_error("https://p.supabase.co", Some("short"), None, "https://i.test"),
             supabase_config_error("https://p.supabase.co", None, Some(""), "https://i.test"),
-            // Secret strength. The shared validator used to interpolate a bare
-            // `PAIRWISE_SALT`; it now carries control's label.
+            // Secret strength. The shared validator carries control's label.
             zeroship_core::config::validate_pairwise_salt(PAIRWISE_SALT_LABEL, "")
                 .expect_err("an unset pairwise salt must fail closed"),
             validate_master_key_material(MASTER_KEY_LABEL, "YWJj")
@@ -1877,18 +1850,15 @@ mod tests {
 
     #[test]
     fn every_auth_provider_diagnostic_names_a_variable_control_reads() {
-        // The defect this pins: all three of these diagnostics named
-        // ZEROSHIP_AUTH_PROVIDER while control read
-        // ZEROSHIP_CONTROL_AUTH_PROVIDER, and two named AUTH_PLATFORM_ISSUER
-        // after that variable had gained its ZEROSHIP_ prefix. An operator who
-        // followed the advice edited a variable this binary does not read.
+        // This pins that every diagnostic about an environment variable names a
+        // variable this binary actually reads: a diagnostic naming a variable
+        // control does not read sends an operator to edit the wrong thing. It
+        // covers the auth-provider diagnostics, the Supabase provider config and
+        // the secret-strength refusals (bare `SUPABASE_JWT_SECRET` and
+        // `PAIRWISE_SALT` spellings no binary reads).
         //
-        // EXTENDED 2026-08-13 to the Supabase provider config and the
-        // secret-strength refusals, which carried the same defect: bare
-        // `SUPABASE_JWT_SECRET` and `PAIRWISE_SALT` spellings that
-        // no binary reads. Extending this test rather than writing a second one
-        // is deliberate - the scanner and the derived readable set are the parts
-        // worth having exactly once.
+        // The scanner and the derived readable set are the parts worth having
+        // exactly once, so this test is extended rather than duplicated.
         //
         // What this does NOT catch: a diagnostic that names a variable control
         // really does read but that is the WRONG one for the failure at hand,
@@ -2013,7 +1983,7 @@ mod tests {
         assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
-    // M4: resolve_trusted_oauth_clients distinguishes absent / present.
+    // resolve_trusted_oauth_clients distinguishes absent / present.
     #[test]
     fn trusted_oauth_clients_none_is_default_set() {
         let auth = zeroship_core::config::AuthSection {

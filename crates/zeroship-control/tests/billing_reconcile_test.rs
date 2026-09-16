@@ -53,7 +53,7 @@ static RECONCILE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
-/// The Stripe API version the client MUST pin (C1). Sourced from the production
+/// The Stripe API version the client MUST pin. Sourced from the production
 /// constant so a drift between the code's pin and the mock's expectation fails
 /// the build, not silently at runtime.
 const PINNED_STRIPE_VERSION: &str = STRIPE_API_VERSION;
@@ -76,7 +76,7 @@ struct RecordedRequest {
     path: String,
     idempotency_key: Option<String>,
     authorization: Option<String>,
-    /// The `Stripe-Version` header the client pinned (C1). A faithful mock
+    /// The `Stripe-Version` header the client pinned. A faithful mock
     /// REQUIRES it on every Stripe call (a 400 otherwise) and serves the wire
     /// shape of THAT version — so a regression test proves we send the pin.
     stripe_version: Option<String>,
@@ -98,20 +98,20 @@ struct MockState {
     /// When false, the mock does NOT replay by Idempotency-Key — it treats every
     /// request as fresh. This simulates Stripe's key window having EXPIRED
     /// (>24h), proving the per-app LEDGER (not Stripe's key) is what guarantees
-    /// at-most-once posting (CRIT-1).
+    /// at-most-once posting.
     dedupe_by_key: bool,
     /// Pending invoice items, in creation order: (id, customer, zs_item_key, amount).
     /// A faithful Stripe lists these on `GET /v1/invoiceitems?...&pending=true`
-    /// so the reconciler's `find_invoice_item_by_key` (C1) can adopt an
+    /// so the reconciler's `find_invoice_item_by_key` can adopt an
     /// already-posted item on a >24h re-drive instead of double-posting. An item
     /// swept onto a finalized invoice would drop off `pending=true`, but our
     /// finalize never sweeps a SECOND copy, so leaving them is faithful enough
     /// for the >24h adopt path under test. The `amount` lets the mock compute a
-    /// SWEPT invoice total — faithful to D1 (sweep only on
-    /// `pending_invoice_items_behavior=include`).
+    /// SWEPT invoice total — a sweep happens only on
+    /// `pending_invoice_items_behavior=include`.
     invoice_items: Vec<MockInvoiceItem>,
     /// Created invoices, keyed by the `in_…` id the mock minted: the swept total
-    /// (D1) + the settlement ids the EXPANDED `GET /v1/invoices` returns (D2).
+    /// plus the settlement ids the EXPANDED `GET /v1/invoices` returns.
     invoices: HashMap<String, MockInvoice>,
     fault: MockFault,
 }
@@ -139,18 +139,18 @@ struct MockInvoiceItem {
     amount: i64,
 }
 
-/// A created invoice recorded by the mock — enough to faithfully model D1 (the
-/// swept total) and D2 (the settlement ids surfaced only under the right expand).
+/// A created invoice recorded by the mock — enough to faithfully model the
+/// swept total and the settlement ids surfaced only under the right expand.
 #[derive(Clone, Default)]
 struct MockInvoice {
     customer: String,
     /// Sum of the pending items swept onto this invoice at create time. ZERO
-    /// unless the create carried `pending_invoice_items_behavior=include` (D1 —
+    /// unless the create carried `pending_invoice_items_behavior=include` —
     /// real Stripe defaults to `exclude`).
     swept_total: i64,
     /// The settling pi_/ch_ (set when the harness "pays" the invoice). Real
     /// Stripe surfaces these ONLY via expand[]=payments.data.payment.payment_intent
-    /// — the mock mirrors that (D2): they appear in GET only when expand is asked.
+    /// — the mock mirrors that: they appear in GET only when expand is asked.
     payment_intent: Option<String>,
     charge: Option<String>,
 }
@@ -229,9 +229,9 @@ impl MockStripe {
         self.state.lock().unwrap().fault = MockFault::FinalizeReturnsFixedId(fixed_id);
     }
 
-    /// The swept total the mock attached to a created invoice (D1). ZERO when the
+    /// The swept total the mock attached to a created invoice. ZERO when the
     /// create did NOT send `pending_invoice_items_behavior=include` (real Stripe's
-    /// default — the masking bug). `None` when no such invoice was created.
+    /// default). `None` when no such invoice was created.
     fn invoice_swept_total(&self, invoice_id: &str) -> Option<i64> {
         self.state
             .lock()
@@ -243,7 +243,7 @@ impl MockStripe {
 
     /// Simulate the harness PAYING an invoice: stamp the settling pi_/ch_ so a
     /// later EXPANDED `GET /v1/invoices/{id}?expand[]=payments.data.payment.payment_intent`
-    /// returns them (D2). On real Stripe these are surfaced ONLY under that expand.
+    /// returns them. On real Stripe these are surfaced ONLY under that expand.
     /// `register_paid_invoice` lets a test stand up a paid invoice the handler can
     /// then resolve through (for the invoice.paid linkage leg).
     fn register_paid_invoice(&self, invoice_id: &str, customer: &str, pi: &str, ch: Option<&str>) {
@@ -364,7 +364,7 @@ fn try_parse_request(buf: &[u8]) -> Option<(RecordedRequest, usize)> {
 /// the request. The `id` returned is derived from the path so each endpoint
 /// yields a plausible object id.
 fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> Vec<u8> {
-    // C1: a faithful Stripe REQUIRES the pinned `Stripe-Version` header on every
+    // A faithful Stripe REQUIRES the pinned `Stripe-Version` header on every
     // API call. Reject (record then 400) when it is ABSENT — proving the client
     // sends the pin on EVERY method. (Real Stripe would simply render against the
     // account default; we make the absence loud so the regression is mechanical.)
@@ -409,7 +409,7 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
     }
 
     // GET /v1/invoiceitems?...&pending=true — list the pending items for a
-    // customer (C1's `find_invoice_item_by_key`). Faithful Stripe list shape:
+    // customer (the reconciler's `find_invoice_item_by_key`). Faithful Stripe list shape:
     // `{ "object":"list", "data":[ {id, metadata:{zs_item_key}}, … ] }`.
     if req.method == "GET" && req.path.starts_with("/v1/invoiceitems") {
         let customer = query_param(&req.path, "customer");
@@ -435,11 +435,11 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
         return http_200_json(&body);
     }
 
-    // GET /v1/invoices/{in_…}[?expand[]=…] — retrieve an invoice. Faithful to D2:
+    // GET /v1/invoices/{in_…}[?expand[]=…] — retrieve an invoice. Faithful to Stripe:
     // the settling pi_/ch_ are surfaced via `payments.data[].payment` ONLY when the
     // caller EXPANDS `payments.data.payment.payment_intent`. Without the expand, the
     // Basil invoice carries NEITHER a top-level payment_intent/charge NOR an inline
-    // payments list (exactly what masked the bug). The pi_ comes back as the EXPANDED
+    // payments list. The pi_ comes back as the EXPANDED
     // PaymentIntent object (its `id`=pi_, `latest_charge`=ch_).
     if req.method == "GET" && req.path.starts_with("/v1/invoices/") {
         let id = req
@@ -524,7 +524,7 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
         return http_200_json(&json);
     }
 
-    // POST /v1/refunds (D2 refund leg). Faithful to real Stripe: `currency` is NOT an
+    // POST /v1/refunds. Faithful to real Stripe: `currency` is NOT an
     // accepted parameter — a body that sends it gets a 400 `parameter_unknown`. The
     // body MUST carry exactly one money target (`payment_intent` OR `charge`).
     if req.method == "POST" && req.path.starts_with("/v1/refunds") {
@@ -547,7 +547,7 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
 
     let new_item_id = format!("ii_mock_{}", short());
     // For a draft-invoice CREATE we mint the id up front so we can register the
-    // swept MockInvoice (D1). `is_invoice_create` = POST /v1/invoices that is NOT a
+    // swept MockInvoice. `is_invoice_create` = POST /v1/invoices that is NOT a
     // /finalize sub-resource.
     let is_invoice_create = req.method == "POST"
         && req.path.starts_with("/v1/invoices")
@@ -598,7 +598,7 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
                 amount,
             });
         }
-        // D1: on a draft create, SWEEP the customer's pending items onto the invoice
+        // On a draft create, SWEEP the customer's pending items onto the invoice
         // ONLY when `pending_invoice_items_behavior=include` was sent (real Stripe
         // defaults to `exclude` → an empty $0 draft). We model the sweep by totalling
         // the customer's pending item amounts and clearing them off the pending list.
@@ -897,11 +897,9 @@ async fn make_plan(state: &AppState) -> String {
 /// Create an app on `plan_id` owned by `owner`. Returns the app id.
 /// An app the given ORGANIZATION bills.
 ///
-/// It used to seed an app in a fresh organization and then seat a human owner in
-/// it, because the reconciler found the subject by walking to that owner. The
-/// subject is now the app row's own `organization_id`, so an app seeded into
-/// one organization and asserted against another would simply never be billed -
-/// the test would go green on an empty sweep. Placing it in the caller's
+/// The reconciler bills an app by its own row's `organization_id`, so an app
+/// seeded into one organization and asserted against another would never be
+/// billed - the test would go green on an empty sweep. Placing it in the caller's
 /// organization is what keeps the assertion attached to anything.
 async fn make_owned_app(state: &AppState, plan_id: &str, organization: &str) -> AppId {
     let name = format!("bill-{}", Uuid::new_v4());
@@ -989,7 +987,7 @@ fn period_d(period_start: i64) -> chrono::NaiveDate {
 }
 
 /// Read the `(status, total_cents)` of the invoice for `(organization, period)`, or
-/// `None` if no invoice row exists. Replaces the old `billing_runs` read.
+/// `None` if no invoice row exists.
 async fn read_invoice(
     state: &AppState,
     organization: &str,
@@ -1010,7 +1008,7 @@ async fn read_invoice(
 
 /// The finalized provider invoice id (`in_…`) for `(organization, period)` via
 /// `invoices ⋈ billing_provider_refs(provider='stripe', ref_kind='invoice')`, or
-/// `None`. Replaces the old `billing_runs.stripe_invoice_id` read.
+/// `None`.
 async fn finalized_invoice_id(
     state: &AppState,
     organization: &str,
@@ -1054,8 +1052,7 @@ async fn draft_invoice_id(
         .map(|r| r.get::<_, String>("external_id"))
 }
 
-/// Count the invoice LINES for a organization (across all their invoices). Replaces
-/// the old `billing_run_items` row count.
+/// Count the invoice LINES for a organization (across all their invoices).
 async fn lines_count(state: &AppState, organization: &str) -> i64 {
     state
         .control_pg
@@ -1069,8 +1066,8 @@ async fn lines_count(state: &AppState, organization: &str) -> i64 {
         .get::<_, i64>("n")
 }
 
-/// Count CONFIRMED line provider-refs (== the old non-NULL `stripe_item_id`
-/// count) for a organization. A line WITH a `billing_line_provider_refs` row is a
+/// Count CONFIRMED line provider-refs for a organization. A line WITH a
+/// `billing_line_provider_refs` row is a
 /// confirmed post; a line without one is intent-only.
 async fn confirmed_lines_count(state: &AppState, organization: &str) -> i64 {
     state
@@ -1201,18 +1198,13 @@ async fn reconcile_creates_invoice_items_per_app_from_real_aggregates() {
     common::drain_pg().await;
 }
 
-/// billing-metering (a): a single-segment invoice → the `create_invoice_item`
+/// A single-segment invoice → the `create_invoice_item`
 /// description CONTAINS the CU count, the metadata carries the FULL derivation
 /// (`compute_units`/`billable_units`/`included_units`/`fx`/per-metric `usage`),
 /// and the authoritative `amount` is UNCHANGED (== the frozen `amount_cents`).
 ///
 /// `make_plan` = 1 CU/request, FX 1c/CU, no included CU. 750 requests ⇒ 750 CU,
 /// 750 billable, amount 750c.
-///
-/// RED pre-change (description-only): the item POST carried `description="Infra
-/// usage — app … — YYYY-MM"` with NO CU suffix and NO `compute_units`/`usage`
-/// metadata — every CU/metadata assertion below fails (the amount assertion held
-/// before and after: the money is provably unchanged).
 // See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
 #[allow(clippy::await_holding_lock)]
 #[compio::test]
@@ -1328,7 +1320,7 @@ async fn single_segment_item_carries_cu_and_full_metadata_amount_unchanged() {
     common::drain_pg().await;
 }
 
-/// billing-metering (c)+(d): a MANY-metric app drives the REAL reconcile, and the
+/// A MANY-metric app drives the REAL reconcile, and the
 /// emitted Stripe item respects BOTH Stripe limits — the description ≤ the
 /// line-item cap (Stripe caps line-item descriptions at 500 chars; we cap at 350),
 /// and EVERY metadata value ≤ 500 chars — packing the per-metric `usage` across
@@ -1337,10 +1329,6 @@ async fn single_segment_item_carries_cu_and_full_metadata_amount_unchanged() {
 ///
 /// 80 custom metrics with long names (each 1 CU/op) → the packed usage blob far
 /// exceeds one 500-char metadata value, forcing the split + the truncation flag.
-///
-/// RED pre-change: no enriched description / no usage metadata at all — the
-/// description-length + per-value-cap + truncation-flag assertions have nothing to
-/// check (the keys are absent), so the test fails on the first metadata lookup.
 // See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
 #[allow(clippy::await_holding_lock)]
 #[compio::test]
@@ -1442,7 +1430,7 @@ async fn many_metric_item_respects_description_and_metadata_length_caps() {
     common::drain_pg().await;
 }
 
-/// C1: EVERY outbound Stripe call — POST, GET, DELETE — carries the pinned
+/// EVERY outbound Stripe call — POST, GET, DELETE — carries the pinned
 /// `Stripe-Version` header. The mock REQUIRES the pinned version on every API call
 /// (400 `version_unpinned` otherwise), so each REAL `StripeClient` method below only
 /// SUCCEEDS when the client sent the pin; we then assert the recorded header on
@@ -1452,10 +1440,6 @@ async fn many_metric_item_respects_description_and_metadata_length_caps() {
 /// under parallel load. Exercises a POST (`create_customer`), a GET
 /// (`find_invoice_item_by_key`), and a DELETE (`delete_invoice_item`) so all three
 /// request builders are covered.
-///
-/// RED pre-fix: with no `Stripe-Version` header sent, the mock 400s every call →
-/// each client method errors, and the per-request assertion (`stripe_version` is
-/// `None`) fails.
 #[compio::test]
 async fn every_stripe_call_pins_the_api_version() {
     let mock = start_mock_stripe().await;
@@ -1522,10 +1506,6 @@ async fn every_stripe_call_pins_the_api_version() {
 /// THE no-double-bill guarantee. Run the tick TWICE for the same (organization,
 /// period). The second run is a pure no-op via the `billing_runs` PK conflict —
 /// the mock server sees the invoice-item creates EXACTLY ONCE.
-///
-/// RED→GREEN: remove the `billing_runs` ON CONFLICT claim and the second run
-/// re-bills (the mock sees 4 invoice-item creates, not 2). The blueprint's
-/// idempotency guard is what makes this GREEN.
 // See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
 #[allow(clippy::await_holding_lock)]
 #[compio::test]
@@ -1651,7 +1631,7 @@ async fn stripe_client_uses_cyper_and_sends_idempotency_key() {
         item_req.body
     );
     assert!(item_req.body.contains("amount=1234"), "amount in form body");
-    // The deterministic lookup key is stamped into metadata for the >24h adopt path (C1).
+    // The deterministic lookup key is stamped into metadata for the >24h adopt path.
     assert!(
         item_req
             .body
@@ -1683,16 +1663,13 @@ async fn stripe_client_uses_cyper_and_sends_idempotency_key() {
     common::drain_pg().await;
 }
 
-/// D1 (real-Stripe regression): `create_invoice` MUST send
+/// `create_invoice` MUST send
 /// `pending_invoice_items_behavior=include` so the period's pending invoice items
 /// are SWEPT onto the draft. On API 2025-09-30.clover the param defaults to
 /// `exclude`, so omitting it finalizes a $0 invoice and bills NO infra usage. The
-/// mock now models the real default: it sweeps the customer's pending items onto a
+/// mock models the real default: it sweeps the customer's pending items onto a
 /// draft create ONLY when `include` is sent. We assert (a) the wire body carries
 /// the param AND (b) the swept invoice total equals the items' sum (not $0).
-///
-/// RED pre-fix: `create_invoice` omitted the param → the mock swept nothing →
-/// `invoice_swept_total` is 0 (≠ 1234+766) and the body lacks the param.
 #[compio::test]
 async fn create_invoice_sweeps_pending_items_via_include_behavior() {
     let url = db_url();
@@ -1746,15 +1723,12 @@ async fn create_invoice_sweeps_pending_items_via_include_behavior() {
     common::drain_pg().await;
 }
 
-/// D2 (real-Stripe regression): a paid infra invoice's settling pi_/ch_ live ONLY
+/// A paid infra invoice's settling pi_/ch_ live ONLY
 /// under `expand[]=payments.data.payment.payment_intent` on API 2025-09-30.clover
 /// (Basil removed the top-level fields). `invoice_settlement_ids` must do the
 /// EXPANDED fetch and read them from the expanded PaymentIntent object
-/// (`id`=pi_, `latest_charge`=ch_). The mock surfaces them ONLY under that expand.
-///
-/// RED pre-fix: the handler read the ids off the (un-expandable) webhook payload,
-/// so against a Basil invoice it captured NOTHING. Here the un-expanded GET also
-/// returns nothing — proving the expand is load-bearing.
+/// (`id`=pi_, `latest_charge`=ch_). The mock surfaces them ONLY under that expand:
+/// the un-expanded GET returns nothing, so the expand is load-bearing.
 #[compio::test]
 async fn invoice_settlement_ids_requires_expand_and_reads_pi_ch() {
     let url = db_url();
@@ -1784,9 +1758,8 @@ async fn invoice_settlement_ids_requires_expand_and_reads_pi_ch() {
     );
 
     // Prove the expand is load-bearing: the client's GET carried the expand path.
-    // (The mock surfaces the ids ONLY under this expand — exactly mirroring real
-    // Stripe, whose bare invoice / webhook payload omits them, which is what
-    // masked the bug.)
+    // The mock surfaces the ids ONLY under this expand — exactly mirroring real
+    // Stripe, whose bare invoice / webhook payload omits them.
     let reqs = fx.mock.requests();
     let get = reqs
         .iter()
@@ -1806,13 +1779,10 @@ async fn invoice_settlement_ids_requires_expand_and_reads_pi_ch() {
     common::drain_pg().await;
 }
 
-/// D2 (real-Stripe regression, refund leg): `POST /v1/refunds` does NOT accept a
+/// `POST /v1/refunds` does NOT accept a
 /// `currency` parameter — sending it is a 400 `parameter_unknown`. `create_refund`
 /// must NOT send `currency`. It also refunds a `pi_…`/`ch_…` DIRECTLY and resolves an
 /// `in_…` via the expanded fetch. The mock 400s a refund body that carries `currency`.
-///
-/// RED pre-fix: `create_refund` always sent `currency` → the mock 400s → the cash
-/// refund fails (the exact real-Stripe 400 the e2e hit).
 #[compio::test]
 async fn create_refund_omits_currency_and_targets_pi_directly() {
     let url = db_url();
@@ -2096,15 +2066,11 @@ async fn crashed_run_with_null_invoice_id_is_redriven() {
     common::drain_pg().await;
 }
 
-/// MAJOR-2 (fail-closed) REGRESSION: weights present, a plan that INHERITS the
+/// Weights present, a plan that INHERITS the
 /// global FX (`fx_pico_cents_per_unit = NULL`), and the global `pricing_config`
 /// default row REMOVED ⇒ the platform cannot price ⇒ the sweep must ABORT
 /// (error out) and produce NO invoice and NO `billing_runs` row — never a silent
-/// base-only $0 invoice (the revenue leak the critic flagged).
-///
-/// RED→GREEN: under the old `charge_cents` (fx None ⇒ 0 ⇒ base-only), this
-/// organization with 600 requests would bill $0 silently and `tick_with` would return
-/// `Ok`; here it returns `Err` and writes nothing.
+/// base-only $0 invoice, which would leak revenue.
 // See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
 #[allow(clippy::await_holding_lock)]
 #[compio::test]
@@ -2239,15 +2205,10 @@ fn dummy_passthrough(fx: &Fixture) -> StripeClient {
     .with_base_url(fx.state.stripe_base_url.clone())
 }
 
-/// CRIT-1: a partial post then crash, followed by a re-drive AFTER Stripe's
+/// A partial post then crash, followed by a re-drive AFTER Stripe's
 /// Idempotency-Key window has expired (dedupe OFF). The per-app LEDGER — not
 /// Stripe's 24h key — must guarantee app A's invoice item is created EXACTLY
 /// ONCE; the re-drive posts ONLY app B.
-///
-/// RED→GREEN: without the `billing_run_items` ledger (or if the re-drive does
-/// not skip ledgered apps), the second drive re-posts app A and the mock — with
-/// dedupe OFF — creates a SECOND item for A (double-bill). The ledger makes it
-/// GREEN: count_created == 2 total (A once + B once), never 3.
 // See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
 #[allow(clippy::await_holding_lock)]
 #[compio::test]
@@ -2293,7 +2254,7 @@ async fn partial_post_then_crash_does_not_double_bill_app_a() {
         created_after_crash, 1,
         "exactly one item posted before the crash"
     );
-    // Claim-then-call (C1): the line (snapshot intent) is written BEFORE each
+    // Claim-then-call: the line (snapshot intent) is written BEFORE each
     // Stripe POST, so after the crash app A is CONFIRMED (has a
     // billing_line_provider_refs row) and app B is INTENT-only (a line with NO
     // provider-ref — its POST failed). Exactly ONE confirmed post.
@@ -2341,16 +2302,11 @@ async fn partial_post_then_crash_does_not_double_bill_app_a() {
     common::drain_pg().await;
 }
 
-/// C1 (the tighter crash window): the item POSTS to Stripe, then the process
+/// The item POSTS to Stripe, then the process
 /// crashes BEFORE the ledger records the post. A re-drive AFTER Stripe's 24h
 /// Idempotency-Key window has expired (dedupe OFF) must NOT post a second item —
 /// the claim-then-call intent row + the deterministic metadata LOOKUP adopt the
 /// already-posted item. The app's invoice item is created EXACTLY ONCE.
-///
-/// RED→GREEN: under the OLD ordering (ledger written AFTER the Stripe call, no
-/// intent row, no zs_item_key metadata), the crashed drive leaves NO ledger row,
-/// so the >24h re-drive (key expired) re-POSTs the SAME app → count_created == 2
-/// (double-bill). The claim-then-call fix makes it count_created == 1.
 // See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
 #[allow(clippy::await_holding_lock)]
 #[compio::test]
@@ -2520,15 +2476,12 @@ async fn post_then_crash_redrive_within_24h_is_idempotent() {
     common::drain_pg().await;
 }
 
-/// C2 (under-bill): create draft (sweeping the real items) → crash before
+/// Create draft (sweeping the real items) → crash before
 /// finalize. A re-drive AFTER Stripe's 24h create-key window has expired (dedupe
 /// OFF) must FINALIZE the ORIGINAL draft (which carries the items) — NOT create a
 /// fresh empty draft and finalize a $0 invoice.
 ///
-/// RED→GREEN: under the OLD non-atomic create+finalize (no persisted draft id),
-/// the >24h re-drive's `create` key is expired ⇒ a NEW draft is created ⇒ it
-/// sweeps NO pending items (they're on the orphaned first draft) ⇒ finalizes a $0
-/// invoice (under-bill). Persisting the draft id before finalize + re-finalizing
+/// Persisting the draft id before finalize + re-finalizing
 /// THAT draft on re-drive makes the finalized invoice carry the real amount.
 // See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
 #[allow(clippy::await_holding_lock)]
@@ -2656,7 +2609,7 @@ async fn archived_app_open_invoice_finalizes_original_draft_after_24h() {
 }
 
 // ===========================================================================
-// CRIT-10: billing/setup self-service authz (own-id ok; cross-organization 403).
+// billing/setup self-service authz (own-id ok; cross-organization 403).
 // ===========================================================================
 
 /// Wire just the `billing/setup` route onto a test App (same path the prod
@@ -2671,13 +2624,7 @@ fn billing_setup_route(cfg: &mut web::ServiceConfig) {
 /// `billing/setup` is authorized by MONEY AUTHORITY AT THE ORGANIZATION named
 /// in the path, and by nothing else.
 ///
-/// This replaced a principal-equals-path test. That check was the right one
-/// while the billing subject WAS the caller - one human, one bill - and it is
-/// not expressible now: the path carries an `org_…` and the principal is a
-/// canonical user id, so the two can never be equal and the old assertion would have
-/// been vacuously true in the deny direction.
-///
-/// What must hold instead is BOTH directions of the seat: a principal seated at
+/// The invariant is BOTH directions of the seat: a principal seated at
 /// A may set up A's card, and the same principal, holding the same token, is
 /// refused at B - where it has no seat. B's customer must not exist afterwards,
 /// which is what makes the refusal a refusal rather than a slow success.
@@ -2769,13 +2716,12 @@ fn force_reconcile_route(cfg: &mut web::ServiceConfig) {
 /// The endpoint is GATED by the SAME `/internal/*` `check_auth` as every other
 /// internal route (control-key bearer). With the fixture's non-empty
 /// `control_key`:
-///   * no bearer ⇒ 401 (the gate, RED if the handler skipped check_auth), and
+///   * no bearer ⇒ 401 (the gate), and
 ///   * the correct control-key bearer ⇒ it drives the REAL reconcile for the
 ///     caller-chosen period, hitting the mock-Stripe over the wire EXACTLY once.
 ///
-/// RED→GREEN: drop the `check_auth` call from `force_reconcile` and the
-/// no-bearer request would 200 + bill — a privilege bypass. Keeping the gate
-/// makes the no-bearer case 401 while the keyed case still reconciles.
+/// The gate is load-bearing: without `check_auth`, the
+/// no-bearer request would 200 + bill — a privilege bypass.
 // See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
 #[allow(clippy::await_holding_lock)]
 #[compio::test]
@@ -2867,7 +2813,7 @@ async fn force_reconcile_endpoint_is_operator_gated_and_drives_a_chosen_period()
 }
 
 // ===========================================================================
-// C1 (replay is FAITHFUL): drive bill_organization end-to-end, then read the
+// Replay is FAITHFUL: drive bill_organization end-to-end, then read the
 // PERSISTED invoice_lines row BACK from the DB and assert charge_cents over the
 // FROZEN snapshot reproduces the stored amount_cents bit-for-bit. The test reads
 // what bill_organization WROTE, not what the test built. The snapshot must freeze the
@@ -2893,11 +2839,10 @@ async fn finalized_line_replays_persisted_amount_bit_for_bit_via_bill_organizati
     let organization = organization.as_str();
     let plan = make_plan(&fx.state).await; // seeds `requests` = 1 CU/op, fx 1c/CU
                                            // Seed a SECOND global weight for a metric the app will NOT use, so the frozen
-                                           // weights_snapshot is a strict SUPERSET of the app's usage keys. Pre-fix (the
-                                           // snapshot filtered to usage.keys()) this metric would be ABSENT from the
-                                           // frozen map; the C1 fix freezes the full map. Either way the replay must equal
-                                           // amount_cents (an unused weight contributes 0), but freezing the full map is
-                                           // what makes the snapshot equal to the real charge INPUT.
+                                           // weights_snapshot is a strict SUPERSET of the app's usage keys. The snapshot
+                                           // freezes the FULL map (not just usage.keys()), so it equals the real charge
+                                           // INPUT. Either way the replay must equal amount_cents (an unused weight
+                                           // contributes 0).
     fx.state
         .control_pg
         .execute(
@@ -2945,7 +2890,7 @@ async fn finalized_line_replays_persisted_amount_bit_for_bit_via_bill_organizati
         read_line_snapshot(&fx.state, organization, &app).await;
 
     // The frozen weights snapshot is the FULL global map — it includes the unused
-    // `cpu_us` weight (C1: superset), not just the applied `requests`.
+    // `cpu_us` weight (superset), not just the applied `requests`.
     let frozen_weights: MetricWeights =
         serde_json::from_value(weights_json).expect("parse frozen weights");
     assert!(
@@ -2977,16 +2922,11 @@ async fn finalized_line_replays_persisted_amount_bit_for_bit_via_bill_organizati
 }
 
 // ===========================================================================
-// M2 (re-finalize converges): a re-drive of the crash window where Stripe
-// finalized but our DB stayed draft. Stripe's `finalize_invoice` now returns
+// Re-finalize converges: a re-drive of the crash window where Stripe
+// finalized but our DB stayed draft. Stripe's `finalize_invoice` returns
 // `invoice_already_finalized`; bill_organization must treat that as SUCCESS, read back
 // the finalized id (== the draft id), and converge the LOCAL finalize — never
 // error-loop forever leaving the DB stranded at 'draft'.
-//
-// RED→GREEN: pre-fix, finalize_invoice's Api error propagates as
-// RegistryError::Database, the sweep swallows it (Ok(0)) and the DB stays 'draft'
-// FOREVER on every re-drive (each re-drive re-finalizes → same error). The M2 fix
-// makes the re-drive converge to 'finalized' with the invoice ref recorded.
 // ===========================================================================
 
 // See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
@@ -3022,8 +2962,8 @@ async fn refinalize_already_finalized_converges_locally() {
     // `billed` is a FLEET-wide count (the sweep bills every un-finalized organization
     // with usage in `period`), so other tests' leftovers can inflate it; assert
     // on THIS organization's converged outcome below rather than the exact count. The
-    // key M2 guarantee is that the drive did NOT error-loop (it returned Ok and
-    // this organization converged), which a pre-fix run could not do.
+    // guarantee under test is that the drive did NOT error-loop (it returned Ok and
+    // this organization converged).
     let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
         .await
         .expect("tick converges on already-finalized (no error loop)");
@@ -3038,7 +2978,7 @@ async fn refinalize_already_finalized_converges_locally() {
         Some(("finalized".to_string(), 450)),
         "local finalize converged to 'finalized' with the real amount",
     );
-    // The invoice provider-ref was recorded (M1's atomic pair), so lookup is
+    // The invoice provider-ref was recorded (the atomic finalize pair), so lookup is
     // auditable. The recorded id is the draft id (finalize does not change the id).
     let persisted_draft = draft_invoice_id(&fx.state, organization, period)
         .await
@@ -3056,7 +2996,7 @@ async fn refinalize_already_finalized_converges_locally() {
 }
 
 // ===========================================================================
-// M1 (atomic finalize→provider-ref): the finalize UPDATE and the invoice
+// Atomic finalize→provider-ref: the finalize UPDATE and the invoice
 // provider-ref INSERT commit in ONE transaction, so a failure of the ref INSERT
 // rolls BACK the finalize — the invoice can never be left 'finalized' with NO
 // 'invoice' ref (the un-auditable partial state where lookup_invoice_id returns
@@ -3065,11 +3005,8 @@ async fn refinalize_already_finalized_converges_locally() {
 // We force the ref INSERT to fail by pre-seeding a DIFFERENT invoice whose
 // `billing_provider_refs(provider='stripe', ref_kind='invoice', external_id=<fixed>)`
 // collides on the UNIQUE(provider, ref_kind, external_id) constraint with the id
-// the decorated finalize returns. The ref INSERT then errors INSIDE the txn.
-//
-// RED→GREEN: pre-fix (two separate autocommits) the finalize UPDATE commits FIRST,
-// then the ref INSERT errors — leaving 'finalized' + NO invoice ref. Post-fix the
-// transaction rolls back the finalize too, so the invoice stays 'draft' (a clean
+// the decorated finalize returns. The ref INSERT then errors INSIDE the txn, so the
+// transaction rolls back the finalize too: the invoice stays 'draft' (a clean
 // retry) and is NEVER finalized-without-ref.
 // ===========================================================================
 
@@ -3175,12 +3112,9 @@ async fn finalize_and_invoice_ref_commit_atomically() {
 /// `Idempotency-Key`, so two concurrent creates for one organization collapse to a
 /// single Stripe object instead of two.
 ///
-/// Both call sites previously passed `None` and justified it identically:
-/// "the caller ensures at-most-once via the `organization_billing` /
-/// `organization_accounts` row check". The caller does a plain check-then-act -
+/// The caller's row check is a plain check-then-act -
 /// `get_customer` -> None -> `create_customer` -> `set_customer` - with no lock
-/// spanning it (stripe_handlers.rs:245/253/257, zero `pg_advisory_lock` and
-/// zero `FOR UPDATE` in that handler). Two concurrent requests both see None
+/// spanning it. Two concurrent requests both see None
 /// and both post, and `ON CONFLICT` then keeps one row while the second Stripe
 /// object is orphaned - an external side effect no local rollback can undo.
 ///
