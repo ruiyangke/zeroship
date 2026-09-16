@@ -27,9 +27,8 @@
 //! `addConstraint(unique)` is not AUTHORABLE on SQLite at all (see
 //! [`ADD_CONSTRAINT_DIALECTS`]), so there is no name for the bound to judge there.
 //! That is a support fact, not a hole - constraint-NAME length is still covered on
-//! SQLite by the `createTable inline constraint` fixture. Do not "restore symmetry"
-//! by asserting SQLite accepts a 63-byte `addConstraint` name; that assertion passed
-//! only while the dialect table wrongly declared the op portable.
+//! SQLite by the `createTable inline constraint` fixture. A 63-byte `addConstraint`
+//! name must NOT be asserted accepted on SQLite: the op is not authorable there.
 //!
 //! The bound is enforced at three seams, because each one is reachable without the
 //! others:
@@ -246,14 +245,12 @@ type NamedOpFactory = (&'static str, fn(&str) -> Op);
 /// SQLite has no in-place `ADD CONSTRAINT`: a unique constraint is added only by
 /// the declarative differ's 12-step table rebuild, so `dialect-support.toml`
 /// declares `addConstraint/unique` `unsupported` there and validate refuses the op
-/// as UNSUPPORTED before any identifier bound is consulted. Asserting either
-/// acceptance or a length refusal on SQLite would be asserting the OLD, wrong
-/// declaration. (The `fk*` variants of the same op ARE authorable on SQLite - the
-/// gap is per-variant.)
+/// as UNSUPPORTED before any identifier bound is consulted. Neither acceptance nor
+/// a length refusal on SQLite is assertable. (The `fk*` variants of the same op ARE
+/// authorable on SQLite - the gap is per-variant.)
 ///
 /// Constraint-NAME length stays covered on SQLite by the `createTable inline
-/// constraint` factory below, which is portable on all three dialects, so nothing
-/// this file exists to prove is lost.
+/// constraint` factory below, which is portable on all three dialects.
 const ADD_CONSTRAINT_DIALECTS: [&DialectId; 2] = [
     &zeroship_migrate_postgres::DIALECT,
     &zeroship_migrate_mysql::DIALECT,
@@ -289,14 +286,10 @@ fn assert_refused_for_length(label: &str, dialect: &DialectId, op: Op) {
     let error = validate(op, dialect).expect_err(&format!(
         "{label} on {dialect:?} must refuse a truncatable name"
     ));
-    // TWO refusals, one bound. The reason used to be a single sentence —
-    // "PostgreSQL truncates identifiers to 63 bytes" — asserted for every dialect,
-    // which made this helper require a FALSE statement on the two targets that do not
-    // truncate at all. The module header above already states the real split: the
-    // create-side bound applies everywhere because the authored name is carried
-    // forward, and only SOME targets truncate. The refusal now says whichever of those
-    // is true for the target it asked, so this checks the disjunction and the parts
-    // that hold in both arms.
+    // TWO refusal reasons, one bound. The create-side bound applies everywhere
+    // because the authored name is carried forward, and only SOME targets truncate,
+    // so the refusal states whichever of those is true for the target it asked;
+    // this checks the disjunction and the parts that hold in both arms.
     assert!(
         error.reason.contains("truncates identifiers")
             || error.reason.contains("authored names are bounded at"),

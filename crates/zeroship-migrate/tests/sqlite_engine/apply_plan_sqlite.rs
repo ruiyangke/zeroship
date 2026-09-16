@@ -252,21 +252,19 @@ async fn sqlite_online_rename_executes_via_rebuild_one_through_apply_plan() {
 }
 
 // ---------------------------------------------------------------------------
-// REGRESSION: apply_plan bootstraps the journal up front.
+// apply_plan bootstraps the journal up front.
 //
 // A standalone plan whose FIRST step is `OnlineRename(TableRebuild)`, applied
-// against a FRESH SQLite file with NO `_mig` journal, made its first journal
-// touch a READ (`journal_sql::applied` SELECT on a non-existent
-// `_mig.schema_migrations`, via the rebuild arm's net-applied-skip lookup) →
-// "no such table". The shipped declarative path always bootstrapped the journal
-// before any read, but `apply_plan` is public API consumed with this net-new
-// rebuild-first shape.
+// against a FRESH SQLite file with NO `_mig` journal, must not read the journal
+// before it exists: `journal_sql::applied`'s SELECT on a non-existent
+// `_mig.schema_migrations` (the rebuild arm's net-applied-skip lookup) would fail
+// with "no such table". The up-front `ensure_journal` must bootstrap `_mig` before
+// any read.
 //
 // The v1 schema is built (with its full system columns) on one backend, then the
 // rebuild-first plan is driven on a SECOND backend opened over the SAME app file
 // but a FRESH (empty) journal file — faithfully reproducing "existing schema, no
-// journal yet". Pre-fix: errors on the journal read (`no such table`). Post-fix:
-// the up-front `ensure_journal` bootstraps `_mig` and the rebuild applies.
+// journal yet".
 #[compio::test]
 async fn rebuild_first_plan_against_fresh_journal_bootstraps_it() {
     let v1 = vec![CollectionDescriptor {
@@ -556,12 +554,12 @@ async fn sqlite_applies_a_zero_lock_budget_the_server_dialects_refuse() {
 /// the steps that precede it.
 ///
 /// The capability question is answerable before the plan starts - it is a property
-/// of the plan and of the deploy target, never of live state - but it used to be
-/// asked at the rename's OWN step, inside the authored-order loop. Every earlier
-/// step commits in its own transaction, so `[addColumn, addColumn, rename]` against
-/// a backend with no online capability left both columns committed and refused the
-/// rename: a schema that is neither the old shape nor the new one, and one no retry
-/// can repair, because the same plan meets the same refusal every time.
+/// of the plan and of the deploy target, never of live state - so it must be asked
+/// up front, not at the rename's OWN step. Every earlier step commits in its own
+/// transaction, so `[addColumn, addColumn, rename]` against a backend with no
+/// online capability would otherwise leave both columns committed and then refuse
+/// the rename: a schema that is neither the old shape nor the new one, and one no
+/// retry can repair, because the same plan meets the same refusal every time.
 ///
 /// The columns are named in full rather than asserted by count, for the reason a
 /// declarative MySQL rename's refusal is: a half-apply has to FAIL this test, not

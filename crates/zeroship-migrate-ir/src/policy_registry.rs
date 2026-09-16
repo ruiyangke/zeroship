@@ -22,21 +22,19 @@
 //! - **`runtime`** - execution & resource behavior (timeouts, index creation, rewrite).
 //! - **`safety`** - data protection (limits AND obligations; polarity is the field).
 //!
-//! Two of the old operator-posture toggles do NOT live here. "Skip the static guard
-//! belt" was a host/root POSTURE rather than a composable per-app grant - the single
-//! most dangerous switch, quarantined OUT of the composable registry, and since
-//! removed outright: no config can select it. The raw-island role-needle relaxation is
-//! an INTERNAL guard vendor-lower rule, not an operator-authorable knob; it survives,
-//! keyed off the `access.role` grant alone now that there is no posture to key off.
+//! Neither "skip the static guard belt" nor the raw-island role-needle relaxation is
+//! a knob here. The former is a host/root POSTURE, not a composable per-app grant -
+//! the single most dangerous switch, and one no config can select. The latter is an
+//! INTERNAL guard vendor-lower rule, not operator-authorable; it is keyed off the
+//! `access.role` grant alone.
 //!
-//! This is the Step-0 prep for moving the guard's capability gate onto the PDP: the
-//! guard, given an [`EffectivePolicy`](zeroship_migrate_policy::EffectivePolicy) composed
-//! over [`builtin_registry`], queries
-//! `grants(key, object)` for the statement's capability key instead of reading a
-//! `VendorCapabilities` bit. The registry here is what makes those queries meaningful
-//! (a key with no def would fail closed).
+//! The guard's capability gate is the PDP: given an
+//! [`EffectivePolicy`](zeroship_migrate_policy::EffectivePolicy) composed over
+//! [`builtin_registry`], it queries `grants(key, object)` for the statement's
+//! capability key instead of reading a `VendorCapabilities` bit. The registry here is
+//! what makes those queries meaningful (a key with no def would fail closed).
 //!
-//! # Object models (II.2.5)
+//! # Object models
 //!
 //! Each knob's [`ObjectModel`] mirrors the granularity at which today's guard makes
 //! the decision:
@@ -154,7 +152,7 @@ fn grant_only_draft_toml(charter_toml: &str) -> Result<String, String> {
 // -- sql - the raw-text escape hatch ---------------------------------------------
 
 /// The gated raw-statement escape (`raw`) (object-scoped Bool grant; still
-/// deny-list-guarded). Object set = all referenced objects (II.2.5).
+/// deny-list-guarded). Object set = all referenced objects.
 pub const KEY_SQL_RAW: &str = "sql.raw";
 /// The gated raw view-body SELECT escape (Global Bool grant).
 pub const KEY_SQL_RAW_VIEW_BODY: &str = "sql.raw_view_body";
@@ -162,7 +160,7 @@ pub const KEY_SQL_RAW_VIEW_BODY: &str = "sql.raw_view_body";
 // -- schema - structural DDL -----------------------------------------------------
 
 /// Namespace-authority: may CREATE a table matching this scope (PerTable Bool
-/// grant, default-deny). The per-op anchor of the II.2.6a creation-gating: an
+/// grant, default-deny). The per-op anchor of the creation-gating: an
 /// object comes into existence ONLY where this grants (structured `createTable`
 /// AND a classified raw `CREATE TABLE` both check it). The compose-time
 /// creatable-within-mandatory-inject lint lives in the policy crate; the guard
@@ -172,8 +170,8 @@ pub const KEY_SCHEMA_CREATE_TABLE: &str = "schema.create_table";
 /// engine-neutral schema-create capabilities into one engine-neutral key.
 pub const KEY_SCHEMA_CREATE_SCHEMA: &str = "schema.create_schema";
 /// Namespace-authority: may name/move a table INTO this scope - the TARGET of a
-/// `RENAME` / `SET SCHEMA` / create-as (PerTable Bool grant, default-deny,
-/// II.2.6a). Closes the rename-TOCTOU: a cross-scope move needs this grant on the
+/// `RENAME` / `SET SCHEMA` / create-as (PerTable Bool grant, default-deny).
+/// Closes the rename-TOCTOU: a cross-scope move needs this grant on the
 /// target scope. (The namespace-authority CHECK - rename-into-inject-scope - stays a
 /// guard rule.)
 pub const KEY_SCHEMA_RENAME: &str = "schema.rename";
@@ -187,8 +185,8 @@ pub const KEY_SCHEMA_CROSS_SCHEMA: &str = "schema.cross_schema";
 /// `ALTER TABLE ATTACH/DETACH PARTITION` (Global Bool grant).
 pub const KEY_SCHEMA_PARTITION: &str = "schema.partition";
 /// Namespace-authority: may `ALTER`/`DROP`/`RENAME` an INJECTED shape element
-/// (column, pinned PK, or index) of a table (PerTable Bool grant, default-deny,
-/// II.2.6b). Injected shape is the operator's floor and immutable by default; only
+/// (column, pinned PK, or index) of a table (PerTable Bool grant, default-deny).
+/// Injected shape is the operator's floor and immutable by default; only
 /// this grant waves the injected-shape-immutability denial. **`inherit = false`** -
 /// this is a POWER GRANT: a SILENT creator draft must NOT inherit "override the
 /// platform's injected columns"; it gets the default (deny) unless it asks explicitly.
@@ -213,7 +211,7 @@ pub const KEY_ACCESS_POLICY: &str = "access.policy";
 /// the guard matches the name the statement spells against this list in BOTH
 /// directions, so a charter permitting one extension has no authority over another.
 /// Empty = deny all. `FORBIDDEN_EXTENSIONS` is a non-grant hard deny in the guard
-/// regardless. (Merged from the former extension bool toggle + name allowlist.)
+/// regardless.
 pub const KEY_CODE_EXTENSION: &str = "code.extension";
 /// `CREATE/DROP FUNCTION` / `PROCEDURE` (Global Bool grant).
 pub const KEY_CODE_FUNCTION: &str = "code.function";
@@ -467,7 +465,7 @@ pub fn builtin_registry() -> PolicyRegistry {
             bool_grant(KEY_ACCESS_RLS, ObjectModel::PerTable, true, "ALTER TABLE … ROW LEVEL SECURITY."),
             // -- schema - structural DDL -----------------------------------------
             bool_grant(KEY_SCHEMA_CREATE_SCHEMA, ObjectModel::PerSchema, true, "CREATE SCHEMA (engine-neutral)."),
-            // namespace-authority creation/movement/immutability grants (II.2.6)
+            // namespace-authority creation/movement/immutability grants
             bool_grant(KEY_SCHEMA_CREATE_TABLE, ObjectModel::PerTable, false, "May CREATE a table matching this scope (default-deny namespace anchor)."),
             bool_grant(KEY_SCHEMA_RENAME, ObjectModel::PerTable, false, "May name/move a table INTO this scope (RENAME / SET SCHEMA target)."),
             // `schema.alter_injected` is a POWER GRANT - inherit = false.
@@ -505,7 +503,7 @@ pub fn builtin_registry() -> PolicyRegistry {
                 docs: "The permitted extension names, for CREATE and DROP alike (empty = deny all; FORBIDDEN_EXTENSIONS still override).".to_string(),
             },
             // -- sql - the raw-text escape hatch ---------------------------------
-            // `sql.raw` is OBJECT-scoped (II.2.5): "raw only in staging" is a
+            // `sql.raw` is OBJECT-scoped: "raw only in staging" is a
             // statement-level referenced-object containment guarantee, and the guard's
             // scoped-raw-SQL rules (unqualified name / SET search_path / opaque body)
             // hinge on a universe-wide grant versus a narrower one - so it is
@@ -570,7 +568,7 @@ mod tests {
         assert_eq!(om(KEY_ACCESS_ROLE), ObjectModel::Global);
         assert_eq!(om(KEY_ACCESS_GRANT), ObjectModel::Global);
         assert_eq!(om(KEY_CODE_EXTENSION), ObjectModel::Global);
-        // `sql.raw` is object-scoped (II.2.5): "raw only in staging".
+        // `sql.raw` is object-scoped: "raw only in staging".
         assert_eq!(om(KEY_SQL_RAW), ObjectModel::PerTable);
         // PerSchema: schema creation + cross-schema reference.
         assert_eq!(om(KEY_SCHEMA_CREATE_SCHEMA), ObjectModel::PerSchema);
@@ -590,7 +588,7 @@ mod tests {
     fn namespace_authority_grants_default_deny() {
         // Creation/movement/immutability anchors are Grant-polarity + default-deny:
         // an object comes into existence / a shape mutates only where explicitly
-        // granted (II.2.6).
+        // granted.
         let reg = builtin_registry();
         for k in [
             KEY_SCHEMA_CREATE_TABLE,
@@ -882,11 +880,8 @@ scope = "all"
 
     #[test]
     fn every_grant_default_is_valid_and_denies() {
-        // The deny half used to live in this test's NAME and comment only: it asserted
-        // that each default validates for its kind and stopped there, so a knob
-        // registered with a permissive default passed. The two sibling tests do assert
-        // denial, but over eight hardcoded keys, so a NEWLY ADDED knob was covered by
-        // neither. This walks the whole registry and asserts the property itself.
+        // This walks the whole registry and asserts the property itself: every knob's
+        // default validates for its kind and grants nothing.
         let reg = builtin_registry();
         for def in reg.iter() {
             assert!(

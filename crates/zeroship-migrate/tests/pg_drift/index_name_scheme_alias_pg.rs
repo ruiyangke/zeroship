@@ -1,4 +1,4 @@
-//! An index the DATA PLANE created no longer churns CREATE/DROP against the same
+//! An index the DATA PLANE created must not churn CREATE/DROP against the same
 //! index the declarative author derived a different name for.
 //!
 //! Two derivations of the same `(table, columns, unique)` triple disagree above 60
@@ -12,10 +12,10 @@
 //! CREATE and a DROP go out for an index that is already exactly right.
 //!
 //! The arms only mean something together: arm A is the defect, arm B is the
-//! population that works today and must keep working, arm C is the author-supplied
-//! rename the fix must NOT swallow, and arm D is the ownership check, which decides
-//! "structurally changed" with strict table equality and so had to learn the same
-//! pairing or it refused a non-owner over an index the differ had already accepted.
+//! population that must keep working, arm C is the author-supplied rename that must
+//! still be acted on, and arm D is the ownership check, which decides "structurally
+//! changed" with strict table equality and must use the same pairing or it refuses a
+//! non-owner over an index the differ has already accepted.
 //!
 //! REQUIRES `ZERO_MIGRATE_TEST_PG_URL`. An unset DSN FAILS these tests: a skipped
 //! live suite reports exactly like a passing one, so there is no skip.
@@ -392,12 +392,11 @@ async fn a_data_plane_named_index_re_diffs_clean() {
     drop_schemas(&session, &cfg).await;
 }
 
-/// ARM B - the population that works today. An index the ENGINE created on a new
-/// table still round-trips clean.
+/// ARM B - an index the ENGINE created on a new table still round-trips clean.
 ///
 /// `diff` hands a new table's index snapshots straight to `render_create_index` with
 /// no re-derivation, so live already carries the author's spelling and there is zero
-/// drift today. The fix must not buy arm A by breaking this.
+/// drift. Arm A must not be bought by breaking this.
 #[compio::test]
 async fn b_engine_named_index_still_round_trips_clean() {
     let url = require_live_pg!();

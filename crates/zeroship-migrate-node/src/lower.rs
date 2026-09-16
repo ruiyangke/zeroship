@@ -433,7 +433,7 @@ pub fn lower_ordered_envelopes_to_plans_for_rollback(
 ///
 /// Only objects the live schema does NOT already carry are filled in, and only the seven
 /// definition-bearing kinds. Tables are deliberately untouched: the catalog is authoritative
-/// for them, and replaying creates over it is what made the first attempt at this fail with
+/// for them, and replaying creates over it fails with
 /// `fold: table \`notes\` already exists`.
 ///
 /// A history that will not replay contributes NOTHING rather than failing the rollback. Some
@@ -681,47 +681,28 @@ fn lower_ordered_envelopes_to_plans_inner(
                                 // projection keeps that shape and drops the op. The
                                 // executor still probes and journals it completed.
                                 //
-                                // OWNERSHIP IS NOT RE-DECIDED HERE, and the check that
-                                // used to be is gone. `enforce_ir_ownership` already ran
-                                // for this envelope, one call up, and it is the layer that
-                                // draws the distinction: a create target the registry
-                                // assigns to ANOTHER app is refused, a target the registry
-                                // does not name takes the declarer rule. A check keyed on
-                                // "would dropping this op change the registry" cannot see
-                                // that difference - `advance_ownership_registry` inserts a
-                                // `CreateTable` target unconditionally, so it read an
-                                // ABSENT entry as foreign. Absent is the DEFAULT state:
-                                // `--registry` is optional and the CLI's
-                                // `loadRegistry(undefined)` returns `{}`. It also
-                                // contradicted the adoption contract the empty-priors
-                                // branch already honours, so the same authored migration
-                                // adopted or refused according to how many priors happened
-                                // to precede it.
-                                //
-                                // MEASURED, not inferred: with the registry naming another
-                                // app, lowering never reaches this match at all - the
-                                // loader refuses first with `ownership violation`. Traced
-                                // through a file sink on this exact branch, with the
-                                // registry-names-this-app case as the positive control:
-                                // the control wrote a trace line, the foreign-owner case
-                                // wrote none. Narrowing the check to the explicit-foreign-
-                                // owner case instead of deleting it was then run as its
-                                // own mutation and moved NOTHING - it is green on every
-                                // arm, exactly as deletion is, because no input can select
-                                // it. The check also never prevented the registry mutation
-                                // it named: `advance_ownership_registry` below runs for
-                                // every projection op, dropped or kept.
+                                // Ownership is not re-decided here:
+                                // `enforce_ir_ownership` already ran for this envelope
+                                // one call up, and it is the layer that draws the
+                                // distinction - a create target the registry assigns to
+                                // ANOTHER app is refused, a target the registry does not
+                                // name takes the declarer rule. A check keyed on "would
+                                // dropping this op change the registry" cannot see that
+                                // difference, because `advance_ownership_registry` below
+                                // inserts a `CreateTable` target unconditionally and so
+                                // reads an ABSENT entry as foreign. Absent is the DEFAULT
+                                // state: `--registry` is optional and the CLI's
+                                // `loadRegistry(undefined)` returns `{}`.
                                 //
                                 // WHAT THIS GIVES UP: defence-in-depth against an
                                 // INCOMPLETE registry. A registry that omits `accounts`,
                                 // an app applying a matching guarded `createTable`
                                 // ("accounts") and then an approved
                                 // `dropColumn("accounts", "ssn")`, now adopts and drops
-                                // another app's column where the projection used to refuse
-                                // at the create. That sequence already succeeds whenever
-                                // the priors are empty, so what is removed is an accident
-                                // of migration count, not a rule - but it is removed, and
-                                // an operator relying on it loses it.
+                                // another app's column where a re-decision here would
+                                // refuse at the create. That sequence already succeeds
+                                // whenever the priors are empty, so what is given up is
+                                // an accident of migration count, not a rule.
                                 //
                                 // Does NOT change any other guard verdict: divergent and
                                 // not-satisfied still refuse below, MySQL still never
@@ -3296,8 +3277,8 @@ scope = "all"
             "data steps do not synthesize down SQL"
         );
 
-        // This is the compatibility view that used to feed apply. Pin its lossiness
-        // so a future execution path cannot accidentally switch back to it.
+        // Pin this compatibility view's lossiness so a future execution path cannot
+        // accidentally switch to it.
         assert!(
             first.migrations().is_empty(),
             "the migration-only projection cannot represent data steps"

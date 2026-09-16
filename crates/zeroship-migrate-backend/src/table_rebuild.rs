@@ -112,14 +112,11 @@ pub trait TableRebuildPolicy: std::fmt::Debug + Sync {
 
 /// How a table rebuild treats the table's AUTOINCREMENT-style high-water mark.
 ///
-/// NEUTRAL on purpose, and it did not used to be. This field on
-/// [`TableRebuildSpec`] was typed `zeroship_migrate_sqlite::SqliteSequencePolicy` -
-/// a type from a crate that sits ABOVE this one - which is what kept the whole
-/// lowered-plan vocabulary (`TableRebuildSpec`, `TableRebuild`, `RenameStep`,
-/// `PlanStep`) stranded in the engine. One field inverted the dependency for all
-/// four.
+/// NEUTRAL on purpose: this field must not name a vendor type, because that would
+/// pull the whole lowered-plan vocabulary (`TableRebuildSpec`, `TableRebuild`,
+/// `RenameStep`, `PlanStep`) into depending on a crate that sits above this one.
 ///
-/// The vendor still owns the BEHAVIOUR. This says only which of the two
+/// The vendor owns the BEHAVIOUR. This says only which of the two
 /// transitions a rebuild is performing; what a high-water mark IS, where it is
 /// stored, how it is captured and how it is restored are the backend's, and
 /// `zeroship-migrate-sqlite` converts this into its own `SqliteSequencePolicy` at its
@@ -181,13 +178,11 @@ impl TableRebuildSpec {
 /// natively.
 ///
 /// NOTE: the engine DRIVES these rebuilds. `MigrationEngine::plan_declarative`
-/// CARRIES the rebuilds into its `DeclarativeDeployPlan`, and the now-generic
+/// CARRIES the rebuilds into its `DeclarativeDeployPlan`, and
 /// `MigrationEngine::apply_declarative` drives each through
 /// `MigrationBackend::rebuild_one` under the destructive/approval gate (the journal
 /// migration is `destructive + requires_approval`, so an un-approved rebuild is
-/// refused before any DDL). The old `plan_declarative` fail-close - a
-/// `DeclarativeError` arm that refused the rebuild the engine now drives, deleted
-/// after it outlived its last constructor - is gone. The direct, executor-internal
+/// refused before any DDL). The direct, executor-internal
 /// `SqliteBackend::rebuild_one` seam remains for tests; the engine path is the gated
 /// production drive.
 #[derive(Debug, Clone)]

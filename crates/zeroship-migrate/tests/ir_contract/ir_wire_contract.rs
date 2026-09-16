@@ -1,8 +1,7 @@
 //! Contract-strictness regression suite.
 //!
 //! These tests pin the FROZEN IR envelope wire contract the JS `op.*`
-//! builder is written against. Each test is RED against the
-//! pre-fix code and GREEN after:
+//! builder is written against:
 //!
 //! - **wire casing** — the op-region (every `Op` struct-variant field, the
 //!   constraint/index/batch/expr-AST/coltype operands) is camelCase, matching
@@ -18,8 +17,8 @@
 //!   `IrScalar`, so the typed value cannot diverge across the JS/Rust front
 //!   doors.
 //! - **base64 bytes** — `{"bytes":…}` is decoded + canonicalized at load;
-//!   invalid base64 is rejected; a non-canonical encoding normalizes so two
-//!   encodings of the same bytes hash identically.
+//!   invalid base64 is rejected; the decoder is strict, so a non-canonical
+//!   encoding is rejected rather than normalized.
 //! - **un-flattened constraint** — `IrConstraint.kind` is a nested object, not
 //!   a flattened sibling (so `deny_unknown_fields` is sound).
 //! - **property A (no raw SQL)** — `createIndex.where` + `setColumnType.using`
@@ -36,9 +35,8 @@ use zeroship_migrate::EXPR_INVALID_NUMERIC;
 
 #[test]
 fn drop_table_fields_are_camel_case() {
-    // The legacy native `if_exists`/`ifExists` boolean field is GONE; the
-    // existence guard is the uniform `existenceGuard` enum (engine-synthesized via a
-    // catalog probe, NOT native `IF EXISTS`). The intentional wire break.
+    // The existence guard is the uniform `existenceGuard` enum (engine-synthesized
+    // via a catalog probe, NOT native `IF EXISTS`).
     use zeroship_migrate::model::ir::ExistenceGuard;
     let op = Op::DropTable {
         table: "t".into(),
@@ -252,14 +250,11 @@ fn fk_constraint_fields_are_camel_case_and_nested() {
 
 #[test]
 fn ir_column_facet_fields_are_camel_case() {
-    // The two declared-only IrColumn facets are the
-    // FIRST multi-word op-region fields, so they are the first to actually exercise
-    // the camelCase nested-field convention every sibling silently obeyed (each was
-    // single-word). They MUST serialize camelCase (`idPrefix` / `vectorMetric`),
-    // matching `FieldDescriptor`'s `#[serde(rename = …)]` — one
-    // spelling across IR↔descriptor. And because `IrColumn` is `deny_unknown_fields`,
-    // the snake_case spelling must NOT deserialize (the inverse of the bug: pre-fix
-    // a camelCase IR envelope following the codebase convention was REJECTED).
+    // The two declared-only IrColumn facets MUST serialize camelCase
+    // (`idPrefix` / `vectorMetric`), matching `FieldDescriptor`'s
+    // `#[serde(rename = …)]` — one spelling across IR↔descriptor. And because
+    // `IrColumn` is `deny_unknown_fields`, the snake_case spelling must NOT
+    // deserialize.
     use zeroship_migrate::model::ir::{ColType, IrColumn, VectorMetric};
 
     let col = IrColumn {
@@ -651,7 +646,7 @@ fn structural_ints_below_2pow53_accepted() {
 /// schemars schema is the single source a JS best-effort hint validates against.
 /// Without `maximum`, a schema-driven JS validator would ACCEPT a `2^53` count
 /// the Rust loader REJECTS — a schema/loader divergence on the determinism
-/// boundary. RED before `SafeU64` gets a hand-written `JsonSchema`.
+/// boundary.
 #[test]
 fn safe_u64_schema_carries_the_2pow53_upper_bound() {
     let schema = schemars::schema_for!(MigrationIr);
@@ -914,9 +909,7 @@ fn bytes_decode_then_canonical_reencode_is_stable() {
     // canonical STANDARD (padded) alphabet, so the typed value (and any
     // downstream checksum) is determined by the payload, not the source
     // spelling. NB: the decoder is STRICT (`BASE64_STANDARD.decode`) — a
-    // non-canonical encoding is REJECTED at load rather than normalized (a
-    // defensible, deterministic choice; this test's old name over-promised
-    // "normalizes non-canonical").
+    // non-canonical encoding is REJECTED at load rather than normalized.
     let canonical: IrScalar = serde_json::from_str(r#"{"bytes":"AAEC"}"#).unwrap();
     // re-serialize must be canonical base64
     let reser = serde_json::to_string(&canonical).unwrap();
@@ -944,8 +937,7 @@ fn bytes_decode_then_canonical_reencode_is_stable() {
 // keys (`JSON.stringify` omits them), so a Rust serialization that emitted
 // explicit nulls would fold a DIFFERENT byte image into `Checksum::of_ir` than
 // the JS side for the SAME logical migration — breaking the single-artifact /
-// single-checksum invariant. These tests are RED before the
-// `skip_serializing_if = "Option::is_none"` fix and GREEN after.
+// single-checksum invariant.
 // ----------------------------------------------------------------------------
 
 #[test]
@@ -1312,13 +1304,10 @@ fn expr_case_omits_absent_else() {
 
 #[test]
 fn checksum_of_ir_matches_js_idiomatic_omitted_optionals() {
-    // The portable single-checksum invariant across the JS and Rust front doors
-    // a JS builder emits ops with UNSET
-    // optionals OMITTED. The Rust `Op` (built with `None`) must hash IDENTICALLY
-    // to the same op deserialized from that idiomatic JS-shaped JSON. Before the
-    // fix, the Rust side folded `"nullable":null,"default":null` while the JS
-    // doc omitted them — distinct bytes, distinct checksum. After the fix both
-    // canonicalize to the same omitted-key image.
+    // The portable single-checksum invariant across the JS and Rust front doors:
+    // a JS builder emits ops with UNSET optionals OMITTED. The Rust `Op` (built
+    // with `None`) must hash IDENTICALLY to the same op deserialized from that
+    // idiomatic JS-shaped JSON.
     use zeroship_migrate::model::ir::ColType;
     use zeroship_migrate::{Checksum, MigrationFlags};
 
@@ -1352,10 +1341,10 @@ fn checksum_of_ir_matches_js_idiomatic_omitted_optionals() {
         "Rust(None) and JS(omitted) must yield the SAME of_ir checksum"
     );
 
-    // Belt-and-braces: an explicit-`null` document — the SHAPE the buggy Rust
-    // serializer produced — must ALSO decode to the same logical op AND, once we
-    // omit on re-serialize, hash to the same value (deny_unknown_fields permits
-    // a present-but-null optional on input; canonicalization drops it).
+    // Belt-and-braces: an explicit-`null` document must ALSO decode to the same
+    // logical op AND, once we omit on re-serialize, hash to the same value
+    // (deny_unknown_fields permits a present-but-null optional on input;
+    // canonicalization drops it).
     let null_json = r#"{"op":"addColumn","table":"t","column":"x","type":"int","nullable":null,"default":null}"#;
     let null_op: Op = serde_json::from_str(null_json).unwrap();
     let null_ck = Checksum::of_ir(&CanonicalOpList(&[null_op]), &flags, "app", &[], &[], &[]);
