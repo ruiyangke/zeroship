@@ -9,7 +9,7 @@ use super::{
     AppWorkflows,
     app::{decode, encode, lock_app_state},
     delivery::{self, CapturedLease, JobReceipt},
-    models::{collection_pages, collection_scans, job_receipts},
+    models::{app_state, collection_pages, job_receipts},
     payloads,
     store::Transaction,
 };
@@ -313,12 +313,12 @@ async fn inspect(tx: &Transaction, job: &JobSpec) -> Result<Stored, WorkflowServ
     if next > plan.ids.len() {
         return Err(invalid());
     }
-    let current = scan::read(tx, &job.app_id).await?.ok_or_else(invalid)?;
+    let current = scan::read(tx, &job.app_id).await?;
     plan.check_scan(&current)?;
     if let Some(receipt) = record.receipt(job)? {
         if next != plan.ids.len()
             || receipt.outcome != outcome(&plan)
-            || current.revision <= plan.revision
+            || current.collection_revision <= plan.revision
         {
             return Err(invalid());
         }
@@ -329,10 +329,13 @@ async fn inspect(tx: &Transaction, job: &JobSpec) -> Result<Stored, WorkflowServ
 }
 
 async fn advance(tx: &Transaction, job: &JobSpec, plan: &Plan) -> Result<(), WorkflowServiceError> {
-    let current = scan::read(tx, &job.app_id).await?.ok_or_else(invalid)?;
+    let current = scan::read(tx, &job.app_id).await?;
     plan.check_scan(&current)?;
-    if current.revision == plan.revision {
-        let revision = current.revision.checked_add(1).ok_or_else(invalid)?;
+    if current.collection_revision == plan.revision {
+        let revision = current
+            .collection_revision
+            .checked_add(1)
+            .ok_or_else(invalid)?;
         let after = if plan.more {
             plan.ids.last().map(String::as_str)
         } else {
@@ -344,18 +347,21 @@ async fn advance(tx: &Transaction, job: &JobSpec, plan: &Plan) -> Result<(), Wor
             None
         };
         let observed_at = plan.more.then_some(plan.observed_at);
+        // Scoping by app and matching the revision this page read is what makes
+        // a lost update impossible: a concurrent advance moved the revision, so
+        // it matches no row and the zero-row result fails the attempt.
         changed_once(
             tx.database()
-                .entity::<collection_scans::Entity>()?
+                .entity::<app_state::Entity>()?
                 .update_many(
-                    collection_scans::id
+                    app_state::app_id
                         .eq(job.app_id.as_str())?
-                        .and(collection_scans::revision.eq(plan.revision)?),
-                    collection_scans::revision
+                        .and(app_state::collection_revision.eq(plan.revision)?),
+                    app_state::collection_revision
                         .set(revision)?
-                        .and(collection_scans::after_id.set(after)?)?
-                        .and(collection_scans::upper_id.set(upper)?)?
-                        .and(collection_scans::observed_at.set(observed_at)?)?,
+                        .and(app_state::collection_after_id.set(after)?)?
+                        .and(app_state::collection_upper_id.set(upper)?)?
+                        .and(app_state::collection_observed_at.set(observed_at)?)?,
                 )
                 .await?,
         )?;
