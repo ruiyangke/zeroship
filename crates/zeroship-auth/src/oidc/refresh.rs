@@ -1,9 +1,9 @@
 //! OP refresh rotation on the SESSION ROW: CLI/programmatic rotation and reuse
 //! detection.
 //!
-//! The refresh FAMILY used to be a chain of `zeroship.oauth_refresh_tokens`
-//! rows joined by `refresh_family_id`. It is now one `zeroship.sessions` row
-//! whose secret rotates in place, and every statement that reads it lives in
+//! The refresh FAMILY is one `zeroship.sessions` row whose secret rotates in
+//! place - not a chain of `zeroship.oauth_refresh_tokens` rows joined by
+//! `refresh_family_id` - and every statement that reads it lives in
 //! `crate::session_store`. What is left here is the OAuth policy around those
 //! statements: client authentication, scope narrowing, the response shape, and
 //! the transaction and lock discipline the rotation runs under.
@@ -227,13 +227,11 @@ pub(super) struct EstablishedSession {
 
 /// Create the session a token exchange mints from.
 ///
-/// This replaces `issue_root_refresh_token`, and it does strictly more: the old
-/// function ran only when `offline_access` was granted, so an exchange without
-/// it minted an access token against no stored object at all. Every exchange
-/// now creates a session; only the SECRET is conditional. A session with no
-/// secret can never be presented again (`session_store::peek` cannot match a
-/// NULL hash), so its one and only mint is the one the creating statement
-/// authorised.
+/// Every exchange creates a session; only the SECRET is conditional on
+/// `offline_access`. A session with no secret can never be presented again
+/// (`session_store::peek` cannot match a NULL hash), so its one and only mint is
+/// the one the creating statement authorised. Minting only when `offline_access`
+/// was granted would leave an access token against no stored object at all.
 ///
 /// The audience and the subject are today's, unchanged. The first-party CLI
 /// client is the PLATFORM audience and its subject is the person's own id,
@@ -966,13 +964,11 @@ pub(super) async fn revoke_sessions_for_subject_in_transaction(
 ///
 /// Returns `(deleted, idempotent records cleared)`.
 ///
-/// This takes NO per-person advisory lock, and the old sweep did. It could:
-/// the family sweep had to enumerate a chain and delete rows a rotation might
-/// be walking, so it serialised against rotation on the person. One row per
-/// session removes the chain, and the two statements this runs touch only rows
-/// whose deadlines have already passed - a row a rotation could still validate
-/// is out of both predicates by construction. A single statement taking only
-/// row locks cannot deadlock against a rotation that takes them in the same
+/// This takes NO per-person advisory lock. It does not need one: the two
+/// statements this runs touch only rows whose deadlines have already passed, and
+/// a row a rotation could still validate is out of both predicates by
+/// construction. A single statement taking only row locks cannot deadlock
+/// against a rotation that takes them in the same
 /// order.
 ///
 /// # Errors
