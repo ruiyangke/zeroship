@@ -247,19 +247,18 @@ pub fn check_unmask_authorization(
 /// helpers.
 ///
 /// Ordinary CRUD gets the same binding from `exec`, but unmask fetches and
-/// audit writes intentionally bypass that executor. The old schema bootstrap
-/// call happened to initialize the backend and attach SQLite before either
-/// path could run; lazy initialization must preserve that prerequisite without
-/// restoring a per-collection boot RPC.
+/// audit writes intentionally bypass that executor. The backend must be
+/// initialized and SQLite attached before either path can run; lazy
+/// initialization must preserve that prerequisite without a per-collection
+/// boot RPC.
 ///
-/// **The backend is a PARAMETER, not something this function resolves.** It
-/// resolved one itself - through `exec::ensure_backend_for_shared_sql`, which
-/// read `crate::context` and called `crate::init_pool_async` - until
-/// 2026-09-03. Both are ADAPTER state, and this file is ENGINE, so that call
-/// was the one dependency direction the crate split forbids. The funnel now
-/// lives at `crate::tx_scope::ensure_backend` and every entry point in this
-/// module receives what it resolved: a routed one takes it off its `TxRoute`,
-/// an unrouted one is handed the value the V8 dispatcher already opened. What
+/// **The backend is a PARAMETER, not something this function resolves.**
+/// Resolving one reads `crate::context` and calls `crate::init_pool_async`.
+/// Both are ADAPTER state, and this file is ENGINE, so that call is the one
+/// dependency direction the crate split forbids. The funnel lives at
+/// `crate::tx_scope::ensure_backend` and every entry point in this module
+/// receives what it resolved: a routed one takes it off its `TxRoute`, an
+/// unrouted one is handed the value the V8 dispatcher already opened. What
 /// is left here is the half that is genuinely about unmask - the per-app
 /// preparation - and it stays because these paths bypass `exec`.
 async fn prepare_unmask_backend(
@@ -380,7 +379,7 @@ pub async fn dispatch_unmask(
 /// One audit-row append: one write op, one row.
 ///
 /// Every unmask writes exactly one, granted or denied, and none of them goes
-/// through `exec::exec_mutation`, so none was billed before 2026-09-01. Call
+/// through `exec::exec_mutation`, so this path meters its own write. Call
 /// this only after the write's `?` has succeeded - metering is a success-arm
 /// signal, and an audit row that failed to land must not be charged for.
 fn meter_audit_write(usage: Option<&dyn crate::metrics::UsageSink>) {
@@ -704,15 +703,14 @@ pub async fn dispatch_bulk_unmask(
         rejected_claim: args.rejected_claim.clone(),
     };
 
-    // ---- Step 1: only after every column is validated, prepare the
+    // ---- Only after every column is validated, prepare the
     // backend and check the startup policy. Invalid descriptor input
     // keeps its typed validation error rather than being reported as a
     // database fault.
     //
-    // That ordering is now local to THIS function. It used to hold for the
-    // whole op, because the backend was opened here; the caller opens it now,
-    // so on an isolate with no database at all the V8 dispatch surfaces the
-    // configuration error first. Nothing in production reaches that state -
+    // The caller opens the backend, so on an isolate with no database at
+    // all the V8 dispatch surfaces the configuration error first. Nothing
+    // in production reaches that state -
     // the isolate always has a URL, and the dev tier opens SQLite lazily - and
     // the alternative is handing the engine an `Option` it would have to
     // unwrap at a statement.
@@ -1083,24 +1081,24 @@ pub async fn dispatch_unmask_for_query(
             // `args.column = mask_meta.canonical_column`, and
             // `dispatch_bulk_unmask` carries it through to its fetch.
             //
-            // This path used to skip it, and `authorize_query_hint` keeps only
-            // the classification, so the caller's spelling reached
-            // `raw_column_name` - a bare prefix with no normalisation. A hint of
+            // Skipping it would let the caller's spelling reach
+            // `raw_column_name` - a bare prefix with no normalisation - while
+            // `authorize_query_hint` keeps only the classification. A hint of
             // `contactEmail` against a descriptor declaring `contact_email`
-            // therefore AUTHORISED correctly (`resolve_schema_column` is
-            // alias-tolerant) and then read `__zs_raw__contactEmail`, which no
-            // migration creates. It failed closed, but three siblings behaving
-            // two ways at one boundary is how the next divergence gets in.
+            // then AUTHORISES correctly (`resolve_schema_column` is
+            // alias-tolerant) and reads `__zs_raw__contactEmail`, which no
+            // migration creates. All three siblings canonicalize at this one
+            // boundary so they cannot diverge.
             //
-            // The `None` arm no longer falls back to the caller's spelling.
-            // That fallback fed an unmasked column's own name to the raw-column
-            // read, and the read is not merely wrong there - on SQLite it is
-            // SILENT, because a double-quoted identifier matching no column is
-            // taken as a string literal, so the "plaintext" that came back was
-            // the column NAME. `authorize_query_hint` already refuses an
-            // unmasked column with `unmask_column_not_masked` before this
-            // function runs (`crud/mod.rs:828`), so this arm is unreachable and
-            // says so rather than reading something.
+            // The `None` arm does not fall back to the caller's spelling.
+            // That fallback would feed an unmasked column's own name to the
+            // raw-column read, and the read is not merely wrong there - on
+            // SQLite it is SILENT, because a double-quoted identifier matching
+            // no column is taken as a string literal, so the "plaintext" that
+            // comes back is the column NAME. `authorize_query_hint` already
+            // refuses an unmasked column with `unmask_column_not_masked`
+            // before this function runs (`crud/mod.rs`), so this arm is
+            // unreachable and says so rather than reading something.
             let canonical = lookup_mask_meta(&schema, col)
                 .map(|meta| meta.canonical_column)
                 .ok_or_else(|| {
@@ -1417,10 +1415,10 @@ mod tests {
 
     #[test]
     fn stripped_auto_actor_is_denied_by_authorization_db3() {
-        // The fix's effect: a sanitized app actor (the `auto` claim stripped to
-        // None) hits check_unmask_authorization's "unauthenticated → denied"
-        // arm — which returns before consulting any policy. Pre-fix the raw
-        // {kind:"auto"} reached the no-policy fallback and was GRANTED.
+        // A sanitized app actor (the `auto` claim stripped to
+        // None) must hit check_unmask_authorization's "unauthenticated → denied"
+        // arm — which returns before consulting any policy. An unsanitized
+        // {kind:"auto"} must never reach the no-policy fallback, which GRANTs.
         let sanitized = sanitize_app_actor(Some(value!({ "kind": "auto" })));
         assert_eq!(sanitized.actor, None);
         assert!(
