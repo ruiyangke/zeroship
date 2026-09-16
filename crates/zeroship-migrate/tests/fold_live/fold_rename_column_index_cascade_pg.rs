@@ -6,19 +6,17 @@
 //! rename commits, and a later `DROP COLUMN` of the new name cascades the index
 //! away exactly as it would have under the old one.
 //!
-//! `render/fold.rs` used to update only `snap.columns` and
-//! `ConstraintSnapshot::cascade_columns` in its `Op::RenameColumn` arm and never
-//! touched `snap.indexes`, so the fold kept naming the OLD column in
-//! `IndexSnapshot::columns` / `IndexSnapshot::elements`. That produced drift twice
-//! over: the surviving index disagreed with live on its key columns, and a
-//! subsequent `dropColumn` of the NEW name found no index to cascade and left a
-//! PHANTOM INDEX behind that PostgreSQL had already removed.
+//! The fold's `Op::RenameColumn` arm must update `IndexSnapshot::columns` /
+//! `IndexSnapshot::elements` alongside `snap.columns` and
+//! `ConstraintSnapshot::cascade_columns`, or it keeps naming the OLD column:
+//! the surviving index disagrees with live on its key columns, and a subsequent
+//! `dropColumn` of the NEW name finds no index to cascade and leaves a PHANTOM
+//! INDEX behind that PostgreSQL had already removed.
 //!
-//! Measured on PostgreSQL 18.4, `ALTER TABLE ... RENAME COLUMN a TO b`:
-//! `CREATE INDEX rename_idx_a ON t (a)` becomes
-//! `CREATE INDEX rename_idx_a ON t USING btree (b)` - the KEY follows the rename
-//! and the index NAME does NOT. The fold has to do both: rewrite the key columns
-//! and leave the name alone.
+//! `ALTER TABLE ... RENAME COLUMN a TO b`: `CREATE INDEX rename_idx_a ON t (a)`
+//! becomes `CREATE INDEX rename_idx_a ON t USING btree (b)` - the KEY follows
+//! the rename and the index NAME does NOT. The fold has to do both: rewrite the
+//! key columns and leave the name alone.
 //!
 //! The same holds for the two column-bearing sites that are RENDERED SQL TEXT - a
 //! partial index's `WHERE` and an expression key - which follow the rename in
@@ -28,8 +26,8 @@
 //! `rename a -> b; drop b` cascades the index instead of leaving a phantom.
 //!
 //! What those arms do NOT pin, because a column list cannot fix it: the rendered
-//! TEXT still names the old column after a pure rename. Measured on PostgreSQL 18.4,
-//! `rename a -> b` leaves the fold holding `("a" > 0)` / `expr:("a" + 1)` against
+//! TEXT still names the old column after a pure rename. `rename a -> b` leaves
+//! the fold holding `("a" > 0)` / `expr:("a" + 1)` against
 //! live's `(b > 0)` / `expr:(b + 1)`. Re-rendering needs the `Expr` the snapshot
 //! discarded; see the `Op::RenameColumn` arm of `render/fold.rs`.
 //!

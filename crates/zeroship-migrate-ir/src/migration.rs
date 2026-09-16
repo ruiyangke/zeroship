@@ -62,8 +62,8 @@ impl MigrationId {
     /// **re-lowering the identical IR envelope reproduces byte-identical ids** - the
     /// property the cross-deploy obligation key, the idempotent re-run skip, the
     /// auto-discharge recognition, and the self-EXPAND exemption all depend on. A
-    /// fresh `generate()` per lower (the bug this replaces) gives each deploy a
-    /// different obligation key for the same logical rename, breaking all four.
+    /// fresh `generate()` per lower would give each deploy a different obligation
+    /// key for the same logical rename, breaking all four.
     ///
     /// Deterministic (same `tag`+`seed` => same id); no OS/random/time input.
     ///
@@ -577,9 +577,9 @@ impl Checksum {
 /// `depends_on` + `supersedes` (each an ordered, domain-separated version list)
 /// + `preconditions` (count, then each canonical-JSON + length-prefixed).
 ///
-/// This is a PURE lift of the tail that used to live inline in `Checksum::of`;
-/// extracting it guarantees the two front doors fold the identity fields
-/// byte-identically (a drift between them would be a tamper-evidence hole).
+/// This is a pure lift of the tail `Checksum::of` also folds, so the two front
+/// doors fold the identity fields byte-identically (a drift between them would
+/// be a tamper-evidence hole).
 ///
 /// # Panics
 /// Panics only if [`MigrationFlags`] or a [`PreconditionCheck`] fails to

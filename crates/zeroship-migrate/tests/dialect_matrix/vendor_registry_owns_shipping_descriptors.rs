@@ -1,9 +1,7 @@
 //! The shipping vendor registry is the only authority for shipping descriptors.
 //!
-//! Capability rows used to be copied into the leaf IR crate, reached through both
-//! the closed dialect enum's `descriptor()` method and a second hardcoded list of
-//! them. A fourth backend could not extend that closed bridge. The rows now live in their vendor
-//! crates and this integration test checks the composition that can see all three.
+//! The rows live in their vendor crates, and this integration test checks the
+//! composition that can see all three.
 
 use zeroship_migrate::{shipping_backends, Capability};
 use zeroship_migrate_backend::registry::BackendVendor;
@@ -35,8 +33,7 @@ fn shipping_vendors() -> [&'static BackendVendor; 3] {
 /// NONE did, the emitting arm would never execute and the census would be a
 /// four-way `assert!(none.is_none())` that no capability answer could ever break.
 ///
-/// Measured on the tree that introduced `Capability::PartitionRelationDdl`:
-/// PostgreSQL emits, SQLite and MySQL refuse.
+/// PostgreSQL emits partition-relation DDL; SQLite and MySQL refuse.
 const VENDORS_WITH_PARTITION_RELATIONS_FLOOR: usize = 1;
 const VENDORS_WITHOUT_PARTITION_RELATIONS_FLOOR: usize = 2;
 
@@ -153,15 +150,15 @@ fn every_shipping_capability_answer_is_pinned() {
 /// whose only mistake was one line in a descriptor. Nothing else in the tree holds
 /// those two answers together, so this does.
 ///
-/// # Why this replaced a required trait method rather than joining it
+/// # Why the capability, not a required trait method
 ///
-/// A native-partitioning predicate on ValidationPolicy used to be a third spelling of
+/// A native-partitioning predicate on ValidationPolicy would be a third spelling of
 /// this same fact, consulted only by the authoring validator while `render/lower.rs`
-/// asked the identical question as `self.dialect != POSTGRES`. Two spellings of one
-/// fact drift; three is a promise to. The capability is now the single spelling —
+/// asks the identical question as `self.dialect != POSTGRES`. Two spellings of one
+/// fact drift; three is a promise to. The capability is the single spelling —
 /// the vocabulary BOTH layers already share — and this census anchors it to the
-/// compiler-forced emitter answers, which is strictly more than the trait method
-/// checked: it forced an ANSWER, never that the answer was TRUE.
+/// compiler-forced emitter answers, which is strictly more than a trait method
+/// checks: it forces an ANSWER, never that the answer is TRUE.
 #[test]
 fn a_backends_two_partition_answers_cannot_disagree() {
     // Values only need to be well-formed; whether a backend spells them is the

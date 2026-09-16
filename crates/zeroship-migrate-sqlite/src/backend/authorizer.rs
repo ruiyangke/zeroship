@@ -514,9 +514,8 @@ fn decide(current: Mode, ctx: &AuthContext<'_>) -> Authorization {
         // and suspenders alongside `load_extension_disable` at open)
         AuthAction::CreateVtable { module_name, .. } => match current {
             // `vec0` only, and ONLY in engine mode. Creator mode can never make a
-            // vtable. `fts5` was removed from this allowance with full-text support:
-            // the engine authors no FTS DDL any more, so conceding the capability
-            // would grant a create nothing asks for.
+            // vtable. `fts5` is not allowed: the engine authors no FTS DDL, so
+            // conceding the capability would grant a create nothing asks for.
             Mode::EngineJournal if module_name.eq_ignore_ascii_case("vec0") => Authorization::Allow,
             _ => Authorization::Deny,
         },
@@ -671,8 +670,7 @@ fn decide(current: Mode, ctx: &AuthContext<'_>) -> Authorization {
         // -- Temp objects denied in CreatorUp --
         // A creator `up` has no business creating temp tables/triggers/views/indexes
         // (they can hold cross-statement state, fire on app writes, or shadow journal
-        // names). These were only INCIDENTALLY blocked before via the temp-master
-        // Insert ordering; deny them explicitly BY THE AUTHORIZER. Engine mode never
+        // names). Deny them explicitly BY THE AUTHORIZER. Engine mode never
         // needs them either, so deny in both modes.
         AuthAction::CreateTempTable { .. }
         | AuthAction::CreateTempTrigger { .. }
@@ -1627,10 +1625,10 @@ mod tests {
     }
 
     // a creator `up` doing a plain `SELECT ... FROM "_mig".schema_migrations` is a
-    // `Read { accessor: None }` on `_mig`. Pre-fix it fell through to the `_ => Allow`
-    // catch-all (the trigger/view-body arm requires `accessor.is_some`), letting the
-    // creator read the immutable journal. It must now be DENIED in CreatorUp - while
-    // the engine's own journal reads (EngineJournal mode) stay allowed.
+    // `Read { accessor: None }` on `_mig`. The trigger/view-body arm requires
+    // `accessor.is_some`, so this must be DENIED in CreatorUp rather than falling
+    // through to the `_ => Allow` catch-all - while the engine's own journal reads
+    // (EngineJournal mode) stay allowed.
     #[test]
     fn creator_read_of_mig_denied_engine_read_allowed() {
         let m = AuthMode::new();

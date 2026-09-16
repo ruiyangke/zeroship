@@ -15,10 +15,8 @@
 //!
 //! See the module-level docs of [`authorizer`](crate::backend::authorizer) and
 //! [`actor`](crate::backend::actor) for the mechanism.
-//! Every claim above is proven against a real temp-file SQLite, split across two
-//! files rather than the three this comment used to name - there is no
-//! `tests/sqlite_journal.rs` and there never was, though the coverage it stood for
-//! does exist:
+//! Every claim above is proven against a real temp-file SQLite, across two
+//! integration files:
 //!
 //! - `zero-migrate/tests/policy_charter/sqlite_confinement.rs` covers the
 //!   authorizer line. A creator `up` may
@@ -99,18 +97,6 @@ pub use rebuild_sql::RebuildError;
 // lone `DIALECT` reads ambiguously beside them.
 use crate::DIALECT as SQLITE_DIALECT;
 
-/* `fn stored_ddl()` USED TO LIVE HERE. It asked the ENGINE's registry which parser
- * handles `SQLITE_DIALECT` and unwrapped the `Option` the registry returns, which
- * is this vendor asking a lookup to hand this vendor back to itself. The answer it
- * received was always `crate::schema::RENDERER.stored_ddl()`, i.e.
- * `Some(&crate::stored_ddl::PARSER)`.
- *
- * Every call site names `crate::stored_ddl::PARSER` directly now - the spelling
- * `fold.rs` in this crate already used - so the round trip, the `Option`, and the
- * `expect` that could never fire are all gone with it. Measure the set with
- * `git grep -n 'stored_ddl::PARSER' -- crates`.
- */
-
 /// The SQLite [`MigrationBackend`]. Holds the dedicated hardened migration actor
 /// for ONE tenant. Construct via [`SqliteBackend::open`].
 #[derive(Debug)]
@@ -173,8 +159,8 @@ impl SqliteBackend {
     /// The peer of [`Self::ensure_journal_sqlite`] for the ONE platform table the
     /// worker writes rather than reads. See
     /// [`audit_unmask_sql`](crate::backend::audit_unmask_sql) for why it lives in
-    /// the app file rather than the journal, and why the data plane no longer
-    /// creates it itself.
+    /// the app file rather than the journal, and why the data plane does not
+    /// create it itself.
     ///
     /// # Errors
     /// [`SqliteActorError`] on a failed mode flip or DDL statement.
@@ -481,9 +467,9 @@ fn project_lock_path(app_path: &Path) -> Result<PathBuf, SqliteActorError> {
     {
         use std::os::unix::fs::MetadataExt;
 
-        // `(dev, ino)` is the inode identity the old implementation got by locking
-        // the file itself. Naming the sidecar after it preserves that property:
-        // two hard links to one database still name one lock file.
+        // `(dev, ino)` is the inode identity the lock is keyed on. Naming the
+        // sidecar after it preserves that property: two hard links to one
+        // database still name one lock file.
         let meta = std::fs::metadata(&canonical).map_err(|error| {
             SqliteActorError::Open(format!(
                 "stat app path {} for project lock: {error}",
@@ -1379,8 +1365,7 @@ mod lock_tests {
     /// The project-lock wait is its own budget, not the DDL one. An operator who
     /// tightens `lock_timeout` to keep a blocking statement off live traffic must
     /// not thereby shorten how long a deploy queues behind a peer deploy - the two
-    /// numbers answer different questions, and 3 seconds is shorter than many real
-    /// migrations.
+    /// numbers answer different questions.
     #[compio::test]
     async fn the_project_lock_wait_is_not_bounded_by_the_ddl_budget() {
         let dir = tempfile::tempdir().expect("tempdir");
