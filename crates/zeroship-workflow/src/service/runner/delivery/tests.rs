@@ -123,6 +123,7 @@ enum Mode {
     Pending,
     AfterCreatorRenewal,
     HardTimeout,
+    RevokedFrontier,
 }
 
 #[derive(Default)]
@@ -135,6 +136,9 @@ struct Probe {
     stopping: RefCell<Option<oneshot::Sender<()>>>,
     stop_gate: RefCell<Option<oneshot::Receiver<()>>>,
     creator_renewed: Cell<bool>,
+    /// Withdrawn from inside app code, so the frontier reaches the runner on
+    /// the same poll and the delivery authority's own arm cannot preempt it.
+    revoke: RefCell<Option<crate::service::policy::PolicyBinding>>,
 }
 
 struct Executor {
@@ -189,6 +193,22 @@ impl TaskExecution for Execution {
                 ))
             }
             Mode::Pending => std::future::pending().await,
+            Mode::RevokedFrontier => {
+                self.probe
+                    .revoke
+                    .borrow_mut()
+                    .take()
+                    .expect("policy binding")
+                    .revoke()?;
+                // Hold the thread, as synchronous app code does, until the
+                // watchdog has observed the withdrawal on its own thread.
+                let mut observed = self.budget.check();
+                while observed.is_ok() {
+                    std::hint::spin_loop();
+                    observed = self.budget.check();
+                }
+                assert_eq!(observed, Err(crate::service::runner::BudgetEnd::Revoked));
+            }
             Mode::AfterCreatorRenewal | Mode::HardTimeout => {
                 loop {
                     self.budget.check()?;
@@ -211,10 +231,8 @@ impl TaskExecution for Execution {
                 }
                 if matches!(self.probe.mode.get(), Mode::HardTimeout) {
                     self.interrupted.recv_async().await.unwrap();
-                    return self
-                        .budget
-                        .check()
-                        .map(|()| unreachable!("hard budget must be exhausted"));
+                    self.budget.check()?;
+                    unreachable!("hard budget must be exhausted");
                 }
             }
         }
@@ -383,6 +401,34 @@ async fn unrepresentable_retry_delay_is_rejected_before_execution() {
         Err(WorkflowServiceError::InvalidRequest(_))
     ));
     assert_eq!(fixture.probe.starts.get(), 0);
+}
+
+/// Expiry is waived when a resolved frontier is published, revocation is not.
+/// App code resolves a complete frontier after its delivery authority has been
+/// withdrawn; nothing from that attempt may reach the journal or the manager.
+#[compio::test]
+async fn revoked_authority_discards_a_resolved_frontier_instead_of_publishing_it() {
+    let fixture = Fixture::new(AppPolicy {
+        lease_ms: 5_000,
+        ..AppPolicy::default()
+    })
+    .await;
+    let binding = fixture
+        .service
+        .policies
+        .current_binding(fixture.app.app_id())
+        .unwrap();
+    fixture.probe.revoke.replace(Some(binding));
+    fixture.probe.mode.set(Mode::RevokedFrontier);
+    let mut slot = fixture.slot(Duration::from_secs(5));
+    assert!(Box::pin(slot.run(&fixture.app, fixture.lease.clone()))
+        .await
+        .is_err());
+    assert_eq!(fixture.probe.starts.get(), 1);
+    assert_eq!(fixture.probe.stops.get(), 1);
+    assert_ne!(fixture.task_state().await, "completed");
+    assert!(fixture.app.job_receipt(&fixture.job).await.unwrap().is_none());
+    assert!(fixture.metadata.requests.borrow().is_empty());
 }
 
 #[compio::test]

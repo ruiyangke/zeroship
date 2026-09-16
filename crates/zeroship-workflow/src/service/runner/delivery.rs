@@ -597,9 +597,13 @@ async fn execute<L: JobLease + Clone>(
     phase: &Phase,
     options: DeliveryOptions,
 ) -> Result<JobReceipt, WorkflowServiceError> {
+    // A resolved frontier describes effects that already reached the world, so
+    // local expiry does not withdraw the right to publish it; the completion
+    // loop below stays bounded by the phase deadline and the creator lease.
+    // Revoked delivery authority does withdraw it, and publishes nothing.
     let result = bounded(options.execution_timeout, execution.wait())
         .await
-        .and_then(|outcome| guard.budget().check().map(|()| outcome));
+        .and_then(|outcome| guard.budget().check_authority().map(|()| outcome));
     // Joining remains mandatory after this deadline, but it must not keep
     // renewing manager or creator authority while native shutdown is stuck.
     phase.finalize(options.operation_timeout, result.as_ref().err());

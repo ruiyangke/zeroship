@@ -195,23 +195,30 @@ impl TaskExecution for V8Execution {
         // Freeze app effects before any host upload can yield. The task lease
         // remains active while staging; app code has finished its frontier.
         self.stop().await;
-        self.budget.check()?;
+        // Shutdown holds the frontier that app code already produced. Only a
+        // revoked authority withdraws the right to hand it to the runner.
+        self.budget.check_authority()?;
         let (transport, limits) = &self.output;
         let (_, assignment) = &self.loader;
         let prepared = PreparedExecution::from_runtime_json(assignment, &json, *limits)?;
         drop(json);
         loop {
+            // An unstaged frontier is incomplete: its payload refs name bytes
+            // that never landed, so expiry here must refuse it and re-execute.
             self.budget.check()?;
-            let staged = prepared.stage(transport.as_ref()).await;
-            self.budget.check()?;
-            match staged {
+            match prepared.stage(transport.as_ref()).await {
                 Err(WorkflowServiceError::Unavailable(_) | WorkflowServiceError::Timeout) => {
                     // Retain the prepared bytes and request IDs when the upload
                     // response is lost. The runner bounds retries by its lease
                     // and execution timeout without invoking app code again.
                     compio::time::sleep(Duration::from_millis(100)).await;
                 }
-                result => return result,
+                // The referenced bytes have landed. The frontier is complete,
+                // and expiry no longer justifies throwing it away.
+                result => {
+                    self.budget.check_authority()?;
+                    return result;
+                }
             }
         }
     }
