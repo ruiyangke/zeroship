@@ -1035,9 +1035,7 @@ impl<'a> BindCtx<'a> {
     ///
     /// The binary case is the VENDOR's to answer - which carrier the value
     /// travels in, and what (if anything) wraps the placeholder - so it goes
-    /// through [`DmlRenderer::bind_bytes`]. This method used to make that choice
-    /// itself, with a three-way `match` on `self.backend.dialect()` spelling
-    /// `decode(.., 'base64')` / `FROM_BASE64(..)` / raw bytes in core.
+    /// through [`DmlRenderer::bind_bytes`].
     fn push_scalar(&mut self, value: &IrScalar) -> String {
         if let IrScalar::Bytes(bytes) = value {
             let backend = self.backend;

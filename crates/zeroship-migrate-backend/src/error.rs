@@ -160,15 +160,14 @@ pub enum DeclarativeError {
     /// Which types those are is the TARGET's answer, asked through
     /// [`SchemaRenderer::identity_column_type_allowed`](crate::schema::SchemaRenderer::identity_column_type_allowed).
     /// PostgreSQL admits `smallint`, `integer` and `bigint` and exactly those --
-    /// MEASURED, including that a DOMAIN over `integer` is refused too -- and answers
+    /// a DOMAIN over `integer` is refused too -- and answers
     /// `identity column type must be smallint, integer, or bigint` while rejecting the
     /// `ALTER` outright, so a plan carrying one dies partway through applying. Widening
     /// and narrowing WITHIN an admitted set stay legal and are not refused here.
     ///
     /// The message names the TARGET rather than a vendor and does not restate the
-    /// permitted set, because the set is not core's to state: it belonged to the one
-    /// backend whose answer was written into this string, and would have been printed
-    /// at any other.
+    /// permitted set, because the set is not core's to state: printing one would
+    /// be a single backend's answer shown for every target.
     ///
     /// The differ's half of [`IrLowerError::IdentityColumnTypeUnsupported`], refused
     /// for the same reason.
@@ -626,8 +625,8 @@ pub enum IrLowerError {
     /// An `alterSequence` that carries no option, so there is no action to render.
     ///
     /// `ALTER SEQUENCE <name>` with an empty action list is not a statement in
-    /// PostgreSQL's grammar. MEASURED on PostgreSQL 18.4 against the engine's own
-    /// emitted text: `ALTER SEQUENCE "s"` answers `syntax error at end of input`.
+    /// PostgreSQL's grammar: `ALTER SEQUENCE "s"` answers `syntax error at end
+    /// of input`.
     ///
     /// Refused here rather than lowered to nothing. A no-op would still take a
     /// journal row and move the drift anchor while changing no sequence, so the
@@ -655,8 +654,7 @@ pub enum IrLowerError {
     /// A `createTrigger` with `INSTEAD OF` timing whose target is a live TABLE.
     ///
     /// `INSTEAD OF` exists to make a VIEW writable, and both dialects that have it
-    /// refuse it on a table in their own words. MEASURED through the engine's own
-    /// emitted SQL:
+    /// refuse it on a table in their own words:
     ///
     /// ```text
     ///   sqlite      cannot create INSTEAD OF trigger on table: t
@@ -666,8 +664,8 @@ pub enum IrLowerError {
     /// So this is NOT a dialect capability and NOT a `dialect-support.toml` cell:
     /// the op IS supported on both, on a view. It is a structural fact about the op,
     /// which is why the refusal is dialect-neutral and lives here rather than in the
-    /// capability tables. Before it existed, the op cleared validate, cleared lower
-    /// and met the operator mid-apply, with the migration's earlier statements
+    /// capability tables. Without it, the op clears validate, clears lower
+    /// and meets the operator mid-apply, with the migration's earlier statements
     /// already committed.
     ///
     /// NOT SQLITE-ONLY. `createTrigger/bodyInsteadOf` is the only dialect-corpus row
