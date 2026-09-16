@@ -1,7 +1,6 @@
-//! **The effect model over the finished fold.** Specified by
-//! `docs/proposals/single-fold-and-effects.md` section G.
+//! **The effect model over the finished fold.**
 //!
-//! Two things live here, and the difference between them is the proposal's whole
+//! Two things live here, and the difference between them is the whole
 //! answer:
 //!
 //! * `state_at` - `state_at(N) = live_at_0 (+) fold(effects[0..N])`, the state the
@@ -65,14 +64,14 @@ use zeroship_migrate_ir::dialect::DialectId;
 /// The state the plan's `n`th step meets: the live schema as it was before the plan
 /// started, advanced by the ops the first `n` steps replay.
 ///
-/// This is the governing identity of section E spelled as code. `base` is
+/// This is the governing identity spelled as code. `base` is
 /// `live_at_0` - pass the [`SchemaSnapshot`] the engine introspected under the held
 /// lock, or [`SchemaSnapshot::default`] for the pure-offline reading. `n` counts OPS,
 /// which is the unit an effect is attached to; `n >= ops.len()` yields the final
 /// state.
 ///
-/// It is a REFOLD rather than an incremental delta. The proposal flags the cost as
-/// unmeasured (`decision 8`), and this is the shape that is obviously correct; if it
+/// It is a REFOLD rather than an incremental delta - the shape that is obviously
+/// correct; if it
 /// ever proves too slow the incremental form is an optimisation of a function whose
 /// answer is already pinned by tests.
 ///
@@ -121,7 +120,7 @@ pub fn ir_state_at(
 
 /// What ONE op does to the catalog facts an obstruction assertion reads.
 ///
-/// EXHAUSTIVE, with no `_` arm: this is section H's op-exhaustiveness requirement
+/// EXHAUSTIVE, with no `_` arm: the op-exhaustiveness requirement
 /// applied to the effect model, and it is what replaces the SQL whitelist's
 /// `_ => false`. A variant added to [`Op`] fails the build here, where the question
 /// "can this remove a dependency edge?" is answerable, rather than silently
@@ -282,10 +281,6 @@ mod tests {
 
     /// Ops that provably only ADD catalog facts.
     ///
-    /// The last four are the ones the deleted SQL whitelist could NOT prove
-    /// additive - it answered `false` for each, disarming the hoist and letting a
-    /// plan half-apply. Measured against the whitelist before it was deleted, not
-    /// assumed.
     /// `CREATE MATERIALIZED VIEW` is adjudicated against a live server in
     /// `crates/zeroship-migrate/tests/pg_engine/pg_plan_precondition_preflight.rs`.
     #[test]
@@ -297,10 +292,10 @@ mod tests {
             r#"{"op":"dropColumnNotNull","table":"t","column":"c"}"#,
             r#"{"op":"createSchema","name":"other"}"#,
             r#"{"op":"createExtension","name":"citext"}"#,
-            // A view that is NOT a replace. Decision 7's additive leg.
+            // A view that is NOT a replace - the additive leg.
             r#"{"op":"createView","name":"v","query":{"kind":"structured",
                 "select":{"from":{"name":"t"},"projection":[]}}}"#,
-            // THE ONES THE WHITELIST GOT WRONG, measured on the unchanged tree.
+            // The cases a SQL text whitelist cannot prove additive.
             r#"{"op":"createView","name":"mv","materialized":true,
                 "query":{"kind":"structured",
                 "select":{"from":{"name":"t"},"projection":[]}}}"#,

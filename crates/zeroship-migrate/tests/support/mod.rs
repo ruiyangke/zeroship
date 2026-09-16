@@ -5,8 +5,7 @@
 //! SHIPPED generic PG apply path — `PostgresBackend<PgDevSession>`, the `<D: SqlSession>`
 //! journal/drift/precondition/baseline free functions, `ops::status` — against a live
 //! Postgres through the SAME driver seam the production napi/Node `pg` host
-//! rides. This is the in-crate live-DB coverage the deleted `native-pg` tests used to
-//! provide (they drove the now-deleted compio client directly).
+//! rides.
 //!
 //! **Never ships.** The `postgres` crate is a `[dev-dependency]` only. It pulls `tokio`
 //! transitively (blocking `postgres` wraps `tokio-postgres` on a private current-thread
@@ -45,8 +44,8 @@ pub mod field_probes;
 /// legs so the two cannot measure different things.
 pub mod model_equivalence;
 
-/// The step 4 consumer 3 corpus and its reduction to golden lines, shared by the
-/// capture binary that recorded the golden from the OLD path and by
+/// The field-defs corpus and its reduction to golden lines, shared by the
+/// capture binary that recorded the golden and by
 /// `gen_types_field_defs_from_the_fold.rs`, which compares against it. Two binaries so
 /// a capture harness can never re-bless the file the comparison reads.
 pub mod field_defs_corpus;
@@ -107,10 +106,8 @@ columns = [
 
 /// The SQLite LINE-1 guard, selected the way the engine selects it.
 ///
-/// These tests used to write `zeroship_migrate::SqliteGuard::new()`, naming a vendor
-/// crate's guard TYPE through a re-export at the engine's crate root. That re-export
-/// is gone; the guard is not. [`zeroship_migrate::guard_for`] resolves the SAME factory
-/// the apply path resolves — `zeroship-migrate-sqlite`'s `BackendVendor::guard`, which is
+/// [`zeroship_migrate::guard_for`] resolves the SAME factory the apply path
+/// resolves — `zeroship-migrate-sqlite`'s `BackendVendor::guard`, which is
 /// literally `Box::new(SqliteGuard::new())` — so this is the same guard object,
 /// chosen through the registry instead of by name.
 ///
@@ -311,7 +308,7 @@ pub const PG_URL_ENV: &str = "ZERO_MIGRATE_TEST_PG_URL";
 /// environment read of its own.
 ///
 /// There is no skip. A skipped live suite is INVISIBLE rather than merely quiet: the
-/// early return still counts as a pass, so `cargo test` printed the same `30 passed` a
+/// early return still counts as a pass, so `cargo test` prints the same tally a
 /// genuine run prints, and no banner reliably survives libtest's output capture. A run
 /// with no database therefore read exactly like a run with one. The only outcome that
 /// cannot be mistaken for coverage is a failure, so that is the only outcome left.
@@ -462,9 +459,7 @@ impl PgDevSession {
 /// reaches that statement. Every `assert!` between the CREATE and the DROP is a
 /// point where a failing run abandons a schema on the server forever, and the leak
 /// is silent: the run reports one failed test, not a database that now carries a
-/// permanent `proj_<pid>_<nanos>_<n>` nobody will ever recognise or reclaim. A
-/// single measured panic left exactly one schema behind (85 -> 86 on a server that
-/// had already accumulated 85).
+/// permanent `proj_<pid>_<nanos>_<n>` nobody will ever recognise or reclaim.
 ///
 /// Constructed where the CREATE happens; the DROP then rides `Drop` and needs no
 /// statement at the end of the test.
@@ -801,8 +796,7 @@ fn to_holder(bind: &Bind) -> ToSqlHolder {
         // the parameter client-side ("error serializing parameter N") the moment the
         // server infers `numeric` from the target column, and a driver that got past
         // that would still hit PostgreSQL's missing text→numeric assignment cast.
-        // This arm read `ToSqlHolder::Text` until 2026-09-04 under a comment claiming
-        // PG inferred the target from context — it does not while a type is declared.
+        // PG does not infer the target from context while a type is declared.
         Bind::Decimal(s) => ToSqlHolder::Inferred(TextParam(Some(s.clone()))),
         Bind::Text(s) => ToSqlHolder::Text(s.clone()),
         // The whole point of the variant: `TextParam` accepts EVERY inferred type
@@ -950,15 +944,13 @@ fn drain_row_iter(mut iter: postgres::RowIter<'_>) -> Result<(Vec<Row>, u64), Db
 
 /// Apply a batch through the PostgreSQL backend over a `SqlSession`.
 ///
-/// The executor's `apply` is generic over `MigrationBackend` and no longer builds
+/// The executor's `apply` is generic over `MigrationBackend` and does not build
 /// a vendor for its caller — deciding that a session is a PostgreSQL session is
 /// the CALLER's knowledge, and in a `pg_*` suite that caller is this harness.
-/// Before, `executor::apply` constructed the `PostgresBackend` itself, which is
-/// exactly the vendor choice that had no business living in neutral orchestration.
+/// Neutral orchestration has no business making that vendor choice.
 ///
-/// The call sites read identically to the old free function on purpose: the PG
-/// suites import this as `apply`, so the ~70 live scenarios exercise the same
-/// path with the same arguments and remain a like-for-like regression bar.
+/// The PG suites import this as `apply`, so the live scenarios exercise the
+/// same path with the same arguments and remain a like-for-like regression bar.
 pub async fn apply_pg<D: zeroship_migrate::driver::SqlSession>(
     conn: &D,
     cfg: &zeroship_migrate::ExecutorConfig,

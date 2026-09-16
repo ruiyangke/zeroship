@@ -42,7 +42,7 @@
 //   owned flush future is awaited to completion while the session is live and
 //   inbound frames are dispatched, so a large bidirectional exchange cannot
 //   wedge the cap-1 channel (MUX-DEADLOCK-1). A terminal read retires the
-//   session and cancels any now-useless write. COPY-IN no longer deadlocks
+//   session and cancels any now-useless write. COPY-IN does not deadlock
 //   (COPY-1/IO-1),
 //   idle listeners receive notifications (IO-2), and later requests are
 //   written without waiting for earlier responses (IO-3). See
@@ -53,10 +53,8 @@
 //   completion before control returns to the dispatch point. Its trade-offs
 //   stand: an idle connection does not read (notifications wait for the next
 //   request), and a COPY-IN the server rejects mid-stream can deadlock.
-//   NEITHER TRANSPORT TAKES THIS PATH ANY MORE. TLS took it until 2026-08-24,
-//   not because rustls cannot be shared but because the adapter holding the
-//   socket could not hand it back; the session is driven directly now and the
-//   socket splits (`tls_sansio`). What is left here serves a custom
+//   Neither built-in transport takes this path: TLS is driven directly and
+//   its socket splits (`tls_sansio`). What is left here serves a custom
 //   `TlsConnect` whose stream answers `Err` to `try_into_split`.
 //
 // Both paths share `Dispatch` (backend-frame routing) and the
@@ -433,27 +431,24 @@ impl ReadObligation {
 
 /// Whether a caller asked for work the driver has not finished.
 ///
-/// IT DELIBERATELY IGNORES WHETHER THE CONSUMER CHANNEL IS STILL CONNECTED,
-/// and the alternative was measured on 2026-08-23 rather than argued. Making a
-/// response with a hung-up consumer count as NOT awaited is attractive: a
-/// caller that abandons a `RowStream` and then drops the last `Client` makes
-/// `crate::release` shut the socket down under the driver's parked read, and
-/// the resulting EOF is reported as `UnexpectedEof`, "connection closed by
-/// server", for a close this side caused
+/// IT DELIBERATELY IGNORES WHETHER THE CONSUMER CHANNEL IS STILL CONNECTED.
+/// Making a response with a hung-up consumer count as NOT awaited is
+/// attractive: a caller that abandons a `RowStream` and then drops the last
+/// `Client` makes `crate::release` shut the socket down under the driver's
+/// parked read, and the resulting EOF is reported as `UnexpectedEof`,
+/// "connection closed by server", for a close this side caused
 /// (`a_client_released_eof_is_reported_as_a_server_close` pins that, wrong
 /// message and all). Two findings say the reachability rule is not the fix:
 ///
 /// * It does not fix what prompted it. The intermittent
 ///   `serialized_copy_reads_startup_then_excludes_producer_idle_time` failure
 ///   happens with `CopyInSink` still holding its `Responses`, so the response
-///   is reachable and stays awaited either way - 9 of 200 runs still failed
-///   with the rule in place.
+///   is reachable and stays awaited either way.
 /// * It breaks a live invariant.
 ///   `integration.rs::losing_the_backend_under_a_live_client_is_still_an_error`
 ///   terminates its own backend, reads the FATAL, drops that one stream and
-///   keeps the `Client`. Every outstanding response is then unreachable, so the
-///   rule calls losing a backend under a live client a clean close. Measured
-///   deterministic, 5 of 5.
+///   keeps the `Client`. Every outstanding response is then unreachable, so
+///   the rule calls losing a backend under a live client a clean close.
 ///
 /// The wrong message is an ATTRIBUTION defect - who closed the socket - and
 /// reachability cannot answer it. Nor can "the client half is gone":
@@ -640,37 +635,26 @@ where
     /// whether or not the connection is doing anything else. This holds over
     /// TLS as well as plaintext.
     ///
-    /// It did NOT hold over TLS until 2026-08-24, and the shape of that bug is
-    /// worth keeping. A TLS stream ran the serialized loop, whose idle step
-    /// awaits the next CLIENT REQUEST and reads no socket, so an unsolicited
-    /// frame waited in the kernel buffer until the application happened to
-    /// issue another query - and for the canonical LISTEN pattern (subscribe
-    /// once, then wait) it never arrived at all. Measured that day: identical
-    /// listeners, same server, same channel; the plaintext one received the
-    /// NOTIFY and the TLS one did not.
-    ///
-    /// The cause was not that rustls state cannot be shared. It was that the
-    /// adapter owning the socket could never give it back, so the stream could
-    /// not be split. `tls_sansio` drives the session directly and splits the
-    /// socket, and `a_notification_reaches_an_idle_tls_connection` in
-    /// `tests/tls_live.rs` fails if that regresses.
+    /// The serialized loop's idle step awaits the next CLIENT REQUEST and
+    /// reads no socket, so on that loop an unsolicited frame waits in the
+    /// kernel buffer until the application happens to issue another query -
+    /// and for the canonical LISTEN pattern (subscribe once, then wait) it
+    /// never arrives at all. TLS is not on that loop: `tls_sansio` drives
+    /// the session directly and splits the socket (rustls state itself can
+    /// be shared; what blocked splitting was an adapter that owned the
+    /// socket and could never give it back).
+    /// `a_notification_reaches_an_idle_tls_connection` in `tests/tls_live.rs`
+    /// fails if that regresses.
     ///
     /// A custom `TlsConnect` whose stream answers `Err` to `try_into_split`
-    /// still gets the serialized loop, and still has this limitation.
+    /// gets the serialized loop, and has this limitation.
     ///
-    /// That residue is a KNOWN DEFECT rather than a design decision, and it is
-    /// worth stating plainly because the failure has no error and no log - the
-    /// events simply never come. Nothing this crate ships reaches it: both the
-    /// plain socket and rustls split, and the only in-tree stream that refuses
-    /// to is `test_utils::SerializedSocket`, which exists to make the
-    /// serialized loop testable at all.
-    ///
-    /// THIS PARAGRAPH ADVISED, UNTIL 2026-09-02, that "a listener that needs
-    /// TLS must poll instead of waiting, or run its subscription over a
-    /// plaintext connection". That was right before the 2026-08-24 fix and
-    /// wrong after it, and it contradicted this comment's own heading four
-    /// paragraphs up. It is a public doc, so the stale version told every
-    /// reader to work around a defect their TLS listener does not have.
+    /// That limitation is a KNOWN DEFECT rather than a design decision, and
+    /// it is worth stating plainly because the failure has no error and no
+    /// log - the events simply never come. Nothing this crate ships reaches
+    /// it: both the plain socket and rustls split, and the only in-tree
+    /// stream that refuses to is `test_utils::SerializedSocket`, which exists
+    /// to make the serialized loop testable at all.
     pub fn notifications(&mut self) -> mpsc::UnboundedReceiver<AsyncMessage> {
         let (tx, rx) = mpsc::unbounded();
         self.async_sender = Some(tx);
@@ -1422,8 +1406,8 @@ impl Dispatch<'_> {
                 // queued and the whole loop re-enters `poll_read` on
                 // the next wake.
                 let messages = e.into_inner();
-                // THE `clone` IS LOAD-BEARING AND DELIBERATE. Measured
-                // 2026-08-23: `futures_channel::mpsc` tracks fullness per
+                // THE `clone` IS LOAD-BEARING AND DELIBERATE.
+                // `futures_channel::mpsc` tracks fullness per
                 // HANDLE, so a clone is born unparked and its `poll_ready`
                 // reports READY on a channel the consumer has drained nothing
                 // from. The stash gate below is therefore a one-iteration
@@ -1437,8 +1421,7 @@ impl Dispatch<'_> {
                 // the outer query's response channel is full, and real
                 // back-pressure deadlocks it. Swapping the parked handle in
                 // here turns `query_backpressure.rs`'s two
-                // `..._without_response_backpressure_deadlock` tests red at
-                // once, which is how this note came to be written.
+                // `..._without_response_backpressure_deadlock` tests red.
                 self.pending_responses.push_back(PendingResponse {
                     sender: response.sender.clone(),
                     messages,
@@ -1567,7 +1550,7 @@ fn route_async(
             // would be "decoded as something it is not". A mid-session
             // `SET client_encoding` reaches the same state through a door that
             // had no check on it, and the consequence is not an error but
-            // WRONG TEXT. Measured against the live server: the same value came
+            // WRONG TEXT. The same value comes
             // back as "\u{e9}" after `SET client_encoding TO 'LATIN1'` where the
             // server holds "\u{c3}\u{a9}", because the LATIN1 bytes happen to be
             // valid UTF-8 for a different string. Where they are not valid
@@ -2498,17 +2481,15 @@ where
                             // pool poison before the prefix can wake its
                             // borrower; the terminal error itself remains
                             // behind that prefix in the read FIFO.
-                            // NOT PEER-OBSERVABLE, and that is measured. This
+                            // NOT PEER-OBSERVABLE. This
                             // shutdown is redundant with `ConnectionDropRelease
                             // ::drop`: the deferred error retires the connection,
                             // so the driver completes and drops the release
                             // handle before any peer read can distinguish the two
-                            // closes. Deleting this line leaves the lib suite
-                            // (763) and the integration suite (797) green.
+                            // closes.
                             //
-                            // A test written for it on 2026-09-02 passed with the
-                            // line deleted, which is the whole point: it was
-                            // observing Drop. Asserting the driver was still
+                            // It cannot be pinned by a peer-side test either:
+                            // asserting the driver was still
                             // pending when the peer saw the close - the check
                             // `replication.rs` uses for its release arms - fails,
                             // because by then the driver is Ready. Keep the call
@@ -3099,8 +3080,7 @@ mod tests {
     /// Stopping at `PendingCopyTerminalFlush` proves nothing: that state has its
     /// own `=> return true` arm in the match below, so deleting the
     /// `copy_terminal_queued` guard entirely still yields `true` and the test
-    /// stays green. Measured - the shorter version passed against the mutated
-    /// driver. Activating moves the state to `Active`, whose arm pauses and
+    /// stays green. Activating moves the state to `Active`, whose arm pauses and
     /// returns `false`, so the queued-terminal guard becomes the only thing
     /// that can answer `true`. Do not "simplify" this step away.
     #[test]
@@ -3940,12 +3920,11 @@ mod tests {
 
     /// A second query must reach the wire before the first is answered.
     ///
-    /// MEASURED 2026-08-24 with a peer that withholds every response and
+    /// With a peer that withholds every response and
     /// counts the Query messages that arrive anyway: the multiplexed loop
-    /// sends BOTH, the serialized loop sends ONE and waits. That was IO-3, and
-    /// it was live on every TLS connection for as long as TLS ran the
-    /// serialized loop. TLS runs the multiplexed loop since 2026-08-24, so the
-    /// remaining exposure is a custom `TlsConnect` that refuses to split.
+    /// sends BOTH, the serialized loop sends ONE and waits (IO-3). The
+    /// serialized loop's remaining exposure is a custom `TlsConnect` that
+    /// refuses to split.
     ///
     /// This asserts the multiplexed count only. Asserting the serialized one
     /// would write the trade-off into the suite as though it were desired.
@@ -4125,8 +4104,8 @@ mod tests {
                     let (tag, _) = read_frontend_message(&mut peer);
                     assert_eq!(tag, expected, "unexpected COPY startup frontend frame");
                 }
-                // Separate writes pin the two response phases that used to
-                // deadlock: the producer cannot emit CopyData until it has
+                // Separate writes pin the two response phases of the COPY
+                // startup exchange: the producer cannot emit CopyData until it has
                 // consumed both BindComplete and CopyInResponse.
                 peer.write_all(b"2\0\0\0\x04")
                     .expect("write COPY BindComplete");
@@ -4892,7 +4871,7 @@ mod tests {
     /// **This pins the OUTCOME, not one arm.** Two independent paths refuse a
     /// malformed frame: the scan's own `Err(_) => return None`, and the
     /// trailing `DbError::parse(..).ok()`, which walks the same bytes and fails
-    /// the same way. Measured: turning the scan's arm into a `break` leaves
+    /// the same way. Turning the scan's arm into a `break` leaves
     /// this test green, because the parse behind it still yields `None`. So the
     /// scan's arm is REDUNDANT here rather than unbound - do not read a green
     /// mutation as evidence that it can be deleted, and do not expect this test
@@ -6110,9 +6089,9 @@ mod tests {
         .expect("retired reader-disappearance test exceeded its watchdog");
     }
 
-    /// The serialized fallback used to stop on the unsupported ParameterStatus
-    /// and drop the SQLSTATE for the second request which it had already
-    /// flushed. A CommandComplete prefix gives the loop a dispatch point at
+    /// On encoding retirement the SQLSTATE of a second request the loop has
+    /// already flushed must survive the unsupported ParameterStatus. A
+    /// CommandComplete prefix gives the loop a dispatch point at
     /// which to dequeue that second request before the encoding switch arrives.
     #[compio::test]
     async fn serialized_encoding_retirement_preserves_a_pipelined_server_error() {
@@ -6920,7 +6899,7 @@ mod tests {
     }
 
     /// A terminal read makes the protocol session unreusable, so an in-flight
-    /// write can no longer be allowed to hold every registered response sender
+    /// write must not keep holding every registered response sender
     /// alive. The two halves coordinate rather than race: the read half refuses
     /// to fail until the write future has started and parked.
     #[compio::test]
@@ -7650,17 +7629,15 @@ mod tests {
             //
             // NOT FIXABLE BY EXCUSING RESPONSES NOBODY IS LISTENING TO. `sink`
             // still owns the `Responses` here, so this response is reachable
-            // and stays awaited under that rule too. Measured 2026-08-23 by
-            // deleting the loop below with the rule in place: 9 of 200 runs
-            // failed at load 24, every one of them this same `UnexpectedEof`
-            // and no other failure mode. `has_awaited_response` carries why the
+            // and stays awaited under that rule too: deleting the loop below
+            // with the rule in place still fails with this same
+            // `UnexpectedEof`. `has_awaited_response` carries why the
             // rule was rejected outright.
             //
-            // MEASURED 2026-08-23, 200 runs of this test alone at load 15.2
-            // against a concurrent workspace build: 14 failures, EVERY one with
-            // `transaction_status()` reading `None` at this point, and 0 of the
-            // 115 runs that reached `Some(Idle)` failed. Widening a budget would
-            // only have lowered the rate.
+            // The failure correlates exactly with `transaction_status()`
+            // still reading `None` at this point; a run that reaches
+            // `Some(Idle)` does not fail. Widening a budget would
+            // only lower the rate.
             let settled_by = Instant::now() + Duration::from_secs(2);
             while client.transaction_status() != Some(crate::TransactionStatus::Idle) {
                 assert!(
@@ -7680,8 +7657,7 @@ mod tests {
             // its socket, so the driver reads EOF and reports "connection
             // closed by server" -- the SYMPTOM. Asserting on the driver first
             // therefore hides every peer-side cause behind one misleading
-            // message, which is what an intermittent failure of this test
-            // looked like on 2026-08-23.
+            // message.
             //
             // The driver still has to be awaited before this: the peer's drain
             // loop only ends when the client's socket closes.
@@ -8274,7 +8250,7 @@ mod tests {
         );
     }
 
-    /// `Connection`'s `Debug` had 53 counted regions and zero executed ones:
+    /// `Connection`'s `Debug` had never been executed anywhere:
     /// nothing in the crate had ever formatted a `Connection`.
     ///
     /// That matters more than a missing smoke test usually would, because this

@@ -1,13 +1,5 @@
 //! SQLite SQL spelling.
 //!
-//! The trigger spelling at the bottom of this file arrived here from
-//! `render::lower`, under `docs/proposals/pluggable-backends.md`. It was a DIRECTORY
-//! MOVE and nothing else: same functions, same bytes emitted, one const renamed. It
-//! was the last SQLite render path living in the core lowerer, and its own doc had
-//! already said so - `backends/sqlite.rs`'s `render_trigger_op` carried a note
-//! calling the delegation "a POINTER to work that `lower.rs`'s own pass has to
-//! finish, not a boundary that is done". That pass has run. MySQL's trigger spelling
-//! was the worked example of where it lands.
 // Every render leaf here returns `IrLowerError`, the cold lower-failure error that
 // sits over the 128-byte heuristic. Boxing it would churn the `?` ergonomics across
 // the whole vendor render path for no real-world win.
@@ -50,28 +42,6 @@ pub(crate) fn placeholder(n: usize) -> String {
 
 // This module's vendor identity, read from `crate::DIALECT` - this module names no
 // dialect literal of its own. See `render/backends/mod.rs`.
-//
-// # It absorbed the trigger renderer's const on the way in
-//
-// `render_sqlite_trigger_op` and the two helpers below it named this vendor
-// nineteen times between them while they lived in `render::lower`: thirteen
-// capability and inline-render arguments that were already right, and six identifier
-// quotes that were NOT. Those six called the PostgreSQL-pinned
-// `dml::quote_bare_ident`, so every identifier in a rendered SQLite trigger was
-// spelled by `PostgresDmlRenderer::quote_ident` - correct only because both vendors
-// spell an identifier `"x"`, and a hard blocker on extracting a `zeroship-migrate-sqlite`
-// crate that does not need `zeroship-migrate-postgres` at RUNTIME. A crate-extraction
-// spike proved the reach was live rather than theoretical: it rendered a
-// `createTrigger` from inside the extracted crate and got PostgreSQL's marker back
-// in the SQLite trigger SQL.
-//
-// Routing those six through `quote_bare_ident_for_backend` was the fix; folding the
-// other thirteen into a single name is what made it stay fixed. That name was a
-// `lower.rs`-local stand-in for the rule this file already obeyed, and its whole
-// purpose was to make the eventual move of those three functions a RELOCATION
-// rather than an edit. It worked: the move renamed one identifier and touched
-// nothing else, and the name those thirteen sites read now is this crate's
-// `DIALECT`.
 use crate::DIALECT;
 
 #[derive(Debug)]
@@ -100,18 +70,7 @@ fn unsupported_expr_owned(name: String) -> ExprDialectRejection {
 /// The truthful remedy for an expression that is out of this backend's envelope,
 /// stated ONCE so the three messages below cannot drift apart.
 ///
-/// # What the old text promised, and why none of it was true
-///
-/// These three rejections advised the operator to "mark the migration PG-only
-/// (`dialect_scope=PgOnly`)". `PgOnly` names no variant: the pinned arm is
-/// `DialectScope::Only(DialectId)` and has been since the enum stopped growing one
-/// variant per vendor, so a MySQL-only artifact could describe itself. `dialect_scope`
-/// names no authorable field either - it is DERIVED from the op list at lowering,
-/// precisely so a declared reach can never disagree with the ops - so there was
-/// nothing for an author to set. And it spelled another vendor's product name in a
-/// message this backend emits about itself.
-///
-/// What an author actually does is put the expression in a `dialect({ ... })` leg.
+/// The remedy is to put the expression in a `dialect({ ... })` leg.
 /// The leg set IS the pin: a set covering one registered backend makes that backend
 /// the plan's whole measured reach, and every other deploy target is then refused
 /// before a step runs.
@@ -832,22 +791,21 @@ impl DmlRenderer for SqliteDmlRenderer {
     }
 
     fn synth_now(&self) -> String {
-        // BOUND, as of 2026-09-04, by `mod sqlite_now_parity` at the bottom of
+        // BOUND by `mod sqlite_now_parity` at the bottom of
         // `crates/zeroship-data-sql/src/compile.rs`, which holds this string, the
         // DEFAULT clause `schema.rs` renders, and the data plane's own
         // expression against one literal stated in that module.
         //
         // NOT `CURRENT_TIMESTAMP`, which SQLite renders space-separated
         // ("YYYY-MM-DD HH:MM:SS"). The data plane writes the ISO-T spelling for
-        // every Unix-ms bind (`zeroship-data-sql/src/compile.rs:3085`), and these
-        // columns are compared BYTEWISE - ' ' is 0x20, 'T' is 0x54 - so two
-        // spellings in one column invert same-day ordering.
+        // every Unix-ms bind, and these columns are compared BYTEWISE -
+        // ' ' is 0x20, 'T' is 0x54 - so two spellings in one column invert
+        // same-day ordering.
         //
-        // The parentheses are load-bearing in BOTH directions, and measured:
-        // SQLite REFUSES a bare function in a DEFAULT clause ("near \"(\":
-        // syntax error" without them), and accepts the parenthesized form in a
-        // SET clause, so one spelling serves `DEFAULT (...)` at
-        // `zeroship-migrate-backend/src/ddl.rs:576` and `col = (...)` alike.
+        // The parentheses are load-bearing in BOTH directions: SQLite REFUSES
+        // a bare function in a DEFAULT clause ("near \"(\": syntax error"
+        // without them), and accepts the parenthesized form in a SET clause,
+        // so one spelling serves `DEFAULT (...)` and `col = (...)` alike.
         "(strftime('%Y-%m-%dT%H:%M:%fZ','now'))".to_string()
     }
 
@@ -912,20 +870,8 @@ impl DmlRenderer for SqliteDmlRenderer {
         Ok(sql)
     }
 
-    /// The trigger spelling this used to reach across the crate for sits at the
-    /// bottom of this file now, so the delegation is a local call.
-    ///
-    /// The note that stood here said the SQLite trigger SPELLING still lived in
-    /// `render::lower::render_sqlite_trigger_op`, inside the core lowerer, and that
-    /// this delegation was "a POINTER to work that `lower.rs`'s own pass has to
-    /// finish, not a boundary that is done". Nothing about the emitted SQL changed
-    /// when it moved - that is what made it a move.
-    ///
-    /// PostgreSQL used to be STILL in the position SQLite just left, via
-    /// `render::vendor`, and that one was not the same shape: `render::vendor` was
-    /// PostgreSQL by CONSTRUCTION rather than by gate (it carried no dialect literal
-    /// at all), so every dialect-match census scored it zero. RESOLVED as well now -
-    /// see [`Self::render_vendor_op`] below and `zeroship_migrate::render::vendor`.
+    /// The trigger spelling lives at the bottom of this file, so the
+    /// delegation is a local call.
     fn render_trigger_op(
         &self,
         op: &Op,
@@ -975,10 +921,8 @@ impl DmlRenderer for SqliteDmlRenderer {
     /// This vendor renders NO vendor ops, and that is written here rather than
     /// inherited.
     ///
-    /// This is the other half of the note above: PostgreSQL is no longer "in the
-    /// position SQLite just left", because the engine no longer names
-    /// `zeroship_migrate_postgres::render_vendor_op`. It asks whichever vendor it
-    /// resolved, and this is what this one answers.
+    /// The engine asks whichever vendor it resolved for vendor ops, and this
+    /// is what this one answers.
     ///
     /// The privileged op kinds are rendered by exactly one registered
     /// backend, so an artifact carrying any of them measures a `DialectScope::Only`

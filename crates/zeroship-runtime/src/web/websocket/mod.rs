@@ -1,17 +1,17 @@
 //! Native WebSocket per WHATWG WebSockets §3.1 + RFC 6455.
 //!
-//! This module is the native implementation that replaces the older
-//! polyfill.
-//!
 //! ## Layout
 //!
 //! - `mod.rs` — class skeleton + IDL surface; this file.
 //! - `algorithms.rs` — spec-named algorithms (validate_close_code_and_reason,
 //!   clamp_unsigned_short, fail_the_websocket_connection, …).
-//! - `handshake.rs` — RFC 6455 §4.1 client-side handshake (step 4).
-//! - `receive_loop.rs` / `send_pump.rs` — frame phase (step 5).
-//! - `pair.rs` — WebSocketPair (workerd extension, step 6).
-//! - `slots.rs` / `budget.rs` / `constants.rs` — supporting infra.
+//! - `handshake.rs` — RFC 6455 §4.1 client-side handshake.
+//! - `network.rs` — per-WS network plumbing: connect spawn + the
+//!   bidirectional reader/writer tasks.
+//! - `frame_reader.rs` / `frame_writer.rs` — RFC 6455 §5.2 frame codec.
+//! - `dispatch.rs` — V8-thread drain of the per-WS event queue.
+//! - `pair.rs` — WebSocketPair (workerd extension).
+//! - `constants.rs` — supporting constants.
 
 pub mod algorithms;
 pub mod constants;
@@ -187,9 +187,9 @@ pub struct WebSocketImpl {
 
     /// Per-isolate WebSocket id — used by:
     ///   - the runtime pump's `OpResult::WebSocketEvent { ws_id, ... }`
-    ///     dispatch (added in step 5);
-    ///   - the WebSocketPair peer-link map (step 6);
-    ///   - the gateway's existing 101-response-extraction path
+    ///     dispatch;
+    ///   - the WebSocketPair peer-link map;
+    ///   - the gateway's 101-response-extraction path
     ///     (`crates/zeroship-runtime/src/transport/handler.rs`, the status-101 +
     ///     `webSocket` property arm).
     pub ws_id: Cell<u32>,
@@ -296,7 +296,7 @@ impl WebSocketImpl {
         // STEP per IDL: `url` is required. A no-args call must
         // TypeError per WebIDL. (Server-side mode via `WebSocketPair`
         // uses the hidden `mint_paired_websocket` helper which bypasses
-        // this constructor — see step 6.)
+        // this constructor — see `pair.rs`.)
         if url_arg.is_undefined() {
             return Err(OpError::type_error(
                 "WebSocket constructor: 'url' is required",
@@ -520,7 +520,7 @@ impl WebSocketImpl {
     //
     // The setter installs the handler via the EventTarget listener
     // list so dispatchEvent finds it; the getter returns the stored
-    // function (or null). undici (`websocket.js:355-445`) is the
+    // function (or null). undici's `websocket.js` is the
     // reference implementation.
 
     #[v8_setter]
@@ -591,10 +591,6 @@ impl WebSocketImpl {
     /// Step 2: silent no-op for CLOSING / CLOSED.
     /// Step 3-6: type-dispatch in spec order — String → Blob →
     /// ArrayBuffer → ArrayBufferView.
-    ///
-    /// In the step-2 skeleton, OPEN is never reached — the connect
-    /// task is stubbed. Tests that need OPEN behaviour drive it via
-    /// the WebSocketPair coupling (step 6) or the receive_loop (step 5).
     #[v8_method]
     fn send(
         &self,
@@ -606,8 +602,8 @@ impl WebSocketImpl {
             return Err(OpError::error("InvalidStateError: WebSocket is still CONNECTING"));
         }
 
-        // Spec step 2: CLOSING / CLOSED → silent no-op (matches the
-        // polyfill behaviour and undici).
+        // Spec step 2: CLOSING / CLOSED → silent no-op (matches
+        // undici).
         if self.ready_state.get() != ReadyState::Open {
             return Ok(());
         }
@@ -982,7 +978,7 @@ pub fn websocket_from_obj<'a>(
 /// native WebSocket. Used by `http.rs::inspect_response` for the
 /// `Response { status: 101, webSocket: client }` path.
 ///
-/// Per §X.1: ws_id lives on the boxed state, NOT mirrored in V8
+/// ws_id lives on the boxed state, NOT mirrored in V8
 /// private symbols.
 pub fn ws_id_of(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> u32 {
     websocket_from_obj(scope, obj)

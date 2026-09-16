@@ -94,10 +94,8 @@ pub enum MaterializedNamedTypeOp<'a> {
 
 /// The dialect feature predicates the migration lowerer asks.
 ///
-/// PROMOTED to public vocabulary in `zeroship_migrate_ir::backend` - unchanged in
-/// spirit and unchanged in membership (the same 25 predicates, the same
-/// spellings). It is re-exported here so the ~250 in-crate `Capability::...` uses
-/// keep naming it through `render::renderer`.
+/// Re-exported from `zeroship_migrate_ir::backend` so in-crate
+/// `Capability::...` uses name it through `render::renderer`.
 pub use zeroship_migrate_ir::backend::Capability;
 
 /// A backend-owned feature-support decision used by the authoring matrix.
@@ -176,28 +174,27 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
 
     /// Which vendor this is.
     ///
-    /// ADDED BY THE CRATE SPLIT, and it is the hinge the whole extraction turns on.
-    /// The spelling helpers in [`crate::dml`] used to take `dialect` as the former
-    /// closed dialect enum and resolve a renderer from it through a registry in the engine - which is
-    /// exactly the edge that could not survive the split, because the registry has
-    /// to be ABOVE the vendors and `dml` has to be BELOW them. They take a
-    /// `&dyn DmlRenderer` now, and this method gives back the one thing the
-    /// dialect parameter was still carrying: the capability and leg-selection
-    /// questions the helpers ask of the dialect itself.
+    /// This is the hinge the crate extraction turns on. The spelling helpers
+    /// in [`crate::dml`] take a `&dyn DmlRenderer` rather than resolving a
+    /// renderer from a dialect through a registry in the engine, because the
+    /// registry has to be ABOVE the vendors and `dml` has to be BELOW them.
+    /// This method gives back the one thing a dialect parameter would still
+    /// carry: the capability and leg-selection questions the helpers ask of
+    /// the dialect itself.
     ///
     /// It is NOT a second dialect literal in a vendor module. Each impl returns its
     /// module's existing `DIALECT` const, so the one-dialect-literal rule (and the
     /// test that enforces it) is unaffected.
     ///
-    /// # Why the OPEN id and not the closed enum
+    /// # Why the OPEN id and not a closed enum
     ///
-    /// It returned the former closed dialect enum until now, and that single return type was what
-    /// stopped a fourth backend from lowering a migration. A vendor crate cannot
-    /// produce a value of a closed enum it does not own, so the only body that
-    /// type-checked outside this workspace's three vendors was `todo!()`: the crate
-    /// compiled and panicked the first time anything asked it who it was. The
-    /// registry was never the blocker - a stub backend registers and is reached
-    /// through the real registry - this signature was.
+    /// A closed dialect enum return type would stop a fourth backend from
+    /// lowering a migration. A vendor crate cannot produce a value of a
+    /// closed enum it does not own, so the only body that type-checked
+    /// outside this workspace's vendors would be `todo!()`: the crate would
+    /// compile and panic the first time anything asked it who it was. The
+    /// registry is not the blocker - a stub backend registers and is reached
+    /// through the real registry - this signature is.
     ///
     /// [`DialectId`] is `const`-constructible from a `&'static str`, so an outsider
     /// writes `DialectId::new("duckdb")` at item scope and answers honestly. It is
@@ -212,13 +209,12 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
     /// What this backend IS: its id, its human-facing name, its capability set and
     /// its limits, all in one value the backend declares in its own crate.
     ///
-    /// The renderer used to hand back an identity ([`dialect`](Self::dialect)) and
-    /// core turned that identity into capabilities through the former closed
-    /// enum's `descriptor` method - an exhaustive match in `zeroship-migrate-ir`, i.e. a
-    /// table core owns about vendors core does not. That is the same closed-set
-    /// problem the identity had, one level up: an outsider's id has no arm in that
-    /// match, so the honest answer for it was "no capabilities at all", and a
-    /// backend that answers NO to everything cannot render anything.
+    /// Deriving capabilities from the identity in core would take an
+    /// exhaustive match over vendors - a table core owns about vendors core
+    /// does not, the same closed-set problem as the identity, one level up:
+    /// an outsider's id has no arm in that match, so the honest answer for it
+    /// would be "no capabilities at all", and a backend that answers NO to
+    /// everything cannot render anything.
     ///
     /// Asking the VENDOR instead removes the table. A backend crate declares one
     /// `BackendDescriptor` const and returns it here; core reads capabilities off
@@ -313,10 +309,6 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
     /// straight through, so the fragment is the bare placeholder; PostgreSQL's
     /// schema-blind DML seam and mysql2 both take canonical base64 as TEXT and
     /// decode it inside the statement, in each vendor's own spelling.
-    ///
-    /// This was a three-way `match` on the former closed dialect enum inside
-    /// `BindCtx::push_scalar` - a spelling decision made in core, which is the shape this module exists
-    /// to hold instead.
     fn bind_bytes(&self, bytes: &[u8], push: &mut dyn FnMut(BindValue) -> String) -> String;
 
     /// Validate this backend's SET-list evaluation semantics.

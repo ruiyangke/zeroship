@@ -66,40 +66,30 @@
 //!
 //! # What is SPELLING here, and what deliberately is not
 //!
-//! Per `docs/proposals/pluggable-backends.md`, the SQL SPELLING in this
-//! module has moved to `render::backends`, reached through the `DmlRenderer`
-//! trait: placeholders, inline string / decimal / bytes literals, `IN`-list
-//! shape, regex match, date extraction, concatenation, `IS DISTINCT FROM`, the
-//! `IS TRUE` / `IS FALSE` predicates, and the per-vendor scalar-call overrides.
-//! Each moved body is character-for-character what stood here; the three
-//! `Postgres | Sqlite` shared arms became one duplicated line in each of the two
-//! modules, which is the price of the arms being per-vendor impls rather than a
-//! match. (Plain text, not doc links: every name in this section is a private
-//! item, and a link from this module's public docs to one is a rustdoc warning.)
+//! The SQL SPELLING lives in `render::backends`, reached through the
+//! `DmlRenderer` trait: placeholders, inline string / decimal / bytes
+//! literals, `IN`-list shape, regex match, date extraction, concatenation,
+//! `IS DISTINCT FROM`, the `IS TRUE` / `IS FALSE` predicates, and the
+//! per-vendor scalar-call overrides. A body both vendors spell identically
+//! is still written once per vendor module: the arms are per-vendor impls,
+//! not a match. (Plain text, not doc links: every name in this section is a
+//! private item, and a link from this module's public docs to one is a
+//! rustdoc warning.)
 //!
 //! The remaining neutral helpers do not select a vendor:
 //!
 //! - **IR leg selection.** `select_dialect_leg` reads the wire-pinned
 //!   `Expr::Dialectal { legs }` map by the backend's own `DialectId`. It cannot
 //!   move; the shape is a checksum input.
-//! - **Bind accumulation.** [`BindCtx`] is contract vocabulary now. It lets each
+//! - **Bind accumulation.** [`BindCtx`] is contract vocabulary. It lets each
 //!   required backend method append values while owning its conflict and limited
 //!   delete grammar; core neither picks a shipping id nor supplies a fallback.
 //!
-//! # There is no placeholder seam here, and there never was one
+//! # Placeholder spelling
 //!
-//! This section used to describe a shared `placeholder(dialect, n)` function the
-//! one-shot assembler and a vendor's batched-backfill executor supposedly both called.
-//! They never did: that function had zero callers anywhere and was deleted, and the
-//! two paths agree because both end at the SAME resolved `DmlRenderer`, not because a
-//! common function routes them. The distinction matters - the old wording made a
-//! `renderer(dialect)` lookup nothing performed look like a dialect boundary, and it
-//! was counted as one. See the tombstone above its old home below.
-//!
-//! A SQLite-named placeholder helper sat beside it with two real callers, both inside
-//! one vendor crate. Two callers in one crate is that crate's helper; it is
-//! `crate::dml::placeholder` in `zeroship-migrate-sqlite` now, and this module names no
-//! backend's placeholder spelling.
+//! This module names no backend's placeholder spelling: the one-shot path
+//! appends through the resolved `DmlRenderer`, and the SQLite helper is
+//! `crate::dml::placeholder` in `zeroship-migrate-sqlite`.
 //!
 //! The transport-safe bind mirror
 //! (`zeroship_migrate_sqlite::backend::actor::SqliteBind`) is the single
@@ -286,28 +276,13 @@ pub const MAX_BIND_PARAMS: usize = 65535;
 /// identifier slot cannot reach the DB. Bare-identifier validation mirrors
 /// `crate::model::backfill::BackfillSpec`.
 ///
-/// # There is no longer a PostgreSQL-pinned spelling of this, and that is the point
+/// # Why there is no dialect-free spelling of this
 ///
-/// This function used to have two dialect-free wrappers, `quote_ident` and its
-/// public-in-crate sibling `quote_bare_ident`, both of which passed
-/// the PostgreSQL variant of the former closed dialect enum. They were safe only
-/// for callers that were THEMSELVES
-/// PostgreSQL-specific, and twice they were not: `render::backends::sqlite` quoted
-/// all four of its identifier emissions with them, and after that was fixed
-/// `render_sqlite_trigger_op` - then still in `render::lower`, since moved into
-/// `render::backends::sqlite` - quoted all six of its trigger
-/// identifiers with them. Both were correct SQL only because the two vendors spell
-/// an identifier `"x"`, and both were hard blockers on extracting a
-/// `zeroship-migrate-sqlite` crate that does not need `zeroship-migrate-postgres` AT
-/// RUNTIME - a crate-extraction spike demonstrated the second one by rendering a
-/// `createTrigger` from inside the extracted crate and getting PostgreSQL's marker
-/// back.
-///
-/// With the trigger path routed through [`quote_bare_ident_for_backend`], rustc
-/// reported both wrappers `never used`, so they are GONE rather than merely
-/// unused: a dialect-free spelling that exists is a trap a future caller falls
-/// into, and its absence is what makes "core hard-codes a dialect behind a
-/// backend's back" unrepresentable here instead of merely absent today.
+/// A dialect-free spelling that exists is a trap a future caller falls
+/// into: the shipping vendors happen to spell an identifier `"x"` alike, so
+/// a PostgreSQL-pinned default is invisible in the emitted SQL while making
+/// "core hard-codes a dialect behind a backend's back" representable.
+/// Requiring the backend explicitly keeps it unrepresentable.
 ///
 /// The fail-closed engine-identifier gate is separately exposed as
 /// [`quote_ident_checked_for_backend`]. It also requires a backend explicitly;
@@ -332,7 +307,7 @@ pub fn quote_ident_for_backend(
 /// Public-in-crate wrapper for author-supplied bare identifiers. Trigger-body
 /// rendering needs the same strict table/column/name gate as the DML assembler, and
 /// must name the dialect it is rendering for - see [`quote_ident_for_backend`] for
-/// why the dialect-free spelling of this was deleted rather than left unused.
+/// why every spelling requires an explicit backend.
 pub fn quote_bare_ident_for_backend(
     what: &'static str,
     ident: &str,
@@ -529,11 +504,11 @@ pub fn inline_literal_for_backend(
 /// Validate an in-list / regex text operand, then let the CALLER'S OWN backend
 /// spell it.
 ///
-/// It takes the backend rather than the former closed dialect enum because every
+/// It takes the backend rather than a dialect id because every
 /// caller is a backend rendering for itself:
 /// `backends/mysql.rs::render_regex_match` and
-/// [`render_in_list_elem_portable`] below. Taking a dialect here meant core
-/// resolving the registry to reach the vendor that had just called in - see
+/// [`render_in_list_elem_portable`] below. A dialect id would make core
+/// resolve the registry to reach the vendor that had just called in - see
 /// [`render_in_list_elem_portable`] for the whole shape. Core owns whether the
 /// operand is LEGAL (non-empty, no NUL); the vendor owns how it is WRITTEN.
 pub fn in_list_text_literal(
@@ -599,16 +574,14 @@ fn homogeneous_in_list_kind(elems: &[IrScalar]) -> Result<Option<InListScalarKin
 ///
 /// # It takes a BACKEND, and that is the whole point
 ///
-/// This used to take `dialect` as the former closed dialect enum, and its only two callers -
-/// `backends/sqlite.rs::render_in_list` and `backends/mysql.rs::render_in_list` -
-/// handed it their own `DIALECT` const. Core then resolved that dialect back
-/// through `crate::render::backends::renderer` to reach the very backend that had
-/// called in. In the crate layout `docs/proposals/pluggable-backends.md` describes,
-/// that reads
-/// `zeroship-migrate-sqlite` -> core -> `zeroship-migrate-sqlite`: a dependency cycle in the
-/// exact shape the crate split exists to remove, and one that emits byte-identical
-/// SQL either way, so no behaviour test can see it. The backends now pass `self`,
-/// and the round trip is gone.
+/// Its only two callers - `backends/sqlite.rs::render_in_list` and
+/// `backends/mysql.rs::render_in_list` - are backends rendering for
+/// themselves. Handing core a dialect id instead would make core resolve
+/// the registry to reach the very backend that had just called in:
+/// `zeroship-migrate-sqlite` -> core -> `zeroship-migrate-sqlite`, a
+/// dependency cycle in the exact shape the crate split exists to remove,
+/// and one that emits byte-identical SQL either way, so no behaviour test
+/// can see it.
 ///
 /// # Why one backend keeps its own lookup-free helper instead of calling this
 ///
@@ -1037,14 +1010,8 @@ pub fn expr_column_refs_for_backend(
 pub struct BindCtx<'a> {
     /// The vendor this walk is rendering for.
     ///
-    /// It used to carry `dialect` as the former closed dialect enum ALONGSIDE the
-    /// backend, with a note saying `dialect` survived only because the sibling doors
-    /// (`quote_ident_for_backend`, `inline_literal_for_backend`, ...) still took one and had
-    /// callers outside `render::`. The crate split is the "later step" that note
-    /// anticipated: those doors take a `&dyn DmlRenderer` now, so the second field
-    /// had nothing left to answer and is gone. Where the walk genuinely needs the
-    /// dialect - a capability question, a dialectal-leg selection - it reads
-    /// [`DmlRenderer::dialect`].
+    /// Where the walk genuinely needs the dialect - a capability question, a
+    /// dialectal-leg selection - it reads [`DmlRenderer::dialect`].
     pub backend: &'a dyn DmlRenderer,
     /// The ordered binds accumulated by the walk.
     pub binds: Vec<BindValue>,
