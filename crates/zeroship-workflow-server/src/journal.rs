@@ -135,10 +135,29 @@ const SCHEMA_PLACEHOLDER: &str = "__ZEROSHIP_BUNDLE_SCHEMA__";
 ///
 /// It asks for exactly what the generated DDL needs and nothing else: create the
 /// journal's tables, name its own schema explicitly, and carry the raw statements
-/// the portable op vocabulary cannot yet express (a column collation). It does
-/// NOT ask to be destructive - the journal's current series never drops anything,
-/// so declaring the tighter posture makes a bundle that suddenly did into a
-/// refusal rather than a surprise.
+/// the portable op vocabulary cannot yet express (a column collation).
+///
+/// # Why the destructive posture is `warn` and not `forbid`
+///
+/// IT ASKED FOR `forbid` UNTIL A DEPLOY ACTUALLY SENT THE BUNDLE, on the belief
+/// that "the series never drops anything". The guard's destructive family is
+/// LOSSY DDL, not drops: `ALTER COLUMN ... TYPE` is in it
+/// (`destructive_alter_table_subtype_operation` in
+/// `crates/zeroship-migrate-postgres/src/analysis/classify.rs`), and the journal's
+/// own first version binds every delivery identity to `COLLATE "C"` with exactly
+/// that statement, because the migration DSL has no column-collation facet and
+/// `schema.ts` therefore authors those as raw islands. Under `forbid` the guard
+/// refused version 1 outright, so NO journal could be installed through the
+/// bundle path at all - by either trigger.
+///
+/// `warn` is the posture the series can actually run under while still recording
+/// an advisory for every lossy statement, which is what a future version that
+/// really did drop a creator's journal data should surface. `allow` would run
+/// the same statements and say nothing.
+///
+/// The confinement that matters is not this knob anyway: the guard is bound to
+/// the target schema, so a statement naming any other schema is refused whatever
+/// the posture says.
 fn charter() -> String {
     format!(
         r#"policy_version = 1
@@ -156,7 +175,7 @@ value = true
 scope = {{ include = ["{SCHEMA_PLACEHOLDER}"] }}
 [[grant]]
 key = "safety.destructive_ops"
-value = "forbid"
+value = "warn"
 scope = "all"
 "#
     )
@@ -186,6 +205,39 @@ mod tests {
             zeroship_workflow_schema::fingerprint(zeroship_workflow_schema::POSTGRES).unwrap()
         );
         assert_eq!(bundle.stamp.table, zeroship_workflow_schema::STAMP_TABLE);
+    }
+
+    /// THE BUNDLE MUST BE ONE THE MIGRATION SERVICE ACCEPTS.
+    ///
+    /// The charter this module declares is composed against that service's
+    /// ceiling and then used to vet every statement, so a charter that asks for
+    /// the wrong posture makes the journal uninstallable by BOTH triggers - and
+    /// nothing here would have said so, because building a bundle always
+    /// succeeds. It asked for `destructive_ops = forbid` until this arm existed,
+    /// and version 1's collation binding is `ALTER COLUMN ... TYPE`, which the
+    /// guard classifies as lossy.
+    ///
+    /// MUTATION-CHECKED: setting the charter's `safety.destructive_ops` back to
+    /// `forbid` fails this arm and leaves the rest of the crate green.
+    #[test]
+    fn the_bundle_this_build_ships_is_one_the_migration_service_accepts() {
+        let bundle = journal_bundle("customer", &charter()).expect("build the bundle");
+        zeroship_migrate_server::bundle::vet_schema_bundle(&bundle).unwrap_or_else(|error| {
+            panic!("the migration service would refuse this build's journal bundle: {error}")
+        });
+    }
+
+    /// The control for the arm above: a guard bound to ANOTHER schema refuses the
+    /// same bundle, so acceptance is a statement about this bundle rather than a
+    /// vet that accepts anything.
+    #[test]
+    fn a_bundle_whose_sql_names_another_schema_is_refused() {
+        let mut bundle = journal_bundle("customer", &charter()).expect("build the bundle");
+        bundle.schema = "someone_else".to_owned();
+        assert!(
+            zeroship_migrate_server::bundle::vet_schema_bundle(&bundle).is_err(),
+            "the vet accepted a bundle whose DDL names a schema it was not bound to"
+        );
     }
 
     /// Every step, and the declared policy, must name the target schema. An
