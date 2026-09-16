@@ -8003,6 +8003,7 @@ dependencies = [
  "zeroship-workflow",
  "zeroship-workflow-client",
  "zeroship-workflow-manager",
+ "zeroship-workflow-schema",
  "zeroship-workflow-server",
  "zeroship-workflow-v8",
  "zstd",
