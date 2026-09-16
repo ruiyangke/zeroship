@@ -572,13 +572,12 @@ export default {
     // gateway and the auth service never resolve creator authority, and the
     // worker holds nothing here, so neither needs a revoke.
     //
-    // WHAT DENIES THE WORKER, NAMED CORRECTLY - this comment credited the wrong
-    // mechanism until 2026-09-07. It is PostgreSQL's OWNER-ONLY DEFAULT: a newly
+    // WHAT DENIES THE WORKER: PostgreSQL's OWNER-ONLY DEFAULT - a newly
     // created table has a null `relacl` and nobody but the owner holds anything.
     // It is NOT the `ALTER DEFAULT PRIVILEGES ... REVOKE` in
     // db/migrations-ts/20260818000200_worker_database_authority.ts, whose lines
     // store nothing - revoking a privilege that was never in the default set is
-    // a no-op, measured as an empty `pg_default_acl`.
+    // a no-op.
     //
     // The distinction is load-bearing rather than pedantic. An ambient default
     // is not a fence: a later migration granting the worker anything on these

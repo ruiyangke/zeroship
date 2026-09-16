@@ -5,40 +5,37 @@
 //! forwarders - makes PostgreSQL answer `CopyInResponse` and then WAIT for copy
 //! data. This driver's simple-query drain cannot supply any: the request was
 //! encoded as one pre-built buffer, so there is no channel to push `CopyData`
-//! through. It reported `unexpected message from server` and dropped the
-//! response stream.
+//! through.
 //!
-//! That left the SESSION in copy mode. The next frontend message was read as
-//! copy data, and PostgreSQL answered (measured 2026-08-23 from the review
-//! server's own log)
+//! Without a terminal the session is left in copy mode: the next frontend
+//! message is read as copy data, and PostgreSQL answers
 //!
 //!   ERROR:  unexpected message type 0x50 during COPY from stdin
 //!   FATAL:  terminating connection because protocol synchronization was lost
 //!
-//! so the connection died. The failure landed on whatever ran NEXT, which in a
-//! pool is the next borrower: after the failing `batch_execute` the client still
-//! reported `is_closed() == false` and `is_dirty() == false`, so nothing marked
-//! it for eviction, and `transaction_status()` was stuck at `None` because the
-//! copy's `ReadyForQuery` was never coming.
+//! so the connection dies. The failure lands on whatever runs NEXT, which in a
+//! pool is the next borrower: `is_closed()` and `is_dirty()` still read false, so
+//! nothing marks the connection for eviction, and `transaction_status()` is stuck
+//! at `None` because the copy's `ReadyForQuery` is never coming.
 //!
-//! The fix ends the copy with `CopyFail`, so the caller gets PostgreSQL's own
+//! The driver ends the copy with `CopyFail`, so the caller gets PostgreSQL's own
 //! diagnostic for the copy it could not feed and the session stays usable.
 //!
 //! `COPY ... TO STDOUT` is the CONTROL. It reaches the same
 //! `unexpected message from server` arm of the same drain loop, but PostgreSQL
 //! streams the whole result unprompted and returns to `ReadyForQuery` on its
-//! own, so that session was never desynchronised and the fix does not touch it.
-//! A test asserting only "the client still works" would pass on the control
+//! own, so that session is never desynchronised and the abort path does not touch
+//! it. A test asserting only "the client still works" would pass on the control
 //! whatever the STDIN case did.
 //!
 //! EVERY TEST HERE IS UNDER A WATCHDOG because the regression this guards is a
-//! HANG as often as an error. The old recovery queued a second request carrying
-//! `CopyFail + Sync`: simple-protocol `CopyFail` already earns ReadyForQuery,
-//! so Sync earned another terminator and forced the driver to invent a response
-//! slot for it. A transaction pooler can release the backend after the first
-//! terminator and discard the second, leaving the follow-up query behind that
-//! orphaned slot forever. Recovery now uses the connection-owned COPY producer
-//! and its simple-protocol terminal is CopyFail alone.
+//! HANG as often as an error. Recovery uses the connection-owned COPY producer
+//! and its simple-protocol terminal is `CopyFail` alone: `CopyFail` already earns
+//! `ReadyForQuery`, so a second request also carrying `Sync` earns another
+//! terminator and forces the driver to invent a response slot for it. A
+//! transaction pooler can release the backend after the first terminator and
+//! discard the second, leaving the follow-up query behind that orphaned slot
+//! forever.
 
 use compio_postgres::Client;
 use compio_postgres::error::SqlState;
@@ -133,8 +130,8 @@ async fn batch_execute_of_copy_from_stdin_leaves_the_session_usable() {
 /// WHAT IT DOES NOT CATCH: it connects to whatever `PG_TEST_URL` names, and
 /// that is normally a DIRECT server, so a plain run does not exercise a pooler
 /// at all - the name of the hazard is not the same as measuring it. Restoring
-/// the redundant `Sync` fails this test on a direct server (measured 3/3 runs),
-/// which is what makes it a regression guard; the pooler claim needs
+/// the redundant `Sync` fails this test on a direct server, which is what makes
+/// it a regression guard; the pooler claim needs
 /// `PG_TEST_URL` pointed at one, per
 /// `docs/runbooks/compio-postgres-transaction-pooler-check.md`.
 #[compio::test]
@@ -224,8 +221,8 @@ async fn simple_query_of_copy_from_stdin_leaves_the_session_usable() {
 }
 
 /// Inside a transaction the abandoned COPY must leave a session the
-/// transaction's own rollback can still reach. Before the fix the `ROLLBACK`
-/// was itself read as copy data.
+/// transaction's own rollback can still reach: the `ROLLBACK` must not be read
+/// as copy data.
 ///
 /// The `Idle` assertion at the end is not decoration: it is the only cheap
 /// witness that the connection task's in-flight accounting came back to zero.

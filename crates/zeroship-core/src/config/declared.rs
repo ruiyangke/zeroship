@@ -610,9 +610,9 @@ macro_rules! read_declared_env_os {
 /// and uses [`crate::read_declared_env`].
 ///
 /// Returns `Option<String>`, dropping a non-Unicode value exactly as the
-/// `std::env::var(..).ok()` it replaces did. That is deliberate: making the
-/// conversion behaviour-preserving is what lets the gate land without auditing
-/// 274 call sites for a changed failure mode. Use the explicit key form when
+/// `std::env::var(..).ok()` it replaces did. That is deliberate: a
+/// behaviour-preserving conversion is what lets the gate land without auditing
+/// every call site for a changed failure mode. Use the explicit key form when
 /// the difference between "unset" and "not Unicode" matters.
 #[macro_export]
 macro_rules! declared_env {
@@ -669,16 +669,16 @@ macro_rules! test_env_os {
     };
 }
 
-/// Resolve the S3 blob-store inputs `zeroship-bundle` can no longer read.
+/// Resolve the S3 blob-store inputs `zeroship-bundle` cannot read.
 ///
 /// `zeroship-core` depends on `zeroship-bundle`, so bundle cannot use the typed
 /// keys in this module; it takes a resolved
-/// [`zeroship_bundle::blob_config::S3Runtime`] instead. That moves four reads
+/// [`zeroship_bundle::blob_config::S3Runtime`] instead. That moves those reads
 /// up into whichever server binary builds the store, and this macro is what
-/// stops the same four reads being written out four times. Every one of them
+/// stops the same reads being written out once per binary. Every one of them
 /// registers against the CALLING binary's consumer, which is the point: the
-/// record now says which process reads `AWS_SECRET_ACCESS_KEY`, where before it
-/// said only that a shared library did.
+/// record names which process reads `AWS_SECRET_ACCESS_KEY`, rather than a
+/// shared library.
 ///
 /// Expands to `Result<S3Runtime, BlobStoreConfigError>`. Call it only when the
 /// location is actually `s3://`; on a local store the credentials are absent by

@@ -6,12 +6,6 @@
 //! runtime child SURVIVES. It keeps its listening socket and, worse, keeps an
 //! exclusive redb lock on the example's `.zeroship/kv.redb` forever.
 //!
-//! Measured on 2026-08-10 (task #221): FOUR orphaned `zeroship serve`
-//! processes on ports 3151/3161/3171/3181, aged 10 to 34 minutes, all holding
-//! one redb file. The next run of that example could not boot on ANY port,
-//! because the contended resource is the per-example state dir and not the
-//! port. Killing the four made the next boot succeed in 3 seconds.
-//!
 //! # Why the parent cannot do this
 //!
 //! `dev-server.ts` already has a teardown path (`killChild`: SIGTERM, then
@@ -64,9 +58,9 @@
 /// Declared here and mirrored in `packages/vite-plugin/src/constants.ts`
 /// (`ENV_DIE_WITH_PARENT`). Neither side's suite can see the other's spelling,
 /// so the two are held together by behaviour rather than by string comparison:
-/// step 7d of `tests/golden_path.sh` kills a REAL vite dev server and requires
-/// the runtime it spawned to be gone. A rename on either side alone leaves the
-/// variable unset on the child and turns that step red.
+/// `tests/golden_path.sh` kills a REAL vite dev server and requires the
+/// runtime it spawned to be gone. A rename on either side alone leaves the
+/// variable unset on the child and fails that check.
 ///
 /// This constant is the spelling the diagnostics interpolate. The read below
 /// keeps the literal at its call site as required by `declared_env!`. The two
@@ -135,8 +129,7 @@ fn arm(expected_parent: Option<i32>) {
     if current != expected {
         // Printed, not silent: this process's stdout/stderr is captured by the
         // dev-server supervisor's log tail, and an unexplained instant exit is
-        // exactly the "runtime never starts" shape that took task #221 twenty
-        // minutes to diagnose.
+        // exactly the "runtime never starts" shape.
         eprintln!(
             "[zeroship] parent {expected} exited before the parent-death guard was armed \
              (current parent is {current}) - exiting rather than becoming an orphan holding \

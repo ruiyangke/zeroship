@@ -48,23 +48,11 @@ pub trait SecretResolver: Send + Sync {
 
 /// Resolves a provider secret through the platform secret grammar.
 ///
-/// # What this replaced, and why the replacement is not the deleted `env:` arm
-///
-/// Until 2026-08-20 this was a name lookup into a map the control plane built at
-/// boot, and `main.rs` put exactly two names in it: `stripe_secret_key` and
-/// `stripe_webhook_secret`. So `lago` and `openmeter`, whose keys are their own
-/// and are not any Stripe secret, had NO name they could resolve: every value an
-/// operator could write for `lago.api_key` was "unknown secret handle", the
-/// factory returned `Config`, and `main.rs` exited 1. `--meter-provider lago`
-/// could not boot at all, for anyone. The three Lago e2e harnesses and
-/// `e2e_openmeter_export.sh` were where that surfaced.
-///
-/// 94c7ba7dd deleted an `env:<NAME>` arm here for a good reason that still
-/// stands: a config string naming an environment variable is env-to-env
-/// indirection, the read has no declared identity, and the provider could be
-/// pointed at any variable in the process. Nothing below reads the environment.
-/// A literal is the material; a `urn:zeroship:file:` reference is a path the
-/// operator wrote, permission-checked before it is read.
+/// This resolver reads no environment. A config value naming an environment
+/// variable would be env-to-env indirection: the read has no declared identity
+/// and the provider could be pointed at any variable in the process. A literal
+/// is the material; a `urn:zeroship:file:` reference is a path the operator
+/// wrote, permission-checked before it is read.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PlatformSecretResolver;
 
@@ -142,12 +130,9 @@ mod tests {
             .map(|s| s.expose_secret().to_string())
     }
 
-    /// REGRESSION. From 94c7ba7dd (2026-08-13) to 2026-08-20 this was
-    /// `Err(Config("unknown secret handle 'lago_key-hooli-1234567890'"))`, the
-    /// lago factory propagated it, and `zeroship-control` exited 1 before
-    /// binding a port. Every assertion in `tests/e2e_lago_billing.sh`,
-    /// `tests/e2e_event_redelivery_dedup.sh` and
-    /// `tests/e2e_multi_app_attribution.sh` was unreachable behind it.
+    /// A provider key written as a literal resolves to itself. Provider keys are
+    /// not pre-registered handles: a third-party provider's key is its own
+    /// secret, not one the control plane loaded at boot.
     #[test]
     fn a_provider_key_written_as_a_literal_resolves_to_itself() {
         assert_eq!(resolve(LAGO_SEEDED_KEY).unwrap(), LAGO_SEEDED_KEY);
@@ -175,9 +160,8 @@ mod tests {
         );
     }
 
-    /// The env-to-env arm 94c7ba7dd deleted stays deleted: `env:LAGO_API_KEY` is
-    /// not a reference, so it is the literal string, and no environment variable
-    /// is read to produce it.
+    /// `env:LAGO_API_KEY` is not a reference, so it is the literal string, and no
+    /// environment variable is read to produce it.
     #[test]
     fn an_env_prefixed_value_reads_no_environment_variable() {
         assert_eq!(resolve("env:LAGO_API_KEY").unwrap(), "env:LAGO_API_KEY");
