@@ -1,12 +1,12 @@
 //! Password-reset token primitive.
 //!
-//! Per proposal §8.3 (Phase 5):
+//! Per proposal §8.3:
 //!
 //! - **Issue**: generate a 32-byte CSPRNG random token, store its SHA-256
 //!   in `zeroship.magic_links` keyed by `(email, purpose='reset')`. The row
 //!   also captures the user's IMMUTABLE `user_id` (resolved from the email at
 //!   issue time) — `complete` binds on that id, never re-resolving the target
-//!   by email (security finding L4). Returns the raw token to the caller,
+//!   by email. Returns the raw token to the caller,
 //!   which embeds it in the `/reset?token=` email link.
 //!
 //! - **Complete**: SHA-256 the raw token, atomically update the user's
