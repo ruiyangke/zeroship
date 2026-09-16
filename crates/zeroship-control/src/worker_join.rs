@@ -88,8 +88,7 @@
 //!    generated at boot in memory, so there is nothing to deduplicate across
 //!    restarts. A worker that exited gracefully has already retired its old
 //!    row through [`retire`]; one that crashed leaves a row that stops being
-//!    live when its LEASE runs out, which is what replaced the sweep this
-//!    module used to say it did not have.
+//!    live when its LEASE runs out.
 //! 2. A retried join - the response was lost, the worker asks again with the
 //!    SAME instance key - returns the id of the row the first attempt (or a
 //!    concurrent racing replica) already committed, rather than minting a
@@ -364,13 +363,12 @@ impl EnrolmentEnvelope {
     ///
     /// # Loopback is ruled on by the declared networks, not by a fence above them
     ///
-    /// There is no standalone loopback refusal, and there was one until
-    /// 2026-09-07. It sat ABOVE the network comparison, so declaring
-    /// `127.0.0.0/8` could not admit a loopback peer and no single-host
-    /// deployment could enrol - which is every developer machine and every
-    /// harness in `tests/` that launches a worker. A fence whose declared input
-    /// cannot express a configuration the operator states outright is a defect,
-    /// not a policy.
+    /// There is no standalone loopback refusal. A refusal sitting ABOVE the
+    /// network comparison would make declaring `127.0.0.0/8` unable to admit a
+    /// loopback peer, so no single-host deployment could enrol - which is every
+    /// developer machine and every harness in `tests/` that launches a worker.
+    /// A fence whose declared input cannot express a configuration the operator
+    /// states outright is a defect, not a policy.
     ///
     /// Admitting a declared loopback costs nothing the derivation was protecting.
     /// The address is still OBSERVED rather than claimed, so a registrant cannot
@@ -1427,9 +1425,8 @@ mod tests {
 
     /// THE PAIRED CONTROL, differing from the case above in the declared
     /// networks and NOTHING ELSE. Without it that test passes against an
-    /// envelope that refuses loopback unconditionally - which is exactly what
-    /// this module did until 2026-09-07 - and the suite cannot tell a rule that
-    /// consults the declaration from one that ignores it.
+    /// envelope that refuses loopback unconditionally, and the suite cannot
+    /// tell a rule that consults the declaration from one that ignores it.
     ///
     /// The v4-mapped spelling is in here rather than in a test of its own
     /// because canonicalisation is load-bearing in the ADMIT direction too: an

@@ -1,4 +1,4 @@
-//! PR-7 (billing-ops gap #26) — organization billing READ APIs, FAITHFUL suite.
+//! Organization billing READ APIs, FAITHFUL suite.
 //!
 //! Drives the REAL ntex handlers (`api::list_app_invoices`, `get_invoice`,
 //! `get_projected_charge`, `get_credit_balance`, `get_payment_method`,
@@ -19,7 +19,7 @@
 //!     the cache's reprice counter, faithfully);
 //!   - the credit balance reflects grants/consumes.
 //!
-//! PARALLEL-SAFE (the PR-6 lesson): every test mints UNIQUE creators/apps and
+//! PARALLEL-SAFE: every test mints UNIQUE creators/apps and
 //! asserts per-organization scope, so the default cargo runner can run them
 //! concurrently without cross-test interference.
 //!
@@ -1345,14 +1345,13 @@ async fn invoice_detail_denies_a_different_creator() {
 }
 
 // ==========================================================================
-// (CRITICAL-1): cross-organization invoice read via SHARED app membership.
+// Cross-organization invoice read via SHARED app membership.
 //
 // Attacker A owns app Z; victim-organization C is merely a VIEWER on Z. C owns app C
-// and has their own invoice. Pre-fix, `get_invoice` looped
-// `list_apps_for_owner(C)` (role-AGNOSTIC → includes Z because C is a member of
-// Z in ANY role) and accepted A's `BillingRead` on Z, leaking C's ENTIRE invoice
-// to A. The fix makes the read organization-LEVEL (caller == invoice.organization_id ||
-// operator), so A → 403. RED pre-fix: A got 200 and C's invoice body.
+// and has their own invoice. The read must be organization-LEVEL (caller ==
+// invoice.organization_id || operator): a role-AGNOSTIC membership lookup would
+// include Z (C is a member of Z in ANY role) and accept A's `BillingRead` on Z,
+// leaking C's ENTIRE invoice to A. A -> 403.
 // ==========================================================================
 
 #[compio::test]

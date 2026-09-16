@@ -176,13 +176,12 @@ pub struct ControlSettings {
     ///
     /// SHARED with the auth service, which SERVES the provider whose tokens
     /// control verifies. One deployment decision, one `ZEROSHIP_AUTH_PROVIDER`,
-    /// one `AuthProviderKind`. It used to be a control-scoped `String` at
-    /// `control.auth_provider` accepting `platform|supabase` against auth's
-    /// `native|supabase`, so the pair could be set to disagree and control
-    /// either widened its trust silently or failed every request at run time.
+    /// one `AuthProviderKind`. A single shared value is what keeps the pair
+    /// from being set to disagree - the failure mode of two independent
+    /// settings, where control either widens its trust silently or fails every
+    /// request at run time.
     ///
-    /// `native` here means the platform's own OP is the trusted issuer - the
-    /// state control used to spell `platform`.
+    /// `native` here means the platform's own OP is the trusted issuer.
     ///
     /// This value names which backend auth SERVES, which is exclusive. What
     /// control TRUSTS is a derived SET: `supabase` PLUS a configured
@@ -360,9 +359,7 @@ pub struct ControlSettings {
     /// without it could neither mint an assertion nor verify a peer's, so every
     /// guarded internal edge would refuse and no worker could load an app -
     /// while `/readyz` and every liveness probe reported a healthy process.
-    /// Absence never admits, and no longer defers either; that is the
-    /// difference between this and the shared secrets it replaces, whose empty
-    /// value disabled the check.
+    /// Absence never admits, and never defers to run time either.
     #[config(name = "control.service_key_file", default = PathBuf::new())]
     pub service_key_file: Operational<PathBuf>,
 
@@ -382,10 +379,9 @@ pub struct ControlSettings {
 
     /// Comma-separated previous master keys accepted during a key rotation.
     ///
-    /// ONE secret holding a list, not a list of secrets. Each entry used to be
-    /// resolvable as its own reference, which meant a comma inside a resolved
-    /// value changed the parse; the whole value is now resolved once and split
-    /// once, so an entry is always a literal key.
+    /// ONE secret holding a list, not a list of secrets. The whole value is
+    /// resolved once and split once, so an entry is always a literal key and a
+    /// comma inside a resolved value cannot change the parse.
     #[config(name = "control.legacy_master_keys")]
     pub legacy_master_keys: Secret<String>,
 
@@ -457,10 +453,9 @@ mod tests {
         // Does not cover: whether those scripts were updated. That is a grep
         // over tests/, not something a clap Command can answer.
         let command = ControlSettingsSources::command();
-        // One assertion per setting rather than a table: the legacy settings
-        // this used to iterate were retired with the workflow engine, and a
-        // `for` over a single-element array is both a clippy error and a
-        // misleading shape. Adding a setting adds a line here.
+        // One assertion per setting rather than a table: a `for` over a
+        // single-element array is both a clippy error and a misleading shape.
+        // Adding a setting adds a line here.
         let assert_flag = |id: &str, long: &str, env: Option<&str>| {
             let arg = command
                 .get_arguments()

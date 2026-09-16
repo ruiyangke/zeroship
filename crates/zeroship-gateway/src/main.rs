@@ -44,9 +44,9 @@ const BROKER_SECRET_LABEL: &str =
 
 /// Parse the comma-separated `--workers`/`WORKER_URLS` list into a clean
 /// vector, trimming whitespace and dropping empty entries. Parsed ONCE so
-/// the check-config count and the runtime hash ring can never disagree
-/// (M7) — previously check-config filtered empties while the runtime kept
-/// them, so `a,,b` reported 2 workers but routed across 3 (one empty URL).
+/// the check-config count and the runtime hash ring can never disagree:
+/// filtering empties in one place while keeping them in the other would
+/// report N workers but route across N+1 (one empty URL).
 fn parse_worker_urls(raw: &str) -> Vec<String> {
     raw.split(',')
         .map(str::trim)
@@ -149,13 +149,11 @@ fn enforce_gateway_credentials(
 /// gateway's `Pool` is `!Send` and lives in a thread-local, so the checkout
 /// happens inside `claim` rather than being held on the store.
 ///
-/// **This is the one consumer of the gateway's database credential that the
-/// auth redesign's step 6 does NOT delete along with the anchor and RP paths.**
-/// That step's F3 says the gateway holds no database credential at all, which
-/// is incompatible with a shared replay store terminating here. The tension is
-/// recorded rather than resolved: whoever lands step 6 has to either move this
-/// edge off the gateway or re-tier it, and finding this comment is how they
-/// learn that.
+/// **This store is why the gateway still holds a database credential.** The
+/// credential-free gateway target is incompatible with a shared replay store
+/// terminating here. The tension is recorded rather than resolved: removing
+/// the credential means either moving this edge off the gateway or re-tiering
+/// it, and finding this comment is how that work learns why.
 struct PoolReplayStore {
     db: zeroship_gateway::db::DbConfig,
 }
@@ -181,11 +179,10 @@ impl zeroship_core::service_assertion::ReplayStore for PoolReplayStore {
 /// Load this gateway's service identity, or refuse to start.
 ///
 /// THERE IS NO UNCONFIGURED ARM, and its absence is the whole of fence F4 in
-/// `docs/proposals/2026-09-05-auth-foundation-redesign.md`. This function used
-/// to return `ServiceAuth::unconfigured()` when neither file was configured, on
-/// the reasoning that every inbound internal edge would then refuse and every
-/// dispatch would carry no credential. Both halves of that were true and it was still
-/// the wrong answer: a gateway in that state binds its port, answers a liveness
+/// `docs/proposals/2026-09-05-auth-foundation-redesign.md`. An unconfigured
+/// fallback - every inbound internal edge refuses, every dispatch carries no
+/// credential - would still be the wrong answer even with both halves behaving
+/// as designed: a gateway in that state binds its port, answers a liveness
 /// probe and looks healthy to an orchestrator, and the first thing that notices
 /// is an end user whose request the worker turns away. Refusing here moves the
 /// failure to deploy time, when someone is watching.
@@ -359,7 +356,7 @@ fn main() -> std::io::Result<()> {
             Some(Arc::new(key))
         };
 
-    // BFF redesign slice R1b — the SIGNED STATELESS session cookie. Built from
+    // The SIGNED STATELESS session cookie. Built from
     // the ed25519 signing key (+ previous key for the rotation overlap),
     // stamping the distinct `zeroship-sess+jwt` typ.
     // Both `Some`, or both `None` (one-to-one with `signing_key`): with no key
@@ -437,10 +434,9 @@ fn main() -> std::io::Result<()> {
         );
         report.field("workers_count", CheckValue::Count(worker_urls.len()));
         // Every secret is reported by PRESENCE, and presence is all a resolved
-        // `Secret<T>` will answer. `!value.is_empty()` used to stand in for that
-        // and could not: under `--check-config` a file-sourced secret has no
-        // material, so the old test read "unset" for a correctly configured
-        // deployment.
+        // `Secret<T>` will answer. A non-empty MATERIAL check cannot stand in
+        // for it: under `--check-config` a file-sourced secret has no material,
+        // so such a check reads "unset" for a correctly configured deployment.
         report.field(
             "db_configured",
             CheckValue::Secret(settings.database_url.is_configured()),
@@ -554,7 +550,7 @@ fn main() -> std::io::Result<()> {
     // is told about first - and this is the one that has to be right whatever
     // else is: without it the gateway signs no `ZeroShip-User` envelope and
     // mints no assertion, so every dispatch fails at the worker's door. See
-    // `build_service_auth` for why there is no longer a boot-anyway arm.
+    // `build_service_auth` for why there is no boot-anyway arm.
     let service_auth = Arc::new(build_service_auth(
         settings.service_key_file.get(),
         settings.service_peers_file.get(),
@@ -758,7 +754,7 @@ fn main() -> std::io::Result<()> {
             )
             .configure(health::configure)
             // The ONE identity-session
-            // resource. `/token` is GONE (merged here); both methods live on
+            // resource. Both methods live on
             // `/__zeroship/auth/session`:
             //   - POST = code→token exchange + create anchor + ISSUE the signed
             //     session cookie + return `{ user, expires_at }`.

@@ -64,29 +64,14 @@ fn require_pg() -> (crate::tests::fixtures::postgres::Postgres, String) {
     (postgres, url)
 }
 
-// `APP_SCHEMA = "default"` lived here and is DELETED. Eleven of the fifteen
-// tests below reached for that one schema through `reset_schema`, which opens
-// with `DROP SCHEMA ... CASCADE`, so at the default thread count they raced to
-// destroy each other's `notes` table: measured 2026-09-04, 13 passed / 11 failed
-// parallel against 19 / 5 serial, with
-// `duplicate key value violates unique constraint "pg_namespace_nspname_index",
-// Key (nspname)=(default)` in the log.
+// Tests in this file must NOT share one schema. `reset_schema` opens with
+// `DROP SCHEMA ... CASCADE`, so two tests bound to the same schema race to
+// destroy each other's tables under a parallel run.
 //
-// THE "19 / 5 SERIAL" HALF OF THAT IS NOT REPRODUCIBLE, and the correction is
-// worth more than the number. Re-measured 2026-09-04 at the pre-parallelism
-// commit, serially, this file scores 24 passed / 0 failed on a freshly created
-// database AND on the long-lived shared one - so those 5 were never a property
-// of the code, and nothing here "fixed" them. They were residue: objects an
-// earlier run left in whichever database the original measurement reused. Read
-// any count from this suite as a statement about a (code, database) pair, and
-// name the database when you record one.
-//
-// The name was also INHERITED rather than chosen: these tests booted with
-// `EnvSnapshot::empty()`, so the runtime's no-`APP_ID` fallback
-// (`crates/zeroship-runtime/src/core/plugin.rs`) picked `default` for them.
-// Each test now mints its own id with `test_app_id!()` and injects it, which
-// isolates the schema, the per-app role and the broker key at once - and stops
-// the fixture depending on a fallback continuing to exist.
+// Each test mints its own id with `test_app_id!()` and injects it, which
+// isolates the schema, the per-app role and the broker key at once - and keeps
+// the fixture independent of the runtime's no-`APP_ID` fallback
+// (`crates/zeroship-runtime/src/core/plugin.rs`).
 
 /// Release this thread's database connections while its compio runtime runs.
 /// Reset the adapter context; callers must release their local clients and
@@ -645,15 +630,14 @@ const _procedures = { transactionBeforeMigrate };
 
 /// A classified failure from the top-level transaction's session setup must
 /// survive the begin-completion event. Revoking the login role's membership in
-/// the app role makes the first setup statement, `SET LOCAL ROLE`, return the
-/// measured SQLSTATE 42501. The callback must never run, and the error app code
+/// the app role makes the first setup statement, `SET LOCAL ROLE`, fail with
+/// SQLSTATE 42501. The callback must never run, and the error app code
 /// sees must name the terminal grant denial rather than generic BEGIN.
 ///
 /// Two arms, one variable apart. The first reads `result.error` off the
 /// wrapper's envelope, which is the published contract and answers 200. The
 /// second RETHROWS it, which is the only way the terminal HTTP remedy reaches
-/// the wire - and that 403 arm had never executed before 2026-09-04, because
-/// the first arm's `try/catch` shape panicked the test first.
+/// the wire.
 #[test]
 fn revoked_grant_transaction_surfaces_grant_revoked() {
     let (_postgres, admin_url) = require_pg();
@@ -1577,17 +1561,16 @@ const _procedures = { nestedPartialFailure };
 /// when the OUTER transaction commits.
 ///
 /// `pending_emits` is a flat, app-keyed `Vec<ChangeEvent>`
-/// (`context.rs:231`) with no savepoint scoping, and the nested settle arm
+/// (`context.rs`) with no savepoint scoping, and the nested settle arm
 /// pops the savepoint depth and runs `ROLLBACK TO SAVEPOINT` without
-/// touching that buffer (`transaction/mod.rs:989-999`). The top-level
+/// touching that buffer (`transaction/mod.rs`). The top-level
 /// commit then drains *everything* queued for the app
-/// (`drain_pending_emits_on_commit`, `exec.rs:600-612`, called at
-/// `transaction/mod.rs:1056`). So a subscriber is told about a row that
-/// was rolled back and does not exist.
+/// (`drain_pending_emits_on_commit` in `exec.rs`). So a subscriber is told
+/// about a row that was rolled back and does not exist.
 ///
 /// The live subscription is load-bearing, not scaffolding: `emit_for_rows`
 /// returns early unless `broker::has_subscribers(app, collection)`
-/// (`exec.rs:501-504`), so without it nothing is ever queued and this test
+/// (`exec.rs`), so without it nothing is ever queued and this test
 /// would pass vacuously against the very defect it exists to catch.
 #[test]
 fn savepoint_rollback_must_not_publish_its_change_event_at_outer_commit() {
@@ -1699,10 +1682,7 @@ const _procedures = { nestedBothCommit };
 ///
 /// NAMED `..._is_refused`, not `..._throws`: the refusal arrives as
 /// `result.error` on the level that could not open its savepoint, because
-/// `env.db.transaction` here is the DB facade wrapper (module header). It
-/// asserted a throw until 2026-09-04 and had never once observed the cap - it
-/// panicked on `tripped: false` while the very same body reported
-/// `reachedLevel: 10`, which is the cap doing exactly its job.
+/// `env.db.transaction` here is the DB facade wrapper (module header).
 #[test]
 fn savepoint_depth_cap_8_exceeded_is_refused() {
     let (_postgres, url) = require_pg();
@@ -1987,11 +1967,11 @@ const _procedures = { seed, failBulk };
     );
 }
 
-/// L8 REVEAL: a transaction PostgreSQL rolled back must not be reported as a
+/// A transaction PostgreSQL rolled back must not be reported as a
 /// successful commit.
 ///
 /// PostgreSQL answers `COMMIT` with a `ROLLBACK` command tag when the
-/// transaction is in a failed state. MEASURED directly against the server:
+/// transaction is in a failed state:
 ///
 /// ```text
 /// BEGIN; SELECT 1/0;  -> ERROR: division by zero
@@ -2002,13 +1982,6 @@ const _procedures = { seed, failBulk };
 /// terminal SQL through `batch_execute_reporting_tag` precisely so the tag
 /// survives, and classifies `(Commit, Some("ROLLBACK"))` as
 /// `TerminalResult::RolledBack`.
-///
-/// **The two paragraphs above replaced a description of the pre-fix world.**
-/// The old text said the settle path sends its COMMIT through `execute_fixture_on`,
-/// which throws the tag away. It does not, and
-/// `transaction/mod.rs`'s own header says so in as many words: terminal
-/// statements deliberately bypass `execute_fixture_on`. The classifier landed and this
-/// comment did not move.
 ///
 /// SCOPE: this drives an EXPLICIT creator transaction on purpose. The autocommit
 /// path goes through the driver's own `tx.commit()` wrapper, which checks the
@@ -2021,21 +1994,13 @@ const _procedures = { seed, failBulk };
 /// orchestrator then commits a poisoned transaction, which is the state under
 /// test.
 ///
-/// This test inserted the same `id` twice until 2026-09-02, expecting a
-/// duplicate-key violation. **It never got one.** `id` is platform-assigned: a
-/// creator-supplied value is discarded and a typed id minted in its place, so
-/// both inserts succeeded with different keys, the transaction committed
-/// cleanly, and the assertion failed against a HEALTHY commit while its message
-/// claimed "the row is gone (count=2)". Measured on the live server, the two
-/// surviving rows were `note_034HvhQfm7VR3Q3olk7zxc` and
-/// `note_034HvhQfTvtV3JZE1b9KdH`, not `l8-keep`. Same defect as the one closed
-/// on `#125`, in a second test.
-///
-/// The poison therefore has to be a constraint on a column the platform does
-/// NOT rewrite. `title` is creator data, so a unique index on it produces a real
-/// `23505` the runtime cannot absorb. The index is created here rather than in
-/// `reset_schema` because every other test in this file inserts duplicate
-/// titles freely.
+/// The poison has to be a constraint on a column the platform does NOT
+/// rewrite. `id` is platform-assigned: a creator-supplied value is discarded
+/// and a typed id minted in its place, so a duplicate-`id` insert never
+/// violates anything and the transaction commits cleanly. `title` is creator
+/// data, so a unique index on it produces a real `23505` the runtime cannot
+/// absorb. The index is created here rather than in `reset_schema` because
+/// every other test in this file inserts duplicate titles freely.
 #[test]
 fn commit_that_postgres_rolled_back_must_not_report_success_l8() {
     let (_postgres, url) = require_pg();
@@ -2082,9 +2047,7 @@ const _procedures = { poisonThenCommit };
     //
     // **Success is the envelope's `error`, not the HTTP status.** An RPC that
     // rejects still answers 200 and carries the failure in the body, so
-    // `status == 200` reads a failed commit as a successful one - which is how
-    // this arm reported "commit reported SUCCESS" while the body plainly said
-    // `{"error":{"code":"commit_rolled_back"}}`.
+    // `status == 200` reads a failed commit as a successful one.
     let tx_error = body
         .pointer("/json/txResult/error")
         .filter(|error| !error.is_null());
