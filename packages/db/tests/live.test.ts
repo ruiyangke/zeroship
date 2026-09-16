@@ -465,12 +465,11 @@ describe("db.live — reactive query layer", () => {
   });
 
   test("Result-shape detection is strict — rows that happen to have {data, error} columns are preserved", async () => {
-    // Regression for the loose `"data" in obj && "error" in obj` check.
-    // A user queryFn that returns rows containing both `data` and
-    // `error` columns (e.g. an event-log table) used to be
-    // mis-interpreted as a Result<R[]> and unwrapped to the value of
-    // `data`. Strict detection (exactly 2 keys, both `data` and `error`)
-    // preserves the rows verbatim.
+    // The detection must be STRICT. A loose `"data" in obj && "error" in obj`
+    // check mis-reads a user queryFn returning rows that contain both `data`
+    // and `error` columns (e.g. an event-log table) as a Result<R[]> and
+    // unwraps it to the value of `data`. Strict detection (exactly 2 keys,
+    // both `data` and `error`) preserves the rows verbatim.
     const ctx = makeMockNative();
     installEnv(ctx.native as unknown as { collection: (n: string) => { openSubscription: () => FakeSub } });
     const db = installSchemaForTest(

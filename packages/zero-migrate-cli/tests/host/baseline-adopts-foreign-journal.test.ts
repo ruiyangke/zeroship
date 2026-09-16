@@ -827,11 +827,11 @@ export function schema() {
  * `kind: "squash"` event was hiding exactly the part an operator is asked to approve.
  *
  * Asserted on `--json`, not on the human lines, because the reply is the only thing
- * a machine consumer sees. The human formatter used to be handed the
- * `--supersede-unmatched` flag separately and could describe the preview correctly
- * from that; a gate reading `superseded` out of the JSON to decide whether to
- * proceed had no such second source and read an empty list on every preview. The
- * flag argument is gone now, so this arm covers both surfaces at once.
+ * a machine consumer sees. The human formatter had the `--supersede-unmatched` flag
+ * separately and could describe the preview correctly from that; a gate reading
+ * `superseded` out of the JSON had no such second source and would read an empty
+ * list on every preview. With the flag argument gone, this arm covers both surfaces
+ * at once.
  */
 test("a baseline preview reports the supersession edges the write would record", async () => {
   const client = await connectLivePg();

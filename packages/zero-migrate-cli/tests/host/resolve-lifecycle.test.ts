@@ -276,7 +276,7 @@ test("a settled rename is named for the state it settled into, not called 'not p
         /is fully applied; there is no outstanding online rename to resolve/,
         `${action} after a commit must say the migration is applied`,
       );
-      // The regression: this used to read as though the rename never ran.
+      // The applied case must not read as though the rename never ran.
       assert.doesNotMatch(
         again.err,
         /is not pending$/m,
