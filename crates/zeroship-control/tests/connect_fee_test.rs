@@ -452,14 +452,11 @@ async fn issue_bearer(state: &AppState, user_id: &UserId, scope: &str) -> Caller
 }
 
 // The scope vocabulary is resource-blind: a scope always lowers to
-// `Resource::Any`, so per-app narrowing now comes from Cedar app membership
-// rather than from the caller-supplied wrapper policy a PAT used to carry.
+// `Resource::Any`, so per-app narrowing comes from Cedar app membership
+// rather than from a caller-supplied wrapper policy.
 // The organization-facing Stripe routes bind `:id` to the principal and consult no
-// grant at all beyond that, so the scope a bearer carries does not decide them
-// - the principal id does. There is no longer any fleet-wide scope that would
-// change the answer: the arms that used to fall back to
-// `require(BillingWrite, Any)` for a NON-path organization are deleted, because
-// nothing grants that once the platform staff roles are gone.
+// grant beyond that, so the scope a bearer carries does not decide them - the
+// principal id does.
 
 async fn cleanup(state: &AppState, subjects: &[&str], callers: &[&Caller]) {
     let pg = &state.control_pg;
@@ -882,12 +879,9 @@ async fn checkout_stamps_the_stored_fee_policy_with_its_cap() {
 
     // A 25% policy capped at $40 (4000 cents), written straight to the store.
     //
-    // It used to be set through `PUT /api/organizations/:id/fee-policy`, which is
-    // deleted along with the rest of the vendor-commercial surface. The
-    // behaviour under test was never that route: it is that CHECKOUT stamps the
-    // stored policy server-side, and `connect_checkout` is very much alive. So
-    // the policy is seeded through `FeePolicyStore` and the assertion below is
-    // unchanged.
+    // Seeded directly rather than through a route: the behaviour under test is
+    // that CHECKOUT stamps the stored policy server-side, not that any particular
+    // route set it.
     zeroship_control::fee_policy::FeePolicyStore::new(fx.state.registry.clone())
         .set(
             organization,
@@ -1026,11 +1020,11 @@ async fn checkout_rejected_when_charges_not_enabled() {
     common::drain_pg().await;
 }
 
-/// M2 (RED→GREEN): an empty `cart_id` must be rejected (it would otherwise
-/// collapse every checkout for a organization onto ONE idempotency key, replaying a
-/// stale charge for a different amount). Two checkouts with empty cart_id and
-/// different amounts must NOT return the same PaymentIntent. After the fix the
-/// empty cart_id is a 400 — no PI is created at all, so no stale replay.
+/// An empty `cart_id` must be rejected: it would collapse every checkout for an
+/// organization onto ONE idempotency key, replaying a stale charge for a different
+/// amount. Two checkouts with an empty cart_id and different amounts must NOT
+/// return the same PaymentIntent, and the request is a 400 - no PI is created at
+/// all, so no stale replay.
 #[compio::test]
 async fn checkout_rejects_empty_cart_id_no_stale_replay() {
     let url = db_url();
@@ -1237,14 +1231,12 @@ async fn checkout_rejects_bad_currency() {
     common::drain_pg().await;
 }
 
-/// `GET /api/organizations/{id}/earnings` and `DELETE /api/organizations/{id}/stripe` are
 /// `earnings` and `unlink` are gated by a SEAT at the organization in the path.
 ///
-/// Both used to require `BillingRead`/`BillingWrite` on `Resource::Any` - an
-/// operator grant - so the organization who owns the payout history could not read
-/// it and the organization who linked the Stripe account could not unlink it. Only
-/// platform staff could, and those roles are deleted, which would have left two
-/// organization capabilities reachable by nobody at all.
+/// Binding to the path organization is what makes them reachable at all: an
+/// operator grant on `Resource::Any` would leave the organization that owns the
+/// payout history unable to read it, and the one that linked the Stripe account
+/// unable to unlink it.
 ///
 /// The assertions run in BOTH directions on the same request shape, so the pair
 /// distinguishes "bound to the principal" from "allows everyone" - a test that
