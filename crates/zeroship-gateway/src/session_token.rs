@@ -1,10 +1,8 @@
 //! Gateway-signed **stateless session cookie** (`__Host-zeroship_app_session`).
 //!
-//! BFF redesign **slice R1b** (`2026-05-30-auth-bff-session-redesign.md`,
-//! "Decision addendum: signed STATELESS session cookie"). The session cookie is
-//! no longer an opaque `gateway_sessions.id` looked up per request — it is a
-//! gateway-SIGNED, `HttpOnly`, short-lived (~15 min) **identity assertion**,
-//! verified LOCALLY on every request (no per-request DB/Redis read).
+//! The session cookie is a gateway-SIGNED, `HttpOnly`, short-lived (~15 min)
+//! **identity assertion**, verified LOCALLY on every request (no per-request
+//! DB/Redis read) - not an opaque `gateway_sessions.id` looked up per request.
 //!
 //! ## A dedicated token type, stamped `typ: zeroship-sess+jwt`
 //!
