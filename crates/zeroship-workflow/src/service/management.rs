@@ -94,15 +94,14 @@ impl AppWorkflows {
                 }
                 let (scope, authority) = captured?;
                 authority.check(&scope)?;
-                let previous = state.require_next(command.revision)?;
+                state.require_next(command.revision)?;
                 tx.capture_mutation(scope.app_id())?;
                 let now = tx.now().await?;
                 let prepared =
                     application::prepare(&scope, &mut tx, command, &authority, now).await?;
                 match prepared {
                     application::Prepared::Outcome(outcome) => {
-                        let receipt =
-                            history::finish(&tx, command, previous.as_ref(), outcome, now).await?;
+                        let receipt = history::finish(&tx, command, outcome, now).await?;
                         authority.check(&scope)?;
                         tx.commit().await?;
                         Ok(receipt)
@@ -136,11 +135,11 @@ impl AppWorkflows {
             return Ok(receipt);
         }
         authority.check(self)?;
-        let previous = state.require_next(command.revision)?;
+        state.require_next(command.revision)?;
         tx.capture_mutation(self.app_id())?;
         let now = tx.now().await?;
         let outcome = application::latest(self, &mut tx, command, target, authority, now).await?;
-        let receipt = history::finish(&tx, command, previous.as_ref(), outcome, now).await?;
+        let receipt = history::finish(&tx, command, outcome, now).await?;
         authority.check(self)?;
         tx.commit().await?;
         Ok(receipt)

@@ -159,12 +159,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_management_receipts_scope
 
 CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_management_revision_identity" ON "__zeroship_workflow_schema"."__zeroship_workflow_management_receipts" ("app_id", "run_id", "revision");
 
-CREATE TABLE "__zeroship_workflow_schema"."__zeroship_workflow_management_scopes" ("id" text COLLATE "C" PRIMARY KEY NOT NULL, "app_id" text COLLATE "C" NOT NULL, "run_id" text COLLATE "C" NOT NULL, "revision" bigint NOT NULL, CONSTRAINT "__zeroship_workflow_management_scope_head" FOREIGN KEY ("app_id", "run_id", "revision") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_management_receipts" ("app_id", "run_id", "revision") ON DELETE RESTRICT, CONSTRAINT "__zeroship_workflow_management_scopes_app" FOREIGN KEY ("app_id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_app_state" ("app_id") ON DELETE RESTRICT);
-
-CREATE INDEX IF NOT EXISTS "__zeroship_workflow_management_scope_head_idx" ON "__zeroship_workflow_schema"."__zeroship_workflow_management_scopes" ("app_id", "run_id", "revision");
-
-CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_management_scopes_scope_key" ON "__zeroship_workflow_schema"."__zeroship_workflow_management_scopes" ("app_id", "run_id");
-
 CREATE TABLE "__zeroship_workflow_schema"."__zeroship_workflow_occurrences" ("id" text COLLATE "C" PRIMARY KEY NOT NULL, "app_id" text COLLATE "C" NOT NULL, "schedule_id" text COLLATE "C" NOT NULL, "revision" bigint NOT NULL, "at" bigint NOT NULL, "job_id" text COLLATE "C" NOT NULL, "run_id" text COLLATE "C", CONSTRAINT "__zeroship_workflow_occurrence_job" FOREIGN KEY ("app_id", "job_id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_job_receipts" ("app_id", id) ON DELETE RESTRICT, CONSTRAINT "__zeroship_workflow_occurrence_run" FOREIGN KEY ("app_id", "run_id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_runs" ("app_id", id) ON DELETE RESTRICT, CONSTRAINT "__zeroship_workflow_occurrence_schedule" FOREIGN KEY ("app_id", "schedule_id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_schedules" ("app_id", id) ON DELETE RESTRICT);
 
 CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_occurrence_job_identity" ON "__zeroship_workflow_schema"."__zeroship_workflow_occurrences" ("app_id", "job_id");

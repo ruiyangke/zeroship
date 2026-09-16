@@ -174,14 +174,6 @@ zeroship_data_orm::orm::schema! {
             created_at: BigInt,
         }
 
-        __zeroship_workflow_management_scopes {
-            #[orm(primary_key)]
-            id: Text,
-            app_id: Text,
-            run_id: Text,
-            revision: BigInt,
-        }
-
         __zeroship_workflow_occurrences {
             #[orm(primary_key)]
             id: Text,
