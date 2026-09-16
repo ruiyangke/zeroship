@@ -1566,17 +1566,6 @@
             "valueColumn": "revision"
           }
         },
-        "digest": {
-          "type": "string",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "digest"
-          }
-        },
         "outcome": {
           "type": "string",
           "required": true,
