@@ -99,9 +99,14 @@ pub(crate) fn migrator_executor_config(
 /// owns it.
 ///
 /// Schema-addressed, so it serves both the app create verb
-/// ([`provision_app_database`], which adds the app's runtime role) and the
-/// schema-bundle path, which has no app to derive one from. Audit tables,
-/// publications and apply-ledger rows remain apply-time concerns.
+/// ([`provision_app_database`]) and the schema-bundle path. Neither the schema
+/// nor the runtime role needs an app identity - both derive from the schema
+/// alone - but the runtime role is deliberately NOT provisioned here: its grant
+/// set is a `GRANT ... ON ALL TABLES` snapshot and this runs before any table
+/// exists, so a role established here would carry no grant on anything the
+/// caller goes on to create. Each caller provisions it, and repeats it after
+/// every step that creates tables. Audit tables, publications and apply-ledger
+/// rows remain apply-time concerns.
 pub async fn provision_database(
     admin: &Client,
     schema: &str,
@@ -285,7 +290,7 @@ pub async fn provision_app_database(
     let (_, migrator) = migrator_executor_config(&schema)?;
     let bound = zeroship_core::schema_name::SchemaName::new(&schema)
         .map_err(|_| ProvisionRoleError::BadRoleName(schema.clone()))?;
-    crate::apply::provision_runtime_app_role(admin, app_id, &bound, &migrator)
+    crate::apply::provision_runtime_app_role(admin, &bound, &migrator)
         .await
         .map_err(|error| ProvisionAppDatabaseError::RuntimeRole(error.to_string()))?;
     Ok(())
