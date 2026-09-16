@@ -54,16 +54,6 @@
 //! for what each verifies. The pool's only jobs here are to build the
 //! connector **once** rather than per connection, and to fail early.
 //!
-//! *This paragraph used to say the opposite.* Until the six modes landed, the
-//! pool hardcoded [`NoTls`] and read `prefer` - the default - as plaintext,
-//! while `Config::connect` with a real connector read the same word as
-//! "TLS, and hard-fail if it does not work". One spelling, two behaviours,
-//! chosen by which entry point you happened to use. The justification was
-//! honest as far as it went (the driver had no reconnect-in-plaintext
-//! fallback, so a verifying connector under `prefer` would have converted
-//! "works, in plaintext" into "fails"), but the fix was to build the fallback,
-//! which `connect.rs` now has.
-//!
 //! Building the connector once is not just a saving: it reads `sslrootcert`
 //! from disk, and `sslrootcert=system` walks the operating system's store. The
 //! pool opens connections at warm-up, on demand, and on every reconnect after
@@ -205,10 +195,9 @@ impl PoolConfig {
     ///
     /// This is also what bounds a pooled connection's MEMORY. A connection's
     /// read buffer grows to the largest message it has carried and is never
-    /// shrunk, so an entry that once served a 50 MB row holds 50 MB until it
-    /// rotates - measured, and the same in tokio-postgres. Size a pool for
-    /// `max_size * largest expected message`, and shorten this if that product
-    /// is uncomfortable.
+    /// shrunk, so an entry that once served a large row holds that buffer
+    /// until it rotates. Size a pool for `max_size * largest expected
+    /// message`, and shorten this if that product is uncomfortable.
     ///
     /// Enforced WITHOUT the housekeeper as well: a connection past its lifetime
     /// is discarded when it is returned, not only when background maintenance
@@ -865,8 +854,8 @@ impl Pool {
     /// This is the only constructor that can produce that combination, because
     /// it is the only one that sets `max_size` without the caller also seeing
     /// `min_idle`: `Pool::connect(url, 1)` against the default `min_idle` of 2
-    /// used to warm up to two connections and hand out both, so the argument
-    /// named `max_size` did not bound anything.
+    /// must not warm up to two connections and hand out both, or the argument
+    /// named `max_size` would not bound anything.
     pub async fn connect(url: &str, max_size: usize) -> Result<Self, Error> {
         let defaults = PoolConfig::default();
         let config = PoolConfig {
@@ -1302,24 +1291,17 @@ impl Pool {
                 // its own `ReadyForQuery`. An `Err` means this round trip itself
                 // did not complete: evict.
                 //
-                // THAT IS ALL AN `Ok` MEANS, and this comment used to claim
-                // more - that the barrier keeps the next caller from inheriting
-                // a broken transaction "if the ROLLBACK failed". It cannot see
-                // that. The queued command's outcome went to its own dropped
-                // response channel, and an empty simple query returns `Ok`
-                // inside an open OR an aborted transaction, so the barrier
-                // clears `dirty` on a session it never proved idle.
-                // `__private_api_rollback` carries the same wrong claim about
-                // this code for its encode-failure arm ("the pool's next-get
-                // barrier will still detect + evict it").
+                // That is ALL an `Ok` means: the queued command's outcome went
+                // to its own dropped response channel, and an empty simple query
+                // returns `Ok` inside an open OR an aborted transaction, so the
+                // barrier clears `dirty` on a session it never proved idle.
                 //
-                // What actually keeps a transaction off the next borrower is
+                // What keeps a transaction off the next borrower is
                 // `return_client`, which queues a ROLLBACK unconditionally
                 // unless the session is provably `Idle` - never this barrier.
-                // Making the claim true costs one line (require
-                // `transaction_status() == Some(Idle)` after the `Ok` and evict
-                // otherwise) but is not here, because with release rolling back
-                // unconditionally there is no interleaving that reaches it, and
+                // Requiring `transaction_status() == Some(Idle)` after the `Ok`
+                // and evicting otherwise is not here, because with release
+                // rolling back unconditionally no interleaving reaches it, and
                 // an unreachable guard is a claim in its own right.
                 //
                 // Runs regardless of `validation_bypass` - a dirty
@@ -1432,8 +1414,7 @@ impl Pool {
                 // reaches the loop's `continue`, and with no idle entry to fall
                 // back on the next iteration opens ANOTHER connection, is
                 // refused again, and repeats until `acquire_timeout` -- a full
-                // TCP connect plus startup handshake each time. Measured before
-                // this change, rejection repeatedly opened connections. A hook
+                // TCP connect plus startup handshake each time. A hook
                 // like "reject if the server is in recovery" answers false for
                 // every connection during a failover and turns one checkout
                 // into sustained load on an already-struggling server.
@@ -1450,7 +1431,7 @@ impl Pool {
                 // decrement total.
                 permit.disarm();
                 return Ok(entry);
-                // H7 design note: we don't wake a waiter on successful
+                // Design note: we don't wake a waiter on successful
                 // connect. The freshly-connected client is immediately
                 // consumed by the current caller - there's no idle entry
                 // for a waiter to acquire. Waiters are woken on
@@ -1533,19 +1514,11 @@ impl Pool {
         // make this arm observable; keeping it preserves shutdown accounting
         // if a violating hook closes the pool before returning.
         //
-        // THE ARM IS REACHED; THE WAKE INSIDE IT IS NOT. Measured 2026-08-31:
-        // `panic!` here fails exactly one test,
-        // `reentrant_close_from_after_release_cannot_redeposit_after_shutdown`,
-        // which simulates the forbidden re-entry. But deleting the
-        // `wake_close_waiters_if_drained()` call fails NOTHING, because in that
-        // state there is no parked close waiter to wake: `close()` runs
-        // `begin_close()` BEFORE awaiting `CloseWaiter`, so any parked waiter
-        // implies the pool was already closed when the return started - and
-        // then the PRE-hook arm above fires instead of this one. Observing this
-        // wake needs a hook that both re-enters AND leaves its own close
-        // parked, i.e. two stacked contract violations. The call stays for
-        // accounting safety, not because a test can pin it; a mutation report
-        // calling it unbound is correct and needs no new test.
+        // In practice the pre-hook arm above fires first: `close()` runs
+        // `begin_close()` BEFORE awaiting `CloseWaiter`, so any parked close
+        // waiter implies the pool was already closed when the return started.
+        // The wake is kept for accounting safety, not because a test can pin
+        // it.
         if self.inner.closed.get() {
             drop(entry);
             drop(permit);
@@ -1603,24 +1576,17 @@ impl Pool {
         // included deliberately: release cannot wait for it, and guessing
         // `Idle` is how an aborted transaction reaches the next borrower.
         //
-        // This used to read the in-flight count and the status as two separate
-        // arms, in an order the comment had to explain. `transaction_status`
-        // now folds the check into its own return type, so there is no ordering
-        // left to get wrong here.
-        //
-        // `dirty` does NOT license skipping this, and until 2026-08-23 it did:
-        // `if !is_dirty() && status != Some(Idle)`. The flag means "a
+        // `dirty` does NOT license skipping this. The flag means "a
         // fire-and-forget command was queued and nobody observed its outcome",
         // and NOTHING on the session clears it - not an awaited `query`, not an
         // awaited `batch_execute`. Only the next checkout's barrier, or an
         // explicit `Transaction::commit`/`rollback`, does. So the flag outlives
-        // the command it describes, and read here as "a ROLLBACK is already
-        // queued" it suppressed the rollback for a transaction opened AFTER
-        // that one: abandon a `Transaction`, then `batch_execute("BEGIN; INSERT
-        // ...")`, then release, and the next borrower inherited the open
-        // transaction and its uncommitted row. The checkout barrier then
-        // laundered the state rather than catching it - an empty `simple_query`
-        // succeeds inside a transaction, so it returned Ok and cleared `dirty`
+        // the command it describes, and cannot be read here as "a ROLLBACK is
+        // already queued": that suppressed the rollback for a transaction
+        // opened after it, and the next borrower inherited the open
+        // transaction and its uncommitted row. The checkout barrier would then
+        // launder the state rather than catch it - an empty `simple_query`
+        // succeeds inside a transaction, so it returns Ok and clears `dirty`
         // without ending anything.
         //
         // There is no cheap accurate version of that test. Restricting the skip
@@ -1733,15 +1699,6 @@ impl Pool {
         // connection that is still alive. Closing over the take keeps the
         // temporary inside the closure, which matches `wake_all` collecting into
         // a `Vec` and `return_client` taking the waker as a return value.
-        //
-        // THE WHOLE CLASS WAS SWEPT 2026-08-26, not just this line: every site
-        // that hands control to arbitrary code - the six `wake` calls here and
-        // in `buf_stream.rs`, plus the `before_acquire`/`after_release` hooks -
-        // was checked for a live borrow at the call. This was the only one out
-        // of step, and `buf_stream::wake_reader` already carried the rationale
-        // in as many words ("End the RefCell borrow before invoking an arbitrary
-        // waker"). So the hazard was known and this site simply missed it; a
-        // fix that stopped at one call site would have been the real risk.
         let waker = slot.and_then(|slot| slot.waker.borrow_mut().take());
         if let Some(w) = waker {
             w.wake();
@@ -2045,7 +2002,7 @@ impl Pool {
     ///
     /// This is the correct primitive for multi-statement DDL - e.g. the
     /// `CREATE TABLE ...; COMMENT ON COLUMN ... IS 'zero-migrate:enc:...'` / `'zero-migrate:mask:...'`
-    /// sentinel batches the schema builder emits (P4 HALF A / P5.5 PR 6).
+    /// sentinel batches the schema builder emits.
     /// `Pool::execute` cannot run those (it prepares a single command).
     ///
     /// # Errors
@@ -4804,18 +4761,12 @@ mod tests {
     /// A waiter's `Waker` must not run while the pool still holds that waiter's
     /// `waker` slot borrowed.
     ///
-    /// `wake_one_waiter` took the waker through `slot.waker.borrow_mut().take()`
-    /// as the scrutinee of an `if let`, then called `wake()` in the body. The
-    /// scrutinee temporary is NOT dropped before the body - Rust 2024 moved that
-    /// drop ahead of the `else` block only - so the `RefMut` was live across the
-    /// wake. Any waker that synchronously re-enters the pool and reaches this
-    /// slot then hits `BorrowMutError`, and because the unwind escapes before
-    /// `permit.disarm()`, the return permit still fires and decrements `total`
-    /// for a connection that is still alive, leaving `total < active`.
-    ///
-    /// Everywhere else in this file wakes OUTSIDE the borrow - `wake_all`
-    /// collects into a `Vec` first, and `return_client` takes the waker as a
-    /// return value - so this was the one site out of step.
+    /// `wake_one_waiter` takes the waker OUT of the borrow before invoking it.
+    /// If the `RefMut` were live across the wake, any waker that synchronously
+    /// re-enters the pool and reaches this slot would hit `BorrowMutError`, and
+    /// because the unwind escapes before `permit.disarm()`, the return permit
+    /// would still fire and decrement `total` for a connection that is still
+    /// alive, leaving `total < active`.
     ///
     /// The assertion is on the BORROW rather than on a panic, so it states the
     /// invariant instead of one caller's way of tripping over it, and it needs no
@@ -5166,8 +5117,7 @@ mod tests {
         // those and return false either way - the entry guard would mutate
         // green. Reaping happens BEFORE those checks, so an expired entry is
         // what makes the guard the only thing standing between a closed pool
-        // and a mutated idle set. Measured: with a fresh entry this test passes
-        // against a driver whose entry guard has been removed.
+        // and a mutated idle set.
         let config = PoolConfig {
             max_size: 1,
             min_idle: 0,
@@ -5582,7 +5532,7 @@ mod tests {
         server.join().expect("fake PostgreSQL server panicked");
     }
 
-    /// WHAT THIS TEST WAS MEASURED TO BIND, which is less than its name says.
+    /// What this test actually binds, which is less than its name says.
     ///
     /// The name claims the pool is released BEFORE the ineligible entry is
     /// discarded. That ordering is NOT bound here: cloning an `Rc<Pool>` so a
@@ -5591,15 +5541,9 @@ mod tests {
     /// the assertion only inspects the `Weak` afterwards.
     ///
     /// What it does bind is the ineligibility discard PATH - depositing a
-    /// hook-closed entry instead of discarding it fails this test. That path
-    /// was already covered by
-    /// `housekeeping_after_connect_ineligibility_records_an_eviction`, so this
-    /// adds a distinct scenario (a hook whose observer drops the pool on wake)
-    /// rather than closing a gap.
-    ///
-    /// Kept and documented rather than deleted or renamed: the scenario is
-    /// real, and a name that promises an ordering nobody verified is exactly
-    /// the thing worth writing down.
+    /// hook-closed entry instead of discarding it fails this test. It adds a
+    /// distinct scenario (a hook whose observer drops the pool on wake) rather
+    /// than closing a gap.
     #[compio::test]
     async fn housekeeping_releases_pool_before_discarding_hook_closed_entry() {
         let (address, finish_tx, count_rx, server) = accepting_postgres_server();
@@ -5946,7 +5890,7 @@ mod tests {
     /// that await: acquisitions reserve slots while this task is parked. Without
     /// the re-check the second iteration reserves a slot the pool no longer has
     /// and opens a physical connection past `max_size` - which is the whole
-    /// point of `max_size`, and which nothing in this suite ruled on until now.
+    /// point of `max_size`.
     #[compio::test]
     async fn housekeeping_refill_rechecks_capacity_after_its_hook_await() {
         let (hook_calls, sessions, total) = refill_sessions_opened_when_total_reaches(3).await;
@@ -6228,9 +6172,7 @@ mod tests {
     /// The housekeeper is optional - [`Pool::start_housekeeper`] is a separate
     /// call and its documented absence means "connections are never proactively
     /// evicted", not "connections are handed out forever". So on a pool that
-    /// never started one, this arm is the ONLY thing enforcing `max_lifetime`,
-    /// and nothing in this suite ruled on it: deleting the check left every
-    /// other test printing exactly what an enforcing pool prints.
+    /// never started one, this arm is the ONLY thing enforcing `max_lifetime`.
     #[compio::test]
     async fn checkout_evicts_an_idle_entry_past_its_max_lifetime() {
         assert_eq!(
@@ -6507,10 +6449,10 @@ mod tests {
     /// Replacing a waiter's `Waker` must not DESTROY the old one inside the
     /// borrow.
     ///
-    /// `Waiter::poll` refreshed the slot with `*w = Some(new)`, which drops the
-    /// previous `Waker` through the `RefMut` while that borrow AND the
-    /// `waiters` borrow are both live. A `Waker` is arbitrary caller code, so a
-    /// destructor that re-enters the pool meets `BorrowError` - the same hazard
+    /// `Waiter::poll` carries the replaced `Waker` out before replacing it, so
+    /// it is destroyed with no borrow held. Dropping it through the `RefMut`
+    /// while that borrow AND the `waiters` borrow were both live would let a
+    /// destructor that re-enters the pool meet `BorrowError` - the same hazard
     /// as waking inside the borrow, moved from the wake to the drop.
     ///
     /// The assertion is on the BORROW rather than on a panic, so it states the
