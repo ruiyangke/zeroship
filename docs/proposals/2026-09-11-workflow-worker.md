@@ -3676,8 +3676,11 @@ is the merge order.
    ready-registry contracts, the assignment host's publication contracts, the
    `env.workflows` binding contracts that refuse an unready or foreign app, and
    the fleet process contract that starts a run through ordinary app ingress and
-   sees it complete through manager delivery. The example fleets run no manager,
-   so their deployed tier refuses `env.workflows` until placement lands; see
+   sees it complete through manager delivery. When this slice landed the example
+   fleets ran no manager, so their deployed tier refused `env.workflows` until
+   placement arrived; slice five gave them one, and the sentence is kept in that
+   tense rather than deleted because it is the reason slice five names both
+   example fleets as its proof. See
    [executable host composition](#executable-host-composition).
 5. **Ingress responsibility and capacity.** The ingress epoch gates every
    creator acceptance, hosts establish it at startup and after a fenced
