@@ -509,7 +509,7 @@ async fn run_apply(
         "migrate-server: applying IR under sealed managed migration policy"
     );
     let applied_by = format!("migrate-server:{}", principal_id.as_str());
-    provision_runtime_app_role(session.client(), app_id, schema, role)
+    provision_runtime_app_role(session.client(), schema, role)
         .await
         .map_err(ApplyRequestError::ProvisionRuntimeRole)?;
     let applied = apply_sealed(
@@ -525,7 +525,7 @@ async fn run_apply(
     .await;
     // Re-run provisioning after the apply attempt so tables and sequences
     // created during it receive the runtime role's schema-wide DML grants.
-    let reprovisioned = provision_runtime_app_role(session.client(), app_id, schema, role)
+    let reprovisioned = provision_runtime_app_role(session.client(), schema, role)
         .await
         .map_err(ApplyRequestError::ProvisionRuntimeRole);
     let outcome = applied?;
@@ -1309,10 +1309,29 @@ impl RuntimeRoleProvisioningSql {
 /// The durable fix is to stop pre-interpolating and let the block quote its own
 /// identifiers with `format('%I', ...)`.
 /// The tenant is no longer an input: every statement below is derived from the
-/// SCHEMA and the migrator role. The parameter stays so callers keep naming the
-/// app they are provisioning for.
+/// SCHEMA and the migrator role. The parameter stays so a caller that holds an
+/// app identity keeps naming the app it is provisioning for; a caller that holds
+/// only a schema reaches [`runtime_role_provisioning_sql_for_schema`] instead.
 pub fn runtime_role_provisioning_sql(
     _app_id: &AppId,
+    schema: &SchemaName,
+    migrator_role: &str,
+) -> Result<RuntimeRoleProvisioningSql, PerAppRoleNameError> {
+    runtime_role_provisioning_sql_for_schema(schema, migrator_role)
+}
+
+/// The same plan, composed from the SCHEMA alone.
+///
+/// This is where every statement is actually built, and it takes what the
+/// statements actually need. The schema-addressed platform paths - the schema
+/// bundle applier above all - have no app identity to hand over and must not
+/// invent one.
+///
+/// # Errors
+///
+/// Returns an error rather than allowing PostgreSQL to truncate an overlong
+/// authorization-role identifier.
+pub(crate) fn runtime_role_provisioning_sql_for_schema(
     schema: &SchemaName,
     migrator_role: &str,
 ) -> Result<RuntimeRoleProvisioningSql, PerAppRoleNameError> {
@@ -1366,11 +1385,10 @@ pub fn runtime_role_provisioning_sql(
 
 pub(crate) async fn provision_runtime_app_role(
     conn: &compio_postgres::Client,
-    app_id: &AppId,
     schema: &SchemaName,
     migrator_role: &str,
 ) -> Result<(), ProvisionRuntimeRoleError> {
-    let provisioning = runtime_role_provisioning_sql(app_id, schema, migrator_role)?;
+    let provisioning = runtime_role_provisioning_sql_for_schema(schema, migrator_role)?;
     for statement in provisioning.statements() {
         exec_retry(conn, statement).await?;
     }
@@ -1682,11 +1700,6 @@ fn scratch_schema_name(raw: &str) -> SchemaName {
 }
 
 #[cfg(test)]
-fn scratch_app_id(schema: &str) -> AppId {
-    AppId::parse(schema).expect("a scratch schema is a printed app id")
-}
-
-#[cfg(test)]
 mod live_audit_unmask_provisioning {
     use super::*;
     use zeroship_migrate_postgres::role::migrator_role_name;
@@ -1697,9 +1710,7 @@ mod live_audit_unmask_provisioning {
 
     /// A scratch app schema derived from a real minted [`AppId`], because
     /// `provision_migrator` derives the migrator role from it and production
-    /// only ever passes an app id. `scratch_app_id` recovers the tenant from
-    /// what this returns, so the pair the provisioning call receives is one a
-    /// deploy could actually produce.
+    /// only ever passes a schema spelled this way.
     fn scratch_schema() -> String {
         app_derivation::schema_name(&AppId::mint())
     }
@@ -1930,7 +1941,6 @@ mod live_audit_unmask_provisioning {
             .expect("provision audit table (production order)");
         provision_runtime_app_role(
             &admin,
-            &scratch_app_id(&before),
             &scratch_schema_name(&before),
             &migrator_before,
         )
@@ -1943,7 +1953,6 @@ mod live_audit_unmask_provisioning {
         let migrator_after = provision_schema_and_migrator(&admin, &after).await;
         provision_runtime_app_role(
             &admin,
-            &scratch_app_id(&after),
             &scratch_schema_name(&after),
             &migrator_after,
         )
@@ -1961,7 +1970,6 @@ mod live_audit_unmask_provisioning {
         let migrator_between = provision_schema_and_migrator(&admin, &between).await;
         provision_runtime_app_role(
             &admin,
-            &scratch_app_id(&between),
             &scratch_schema_name(&between),
             &migrator_between,
         )
@@ -1972,7 +1980,6 @@ mod live_audit_unmask_provisioning {
             .expect("provision audit table (between the two calls)");
         provision_runtime_app_role(
             &admin,
-            &scratch_app_id(&between),
             &scratch_schema_name(&between),
             &migrator_between,
         )
@@ -2170,7 +2177,6 @@ mod live_creator_schema_table_privileges {
             .expect("provision the audit table");
         provision_runtime_app_role(
             admin,
-            &scratch_app_id(schema),
             &scratch_schema_name(schema),
             &migrator,
         )
@@ -2206,7 +2212,6 @@ mod live_creator_schema_table_privileges {
             .expect("seed an inflight marker");
         provision_runtime_app_role(
             &admin,
-            &scratch_app_id(&schema),
             &scratch_schema_name(&schema),
             &migrator,
         )
@@ -2366,7 +2371,6 @@ mod live_creator_schema_table_privileges {
 
         provision_runtime_app_role(
             &admin,
-            &scratch_app_id(&schema),
             &scratch_schema_name(&schema),
             &migrator,
         )

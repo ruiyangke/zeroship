@@ -203,6 +203,93 @@ test("t.text({ caseSensitive:false }) records the caseSensitive facet", () => {
   assert.equal(ops[1].caseSensitive, false, "addColumn carries the text facet too");
 });
 
+test(".collation('bytewise') records the collation facet on a create-table column", () => {
+  const ops = record(() => {
+    table("u").create({
+      columns: {
+        plain: t.text(),
+        ordered: t.text().collation("bytewise"),
+        bounded: t.string({ length: 32 }).collation("bytewise").notNull(),
+      },
+    });
+  });
+  const cols = ops[0].columns;
+  assert.equal(cols[0].collation, undefined, "t.text() omits collation");
+  assert.ok(!("collation" in cols[0]), "an uncollated column carries no collation key at all");
+  assert.equal(cols[1].collation, "bytewise", "the intent token lands verbatim on the wire");
+  assert.equal(cols[2].collation, "bytewise", "t.string() is collatable too");
+  assert.deepEqual(cols[2].type, { string: { length: 32 } }, "the facet leaves the type alone");
+});
+
+test(".collation() returns a fresh def and leaves the receiver uncollated", () => {
+  const ops = record(() => {
+    const base = t.text().notNull();
+    table("u").create({ columns: { a: base, b: base.collation("bytewise") } });
+  });
+  const cols = ops[0].columns;
+  assert.ok(!("collation" in cols[0]), "the hoisted receiver is untouched by the modifier");
+  assert.equal(cols[1].collation, "bytewise");
+});
+
+test(".collation() refuses an out-of-set token and every type that cannot carry one", () => {
+  const refusal = (fn: () => unknown) => {
+    assert.throws(fn, (e: any) => e.code === "OP_INVALID");
+  };
+  // REJECTION CONTROL: an out-of-set intent, so an acceptance test cannot pass
+  // by ignoring the argument.
+  refusal(() => (t.text() as any).collation("nocase"));
+  refusal(() => (t.text() as any).collation("C"));
+  refusal(() => (t.text() as any).collation(undefined));
+  // REJECTION CONTROL: the engine's validator accepts the facet on `text` and
+  // `string` only; every other type is refused here, at the call site.
+  for (const def of [
+    t.int(),
+    t.bigInt(),
+    t.uuid(),
+    t.timestamp(),
+    t.bytes(),
+    t.boolean(),
+    t.json(),
+    t.textArray(),
+    t.char({ length: 3 }),
+    t.numeric(),
+    t.inet(),
+    t.enum("mood"),
+    t.encrypted({ of: t.text() }),
+  ]) {
+    refusal(() => def.collation("bytewise"));
+  }
+  // The two facets that already decide the column's comparison order.
+  refusal(() => t.text({ caseSensitive: false }).collation("bytewise"));
+  refusal(() => t.string({ caseSensitive: false }).collation("bytewise"));
+  refusal(() => ids.typeId({ prefix: "doc" }).collation("bytewise"));
+  refusal(() => ids.ulid().collation("bytewise"));
+});
+
+test(".collation() is create-table-only and is refused, not dropped, elsewhere", () => {
+  const collated = t.text().collation("bytewise");
+  const refusal = (fn: () => unknown) => {
+    assert.throws(fn, (e: any) => e.code === "OP_INVALID");
+  };
+  __begin();
+  try {
+    // REJECTION CONTROL for each position that has no slot for the facet. A
+    // silent drop here would leave the migration source claiming an ordering the
+    // database does not have.
+    refusal(() => table("u").column("c").add({ type: collated }));
+    refusal(() => table("u").column("c").setType({ to: collated }));
+    refusal(() => table("u").column("c").rename({ to: "d", type: collated }));
+    refusal(() => t.encrypted({ of: collated }));
+    // ...and the create-table position still accepts it, so the refusals above
+    // are about the POSITION and not about the def.
+    table("u").create({ columns: { c: collated } });
+  } finally {
+    const ops = __drain();
+    assert.equal(ops.length, 1, "only the accepting position recorded an op");
+    assert.equal(ops[0].columns[0].collation, "bytewise");
+  }
+});
+
 test("typed references preserve explicit local types and record only the reference facet", () => {
   const ops = record(() => {
     table("children").create({

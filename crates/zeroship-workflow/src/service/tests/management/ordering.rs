@@ -41,6 +41,87 @@ case!(
     postgres_management_receipt_replays_without_policy_or_deployments,
     replay
 );
+case!(
+    sqlite_management_fences_on_its_own_app_and_run_head,
+    postgres_management_fences_on_its_own_app_and_run_head,
+    head_derivation
+);
+
+/// The revision fence reads the highest revision this app's run has recorded.
+/// A run the journal holds for another app, a sibling run and an already
+/// applied revision all leave that head where it was.
+async fn head_derivation(store: Rc<OrmStore>) {
+    let (service, local, foreign, _deployments) = registered_service(store).await;
+    let here = service.fixture_app(local.clone());
+    let there = service.fixture_app(foreign.clone());
+    // One run identity the journal holds under both apps, and a second run of
+    // the first app. Neither is started: an unknown run still records history.
+    let shared = RunId::mint();
+    let sibling = RunId::mint();
+
+    // Each command's fence is the highest revision already recorded, so the
+    // sequence advances past the revision its first command wrote.
+    for revision in 1..=3 {
+        assert_eq!(
+            here.management_outcome(&started(&local, shared.as_str(), revision))
+                .await
+                .unwrap(),
+            ManagementOutcome::NotFound {},
+            "revision {revision}"
+        );
+    }
+    // A replayed revision under a fresh command identity, and a gap past the
+    // head, are both refused.
+    for revision in [3, 5] {
+        assert!(
+            matches!(
+                here.management_job(&started(&local, shared.as_str(), revision))
+                    .await,
+                Err(WorkflowServiceError::Conflict(_))
+            ),
+            "revision {revision}"
+        );
+    }
+
+    // The other app's identical run identity has its own empty history.
+    assert!(matches!(
+        there
+            .management_job(&started(&foreign, shared.as_str(), 4))
+            .await,
+        Err(WorkflowServiceError::Conflict(_))
+    ));
+    assert_eq!(
+        there
+            .management_outcome(&started(&foreign, shared.as_str(), 1))
+            .await
+            .unwrap(),
+        ManagementOutcome::NotFound {}
+    );
+    // Advancing it leaves this app's run where its own history ended.
+    assert!(matches!(
+        here.management_job(&started(&local, shared.as_str(), 5)).await,
+        Err(WorkflowServiceError::Conflict(_))
+    ));
+    assert_eq!(
+        here.management_outcome(&started(&local, shared.as_str(), 4))
+            .await
+            .unwrap(),
+        ManagementOutcome::NotFound {}
+    );
+
+    // A sibling run of the same app begins its own sequence at one.
+    assert!(matches!(
+        here.management_job(&started(&local, sibling.as_str(), 2))
+            .await,
+        Err(WorkflowServiceError::Conflict(_))
+    ));
+    assert_eq!(
+        here.management_outcome(&started(&local, sibling.as_str(), 1))
+            .await
+            .unwrap(),
+        ManagementOutcome::NotFound {}
+    );
+}
 
 async fn ordered(store: Rc<OrmStore>) {
     let (service, app_id, _, _deployments) = registered_service(store.clone()).await;

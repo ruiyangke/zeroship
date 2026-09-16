@@ -3,11 +3,11 @@ use super::{
 };
 use crate::service::{
     app::{decode, encode},
-    models::{job_receipts, management_receipts as receipts, management_scopes as scopes},
-    types::{digest, storage_id},
+    models::{job_receipts, management_receipts as receipts},
+    types::digest,
 };
 use zeroship_core::{
-    app_id::AppId, typed_id, workflow_coordination::ManagementOutcome, workflow_jobs::JobOutcome,
+    app_id::AppId, workflow_coordination::ManagementOutcome, workflow_jobs::JobOutcome,
 };
 use zeroship_data_orm::orm::{FindOptions, FromRow, Insertable};
 
@@ -22,15 +22,6 @@ struct History {
     digest: String,
     outcome: String,
     created_at: i64,
-}
-
-#[derive(FromRow, Insertable)]
-#[orm(entity = scopes)]
-pub(super) struct Scope {
-    id: String,
-    app_id: String,
-    run_id: String,
-    revision: i64,
 }
 
 #[derive(FromRow)]
@@ -50,27 +41,22 @@ struct PendingReceipt {
 
 pub(super) enum Observed {
     Replay(JobReceipt),
-    Fresh(Option<Scope>),
+    /// The run's applied management revision, absent until its first command.
+    Fresh(Option<i64>),
 }
 
 impl Observed {
-    pub(super) fn require_next(self, revision: i64) -> Result<Option<Scope>, WorkflowServiceError> {
+    pub(super) fn require_next(self, revision: i64) -> Result<(), WorkflowServiceError> {
         let Self::Fresh(previous) = self else {
             return Err(invalid());
         };
-        let expected = previous
-            .as_ref()
-            .map_or(0, |scope| scope.revision)
-            .checked_add(1)
-            .ok_or_else(|| {
-                WorkflowServiceError::ResourceExhausted(
-                    "workflow management revision exhausted".into(),
-                )
-            })?;
+        let expected = previous.unwrap_or(0).checked_add(1).ok_or_else(|| {
+            WorkflowServiceError::ResourceExhausted("workflow management revision exhausted".into())
+        })?;
         if revision != expected {
             return Err(conflict());
         }
-        Ok(previous)
+        Ok(())
     }
 }
 
@@ -100,17 +86,14 @@ pub(super) async fn inspect(
             },
         )
         .await?;
-    let current = scope(tx, &command.job.app_id, command.run_id.as_str()).await?;
+    let current = applied(tx, &command.job.app_id, command.run_id.as_str()).await?;
     if let Some(receipt) = recorded {
         if anchored.len() != 1 {
             return Err(invalid());
         }
         let history = &anchored[0];
         check_history(history, command, &receipt)?;
-        if current
-            .as_ref()
-            .is_none_or(|scope| scope.revision < command.revision)
-        {
+        if current.is_none_or(|revision| revision < command.revision) {
             return Err(invalid());
         }
         return Ok(Observed::Replay(receipt));
@@ -126,50 +109,40 @@ pub(super) async fn inspect(
     Ok(Observed::Fresh(current))
 }
 
-async fn scope(
+/// The management revision this app's run has applied: the highest revision its
+/// retained command history carries. One journal holds many apps, so the app
+/// bounds the lookup as tightly as the run does, and the revision identity index
+/// over both orders it. Reading it validates the head command it names.
+async fn applied(
     tx: &Transaction,
     app: &AppId,
     run: &str,
-) -> Result<Option<Scope>, WorkflowServiceError> {
-    let current = tx
-        .database()
-        .entity::<scopes::Entity>()?
-        .find::<Scope>(
-            scopes::app_id
+) -> Result<Option<i64>, WorkflowServiceError> {
+    let database = tx.database();
+    let source = database.entity::<receipts::Entity>()?.alias("h")?;
+    let head = database
+        .from(&source)
+        .filter(
+            source
+                .column(receipts::app_id)
                 .eq(app.as_str())?
-                .and(scopes::run_id.eq(run)?),
-            FindOptions {
-                limit: Some(1),
-                ..Default::default()
-            },
+                .and(source.column(receipts::run_id).eq(run)?),
         )
+        .order_by(source.column(receipts::revision).desc())
+        .select(source.row::<History>())?
+        .limit(1)?
+        .all()
         .await?
         .into_iter()
         .next();
-    if let Some(current) = &current {
-        if current.revision <= 0 || typed_id::parse_with_prefix(&current.id, "wjr").is_err() {
-            return Err(invalid());
-        }
-        let head = tx
-            .database()
-            .entity::<receipts::Entity>()?
-            .find::<History>(
-                receipts::app_id
-                    .eq(app.as_str())?
-                    .and(receipts::run_id.eq(run)?)
-                    .and(receipts::revision.eq(current.revision)?),
-                FindOptions {
-                    limit: Some(1),
-                    ..Default::default()
-                },
-            )
-            .await?
-            .into_iter()
-            .next()
-            .ok_or_else(invalid)?;
-        validate_saved(tx, &head).await?;
+    let Some(head) = head else {
+        return Ok(None);
+    };
+    if head.revision <= 0 {
+        return Err(invalid());
     }
-    Ok(current)
+    validate_saved(tx, &head).await?;
+    Ok(Some(head.revision))
 }
 
 async fn validate_saved(tx: &Transaction, history: &History) -> Result<(), WorkflowServiceError> {
@@ -224,7 +197,6 @@ fn check_history(
 pub(super) async fn finish(
     tx: &Transaction,
     command: Command<'_>,
-    previous: Option<&Scope>,
     outcome: ManagementOutcome,
     now: i64,
 ) -> Result<JobReceipt, WorkflowServiceError> {
@@ -263,37 +235,5 @@ pub(super) async fn finish(
             outcome: JobOutcome::Management { outcome },
         },
     )?;
-    let scopes = tx.database().entity::<scopes::Entity>()?;
-    if let Some(previous) = previous {
-        let changed = scopes
-            .update_many(
-                scopes::id
-                    .eq(previous.id.as_str())?
-                    .and(scopes::app_id.eq(command.job.app_id.as_str())?)
-                    .and(scopes::run_id.eq(command.run_id.as_str())?)
-                    .and(scopes::revision.eq(previous.revision)?),
-                scopes::revision.set(command.revision)?,
-            )
-            .await?;
-        if changed != 1 {
-            return Err(invalid());
-        }
-    } else {
-        let inserted = scopes
-            .insert::<_, Scope>(Scope {
-                id: storage_id(),
-                app_id: command.job.app_id.as_str().to_owned(),
-                run_id: command.run_id.as_str().to_owned(),
-                revision: command.revision,
-            })
-            .await?;
-        if inserted.app_id != command.job.app_id.as_str()
-            || inserted.run_id != command.run_id.as_str()
-            || inserted.revision != command.revision
-            || typed_id::parse_with_prefix(&inserted.id, "wjr").is_err()
-        {
-            return Err(invalid());
-        }
-    }
     delivery::finish(tx, command.job, JobOutcome::Management { outcome }, now).await
 }
