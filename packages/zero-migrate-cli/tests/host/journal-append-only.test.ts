@@ -1,8 +1,8 @@
 // The migration journal is append-only, and the DATABASE enforces it.
 //
-// `docs/security-model.md` states the property - "Migration history is
-// append-only" - and then gives advice beside it: "Do not give migration
-// credentials permission to update, delete, or truncate the journal."
+// The property is "migration history is append-only"; the operational advice
+// beside it is "do not give migration credentials permission to update,
+// delete, or truncate the journal."
 //
 // Read together, the advice implies the property is a CONVENTION: that holding
 // the grant would be enough to rewrite history, and the only thing stopping you
@@ -10,9 +10,9 @@
 // for the role that owns the table, so the guarantee survives a credential that
 // was over-granted by mistake - which is the case the advice is really about.
 //
-// Nothing measured it. `cli.test.ts` exercises the strict gate against a
-// FABRICATED status reply, and the engine suite tampers through its own seam, so
-// no test had ever pointed plain SQL at a live journal.
+// The neighbouring suites do not cover this: `cli.test.ts` exercises the
+// strict gate against a FABRICATED status reply, and the engine suite tampers
+// through its own seam. This suite points plain SQL at a live journal.
 //
 // The three arms are separate statements, not one: PostgreSQL treats UPDATE,
 // DELETE and TRUNCATE as different privileges, and a guard that covered only the
@@ -21,9 +21,8 @@
 // WHAT THIS DOES NOT CLAIM. The fourth arm records that a forged INSERT was
 // rejected, but by the `__zeroship_schema_migrations_event_shape` CHECK - a well-formedness
 // constraint, not an authenticity one. It is evidence that a careless forgery
-// fails, NOT that forging a properly shaped event is impossible. The manifest
-// that `security-model.md` describes for Rust hosts is what addresses that, and
-// it is out of this suite's reach.
+// fails, NOT that forging a properly shaped event is impossible. The Rust-host
+// manifest addresses that, and it is out of this suite's reach.
 //
 // GATE: `connectLivePg` (see `live-db.ts`).
 
