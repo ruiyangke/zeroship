@@ -14,28 +14,23 @@
 //!
 //! # And a THIRD class that is neither: the capability tautology
 //!
-//! A method that emits no bytes and whose three impls differ only by their own
+//! A method that emits no bytes and whose impls differ only by their own
 //! `DIALECT` const is not a vendor decision at all. `validate_view_materialized`
-//! was one: every impl read
+//! is the example: every impl read
 //! its own descriptor's `MaterializedView` answer and built a CORE error type
 //! from it, so resolving a renderer only to ask the vendor about ITSELF put a
 //! dispatch between a question core could already answer - core holds the
 //! resolved vendor and reads the same descriptor the vendor read.
 //!
-//! It now lives in `render::lower` as a plain dialect-parameterized fn. The
-//! distinction matters for `docs/proposals/pluggable-backends.md` because this
-//! class is DELETED rather than inverted: a backend crate never has to export it,
-//! and core never has to reach a registry to run it. MEASURED, not assumed: exactly
-//! ONE of this contract's methods was in the class, removing it changed no emitted
-//! byte across the `--lib`, `authoring_surface`, `dialect_matrix` and `fold_offline`
-//! suites, and the control (an unconditional refusal in the moved fn) reddened them.
+//! It lives in `render::lower` as a plain dialect-parameterized fn: this
+//! class is DELETED rather than inverted, so a backend crate never has to
+//! export it, and core never has to reach a registry to run it.
 //!
-//! It is NOT a free win for the cycle, and that is the part worth carrying
-//! forward. Deleting the method removed two `renderer(dialect)` CALLS but zero
-//! `renderer(dialect)` LOOKUPS: both sites bind the renderer for sibling spelling
-//! methods on the next line, so `render::lower` holds exactly the lookups it held
-//! before. The unit that blocks the crate split is the LOOKUP, not the call site,
-//! and the two counts are not the same number.
+//! Deleting such a method removes `renderer(dialect)` CALLS but not
+//! necessarily `renderer(dialect)` LOOKUPS: a site that binds the renderer
+//! for sibling spelling methods keeps the lookup. The unit that blocks the
+//! crate split is the LOOKUP, not the call site, and the two counts are not
+//! the same number.
 
 use crate::dml::{BindCtx, DmlError, LimitedDeleteRenderRequest, OnConflictRenderRequest};
 use crate::error::IrLowerError;

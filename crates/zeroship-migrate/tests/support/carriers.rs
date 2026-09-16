@@ -155,12 +155,11 @@ pub fn walk_table(table: &TableSnapshot, set: &mut CarrierSet) {
          offline would fabricate a `CREATE TABLE` text no catalog ever stored.",
     );
 
-    // A CARRIER the section-H list does not name, and the one with the worst failure
-    // mode of the set: `TableSnapshot::eq` COMPARES `partition_by`, so a stale
-    // partition key is drift the differ REPORTS, on every introspection, forever.
-    // Measured on PostgreSQL 18.4: `pg_get_partkeydef` reads `partattrs` as attribute
-    // NUMBERS, so `RANGE (created_at)` becomes `RANGE (event_day)` the instant the
-    // rename commits.
+    // A CARRIER with the worst failure mode of the set: `TableSnapshot::eq`
+    // COMPARES `partition_by`, so a stale partition key is drift the differ
+    // REPORTS, on every introspection, forever. `pg_get_partkeydef` reads
+    // `partattrs` as attribute NUMBERS, so `RANGE (created_at)` becomes
+    // `RANGE (event_day)` the instant the rename commits.
     set.field(
         "TableSnapshot::partition_by.columns",
         partition_by

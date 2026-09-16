@@ -1881,9 +1881,9 @@ mod tests {
         // distinguishable from `collection_not_declared` (see the sibling test
         // below) — an SDK caller branches on `.code`.
         //
-        // This used to reach the same code by declaring NOTHING, which the
-        // descriptor now refuses outright; asserting it that way would have
-        // stopped measuring the column check the moment the refusal landed.
+        // Declaring nothing would not reach this check: the descriptor
+        // refuses an undeclared collection outright, before the column check
+        // runs.
         let app_id = "bulk_unit_unknown_column_app";
         crate::tests::fixtures::cache_schema(
             app_id,
