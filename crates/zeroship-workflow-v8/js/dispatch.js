@@ -226,6 +226,14 @@ function wfHasCompensator(config) {
     return !!(config && typeof config === "object" && typeof config.compensate === "function");
 }
 
+// Step identity, as the journal records it. `generation` is load-bearing: a
+// restart copies the retained prefix into a new generation and re-executes the
+// rest at the same ordinals, so a key without it would let a creator's
+// downstream deduplicate the restart away.
+function wfStepKey(prefix, runId, generation, ordinal, occurrence) {
+    return `${prefix}:${runId}:${generation}:${ordinal}:${occurrence}`;
+}
+
 function wfCreateStepOutputRef(descriptor, outputRead, runId, name, occurrence, memo) {
     const ref = descriptor.ref ?? `wfblob:sha256:${descriptor.hash}`;
     const memoKey = `${runId}:${name}:${occurrence}:${descriptor.hash}`;
@@ -339,15 +347,37 @@ class ZsJournalBackedStep {
     #trigger = {};
     #compensatorRegistry = new Map();
     #workflowNames;
+    #generation = 0;
 
-    constructor(steps, quiescence, runId = "", outputRead = undefined, phase = "running", trigger = {}, workflowNames = new Map()) {
+    constructor(steps, quiescence, runId = "", outputRead = undefined, phase = "running", trigger = {}, workflowNames = new Map(), generation = 0) {
         this.#quiescence = quiescence;
         this.#runId = runId;
         this.#outputRead = outputRead;
         this.#phase = phase;
         this.#trigger = trigger;
         this.#workflowNames = workflowNames;
+        this.#generation = generation;
         for (const row of steps) this.#stepsByOrdinal.set(row.ordinal, row);
+    }
+
+    // Every field is a durable journal fact, so the context a re-executed body
+    // receives is identical to the one the discarded execution received.
+    #stepContext(issued, name) {
+        return {
+            runId: this.#runId,
+            workflowName: String(this.#trigger.workflowName ?? ""),
+            ordinal: issued.ordinal,
+            name,
+            occurrence: issued.nameOccurrence,
+            idempotencyKey: wfStepKey(
+                "step",
+                this.#runId,
+                this.#generation,
+                issued.ordinal,
+                issued.nameOccurrence,
+            ),
+            trigger: this.#trigger,
+        };
     }
 
     get frontierDrainPromise() {
@@ -522,7 +552,7 @@ class ZsJournalBackedStep {
     }
 
     async #runFrontier(issued, name, config, fn) {
-        const bodyPromise = this.#invokeStepBody(fn);
+        const bodyPromise = this.#invokeStepBody(fn, this.#stepContext(issued, name));
         try {
             const output = await bodyPromise;
             const outputConfig = wfOutputConfig(config);
@@ -558,7 +588,7 @@ class ZsJournalBackedStep {
     }
 
     async #sideEffectFrontier(issued, name, fn) {
-        const bodyPromise = this.#invokeStepBody(fn);
+        const bodyPromise = this.#invokeStepBody(fn, this.#stepContext(issued, name));
         try {
             const output = await bodyPromise;
             return {
@@ -578,7 +608,7 @@ class ZsJournalBackedStep {
         }
     }
 
-    #invokeStepBody(fn) {
+    #invokeStepBody(fn, ctx) {
         this.#activeStepCallbacks++;
         this.#parallelIssueWindow = true;
         const issueWindowToken = ++this.#parallelIssueWindowToken;
@@ -590,7 +620,7 @@ class ZsJournalBackedStep {
 
         this.#callbackSyncDepth++;
         try {
-            return zsWorkflowDispatchAls.run({ mode: "step" }, () => Promise.resolve(fn()));
+            return zsWorkflowDispatchAls.run({ mode: "step" }, () => Promise.resolve(fn(ctx)));
         } catch (e) {
             return Promise.reject(e);
         } finally {
@@ -665,7 +695,13 @@ class ZsJournalBackedStep {
             throw new ZsNondeterministicError("compensating run has no pending compensator");
         }
         const ctx = {
-            idempotencyKey: `comp:${this.#runId}:${pending.ordinal}:${pending.nameOccurrence}`,
+            idempotencyKey: wfStepKey(
+                "comp",
+                this.#runId,
+                this.#generation,
+                pending.ordinal,
+                pending.nameOccurrence,
+            ),
             trigger: this.#trigger,
         };
         try {
@@ -1043,6 +1079,7 @@ export async function dispatch(userNamespace, envelope, _ctx) {
             String(envelope.phase ?? "running"),
             trigger,
             registry.names,
+            Number(envelope.generation ?? 0),
         );
         if (envelope.phase === "compensating") {
             try {

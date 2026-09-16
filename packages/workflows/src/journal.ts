@@ -15,7 +15,9 @@ import {
   type ChildWorkflowOptions,
   type SignalEnvelope,
   type StartManyItem,
+  type StepBody,
   type StepConfig,
+  type StepContext,
   type StepOutputRef,
   type WaitForSignalOptions,
   type Workflow,
@@ -59,10 +61,27 @@ export interface JournalStepRecord {
 
 export interface JournalEnvelope {
   runId: string;
+  /**
+   * Scopes step identity to one attempt at the run. A restart copies the
+   * retained prefix into a new generation and re-executes the rest at the same
+   * ordinals, so step idempotency keys must carry it.
+   */
+  generation: number;
   workflowName: string;
   trigger: WorkflowTrigger<unknown>;
   steps: JournalStepRecord[];
   outputRead?: WorkflowOutputReader;
+}
+
+/** Step identity, as the journal records it. */
+function stepKey(
+  prefix: string,
+  runId: string,
+  generation: number,
+  ordinal: number,
+  occurrence: number,
+): string {
+  return `${prefix}:${runId}:${generation}:${ordinal}:${occurrence}`;
 }
 
 export type WorkflowOutputReader = (name: string, occurrence: number) => Promise<Uint8Array>;
@@ -316,6 +335,29 @@ class JournalBackedStep implements WorkflowStep {
     }
   }
 
+  // Every field is a durable journal fact, so the context a re-executed body
+  // receives is identical to the one the discarded execution received.
+  #stepContext(
+    issued: { ordinal: number; nameOccurrence: number },
+    name: string,
+  ): StepContext {
+    return {
+      runId: this.#envelope.runId,
+      workflowName: this.#envelope.workflowName,
+      ordinal: issued.ordinal,
+      name,
+      occurrence: issued.nameOccurrence,
+      idempotencyKey: stepKey(
+        "step",
+        this.#envelope.runId,
+        this.#envelope.generation,
+        issued.ordinal,
+        issued.nameOccurrence,
+      ),
+      trigger: this.#envelope.trigger,
+    };
+  }
+
   get frontierDrainPromise(): Promise<never> | undefined {
     return this.#frontier?.drainPromise;
   }
@@ -328,12 +370,12 @@ class JournalBackedStep implements WorkflowStep {
     return this.#frontier?.settled === false;
   }
 
-  run<T>(name: string, fn: () => T | Promise<T>): Promise<T>;
-  run<T>(name: string, config: StepConfig<T>, fn: () => T | Promise<T>): Promise<T>;
+  run<T>(name: string, fn: StepBody<T>): Promise<T>;
+  run<T>(name: string, config: StepConfig<T>, fn: StepBody<T>): Promise<T>;
   run<T>(
     name: string,
-    configOrFn: StepConfig<T> | (() => T | Promise<T>),
-    maybeFn?: () => T | Promise<T>,
+    configOrFn: StepConfig<T> | StepBody<T>,
+    maybeFn?: StepBody<T>,
   ): Promise<T> {
     this.#assertNotNested();
     const config = typeof configOrFn === "function" ? undefined : configOrFn;
@@ -353,12 +395,12 @@ class JournalBackedStep implements WorkflowStep {
         issued,
         name,
         config as StepConfig<unknown> | undefined,
-        fn as () => T | Promise<T>,
+        fn as StepBody<T>,
       ),
     );
   }
 
-  sideEffect<T>(name: string, fn: () => T | Promise<T>): Promise<T> {
+  sideEffect<T>(name: string, fn: StepBody<T>): Promise<T> {
     this.#assertNotNested();
     if (typeof fn !== "function") {
       return brandStepPromise(Promise.reject(
@@ -518,9 +560,9 @@ class JournalBackedStep implements WorkflowStep {
     issued: { ordinal: number; nameOccurrence: number },
     name: string,
     config: StepConfig<unknown> | undefined,
-    fn: () => T | Promise<T>,
+    fn: StepBody<T>,
   ): Promise<FrontierOutcome> {
-    const bodyPromise = this.#invokeStepBody(fn);
+    const bodyPromise = this.#invokeStepBody(fn, this.#stepContext(issued, name));
     try {
       const output = await this.#withTimeout(bodyPromise, config?.timeout);
       const outputConfig = workflowOutputConfig(config);
@@ -560,9 +602,9 @@ class JournalBackedStep implements WorkflowStep {
   async #sideEffectFrontier<T>(
     issued: { ordinal: number; nameOccurrence: number },
     name: string,
-    fn: () => T | Promise<T>,
+    fn: StepBody<T>,
   ): Promise<FrontierOutcome> {
-    const bodyPromise = this.#invokeStepBody(fn);
+    const bodyPromise = this.#invokeStepBody(fn, this.#stepContext(issued, name));
     try {
       const output = await bodyPromise;
       return {
@@ -582,7 +624,7 @@ class JournalBackedStep implements WorkflowStep {
     }
   }
 
-  #invokeStepBody<T>(fn: () => T | Promise<T>): Promise<T> {
+  #invokeStepBody<T>(fn: StepBody<T>, ctx: StepContext): Promise<T> {
     this.#activeStepCallbacks++;
     this.#parallelIssueWindow = true;
     const issueWindowToken = ++this.#parallelIssueWindowToken;
@@ -594,7 +636,7 @@ class JournalBackedStep implements WorkflowStep {
 
     this.#callbackSyncDepth++;
     try {
-      return workflowDispatchAls.run({ mode: "step" }, () => Promise.resolve(fn()));
+      return workflowDispatchAls.run({ mode: "step" }, () => Promise.resolve(fn(ctx)));
     } catch (e) {
       return Promise.reject(e);
     } finally {
