@@ -214,15 +214,12 @@ pub struct GatewaySection {
     pub stash_signing_key: Option<String>,
     /// Broker master-secret source FILE, byte-identical to auth's.
     ///
-    /// This section carried `broker_secret: Option<String>` instead until
-    /// 2026-08-13, which was wrong in both directions and neither half was
-    /// visible from here. Nothing read `broker_secret`, so an operator who set
-    /// it configured nothing; and the gateway's actual declaration is
-    /// `gateway.broker_secret_file`, which `deny_unknown_fields` REJECTED,
-    /// so the overlay tier the contract advertises could not be used at all.
-    /// Found by the generated-TOML-path check in `zeroship-config-contract
-    /// audit`, which now requires every `ConfigSpec` overlay path to be a leaf
-    /// this schema accepts.
+    /// This schema must declare every overlay path the binaries declare: under
+    /// `deny_unknown_fields` an undeclared path is not optional, it is
+    /// REJECTED, so the overlay tier the contract advertises would not exist.
+    /// The generated-TOML-path check in `zeroship-config-contract audit`
+    /// requires every `ConfigSpec` overlay path to be a leaf this schema
+    /// accepts.
     pub broker_secret_file: Option<std::path::PathBuf>,
     /// PEM/PKCS#8 signing key FILE for the gateway-signed session cookie.
     /// PEM/PKCS#8 signing key FILE for the wrapper-token issuer. A path, not
@@ -550,9 +547,7 @@ pub struct AuthSection {
     /// `GatewaySection::broker_secret_file` is: the binaries DECLARE these
     /// overlay paths, so leaving them out of this schema does not make them
     /// optional, it makes `deny_unknown_fields` reject any overlay that uses
-    /// them - the tier the contract advertises would not exist. The four
-    /// sections' pairs were missing together and `zeroship-config-contract
-    /// audit` named all of them.
+    /// them - the tier the contract advertises would not exist.
     pub service_key_file: Option<std::path::PathBuf>,
     /// See `service_key_file`.
     pub service_peers_file: Option<std::path::PathBuf>,
@@ -560,8 +555,7 @@ pub struct AuthSection {
     ///
     /// `provider`, not `auth_provider`: the canonical identity is
     /// `auth.provider`, and the scope segment already says `auth`. This ONE key
-    /// governs both the auth service and control; `[control] auth_provider` was
-    /// its second half and is gone, so `deny_unknown_fields` now rejects it.
+    /// governs both the auth service and control.
     pub provider: Option<String>,
     /// Supabase Auth / GoTrue base URL used when the auth provider is Supabase.
     pub supabase_url: Option<String>,
@@ -581,9 +575,7 @@ pub struct AuthSection {
     ///
     /// File-and-default ONLY, like `trusted_oauth_clients`: it is a list of
     /// tables, and the generated declarations carry scalars. Registering an RP
-    /// of your own OP is a deployment decision, not a runtime one, which is why
-    /// this replaced the three `/admin/oauth-clients` routes rather than moving
-    /// them behind a different credential.
+    /// of your own OP is a deployment decision, not a runtime one.
     ///
     /// `None` (key absent) leaves the table untouched. `Some(list)` makes this
     /// the AUTHORITATIVE first-party set: entries are upserted, and a
@@ -931,8 +923,7 @@ log_format = "json"
         }
 
         // Does NOT cover deploy/compose/docker-compose.yml, which still carries
-        // comments describing the deleted [secrets] table. Rewriting deployment
-        // inputs is Step 6 of the proposal and is sequenced separately.
+        // comments describing the deleted [secrets] table.
     }
 
     #[test]
@@ -1077,11 +1068,10 @@ trusted_oauth_clients = ["a", "b"]
         );
     }
 
-    // The `[secrets]` table itself is GONE, not merely emptied. Secrets now sit
-    // with their siblings, so location encodes sharing; an overlay that still
-    // carries the flat table must be told so at load rather than have its
-    // credentials silently ignored. `deny_unknown_fields` at the ROOT is what
-    // makes that a parse error.
+    // Secrets sit with their siblings so location encodes sharing. An overlay
+    // that still carries a flat `[secrets]` table must be told so at load
+    // rather than have its credentials silently ignored; `deny_unknown_fields`
+    // at the ROOT is what makes that a parse error.
     #[test]
     fn the_deleted_secrets_table_is_rejected_rather_than_ignored() {
         let file = TempFile::write(
@@ -1093,8 +1083,8 @@ trusted_oauth_clients = ["a", "b"]
             .expect_err("a [secrets] table must be rejected, not ignored");
         assert!(matches!(err, ConfigError::Parse { .. }));
 
-        // Does NOT cover a deployment file that still WRITES the table. That is
-        // a tracked-tree search, and Step 6 owns it.
+        // Does NOT cover a deployment file that still WRITES the table; that is
+        // a tracked-tree search.
     }
 
     // A secret at its canonical path, as a LITERAL. Permitted on purpose: the
@@ -1142,10 +1132,9 @@ master_key = "literal-master"
         assert!(matches!(err, ConfigError::Parse { .. }));
     }
 
-    // The per-binary sections added for the operational conversion. Without
-    // them `deny_unknown_fields` rejects the very overlay the generated
-    // resolvers walk, so a canonical `[control] port = 9090` would be a startup
-    // ERROR rather than the supported way to set it.
+    // Without the per-binary sections `deny_unknown_fields` rejects the very
+    // overlay the generated resolvers walk, so a canonical `[control] port =
+    // 9090` would be a startup ERROR rather than the supported way to set it.
     #[test]
     fn the_per_binary_sections_parse_and_still_reject_a_typo_inside_them() {
         let file = TempFile::write(

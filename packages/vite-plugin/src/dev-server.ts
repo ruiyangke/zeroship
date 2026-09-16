@@ -1,7 +1,7 @@
 // packages/vite-plugin/src/dev-server.ts
 //
-// configureServer hook that replaces the old child-process+proxy approach
-// with the Vite Environment API.
+// configureServer hook that wires the dev runtime through the Vite
+// Environment API.
 
 import type { Plugin, ViteDevServer } from "vite";
 import { resolve, dirname, relative, extname } from "node:path";
@@ -84,10 +84,9 @@ export interface DevServerOptions {
 /**
  * The migration paths, resolved from `zeroship.jsonc` (or its schema defaults).
  *
- * Both members are REQUIRED here rather than optional-with-a-fallback. Four
- * places in this file used to spell `?? GEN_TYPES_OUT_DEFAULT`, and a fifth
- * spelling of the same fallback lived in the Rust CLI where it could not agree
- * with any of them. The type is what stops a sixth.
+ * Both members are REQUIRED rather than optional-with-a-fallback, so no call site
+ * can silently substitute its own default (as `?? GEN_TYPES_OUT_DEFAULT` did) and
+ * drift from the others.
  */
 type MigrationPaths = { dir: string; out: string };
 
@@ -108,23 +107,19 @@ type FetchMethod = "fetchModule" | "getBuiltins";
  * vite's. When our child cannot bind that port it is because some OTHER process
  * holds it - in practice a second example's dev runtime, since several examples
  * share the 3001 default. Proxying anyway does not produce a connection error:
- * it produces a SUCCESSFUL connection to somebody else's app. Measured on
- * examples/starter + examples/error-probe sharing one runtime port, the starter
- * dev server answered its own `getMessages` with
- * `404 {"message":"Method not found: getMessages"}` - error-probe's runtime
- * replying about a procedure it has never heard of. Two instances of the SAME
- * example are worse still: HTTP 200 carrying the other instance's data.
- * So the guard is not belt-and-braces around a connection refusal; it is the
- * only thing standing between a creator and another app's answers.
+ * it produces a SUCCESSFUL connection to somebody else's app, which answers with
+ * its own data or a "Method not found" for a procedure it has never heard of.
+ * Two instances of the SAME example are worse still: HTTP 200 carrying the other
+ * instance's data. So the guard is not belt-and-braces around a connection
+ * refusal; it is the only thing standing between a creator and another app's
+ * answers.
  *
  * WHAT THIS DOES NOT CLOSE. The state starts at `ok`, so between vite accepting
- * its first request and the first child exit (measured at 7-65ms for a bind
- * failure, though vite may answer sooner) a request CAN still be forwarded to
+ * its first request and the first child exit a request CAN still be forwarded to
  * whoever holds the port. That window is bounded by one process spawn and ends
- * for good at the first exit; the defect this replaces had no end. Closing it
- * entirely would mean proving our own child owns the socket before every
- * proxy - a per-request syscall against a race that resolves itself in
- * milliseconds. Named here so the next reader does not mistake the guard for
+ * for good at the first exit. Closing it entirely would mean proving our own child
+ * owns the socket before every proxy - a per-request syscall against a race that
+ * resolves itself. Named here so the next reader does not mistake the guard for
  * total.
  */
 type RuntimeHealth = "ok" | "failing" | "fatal";
@@ -220,21 +215,17 @@ function runtimeDownEnvelope(status: RuntimeStatus): Record<string, unknown> {
 /**
  * A runtime whose state dir is locked by an earlier, un-reaped run.
  *
- * This matters because the two remedies are mutually exclusive and the banner
- * used to print the wrong one unconditionally. A state-dir lock is NOT a port
+ * The two remedies are mutually exclusive, and a state-dir lock is NOT a port
  * clash: the contended resource is `.zeroship/`, so moving `devServerPort`
- * changes nothing (task #221 - four orphaned `zeroship serve` processes held
- * `.zeroship/kv.redb` across four different ports).
+ * changes nothing.
  *
- * Keyed on a marker the PLATFORM emits, not on redb's prose. This used to match
- * /Database already open|Cannot acquire lock/ - a third-party library's wording,
- * matched in a different language, with nothing holding the two together. redb
- * could reword that in a patch release and both test suites would stay green
- * while this silently reverted to advising a port change.
- *
- * The prose match now lives in `crates/zeroship-kv/src/backend/redb.rs`, next to
- * the crate that produces the prose, and what crosses the language boundary is
- * `STATE_DIR_LOCK_MARKER` - a constant we own on both sides.
+ * Keyed on a marker the PLATFORM emits, not on redb's prose. Matching the
+ * library's own wording would tie a platform decision to a third-party sentence
+ * that redb could reword in a patch release, silently reverting the banner to
+ * advising a port change. The prose match lives in
+ * `crates/zeroship-kv/src/backend/redb.rs`, next to the crate that produces it,
+ * and what crosses the language boundary is `STATE_DIR_LOCK_MARKER` - a constant
+ * we own on both sides.
  *
  * STILL UNGATED, and worth knowing before trusting this: nothing enforces that
  * the literal below equals the Rust constant. The Rust side asserts the marker
@@ -317,7 +308,7 @@ function isUnderMigrationsDir(file: string, migrationsAbs: string): boolean {
  * Never THROWS; it classifies instead. A fault in the creator's own migration
  * source is logged and survived; anything else (missing addon, engine panic,
  * unwritable out dir) is a PLATFORM fault, printed as such, and fatal at boot.
- * See `MigrationSourceError` in `gen-types/index.ts` and task #269.
+ * See `MigrationSourceError` in `gen-types/index.ts`.
  *
  * Dev always WRITES (no `--check`; that is a CI/build generated-artifact concern).
  */
@@ -354,12 +345,10 @@ async function regenTypesDev(
       // descriptor with one line of warning, so every type error afterwards is
       // a lie.
       //
-      // AN ENGINE PANIC IS NOT ONE OF THEM AT OUR PIN, and the first version of
-      // this comment said it was. `third_party/zero-migrate` @ cb1bcb59 has ZERO
-      // `catch_unwind` in the addon crate, so a panic aborts the process before
-      // this arm can run; the upstream fix that would change that is not an
-      // ancestor of our pin. Verified, not assumed - see the long note on
-      // `MigrationSourceError` in gen-types/index.ts and task #271.
+      // An engine panic is NOT one of them at our pin: the addon crate has ZERO
+      // `catch_unwind`, so a panic aborts the process before this arm can run.
+      // Verified, not assumed - see the long note on `MigrationSourceError` in
+      // `gen-types/index.ts`.
       //
       // At boot nothing has been served yet, so refusing to start costs the
       // creator nothing and names the fault while it is still the only thing on
@@ -397,11 +386,10 @@ async function regenTypesDev(
  * half-written migration cannot be applied by the mere act of running the dev
  * server, nor re-applied by every file-watch restart.
  *
- * What is left here is the diagnostic the coupling used to provide for free: if
- * the app declares collections the dev database does not have, say so, name the
- * command that fixes it, and keep serving. The failure this guards against is
- * silent — a 500 on every `env.db` call with no indication the schema was never
- * created.
+ * The diagnostic: if the app declares collections the dev database does not
+ * have, say so, name the command that fixes it, and keep serving. The failure
+ * this guards against is silent — a 500 on every `env.db` call with no
+ * indication the schema was never created.
  *
  * READ-ONLY by construction: it opens the app file `readonly` and touches
  * nothing else.

@@ -39,8 +39,7 @@ const STREAM_FLUSH_BYTES: u64 = 1024 * 1024;
 /// extractor has accepted the frame, so the route must also carry a
 /// `PayloadConfig` of [`zeroship_core::dispatch_frame::MAX_DISPATCH_FRAME_BYTES`].
 /// Without one, ntex applies its own 256 KiB default and rejects anything
-/// larger with a bare 400 before this handler is ever entered - which is what
-/// it did until this was wired up.
+/// larger with a bare 400 before this handler is ever entered.
 pub const MAX_DISPATCH_BODY_BYTES: usize = zeroship_core::dispatch_frame::MAX_REQUEST_BODY_BYTES;
 
 /// Verify the CALLER's own service credential on the dispatch endpoints.
@@ -60,10 +59,8 @@ pub const MAX_DISPATCH_BODY_BYTES: usize = zeroship_core::dispatch_frame::MAX_RE
 ///
 /// # There is no bypass
 ///
-/// The predecessor returned `None` - authorized - when the shared secret was
-/// empty, so an unconfigured worker accepted every caller. An unconfigured
-/// [`ServiceAuth`] REFUSES instead. Absence of key material is now a closed
-/// door, not an open one.
+/// An unconfigured [`ServiceAuth`] REFUSES. Absence of key material is a
+/// closed door, not an open one.
 pub(crate) async fn check_worker_auth(
     req: &HttpRequest,
     service_auth: &ServiceAuth,
@@ -173,10 +170,8 @@ async fn recv_with_timeout<T>(
 }
 
 /// The dispatch wall cap. `None` for the `unlimited`/`enterprise` plan
-/// (`wall_timeout` unset) ⇒ no cap. Previously this `unwrap_or(30s)`'d the
-/// `None`, silently capping every request at 30 s even on the unlimited plan —
-/// which made large single-request streaming uploads impossible regardless of
-/// plan. Bounded plans keep their configured `Some(_)` deadline.
+/// (`wall_timeout` unset) ⇒ no cap. Bounded plans keep their configured
+/// `Some(_)` deadline.
 fn wall_limit(runtime: &Runtime) -> Option<std::time::Duration> {
     runtime.wall_timeout()
 }
@@ -190,9 +185,7 @@ fn wall_limit(runtime: &Runtime) -> Option<std::time::Duration> {
 /// The server and the tests both go through here deliberately. These caps are
 /// enforced by the route's `PayloadConfig`, not by the handler body, so a test
 /// that wires the route itself would be measuring a limit the server does not
-/// have. That is not hypothetical: the size check inside [`dispatch`] was
-/// unreachable in production for as long as this registration lived only in
-/// `main.rs`, and no test could tell, because every test wired its own route.
+/// have.
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::resource("/dispatch/{app_id}")
@@ -594,10 +587,10 @@ fn stream_response(
     // have streamed OR ≥ STREAM_FLUSH_INTERVAL has elapsed, plus a final
     // delta when the loop ends (client disconnect or stream complete). So a
     // multi-hour stream bills continuously and a worker crash loses at most
-    // one interval's delta, instead of the whole stream (the pre-fix
-    // finalize-only behaviour). `requests`/`cpu_us`/`ingress_bytes` were
-    // already recorded once at stream start (`record_stream_unary`) and are
-    // NOT touched here — a stream is one request.
+    // one interval's delta, instead of the whole stream. `requests`/`cpu_us`/
+    // `ingress_bytes` were already recorded once at stream start
+    // (`record_stream_unary`) and are NOT touched here — a stream is one
+    // request.
     compio::runtime::spawn(async move {
         let stream_start = std::time::Instant::now();
         // Running deltas SINCE the last recorded flush.
@@ -718,9 +711,8 @@ fn make_error_msg(status: u16, msg: &str) -> HttpResponse {
 /// `cache::get_runtime` returns a ready isolate but `get_env` returns
 /// None — concurrent dispatches on the same thread between the two
 /// steps would 503 unnecessarily AND the new V8 code might run
-/// against the OLD env on a later step in this function. Now we
-/// stage everything in locals first and only mutate cache at the
-/// end.
+/// against the OLD env on a later step in this function. Everything is
+/// staged in locals first and cache is only mutated at the end.
 ///
 /// The normal app manifest selects its complete module graph and descriptor.
 async fn load_on_demand(

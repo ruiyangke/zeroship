@@ -56,15 +56,9 @@ struct Fx {
 impl Fx {
     /// A fixture, or no run at all.
     ///
-    /// IT RETURNED `Option<Self>` UNTIL 2026-09-08, under a comment saying
-    /// `None` meant "no migrated database is configured". That was never
-    /// reachable: `common::require_control_db` ENDS the process when the DSN is
-    /// absent and again when the schema is not there, so the only value this
-    /// could produce was `Some`. What the `Option` did produce was thirty-odd
-    /// `let Some(fx) = Fx::new().await else { return }` call sites - the exact
-    /// shape that used to mean "pass silently", left standing as a template for
-    /// the next test to copy. Returning the value makes it unwritable rather
-    /// than merely unreachable.
+    /// `common::require_control_db` ENDS the process when the DSN is absent and
+    /// again when the schema is not there, so there is no "no database" outcome
+    /// to represent: the fixture is always available, or the run is already over.
     async fn new() -> Self {
         let url = common::require_control_db();
         let (pg, conn) = connect(&url, NoTls).await.expect("control-pg connect");
@@ -505,8 +499,7 @@ async fn pending_invites(fx: &Fx, organization_id: &str, email: &str) -> i64 {
 ///
 /// The strict inequality alone lets any member unseat anyone below them, so
 /// without the floor a developer evicts a viewer and only Cedar's band refuses
-/// it. This is the sibling of the seating case, and it went unfixed when that
-/// one did.
+/// it.
 #[compio::test]
 async fn a_developer_removes_nobody_where_an_admin_removes_a_viewer() {
     let fx = Fx::new().await;
@@ -2479,11 +2472,9 @@ async fn a_closed_organization_releases_its_slug() {
 /// The statement is `INSERT ... SELECT` over the join from the app to its
 /// project's organization. Over an empty result set that is a SUCCESSFUL
 /// statement affecting no rows, so an app id that was never created - or one
-/// whose project row is missing - used to seat nobody and say nothing. The run
-/// then failed far away, as a 403 from whichever route wanted an owner, with
-/// nothing pointing back at the fixture. The shell peer of this helper reads a
-/// token back out of the database for the same reason; this one reads the
-/// affected-row count.
+/// whose project row is missing - would seat nobody and say nothing. The shell
+/// peer of this helper reads a token back out of the database for the same
+/// reason; this one reads the affected-row count.
 ///
 /// The app id is freshly minted, so the failure is the one being bound rather
 /// than a foreign key on some other column: no row is examined at all.
@@ -2494,12 +2485,6 @@ async fn a_closed_organization_releases_its_slug() {
 #[compio::test]
 #[should_panic(expected = "affected 0 row(s)")]
 async fn seating_an_app_that_does_not_exist_refuses_instead_of_seating_nobody() {
-    // This case is `#[should_panic]`, and it used to be the ONE site in this
-    // file that did not write `let Some(fx) = ... else { return }` - a comment
-    // here spelled out that a silent early return would report "did not panic"
-    // rather than the refusal it never saw. That exception is gone with the
-    // shape that made it necessary: `Fx::new` returns the fixture, and a
-    // database it cannot reach ends the run before any case is entered.
     let fx = Fx::new().await;
     common::seat_app_organization_member(&fx.pg, &AppId::mint(), &UserId::mint(), "owner").await;
 }

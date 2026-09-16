@@ -38,14 +38,13 @@ fn tmpdir(label: &str) -> PathBuf {
 }
 
 /// A period this test OWNS, which is what its `subjects_checked` assertions
-/// need and what the local random draw this replaced never actually gave them.
+/// need.
 ///
 /// `reconcile_pass` counts every subject in the period, summed over every meter
 /// in it, so `assert_eq!(subjects_checked, 1)` is a claim about the whole
-/// period, not about this test's app. The old `unique_closed_period_now()` drew
-/// a fresh month from a fixed range per call and was unique only by luck;
-/// measured on 2026-08-20 it landed on a month another module had seeded, and
-/// the count came back as the whole fleet's.
+/// period, not about this test's app. A draw from a fixed range is unique only
+/// by luck, and a month another module seeded comes back as the whole fleet's
+/// count.
 ///
 /// `common::next_isolated_period()` reserves a private window instead - private
 /// to this call within the run, AND to this run against the database, which is
@@ -816,10 +815,6 @@ fn the_run_base_is_part_of_the_window_address() {
 /// pins periods below `common::ISOLATED_PERIOD_BASE_YEAR`; this fails if a new
 /// literal moves into the band, which is the only way the disjointness the
 /// billing assertions rely on can silently come apart.
-///
-/// Measured 2026-08-20 with the band at 2030: `src/cron/spend_recompute.rs`'s
-/// hardcoded 2036-08 sat inside a window handed to a proration test, so two
-/// modules' apps shared a period. This test is what keeps that from recurring.
 #[test]
 fn period_band_is_reserved_for_the_allocator() {
     fn collect_rs(dir: &std::path::Path, out: &mut Vec<PathBuf>) {

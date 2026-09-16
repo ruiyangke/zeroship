@@ -241,8 +241,8 @@ pub fn session_backend_pid(app_id: &str) -> Option<i32> {
 
 /// `(idle, active, total)` for the pool behind the backend the caller holds.
 ///
-/// Same correction as [`begin`]: this read `crate::context` for the handle, and
-/// the handle is something every caller of this function already has.
+/// The backend handle is a parameter, matching [`begin`], because every caller
+/// already has it rather than reading it back out of `crate::context`.
 #[must_use]
 pub fn pool_counts(backend: &BackendHandle) -> Option<(usize, usize, usize)> {
     backend.pool_counts()
@@ -302,15 +302,13 @@ impl HeldSession {
 /// the `CancellationSql` deadline fires in its own task while cleanup is still
 /// waiting for a cancelled statement to hand the session back.
 ///
-/// **The successor is the point, and it used to be faked.** A stale cleanup must
-/// find a filled slot it can no longer prove is its own; in production that
-/// session belongs to the NEXT transaction, because a claim is never released
-/// while its own session is parked - `settle_now` emits `WithdrawSession` or
-/// `ReleaseSession` immediately before every `ReleaseAdmission`, and there is no
-/// second emission site. This used to stand the retired transaction's own
-/// session in the slot, which is a state production cannot reach; re-homing it
-/// onto a successor lane models what actually happens and costs the arm nothing,
-/// since what it rules on is a filled slot plus a dead identity.
+/// **The successor is the point.** A stale cleanup must find a filled slot it
+/// can no longer prove is its own; in production that session belongs to the
+/// NEXT transaction, because a claim is never released while its own session is
+/// parked - `settle_now` emits `WithdrawSession` or `ReleaseSession` immediately
+/// before every `ReleaseAdmission`, and there is no second emission site.
+/// Re-homing the session onto a successor lane models that state; what the arm
+/// rules on is a filled slot plus a dead identity.
 pub fn abandon_reducer(app_id: &str) {
     crate::tx_lanes::with_mut(|l| {
         let session = l.take_tx_client_for(app_id);
