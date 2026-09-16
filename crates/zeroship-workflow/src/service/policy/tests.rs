@@ -486,3 +486,41 @@ async fn initial_missing_authority_permits_receipt_reads_but_never_mutation_auth
     assert_unavailable(captured.check());
     CapturedPolicy::capture(&binding).check().unwrap();
 }
+
+/// A renewal of the SAME window may land slightly earlier than the one before
+/// it, because the deadline is rebuilt from a duration measured across a round
+/// trip and anchored at the near end. That is an artefact of the anchoring, not
+/// a reduction of authority, and retiring the epoch for it cancels every
+/// delivery in flight - measured at 137 retirements in a single probe run,
+/// every one of them this.
+///
+/// The control is the case one line down: earlier by MORE than the slack is a
+/// real shortening and must still fence, which is the contract
+/// `shortening_then_extension_never_revives_captured_authority` holds and which
+/// an earlier attempt at this broke by clamping the deadline instead.
+#[test]
+fn a_deadline_re_anchored_inside_its_slack_keeps_the_epoch() {
+    let (_, binding) = registry();
+    let now = Instant::now();
+    let granted = now + Duration::from_secs(30);
+    install(&binding, leased(1, granted));
+    let captured = binding.authority().unwrap();
+
+    let slack = Duration::from_millis(40);
+    install(
+        &binding,
+        leased(1, granted - Duration::from_millis(5)).with_anchor_slack(slack),
+    );
+    captured
+        .check()
+        .expect("a re-anchored deadline inside its slack must not retire the epoch");
+
+    // A whole second earlier than the deadline now installed: far outside any
+    // round trip, so this is a real reduction of the window and must fence even
+    // though it carries the same slack.
+    install(
+        &binding,
+        leased(1, granted - Duration::from_secs(1)).with_anchor_slack(slack),
+    );
+    assert_unavailable(captured.check());
+}

@@ -14,6 +14,7 @@ use zeroship_core::{
 pub struct LeasedPolicy {
     lease: PolicyLease,
     expires_at: Instant,
+    anchor_slack: Duration,
 }
 
 impl LeasedPolicy {
@@ -58,6 +59,15 @@ impl LeasedPolicy {
     /// Install this original deadline; sampling remaining time and adding it
     /// to a later instant would extend authority.
     #[must_use]
+    /// How far this deadline may under-state the granted expiry, measured as
+    /// the round trip that produced it. A later lease whose deadline is earlier
+    /// by no more than this is the SAME window re-anchored, not a shortening.
+    #[must_use]
+    pub const fn anchor_slack(&self) -> Duration {
+        self.anchor_slack
+    }
+
+    #[must_use]
     pub const fn expires_at(&self) -> Instant {
         self.expires_at
     }
@@ -81,10 +91,29 @@ impl LeasedPolicy {
         if remaining_ms > lease.policy.lease_ms {
             return Err(Error::InvalidResponse);
         }
+        // ANCHORED CONSERVATIVELY, AND THE ERROR IS RECORDED.
+        //
+        // The manager measured `remaining_ms` at some instant between this
+        // request leaving and its reply arriving. Anchoring at `started` - the
+        // earlier end - therefore UNDER-states the true expiry, which is the
+        // safe direction: the host never believes it holds authority longer
+        // than it was granted.
+        //
+        // The cost is that the same unchanged lease yields a slightly EARLIER
+        // absolute deadline on every renewal, because the anchor moves forward
+        // by one round trip each time. A reader comparing two such deadlines
+        // sees a shortening that never happened. `anchor_slack` is the measured
+        // width of that error, so the reader can tell an artefact of this
+        // anchoring from a real reduction in authority.
+        let anchor_slack = Instant::now().saturating_duration_since(started);
         let expires_at = started
             .checked_add(Duration::from_millis(lease.remaining_ms.get()))
             .ok_or(Error::InvalidResponse)?;
-        let received = Self { lease, expires_at };
+        let received = Self {
+            lease,
+            expires_at,
+            anchor_slack,
+        };
         received.remaining()?;
         Ok(received)
     }

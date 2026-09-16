@@ -180,6 +180,7 @@ impl AssignedPolicies {
         lease.remaining().map_err(transport_error)?;
         ticket.install(
             PolicySnapshot::lease(lease.revision(), lease.policy().clone(), lease.expires_at())?
+                .with_anchor_slack(lease.anchor_slack())
                 .with_ingress_epoch(lease.ingress_epoch()),
         )
     }
