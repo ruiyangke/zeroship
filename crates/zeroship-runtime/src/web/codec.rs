@@ -1,12 +1,12 @@
 //! Codec layer for `CompressionStream` / `DecompressionStream` and
 //! internal fetch `Content-Encoding` decoding.
 //!
-//! This module owns four wire formats × two directions = eight codec
-//! impls behind a single `Codec` trait. The JS-facing classes are
-//! built on top of these in the native-streams sibling project; this
-//! module is *only* the streaming codec engine plus a few helpers
-//! (multi-coding chain builder, lenient deflate fallback) that the
-//! fetch layer will plug in once it lands.
+//! This module owns the codec impls for the four wire formats in both
+//! directions behind a single `Codec` trait. The JS-facing classes are
+//! built on top of these in `web::streams::compression`; this module is
+//! *only* the streaming codec engine plus a few helpers (multi-coding
+//! chain builder, lenient deflate fallback) that the fetch layer plugs
+//! in via `web::fetch::content_encoding`.
 //!
 //! ## Spec sources
 //!
@@ -31,19 +31,18 @@
 //!
 //! flate2's writers swallow trailing data: `ZlibDecoder` / `GzDecoder`
 //! return `Ok(0)` for any bytes past stream-end and `finish()` does
-//! NOT detect them (proven by upstream's own
-//! `decode_extra_data` test at
-//! `flate2/src/zlib/write.rs:357-383`). The trait's `write` therefore
+//! NOT detect them (proven by upstream's own `decode_extra_data`
+//! test). The trait's `write` therefore
 //! returns `(Vec<u8>, usize)` where `usize < chunk.len()` means the
 //! call site must surface a `TrailingBytes` error. brotli's writer
-//! already returns the consumed-offset directly via the `CustomWrite`
-//! contract (`brotli-decompressor/src/writer.rs:337-368`), so we
-//! adopt the same `(produced, consumed)` shape uniformly.
+//! already returns the consumed-offset directly via its `CustomWrite`
+//! contract, so we adopt the same `(produced, consumed)` shape
+//! uniformly.
 //!
 //! ## Design references
 //!
-//! `docs/archive/compression-streams-native.md` records the design
-//! tradeoffs that shaped this implementation.
+//! `docs/decisions/2026-05-01-compression-streams-native.md` records
+//! the design tradeoffs that shaped this implementation.
 
 use std::io::Write;
 
@@ -55,8 +54,7 @@ use flate2::{Compression, Decompress, FlushDecompress, Status};
 // ---------------------------------------------------------------------------
 
 /// Wire format. Spec values are `gzip`, `deflate`, `deflate-raw`,
-/// `brotli` (the latter added by whatwg/compression PR #80 on
-/// 2026-04-02). The codec layer also accepts these from the
+/// `brotli`. The codec layer also accepts these from the
 /// multi-coding chain builder via `parse_format` / lookup tables in
 /// `build_codec_chain`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,8 +77,8 @@ pub enum CodecMode {
 }
 
 /// Errors raised by the codec layer. Mapped to JS errors at the call
-/// site by the wrappers in `error_mapping` below — never directly by
-/// the codec impls themselves.
+/// site by `throw_input_type_error` / `throw_decode_data_error` below —
+/// never directly by the codec impls themselves.
 ///
 /// A single Rust variant set backs the JS surface. The JS side has
 /// *two* wrapper functions (`throw_input_type_error` for the
@@ -150,20 +148,20 @@ pub trait Codec: Send {
 /// When the WHATWG Compression spec issue #51 lands and decode-data
 /// errors flip from `TypeError` to `DOMException("DataError")`, set
 /// this constant to `true`. The codec layer never directly throws
-/// JS exceptions; this constant is read by the JS-facing wrappers
-/// (lives near the V8 class code in the sibling native-classes
-/// project) when mapping `CodecError::DecodeData` and
-/// `CodecError::Truncated` / `TrailingBytes`.
+/// JS exceptions; this constant is read by `throw_decode_data_error`
+/// below when mapping `CodecError::DecodeData` and
+/// `CodecError::Truncated` / `TrailingBytes`, and the V8-side throw
+/// lives in `web::streams::compression`.
 ///
-/// As of 2026-05-01 the spec still says `TypeError`, so this is `false`.
+/// The spec still says `TypeError`, so this is `false`.
 /// See https://github.com/whatwg/compression/issues/51 for the issue.
 pub const DECODE_ERROR_USES_DOMEXCEPTION: bool = false;
 
 /// Build a JS-side error message for a "wrong input type" condition
 /// (e.g. SAB-backed view, non-BufferSource chunk). Always a TypeError.
 /// The actual `throw` lives in the V8 class layer
-/// in a sibling project; this is the message + classification helper
-/// the codec layer exposes today.
+/// (`web::streams::compression`); this is the message + classification
+/// helper the codec layer exposes.
 pub fn throw_input_type_error(msg: &str) -> ThrownError {
     ThrownError {
         kind: ThrownErrorKind::TypeError,
@@ -191,8 +189,8 @@ pub fn throw_decode_data_error(err: &CodecError) -> ThrownError {
 }
 
 /// Plain-Rust description of the JS error to throw. The real V8-side
-/// `throw_exception` call lives next to `CompressionStream` in the
-/// sibling native-classes project; this struct is the codec layer's
+/// `throw_exception` call lives next to `CompressionStream` in
+/// `web::streams::compression`; this struct is the codec layer's
 /// stable hand-off type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThrownError {
@@ -665,9 +663,9 @@ fn raw_deflate_decoder() -> InflateDecoder {
 // Brotli encoder + decoder
 // ---------------------------------------------------------------------------
 
-/// Brotli encoder. Quality=4 and `lgwin=22` trade ~2% compression
-/// ratio for ~3x throughput versus quality=6, while still beating
-/// gzip's
+/// Brotli encoder. Quality=4 and `lgwin=22` trade a little compression
+/// ratio for substantially better throughput than quality=6, while
+/// still beating gzip's
 /// default quality. Buffer size 4096 is the rust-brotli example
 /// default; larger buffers don't help at our typical chunk sizes.
 struct BrotliEncoder {
@@ -707,8 +705,7 @@ impl Codec for BrotliEncoder {
         // which does NOT emit the stream-end marker — a decoder fed
         // those bytes would never see ResultSuccess. We need
         // BROTLI_OPERATION_FINISH, which is reachable only via
-        // `into_inner()` (or Drop, but Drop swallows errors). See
-        // brotli/src/enc/writer.rs:242-248.
+        // `into_inner()` (or Drop, but Drop swallows errors).
         let final_buf = inner.into_inner();
         Ok(final_buf)
     }
@@ -724,9 +721,9 @@ impl Codec for BrotliEncoder {
 }
 
 /// Brotli decoder. The underlying `DecompressorWriter::write` returns
-/// the consumed-offset directly (per
-/// `brotli-decompressor/src/writer.rs:337-368`), so the trailing-byte
-/// detection naturally surfaces as `consumed < chunk.len()`.
+/// the consumed-offset directly (per brotli-decompressor's `CustomWrite`
+/// contract), so the trailing-byte detection naturally surfaces as
+/// `consumed < chunk.len()`.
 struct BrotliDecoder {
     inner: Option<brotli::DecompressorWriter<Vec<u8>>>,
     reached_end: bool,
@@ -909,19 +906,15 @@ impl Codec for IdentityCodec {
 ///
 /// Strategy: try strict zlib first; on failure, try raw DEFLATE.
 /// Most real-world `Content-Encoding: deflate` bodies are zlib-wrapped
-/// (per HTTP/1.1 RFC 2616 history), but ~20% of servers send raw
-/// DEFLATE, which is what the spec originally meant. Chrome and Firefox
-/// both fall back to raw on header mismatch. See
+/// (per HTTP/1.1 RFC 2616 history), but a substantial minority of
+/// servers send raw DEFLATE, which is what the spec originally meant.
+/// Chrome and Firefox both fall back to raw on header mismatch. See
 /// `net/filter/gzip_source_stream.cc` (`ZlibInflate::Init`) and
 /// https://zlib.net/zlib_faq.html#faq39 for the historical accident.
 ///
-/// This is a one-shot whole-buffer decoder for the v1 fetch hook; a
-/// streaming probe-the-first-bytes-then-pick variant is a future
-/// optimisation. Returns the decompressed bytes or an error.
-///
-/// Currently `dead_code` because the fetch integration that calls
-/// this lives in the sibling native-fetch project — gating the
-/// warning so the trunk stays warning-free until that lands.
+/// This is a one-shot whole-buffer decoder for the fetch layer's
+/// Content-Encoding path (see `web::fetch::content_encoding`). Returns
+/// the decompressed bytes or an error.
 #[allow(dead_code)]
 pub(crate) fn try_zlib_then_raw_decode(input: &[u8]) -> Result<Vec<u8>, CodecError> {
     // Strict zlib first. On any error, fall back to raw.

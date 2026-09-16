@@ -21,15 +21,10 @@
 //! separate function that no gate calls, and its one caller is `zeroship serve`
 //! in `crates/zeroship-cli/src/main.rs`.
 //!
-//! Note: cyper 0.8 does **not** follow HTTP redirects automatically. The
+//! Note: cyper does **not** follow HTTP redirects automatically. The
 //! native fetch in `crate::fetch_native` does redirect handling and
 //! re-validates each hop; this module exposes the building blocks it
 //! consumes.
-//!
-//! Historical note: this file used to also house the `__rawFetch` V8
-//! callback and the legacy fetch executor. Both were deleted alongside
-//! the native fetch cutover; `globalThis.fetch` is now the native
-//! callback installed by `fetch_native::install_fetch_global`.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -52,16 +47,12 @@ static DEV_MODE: AtomicBool = AtomicBool::new(false);
 /// returns exactly what [`set_dev_mode`] last stored, and a process in which
 /// nothing stated a mode runs the whole guard.
 ///
-/// It used to fall back, on its first read, to
-/// `declared_env!(dev, "ZEROSHIP_DEV", ..)`, and [`validate_url`] returned
-/// `Ok(())` for every host the moment that answered yes. An environment
-/// variable is not a construction boundary: `ZEROSHIP_DEV=1` exported into a
-/// production `zeroship-worker` turned SSRF validation off for every `fetch`
-/// that worker made, and nothing reported it. The tree already states the
-/// opposite standard about the same process, at
-/// `crates/zeroship-worker/src/main.rs:146-147` - "The authority is the
-/// worker's identity, not an env flag: `SQLite` is refused even if
-/// `ZEROSHIP_DEV=1` leaked into a prod worker."
+/// An environment variable is not a construction boundary: a
+/// `ZEROSHIP_DEV=1` exported into a production `zeroship-worker` must not
+/// turn SSRF validation off for every `fetch` that worker makes, which is
+/// why no gate reads one. The worker applies the same standard to its
+/// database backend (`crates/zeroship-worker/src/main.rs`,
+/// `worker_rejects_db_url`).
 ///
 /// The surviving read is [`dev_mode_from_process_env`], whose one caller is
 /// `cmd_serve` in `crates/zeroship-cli/src/main.rs` - the binary that IS the
@@ -83,7 +74,7 @@ pub fn dev_mode_enabled() -> bool {
 /// The one caller is `cmd_serve` in `crates/zeroship-cli/src/main.rs`: the
 /// single-process runtime `@zeroship/vite-plugin` spawns as
 /// `zeroship serve <entry>` with `ZEROSHIP_DEV=1`
-/// (`packages/vite-plugin/src/dev-server.ts:939`). `zeroship-worker` does not call
+/// (`packages/vite-plugin/src/dev-server.ts`). `zeroship-worker` does not call
 /// it, which is what makes a leaked `ZEROSHIP_DEV=1` inert there.
 #[must_use]
 pub fn dev_mode_from_process_env() -> bool {
@@ -108,9 +99,9 @@ fn dev_mode_from_env_value(raw: Option<&str>) -> bool {
 ///
 /// The alternative a test would otherwise reach for is
 /// `std::env::set_var("ZEROSHIP_DEV", ..)`, which mutates the process-global
-/// environment underneath every other thread and races libc `getenv`
-/// (undefined behaviour, and `unsafe` in Rust 2024). Since the environment no
-/// longer reaches the gate, that spelling would not even work.
+    /// environment underneath every other thread and races libc `getenv`
+    /// (undefined behaviour, and `unsafe` in Rust 2024). The environment does
+    /// not reach the gate, so that spelling would not even work.
 ///
 /// A test that toggles the mode still needs its own mutual exclusion: this
 /// cell is process-wide, so two tests disagreeing about the mode still
@@ -232,10 +223,7 @@ pub fn is_blocked_ip_under_dev(addr: IpAddr, dev_loopback: bool) -> bool {
 ///
 /// Under a stated dev relaxation ([`set_dev_mode`]) LOOPBACK ONLY is allowed,
 /// so the Vite plugin's `ModuleRunner` can fetch modules from the Vite dev
-/// server. Every other blocked range stays refused in dev. Until 2026-08-27
-/// this returned `Ok(())` above the host lookup for any process the relaxation
-/// was on in, which is orders of magnitude wider than that purpose - the cloud
-/// metadata endpoint, RFC1918, CGNAT and link-local were all reachable.
+/// server. Every other blocked range stays refused in dev.
 pub fn validate_url(url: &str) -> Result<(), String> {
     validate_url_under(url, dev_mode_enabled())
 }
@@ -249,11 +237,10 @@ pub fn validate_url(url: &str) -> Result<(), String> {
 fn validate_url_under(url: &str, dev_loopback: bool) -> Result<(), String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("Invalid URL: {e}"))?;
 
-    // `fetch` is the only caller. `ws`/`wss` used to be accepted here because
-    // the WebSocket handshake shared this function; it now goes through
-    // `transport::egress::evaluate` instead, so leaving them accepted would
-    // only mean `fetch("ws://...")` getting past the scheme check to fail
-    // further down.
+    // `fetch` is the only caller. WebSocket URLs are decided by
+    // `transport::egress::evaluate` on the handshake path, not here, so
+    // accepting `ws`/`wss` would only mean `fetch("ws://...")` getting past
+    // the scheme check to fail further down.
     //
     // Note this function has never checked PORTS, for any scheme. Ports are
     // decided by the egress rule set, which carries one, and are not a thing
@@ -271,12 +258,12 @@ fn validate_url_under(url: &str, dev_loopback: bool) -> Result<(), String> {
 
     // Block localhost. This is the ONE name the dev relaxation admits, and it
     // is the name the Vite dev server is addressed by: the ModuleRunner
-    // transport fetches `${ZEROSHIP_VITE_ORIGIN}/__zeroship_fetch_module`
-    // (`packages/vite-plugin/src/dev-bootstrap/transport.ts:38`) and the plugin
-    // sets that origin to `http://localhost:<vitePort>`
-    // (`packages/vite-plugin/src/dev-server.ts:947`). It is spawned as a CHILD of
-    // the Vite process (`dev-server.ts:970`), so the dev server is always on
-    // this host and loopback always reaches it.
+    // transport fetches `${ZEROSHIP_VITE_ORIGIN}/__zeroship_fetch`
+    // (`packages/vite-plugin/src/dev-bootstrap/transport.ts`,
+    // `MODULE_FETCH_PATH`) and the plugin sets that origin to
+    // `http://localhost:<vitePort>` (`packages/vite-plugin/src/dev-server.ts`).
+    // The runtime is spawned as a CHILD of the Vite process, so the dev
+    // server is always on this host and loopback always reaches it.
     if host == "localhost" {
         if dev_loopback {
             return Ok(());
@@ -313,12 +300,12 @@ fn validate_url_under(url: &str, dev_loopback: bool) -> Result<(), String> {
 /// address — the caller sees a generic connect error instead of reaching the
 /// internal service.
 ///
-/// IT MUST BE INSTALLED IN BOTH MODES. Until 2026-08-27 the dev arm of
-/// `transport::client::shared_cyper_client` built the client with NO custom
-/// resolver at all, so `fetch("http://metadata.internal.example/")` resolving
-/// into link-local space connected. Narrowing [`validate_url`] alone would
-/// have left that intact and read as closed: the string fast path cannot see a
-/// hostname's addresses, which is the whole reason this layer exists.
+/// IT MUST BE INSTALLED IN BOTH MODES. A client built with NO custom resolver
+/// at all would let `fetch("http://metadata.internal.example/")` connect when
+/// the name resolves into link-local space, and narrowing [`validate_url`]
+/// alone would leave that intact while reading as closed: the string fast
+/// path cannot see a hostname's addresses, which is the whole reason this
+/// layer exists.
 pub struct SsrfResolver {
     /// Whether loopback survives the filter. Everything else
     /// [`is_blocked_ip`] rejects is stripped either way.
@@ -400,12 +387,10 @@ mod tests {
     /// empty string, an unset variable and anything truthy-looking are all
     /// non-dev, and each must fail CLOSED.
     ///
-    /// This lived in `tests/node_net_security.rs`, which looped a live
-    /// `set_var("ZEROSHIP_DEV", ..)` over two non-affirmative spellings and
-    /// asserted the connect was still refused. Dev mode is a cached
-    /// process-level cell now, so no test can ask the environment twice; the
-    /// spelling question is asked here, and the integration tests ask the
-    /// separate question of whether an off mode still refuses.
+    /// Dev mode is a cached process-level cell, so no test can ask the
+    /// environment twice; the spelling question is asked here, and the
+    /// integration tests ask the separate question of whether an off mode
+    /// still refuses.
     #[test]
     fn only_exactly_one_is_dev_mode() {
         assert!(dev_mode_from_env_value(Some("1")));
@@ -472,13 +457,8 @@ mod tests {
     }
 
     /// The addresses this guard exists for, asserted about the SHIPPED entry
-    /// point rather than about `is_blocked_ip` in isolation.
-    ///
-    /// `is_blocked_ip` had a row for every one of these before this test
-    /// existed, and all of them were green while `validate_url` returned
-    /// `Ok(())` above its host lookup for any process holding
-    /// `ZEROSHIP_DEV=1`. A blocklist test cannot see a caller that never
-    /// consults the blocklist.
+    /// point rather than about `is_blocked_ip` in isolation: a blocklist test
+    /// cannot see a caller that never consults the blocklist.
     ///
     /// This is also the body the environment regression test re-runs in a
     /// child process, so keep it free of process-wide state.
@@ -840,9 +820,10 @@ mod tests {
     }
 
     /// THE DNS LAYER, which the string fast path cannot stand in for: a
-    /// hostname's addresses are invisible to `validate_url`, so narrowing that
-    /// function while `client.rs` built its dev client with no resolver at all
-    /// would have left `fetch("http://metadata.internal.example/")` connecting.
+    /// hostname's addresses are invisible to `validate_url`, so a dev client
+    /// built with no resolver at all would let
+    /// `fetch("http://metadata.internal.example/")` connect even with the
+    /// string path narrowed.
     ///
     /// Both arms use IP literals, which `to_socket_addrs` resolves without a
     /// nameserver, so the row is deterministic on a machine with no DNS.
