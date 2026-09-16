@@ -50,14 +50,8 @@
 //! through an ntex handler because that's the only code path that runs
 //! on a worker thread.
 //!
-//! See also: `docs/specs/` for higher-level design docs.
-//!
-//!
-//! Same architecture as runtime-tokio's Runtime, but uses compio for timers
-//! and the outer event loop. V8 dispatch is identical (zeroship-v8-core).
-//!
-//! The main difference: `compio::time::sleep` replaces `tokio::time::sleep`,
-//! and `futures::select!` replaces `tokio::select!`.
+//! The outer event loop runs on compio: `compio::time::sleep` for timers and
+//! `futures::select!` for the pump's wait.
 //!
 //! ## Async dispatch architecture
 //!
@@ -260,16 +254,14 @@ const IDLE_GC_TICK: Duration = Duration::from_secs(10);
 /// into one. 64 is chosen to sit far above what real programs queue in a single
 /// turn — promise-resolution ladders, `await new Promise(r => setTimeout(r, 0))`
 /// hops and the like run one to a handful of zero-delay timers per turn, so
-/// they drain in the first pass and observe byte-for-byte the behaviour they
-/// did when the drain was unbounded. It only bites a callback chain that
+/// they drain in the first pass. It only bites a callback chain that
 /// re-arms itself faster than it is consumed, which is exactly the runaway the
 /// bound exists to catch.
 ///
 /// It can be this small because crossing a pass boundary is cheap: while
 /// `ready_timers` is non-empty `pump_loop` waits only up to
 /// [`READY_TIMER_PASS_TICK`] before re-entering PHASE 1, so a boundary costs one
-/// isolate enter/exit plus one reactor turn rather than an unbounded park.
-/// Measured at roughly 7 us per boundary against a pass of 64 callbacks. What
+/// isolate enter/exit plus one reactor turn rather than an unbounded park. What
 /// the boundary buys is that `bill_pump_cpu` runs, pending I/O gets looked at,
 /// and other tasks on the thread get a scheduling slot.
 ///
@@ -323,8 +315,8 @@ pub struct Runtime {
 
 /// Test-only strong-count probe over the inner `Rc<RefCell<RuntimeInner>>`.
 /// Holds only a `Weak`, so it never keeps the inner alive. `strong_count()`
-/// counts the remaining strong references (cache handle, in-flight request
-/// handles, and — pre-fix — the leaked pump task). Returned by
+/// counts the remaining strong references (cache handle and in-flight
+/// request handles). Returned by
 /// [`Runtime::into_inner_probe_for_test`].
 #[doc(hidden)]
 pub struct InnerProbe(Weak<RefCell<RuntimeInner>>);
@@ -1125,11 +1117,10 @@ pub(crate) struct RuntimeInner {
 // ntex thread, the pump runs on the same thread, and the public `Runtime`
 // handle only ever wraps `Rc<RefCell<RuntimeInner>>` (itself `!Send`).
 //
-// A previous revision carried `unsafe impl Send for Runtime {}` "for API
-// compat". That impl was unused and only weakened the type system's ability
-// to catch a future accidental cross-thread move, so it has been removed.
-// If a new executor ever needs `Send`, switch to channel-based ownership
-// transfer instead of re-adding this impl.
+// Do not add `unsafe impl Send` for `Runtime`/`RuntimeInner`: it would only
+// weaken the type system's ability to catch a future accidental cross-thread
+// move. If a new executor ever needs `Send`, switch to channel-based ownership
+// transfer instead.
 
 impl Drop for RuntimeInner {
     /// Make `OwnedIsolate::Drop`'s `current == self` assertion pass even
@@ -1181,8 +1172,9 @@ impl RuntimeInner {
         init_v8();
 
         // Default 128 MB per isolate. Control-plane can tune per-app:
-        // free-tier → 64 MB, paid → 256 MB. The old hardcoded 512 MB
-        // meant MAX_ISOLATES=200 × 512 MB × threads could claim 100+ GB.
+        // free-tier → 64 MB, paid → 256 MB. A per-isolate cap keeps app heap,
+        // isolate count and worker thread count from multiplying into a
+        // machine-sized allocation.
         const DEFAULT_HEAP: usize = 128 * 1024 * 1024;
         let heap_max = heap_limit_bytes.unwrap_or(DEFAULT_HEAP);
         let params = v8::CreateParams::default().heap_limits(0, heap_max);
@@ -1745,32 +1737,14 @@ impl RuntimeInner {
             };
 
             if let Some(first_event) = event {
-                // ----------------------------------------------------------
-                // Event batching — the key latency improvement.
-                //
-                // Before: each pump iteration handled exactly one event,
-                // each requiring its own borrow_mut + enter_isolate +
-                // microtask_checkpoint + collect_settled_promises +
-                // exit_isolate. When 10 fetch completions arrived in a
-                // burst, that was 10 borrow cycles, each blocking every
-                // handler on this thread for the full V8 turn.
-                //
-                // Now: after the first event fires, we greedily drain
+                // Event batching. After the first event fires, greedily drain
                 // every OTHER ready event from pending_ops/timers (via
-                // `now_or_never()` — non-blocking), then enter V8 ONCE
-                // to process the entire batch. One microtask checkpoint
-                // covers all resolved promises, one collect_settled scan,
-                // one borrow window.
-                //
-                // Net effect: borrow-hold time changes from
-                //   O(burst_size × per_event_cost)
-                // to
-                //   O(burst_size + per_event_cost)
-                //
-                // For 10 concurrent fetch completions on a thread with
-                // 125 queued requests (the c=2000 scenario), this alone
-                // should cut p99.9 by roughly an order of magnitude.
-                // ----------------------------------------------------------
+                // `now_or_never()` — non-blocking), then enter V8 ONCE to
+                // process the entire batch. One microtask checkpoint covers all
+                // resolved promises, one collect_settled scan, one borrow
+                // window. Without this, each ready event would pay its own
+                // borrow window and block every handler on this thread for the
+                // full V8 turn.
                 let mut batch = vec![first_event];
 
                 // Drain any OTHER events that are already resolved. This
@@ -2480,26 +2454,16 @@ impl RuntimeInner {
                 retryable,
             }) => {
                 // Handler threw (or returned a rejected promise). Honor
-                // `err.status` so `throw new HttpError(404)` yields 404,
-                // not the previous hardcoded 500. Forward any structured-
-                // error extras (code/details/retryable) verbatim.
+                // `err.status` so `throw new HttpError(404)` yields 404.
+                // Forward any structured-error extras (code/details/retryable)
+                // verbatim.
                 self.clear_executing_request();
-                // DRAIN, do not discard. This arm used to call
-                // `discard_request_state`, which REMOVES `per_request_logs[id]`
-                // and returns nothing, and then emitted `logs: vec![]` - so
-                // everything the procedure printed before it threw was destroyed
-                // here, one layer above anything that could forward it (#334).
-                //
-                // Measured: `getMessages` and `boom` in the same app, same run,
-                // same GET /api/apps/<id>/logs payload - the succeeding
-                // procedure's line delivered, the throwing one's absent. The
-                // capture was never the problem; the entry existed under a real
-                // request id right up until this line removed it.
-                //
-                // `drain_request_logs` is a SUPERSET of `discard_request_state`:
-                // it drops the same sibling per-request state (user, bound ctx,
-                // Request) and additionally clears `executing_request_id`, which
-                // is why the success arm calls it alone.
+                // DRAIN, do not discard: logs a procedure printed before it
+                // threw must still reach the client. `drain_request_logs` is a
+                // SUPERSET of `discard_request_state`: it drops the same sibling
+                // per-request state (user, bound ctx, Request) and additionally
+                // clears `executing_request_id`, which is why the success arm
+                // calls it alone.
                 let logs = self.drain_request_logs(request_id);
                 let extras = crate::dispatch::ErrorExtras {
                     stack: stack.as_deref(),
@@ -2623,8 +2587,7 @@ impl RuntimeInner {
 
     /// Convert a `ResponseInfo` into a `FetchOutcome`. Mirrors
     /// [`Self::build_fetch_outcome`] exactly — the writer-attachment logic
-    /// for streaming responses is preserved verbatim. When the old HTTP
-    /// path is deleted, this helper fully replaces it.
+    /// for streaming responses is preserved verbatim.
     fn build_fetch_outcome(
         &mut self,
         request_id: u64,
@@ -3337,25 +3300,23 @@ impl RuntimeInner {
     // collect_settled_promises is a free function below (avoids double-borrow
     // when called inside enter_v8! which already borrows self.isolate).
 
-    /// Fire zero-delay timers inline during dispatch_start (no AsyncWork needed).
-    /// Spawned ops/timers from callbacks remain in RuntimeState for the pump to drain.
     /// Fire zero-delay timers, draining new tasks into external AsyncWork.
     ///
     /// BOUNDED BY DESIGN — fires at most [`MAX_READY_TIMERS_PER_PASS`] callbacks
     /// and then returns, leaving whatever is left (including anything the fired
     /// callbacks re-scheduled) on `ready_timers` for the next pass. Without the
-    /// bound this was a liveness hole: a callback that re-arms itself with
+    /// bound it is a liveness hole: a callback that re-arms itself with
     /// `setTimeout(fn, 0)` pushes onto the very queue this loop pops from, so
-    /// `spin(){ work(); setTimeout(spin, 0) }` never let the loop reach its
+    /// `spin(){ work(); setTimeout(spin, 0) }` never reaches the loop's
     /// `break`. Everything that would have noticed sits AFTER the drain —
     /// `bill_pump_cpu` in the pump's PHASE 1, `record_pump_cpu` in PHASE 2 —
-    /// so the loop pinned a core while being billed nothing and policed by
+    /// so the loop would pin a core while being billed nothing and policed by
     /// nothing. Returning early puts the pump back in control of both.
     ///
     /// FIFO order is preserved across the pass boundary: entries are taken with
     /// `pop_front` and the untouched remainder keeps its position in the deque,
-    /// so a bounded pass fires exactly the same callbacks in exactly the same
-    /// order as the old unbounded one — it just gets there in several hops.
+    /// so a bounded pass fires callbacks in the same order an unbounded drain
+    /// would — it just gets there in several hops.
     fn fire_ready_timers_pump(&mut self, work: &mut AsyncWork) {
         for _ in 0..MAX_READY_TIMERS_PER_PASS {
             let timer_id = {
@@ -3507,11 +3468,10 @@ impl RuntimeInner {
         // leak memory for long-lived workers.
         //
         // RPC fast path skips Request construction and ctx binding, so
-        // only call .remove() when there's actually something to remove.
-        // Each .remove() on an empty HashMap still hashes the key + does
-        // a probe; ~150ns × 4 maps = 600ns/req we save when the maps are
-        // empty (the common case for the bench fixture's no-side-effect
-        // procedures).
+        // only call .remove() when there's actually something to remove:
+        // each .remove() on an empty HashMap still hashes the key and
+        // probes, and those maps are empty on the common no-side-effect
+        // path.
         if !s.per_request_user.is_empty() {
             s.per_request_user.remove(&request_id);
         }
@@ -3770,7 +3730,7 @@ impl RuntimeInner {
     /// Remove every timer callback owned by `request_id`. The associated
     /// `compio::time::sleep` futures in the pump's `pending_timers` pool
     /// still run to completion (we don't have a handle to abort them),
-    /// but `fire_timer_callback` at `dispatch.rs:141` looks the timer up
+    /// but `dispatch.rs::fire_timer_callback` looks the timer up
     /// by id and finds no entry — so no user JS runs.
     fn drop_timers_owned_by(&mut self, request_id: u64) {
         let mut s = self.state.borrow_mut();
@@ -3898,12 +3858,9 @@ fn pass_through_on_exception_noop_callback(
 ) {
 }
 
-/// V8 callback for `ctx.waitUntil(promise)`. Real wiring (register the
-/// promise into `RuntimeState.wait_until_by_request` so the kernel
-/// awaits before releasing the isolate) lands in Task C3. Until then,
-/// we still need to prevent unhandled-rejection spam: if user code
-/// passes a rejecting promise and we drop it silently, V8 emits an
-/// unhandled-rejection for every call.
+/// V8 callback for `ctx.waitUntil(promise)`. It only prevents unhandled-
+/// rejection spam: a rejecting promise dropped silently makes V8 emit an
+/// unhandled rejection for every call.
 ///
 /// The minimum-safe no-op attaches `.catch(() => {})` to the argument
 /// when it's a promise, so rejections are suppressed. This matches the
@@ -3946,8 +3903,8 @@ fn wait_until_noop_callback(
 /// - `Ok(DispatchResult::Error)` — the Response object couldn't be
 ///   inspected (malformed shape, non-Response return). Maps to 500.
 /// - `Err(v8::Global<v8::Promise>)` — handler returned a still-pending
-///   promise. The real async path lands in Task B4; caller serves 501
-///   in the meantime.
+///   promise; the caller hands it to the pump and serves it once the
+///   promise settles.
 ///
 /// Outcome of the `fetchFast(method, url, bodyBytes, env)` extension.
 ///
@@ -4138,16 +4095,12 @@ enum ZsV1Path<'a> {
 /// The reserved path must not fall through to creator `fetch` merely because
 /// its name is empty or the procedure kind rejects the request method.
 ///
-/// The prefix anchor is load-bearing, not tidiness. This used to be
-/// `url.find(TAG)` — a substring search — while the gateway's own RPC lookup
-/// (`compiled.rs::lookup_canonical_resource_key`) fires only on a canonical
-/// path that STARTS WITH the tag. Prefix on one side and substring on the other
-/// is a gateway↔worker disagreement: measured end to end on 2026-08-10
-/// (`tests/e2e_gateway_path_backslash.sh` T9), `GET /x/__zeroship/v1/secret`
-/// was authorized by the gateway against the app's anonymous URL catch-all and then
-/// EXECUTED the `rpc:secret` procedure here, which answers 401 on its own
-/// canonical URL (T7a, the one-variable control). No exotic byte was needed —
-/// any leading segment at all was enough.
+/// The prefix anchor is load-bearing, not tidiness. A substring search would
+/// disagree with the gateway's own RPC lookup
+/// (`compiled.rs::lookup_canonical_resource_key`), which fires only on a
+/// canonical path that STARTS WITH the tag. Prefix on one side and substring
+/// on the other lets any leading segment authorize against the app's
+/// anonymous URL catch-all and then execute the procedure here.
 ///
 /// This scans the request target directly and does not construct a URL object.
 fn classify_zs_v1_path(url: &str) -> ZsV1Path<'_> {
@@ -4393,10 +4346,9 @@ fn build_rpc_ctx_inputs(request_id: u64, headers: &[(String, String)]) -> RpcCtx
     }
 }
 
-/// Hand-rolled `format!("req_{:016x}", id)`. Avoids two heap-allocations
-/// and the `core::fmt` LowerHex stack the dispatch path used to spend
-/// 9.22% inclusive CPU in (perf 2026-05-07). Output bit-identical to
-/// `format!`: `req_` + 16 lowercase hex chars (length 20).
+/// Hand-rolled `format!("req_{:016x}", id)`. Avoids the heap allocations and
+/// the `core::fmt` LowerHex machinery `format!` pulls in. Output
+/// bit-identical to `format!`: `req_` + 16 lowercase hex chars (length 20).
 #[inline]
 fn format_req_id_hex(id: u64) -> String {
     let mut s = String::with_capacity(20);
@@ -4583,10 +4535,10 @@ fn call_fetch_inner(
 mod rpc_path_anchor_tests {
     use super::{ZsV1Path, classify_zs_v1_path, url_path_start};
 
-    /// The bypass this anchor exists to close. Before the fix the tag was
-    /// located with `url.find(TAG)` — a SUBSTRING search — while the gateway
+    /// The bypass this anchor exists to close: locating the tag with
+    /// `url.find(TAG)` — a SUBSTRING search — while the gateway
     /// only recognises an RPC request whose canonical path STARTS WITH the tag.
-    /// Prefix on one side, substring on the other: an `auth:user` procedure ran
+    /// Prefix on one side, substring on the other: an `auth:user` procedure runs
     /// anonymously behind any leading segment, plain ASCII.
     ///
     /// Each case is paired with the canonical form it differs from by exactly

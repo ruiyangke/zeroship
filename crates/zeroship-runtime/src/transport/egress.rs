@@ -449,13 +449,12 @@ fn filter_answer(
         // same narrowing `ssrf::validate_url` applies, through the same
         // predicate, so the two cannot drift; and a unit test can cover the
         // dev arm without writing a process-wide cell that would decide the
-        // result of every other test in the binary. Until 2026-08-27 this read
-        // `!dev_mode && is_blocked_ip(ip)`, so a dev process skipped the floor
-        // ENTIRELY and INVARIANT GRANTS-NARROW did not hold for it: a creator
-        // `Range` ACCEPT naming 169.254.169.254 was then admitted by step 6,
-        // which is the exact widening step 4 exists to prevent. (`Trusted`
-        // skipped it too, but no creator app can hold `Trusted` -
-        // `crates/zeroship-worker/src/cache.rs:1570-1588` pins that.)
+        // result of every other test in the binary. Widening the dev arm past
+        // loopback - or skipping the floor in a dev process - would let a
+        // creator `Range` ACCEPT naming 169.254.169.254 through step 6, the
+        // exact widening step 4 exists to prevent. (`Trusted` is not subject
+        // to the loopback narrowing, but no creator app can hold `Trusted`;
+        // the worker's deploy cache pins that.)
         if is_blocked_ip_under_dev(ip, dev_loopback) {
             floor.push(ip);
             continue;
@@ -899,11 +898,7 @@ mod tests {
     ///
     /// `Trusted` is the policy that makes the floor observable on its own: it
     /// matches no rules, so step 5 and step 6 admit everything and the only
-    /// thing that can drop an address is step 4. Until 2026-08-27 step 4 read
-    /// `!dev_mode && is_blocked_ip(ip)`, so this exact combination - a dev
-    /// process on a `Trusted` policy - reached 169.254.169.254 outright, and
-    /// no row in this module could see it because every row ran with the mode
-    /// off.
+    /// thing that can drop an address is step 4.
     #[test]
     fn the_dev_relaxation_opens_loopback_only_at_the_floor() {
         let trusted = NetPolicy::trusted(4, 1024 * 1024);
