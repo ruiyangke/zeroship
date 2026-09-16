@@ -514,6 +514,7 @@ jobs:
       # workspace globs matched nothing, and install failed on an unresolvable
       # link. The engine is in-tree now, so nothing here depends on a submodule.
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/nix-toolchain
       - uses: actions/setup-node@v4
         with:
           node-version: 22
