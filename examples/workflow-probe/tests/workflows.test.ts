@@ -1,5 +1,7 @@
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { expect, test } from "vitest";
+import { expect, inject, test } from "vitest";
 import { targets, type Target } from "./targets";
 
 type Run = { workflow: string; runId: string };
@@ -80,8 +82,23 @@ test("compensation reverses the effect and preserves the original error in both 
   for (const target of targets()) {
     expect(await rpc(target, "resetTrail", {})).toEqual({ reset: true });
     const result = await until(target, await start(target, "compensate"), "failed");
+    const trail = await rpc(target, "trail", {});
+    // Compensation is at-least-once, so the compensator may be dispatched again
+    // after its effect landed; the app dedupes on `ctx.idempotencyKey`, which is
+    // what keeps the trail below exact. The count of those re-runs is RECORDED,
+    // never asserted: a fixed expectation would fail the run for behaviour the
+    // platform documents as permitted. It is recorded ahead of the assertions so
+    // a failing run keeps the value too, and into a file because vitest does not
+    // surface a test's console output here -- a counter nothing can read
+    // measures nothing. Only its shape is checked.
+    const { redispatches } = await rpc<{ redispatches: number }>(target, "compensatorRedispatches", {});
+    writeFileSync(
+      join(inject("workflowArtifacts"), `compensator-redispatches-${target.name}.json`),
+      `${JSON.stringify({ target: target.name, redispatches })}\n`,
+    );
+    expect(typeof redispatches).toBe("number");
     expect(result.error?.message).toContain("probe-intentional-failure");
-    expect(await rpc(target, "trail", {})).toEqual({ trail: "do:reserve,undo:reserve" });
+    expect(trail).toEqual({ trail: "do:reserve,undo:reserve" });
     expect(result.error?.compensation).toMatchObject({ outcome: "completed" });
   }
 });

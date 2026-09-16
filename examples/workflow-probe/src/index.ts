@@ -28,6 +28,12 @@ const workflows = (env as unknown as { workflows: Record<string, ProbeWorkflowHa
 interface ProbeKv {
   get(key: string): Promise<string | null>;
   set(key: string, value: string, opts?: { ttlMs?: number }): Promise<{ ok: true }>;
+  setIfAbsent(
+    key: string,
+    value: string,
+    opts?: { ttlMs?: number },
+  ): Promise<{ stored: boolean }>;
+  incr(key: string, opts?: { by?: number; ttlMs?: number }): Promise<number>;
   delete(key: string): Promise<{ deleted: boolean }>;
 }
 const kv = (env as unknown as { kv: ProbeKv }).kv;
@@ -40,10 +46,51 @@ const kv = (env as unknown as { kv: ProbeKv }).kv;
 // examples/kv-dashboard/tests/rpc.test.ts, so a difference here is a workflow
 // difference and not a kv one.
 const TRAIL_KEY = "wfprobe:trail";
+// Compensation is at-least-once: docs/reference/workflows.md states a
+// compensator may run again after a crash, a retry or a lease handoff, and the
+// platform mints `ctx.idempotencyKey` so the undo effect can dedupe on it. A
+// key under this prefix means that occurrence's undo has already landed.
+const COMPENSATED_PREFIX = "wfprobe:compensated:";
+// The claim expires, so a compensated run does not leave a key behind for the
+// life of the store. It outlives any re-dispatch of the run that wrote it, and
+// expiry costs at most a repeated undo, which is the outcome the platform
+// already permits.
+const COMPENSATED_CLAIM_TTL_MS = 3_600_000;
+// A deduped re-run is counted rather than discarded. The trail stays exactly
+// what the workflow did once, and this counter is the creator-visible measure
+// of how often the platform re-dispatches a compensator that already
+// succeeded; the acceptance test records it per run.
+const REDISPATCH_KEY = "wfprobe:compensator-redispatches";
 
 async function appendTrail(entry: string): Promise<void> {
   const current = (await kv.get(TRAIL_KEY)) ?? "";
   await kv.set(TRAIL_KEY, current === "" ? entry : `${current},${entry}`);
+}
+
+/// Run `effect` once per compensator occurrence, counting the re-dispatches
+/// that find it already done.
+///
+/// The claim is written AFTER the effect, never before. A claim therefore means
+/// the undo landed, so losing the isolate between the two costs a repeated undo
+/// -- which the platform permits and the claim absorbs -- instead of a skipped
+/// undo that the run would still report as a completed rollback.
+async function compensateOnce(
+  idempotencyKey: string,
+  effect: () => Promise<void>,
+): Promise<void> {
+  const claim = `${COMPENSATED_PREFIX}${idempotencyKey}`;
+  if ((await kv.get(claim)) !== null) {
+    await kv.incr(REDISPATCH_KEY);
+    return;
+  }
+  await effect();
+  // A claim already present here belongs to a dispatch that ran concurrently,
+  // which the read above cannot see. Counting it keeps the counter a measure of
+  // every re-dispatch that met a landed effect.
+  const { stored } = await kv.setIfAbsent(claim, "1", {
+    ttlMs: COMPENSATED_CLAIM_TTL_MS,
+  });
+  if (!stored) await kv.incr(REDISPATCH_KEY);
 }
 
 // ── Workflow classes ───────────────────────────────────────────────────────
@@ -113,8 +160,10 @@ export class CompensateCase extends Workflow<{ label: string }, unknown> {
     await step.run(
       "reserve",
       {
-        compensate: async () => {
-          await appendTrail("undo:reserve");
+        compensate: async (_output, ctx) => {
+          await compensateOnce(ctx.idempotencyKey, () =>
+            appendTrail("undo:reserve"),
+          );
         },
       },
       async () => {
@@ -213,9 +262,22 @@ export const trail = query(
 export const resetTrail = mutation(
   async () => {
     await kv.delete(TRAIL_KEY);
+    // The per-occurrence claim keys carry the run id, so a later run never
+    // meets an earlier claim, and their TTL collects them. This counter is
+    // app-wide and has to be cleared with the trail it accompanies.
+    await kv.delete(REDISPATCH_KEY);
     return { reset: true };
   },
   { id: "wf.resetTrail" },
+);
+
+/// How many times a compensator was dispatched again after its effect had
+/// already landed. Zero on a run where every compensator ran once.
+export const compensatorRedispatches = query(
+  async () => ({
+    redispatches: Number.parseInt((await kv.get(REDISPATCH_KEY)) ?? "0", 10),
+  }),
+  { id: "wf.compensatorRedispatches" },
 );
 
 export const ping = query(
