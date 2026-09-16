@@ -1,7 +1,18 @@
 use super::{invalid, Transaction, WorkflowServiceError};
-use crate::service::models::{app_state, deployment_holds, job_publications};
+use crate::service::models::{app_state, deployment_holds, job_publications, reconciliation_pages};
 use serde::{Deserialize, Serialize};
-use zeroship_data_orm::orm::{FindOptions, FromRow};
+use zeroship_data_orm::orm::{FindOptions, FromRow, Insertable};
+
+/// The delivered page's receipt extension: the plan it committed to and the
+/// index of the next intent it will reserve.
+#[derive(FromRow, Insertable)]
+#[orm(entity = reconciliation_pages)]
+pub(super) struct Page {
+    pub id: String,
+    pub app_id: String,
+    pub plan: String,
+    pub next_index: i64,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -16,7 +16,7 @@ use super::{
 use crate::WorkflowServiceError;
 use std::time::{Duration, Instant};
 use zeroship_core::workflow_jobs::{JobLease, JobOperation, JobOutcome, JobSpec};
-use zeroship_data_orm::orm::{FindOptions, Insertable};
+use zeroship_data_orm::orm::Insertable;
 
 mod scan;
 use scan::{Page, Plan};
@@ -238,22 +238,7 @@ impl AppWorkflows {
             return Err(invalid());
         }
         let progress = if let Some(id) = plan.ids.get(next) {
-            changed_once(
-                tx.database()
-                    .entity::<collection_pages::Entity>()?
-                    .update_many(
-                        collection_pages::id
-                            .eq(job.id.as_str())?
-                            .and(collection_pages::app_id.eq(self.app_id().as_str())?)
-                            .and(
-                                collection_pages::next_index
-                                    .eq(i64::try_from(next).map_err(|_| invalid())?)?,
-                            ),
-                        collection_pages::next_index
-                            .set(i64::try_from(next + 1).map_err(|_| invalid())?)?,
-                    )
-                    .await?,
-            )?;
+            delivery::reserve::<collection_pages::Entity>(&tx, job, next, invalid).await?;
             Progress::Item(id.clone())
         } else {
             Box::pin(advance(&tx, job, &plan)).await?;
@@ -283,26 +268,10 @@ async fn inspect(tx: &Transaction, job: &JobSpec) -> Result<Stored, WorkflowServ
     if !matches!(job.operation, JobOperation::Collect {}) {
         return Err(invalid());
     }
-    let record = delivery::read(tx, job).await?;
-    let page = tx
-        .database()
-        .entity::<collection_pages::Entity>()?
-        .find::<Page>(
-            collection_pages::id
-                .eq(job.id.as_str())?
-                .and(collection_pages::app_id.eq(job.app_id.as_str())?),
-            FindOptions {
-                limit: Some(1),
-                ..Default::default()
-            },
-        )
-        .await?
-        .into_iter()
-        .next();
-    let (record, page) = match (record, page) {
-        (None, None) => return Ok(Stored::Missing),
-        (Some(record), Some(page)) => (record, page),
-        _ => return Err(invalid()),
+    let Some((record, page)) =
+        delivery::read_extended::<collection_pages::Entity, Page>(tx, job, invalid).await?
+    else {
+        return Ok(Stored::Missing);
     };
     if page.id != job.id.as_str() || page.app_id != job.app_id.as_str() {
         return Err(invalid());

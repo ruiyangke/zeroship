@@ -158,8 +158,6 @@ zeroship_data_orm::orm::schema! {
             run_id: Nullable<Text>,
             specification: Text,
             outcome: Nullable<Text>,
-            reconciliation: Nullable<Text>,
-            reconciliation_next: Nullable<BigInt>,
             created_at: BigInt,
             completed_at: Nullable<BigInt>,
         }
@@ -244,6 +242,14 @@ zeroship_data_orm::orm::schema! {
             revision: BigInt,
             finished: BigInt,
             created_at: BigInt,
+        }
+
+        __zeroship_workflow_reconciliation_pages {
+            #[orm(primary_key)]
+            id: Text,
+            app_id: Text,
+            plan: Text,
+            next_index: BigInt,
         }
 
         __zeroship_workflow_requests {
@@ -434,17 +440,32 @@ mod tests {
     }
 
     #[test]
-    fn reconciliation_metadata_preserves_nullable_receipts_and_phased_cursors() {
+    fn reconciliation_metadata_keeps_page_state_off_the_receipt_and_phases_the_cursor() {
         use zeroship_data_orm::{orm::Entity, schema::LogicalType};
         let receipts = journal::__zeroship_workflow_job_receipts::Entity::schema();
         assert!(!receipts["run_id"].required);
-        assert!(!receipts["reconciliation"].required);
-        assert_eq!(receipts["reconciliation"].logical_type, LogicalType::Text);
-        assert!(!receipts["reconciliation_next"].required);
-        assert_eq!(
-            receipts["reconciliation_next"].logical_type,
-            LogicalType::BigInt
-        );
+        // The receipt carries no kind's state. Both paged sweeps keep the same
+        // extension in their own table instead.
+        for column in [
+            "reconciliation",
+            "reconciliation_next",
+            "plan",
+            "next_index",
+        ] {
+            assert!(!receipts.contains_key(column), "{column}");
+        }
+        for pages in [
+            journal::__zeroship_workflow_collection_pages::Entity::schema(),
+            journal::__zeroship_workflow_reconciliation_pages::Entity::schema(),
+        ] {
+            assert!(pages["id"].primary_key);
+            assert_eq!(pages.values().filter(|field| field.primary_key).count(), 1);
+            assert!(pages["app_id"].required);
+            assert!(pages["plan"].required);
+            assert_eq!(pages["plan"].logical_type, LogicalType::Text);
+            assert!(pages["next_index"].required);
+            assert_eq!(pages["next_index"].logical_type, LogicalType::BigInt);
+        }
         let state = journal::__zeroship_workflow_app_state::Entity::schema();
         assert!(state["id"].primary_key);
         assert!(state["app_id"].required);

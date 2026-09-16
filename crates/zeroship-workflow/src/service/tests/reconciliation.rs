@@ -180,6 +180,11 @@ case!(
     postgres_reconciliation_concurrent_roots_do_not_regress_the_scan,
     concurrency
 );
+case!(
+    sqlite_reconciliation_cannot_settle_from_another_kinds_page,
+    postgres_reconciliation_cannot_settle_from_another_kinds_page,
+    foreign_extension
+);
 
 async fn pages(store: Rc<OrmStore>) {
     let (service, app, foreign, _deployments) = registered_service(store.clone()).await;
@@ -409,6 +414,88 @@ async fn failures(store: Rc<OrmStore>) {
         .await
         .unwrap();
     assert!(scope.pending_jobs(None, 10).await.unwrap().is_empty());
+}
+
+/// A sweep's cursor lives in its own kind's table. The two paged sweeps store
+/// the identical shape, and the receipt's foreign key accepts either, so filing
+/// this page under the collection sweep is a write the journal allows: only the
+/// separate tables keep the reconciliation reader from settling on it.
+async fn foreign_extension(store: Rc<OrmStore>) {
+    let (service, app, _, _deployments) = registered_service(store).await;
+    let scope = service.fixture_app(app.clone());
+    let jobs = start(&scope, 3).await;
+    let publisher = Publisher::new(&app).await;
+    let grant = Grant::new(&jobs[0]);
+    let id = grant.delivery.job.id.clone();
+    assert_eq!(
+        scope
+            .reconcile_job(&grant, &publisher, options(1))
+            .await
+            .unwrap()
+            .outcome,
+        JobOutcome::Waiting {}
+    );
+
+    let tx = service.begin().await.unwrap();
+    let stored = journal_rows(
+        &tx,
+        "reconciliation_pages",
+        json!({"app_id":app.as_str(), "id":id.as_str()}),
+    )
+    .await;
+    assert_eq!(stored.len(), 1);
+    let page = json!({
+        "id": id.as_str(), "app_id": app.as_str(),
+        "plan": stored[0].text("plan").unwrap(),
+        "next_index": stored[0].integer("next_index").unwrap(),
+    });
+    tx.commit().await.unwrap();
+
+    for (from, to) in [
+        ("reconciliation_pages", "collection_pages"),
+        ("collection_pages", "reconciliation_pages"),
+    ] {
+        let tx = service.begin().await.unwrap();
+        tx.database()
+            .collection(&format!("__zeroship_workflow_{from}"))
+            .unwrap()
+            .delete(json!({"app_id":app.as_str(), "id":id.as_str()}).into())
+            .await
+            .unwrap();
+        journal_insert(&tx, to, page.clone()).await.unwrap();
+        tx.commit().await.unwrap();
+        let replay = scope
+            .reconcile_job(&grant.retry(), &publisher, options(1))
+            .await;
+        // The receipt reader settles nothing, so only the missing page can
+        // decide it: a committed outcome with no page of its own is refused
+        // rather than replayed, and never reported as an absent job.
+        let reread = scope.job_receipt(&grant.delivery.job).await;
+        if to == "collection_pages" {
+            assert!(
+                matches!(replay, Err(WorkflowServiceError::Internal(_))),
+                "{replay:?}"
+            );
+            assert!(
+                matches!(reread, Err(WorkflowServiceError::Internal(_))),
+                "{reread:?}"
+            );
+        } else {
+            assert_eq!(replay.unwrap().outcome, JobOutcome::Waiting {});
+            assert_eq!(reread.unwrap().unwrap().outcome, JobOutcome::Waiting {});
+        }
+    }
+
+    // The extension's foreign key is what forbids a page with no receipt.
+    let tx = service.begin().await.unwrap();
+    let orphan = journal_insert(
+        &tx,
+        "reconciliation_pages",
+        json!({"id":JobId::mint().as_str(), "app_id":app.as_str(), "plan":"{}", "next_index":0}),
+    )
+    .await;
+    assert!(orphan.is_err(), "{orphan:?}");
+    drop(tx);
 }
 
 async fn policy(store: Rc<OrmStore>) {

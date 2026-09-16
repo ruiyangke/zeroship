@@ -1403,26 +1403,6 @@
             "valueColumn": "outcome"
           }
         },
-        "reconciliation": {
-          "type": "string",
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "reconciliation"
-          }
-        },
-        "reconciliation_next": {
-          "type": "bigInt",
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "reconciliation_next"
-          }
-        },
         "created_at": {
           "type": "bigInt",
           "required": true,
@@ -2254,6 +2234,70 @@
         },
         {
           "name": "__zeroship_workflow_propagation_identity",
+          "fields": [
+            "app_id",
+            "id"
+          ],
+          "unique": true
+        }
+      ]
+    },
+    "__zeroship_workflow_reconciliation_pages": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true
+        },
+        "app_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "app_id"
+          }
+        },
+        "plan": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "plan"
+          }
+        },
+        "next_index": {
+          "type": "bigInt",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "next_index"
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "__zeroship_workflow_reconciliation_pages_scope_key",
           "fields": [
             "app_id",
             "id"
