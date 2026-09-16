@@ -8,6 +8,7 @@ fn replay_input_keeps_claim_credentials_in_the_host() {
     let config = WorkflowEngineConfig::default();
     let request = StepRequest {
         run_id: "run_claimed".into(),
+        generation: 3,
         app_id: zeroship_core::AppId::mint(),
         workflow_name: "Checkout".into(),
         deploy_id: "dep_pinned".into(),
@@ -33,6 +34,8 @@ fn replay_input_keeps_claim_credentials_in_the_host() {
     assert!(!text.contains(&request.owner_id));
     assert_eq!(encoded["appId"], request.app_id.as_str());
     assert_eq!(encoded["deployHash"], request.deploy_hash);
+    // Step idempotency keys are generation-scoped, so replay input must carry it.
+    assert_eq!(encoded["generation"], request.generation);
     assert_eq!(encoded["trigger"]["runId"], request.run_id);
     assert_eq!(encoded["trigger"]["input"], request.input.unwrap());
 }

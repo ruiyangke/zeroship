@@ -77,6 +77,7 @@ pub(crate) async fn invocation(
         deploy_id: run.text("deploy_id")?,
         deploy_hash: deployment.hash,
         run_id: id.clone(),
+        generation: run.integer("generation")?,
         workflow_name: workflow_name.clone(),
         phase: if run.text("state")? == "compensating" {
             "compensating"
