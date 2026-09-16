@@ -48,7 +48,7 @@
 //! the end of this section, and it changed both the release design AND this
 //! file.
 //!
-//! ## What the fix is NOT, measured 2026-08-25
+//! ## What the fix is NOT
 //!
 //! Three cheaper repairs were tried against a live TLS server and none of them
 //! removes the line. Each was one connection: connect, `SELECT 1`, drop.
