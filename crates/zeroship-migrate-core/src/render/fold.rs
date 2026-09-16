@@ -133,7 +133,7 @@ fn supports(vendors: VendorSet, dialect: &DialectId, capability: Capability) -> 
         .contains(capability)
 }
 
-/// The single fold of `docs/proposals/single-fold-and-effects.md`: ONE traversal and
+/// The single fold: ONE traversal and
 /// four typed projections, each proven equal to the walker it replaces.
 ///
 /// A CHILD of this module rather than a sibling, so it reaches the per-op decision
@@ -561,8 +561,8 @@ fn rewrite_incoming_fk_targets(
 /// thing a later `dropView` can render its `CREATE VIEW` inverse from
 /// (`render::lower::render_view_op`). Leaving it stale does not merely disagree with
 /// the catalog: it makes the down migration name a table that no longer exists, and
-/// PostgreSQL rejects it at rollback time with `relation ... does not exist` - measured
-/// on PG 18.4 by `rollback/drop_view_rollback_pg.rs::a_table_rename_reaches_the_body_a_dropped_view_is_restored_from`.
+/// PostgreSQL rejects it at rollback time with `relation ... does not exist` - pinned
+/// by `rollback/drop_view_rollback_pg.rs::a_table_rename_reaches_the_body_a_dropped_view_is_restored_from`.
 ///
 /// **Structured bodies only.** A [`ViewQuery::Raw`] body is author-supplied SQL TEXT
 /// with no AST to re-render from, so following a rename into it would be the naive
@@ -673,7 +673,7 @@ fn rename_table_in_select(
 /// own snapshot, but a FK `definition` in ANOTHER table embeds the referenced column
 /// by name in its `REFERENCES <schema>.<target>(id)` tail. Live PG holds
 /// `pg_constraint.confkey` as attribute NUMBERS, so `pg_get_constraintdef` deparses
-/// the NEW name there the instant the rename commits (measured on PG 18.4). Leaving
+/// the NEW name there the instant the rename commits. Leaving
 /// the referencing table stale is a permanent phantom drift: the differ compares
 /// `definition` for every kind but EXCLUDE and CHECK.
 ///
@@ -739,15 +739,15 @@ pub(crate) fn selected_dialectal_leg<'a>(
 /// and the offline SQL preview's per-op presence carrier - so both call THIS
 /// function rather than restating the rule. A set that handled `createTable` and
 /// nothing else would disagree with the fold - and with PostgreSQL - the moment a
-/// stream dropped, renamed, or detached anything. For example, on PostgreSQL 18.4:
+/// stream dropped, renamed, or detached anything. For example:
 ///
 ///   - `createTable alpha; dropTable alpha; createTable gamma REFERENCES alpha` -
-///     the stale-present `alpha` made the create-time FK INLINE, and the preview
-///     reported the whole envelope resolved. The server answers
+///     a stale-present `alpha` would make the create-time FK INLINE, and the preview
+///     would report the whole envelope resolved. The server answers
 ///     `ERROR: relation "alpha" does not exist`, mid-migration.
 ///   - `createTable alpha; renameTable alpha -> beta; createTable gamma REFERENCES
-///     beta` - `beta` was never recorded, so the FK deferred with no target and the
-///     lower REFUSED the artifact ("non-live target ... never created later"). The
+///     beta` - if `beta` is never recorded, the FK defers with no target and the
+///     lower REFUSES the artifact ("non-live target ... never created later"). The
 ///     server accepts that sequence.
 ///   - the same refusal for `detachPartition`, whose child becomes an ordinary
 ///     table the server is equally happy to be referenced.
@@ -758,7 +758,7 @@ pub(crate) fn selected_dialectal_leg<'a>(
 /// **`attachPartition` is deliberately NOT here, and that is a deliberate exclusion.**
 /// The fold's arm `tables.remove`s an attached child, but only because it re-homes
 /// the snapshot into its `partitions` map - the relation itself still exists.
-/// PostgreSQL 18.4 accepts `ALTER TABLE parent ATTACH PARTITION child; CREATE TABLE
+/// PostgreSQL accepts `ALTER TABLE parent ATTACH PARTITION child; CREATE TABLE
 /// gamma ... REFERENCES child(id)`, so mirroring that removal into a name set whose
 /// whole job is "may a foreign key name this" would manufacture a false refusal.
 /// This set means REFERENCEABLE RELATION, which is what its callers ask of it; it is
@@ -1301,12 +1301,10 @@ impl<'a> CatalogFold<'a> {
     /// nothing to a structural snapshot are NAMED in the last two arms rather than swept
     /// up by a catch-all, so an `Op` variant added to the IR is a compile error here.
     ///
-    /// Section A of `docs/proposals/single-fold-and-effects.md` tabulates this walker as
-    /// "56 arms, 4 `_ =>`", which is measurably not what it is. The four `_` arms it
-    /// counted are nested matches INSIDE four op arms - over `IndexElementSnapshot`,
+    /// The `_` arms in the body are nested matches INSIDE op arms - over
+    /// `IndexElementSnapshot`,
     /// `ColType`, `IrConstraintKind` and an `Option<&ViewSnapshot>`. None of them can
-    /// swallow an op. The catch-all worry the proposal attaches to this walker belongs
-    /// to the two artifact walkers it also tabulates, which are now deleted.
+    /// swallow an op.
     ///
     /// # Errors
     /// See [`FoldError`] for incoherent transitions relative to the state so far.
@@ -2030,7 +2028,7 @@ impl<'a> CatalogFold<'a> {
                 //     of `elements` (the same keys, carrying sort order / opclass),
                 //     and `include` (the non-key payload, whose attributes are
                 //     `indkey` entries past `indnkeyatts` and so depend on the column
-                //     exactly as a key does - measured on PG 18.4:
+                //     exactly as a key does:
                 //     `CREATE INDEX i ON t (b) INCLUDE (a); ALTER TABLE t DROP COLUMN a`
                 //     leaves no `i` in `pg_indexes`). All three are exact names, so an
                 //     exact compare suffices; a multi-column index partially covering
@@ -2039,12 +2037,12 @@ impl<'a> CatalogFold<'a> {
                 //
                 //     The other two column-bearing sites - `IndexSnapshot::predicate`
                 //     (a partial index's `WHERE`) and the `Expr` variant of `elements`
-                //     (an expression key) - cascade in PG too: measured on PG 18.4,
+                //     (an expression key) - cascade in PG too:
                 //     both `CREATE INDEX i ON t (b) WHERE (a > 0)` and
                 //     `CREATE INDEX i ON t ((a + 1))` vanish from `pg_indexes` on
                 //     `DROP COLUMN a`. They are RENDERED SQL TEXT here, not names, and
                 //     matching a name inside rendered SQL is the trap the CHECK cascade
-                //     below exists to avoid: measured on PG 18.4,
+                //     below exists to avoid:
                 //     `CREATE INDEX i ON t (note) WHERE (note <> 'a')` SURVIVES
                 //     `DROP COLUMN a`, so a text match would drop an index PG KEPT -
                 //     worse than the phantom it fixes. So they cascade off
@@ -2215,8 +2213,8 @@ impl<'a> CatalogFold<'a> {
                 // (`apply::drift::constraint_definition_is_comparable`). PG holds
                 // `conkey` as attribute NUMBERS, so `pg_get_constraintdef` deparses
                 // `UNIQUE (b)` / `FOREIGN KEY (b) REFERENCES ...` / `PRIMARY KEY (b)`
-                // the moment the rename commits (measured on PG 18.4) while the fold
-                // kept the old rendering and reported drift on the next introspection.
+                // the moment the rename commits, so a fold that kept the old rendering
+                // would report drift on the next introspection.
                 //
                 // Only the LEADING PARENTHESIZED GROUP is re-rendered, and only for the
                 // three kinds whose leading group is a LOCAL COLUMN LIST. That group
@@ -2252,10 +2250,10 @@ impl<'a> CatalogFold<'a> {
                     }
                 }
                 // The CHECK body, through the quoted-run walk rather than the column-list
-                // re-render above. Measured against live PostgreSQL 18.4: after
+                // re-render above. After
                 // `rename qty_on_hand -> amount_on_hand` the server deparses
                 // `CHECK (((amount_on_hand > 0) AND (note <> 'qty_on_hand'::text)))` -
-                // the REFERENCE moves and the LITERAL does not - and the fold now says
+                // the REFERENCE moves and the LITERAL does not - and the fold says
                 // the same thing about both halves. See
                 // `render::declarative::rename_column_in_check_definitions` for why the
                 // walk is sound here and what it still leaves stale.
@@ -2277,7 +2275,7 @@ impl<'a> CatalogFold<'a> {
                 // would still say `a`).
                 //
                 // The index NAME is deliberately NOT rewritten: PG does NOT rename an
-                // index when a column is renamed (measured on PG 18.4 - an index created
+                // index when a column is renamed (an index created
                 // as `t_a_idx` over `a` is still `t_a_idx` after `a` becomes `b`), so
                 // rewriting it here would invent an index live does not have. Key and
                 // INCLUDE lists are POSITIONAL, so they are rewritten in place and never
@@ -2288,7 +2286,7 @@ impl<'a> CatalogFold<'a> {
                 // keeps `indpred` / `indexprs` pointing at the renamed attribute, so a
                 // later drop of the NEW name still cascades the index. Without this,
                 // `createIndex WHERE a > 0; rename a -> b; drop b` leaves a PHANTOM
-                // partial index - measured against live PG 18.4. Order carries no
+                // partial index. Order carries no
                 // meaning here (unlike the positional key and INCLUDE lists), so it is
                 // re-sorted back to the canonical form `create_index_snapshot` emits.
                 //
@@ -2344,8 +2342,8 @@ impl<'a> CatalogFold<'a> {
                 //
                 // PostgreSQL holds the key in `pg_partitioned_table.partattrs` as
                 // attribute NUMBERS, so `pg_get_partkeydef` deparses the new name the
-                // instant the rename commits (measured on 18.4:
-                // `RANGE (created_at)` -> `RANGE (event_day)`), and live introspection
+                // instant the rename commits
+                // (`RANGE (created_at)` -> `RANGE (event_day)`), and live introspection
                 // expands those same `partattrs` through `pg_attribute`. The key is a
                 // STRUCTURED column list, so this is a name compare like `columns` and
                 // `include` above - no text surgery, and POSITIONAL, so it is rewritten
@@ -4418,7 +4416,7 @@ fn push_folded_constraint(
 /// reach a column through a parse tree, but PostgreSQL treats the two dependencies
 /// differently: an expression/partial INDEX is cascaded away silently, while an
 /// EXCLUDE that names the column only through `indexprs` / `indpred` carries a NORMAL
-/// dependency and PostgreSQL REFUSES the drop outright - measured on PostgreSQL 18.4:
+/// dependency and PostgreSQL REFUSES the drop outright:
 ///
 /// ```text
 /// ALTER TABLE t ADD CONSTRAINT x EXCLUDE USING btree (((a + 1)) WITH =);
@@ -4436,8 +4434,8 @@ fn push_folded_constraint(
 /// `conkey` at all.
 ///
 /// A column reached through BOTH a plain element and an expression/predicate still
-/// cascades, because the plain element's auto dependency is enough - measured on
-/// PostgreSQL 18.4, `EXCLUDE USING gist (a WITH =, ((b + 1)) WITH =)` loses the whole
+/// cascades, because the plain element's auto dependency is enough:
+/// `EXCLUDE USING gist (a WITH =, ((b + 1)) WITH =)` loses the whole
 /// constraint to `DROP COLUMN a`. Matching on the plain elements alone gets that
 /// right.
 ///
@@ -5202,11 +5200,8 @@ fn resolved_injected_column_matches(
 //
 // The `FieldDef` PROJECTION is the RECOVERY direction (ops -> FieldDef map); this is
 // its faithful INVERSE over the authoring surface (descriptor -> ops), the structural
-// inverse of `ir_column_to_field` + `recover_check_facet`. The recovery direction used
-// to be a standalone `FieldDef` walker in this file; it is deleted
-// (`docs/proposals/single-fold-and-effects.md` section G) and the answer is
-// now `single_fold::fold(ops)?.project_field_defs()`. The round-trip parity claim is
-// unchanged - only the name of the side that produces the right-hand column moved:
+// inverse of `ir_column_to_field` + `recover_check_facet`. The recovery direction
+// is `single_fold::fold(ops)?.project_field_defs()`. The round-trip parity claim is:
 //
 //   author (declarative)         descriptor_to_sdk_schema(descriptor)   --+
 //        |                                                                 +- MUST be byte-identical
@@ -9048,14 +9043,7 @@ columns = [
     // depend on the carry + lift logic.
     // ===================================================================
 
-    /// The wire `FieldDef` map for `ops`.
-    ///
-    /// The standalone `FieldDef` walker is deleted
-    /// (`docs/proposals/single-fold-and-effects.md` section G); the map is a PROJECTION
-    /// of the one fold now, and this is the whole of the difference at a call site.
-    /// The tests below are
-    /// unchanged otherwise, which is the claim - they were written against the walker's
-    /// answers and they still hold.
+    /// The wire `FieldDef` map for `ops` - a PROJECTION of the one fold.
     fn field_defs_of(
         ops: &[Op],
         dialect: &DialectId,

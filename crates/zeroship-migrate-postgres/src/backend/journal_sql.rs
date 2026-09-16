@@ -268,9 +268,7 @@ pub async fn ensure_journal<D: SqlSession>(
     // `None` (see `engine.rs`, which states the same thing where it declines to
     // roll obligations back). So no marker is written today and none can be
     // promoted or recovered. Treat everything below as the design a driver would
-    // have to implement, not as behaviour you can observe. `docs/review-log.md`
-    // carries it as an open decision, with the options for where the driver
-    // should live.
+    // have to implement, not as behaviour you can observe.
     //
     // The design: a deploy would make itself a RECOVERABLE unit by having each
     // same-deploy EXPAND write an `in_progress` row keyed on a per-deploy

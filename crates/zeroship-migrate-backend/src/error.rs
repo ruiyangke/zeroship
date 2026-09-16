@@ -1,30 +1,23 @@
 //! The two render-time ERROR types the backend contract carries across the crate
 //! boundary.
 //!
-//! They live here rather than in the engine for one measured reason: they are the
-//! `Err` halves of [`crate::renderer::DmlRenderer`]'s signatures, so a vendor crate
-//! cannot implement the trait without naming them. Leaving them in the engine is
-//! exactly the cycle `docs/proposals/pluggable-backends.md` describes - the engine
-//! would name the vendors for its registry while the vendors name the engine for
-//! their error type, and Cargo refuses.
+//! They live here rather than in the engine because they are the `Err`
+//! halves of [`crate::renderer::DmlRenderer`]'s signatures, so a vendor crate
+//! cannot implement the trait without naming them. Leaving them in the engine
+//! would close a dependency cycle: the engine would name the vendors for its
+//! registry while the vendors name the engine for their error type, and Cargo
+//! refuses.
 //!
-//! MEASURED, not assumed. With these two enums, [`crate::step::BindValue`] and the
-//! `renderer` / `dml` / `vendor` modules moved out, the transitive core-module
-//! closure of the DML vendor modules collapses from effectively the whole engine to a
-//! small neighbourhood. `IrLowerError` alone was the bridge: it sat in
-//! `render::lower`, which reaches `engine`, `apply::*`, `model::validate` and
-//! `render::fold` - effectively all of the engine.
-//!
-//! Neither enum needed anything from the engine to come with it. Every
+//! Neither enum needs anything from the engine to come with it. Every
 //! `DeclarativeError` payload is a `String`, a `&'static str` or a `Vec<String>`;
 //! `IrLowerError`'s only non-scalar payloads are the other three render errors
 //! ([`DeclarativeError`], [`crate::vendor::VendorError`], [`crate::dml::DmlError`])
-//! and `zeroship_migrate_ir::validate::AuthoringError`, which was already in the leaf
+//! and `zeroship_migrate_ir::validate::AuthoringError`, which is in the leaf
 //! wire crate.
 //!
-//! Both are re-exported from their historical engine paths
+//! Both are re-exported from the engine paths
 //! (`zeroship_migrate::render::lower::IrLowerError`,
-//! `zeroship_migrate::render::declarative::DeclarativeError`), so every existing caller
+//! `zeroship_migrate::render::declarative::DeclarativeError`), so every caller
 //! and every `match` arm resolves unchanged.
 
 use zeroship_migrate_ir::dialect::DialectId;
@@ -127,27 +120,24 @@ pub enum DeclarativeError {
     /// [`ColumnRenameStrategy`](crate::schema::ColumnRenameStrategy) is `Refuse`.
     ///
     /// The rename author is dialect-blind: a backend that rebuilds skips past it, so
-    /// every OTHER backend pushed an `ExpandContractPlan` into the plan's `renames`
-    /// whether or not it could run one. The engine then maps every one of them to
-    /// `RenameStep::ExpandContract` unconditionally, and a backend that exposes no
-    /// `OnlineSchemaChange` capability has nothing to drive it with - so the deploy
-    /// died mid-apply on an internal "routing bug" message, AFTER the plain DDL ahead
-    /// of it had already committed, leaving a schema that was neither the old shape
-    /// nor the new one and that no retry could complete.
+    /// without this refusal every OTHER backend would push an `ExpandContractPlan`
+    /// into the plan's `renames` whether or not it could run one. The engine maps
+    /// every one of them to `RenameStep::ExpandContract` unconditionally, and a
+    /// backend that exposes no `OnlineSchemaChange` capability has nothing to drive
+    /// it with - the deploy would die mid-apply on an internal "routing bug"
+    /// message, AFTER the plain DDL ahead of it had already committed, leaving a
+    /// schema that was neither the old shape nor the new one and that no retry
+    /// could complete.
     ///
-    /// **The engine already declared this unsupported everywhere else**: the
-    /// disposition table records `renameColumn | base | mysql: Unsupported`,
-    /// `docs/dialects.md` prints `No`, and the IR lane's `lower_ir_rename` answers
-    /// `Err(UnsupportedInV1)` at plan time. Only the differ dissented, and it was the
-    /// one path that reached a live server.
+    /// **The engine declares this unsupported everywhere else**: the disposition
+    /// table records `renameColumn | base | mysql: Unsupported`, and the IR lane's
+    /// `lower_ir_rename` answers `Err(UnsupportedInV1)` at plan time. This refusal
+    /// is the differ path agreeing with them.
     ///
-    /// Note the DIRECTION, because the previous MySQL disagreement in this codebase
-    /// ran the other way: for `setColumnType` the table said *portable* while the
-    /// engine refused - the table was right and the engine under-delivered. This one
-    /// is the mirror image. The table said *unsupported* and the engine
-    /// OVER-delivered, planning an apply that could not work. Same class of
-    /// table-vs-engine disagreement, opposite sign; check which way the next one
-    /// points before assuming the table is the thing that needs correcting.
+    /// Table-vs-engine disagreements run in both directions - elsewhere a table
+    /// has said *portable* while the engine under-delivered; this one is the
+    /// mirror image. Check which way one points before assuming the table is the
+    /// thing that needs correcting.
     #[error(
         "cannot rename column {table}.{from} to {to} on {dialect}: the differ authors \
          a rename as the expand-contract sequence (add shadow column, dual-write \
@@ -605,14 +595,13 @@ pub enum IrLowerError {
     /// A `setColumnType` on an IDENTITY column named a target PostgreSQL will not
     /// let an identity column have.
     ///
-    /// MEASURED on PostgreSQL 18.4 through the engine's own emitted SQL: the
-    /// server answers `identity column type must be smallint, integer, or bigint`
-    /// and refuses the `ALTER` outright. The op cleared `validate` AND `preview`
-    /// before this refusal existed, so the operator met the verdict mid-deploy,
-    /// with the migration's earlier statements already applied.
+    /// PostgreSQL answers `identity column type must be smallint, integer, or
+    /// bigint` and refuses the `ALTER` outright. This refusal exists so the
+    /// verdict meets the operator at plan time, not mid-deploy with the
+    /// migration's earlier statements already applied.
     ///
     /// The permitted set is exactly the server's three, and exactly them: a DOMAIN
-    /// over `integer` is refused by PostgreSQL too, measured, so it is refused
+    /// over `integer` is refused by PostgreSQL too, so it is refused
     /// here. Widening and narrowing WITHIN the set stay legal - `int -> bigint` and
     /// `int -> smallint` both apply with `attidentity` intact - because a refusal
     /// broader than the server's would deny a migration the database honours.
@@ -711,7 +700,7 @@ pub enum IrLowerError {
     ///
     /// The emitters render `CREATE INDEX IF NOT EXISTS` whether or not the author
     /// asked, so the server SKIPS such a statement and reports success while
-    /// keeping the live index. Measured: with `ix` live as a non-unique index on
+    /// keeping the live index: with `ix` live as a non-unique index on
     /// `(v)`, `CREATE UNIQUE INDEX IF NOT EXISTS "ix" ... ("w")` succeeds with a
     /// NOTICE and leaves the old index - the author gets neither the uniqueness
     /// they asked for nor an error.
@@ -777,9 +766,9 @@ pub enum IrLowerError {
     ///
     /// The message states its two reasons as alternatives because they ARE
     /// alternatives, and only one of them holds on any given refusal. The capability
-    /// route reaches this without inspecting the snapshot at all, so a caller who
-    /// supplied a complete one used to be told it was missing and went looking for
-    /// introspection data it already had.
+    /// route reaches this without inspecting the snapshot at all, so naming a
+    /// missing snapshot as the sole reason would send a caller who supplied a
+    /// complete one looking for introspection data it already has.
     #[error(
         "IrAuthor::lower of op {op_kind:?} on {dialect} needs a whole-table rebuild, \
          which this path cannot emit: either the op shape is one it does not rebuild, \
@@ -886,10 +875,8 @@ pub enum IrLowerError {
     /// column's type is absent" that EVERY target needs.
     ///
     /// `missing` is the CALLER'S name for the input it could not find, because the
-    /// caller owns that input's type. The message used to enumerate two field paths
-    /// on the engine's own live-schema struct, one of which spells a vendor; the
-    /// caller supplies whichever one it actually looked for now, so the refusal names
-    /// exactly the map that is absent instead of both.
+    /// caller owns that input's type: the refusal names exactly the map that is
+    /// absent.
     #[error(
         "IrAuthor::lower of a renameColumn on {dialect} table {table:?} needs \
          {missing} to author its rebuild; it is absent — refusing to emit a rebuild \

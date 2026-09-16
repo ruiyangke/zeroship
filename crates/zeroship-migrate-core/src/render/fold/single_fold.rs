@@ -77,7 +77,7 @@ pub(crate) struct AuthoredTable {
 ///   independently of the table and the column it covers, so neither
 ///   `ALTER TABLE ... RENAME TO` nor `ALTER TABLE ... RENAME COLUMN` renames it -
 ///   the rule [`super::fold_ops`]'s `Op::RenameTable` arm states for the catalog
-///   half, measured against live servers by `fold_roundtrip_pg.rs`. A projection
+///   half, pinned against live servers by `fold_roundtrip_pg.rs`. A projection
 ///   that re-derived `{table}_{column}_key` from the CURRENT names would invent a
 ///   rename no server performs and name an index the database does not have.
 /// * `column` FOLLOWS a column rename, because the field the index covers is the
@@ -125,8 +125,7 @@ pub struct FoldedSchema {
 /// # Errors
 /// Any [`FoldError`] the structural catalog replay reports. The fold fails CLOSED for
 /// every projection: a stream the catalog refuses yields no artifact at all, which is
-/// what `render_artifacts` already does by returning the fold's error, and is the
-/// behaviour `docs/review-log.md` records for the two fold-backed walkers.
+/// what `render_artifacts` already does by returning the fold's error.
 pub fn fold(
     vendors: VendorSet,
     ops: &[Op],
@@ -178,10 +177,9 @@ struct AuthoredState<'a> {
 impl AuthoredState<'_> {
     /// Advance the authored half by ONE op.
     ///
-    /// The match is EXHAUSTIVE with no `_` arm, which is section H's op-exhaustiveness
-    /// requirement: an `Op` variant added to the IR is a compile error here rather than
-    /// a silent fall-through. Section A measured walkers whose catch-alls swallow most
-    /// of the `Op` variants; this one swallows nothing silently.
+    /// The match is EXHAUSTIVE with no `_` arm: an `Op` variant added to the IR is a
+    /// compile error here rather than
+    /// a silent fall-through, and this walker swallows nothing silently.
     #[allow(clippy::too_many_lines)]
     fn advance(&mut self, op: &Op, effective: &EffectivePolicy) -> Result<(), FoldError> {
         let dialect = self.dialect;
@@ -275,11 +273,8 @@ impl AuthoredState<'_> {
             Op::DropTable { table, .. } => {
                 self.tables.remove(table);
             }
-            // A dropped partition is a dropped RELATION. This arm was once recorded as
-            // a CHOICE - the differential corpus never constructs the only pair that
-            // reaches it, `createTable` followed by `attachPartition` - and then
-            // `project_authoring_tables` made it live in `env.db.ts`, so it stopped
-            // being allowed to stay unmeasured. It is now measured three ways:
+            // A dropped partition is a dropped RELATION. The arm is pinned three
+            // ways:
             //
             // * against a live PostgreSQL, in
             //   `crates/zeroship-migrate/tests/fold_live/env_db_ts_matches_the_server_pg.rs`: the migration is applied
@@ -477,43 +472,38 @@ impl AuthoredState<'_> {
                     .and_then(|state| state.core.columns.get_mut(column))
                 {
                     // THE PER-FACET VERDICT for `Op::SetColumnType`: what a change of
-                    // base type does to every OTHER facet the column carries. It lived
-                    // on a retype helper in `render::lower` until that helper was
-                    // deleted, because the walker was its only caller - so the
-                    // verdict lives HERE now, in the one traversal, and
+                    // base type does to every OTHER facet the column carries. The
+                    // verdict lives HERE, in the one traversal, and
                     // `set_column_type_facets` pins it.
                     //
-                    // WHY THE MOVE MATTERS. The verdict used to be stated three times:
-                    // once for the authoring tables, once for the `FieldDef` map, and
-                    // once in the catalog fold's `ColumnSnapshot` terms. The first two
-                    // are now ONE statement with two readers - this arm - which is the
-                    // whole point of the proposal. Two statements remain: this one and
-                    // `fold_ops`'s, plus `model::validate`'s `declare_logical_column`
-                    // for the logical-column contract. They still have to agree, and
-                    // `set_column_type_facets` is still what makes them.
+                    // The verdict is stated in TWO places that must agree: this arm
+                    // (covering the authoring tables and the `FieldDef` map) and
+                    // `fold_ops`'s arm in `ColumnSnapshot` terms, plus
+                    // `model::validate`'s `declare_logical_column` for the
+                    // logical-column contract. `set_column_type_facets` is what makes
+                    // them agree.
                     //
                     // RE-DERIVED. Every parameterised facet rides INSIDE `ColType`
                     // (`String { length }`, `Char { length }`, `Vector { vector }`,
                     // `Encrypted { of }`), so assigning `ty` re-derives `max_length`,
                     // `char_len`, `vector_dims`, `unbounded_text` and `encrypted` by
                     // construction, at projection time, through the same
-                    // `ir_column_to_field` a `createTable` column goes through. A replay
-                    // that assigned only the TOKEN was wrong in both directions: it kept
-                    // `maxLength: 24` on a column widened to `varchar(40)` and emitted a
+                    // `ir_column_to_field` a `createTable` column goes through. Assigning
+                    // only the TOKEN would be wrong in both directions: it would keep
+                    // `maxLength: 24` on a column widened to `varchar(40)` and emit a
                     // bare `{"type":"char"}` - which is not a type - for a retype INTO
                     // `char(8)`.
                     //
                     // CLEARED, because `Op::SetColumnType` has no slot to re-declare
                     // them and a retype that kept them would describe the type the
-                    // column no longer has - section B's five `setColumnType` rows in
-                    // one line:
+                    // column no longer has:
                     //
                     // * `case_sensitive` - on PostgreSQL case-insensitivity IS the
-                    //   `citext` TYPE, so changing the type destroys it. Measured on
-                    //   live PostgreSQL 18.4: `citext -> character varying(40)` leaves a
+                    //   `citext` TYPE, so changing the type destroys it:
+                    //   `citext -> character varying(40)` leaves a
                     //   plain case-SENSITIVE column, and because `case_sensitive` is
-                    //   DRIFT-COMPARED, keeping it reported drift on a schema that was
-                    //   exactly what had been deployed.
+                    //   DRIFT-COMPARED, keeping it would report drift on a schema that
+                    //   was exactly what had been deployed.
                     // * `vector_metric` - a DECLARED-ONLY opclass selector with no
                     //   catalog trace, meaningless off a `vector` type.
                     // * `id_prefix` - the legacy text-shaped brand, whose writer owns
@@ -525,12 +515,10 @@ impl AuthoredState<'_> {
                     // `min`, `max`, `enum_values` and `literal_value` need no clearing
                     // in this model and that is a PROPERTY rather than an omission: they
                     // are not column state at all, they are derived at projection time
-                    // from the constraints the table still holds. The walker had to
-                    // clear them by hand because it kept them in a side map, and the
-                    // same side map is what let a DROPPED constraint's bound outlive it.
+                    // from the constraints the table still holds, so a DROPPED
+                    // constraint's bound cannot outlive it.
                     //
-                    // KEPT, measured on live PostgreSQL 18.4 with one
-                    // `ALTER TABLE ... ALTER COLUMN ... TYPE` per row: `nullable`
+                    // KEPT: `nullable`
                     // (`attnotnull` survives), `unique` (the index is REBUILT and
                     // survives), `default` (PostgreSQL re-casts it and REFUSES the whole
                     // ALTER when it cannot, so a default that reaches a fold is one the
@@ -545,7 +533,7 @@ impl AuthoredState<'_> {
                     // cleared nor kept - `fold_ops`'s own `Op::SetColumnType` arm fails
                     // closed on them, because the apply path emits ONLY
                     // `ALTER COLUMN ... TYPE` and the database would keep a contract this
-                    // side can no longer describe. The full measurement is recorded at
+                    // side can no longer describe. The reasons are recorded at
                     // that refusal.
                     column.ty.clone_from(to_type);
                     column.value_format = None;
@@ -782,13 +770,13 @@ pub(crate) fn field_defs_from_collections(
 }
 
 impl FoldedSchema {
-    /// **Projection 1: the catalog snapshot.** Today's `fold_ops` output.
+    /// **Projection 1: the catalog snapshot.** The `fold_ops` output.
     ///
     /// The tables come back through the NEUTRAL/VENDOR split, so this projection
     /// exercises `SchemaModel::from_tables` / `to_tables` on FOLDED shapes across the
-    /// whole corpus. The existing equivalence suites only ever ran the split on
+    /// whole corpus. The equivalence suites otherwise only ever run the split on
     /// LIVE-INTROSPECTED snapshots, which populate a different set of vendor families,
-    /// so a family the split drops on an authored shape was previously unmeasured.
+    /// so a family the split drops on an authored shape is invisible to them.
     #[must_use]
     pub(crate) fn project_snapshot(&self) -> SchemaSnapshot {
         let mut snapshot = self.unmodelled.clone();
@@ -796,8 +784,7 @@ impl FoldedSchema {
         snapshot
     }
 
-    /// **Projection 2: the per-table wire `FieldDef` map.** LIVE: it replaced the
-    /// deleted op-stream walker that used to produce it, and it feeds
+    /// **Projection 2: the per-table wire `FieldDef` map.** It feeds
     /// `schema.runtime.json` and, on SQLite, `live.sdk_schemas`.
     ///
     /// The `live.sdk_schemas` half is READ by exactly one caller - `render/lower.rs`'s
@@ -806,11 +793,11 @@ impl FoldedSchema {
     /// arm, which replays SQLite's own `CREATE TABLE` text. The map's CONTENT reaches a
     /// rebuilt `CREATE TABLE` only on the SDK-value arm, which needs a live snapshot with
     /// no `stored_create_sql` - the shape `engine::refresh_historical_live` builds. Both
-    /// halves are measured in `crates/zeroship-migrate/tests/fold_live/sqlite_rebuild_field_defs_live.rs`; do not read
+    /// halves are pinned in `crates/zeroship-migrate/tests/fold_live/sqlite_rebuild_field_defs_live.rs`; do not read
     /// "therefore the 12-step rebuild" into this without reading that file first.
     ///
     /// Every facet is DERIVED FROM THE MODEL, never recovered from a rendered
-    /// artifact - decision 5. The CHECK and FK facets come from the authored
+    /// artifact. The CHECK and FK facets come from the authored
     /// constraints the model holds, so `recover_check_facet` reads a closed AST the
     /// fold carried forward rather than SQL text some other projection emitted.
     #[must_use]
