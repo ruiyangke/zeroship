@@ -259,11 +259,11 @@ impl SpendEngine {
             .map(|p| (p.id.clone(), p))
             .collect();
 
-        // Compute-unit pricing (Refactor B): load the GLOBAL cost model + the
+        // Compute-unit pricing: load the GLOBAL cost model + the
         // default FX ONCE per sweep (both are tiny global tables), then price
         // every app's usage as integer CU × the plan's effective FX. The dollar
-        // cap comparison below is UNCHANGED — `total_units × fx` is folded into
-        // `total_cents` exactly as the old per-metric overage was.
+        // cap comparison below is unchanged — `total_units × fx` is folded into
+        // `total_cents`.
         let pricing = PricingStore::new(self.registry.clone());
         let weights = pricing.weights().await?;
         let default_fx = pricing.default_fx_pico_cents_per_unit().await?;
@@ -460,10 +460,10 @@ impl SpendEngine {
             ],
         )
         .await?;
-        // `spend_state_history.period` is NOT NULL — bind it (this is why the
-        // 0041 DDL and this code had to land together). The `from_state`/`to_state`
-        // params are bound `::text` (the spend_state domain rejects a bare &str).
-        // `id` is the PR-6 surrogate PK (`she_<base36>`) = the
+        // `spend_state_history.period` is NOT NULL — bind it. The
+        // `from_state`/`to_state` params are bound `::text` (the spend_state domain
+        // rejects a bare &str).
+        // `id` is the surrogate PK (`she_<base36>`) = the
         // `billing_notifications.transition_id` for spend-driven notification kinds;
         // minted in Rust here (no SQL DEFAULT — the prefix the notify dedup-disjointness
         // relies on cannot be produced by `gen_random_uuid()`).
@@ -488,9 +488,9 @@ impl SpendEngine {
     }
 
     /// UPSERT spend/eval-limit freshness WITHOUT a state change (no history).
-    /// The creator override now lives in the SEPARATE `app_spend_limit` table
-    /// (set only via `set_limit`), so this derived-state write no longer has an
-    /// override column to clobber — ending the prior three-writer clobber dance.
+    /// The creator override lives in the SEPARATE `app_spend_limit` table (set
+    /// only via `set_limit`), so this derived-state write has no override column
+    /// to clobber.
     async fn touch_state(
         conn: &compio_postgres::Client,
         app_id: &AppId,
@@ -520,9 +520,9 @@ impl SpendEngine {
     }
 
     /// Set (or clear, with `None`) the per-app spend-limit override. Used by
-    /// the M4 creator endpoint. Upserts the dedicated CONFIG table
-    /// `app_spend_limit` ONLY — it no longer touches the derived `app_spend_state`
-    /// row (that was the three-writer clobber). The next `evaluate_all` tick
+    /// the creator endpoint. Upserts the dedicated CONFIG table
+    /// `app_spend_limit` ONLY — it never touches the derived `app_spend_state`
+    /// row. The next `evaluate_all` tick
     /// re-derives against the new effective limit (immediate recovery on a raise,
     /// via the `limit_changed` deadband bypass).
     pub async fn set_limit(
