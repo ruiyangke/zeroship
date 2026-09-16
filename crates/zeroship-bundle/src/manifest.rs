@@ -428,13 +428,16 @@ impl Manifest {
     /// §7. Future breaking changes bump to v2.
     fn default_version() -> u16 { 1 }
 
-    /// Synthesize the default "everything goes to the worker" manifest.
-    /// Used for apps that haven't yet shipped a manifest of their own.
-    /// One catch-all `*` resource entry keeps every URL path landing on
-    /// the worker as SSR; an `anonymous` policy with `publicly_accessible: true`
-    /// satisfies the secure-by-default check. Synthesized rather than
-    /// built — `metadata.built_at` is the fixed epoch sentinel so it's
-    /// recognizable.
+    /// Synthesize the minimal manifest for an app that has not shipped one.
+    ///
+    /// A single catch-all `*` resource entry with an `anonymous`,
+    /// `publicly_accessible: true` policy satisfies the secure-by-default check.
+    /// It does NOT route arbitrary URL paths: the gateway resolves no per-path
+    /// resource from it and answers 404 without invoking the worker
+    /// (`passthrough_manifest_has_only_root_default`).
+    ///
+    /// Synthesized rather than built — `metadata.built_at` is the fixed epoch
+    /// sentinel so it's recognizable.
     pub fn passthrough() -> Self {
         let mut resources: HashMap<String, ResourceEntry> = HashMap::new();
         resources.insert(
