@@ -123,13 +123,10 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
     // The spend-band tests below drive the real spend-reconcile sweep, which
     // fails closed with "global default FX missing" unless the shared
     // `pricing_config` singleton exists. Nothing in the platform migration
-    // creates that row: it appeared only because `billing_reconcile_test` (whose
-    // fail-closed case deletes and then re-INSERTs it) happened to run FIRST in
-    // the old hand-ordered binary list. That is a hidden order dependency, and
-    // it broke the moment the runner stopped enumerating binaries by name. Seed
-    // it here so this binary is self-sufficient in any order. The value matches
-    // the restore in `billing_reconcile_test`, and `ON CONFLICT DO NOTHING`
-    // leaves a value another binary set alone.
+    // creates that row, so this binary must seed it to be self-sufficient in any
+    // order (a sibling binary's own seed order is not a contract). The value
+    // matches the restore in `billing_reconcile_test`, and `ON CONFLICT DO
+    // NOTHING` leaves a value another binary set alone.
     control_pg_client
         .execute(
             "INSERT INTO zeroship.pricing_config (id, fx_pico_cents_per_unit) \
@@ -780,9 +777,9 @@ async fn history_surrogate_ids_carry_disjoint_prefixes() {
 // idempotent across ticks. Authoritative assertions are off the `billing_notifications`
 // ledger (per-organization, per-kind), cross-fixture-safe exactly like the other kinds.
 //
-// RED pre-wiring: before the BillingNotificationKind::Spend* variants + the scan arm (g)
-// existed, `scan_unsent` never read `spend_state_history`, so ZERO spend notifications
-// were ever produced — `sent_count_kind(.., SpendWarn/Degrade/Block)` would all be 0.
+// `scan_unsent` must read `spend_state_history`: if it does not, ZERO spend
+// notifications are produced and every `sent_count_kind(.., SpendWarn/Degrade/Block)`
+// is 0.
 // ===========================================================================
 
 /// A process-wide gate serializing SPEND ticks across this binary's tests (the
@@ -799,8 +796,7 @@ fn lock_spend_gate() -> std::sync::MutexGuard<'static, ()> {
 /// Seed a plan charging 1 cent/request with `limit_cents` default spend cap and
 /// an app on that plan IN `organization`.
 ///
-/// The link used to be an `owner` seat, because the notify scan walked the app
-/// to a human. It scans `apps.organization_id` now, so the app has to be placed
+/// The notify scan walks `apps.organization_id`, so the app has to be placed
 /// in the organization under test - an app in some other organization would
 /// simply produce no notification for this one and the sweep would time out
 /// rather than fail on a value.
@@ -1065,12 +1061,11 @@ async fn spend_band_walk_produces_one_notification_per_transition() {
 // `to_state` is still warn/degrade/block must NOT email — telling a organization whose app is
 // RECOVERING that it "is being throttled" / "approaching the limit" is wrong.
 //
-// RED proof: the original arm (g) filtered solely on `to_state IN ('warn','degrade','block')`
-// with NO direction check, so the `block→degrade` edge produced a spurious SpendDegrade
-// ("being throttled") email and `degrade→warn` produced a spurious SpendWarn ("approaching
-// your limit") email on the way DOWN. This test walks the band DOWN (Block→Degrade→Warn→
-// Allow) via real limit-raise reconcile ticks and asserts ZERO spend notifications — it
-// FAILS against the pre-fix code (2 spurious recovery emails), passes after the SQL gate.
+// The scan must filter on DIRECTION, not `to_state` alone: a `block→degrade` edge
+// would otherwise produce a spurious SpendDegrade ("being throttled") email and
+// `degrade→warn` a spurious SpendWarn ("approaching your limit") on the way DOWN.
+// This test walks the band DOWN (Block→Degrade→Warn→Allow) via real limit-raise
+// reconcile ticks and asserts ZERO spend notifications.
 // ===========================================================================
 // See the allow on `tick_until_sent` above.
 #[allow(clippy::await_holding_lock)]
@@ -1167,8 +1162,9 @@ async fn spend_band_recovery_walk_sends_no_notifications() {
     let warn = sent_count_kind(&fx.pg, organization, SpendWarn).await;
     let degrade = sent_count_kind(&fx.pg, organization, SpendDegrade).await;
     let block = sent_count_kind(&fx.pg, organization, SpendBlock).await;
-    // DELTA vs the baseline (the upward allow→block): the recovery walk must add NOTHING.
-    // Pre-fix, block→degrade adds a SpendDegrade and degrade→warn adds a SpendWarn.
+    // DELTA vs the baseline (the upward allow→block): the recovery walk must add
+    // NOTHING, so a block→degrade edge adds no SpendDegrade and degrade→warn no
+    // SpendWarn.
     assert_eq!(
         warn, base_warn,
         "NO new spend_warn on the degrade→warn recovery edge"
