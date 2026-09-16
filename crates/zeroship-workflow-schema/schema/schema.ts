@@ -21,6 +21,7 @@ const bytewiseColumns = {
   deployment_holds: ["deploy_id"],
   job_receipts: ["id", "app_id", "run_id"],
   collection_pages: ["id", "app_id"],
+  reconciliation_pages: ["id", "app_id"],
   payloads: ["id", "app_id"],
   activations: ["id", "app_id", "deploy_id"],
   activation_scopes: ["id", "activation_id"],
@@ -193,17 +194,28 @@ export function workflowSchema(namespace) {
     },
     sqlite() {},
   });
+  // A column lives here only when code that has not yet determined the job's
+  // kind reads it: `run_id` answers the kind-blind left join that finds runs
+  // with no outstanding receipt. Everything a single kind stores lives in that
+  // kind's own table, keyed by the job id and scoped by the app.
   create("job_receipts", {
     ...identity(), run_id: t.text(), id: text(), specification: text(), outcome: t.text(),
-    reconciliation: t.text(), reconciliation_next: t.bigInt(),
     created_at: integer(), completed_at: t.bigInt(),
   }, ["app_id", "id"], [appFk("job_receipts")]);
   index("job_receipts", "run", ["app_id", "run_id"]);
+  // Both paged sweeps store the same extension: the plan the delivered page
+  // committed to, and the index of the next item it will reserve.
   create("collection_pages", {
     ...identity(), plan: text(), next_index: integer(),
   }, ["app_id", "id"], [
     appFk("collection_pages"),
     fk("collection_page_receipt", ["app_id", "id"], "job_receipts", ["app_id", "id"]),
+  ]);
+  create("reconciliation_pages", {
+    ...identity(), plan: text(), next_index: integer(),
+  }, ["app_id", "id"], [
+    appFk("reconciliation_pages"),
+    fk("reconciliation_page_receipt", ["app_id", "id"], "job_receipts", ["app_id", "id"]),
   ]);
   create("activations", {
     ...identity(), deploy_id: text(), revision: integer(),

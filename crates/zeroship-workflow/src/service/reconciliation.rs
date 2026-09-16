@@ -8,7 +8,7 @@
 use super::{
     app::{decode, encode, lock_app_state},
     delivery::{self, CapturedLease, JobReceipt},
-    models::{app_state, job_receipts},
+    models::{app_state, job_receipts, reconciliation_pages},
     publication::JobPublisher,
     store::Transaction,
     AppWorkflows,
@@ -51,7 +51,7 @@ impl ReconciliationOptions {
 }
 
 mod scan;
-use scan::{pending_ids, scan, Phase, Plan};
+use scan::{pending_ids, scan, Page, Phase, Plan};
 
 enum Admission {
     Page(Plan),
@@ -176,8 +176,8 @@ impl AppWorkflows {
     ) -> Result<Admission, WorkflowServiceError> {
         let mut tx = self.service.begin().await?;
         lock_app_state(&mut tx, self.app_id()).await?;
-        let record = delivery::read(&tx, job).await?;
-        if let Some(record) = &record {
+        let stored = read_page(&tx, job).await?;
+        if let Some((record, _)) = &stored {
             if let Some(receipt) = record.receipt(job)? {
                 tx.commit().await?;
                 return Ok(Admission::Settled(receipt));
@@ -185,8 +185,8 @@ impl AppWorkflows {
         }
         let authority = authority.map_err(Clone::clone)?;
         authority.check(self)?;
-        let plan = if let Some(record) = record {
-            let plan: Plan = decode(record.reconciliation.as_deref().ok_or_else(invalid)?)?;
+        let plan = if let Some((_, page)) = stored {
+            let plan: Plan = decode(&page.plan)?;
             plan.validate()?;
             plan
         } else {
@@ -239,7 +239,10 @@ impl AppWorkflows {
             plan.validate()?;
             let now = tx.now().await?;
             tx.database().collection(job_receipts::Entity::COLLECTION)?.insert(value!({
-                "id":job.id.as_str(), "app_id":self.app_id().as_str(), "specification":encode(job)?, "reconciliation":encode(&plan)?, "reconciliation_next":0, "created_at":now,
+                "id":job.id.as_str(), "app_id":self.app_id().as_str(), "specification":encode(job)?, "created_at":now,
+            })).await?;
+            tx.database().collection(reconciliation_pages::Entity::COLLECTION)?.insert(value!({
+                "id":job.id.as_str(), "app_id":self.app_id().as_str(), "plan":encode(&plan)?, "next_index":0,
             })).await?;
             plan
         };
@@ -257,17 +260,16 @@ impl AppWorkflows {
     ) -> Result<Progress, WorkflowServiceError> {
         let mut tx = self.service.begin().await?;
         lock_app_state(&mut tx, self.app_id()).await?;
-        let record = delivery::read(&tx, job).await?.ok_or_else(invalid)?;
+        let (record, page) = read_page(&tx, job).await?.ok_or_else(invalid)?;
         if let Some(receipt) = record.receipt(job)? {
             tx.commit().await?;
             return Ok(Progress::Settled(receipt));
         }
         authority.check(self)?;
-        if decode::<Plan>(record.reconciliation.as_deref().ok_or_else(invalid)?)? != *plan {
+        if decode::<Plan>(&page.plan)? != *plan {
             return Err(invalid());
         }
-        let index = usize::try_from(record.reconciliation_next.ok_or_else(invalid)?)
-            .map_err(|_| invalid())?;
+        let index = usize::try_from(page.next_index).map_err(|_| invalid())?;
         if index > plan.ids.len() {
             return Err(invalid());
         }
@@ -276,15 +278,7 @@ impl AppWorkflows {
         let progress = if let Some(id) = plan.ids.get(index) {
             // Reserve before I/O. Cancellation may skip this attempt, but the
             // intent stays pending for the next sweep; redelivery reaches its suffix.
-            let next = i64::try_from(index)
-                .map_err(|_| invalid())?
-                .checked_add(1)
-                .ok_or_else(invalid)?;
-            let changed = tx.database().collection(job_receipts::Entity::COLLECTION)?.execute(Operation::Update {
-                filter:value!({"id":job.id.as_str(), "app_id":self.app_id().as_str(), "reconciliation_next":record.reconciliation_next}),
-                patch:value!({"reconciliation_next":next}), many:true,
-            }).await?;
-            changed_once(&changed)?;
+            delivery::reserve::<reconciliation_pages::Entity>(&tx, job, index, invalid).await?;
             Progress::Item(id.clone())
         } else {
             if current.reconciliation_revision == plan.revision {
@@ -340,6 +334,36 @@ impl AppWorkflows {
         }
         Ok(progress)
     }
+}
+
+/// Replay a delivered page's committed outcome. The page is read with the
+/// receipt, so a settled reconciliation that has lost its page reports a
+/// damaged journal rather than an outcome.
+pub(super) async fn receipt(
+    tx: &Transaction,
+    job: &JobSpec,
+) -> Result<Option<JobReceipt>, WorkflowServiceError> {
+    match read_page(tx, job).await? {
+        Some((record, _)) => record.receipt(job),
+        None => Ok(None),
+    }
+}
+
+/// Read the receipt together with the page it is settling. The page carries the
+/// job's own identity, scoped by the app, so a row naming anything else is a
+/// damaged journal rather than another app's page.
+async fn read_page(
+    tx: &Transaction,
+    job: &JobSpec,
+) -> Result<Option<(delivery::Record, Page)>, WorkflowServiceError> {
+    let stored =
+        delivery::read_extended::<reconciliation_pages::Entity, Page>(tx, job, invalid).await?;
+    if let Some((_, page)) = &stored {
+        if page.id != job.id.as_str() || page.app_id != job.app_id.as_str() {
+            return Err(invalid());
+        }
+    }
+    Ok(stored)
 }
 
 fn changed_once(output: &Output) -> Result<(), WorkflowServiceError> {
