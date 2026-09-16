@@ -111,7 +111,6 @@ async fn snapshot(service: &WorkflowService) -> Snapshot {
         "generations",
         "job_publications",
         "management_receipts",
-        "management_scopes",
         "job_receipts",
         "requests",
         "outbox",

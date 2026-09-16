@@ -24,7 +24,6 @@ pub use journal::{
     __zeroship_workflow_job_publications as job_publications,
     __zeroship_workflow_job_receipts as job_receipts,
     __zeroship_workflow_management_receipts as management_receipts,
-    __zeroship_workflow_management_scopes as management_scopes,
     __zeroship_workflow_occurrences as occurrences, __zeroship_workflow_outbox as outbox,
     __zeroship_workflow_payload_refs as payload_refs, __zeroship_workflow_payloads as payloads,
     __zeroship_workflow_propagation_pages as propagation_pages,

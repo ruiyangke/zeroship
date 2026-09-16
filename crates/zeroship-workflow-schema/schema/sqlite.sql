@@ -157,12 +157,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_management_receipts_scope
 
 CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_management_revision_identity" ON "__zeroship_workflow_management_receipts" ("app_id", "run_id", "revision");
 
-CREATE TABLE "__zeroship_workflow_management_scopes" ("id" TEXT COLLATE BINARY PRIMARY KEY NOT NULL, "app_id" TEXT COLLATE BINARY NOT NULL, "run_id" TEXT COLLATE BINARY NOT NULL, "revision" INTEGER NOT NULL, CONSTRAINT "__zeroship_workflow_management_scope_head" FOREIGN KEY (app_id, run_id, revision) REFERENCES "__zeroship_workflow_management_receipts"(app_id, run_id, revision) ON DELETE RESTRICT, CONSTRAINT "__zeroship_workflow_management_scopes_app" FOREIGN KEY (app_id) REFERENCES "__zeroship_workflow_app_state"(app_id) ON DELETE RESTRICT);
-
-CREATE INDEX IF NOT EXISTS "__zeroship_workflow_management_scope_head_idx" ON "__zeroship_workflow_management_scopes" ("app_id", "run_id", "revision");
-
-CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_management_scopes_scope_key" ON "__zeroship_workflow_management_scopes" ("app_id", "run_id");
-
 CREATE TABLE "__zeroship_workflow_occurrences" ("id" TEXT COLLATE BINARY PRIMARY KEY NOT NULL, "app_id" TEXT COLLATE BINARY NOT NULL, "schedule_id" TEXT COLLATE BINARY NOT NULL, "revision" INTEGER NOT NULL, "at" INTEGER NOT NULL, "job_id" TEXT COLLATE BINARY NOT NULL, "run_id" TEXT COLLATE BINARY, CONSTRAINT "__zeroship_workflow_occurrence_job" FOREIGN KEY (app_id, job_id) REFERENCES "__zeroship_workflow_job_receipts"(app_id, id) ON DELETE RESTRICT, CONSTRAINT "__zeroship_workflow_occurrence_run" FOREIGN KEY (app_id, run_id) REFERENCES "__zeroship_workflow_runs"(app_id, id) ON DELETE RESTRICT, CONSTRAINT "__zeroship_workflow_occurrence_schedule" FOREIGN KEY (app_id, schedule_id) REFERENCES "__zeroship_workflow_schedules"(app_id, id) ON DELETE RESTRICT);
 
 CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_occurrence_job_identity" ON "__zeroship_workflow_occurrences" ("app_id", "job_id");
@@ -228,4 +222,4 @@ CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_propagation_page_revision
 CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_propagation_pages_scope_key" ON "__zeroship_workflow_propagation_pages" ("app_id", "id");
 
 CREATE TABLE "__zeroship_workflow_reconciliation_scans" ("id" TEXT COLLATE BINARY PRIMARY KEY NOT NULL, "revision" INTEGER NOT NULL, "phase" TEXT NOT NULL, "after_id" TEXT COLLATE BINARY, "upper_id" TEXT COLLATE BINARY, CONSTRAINT "__zeroship_workflow_reconciliation_scan_app" FOREIGN KEY (id) REFERENCES "__zeroship_workflow_app_state"(app_id) ON DELETE RESTRICT);
-INSERT INTO "main".__zeroship_workflow_schema_version (id, version, fingerprint) VALUES ('workflow', 1, '13d9957037e3c1635f5eb0be0df6a7a2f7dfd0a67fc75d7cb1dd5ae963e6b9c1');
+INSERT INTO "main".__zeroship_workflow_schema_version (id, version, fingerprint) VALUES ('workflow', 1, '3394ebe472164bc21fd9a1e1da784dfb1733f9615cd747f635fec6489e63c362');
