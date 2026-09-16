@@ -2,10 +2,9 @@
 //! `SqliteBackend`, against REAL temp-file `SQLite` (the faithful path: the actual
 //! `DeclarativeAuthor` builds the plan, and the engine's generic `apply_declarative`
 //! orchestrates the plain set + the 12-step rebuild under confinement + the `_mig`
-//! journal). This proves the engine is now generic over
-//! `MigrationBackend`, the `plan_declarative` fail-close on `SQLite` rebuilds is gone,
-//! and a rebuild is driven through `SqliteBackend::rebuild_one` under the
-//! destructive/approval gate — NOT the direct executor-internal seam.
+//! journal). The engine is generic over `MigrationBackend`, and a rebuild is
+//! driven through `SqliteBackend::rebuild_one` under the destructive/approval
+//! gate — NOT a direct executor-internal seam.
 //!
 //! Coverage:
 //! - the engine applies a declarative deploy with a rebuild (a column TYPE change)
@@ -144,7 +143,6 @@ async fn is_completed(be: &SqliteBackend, version: &str) -> bool {
 //     (a column type change) through `apply_declarative` — the plain first deploy +
 //     the rebuild second deploy, both driven by the engine over a SqliteBackend.
 //     Data preserved, table rebuilt to the new shape, journaled `completed`.
-//     This proves the fail-close is gone and the engine drives SQLite rebuilds.
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn engine_applies_sqlite_rebuild_end_to_end() {
@@ -552,10 +550,9 @@ async fn engine_sqlite_rename_routes_to_rebuild_not_run_expand() {
     );
 
     // The SQLite backend has NO online schema-change capability: `online()`
-    // is `None`. This is the honest capability the old `expand_conn() == None`
-    // sentinel became — paired with the renames-empty invariant above, it proves the
-    // online path is structurally never reached on SQLite (no `compio_postgres::Client`
-    // anywhere in the SQLite leg).
+    // is `None`. Paired with the renames-empty invariant above, this proves the
+    // online path is structurally never reached on SQLite (no
+    // `compio_postgres::Client` anywhere in the SQLite leg).
     assert!(
         be.online().is_none(),
         "SQLite exposes no OnlineSchemaChange capability — online() must be None"
@@ -969,12 +966,8 @@ async fn roll_forward_over_destructive_history_on_sqlite() {
 // re-plan against the REAL introspected live schema yields an EMPTY diff — no
 // spurious DROP of either table — and BOTH tables stay usable (a write into each
 // succeeds). This is the declared-set path on the SQLite schema authority (the
-// migrate engine). The engine is the ONLY warm-boot authority on SQLite here,
-// which needs no argument in this workspace: there is no runtime pipeline to
-// compete with it. The clause this comment used to carry argued it instead from
-// appbase's plugin-db registration path, and from the trait bounds a native
-// PostgreSQL driver put on that path - a product this tree is not, and a driver
-// this tree deleted.
+// migrate engine). The engine is the ONLY warm-boot authority on SQLite here:
+// there is no runtime pipeline to compete with it.
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn warm_multi_collection_reboot_no_spurious_drop_both_usable() {
@@ -1164,8 +1157,8 @@ async fn warm_multi_collection_reboot_no_spurious_drop_both_usable() {
 // (5) BASELINE: a SQLite baseline records the live schema as a `'baseline'`
 //     journal entry WITHOUT running its `up`, adopting an existing journal-less
 //     file. First-entry semantics: idempotent for the same version, refuses a
-//     different baseline once one exists. This is the new SQLite `baseline`
-//     (the PG `baseline()` is &Client-typed and previously had no SQLite peer).
+//     different baseline once one exists. The PG `baseline()` is
+//     `&Client`-typed; this is its SQLite peer.
 // ---------------------------------------------------------------------------
 
 /// A baseline migration whose `up` DOCUMENTS the live schema (recorded, not run).
@@ -1418,11 +1411,10 @@ async fn sqlite_backend_has_no_shadow_and_dry_run_is_explicitly_unsupported() {
     let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let cfg = exec_cfg();
 
-    // The capability itself is absent — a deliberate absence, not a stub. It used to
-    // be asserted here as `be.shadow().is_none()`. `shadow()` is no longer on
-    // `MigrationBackend`: every backend answered `None`, so the seam asked each
-    // vendor to declare a harness it did not own. The harness is supplied directly
-    // to `dry_run` now.
+    // The capability itself is absent — a deliberate absence, not a stub. There
+    // is no `shadow()` on `MigrationBackend`: every backend would answer `None`,
+    // so the seam would ask each vendor to declare a harness it does not own.
+    // The harness is supplied directly to `dry_run`.
     let _ = &be;
 
     let shadow_cfg = ShadowConfig {

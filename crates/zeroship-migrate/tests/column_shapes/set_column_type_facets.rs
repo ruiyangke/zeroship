@@ -11,26 +11,20 @@
 //! |                             | renders `CREATE TABLE` from                 |
 //! | `fold_ops`                  | the snapshot drift compares                 |
 //!
-//! \* both were private walkers until step 4 of
-//! `docs/proposals/single-fold-and-effects.md`: the authoring-table walker until
-//! consumer 2 and the `FieldDef` walker until consumer 3. They are
-//! `FoldedSchema::project_authoring_tables` and `FoldedSchema::project_field_defs` now,
-//! and - the point of the proposal - they are two READS of ONE traversal, so the top two
-//! rows of that table are no longer two replays that can disagree. The retype verdict
-//! they must agree on lives on that traversal's `Op::SetColumnType` arm; it lived on
-//! a retype helper in `render::lower` until consumer 3 deleted it, the walker
-//! having been its only caller.
+//! \* both are `FoldedSchema` projections - `project_authoring_tables` and
+//! `project_field_defs` - two READS of ONE traversal, so the top two rows of
+//! that table are not two replays that can disagree. The retype verdict they
+//! must agree on lives on that traversal's `Op::SetColumnType` arm.
 //!
-//! This file drives `render_artifacts`, so it measures whichever producer is wired in
-//! and needed no change across either move - which is itself the claim it makes about
-//! the retype verdict surviving a producer swap.
+//! This file drives `render_artifacts`, so it measures whichever producer is
+//! wired in rather than naming one of its own.
 //!
-//! They disagreed. The `FieldDef` walker replayed a retype by assigning the TYPE
-//! TOKEN and nothing else, which is wrong in BOTH directions because the token is
-//! not the whole type: `ColType::String { length }`, `Char { length }` and
-//! `Vector { vector }` carry their parameter in a SIBLING descriptor field.
-//! Measured before this fixture existed, by folding each envelope and printing all
-//! three replays:
+//! The hazard this fixture guards: a replay that assigns the TYPE TOKEN and
+//! nothing else is wrong in BOTH directions, because the token is not the whole
+//! type - `ColType::String { length }`, `Char { length }` and
+//! `Vector { vector }` carry their parameter in a SIBLING descriptor field. A
+//! token-only replay leaves the old parameter STALE on the new type and leaves
+//! the new parameter ABSENT. The failure shapes, by replay:
 //!
 //! ```text
 //!                            the FieldDef map        env.db.ts        fold_ops
@@ -43,8 +37,8 @@
 //!   text(ci) -> int          caseSensitive STALE     t.int()          case_sensitive STALE
 //! ```
 //!
-//! `Decimal { precision, scale }` joined that list later and is the sharpest member,
-//! because it is the only one whose token is SHARED with a different type:
+//! `Decimal { precision, scale }` is the sharpest member of that list, because
+//! it is the only one whose token is SHARED with a different type:
 //! `col_type_to_token` spells `Decimal` and `Double` alike as `number`, so
 //! `precision` does not merely parameterise a settled type - it says WHICH type the
 //! column is. A `numeric(20, 4)` -> `t.double()` retype changes no token at all, and a
@@ -52,13 +46,13 @@
 //! when it is now a float. The live half of that seam - the emitter reading the facet,
 //! adjudicated by a real SQLite - is `tests/fold_live/sqlite_decimal_rebuild_live.rs`.
 //!
-//! The last row is the one where `fold_ops` is wrong too, and it is not cosmetic:
-//! `case_sensitive` is DRIFT-COMPARED. So is `collation`, `value_format` and
-//! `id_default`, and `fold_ops` left all four behind.
+//! The last row is the one where `fold_ops` needs the verdict as much as the
+//! descriptor does, and it is not cosmetic: `case_sensitive` is DRIFT-COMPARED.
+//! So are `collation`, `value_format` and `id_default`.
 //!
 //! THE VERDICT PER FACET is written where it is enforced - the `Op::SetColumnType`
 //! arm of [`zeroship_migrate::render::fold::single_fold`] holds the table and the
-//! reason for each entry, measured against live PostgreSQL 18.4. This fixture
+//! reason for each entry, measured against live PostgreSQL. This fixture
 //! pins the OBSERVABLE half of it, and pins the three replays to each other so a
 //! future divergence is a test failure rather than a discovery.
 
@@ -105,7 +99,7 @@ fn descriptor(create_col: &str, to_type: &str) -> serde_json::Value {
 }
 
 /// The `env.db.ts` line for column `v`, from whichever producer `render_artifacts`
-/// is wired to - `FoldedSchema::project_authoring_tables` since step 4 consumer 2.
+/// is wired to - `FoldedSchema::project_authoring_tables`.
 fn authoring(create_col: &str, to_type: &str) -> String {
     let ir = envelope(create_col, to_type);
     let effective = support::operator_charter(SCHEMA);
@@ -243,7 +237,7 @@ fn a_retype_off_a_decimal_onto_an_int_drops_both_parameters() {
 
 /// **`int` -> `numeric(20, 4)`: the parameters arrive with the type that needs them.**
 ///
-/// The direction that was ABSENT rather than STALE, and the one the DDL cannot fake: a
+/// The ABSENT direction rather than the STALE one, and the one the DDL cannot fake: a
 /// `number` with no `precision` is a float on all three dialects, so a retype that
 /// dropped the parameters would silently give the column IEEE-754 storage under the
 /// name `numeric`.
@@ -270,8 +264,7 @@ fn a_retype_onto_a_fixed_precision_decimal_reports_its_precision() {
 fn a_retype_between_two_bounded_strings_reports_the_new_bound() {
     // The sharpest of the set: the type TOKEN does not change (`ColType::String`
     // and `ColType::String` are both the `string` token), so a replay that
-    // assigns only the token cannot tell this case from a no-op. The descriptor
-    // said 24 while the database held 40.
+    // assigns only the token cannot tell this case from a no-op.
     assert_eq!(
         descriptor(STRING_24, TO_STRING_40),
         serde_json::json!({ "type": "string", "maxLength": 40 }),
@@ -347,7 +340,7 @@ fn a_retype_off_a_vector_column_drops_its_dimensionality_and_metric() {
 
 #[test]
 fn a_retype_clears_case_insensitivity_in_all_three_replays() {
-    // Measured on live PostgreSQL 18.4: case-insensitivity IS the `citext` TYPE,
+    // Measured on live PostgreSQL: case-insensitivity IS the `citext` TYPE,
     // so `ALTER ... TYPE character varying(40)` leaves a plain, case-SENSITIVE
     // column. `case_sensitive` is drift-compared, so keeping it reports a
     // difference that does not exist - see `set_column_type_facets_pg`.
@@ -378,13 +371,13 @@ fn a_retype_clears_case_insensitivity_in_all_three_replays() {
 fn the_only_fold_side_producer_of_a_collation_is_the_facet_the_retype_refuses() {
     // `collation` is DRIFT-COMPARED and PostgreSQL RESETS it on ALTER TYPE
     // (measured: `text COLLATE "C" -> character varying(40)` leaves the catalog
-    // reporting the DEFAULT collation, never `C`). It was reachable exactly once,
-    // through a value-format column - `render::value_format`'s
+    // reporting the DEFAULT collation, never `C`). It is reachable through
+    // exactly one path - a value-format column: `render::value_format`'s
     // `bytewise_column_metadata` is the ONE fold-side writer, and it runs only
     // for TypeID/ULID. SQLite's `NOCASE` rides on `case_sensitive`, not here.
     //
     // So the refusal above closes the only route, and `fold_ops`'s
-    // `col.collation = new_col.collation` is belt-and-braces rather than the fix.
+    // `col.collation = new_col.collation` is belt-and-braces.
     // This test states that rather than asserting `None == None` on a column that
     // never had a collation, which would pass against ANY implementation.
     assert!(pg_snapshot(TYPE_ID, r#""text""#)
@@ -397,10 +390,9 @@ fn the_only_fold_side_producer_of_a_collation_is_the_facet_the_retype_refuses() 
 #[test]
 fn a_retype_off_an_enum_column_drops_the_enum_check_it_left_behind() {
     // `inline_checks` is emission-only, but it is DDL: the SQLite rebuild joins
-    // it straight into the new table's column declaration. Before the fix, a
-    // SQLite `enum -> int` retype left `CHECK ("v" IN ('ok', 'bad'))` sitting on
-    // an `integer` column - the same shape as the stale generated body that made
-    // a SQLite rename undeployable.
+    // it straight into the new table's column declaration, so a membership CHECK
+    // that belongs to the enum type must not survive an `enum -> int` retype
+    // onto the integer column.
     let ir: MigrationIr = serde_json::from_str(
         r#"{"ir_version":1,"name":"n","ops":[
             {"op":"createEnum","name":"mood","values":["ok","bad"]},
