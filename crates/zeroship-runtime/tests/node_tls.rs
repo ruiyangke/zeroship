@@ -21,16 +21,12 @@ use zeroship_runtime::{EgressRule, Verdict,
 /// States the two runtime settings the tests in this file vary - dev mode, and
 /// the platform trust anchors - and restores the previous values on drop.
 ///
-/// The trust anchors used to be stated by pointing `SSL_CERT_FILE` at a
-/// fixture and clearing `SSL_CERT_DIR`, which took effect only because
-/// `rustls_native_certs` happens to read those names. It is a runtime setting
-/// now, so the fixture PEM goes straight in and no temp file is needed. What
-/// the tests below assert is unchanged: whether the NATIVE root path was
-/// consulted, not which environment variable feeds it.
+/// The trust anchors are a runtime setting, so the fixture PEM goes straight
+/// in and no temp file is needed. What the tests below assert is whether the
+/// NATIVE root path was consulted, not which environment variable feeds it.
 ///
 /// Both settings are process-wide, so every user still takes [`lock_env`].
-/// Neither is process ENVIRONMENT any more, so nothing here races libc
-/// `getenv`.
+/// Neither is process ENVIRONMENT, so nothing here races libc `getenv`.
 struct SettingsGuard {
     prev_dev: bool,
 }
@@ -393,14 +389,11 @@ fn tls_module(body: &str) -> String {
 }
 
 /// `node:tls` and `node:net` must refuse an inadmissible target IDENTICALLY -
-/// same code, same moment. That parity is the property; the moment itself
-/// changed with the egress rework and the parity did not.
+/// same code, same moment. That parity is the property, not the delivery
+/// mechanism.
 ///
-/// It used to be a synchronous throw from `connect()`, because admission was a
-/// boolean over the host string. An IP literal is now decided in the address
-/// phase, alongside the platform SSRF floor and after it, so both surfaces
-/// report on the socket's `error` event. A test that still asserted "throws"
-/// would be pinning the delivery mechanism rather than the parity.
+/// An IP literal is decided in the address phase, alongside the platform SSRF
+/// floor and after it, so both surfaces report on the socket's `error` event.
 #[test]
 fn tls_connect_admission_errors_match_plain_net() {
     let _lock = lock_env();

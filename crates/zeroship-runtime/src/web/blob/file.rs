@@ -116,9 +116,7 @@ fn parse_file_property_bag(
     let last_modified: i64 = match bag.last_modified {
         // WebIDL `long long`: ToInt64(V). The dict converter has
         // already done ToNumber via `f64::from_v8`; `as i64` here
-        // truncates toward zero and saturates ±∞ — same end result
-        // the previous hand-roll produced via
-        // `number_value(scope).unwrap_or(0.0) as i64`.
+        // truncates toward zero and saturates ±∞.
         Some(n) => n as i64,
         None => current_time_ms(),
     };

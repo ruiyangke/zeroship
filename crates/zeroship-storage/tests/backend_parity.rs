@@ -2,15 +2,15 @@
 //!
 //! Both backends are driven through the *same* `Backend` trait sequence —
 //! buffered put/get, streaming put/get, list, delete — and asserted to
-//! produce identical observable results. A large (> part-size) streaming
-//! put → get → byte-compare exercises the S3 multipart path end to end.
+//! produce identical observable results. A large streaming put → get →
+//! byte-compare exercises the S3 multipart path end to end.
 //!
 //! `LocalFs` always runs (temp dir). The `S3` leg starts its own MinIO
-//! container and **FAILS** when Docker is unavailable - it used to skip, which
-//! meant a machine without Docker reported the same green as a machine that had
-//! actually compared the two backends, and comparing them is the entire point
-//! of the file. The whole-object size caps were removed as a buffering limit,
-//! so the large test really does stream.
+//! container and **FAILS** when Docker is unavailable: skipping it would let a
+//! machine without Docker report the same green as a machine that had actually
+//! compared the two backends, and comparing them is the entire point of the
+//! file. Nothing caps the whole-object size, so the large test really does
+//! stream.
 //!
 //! Run explicitly:
 //!   `cargo test -p zeroship-storage --features s3 --test backend_parity -- --nocapture`
@@ -107,10 +107,8 @@ async fn run_parity(backend: &dyn Backend, label: &str) {
     assert_eq!(got, body, "[{label}] buffered get bytes");
     assert_eq!(meta.size, body.len() as u64, "[{label}] buffered get meta size");
     // The content type the creator set on `put` must survive the round trip
-    // IDENTICALLY on every backend. This is the assertion the parity suite was
-    // missing: `LocalFs` used to drop the type on the floor and hand back
-    // `None` while `S3` returned `Some("text/plain")`, so an object served off
-    // the shared LocalFs volume in a multi-node deployment lost its type.
+    // IDENTICALLY on every backend: an object served off the shared LocalFs
+    // volume in a multi-node deployment must not lose the type that S3 keeps.
     assert_eq!(
         meta.content_type.as_deref(),
         Some("text/plain"),
@@ -332,15 +330,10 @@ async fn run_content_type_parity(backend: &dyn Backend, label: &str) {
     backend.delete(APP, BUCKET, "ct-overwrite.bin").await.unwrap();
 }
 
-/// `list` pagination parity — the property that used to differ silently.
+/// `list` pagination parity.
 ///
-/// Before this existed, `LocalFs::list` returned EVERY key in the bucket with
-/// no truncation signal, while `S3::list` followed continuation tokens until
-/// `compio_s3`'s `max_list_entries` and then FAILED the whole call. Two
-/// backends, two behaviours, neither of which a caller could page through.
-///
-/// Both must now: honour `limit` exactly, report `cursor = Some(_)` iff more
-/// keys remain, and resume from that cursor to yield every remaining key
+/// Both backends must honour `limit` exactly, report `cursor = Some(_)` iff
+/// more keys remain, and resume from that cursor to yield every remaining key
 /// exactly once in ascending key order.
 ///
 /// Does NOT catch: cursor stability across concurrent mutation (a key written
@@ -683,10 +676,10 @@ impl ChunkSource for SlowChunks {
         if self.produced >= self.total {
             return None;
         }
-        // Delay BEFORE every chunk after the first — this is the inter-chunk
-        // stall that, on the old gate-only-drain loop, parked the upload loop
-        // and left the in-flight `UploadPart`s unpolled while their deadlines
-        // ticked. The select-overlap loop instead advances them concurrently.
+        // Delay BEFORE every chunk after the first. This is the inter-chunk
+        // stall the select-overlap loop must tolerate: the producer and the
+        // in-flight `UploadPart`s are driven concurrently, so a stalled
+        // producer cannot leave their deadlines ticking unpolled.
         if self.first {
             self.first = false;
         } else {
@@ -702,12 +695,10 @@ impl ChunkSource for SlowChunks {
     }
 }
 
-/// HIGH-2 regression (plugin-storage `S3::put_stream`): a SLOW producer — real
-/// inter-chunk delays, total spanning several parts — must still COMPLETE the
-/// multipart upload byte-exact. On the old gate-only-drain loop the in-flight
-/// `UploadPart`s sat unpolled while the loop was parked on the slow producer
-/// between dispatches; the new select-overlap loop drives the producer and the
-/// in-flight PUTs concurrently so a slow-but-progressing source finishes.
+/// A SLOW producer — real inter-chunk delays, total spanning several parts —
+/// must still COMPLETE the multipart upload byte-exact. The select-overlap loop
+/// drives the producer and the in-flight PUTs concurrently so a
+/// slow-but-progressing source finishes.
 #[cfg(feature = "s3")]
 async fn run_s3_slow_producer_overlap(minio: &s3_fixture::Minio) {
     use zeroship_storage::S3UploadTuning;
@@ -720,10 +711,10 @@ async fn run_s3_slow_producer_overlap(minio: &s3_fixture::Minio) {
     });
 
     let key = "slow-producer.bin";
-    // ~3.1 parts total, fed as ~1 MiB chunks with a ~1.2s inter-chunk delay —
-    // ~30s of cumulative producer stall spread across the upload. The select-
-    // overlap loop keeps the in-flight PUTs advancing through every stall, so
-    // the upload completes byte-exact instead of hanging / timing out a part.
+    // Fed as small chunks with a real inter-chunk delay: cumulative producer
+    // stall spread across the upload. The select-overlap loop keeps the
+    // in-flight PUTs advancing through every stall, so the upload completes
+    // byte-exact instead of hanging / timing out a part.
     let total = PART_SIZE * 3 + 100_000;
     let chunk = 1024 * 1024;
     let src = SlowChunks {

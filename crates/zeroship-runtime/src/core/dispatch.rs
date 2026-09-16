@@ -25,9 +25,8 @@ use crate::state::{DispatchResult, SharedState};
 // Each `v8_exception_to_<field>` looks up a constant key
 // (`"message"`, `"name"`, `"stack"`, etc) on the exception object. The
 // pre-cached keys avoid the per-call `v8::String::new` (UTF-8 validation
-// + hash + StringTable internalize), which the bench shows at ~1.8% on
-// saturated load. Cached as v8::Globals in an isolate slot so they're
-// shared across every call into dispatch.
+// + hash + StringTable internalize). Cached as v8::Globals in an isolate
+// slot so they're shared across every call into dispatch.
 struct DispatchKeys {
     message: v8::Global<v8::String>,
     name: v8::Global<v8::String>,
@@ -104,36 +103,22 @@ pub struct ErrorExtras<'a> {
 /// `stack`, `code`, `details`, `retryable`.
 ///
 /// The FIELD SET matches the JS-side `errorResponse()` in
-/// `init.rs::host_entry_js`. The BEHAVIOUR does not, and this comment used to
-/// say it did — "so a procedure throw produces the same body whether the
-/// kernel's RPC fast path caught the exception or the slow path's JS handler
-/// did". That is false at 5xx and the difference is the whole point of this
-/// function: `errorResponse` has no sanitization rail at all, so it forwards
-/// `err.message` verbatim at any status. It is reachable only from
-/// `fallbackFetch`'s `user.index()` catch, not from the RPC path — see the
-/// ticket for the exposure. Do not restore the equivalence claim; if the two
-/// are ever made to agree, say which one moved.
+/// `init.rs::host_entry_js`; the BEHAVIOUR deliberately does not, and that
+/// difference is the whole point of this function: `errorResponse` has no
+/// sanitization rail at all, so it forwards `err.message` verbatim at any
+/// status. It is reachable only from `fallbackFetch`'s `user.index()` catch,
+/// not from the RPC path.
 ///
 /// THIS function is what a deployed vite-built app's RPC error actually goes
-/// through, and the evidence is the `request_id` format, not a reading of the
-/// call graph. A vite-built app DOES install the TS handler as `default.fetch`
-/// on both tiers (`packages/vite-plugin/src/rpc-registry.ts` generates the
-/// synthetic entry and calls `createFetchHandler`), so
-/// `fetch-handler.ts`'s own 5xx rail is reachable in principle. It did not
-/// serve the constraint errors measured by `examples/db-todos/tests/database.test.ts`:
-/// its `newRequestId()` returns a UUID, and those bodies carried
-/// `"request_id":"5"` / `"6"` — the u64 counter below. The two emit an
-/// identical body shape when there is no code, so the id format is the only
-/// thing that distinguishes them.
-///
-/// The mechanism is the three-tier dispatcher, not a failure of the TS catch.
-/// The synthetic entry exports BOTH (`export default { fetch: _zsFetchHandler,
-/// rpc: _zsRpc, workflows }`, rpc-registry.ts), and the kernel prefers
-/// `default.rpc`. A `/__zeroship/v1/<id>` request taken by that fast path calls
-/// the procedure directly, so a throw propagates into native code and lands
-/// here. `createFetchHandler`'s own `/__zeroship/v1/` branch does catch — its
-/// `rpcAndRespond` opens with a `try` — but it is the fallback for a direct
-/// HTTP hit, and the kernel path never enters it. So the TS rail is not
+/// through. A vite-built app installs the TS handler as `default.fetch` on
+/// both tiers (`packages/vite-plugin/src/rpc-registry.ts` generates the
+/// synthetic entry and calls `createFetchHandler`), but the synthetic entry
+/// exports `default.rpc` as well and the kernel prefers it. A
+/// `/__zeroship/v1/<id>` request taken by that fast path calls the procedure
+/// directly, so a throw propagates into native code and lands here.
+/// `createFetchHandler`'s own `/__zeroship/v1/` branch does catch — its
+/// `rpcAndRespond` opens with a `try` — but that is the fallback for a direct
+/// HTTP hit, and the kernel path never enters it. The TS rail is not
 /// bypassed, it is simply not on this route.
 ///
 /// Two independent rails, both client-visible boundaries:
@@ -143,7 +128,7 @@ pub struct ErrorExtras<'a> {
 ///    id. `is_public_error_code` codes are exempt from the blanking.
 /// 2. **`stack` is never emitted, at ANY status.** Not at 4xx (which
 ///    skips rail 1 entirely) and not via rail 1's code exemption. See the
-///    inline note at the strip for what was measured leaking.
+///    inline note at the strip.
 #[inline]
 pub fn build_error_body(
     status: u16,
@@ -170,12 +155,8 @@ pub fn build_error_body(
         // platform owns the message string. Still logged above.
         // Everything else is blanked.
         //
-        // "and there is no stack" USED TO BE ASSERTED HERE. It was not
-        // true: this arm skips the blanking, so whatever stack was on the
-        // thrown error rode straight out at 500, measured reaching an
-        // anonymous caller. The stack strip below is what makes the claim
-        // true now; it is not a property of the codes. Do not restore the
-        // assertion in place of the enforcement.
+        // The stack strip below, not a property of the codes, is what
+        // keeps this arm from leaking a stack at 500.
         if !extras.code.is_some_and(is_public_error_code) {
             // The code may still ride out alone: see `is_code_only_public_error`
             // for why a constraint violation needs its classification kept and
@@ -207,15 +188,9 @@ pub fn build_error_body(
     //     401 and native procedure resolution's `NOT_FOUND` /
     //     `INVALID_ARGUMENT` failures are all platform-minted 4xx, so "the creator
     //     chose to throw it" is not true of the common cases;
-    //   - the 5xx whitelist exemption, which was written to keep a
-    //     developer-facing `code` on the wire and, being implemented as
-    //     "skip the blanking arm", dragged the stack through with it.
-    //
-    // Measured leaking to an anonymous caller through a real gateway before
-    // this strip (tests/e2e_dev_vs_deployed_errors.sh): the app's internal
-    // module layout, the dispatcher frame names, and the
-    // `__zs_host_entry_<uuid>` build fingerprint plus byte offsets into the
-    // minified server bundle.
+    //   - the 5xx whitelist exemption, which keeps a developer-facing `code`
+    //     on the wire by skipping the blanking arm and must not drag the
+    //     stack through with it.
     //
     // Only `stack` is removed. `message`, `code`, `details` and `retryable`
     // still ride at 4xx on purpose — creators throw intentional 401/403
@@ -504,9 +479,8 @@ pub fn v8_exception_to_retryable(
 /// Reads message/name/stack/status (always) plus the structured-error
 /// extras (code, details, retryable) when the throw shape carries them.
 ///
-/// Uses cached property-name keys (`DispatchKeys`) to avoid 7 per-call
-/// `v8::String::new` invocations. The bench showed a flat ~1.8% on those
-/// allocations alone in the saturated rejection loop.
+/// Uses cached property-name keys (`DispatchKeys`) so the per-call
+/// `v8::String::new` allocations disappear from the saturated rejection loop.
 pub fn v8_exception_to_error_value(
     scope: &mut v8::PinScope,
     exception: v8::Local<v8::Value>,
@@ -697,12 +671,10 @@ mod tests {
         }
     }
 
-    /// THE ANCHOR REGRESSION. A creator who deployed an `env.db` app and
-    /// skipped `zeroship migrate` got `{"message":"internal error"}` while
-    /// the worker logged `role "app_<uuid>_role" does not exist`. The
-    /// sanitiser was right; the classifier was wrong. Now that plugin-db
-    /// stamps `schema_not_provisioned`, this rail must let the message
-    /// through so the response itself names the command.
+    /// A missing per-app Postgres role must reach the caller as
+    /// `schema_not_provisioned` WITH its message, so the response itself
+    /// names `zeroship migrate`. The sanitiser is right to blank unlisted
+    /// codes; the classifier is what must stamp this one.
     ///
     /// Both spellings, for the reason the sibling test above documents:
     /// `@zeroship/db` re-stamps native codes through `canonicalErrorCode`
@@ -814,16 +786,12 @@ mod tests {
     /// A database CONSTRAINT violation must reach the caller with its
     /// `.code`, and without its message.
     ///
-    /// Measured 2026-08-10 by `examples/db-todos/tests/database.test.ts`: inserting a
-    /// todo whose `userId` names no user, and re-inserting a duplicate
-    /// `users.email`, both came back as
-    /// `{"message":"internal error","name":"Error","request_id":"5"}` — no
-    /// code. plugin-db classifies both correctly (`DbError::FkViolation` /
+    /// plugin-db classifies both correctly (`DbError::FkViolation` /
     /// `UniqueViolation`, stamped `fk_violation` / `unique_violation` in
     /// `to_op_error`), so the platform KNOWS which constraint failed and the
-    /// creator cannot find out. "Duplicate email" is indistinguishable from
-    /// "the server fell over", which is the difference between a form
-    /// validation message and a 500 page.
+    /// creator must be able to find out. "Duplicate email" must not be
+    /// indistinguishable from "the server fell over", which is the difference
+    /// between a form validation message and a 500 page.
     ///
     /// The message must still be blanked, and that is not belt-and-braces.
     /// Postgres phrases it `duplicate key value violates unique constraint
@@ -906,16 +874,13 @@ mod tests {
         );
     }
 
-    /// Regression for the measured production stack leak
-    /// (`tests/e2e_dev_vs_deployed_errors.sh`, row `err.status4xx`).
+    /// A 4xx must not ship a `stack` to the client.
     ///
-    /// A 4xx skips the 5xx sanitization rail entirely, so before the fix the
-    /// thrown `Error.stack` went verbatim to whoever made the request — and
-    /// 4xx is the status class an ANONYMOUS caller can reach most easily
-    /// (`requireUser()`'s 401 and native procedure resolution's `NOT_FOUND`
-    /// and `INVALID_ARGUMENT`). The measured deployed body carried the
-    /// internal module layout, the dispatcher frame names, and the
-    /// `__zs_host_entry_<uuid>` build fingerprint.
+    /// A 4xx skips the 5xx sanitization rail entirely, and it is the status
+    /// class an ANONYMOUS caller can reach most easily (`requireUser()`'s 401
+    /// and native procedure resolution's `NOT_FOUND` and `INVALID_ARGUMENT`),
+    /// so the strip below is the only thing keeping a thrown stack off the
+    /// wire.
     ///
     /// WHAT THIS TEST DOES NOT CATCH: it pins the `stack` key only. It says
     /// nothing about `message`, which is deliberately still forwarded at 4xx
