@@ -128,6 +128,14 @@ impl AuthServer {
                     .state(cfg)
                     .state(db_state)
                     .state(refresh_pool)
+                    // `/readyz` extracts this state, so an app built without it
+                    // answers the readiness probe with a 500 rather than with a
+                    // verdict. The production binary registers it in
+                    // `server.rs`; a fixture serving that route must serve the
+                    // same app.
+                    .state(Arc::new(
+                        zeroship_core::readiness::ReadinessGate::with_defaults(),
+                    ))
                     .middleware(SecurityHeaders::new(frame_ancestor_origins))
                     .configure(server::configure(google_enabled, github_enabled));
                 let app = if let Some(issuer) = issuer {

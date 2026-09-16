@@ -62,6 +62,12 @@ fn removed_database_search_surface_has_no_producer_or_documented_api() {
                 !is_migration(file)
                     && !file
                         .starts_with(repo::root().join("crates/zeroship-runtime/tests/fixtures"))
+                    // The auth crate's browser specs are TypeScript, and this
+                    // scan's vocabulary is about a database surface. Excluded
+                    // for the reason the fixtures above are: a rule about
+                    // producers in `crates/` should not govern a spec file whose
+                    // subject is a rendered page.
+                    && !file.starts_with(repo::root().join("crates/zeroship-auth/tests/web"))
             })
             .collect(),
         900,

@@ -1,4 +1,4 @@
-# Auth UI browser gate (`tests/e2e_auth_ui/`)
+# Auth UI browser gate (`crates/zeroship-auth/tests/web/`)
 
 Playwright specs that drive **real Chromium** against the **real
 `zeroship-auth` binary**, booted natively on a loopback port over a real
@@ -35,17 +35,19 @@ the day this was written are both invisible to a response-body assertion:
 ## How to run
 
 ```bash
-nix develop --command bash tests/e2e_auth_ui.sh
+nix develop --command cargo test -p zeroship-auth --test main -- --ignored auth_ui
 ```
 
-The script is self-contained: it provisions and migrates its OWN database
-(`zeroship_authui_test` on the dev Postgres at `127.0.0.1:5440` - never the auth
-gate's `zeroship_auth_test`), generates secrets with `zeroship dev init`, boots
-`target/release/zeroship-auth` with both mailers on stdout, waits on `/readyz`,
-runs Chromium, and tears all of it down on EXIT. A run that could not happen
-fails loudly rather than reporting green - it sources
-`tests/lib/measurement_integrity.sh` and defaults its verdict to
-`test run did not happen`.
+The case is `#[ignore]`d so a browser never becomes a prerequisite of
+`cargo test -p zeroship-auth`. It is self-contained through the crate's own
+fixtures: an owned PostgreSQL container migrated from the real corpus, the
+production auth router served in-process, and a mailer that appends the
+`=== MAIL ===` block to the log these specs read. A run that could not happen
+fails loudly - provisioning panics rather than reporting green.
+
+It does NOT cover the `zeroship-auth` binary's own startup (argument parsing,
+secret-file loading, the readiness gate). Those are process-level contracts owned
+by `config_env_tier` and `check_config_smtp_test`.
 
 You must be inside the nix env: the runner is nix `playwright` 1.58.2 with
 `PLAYWRIGHT_BROWSERS_PATH`, and `scripts/link-playwright.sh` points the local

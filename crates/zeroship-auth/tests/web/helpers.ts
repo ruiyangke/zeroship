@@ -12,7 +12,9 @@ export interface CspViolationEvidence {
 export function authUrl(path: string): string {
   const rawBaseURL = process.env.ZEROSHIP_AUTH_UI_BASE_URL;
   if (!rawBaseURL) {
-    throw new Error("ZEROSHIP_AUTH_UI_BASE_URL is required; use tests/e2e_auth_ui.sh");
+    throw new Error(
+      "ZEROSHIP_AUTH_UI_BASE_URL is required; run the auth_ui case in crates/zeroship-auth/tests/",
+    );
   }
   return new URL(path, rawBaseURL).href;
 }
@@ -20,7 +22,9 @@ export function authUrl(path: string): string {
 export function authLogPath(): string {
   const path = process.env.ZEROSHIP_AUTH_UI_AUTH_LOG;
   if (!path) {
-    throw new Error("ZEROSHIP_AUTH_UI_AUTH_LOG is required; use tests/e2e_auth_ui.sh");
+    throw new Error(
+      "ZEROSHIP_AUTH_UI_AUTH_LOG is required; run the auth_ui case in crates/zeroship-auth/tests/",
+    );
   }
   return path;
 }

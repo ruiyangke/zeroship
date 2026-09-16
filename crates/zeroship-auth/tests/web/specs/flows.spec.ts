@@ -123,7 +123,9 @@ function wrongTotpCode(secretBase32: string): string {
 
 function requiredEnv(name: string): string {
   const value = process.env[name];
-  if (!value) throw new Error(`${name} is required; use tests/e2e_auth_ui.sh`);
+  if (!value) {
+    throw new Error(`${name} is required; run the auth_ui case in crates/zeroship-auth/tests/`);
+  }
   return value;
 }
 

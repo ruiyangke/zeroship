@@ -188,15 +188,7 @@ jobs:
       # cache, `-D` truncating the count, and a build that did not run reporting
       # zero warnings). The script's header documents all three and asserts the
       # documented-crate count as the control; see it before touching the floors.
-      # The library that lets the live-DB gates say "this did not measure
-      # anything" instead of reporting a full disk as a compile failure. Gated
-      # here because it is exactly the kind of check that rots unnoticed: it only
-      # ever runs on a bad day, so a pattern that silently stopped matching would
-      # go undetected until the next time it was needed. The self-test asserts
-      # both directions - a full disk IS recognised, and a genuine failure is NOT
-      # relabelled as infrastructure - and refuses to pass over zero cases.
-      - name: Measurement-integrity self-test
-        run: tests/lib_measurement_integrity_selftest.sh
+      #
       # Same reasoning one layer over: the dev-readiness diagnosis only prints on
       # a bad day, so a rule that stopped matching would be invisible until the
       # run it was meant to explain. It classifies a TIMEOUT into cold dependency

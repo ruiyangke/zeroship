@@ -17,6 +17,7 @@ mod common;
 mod account_deletion_test;
 mod account_linking;
 mod audit_retention_test;
+mod auth_ui;
 mod check_config_smtp_test;
 mod cli_device_refresh_test;
 mod config_env_tier;
