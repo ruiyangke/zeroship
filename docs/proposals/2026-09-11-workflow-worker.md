@@ -866,6 +866,30 @@ table has the `__zeroship_workflow_` prefix; none belongs in Control's schema.
 | `collection_scans` | App-owned collection revision, expiry cutoff, ordering cursor and captured upper payload identity. |
 | `collection_pages` | Immutable bounded payload identity plan and reserved item offset, scoped to its logical job receipt. |
 
+### How a job kind extends its receipt
+
+A column lives on `job_receipts` if and only if code that has not yet determined
+the job's kind reads it. All kind-specific state lives in that kind's own table,
+keyed `id` (the job id), with `(app_id, id)` unique and a foreign key to
+`job_receipts(app_id, id)`. A kind with no extension state gets no table; that is
+the rule returning zero columns rather than an exception to it.
+
+The rule exists because the alternative cannot be adopted. Folding kind state
+inline would make `fanout_pages` and `propagation_pages` part of `job_receipts`,
+and both carry a foreign key into `job_publications` on columns that are never
+null, so the constraint could not be skipped for the kinds that are never
+published. Inlining would have to delete two foreign keys that both dialects
+enforce today, replacing a write-time refusal with a read-time validator on a
+journal that creator code can reach.
+
+`job_receipts.reconciliation` and `reconciliation_next` are the one violation
+still present. They are the reason `delivery.rs` carries a validator that matches
+every job operation solely to assert which columns are null, and they duplicate
+the shape `collection_pages` already stores. They move to a side table.
+`job_publications` carries the same violation for its own three operations and is
+converted with them, so that the journal's two job tables answer this question
+the same way.
+
 Publication intents now use dedicated journal records. The scoped unique index
 binds run, generation, frontier revision and due time; `id` remains the sole
 primary key. A transition that advances an idle run invalidates its older
