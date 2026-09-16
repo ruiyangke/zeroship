@@ -1,0 +1,97 @@
+{
+  "schema_version": [
+    "id"
+  ],
+  "queue_scopes": [
+    "id"
+  ],
+  "deployment_holds": [
+    "id",
+    "app_id",
+    "deployment_id",
+    "holder_id",
+    "journal_job_id"
+  ],
+  "workers": [
+    "id",
+    "execution_zone_id"
+  ],
+  "assignments": [
+    "id",
+    "app_id",
+    "worker_id"
+  ],
+  "placement_receipts": [
+    "id",
+    "app_id",
+    "request_id",
+    "worker_id"
+  ],
+  "management": [
+    "id",
+    "app_id",
+    "request_id",
+    "run_id"
+  ],
+  "management_scopes": [
+    "id",
+    "app_id",
+    "run_id"
+  ],
+  "jobs": [
+    "id",
+    "app_id",
+    "deployment_id",
+    "worker_id",
+    "run_id",
+    "management_request_id"
+  ],
+  "recovery_scopes": [
+    "id",
+    "deployment_id",
+    "close_job_id"
+  ],
+  "recovery_duties": [
+    "id",
+    "app_id",
+    "pending_job_id"
+  ],
+  "capacity_demands": [
+    "id",
+    "execution_zone_id"
+  ],
+  "capacity_targets": [
+    "id"
+  ],
+  "schedule_deployments": [
+    "id",
+    "app_id"
+  ],
+  "schedule_activations": [
+    "id",
+    "app_id",
+    "deployment_id"
+  ],
+  "schedule_disables": [
+    "id",
+    "app_id"
+  ],
+  "schedule_scopes": [
+    "id",
+    "activation_id"
+  ],
+  "schedules": [
+    "id",
+    "app_id",
+    "name",
+    "activation_id"
+  ],
+  "schedule_occurrences": [
+    "id",
+    "app_id",
+    "schedule_id",
+    "run_id",
+    "job_id",
+    "activation_id"
+  ]
+}

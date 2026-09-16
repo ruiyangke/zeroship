@@ -1,33 +1,34 @@
 //! Durable workflow V8 binding — `env.workflows`.
 //!
 //! `WorkflowBinding::build_instance` mints a native `env.workflows` namespace
-//! per isolate. The namespace carries only an app-scoped bearer token derived
-//! in Rust as `HMAC-SHA256(control_key, app_id)`; the raw control key never
-//! enters V8.
+//! per isolate. Each namespace owns an app-scoped Rust backend; credentials
+//! remain in the host. Service bindings validate the immutable runtime identity
+//! before evaluating app code. Ready bindings resolve the backend a workflow
+//! host published for the isolate's own app, on every call.
 
-mod dev;
 mod error;
+mod executor;
+mod loader;
 pub mod v8_class;
 
-use std::path::Path;
+pub use executor::{LoadedWorkflow, V8TaskExecutor, WorkflowRuntimeLoader};
+pub use loader::AppRuntimeLoader;
+
 use std::sync::Arc;
 
-use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
-use zeroship_workflow::backend::{HttpWorkflowBackend, SharedWorkflowBackend};
-
-use zeroship_workflow::DevWorkflowEngine;
-use zeroship_workflow::WorkflowClientConfig;
+use zeroship_runtime::plugin::{JavaScriptModule, NativePlugin, NativeRegistrar};
+use zeroship_workflow::backend::SharedWorkflowBackend;
+use zeroship_workflow::service::runner::ready::ReadyApps;
 
 pub use v8_class::{is_excluded_workflow_property, mint_workflows};
 
 #[derive(Clone, Debug)]
 enum WorkflowBackendFactory {
-    Http {
-        control_url: String,
-        control_key: String,
+    Service {
+        backend: Arc<zeroship_workflow::service::AppBackend>,
     },
-    DevSqlite {
-        engine: Arc<DevWorkflowEngine>,
+    Ready {
+        apps: ReadyApps,
     },
 }
 
@@ -37,58 +38,46 @@ pub struct WorkflowBinding {
 }
 
 impl WorkflowBinding {
+    /// Bind the customer's workflow engine to its authorized app.
     #[must_use]
-    pub fn new(control_url: impl Into<String>, control_key: impl Into<String>) -> Self {
+    pub fn service(backend: zeroship_workflow::service::AppBackend) -> Self {
         Self {
-            backend: WorkflowBackendFactory::Http {
-                control_url: control_url.into(),
-                control_key: control_key.into(),
+            backend: WorkflowBackendFactory::Service {
+                backend: Arc::new(backend),
             },
         }
     }
 
-    /// Construct the local dev-tier workflow backend.
-    ///
-    /// This constructor is only called by `zeroship serve`. The production
-    /// worker keeps using [`Self::new`], so the in-process engine is
-    /// dev-only by construction.
-    pub fn dev_sqlite(
-        db_path: impl AsRef<Path>,
-        modules: Vec<zeroship_runtime::ModuleEntry>,
-        env_vars: std::collections::HashMap<String, String>,
-        plugins: Vec<Arc<dyn NativePlugin>>,
-    ) -> Result<Self, String> {
-        let engine = DevWorkflowEngine::open(
-            db_path,
-            Arc::new(dev::V8WorkflowExecutor::new(modules, env_vars, plugins)),
-        )?;
-        Ok(Self {
-            backend: WorkflowBackendFactory::DevSqlite { engine },
-        })
-    }
-
-    fn build_backend(&self, app_id: &str) -> SharedWorkflowBackend {
-        match &self.backend {
-            WorkflowBackendFactory::Http {
-                control_url,
-                control_key,
-            } => {
-                let token = zeroship_workflow::app_scoped_token(control_key, app_id);
-                Arc::new(HttpWorkflowBackend::new(WorkflowClientConfig::new(
-                    control_url.clone(),
-                    app_id.to_string(),
-                    token,
-                )))
-            }
-            WorkflowBackendFactory::DevSqlite { engine } => {
-                engine.ensure_scheduler();
-                Arc::new(engine.backend_for_app(app_id))
-            }
+    /// Bind each isolate to the backend a workflow host published for the
+    /// runtime's own app. An isolate of an app that is unknown or not ready
+    /// on this process receives a retryable refusal from every call.
+    #[must_use]
+    pub fn ready(apps: ReadyApps) -> Self {
+        Self {
+            backend: WorkflowBackendFactory::Ready { apps },
         }
     }
+
 }
 
 impl NativePlugin for WorkflowBinding {
+    fn bind_runtime_descriptor<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        _app_id: &str,
+        _namespace: v8::Local<'s, v8::Object>,
+        _descriptor: Option<&serde_json::Value>,
+    ) -> Result<(), String> {
+        if let WorkflowBackendFactory::Service { backend } = &self.backend {
+            if zeroship_runtime::plugin::runtime_app_identity(scope).as_ref()
+                != Some(backend.app_id())
+            {
+                return Err("workflow binding does not match runtime app identity".into());
+            }
+        }
+        Ok(())
+    }
+
     fn namespace(&self) -> &str {
         "workflows"
     }
@@ -99,11 +88,47 @@ impl NativePlugin for WorkflowBinding {
 
     fn register(&self, _r: &mut NativeRegistrar) {}
 
+    /// The replay bridge. Host-only: creator modules cannot import it, so the
+    /// interpreter is never part of the creator's module graph and never
+    /// reachable from creator code.
+    fn host_javascript_modules(&self) -> &'static [JavaScriptModule] {
+        &[JavaScriptModule {
+            specifier: zeroship_runtime::WORKFLOW_DISPATCH_MODULE,
+            source: include_str!("../js/dispatch.js"),
+        }]
+    }
+
+    /// Wrap the ambient I/O globals before creator modules evaluate. A creator
+    /// that captures `fetch` or `setTimeout` at module scope must still hold a
+    /// binding that refuses direct I/O from a workflow body.
+    fn prepare_runtime<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        _namespace: v8::Local<'s, v8::Object>,
+        _descriptor: Option<&serde_json::Value>,
+    ) -> Result<Option<v8::Global<v8::Promise>>, String> {
+        zeroship_runtime::modules::invoke_module_export(
+            scope,
+            zeroship_runtime::WORKFLOW_DISPATCH_MODULE,
+            "installBodyGuards",
+            &[],
+        )
+        .map(Some)
+    }
+
     fn build_instance<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
-        app_id: &str,
+        _app_id: &str,
     ) -> Option<v8::Local<'s, v8::Object>> {
-        mint_workflows(scope, self.build_backend(app_id))
+        let backend: SharedWorkflowBackend = match &self.backend {
+            WorkflowBackendFactory::Service { backend } => backend.clone(),
+            // The immutable identity the runtime was built with selects the
+            // app; creator-visible environment values cannot.
+            WorkflowBackendFactory::Ready { apps } => {
+                apps.backend(zeroship_runtime::plugin::runtime_app_identity(scope)?)
+            }
+        };
+        mint_workflows(scope, backend)
     }
 }

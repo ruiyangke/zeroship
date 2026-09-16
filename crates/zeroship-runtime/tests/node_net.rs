@@ -948,3 +948,48 @@ fn accept_target(host: &str, port: u16) -> EgressRule {
     };
     EgressRule::parse(Verdict::Accept, &destination, port).expect("valid test egress rule")
 }
+
+#[test]
+fn workflow_shutdown_joins_native_socket_drivers_and_releases_quota() {
+    let _lock = lock_env();
+    let _env = SettingsGuard::set(true, None);
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (ready, observed) = futures::channel::oneshot::channel();
+        let server = compio::runtime::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            while bytes.len() < b"ready".len() {
+                let compio::BufResult(size, buffer) = socket.read(vec![0; 128]).await;
+                let size = size.unwrap();
+                assert!(size > 0);
+                bytes.extend_from_slice(&buffer[..size]);
+            }
+            assert_eq!(bytes, b"ready");
+            ready.send(()).unwrap();
+            let compio::BufResult(size, _) = socket.read(vec![0; 128]).await;
+            assert_eq!(size.unwrap(), 0, "shutdown must close the native transport");
+        });
+        zeroship_runtime::init_v8();
+        let runtime = Runtime::builder()
+            .modules(vec![ModuleEntry {
+                specifier: "index.js".into(),
+                source: wrap_module("import * as net from 'node:net';", &format!(
+                    "const socket = net.createConnection({{host:'127.0.0.1',port:{}}}); socket.on('error', () => {{}}); socket.on('connect', () => socket.write('ready')); await new Promise(() => {{}}); return 'unreachable';",
+                    addr.port(),
+                )),
+            }])
+            .net_policy(trusted(2))
+            .build();
+        runtime.start_pump();
+        let outcome = runtime.call_fetch_handler("GET", "http://local/", &[], [], &EnvSnapshot::empty(), RequestCtx::new(CancelFlag::new()));
+        runtime.exit_isolate();
+        assert!(matches!(outcome, FetchOutcome::Pending { .. }));
+        compio::time::timeout(Duration::from_secs(5), observed).await.unwrap().unwrap();
+        assert!(runtime.active_native_socket_count() > 0);
+        compio::time::timeout(Duration::from_secs(5), runtime.shutdown()).await.unwrap();
+        assert_eq!(runtime.active_native_socket_count(), 0);
+        compio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
+    });
+}

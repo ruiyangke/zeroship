@@ -5,24 +5,23 @@
 // time.
 #![recursion_limit = "256"]
 
-mod enrol;
+mod join;
 
 use zeroship_worker::{cache, handler, health, logs, metrics, sync, WorkerConfig};
 
-use std::sync::{Arc, RwLock};
 use clap::Parser;
 use ntex::web;
-use zeroship_worker::config::{WorkerSettings, WorkerSettingsSources, WorkerSettingsConsumer};
-use zeroship_core::config::{
-    audit_credentials, bootstrap_or_exit, mark_dev_escape_active, require_nonempty,
-    BuildProfile, CheckConfigReport, CheckValue, CredentialPosture,
-    CredentialVerdict, SubsystemCredential,
-};
+use std::sync::{Arc, RwLock};
 use zeroship_bundle::{
-    build_blob_store, build_workflow_blob_store, BlobStore, StoreUrl, WorkflowBlobStore,
+    build_blob_store, BlobStore, StoreUrl,
 };
-use zeroship_storage::StorageBackendConfig;
+use zeroship_core::config::{
+    audit_credentials, bootstrap_or_exit, mark_dev_escape_active, require_nonempty, BuildProfile,
+    CheckConfigReport, CheckValue, CredentialPosture, CredentialVerdict, SubsystemCredential,
+};
 use zeroship_runtime::init::init_v8;
+use zeroship_storage::StorageBackendConfig;
+use zeroship_worker::config::{WorkerSettings, WorkerSettingsConsumer, WorkerSettingsSources};
 
 use crate::sync::{SharedEnvs, SharedVersions};
 
@@ -44,26 +43,23 @@ const WORKER_LISTEN_BACKLOG: i32 = 1024;
 /// Every credential the worker needs, tagged by the subsystem that needs it.
 ///
 /// ONE, and unconditional: a worker that cannot poll control for versions is a
-/// worker with nothing to do. The dispatch credential is NOT here and is not an
-/// omission - it is an ed25519 key file loaded by
-/// [`load_role_material`], which refuses a file it cannot read or that other
-/// local users can, checks this audit cannot express and a strength floor on a
-/// shared string cannot replace.
+/// worker with nothing to do. The JOIN TOKEN is NOT here and is not an
+/// omission - it is the file loaded by [`load_join_material`], which refuses a
+/// file it cannot read or that other local users can, checks this audit cannot
+/// express and a strength floor on a shared string cannot replace.
 /// [`zeroship_core::config::audit_credentials`] handles the three material
 /// cases, so a `--check-config` run still never judges a secret it deliberately
 /// did not read.
 fn worker_credentials(
     settings: &zeroship_worker::config::WorkerSettings,
 ) -> Vec<SubsystemCredential<'_>> {
-    vec![
-        SubsystemCredential {
-            subsystem: "control-version-poll",
-            enabled: true,
-            label: CONTROL_KEY_LABEL,
-            secret: &settings.control_key,
-            validate: require_nonempty,
-        },
-    ]
+    vec![SubsystemCredential {
+        subsystem: "control-version-poll",
+        enabled: true,
+        label: CONTROL_KEY_LABEL,
+        secret: &settings.control_key,
+        validate: require_nonempty,
+    }]
 }
 
 /// Apply the boot gate, or exit. See `crates/zeroship-gateway/src/main.rs` for the shape;
@@ -106,40 +102,30 @@ fn worker_rejects_db_url(db_url: &str) -> bool {
         && !normalized.starts_with("postgresql://")
 }
 
-/// Whether `bind_host` reaches only this machine.
-///
-/// String comparison, not a parse, because this compares against the value the
-/// operator supplied rather than a resolved socket address - `--bind localhost` is
-/// loopback in intent and does not parse as an `IpAddr` at all. It is therefore
-/// deliberately conservative: an unusual spelling of loopback (`127.1`,
-/// `::ffff:127.0.0.1`) reads as routable and is refused, which fails in the safe
-/// direction for both callers.
-///
-/// Extracted so the two guards that need it cannot drift apart. The set used to be
-/// inlined at the credential guard only; a second copy at the unsigned-advance
-/// guard would have been one edit away from disagreeing about what counts as local.
-fn is_loopback_bind(bind_host: &str) -> bool {
-    bind_host == "127.0.0.1" || bind_host == "::1" || bind_host == "localhost"
+/// A workflow host prepares creator journals in the worker's own database and
+/// stages payloads in its own object store, so it cannot run without either.
+/// Refusing the boot beats a host that registers capacity it can never use.
+fn workflow_host_prerequisites(database: bool, storage: bool) -> Result<(), &'static str> {
+    if !database {
+        return Err("worker.workflow_manager_url requires worker.database_url: creator \
+                    workflow journals live in the app database");
+    }
+    if !storage {
+        return Err("worker.workflow_manager_url requires worker.storage_url: workflow \
+                    payloads live in the app object store");
+    }
+    Ok(())
 }
 
-/// Whether the worker may bind `bind_host` given the unsigned-workflow-advance flag.
+/// Load the JOIN TOKEN and peer document this worker boots with, or refuse to
+/// start.
 ///
-/// With the flag off - the default, and what every deployment under `deploy/` uses -
-/// any bind is fine, because the endpoint answers 403. With it on, the endpoint
-/// replays workflow state with no signature or nonce check, so it must not be
-/// reachable from off-box.
-fn unsigned_advance_bind_allowed(bind_host: &str, unsigned_advance: bool) -> bool {
-    !unsigned_advance || is_loopback_bind(bind_host)
-}
-
-/// Load the operator's `svc/worker` key material, or refuse to start.
-///
-/// It is NOT this process's serving identity, and that is the change this
-/// function's name now carries. The role key is shared by every worker replica,
-/// so an assertion minted under it names a fleet; what serves is the INSTANCE
-/// identity `crate::enrol::enrol` exchanges this material for, once, after the
-/// port is bound. See that module for why there are two keyrings and why the
-/// split is forced rather than chosen.
+/// NEITHER IS A SIGNING KEY. The token is a JWT a trusted signer minted; this
+/// process cannot mint anything with it and cannot even verify it. What serves
+/// is the INSTANCE identity `crate::join::join` exchanges it for, once, after
+/// the port is bound - and the keypair behind that identity is drawn in memory
+/// at that moment, so a worker holds no private half on disk at all. No
+/// `svc/worker` role key is loaded, because none exists.
 ///
 /// The verifier is the TRANSPORT-ONLY one. The worker is a callee on exactly
 /// one edge - the gateway's dispatch hop - and that hop carries every end-user
@@ -150,16 +136,16 @@ fn unsigned_advance_bind_allowed(bind_host: &str, unsigned_advance: bool) -> boo
 ///
 /// EVERY OUTCOME BUT ONE IS AN EXIT, and that is fence F4 of
 /// `docs/proposals/2026-09-05-auth-foundation-redesign.md` in full: "absent a
-/// configured gateway public key the worker refuses to start". Unconfigured,
-/// unreadable, unparseable and missing-the-gateway-key are one fate, because
-/// from the outside they produce one behaviour - a worker that binds its port,
-/// passes a liveness probe and turns away every request that reaches it. Step 3
-/// landed the request-time half of this and left the startup half owing; this
-/// is the half that is loud where an operator is looking.
+/// configured gateway public key the worker refuses to start". An unconfigured,
+/// unreadable, insecurely permissioned or unparseable join token or peer
+/// document, and a peer document missing the gateway key, are one fate,
+/// because from the outside they produce one behaviour - a worker that binds
+/// its port, passes a liveness probe and turns away every request that reaches
+/// it.
 ///
-/// The unconfigured case is refused by `ServiceKeyring::load` rather than by a
-/// branch here, so no future edit of this function can restore the escape by
-/// giving the empty path its own arm.
+/// The unconfigured token file is refused by `crate::join::read_join_token`
+/// rather than by a branch here, so no future edit of this function can restore
+/// the escape by giving the empty path its own arm.
 ///
 /// The same peer document also supplies the GATEWAY's public key for the
 /// `ZeroShip-User` identity envelope, and a document that omits it is a HARD
@@ -167,14 +153,14 @@ fn unsigned_advance_bind_allowed(bind_host: &str, unsigned_advance: bool) -> boo
 /// opposite - an empty `worker_key` turned the envelope check off and the
 /// bearer check with it - so the missing-key branch here is the point of the
 /// change, not an edge case of it.
-fn load_role_material(
-    key_file: &std::path::Path,
+fn load_join_material(
+    join_token_file: &std::path::Path,
     peers_file: &std::path::Path,
-) -> crate::enrol::RoleMaterial {
-    use zeroship_core::service_peers::{service_issuer, ServiceKeyring};
+) -> crate::join::JoinMaterial {
+    use zeroship_core::service_peers::{load_peer_bundle, service_issuer};
     use zeroship_core::user_envelope::UserEnvelopeVerifier;
 
-    let issuer = match service_issuer(zeroship_core::service_peers::WORKER_SERVICE_NAME) {
+    let role = match service_issuer(zeroship_core::service_peers::WORKER_SERVICE_NAME) {
         Ok(issuer) => issuer,
         Err(error) => {
             tracing::error!(%error, "worker: refusing to start - worker service issuer is malformed");
@@ -188,20 +174,26 @@ fn load_role_material(
             std::process::exit(1);
         }
     };
-    let mut keyring = match ServiceKeyring::load(issuer.clone(), key_file, peers_file) {
-        Ok(keyring) => keyring,
+    let token = match crate::join::read_join_token(join_token_file) {
+        Ok(token) => token,
         Err(error) => {
             tracing::error!(
                 %error,
-                "worker: refusing to start - service key material rejected; set \
-                 worker.service_key_file and worker.service_peers_file"
+                "worker: refusing to start - join token rejected; set worker.join_token_file"
             );
             std::process::exit(1);
         }
     };
-    let Some(bundle) = keyring.take_bundle() else {
-        tracing::error!("worker: refusing to start - peer bundle already taken");
-        std::process::exit(1);
+    let bundle = match load_peer_bundle(peers_file) {
+        Ok(bundle) => bundle,
+        Err(error) => {
+            tracing::error!(
+                %error,
+                "worker: refusing to start - peer document rejected; set \
+                 worker.service_peers_file"
+            );
+            std::process::exit(1);
+        }
     };
     // Built HERE, while the material is being read, and fatal if it cannot be.
     // A worker that came up without it would verify the dispatch hop and then
@@ -224,7 +216,7 @@ fn load_role_material(
             std::process::exit(1);
         }
     };
-    crate::enrol::RoleMaterial::new(keyring, bundle, user_envelope, issuer)
+    crate::join::JoinMaterial::new(token, bundle, user_envelope, role)
 }
 
 fn main() -> std::io::Result<()> {
@@ -234,7 +226,6 @@ fn main() -> std::io::Result<()> {
         "worker",
     );
     let check_config = *settings.check_config.get();
-    let workflow_advance_unsigned = *settings.workflow_advance_unsigned.get();
 
     let port = *settings.port.get();
     let workers_count = *settings.threads.get();
@@ -246,14 +237,14 @@ fn main() -> std::io::Result<()> {
     // report below asks `is_configured()` and the boot path is not reached.
     let control_key = settings.control_key.expose_str().to_owned();
     let max_isolates = *settings.max_isolates.get();
-    let max_pinned_isolates_per_app = *settings.max_pinned_isolates_per_app.get();
-    let poll_interval = match crate::sync::validate_poll_interval_secs(*settings.poll_interval.get()) {
-        Ok(secs) => secs,
-        Err(message) => {
-            tracing::error!("worker: {message}");
-            std::process::exit(2);
-        }
-    };
+    let poll_interval =
+        match crate::sync::validate_poll_interval_secs(*settings.poll_interval.get()) {
+            Ok(secs) => secs,
+            Err(message) => {
+                tracing::error!("worker: {message}");
+                std::process::exit(2);
+            }
+        };
     let db_url = settings.database_url.expose_str().to_owned();
     let shutdown_timeout = *settings.shutdown_timeout.get();
     let blob_store_root = settings.blob_store.get().clone();
@@ -288,31 +279,36 @@ fn main() -> std::io::Result<()> {
     };
     let bind_host = settings.bind.get().clone();
     let socket_path = settings.socket.get().clone();
+    // The workflow host is optional: without a manager origin no host runs
+    // and `env.workflows` refuses every app. A configured one must be usable.
+    let workflow_manager_url = settings.workflow_manager_url.get().clone();
+    let workflow_host_config = (!workflow_manager_url.is_empty()).then(|| {
+        zeroship_worker::workflow_host::WorkflowHostConfig {
+            manager_url: workflow_manager_url.clone(),
+            capacity: *settings.workflow_capacity.get(),
+            slots: *settings.workflow_slots.get(),
+        }
+    });
+    if let Some(config) = &workflow_host_config {
+        if let Err(message) = config.validate() {
+            tracing::error!("worker: {message}");
+            std::process::exit(2);
+        }
+        if let Err(message) = workflow_host_prerequisites(
+            settings.database_url.is_configured(),
+            storage_backend.is_some(),
+        ) {
+            tracing::error!("worker: {message}");
+            std::process::exit(1);
+        }
+    }
 
     // THE BOOT GATE, before the bind guard below and before the
     // `--check-config` report, so a dry run over a placeholder credential exits
     // non-zero. The credential strength check used to sit AFTER the bind guard;
     // the two are independent refusals and only the order in which a
     // doubly-misconfigured launch reports changes.
-    let credentials =
-        enforce_worker_credentials(&settings, &boot.overlay.source, check_config);
-
-    // `--workflow-advance-unsigned` makes POST /internal/workflow/advance-unsigned
-    // live. That route is registered unconditionally (handler.rs) and performs NO
-    // signature or nonce verification - its own doc records that DW-05 deferred
-    // that - so the flag is the only thing standing between an unauthenticated
-    // caller and workflow state replay.
-    //
-    // The unsigned route has its own deliberately narrow loopback-only guard. It is
-    // unrelated to the deleted process-wide security-relaxation mode.
-    if !unsigned_advance_bind_allowed(&bind_host, workflow_advance_unsigned) {
-        tracing::error!(
-            bind = %bind_host,
-            "refusing to bind non-loopback with --workflow-advance-unsigned — would expose \
-             unauthenticated workflow replay"
-        );
-        std::process::exit(1);
-    }
+    let credentials = enforce_worker_credentials(&settings, &boot.overlay.source, check_config);
 
     // SQLite belongs to local `zeroship serve`. Require a PostgreSQL selector
     // here rather than treating an invalid SQLite selector as another backend.
@@ -335,12 +331,14 @@ fn main() -> std::io::Result<()> {
             CheckValue::Plain(boot.overlay.source.to_string()),
         );
         report.field("control_url", CheckValue::Plain(control_url.clone()));
+        // Presence only: the token is a bearer credential, and a dry run does
+        // not read secret material.
+        report.field(
+            "join_token_file_configured",
+            CheckValue::Flag(!settings.join_token_file.get().as_os_str().is_empty()),
+        );
         report.field("worker_threads", CheckValue::Count(workers_count));
         report.field("max_isolates", CheckValue::Count(max_isolates));
-        report.field(
-            "max_pinned_isolates_per_app",
-            CheckValue::Count(max_pinned_isolates_per_app),
-        );
         report.field(
             "poll_interval_secs",
             CheckValue::Count(usize::try_from(poll_interval).unwrap_or(usize::MAX)),
@@ -354,10 +352,25 @@ fn main() -> std::io::Result<()> {
         report.field("blob_store", CheckValue::Plain(blob_store_root.clone()));
         report.field("blob_store_remote", CheckValue::Flag(blob_store_is_remote));
         report.field(
-            "max_step_blob_bytes",
-            CheckValue::Count(usize::try_from(*settings.max_step_blob_bytes.get()).unwrap_or(usize::MAX)),
+            "socket_configured",
+            CheckValue::Flag(!socket_path.is_empty()),
         );
-        report.field("socket_configured", CheckValue::Flag(!socket_path.is_empty()));
+        report.field(
+            "workflow_host_configured",
+            CheckValue::Flag(workflow_host_config.is_some()),
+        );
+        report.field(
+            "workflow_manager_url",
+            CheckValue::Plain(workflow_manager_url.clone()),
+        );
+        report.field(
+            "workflow_capacity",
+            CheckValue::Count(*settings.workflow_capacity.get()),
+        );
+        report.field(
+            "workflow_slots",
+            CheckValue::Count(*settings.workflow_slots.get()),
+        );
         // Both are reported by PRESENCE, which is all a resolved `Secret<T>`
         // will answer. `!value.is_empty()` used to stand in for that and could
         // not: under `--check-config` a file-sourced secret has no material, so
@@ -387,7 +400,11 @@ fn main() -> std::io::Result<()> {
         );
         report.field(
             "storage_remote",
-            CheckValue::Flag(storage_backend.as_ref().is_some_and(StorageBackendConfig::is_remote)),
+            CheckValue::Flag(
+                storage_backend
+                    .as_ref()
+                    .is_some_and(StorageBackendConfig::is_remote),
+            ),
         );
         // Both from the RESOLVED settings, which is the same expression the
         // producer boots from. They used to be two independent readings of
@@ -443,8 +460,8 @@ fn main() -> std::io::Result<()> {
     // hop claims no `jti` precisely so inbound authentication needs no database
     // at all. Reading two files needs no async runtime, so nothing is lost by
     // doing it first.
-    let role_material = load_role_material(
-        settings.service_key_file.get(),
+    let join_material = load_join_material(
+        settings.join_token_file.get(),
         settings.service_peers_file.get(),
     );
 
@@ -466,9 +483,6 @@ fn main() -> std::io::Result<()> {
     });
     let blob_store: Arc<dyn BlobStore> = build_blob_store(&store_url, s3_runtime.as_ref())
         .expect("failed to initialise blob store");
-    let workflow_blob_store: Arc<dyn WorkflowBlobStore> =
-        build_workflow_blob_store(&store_url, s3_runtime.as_ref())
-            .expect("failed to initialise workflow blob store");
     tracing::info!(
         blob_store_root = %blob_store_root,
         blob_store_remote = blob_store_is_remote,
@@ -628,13 +642,13 @@ fn main() -> std::io::Result<()> {
     // ── THE PORT, THEN THE IDENTITY ──────────────────────────────────────
     //
     // The listener is created HERE, eagerly, and handed to ntex below instead
-    // of letting `HttpServer::bind` create it. The order is the point:
-    // enrolment ADVERTISES this port to control, control writes a row carrying
-    // it, and NOTHING REAPS THAT ROW. Enrolling before the socket exists would
-    // therefore let a bind failure leave a live-looking registry entry pointing
-    // at a port nothing listens on. `bind` is reachable only through the server
-    // builder, and the server cannot be built until the identity enrolment
-    // returns is in hand - so the bind moves out here rather than the enrolment
+    // of letting `HttpServer::bind` create it. The order is the point: the join
+    // ADVERTISES this port to control and control writes a row carrying it.
+    // Joining before the socket exists would let a bind failure leave a
+    // live-looking registry entry pointing at a port nothing listens on, for as
+    // long as the instance lease runs. `bind` is reachable only through the
+    // server builder, and the server cannot be built until the identity the
+    // join returns is in hand - so the bind moves out here rather than the join
     // moving earlier. Socket options match what `HttpServer::bind` would have
     // applied: `ntex::server::bind_addr` is the same function it calls.
     let listeners = match ntex::server::bind_addr(&bind_addr, WORKER_LISTEN_BACKLOG) {
@@ -646,29 +660,47 @@ fn main() -> std::io::Result<()> {
     };
 
     // EVERY FAILURE HERE REFUSES THE BOOT, and that is the whole of it. A
-    // worker that logged this and carried on would serve traffic under the
-    // SHARED role key while control's registry either knows nothing about it or
-    // holds a row for a process that never finished starting - and from the
-    // outside it would look exactly like a worker that enrolled, which is the
-    // failure shape this platform keeps re-learning.
+    // worker that logged this and carried on would have no identity to verify
+    // dispatch or read an app with, while control's registry either knows
+    // nothing about it or holds a row for a process that never finished
+    // starting - and from the outside it would look exactly like a worker that
+    // joined, which is the failure shape this platform keeps re-learning.
     //
-    // `enrol` CONSUMES the role material, so the operator's shared key is
-    // spent on this one call and is unreachable afterwards. What comes back
-    // mints under `svc/worker/<wkr_id>` and is addressed as `svc/worker`;
-    // everything below - the version poller, every reconcile, every dispatch -
-    // is handed that and only that.
-    let service_auth = match enrol::enrol(role_material, &control_url, port).await {
+    // `join` CONSUMES the join material, so the token is spent on this one call
+    // and is unreachable afterwards. What comes back mints under
+    // `svc/worker/<wkr_id>` and is addressed as `svc/worker`; everything below
+    // - every reconcile, every dispatch, the CDC relay, the lease renewals and
+    // the retirement at exit - is handed that and only that.
+    let service_auth = match join::join(join_material, &control_url, port).await {
         Ok(auth) => Arc::new(auth),
         Err(error) => {
             tracing::error!(
                 control_url = %control_url,
                 port,
                 %error,
-                "worker: refusing to start - this process could not enrol an instance identity"
+                "worker: refusing to start - this process could not join an instance identity"
             );
             std::process::exit(1);
         }
     };
+
+    // THE IDENTITY EXPIRES, so this process renews it for as long as it runs.
+    // Started immediately after the join rather than with the other background
+    // tasks: the lease is already ticking, and a renewal loop that only starts
+    // once the server is up would leave a worker whose boot stalls holding a
+    // credential nothing extends.
+    //
+    // The loop RETURNS when control refuses - the identity lapsed or was
+    // retired, and neither can be revived - rather than exiting the process.
+    // Killing the process there would drop requests in flight for a credential
+    // that is already dead; the refusals those requests then get at control are
+    // the honest outcome, and the orchestrator restarts a worker that rejoins
+    // with a token this process no longer holds.
+    compio::runtime::spawn(join::renew_forever(
+        Arc::clone(&service_auth),
+        control_url.clone(),
+    ))
+    .detach();
 
     let db_service = match db_url_opt.as_deref() {
         Some(url) => Some(
@@ -702,21 +734,20 @@ fn main() -> std::io::Result<()> {
     };
 
 
+    // Kept back for the retirement after the server drains: the config itself
+    // moves into the server factory below.
+    let retirement = (Arc::clone(&service_auth), control_url.clone());
+
     let config = Arc::new(WorkerConfig {
         service_auth,
         control_url,
         control_key,
-        db_url: db_url_opt,
         kv_store,
         storage_backend,
         max_isolates,
-        max_pinned_isolates_per_app,
         poll_interval_secs: poll_interval,
         shutdown_timeout_secs: shutdown_timeout,
         blob_store,
-        workflow_blob_store,
-        max_step_blob_bytes: *settings.max_step_blob_bytes.get(),
-        workflow_advance_unsigned,
     });
 
     // The single process-wide version poller. Started after the `env.db`
@@ -727,9 +758,9 @@ fn main() -> std::io::Result<()> {
     // known-app set, so env entries for deleted apps don't leak forever.
     //
     // It is also the LAST thing before the server that talks to control, and it
-    // is now downstream of enrolment - so no outbound call this process makes
-    // can be minted under the role key. Nothing before this point mints at all:
-    // the poller's own credential is the shared control key
+    // is downstream of the join - so every service assertion this process mints
+    // after joining is the instance's, and the join token is already gone. The
+    // poller's own credential is the shared control key
     // (`sync::version_poll_authorization`), and the two service-assertion
     // callers - `fetch_app_version` and `fetch_app_env` - are reachable only
     // from the per-thread reconcile loop, the dispatch handler and the log
@@ -742,11 +773,55 @@ fn main() -> std::io::Result<()> {
         db_service.clone(),
     );
 
+    // ── THE WORKFLOW HOST ────────────────────────────────────────────────
+    //
+    // ONE host for the whole process, on its own thread, holding this
+    // instance's identity towards the manager. HTTP threads only ever see the
+    // `ReadyApps` it publishes into: an app is reachable through
+    // `env.workflows` once its assignment's preparation passed its final
+    // checks, and not before or after. With no manager configured the
+    // registry simply stays empty.
+    let workflows = zeroship_workflow::service::runner::ready::ReadyApps::default();
+    let workflow_host = match workflow_host_config {
+        Some(host_config) => {
+            let resources = zeroship_worker::workflow_host::HostResources {
+                service_auth: Arc::clone(&config.service_auth),
+                control_url: config.control_url.clone(),
+                db_service: db_service
+                    .clone()
+                    .expect("the boot refused a workflow host without a database"),
+                storage: config
+                    .storage_backend
+                    .clone()
+                    .expect("the boot refused a workflow host without storage"),
+                kv_store: config.kv_store.clone(),
+                blob_store: Arc::clone(&config.blob_store),
+                meter: Arc::clone(&meter),
+                versions: shared_versions.clone(),
+                envs: shared_envs.clone(),
+            };
+            match zeroship_worker::workflow_host::WorkflowHost::start(
+                host_config,
+                resources,
+                workflows.clone(),
+            ) {
+                Ok(host) => Some(host),
+                Err(error) => {
+                    tracing::error!(%error, "worker: refusing to start - the workflow host did not start");
+                    std::process::exit(1);
+                }
+            }
+        }
+        None => {
+            tracing::info!("worker: no workflow manager configured; env.workflows refuses every app");
+            None
+        }
+    };
+
     tracing::info!(
         bind = %bind_addr,
         threads = workers_count,
         max_isolates = config.max_isolates,
-        max_pinned_isolates_per_app = config.max_pinned_isolates_per_app,
         shutdown_timeout_secs = config.shutdown_timeout_secs,
         "worker listening"
     );
@@ -764,10 +839,8 @@ fn main() -> std::io::Result<()> {
         let logs = shared_logs.clone();
         cache::init_cache(
             config.max_isolates,
-            config.max_pinned_isolates_per_app,
             cache::KernelConfig {
-                control_url: config.control_url.clone(),
-                control_key: config.control_key.clone(),
+                workflows: workflows.clone(),
                 db_service: db_service.clone(),
                 kv_store: config.kv_store.clone(),
                 storage_backend: config.storage_backend.clone(),
@@ -816,8 +889,61 @@ fn main() -> std::io::Result<()> {
     // serving their current requests, and returns. Detached tasks
     // (fetch body readers, stream drainers) whose futures the pump is
     // polling get one last chance to run during the drain window.
-    let run_result = server.run().await;
+    let server = server.run();
+
+    // A request server must not keep accepting durable work after its
+    // workflow host died: stop serving and exit non-zero so the orchestrator
+    // replaces this process, which enrols as a new instance.
+    let host_failure = std::rc::Rc::new(std::cell::RefCell::new(None::<String>));
+    if let Some(host) = &workflow_host {
+        let failure = host.failure();
+        let failed = host_failure.clone();
+        let handle = server.clone();
+        ntex::rt::spawn(async move {
+            let reason = failure.await;
+            tracing::error!(%reason, "worker: the workflow host stopped unexpectedly; stopping");
+            *failed.borrow_mut() = Some(reason);
+            handle.stop(true).await;
+        });
+    }
+
+    // `server` resolves once SIGINT/SIGTERM (or a failed host) stopped it and
+    // the HTTP drain finished.
+    let run_result = server.await;
+
+    // HTTP HAS DRAINED; NOW THE WORKFLOW HOST. No request can resolve an app
+    // backend any more, so the host closes its assignment bindings - which
+    // withdraws every published backend and revokes its policy generation -
+    // reports draining to the manager while delivered executions join, and
+    // its thread is joined. Only then does the instance retire, because the
+    // host's final manager exchange is signed with the instance key.
+    if let Some(host) = workflow_host {
+        match host.shutdown().await {
+            Ok(()) => tracing::info!("worker: workflow host drained"),
+            Err(error) => tracing::warn!(%error, "worker: workflow host drain failed"),
+        }
+    }
+
+    // THE INSTANCE RETIRES ITSELF, and only here: after the drain, so no
+    // request still in flight loses its identity mid-read, and only on the
+    // graceful path, because a process that crashed says nothing at all. The
+    // server factory does not stop this runtime when it stops, so the call
+    // runs on the same thread that joined. A retirement that fails is
+    // logged and the exit carries on - the row then stays `active` with no
+    // process behind it, which is what a crash leaves.
+    let (retirement_auth, retirement_control) = retirement;
+    match join::retire(&retirement_auth, &retirement_control).await {
+        Ok(()) => tracing::info!("worker: instance retired at control"),
+        Err(error) => tracing::warn!(
+            %error,
+            "worker: could not retire this instance at control; it stays active until its \
+             lease runs out"
+        ),
+    }
     tracing::info!("worker shutdown complete");
+    if let Some(reason) = host_failure.borrow_mut().take() {
+        return Err(std::io::Error::other(format!("workflow host failed: {reason}")));
+    }
     run_result
         })
 }

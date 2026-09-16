@@ -472,10 +472,10 @@ impl std::error::Error for PlanSeedError {}
 
 /// Idempotently seed the built-in plan tiers into the catalog.
 ///
-/// Every write is an `ON CONFLICT (id) DO UPDATE` keyed on the deterministic
-/// `pln_<base36>` ids, so re-running is a no-op. `main.rs` calls this on every
-/// boot, before anything can write an app row, because `apps.plan_id` is an FK
-/// into `zeroship.plans`.
+/// Refresh built-in pricing and runtime defaults under deterministic plan IDs.
+/// Preserve operator archival and workflow policy when the process restarts.
+/// `main.rs` calls this before app creation because `apps.plan_id` references
+/// the catalog.
 ///
 /// # Errors
 /// [`PlanSeedError::Db`] if the catalog upsert fails.
@@ -483,8 +483,7 @@ pub async fn seed_plans(registry: &Registry) -> Result<(), PlanSeedError> {
     let catalog = PlanCatalog::new(registry.clone());
     for plan in builtin_plans() {
         catalog
-            // Built-in tiers are always unarchived; assert it explicitly.
-            .upsert(&plan, Some(plan.archived))
+            .upsert(&plan, None)
             .await
             .map_err(|e| PlanSeedError::Db(format!("seed plan '{}': {e}", plan.id)))?;
     }

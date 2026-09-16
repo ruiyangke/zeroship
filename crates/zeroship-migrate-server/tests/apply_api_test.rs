@@ -217,18 +217,11 @@ async fn cleanup_app(conn: &Client, app_id: &AppId) {
     // before reaching it.
     let role = zeroship_migrate_postgres::role::migrator_role_name(&schema).unwrap();
     let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
-    // THE WORKFLOW JOURNAL SCHEMA WAS THE THIRD ONE, and it was leaking. A
-    // successful apply runs `runtime_dependents_sql`, which used to create
-    // `app_<uuid>` beside `<uuid>`; this teardown dropped only the latter two.
-    // It is now the app schema itself, so the journal drop is the third entry
-    // below and names the derivation rather than composing a prefix.
     let _ = conn
         .batch_execute(&format!(
             "DROP SCHEMA IF EXISTS {} CASCADE; \
-             DROP SCHEMA IF EXISTS {} CASCADE; \
              DROP SCHEMA IF EXISTS {} CASCADE;",
             q(&format!("{schema}_migrations")),
-            q(&zeroship_migrate_server::provisioning::workflow_journal_schema_name(app_id)),
             q(&schema),
         ))
         .await;
@@ -1127,14 +1120,14 @@ async fn create_database_is_idempotent_and_provisions_only_schema_and_migrator_p
         ),
     )
     .await;
-    // THE WORKFLOW JOURNAL SCHEMA IS NO LONGER A WITNESS HERE, and deleting the
-    // probe is the honest move rather than an omission. It was `app_<uuid>`
-    // beside a data schema of `<uuid>`, so its absence proved that create had
-    // not done apply-owned work. The journal schema is now
-    // `provisioning::workflow_journal_schema_name` of the tenant, which is the
-    // DATA schema this same test asserts create DOES make - so the probe would
-    // now be asserting that one name is both present and absent. The runtime
-    // role and the audit table below still witness the same boundary.
+    // THE RUNTIME ROLE MOVED ACROSS THIS BOUNDARY, and the assertion below moved
+    // with it rather than being dropped. It used to be apply-owned, which left an
+    // app that never applies a creator migration holding a database it could not
+    // open: the only thing that provisioned its role was a domain-specific entry
+    // point beside the apply path, and that entry point is gone. Create now
+    // establishes every IDENTITY the database needs. The audit table and the
+    // ledger row below still witness the boundary, because both describe
+    // MIGRATIONS rather than the database's existence.
     let runtime_role_exists = probe_bool(
         &conn,
         &format!(
@@ -1171,8 +1164,9 @@ async fn create_database_is_idempotent_and_provisions_only_schema_and_migrator_p
         "create did not provision migrator role {migrator_role}"
     );
     assert!(
-        !runtime_role_exists,
-        "create crossed into apply-owned runtime role {runtime_role}"
+        runtime_role_exists,
+        "create left the database without the runtime role {runtime_role} the worker opens \
+         it under"
     );
     assert!(
         !audit_table_exists,

@@ -211,7 +211,7 @@ stack_workspace() {
   #
   # LOOPBACK IS ADMITTED BECAUSE IT IS DECLARED, NOT BY DEFAULT. The network
   # comparison in `derive_address`
-  # (crates/zeroship-control/src/worker_enrolment.rs) is the only thing that
+  # (crates/zeroship-control/src/worker_join.rs) is the only thing that
   # admits a loopback peer, and an undeclared envelope still refuses one.
   # Everything this file starts runs on localhost, so `127.0.0.0/8` is what the
   # peer socket reports and `127.0.0.0/8` is what is stated here.
@@ -226,6 +226,20 @@ stack_workspace() {
   ZEROSHIP_CONTROL_WORKER_ENROLMENT_NETWORKS="${ZEROSHIP_CONTROL_WORKER_ENROLMENT_NETWORKS:-127.0.0.0/8}"
   ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS="${ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS:-$ZEROSHIP_WORKER_PORT}"
   export ZEROSHIP_CONTROL_WORKER_ENROLMENT_NETWORKS ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS
+
+  # --- the join token every worker this file starts presents at boot --------
+  #
+  # `e2e_export_runtime_secrets` above provisioned the join signer credential
+  # (`E2E_JOIN_SIGNER_CREDENTIAL`) and Control's trusted-signer import file
+  # (`ZEROSHIP_CONTROL_JOIN_SIGNERS_FILE`). This mints ONE token from that
+  # signer with the real `zeroship join-token` binary, minted with more uses
+  # than a single-worker stack needs so a harness that boots several workers
+  # off this same workspace - tests/e2e_platform.sh's three - can present the
+  # same token from every one without minting its own.
+  ZEROSHIP_WORKER_JOIN_TOKEN_FILE="$WORK/join-token"
+  e2e_mint_join_token "$E2E_BIN/zeroship" "$E2E_JOIN_SIGNER_CREDENTIAL" \
+    "$ZEROSHIP_WORKER_JOIN_TOKEN_FILE" || return 1
+  export ZEROSHIP_WORKER_JOIN_TOKEN_FILE
 
   export WORK PIDFILE DBURL PG_CONTAINER
   return 0

@@ -613,25 +613,4 @@ mod backend_init_tests {
     }
 }
 
-/// Compare the workflow journal names used by migration provisioning and reads.
-/// This test links both consumers so a fixture cannot conceal a naming mismatch.
-#[cfg(test)]
-mod journal_schema_derivations_agree {
-    use zeroship_core::AppId;
-
-    /// Both derivations must produce the same schema name for the same app.
-    #[test]
-    fn the_writer_and_the_reader_name_the_same_schema() {
-        let id = AppId::mint();
-        let writer = zeroship_migrate_server::provisioning::workflow_journal_schema_name(&id);
-        let reader = zeroship_workflow::store::pg::app_schema_for(&id);
-        assert_eq!(
-            writer, reader,
-            "the migration service provisions the workflow journal schema as \
-             {writer} while the workflow plugin reads {reader}; a deploy would \
-             write its journal where nothing looks for it"
-        );
-    }
-}
-
 mod v8_values;

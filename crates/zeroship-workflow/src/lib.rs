@@ -1,21 +1,21 @@
-//! Durable workflow journal, dispatch protocol, and app-scoped Rust backends.
+//! Durable workflow engine, app-scoped Rust backends and the creator host.
 //!
-//! This crate has no dependency on V8. Hosts provide a workflow executor for
-//! local SQLite runs; deployed runs use the control-plane HTTP backend.
+//! This crate has no dependency on V8. Customer hosts compose the shared engine
+//! with their journal, retained executables and task executor.
 
-pub mod advance;
-pub mod apply;
+#[cfg(test)]
+extern crate self as zeroship_workflow;
+
 pub mod backend;
-pub mod claim;
-pub mod client;
-pub mod dev;
+pub mod deployment_holds;
 pub mod engine;
 pub mod errors;
-pub mod store;
+pub mod execution;
+pub mod lifecycle;
+pub mod operations;
+pub mod service;
+pub mod validation;
 
-pub use backend::{HttpWorkflowBackend, SharedWorkflowBackend, WorkflowBackend};
-pub use client::{
-    app_scoped_token, WorkflowClientConfig, WorkflowHttpMethod, WorkflowHttpRequest,
-    WorkflowRpcError,
-};
-pub use dev::{DevWorkflowEngine, WorkflowExecutor};
+pub use backend::{SharedWorkflowBackend, WorkflowBackend};
+pub use errors::WorkflowServiceError;
+pub use execution::{WorkflowExecution, WorkflowInvocation, WorkflowTrigger};

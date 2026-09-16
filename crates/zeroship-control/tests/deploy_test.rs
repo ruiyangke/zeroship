@@ -237,6 +237,7 @@ async fn deploy_round_trip() {
             &zeroship_control::plan_catalog::free_plan_id(),
             &owner_id,
             None,
+            None,
         )
         .await
         .expect("create");
@@ -244,18 +245,20 @@ async fn deploy_round_trip() {
 
     // Re-run ingest under the real app id, then update the DB.
     let success2 = deploy::ingest(&bs, &app_id2, &body).await.expect("ingest2");
-    let updated = registry
-        // No descriptor: this bundle declares no schema and the app has no
-        // applied migrations, which is the arm the precondition permits.
-        .set_deploy_with_manifest(
-            &app_id2,
-            &success2.deploy_hash,
-            &success2.manifest_json,
-            None,
-        )
+    // No descriptor: this bundle declares no schema and the app has no
+    // applied migrations, which is the arm the precondition permits.
+    let deployment = zeroship_control::publication::VerifiedDeployment::verify(
+        success2.manifest_json.clone(),
+        success2.deploy_hash.clone(),
+    )
+    .expect("ingest produced a verified deployment");
+    let accepted = registry
+        .deploy(common::deployments::command(
+            &app_id2, &owner_id, deployment,
+        ))
         .await
         .expect("set deploy");
-    assert!(updated);
+    assert!(!accepted.replayed());
 
     let row = registry.get_app(&app_id2).await.expect("get_app").unwrap();
     assert_eq!(

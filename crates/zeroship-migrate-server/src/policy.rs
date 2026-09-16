@@ -37,7 +37,7 @@ use zeroship_migrate_ir::policy_approval::{require_approval_level, ApprovalLevel
 use zeroship_migrate_ir::policy_registry::KEY_SCHEMA_CREATE_SCHEMA;
 use zeroship_migrate_ir::policy_registry::{
     builtin_registry, KEY_CODE_EXTENSION, KEY_SAFETY_DESTRUCTIVE_OPS, KEY_SAFETY_REQUIRE_RLS,
-    KEY_SCHEMA_CREATE_TABLE, KEY_SCHEMA_CROSS_SCHEMA, KEY_SCHEMA_RENAME,
+    KEY_SCHEMA_CREATE_TABLE, KEY_SCHEMA_CROSS_SCHEMA, KEY_SCHEMA_RENAME, KEY_SQL_RAW,
 };
 
 use zeroship_migrate_policy::{
@@ -521,6 +521,95 @@ fn bind_confined_charter_to_schema(source: &str, schema: &str) -> Result<String,
     }
 
     toml::to_string(&doc).map_err(|error| format!("serialize app-bound charter: {error}"))
+}
+
+/// The monorepo-owned ceiling a PLATFORM schema bundle composes against.
+const BUNDLE_CEILING_TOML: &str = include_str!("../policies/bundle.policy.toml");
+
+/// The keys [`bind_bundle_charter_to_schema`] confines to the target schema.
+///
+/// Not a catch-all: a schema-scoped key absent from this list is REFUSED rather
+/// than passed through at its authored `scope = "all"`, for the same reason the
+/// confined binder refuses one. A grant whose confinement nobody has thought
+/// about is authority over every schema, from the function whose job is to
+/// remove exactly that.
+const BUNDLE_SCHEMA_SCOPED_KEYS: &[&str] = &[
+    KEY_SCHEMA_CREATE_TABLE,
+    KEY_SCHEMA_RENAME,
+    KEY_SCHEMA_CROSS_SCHEMA,
+    KEY_SQL_RAW,
+];
+
+/// Compose the bundle ceiling ⊓ the policy the bundle declares, bound to the one
+/// schema the bundle targets.
+///
+/// Escalation-reject, exactly as for a creator draft: a bundle that asks for more
+/// than the ceiling permits is refused, never clamped. This is what keeps "policy
+/// arrives in the artifact, not the database" true of a platform caller too.
+///
+/// # Errors
+/// [`ManagedPolicyError::CeilingCompose`] when the embedded ceiling cannot be
+/// bound or composed, [`ManagedPolicyError::MalformedDraft`] when the declared
+/// policy does not parse, and [`ManagedPolicyError::Compose`] when it escalates.
+pub fn bundle_policy_for_schema(
+    schema: &str,
+    declared: &str,
+) -> Result<PdpPolicy, ManagedPolicyError> {
+    let charter = bind_bundle_charter_to_schema(BUNDLE_CEILING_TOML, schema)
+        .map_err(ManagedPolicyError::CeilingCompose)?;
+    let ceiling =
+        effective_policy_from_charter_toml(&charter).map_err(ManagedPolicyError::CeilingCompose)?;
+    let draft = parse_draft_body(declared, "bundle policy")?;
+    admit(&ceiling, &draft.doc, &builtin_registry()).map_err(ManagedPolicyError::Compose)
+}
+
+/// Bind every schema-scoped grant in the bundle ceiling to one exact schema.
+///
+/// The peer of [`bind_confined_charter_to_schema`], and deliberately a separate
+/// function rather than a parameter on it: that one REFUSES a cross-schema grant
+/// outright, because a creator app must never reach a foreign schema. A platform
+/// bundle's DDL names its own schema explicitly, so it needs that grant confined
+/// to exactly one name instead of removed.
+fn bind_bundle_charter_to_schema(source: &str, schema: &str) -> Result<String, String> {
+    let mut doc: toml::Value = toml::from_str(source)
+        .map_err(|error| format!("parse bundle charter for schema binding: {error}"))?;
+    let grants = doc
+        .as_table_mut()
+        .and_then(|root| root.get_mut("grant"))
+        .and_then(toml::Value::as_array_mut)
+        .ok_or_else(|| "bundle charter must contain [[grant]] rules".to_string())?;
+
+    let mut bound = 0_usize;
+    for (index, value) in grants.iter_mut().enumerate() {
+        let rule = value
+            .as_table_mut()
+            .ok_or_else(|| format!("bundle charter grant {index} must be a table"))?;
+        let key = rule
+            .get("key")
+            .and_then(toml::Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| format!("bundle charter grant {index} must have a string key"))?;
+        if BUNDLE_SCHEMA_SCOPED_KEYS.contains(&key.as_str()) {
+            if rule.get("scope").and_then(toml::Value::as_str) != Some("all") {
+                return Err(format!(
+                    "bundle charter {key} must remain at scope=all before schema binding"
+                ));
+            }
+            rule.insert("scope".to_string(), schema_scope_value(schema));
+            bound += 1;
+        } else if key.starts_with("schema.") || key.starts_with("sql.") {
+            return Err(format!(
+                "bundle charter grant {index} carries schema-scoped key {key}, which schema \
+                 binding does not know how to confine; bind it explicitly or remove it"
+            ));
+        }
+    }
+    if bound != BUNDLE_SCHEMA_SCOPED_KEYS.len() {
+        return Err(format!(
+            "bundle charter must carry one grant for each of {BUNDLE_SCHEMA_SCOPED_KEYS:?}"
+        ));
+    }
+    toml::to_string(&doc).map_err(|error| format!("serialize schema-bound bundle charter: {error}"))
 }
 
 #[derive(Debug, Clone, Copy)]

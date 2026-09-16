@@ -94,6 +94,7 @@ async fn provision_asserts_native_db_scopes_routes_and_redirect_sync() {
             &zeroship_control::plan_catalog::free_plan_id(),
             &owner_id,
             None,
+            None,
         )
         .await
         .expect("create app");
@@ -305,10 +306,6 @@ async fn build_state(db_url: &str, app_base_domain: &str) -> Arc<AppState> {
     let stripe_store = StripeStore::new(registry.clone());
     let blob_store: Arc<dyn BlobStore> =
         Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
-    let workflow_blob_store: Arc<dyn zeroship_bundle::WorkflowBlobStore> = Arc::new(
-        zeroship_bundle::LocalWorkflowBlobStore::new(blob_root.clone())
-            .expect("workflow blob store"),
-    );
     let control_pg = Arc::new(pg(db_url).await);
 
     Arc::new(AppState {
@@ -317,20 +314,18 @@ async fn build_state(db_url: &str, app_base_domain: &str) -> Arc<AppState> {
         env_store,
         stripe_store,
         blob_store,
-        workflow_blob_store,
         control_key: SecretString::new("test-control-key".to_string()),
         master_key: SecretString::new("test-master-key-deadbeefcafebabe".to_string()),
         stripe_webhook_secret: SecretString::new(String::new()),
         stripe_secret_key: SecretString::new(String::new()),
         stripe_base_url: "https://api.stripe.com".to_string(),
-        gateway_url: "http://127.0.0.1:9".to_string(),
         worker_urls: Vec::new(),
         admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
         webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
         // Public OAuth URLs follow deployment topology.
         origin_scheme: OriginScheme::Https,
         trust_proxy: false,
-        worker_enrolment: zeroship_control::worker_enrolment::EnrolmentEnvelope::closed(),
+        worker_enrolment: zeroship_control::worker_join::EnrolmentEnvelope::closed(),
         deploy_tmp_dir: blob_root.clone(),
         control_pg,
         app_base_domain: app_base_domain.to_string(),
@@ -375,6 +370,7 @@ async fn appstate_origin_scheme_provisions_urls_then_archive_preserves_oauth_row
             &app_name,
             &zeroship_control::plan_catalog::free_plan_id(),
             &owner_id,
+            None,
             None,
         )
         .await

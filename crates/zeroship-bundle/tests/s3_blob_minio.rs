@@ -58,7 +58,7 @@ fn require_docker() {
          daemon, and check that your user can reach it:\n\
          \x20 docker info\n\
          \n\
-         The suite then pulls `minio/minio` on first run, so the first run needs\n\
+         The suite then pulls `quay.io/minio/minio` on first run, so the first run needs\n\
          network access to the registry.\n\
          \n\
          There is no environment variable that makes this a skip. A backend this\n\
@@ -96,7 +96,7 @@ fn start_minio() {
             &format!("MINIO_ROOT_USER={ACCESS_KEY}"),
             "-e",
             &format!("MINIO_ROOT_PASSWORD={SECRET_KEY}"),
-            "minio/minio",
+            "quay.io/minio/minio",
             "server",
             "/data",
         ])
@@ -106,14 +106,14 @@ fn start_minio() {
         "The MinIO container this test needs would not start.\n\
          \n\
          \x20 backend:   MinIO (S3)\n\
-         \x20 image:     minio/minio\n\
+         \x20 image:     quay.io/minio/minio\n\
          \x20 container: {CONTAINER}\n\
          \x20 port:      {PORT} on the host, mapped to 9000\n\
          \n\
          `docker run` failed. The usual causes, in the order worth checking:\n\
          \x20 docker ps -a --filter name={CONTAINER}   # a leftover container\n\
          \x20 ss -lptn 'sport = :{PORT}'                     # the port is taken\n\
-         \x20 docker pull minio/minio                        # the image is not local\n\
+         \x20 docker pull quay.io/minio/minio                # the image is not local\n\
          \n\
          Nothing in this repository provisions it; the test starts and removes\n\
          it itself, so there is no script to run - fix the daemon and re-run.\n\
@@ -155,7 +155,7 @@ fn start_minio() {
          MinIO said:\n\
          \x20 docker run -d --name {CONTAINER} -p {PORT}:9000 \\\n\
          \x20   -e MINIO_ROOT_USER={ACCESS_KEY} -e MINIO_ROOT_PASSWORD={SECRET_KEY} \\\n\
-         \x20   minio/minio server /data\n\
+         \x20   quay.io/minio/minio server /data\n\
          \x20 docker logs {CONTAINER}\n\
          \n\
          An `mc` that is missing from the image is the one cause this loop\n\

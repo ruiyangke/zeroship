@@ -7,17 +7,16 @@ The default export exposes the workflow classes and an HTTP fetch handler.
 
 ```sh
 pnpm build
-zeroship serve dist/index.js --port 3000
+zeroship serve dist/app.zship --port 3000
 pnpm test
 ```
 
-Vite bundles the SDK into `dist/index.js`. Local development uses the SQLite
-workflow engine. Its child-workflow limitation means an order currently ends
-with `WorkflowUnsupportedError` locally; the deployed engine runs the full
-order flow.
+The zeroship Vite plugin builds the ordinary app bundle at `dist/app.zship`,
+including its workflow definitions. Local development uses the SQLite workflow
+engine and executes the same child, approval, and shipment flow as deployment.
 
 The example owns its Vitest and Playwright tests under `tests/`. Its fixture
-builds a raw `.zship`, starts PostgreSQL through Testcontainers, applies platform
+builds the app bundle, starts PostgreSQL through Testcontainers, applies platform
 migrations, and deploys to real control, gateway, and worker processes. Docker
 and the built workspace SDKs are required. Tests cover duplicate starts,
 approval signals, shipment results, and browser requests. Logs and screenshots

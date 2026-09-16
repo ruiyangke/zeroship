@@ -69,26 +69,19 @@ test("signals resume an observed waiting run with the supplied payload", async (
   }
 });
 
-test("deployed child workflows return their output and local development reports unsupported calls", async () => {
+test("child workflows return their output in local and deployed runs", async () => {
   for (const target of targets()) {
     const run = await start(target, "child");
-    if (target.name === "local") {
-      expect((await until(target, run, "failed")).error?.type).toBe("WorkflowUnsupportedError");
-    } else {
-      expect((await until(target, run, "completed")).output).toEqual({ child: { doubled: 42 }, parentSaw: 42 });
-    }
+    expect((await until(target, run, "completed")).output).toEqual({ child: { doubled: 42 }, parentSaw: 42 });
   }
 });
 
-test("compensation reverses the deployed effect and preserves the original error in both tiers", async () => {
+test("compensation reverses the effect and preserves the original error in both tiers", async () => {
   for (const target of targets()) {
     expect(await rpc(target, "resetTrail", {})).toEqual({ reset: true });
     const result = await until(target, await start(target, "compensate"), "failed");
     expect(result.error?.message).toContain("probe-intentional-failure");
-    const local = target.name === "local";
-    expect(await rpc(target, "trail", {})).toEqual({ trail: local ? "do:reserve" : "do:reserve,undo:reserve" });
-    expect(result.error?.compensation).toMatchObject(local
-      ? { supported: false, outcome: "not-attempted", type: "WorkflowUnsupportedError", steps: ["reserve"] }
-      : { outcome: "completed" });
+    expect(await rpc(target, "trail", {})).toEqual({ trail: "do:reserve,undo:reserve" });
+    expect(result.error?.compensation).toMatchObject({ outcome: "completed" });
   }
 });

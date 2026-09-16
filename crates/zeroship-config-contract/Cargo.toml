@@ -33,7 +33,7 @@ zeroship-data-cdc-server = { workspace = true }
 zeroship-gateway = { workspace = true }
 zeroship-migrate-server = { workspace = true }
 zeroship-worker = { workspace = true }
-zeroship-workflow-scheduler = { workspace = true }
+zeroship-workflow-server = { workspace = true }
 # A SEVENTH ENTRY USED TO SIT HERE: `zeroship-migrate-adapter`, linked for the
 # `zeroship-platform-migrate` one-shot's declaration. Both the binary and the
 # `PlatformMigrateSettings` declaration were deleted on 2026-08-28 when the

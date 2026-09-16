@@ -488,13 +488,92 @@ _e2e_base64url() {
   openssl base64 -A -in "$1" | tr '+/' '-_' | tr -d '='
 }
 
+# _e2e_write_join_signer <credential> <import-file> [zone]
+#
+# Mint ONE join signer: the credential a minter holds (`wjs_` id and PKCS#8
+# key in one document, the shape `control.join_token_signer_file` and
+# `zeroship join-token --credential` both read) and Control's import file
+# naming its public half in the given execution zone
+# (`ZEROSHIP_CONTROL_JOIN_SIGNERS_FILE`). `zeroship dev init` is the
+# operator's tool for the same two files; this mints them without a full
+# platform-secrets bootstrap, because not every harness sourcing this file
+# wants one. The shapes are `parse_join_signer_credential` and
+# `parse_join_signer_import` in crates/zeroship-core/src/worker_join.rs, and
+# both loaders refuse anything else.
+_e2e_write_join_signer() {
+  local credential="$1" import_file="$2" zone="${3:-default}"
+  command -v node >/dev/null 2>&1 || {
+    echo "_e2e_write_join_signer: node is required" >&2
+    return 1
+  }
+  node - "$credential" "$import_file" "$zone" <<'JOIN_SIGNER_JS'
+const fs = require("node:fs");
+const crypto = require("node:crypto");
+const [credential, importFile, zone] = process.argv.slice(2);
+const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
+// A wjs_ typed id: base36 of 128 random bits, 25 digits wide.
+let value = BigInt("0x" + crypto.randomUUID().replaceAll("-", ""));
+let body = "";
+for (let digit = 0; digit < 25; digit++) {
+  body = "0123456789abcdefghijklmnopqrstuvwxyz"[Number(value % 36n)] + body;
+  value /= 36n;
+}
+const id = "wjs_" + body;
+fs.writeFileSync(credential, JSON.stringify({
+  signer_id: id,
+  private_key: privateKey.export({ format: "pem", type: "pkcs8" }).toString(),
+}), { mode: 0o600 });
+fs.writeFileSync(importFile, JSON.stringify({ signers: [{
+  id, zones: [zone], public_key: publicKey.export({ format: "jwk" }).x,
+}] }));
+JOIN_SIGNER_JS
+}
+
+# e2e_mint_join_token <zeroship-binary> <credential> <token-file> [zone] [ttl] [uses]
+#
+# Mint a join token with the REAL `zeroship join-token` binary rather than
+# hand-rolling a JWT in shell, and write it to <token-file> so a worker
+# pointed at it via `ZEROSHIP_WORKER_JOIN_TOKEN_FILE` can present it. The file
+# is left at mode 0600: `worker.join_token_file`'s reader refuses a group- or
+# world-readable bearer credential.
+#
+# No `--audience` is passed. `zeroship join-token`'s own default, absent that
+# flag, is `service_peers::service_issuer(CONTROL_SERVICE_NAME)` -- the exact
+# value Control checks a join token's `aud` against
+# (`crate::internal::control_service_issuer` in
+# crates/zeroship-control/src/internal.rs) -- so the two sides agree by
+# construction rather than by a literal repeated on both ends.
+e2e_mint_join_token() {
+  local binary="$1" credential="$2" token_file="$3"
+  local zone="${4:-default}" ttl="${5:-900}" uses="${6:-8}"
+  [ -x "$binary" ] || {
+    echo "e2e_mint_join_token: no zeroship binary at ${binary:-<unset>}" >&2
+    return 1
+  }
+  [ -s "$credential" ] || {
+    echo "e2e_mint_join_token: no join signer credential at ${credential:-<unset>}" >&2
+    return 1
+  }
+  "$binary" join-token --credential="$credential" --zone="$zone" --ttl="$ttl" --uses="$uses" \
+    > "$token_file"
+  local rc=$?
+  [ "$rc" -eq 0 ] && chmod 600 "$token_file"
+  return "$rc"
+}
+
 # e2e_export_service_keys <secret-dir>
 #
-# One ed25519 private key per platform service, plus ONE peer document naming
-# every public half. Every harness that boots more than one binary needs both,
-# because the internal edges between them now carry a per-service assertion
-# rather than a shared bearer: a worker with no key gets 401 from control on the
-# app-env read, and a gateway with no key gets 401 from the worker on dispatch.
+# One ed25519 private key per platform service that holds one, plus ONE peer
+# document naming every public half. Every harness that boots more than one
+# binary needs both, because the internal edges between them carry a
+# per-service assertion rather than a shared bearer: a gateway with no key gets
+# 401 from the worker on dispatch.
+#
+# THE WORKER IS NOT IN THAT SET. It joins with a JOIN TOKEN a trusted signer
+# minted -- the signer credential and Control's import file are minted below --
+# and it mints under an instance key it draws at boot. It holds no signing key
+# of its own on disk: no process holds a `svc/worker` role key, and the peer
+# document publishes none.
 #
 # THE DOCUMENT IS SHARED AND THAT CONCEDES NOTHING. It holds PUBLIC keys, and a
 # verified assertion still has to match the callee's own audience and the
@@ -521,7 +600,7 @@ e2e_export_service_keys() {
 
   ZEROSHIP_SERVICE_PEERS_FILE="${ZEROSHIP_SERVICE_PEERS_FILE:-$secret_dir/service-peers.json}"
 
-  for svc in gateway worker control auth; do
+  for svc in gateway control auth; do
     key_path="$secret_dir/svc-$svc.pem"
     if [ ! -s "$key_path" ]; then
       openssl genpkey -algorithm ed25519 -out "$key_path" 2>/dev/null || return 1
@@ -544,8 +623,20 @@ e2e_export_service_keys() {
   printf '{"keys":[%s]}' "${entries%,}" > "$ZEROSHIP_SERVICE_PEERS_FILE" || return 1
 
   ZEROSHIP_GATEWAY_SERVICE_KEY_FILE="${ZEROSHIP_GATEWAY_SERVICE_KEY_FILE:-$secret_dir/svc-gateway.pem}"
-  ZEROSHIP_WORKER_SERVICE_KEY_FILE="${ZEROSHIP_WORKER_SERVICE_KEY_FILE:-$secret_dir/svc-worker.pem}"
   ZEROSHIP_CONTROL_SERVICE_KEY_FILE="${ZEROSHIP_CONTROL_SERVICE_KEY_FILE:-$secret_dir/svc-control.pem}"
+  # The join signer: the credential a minter holds and Control's import file
+  # naming its public half. `E2E_JOIN_SIGNER_CREDENTIAL` is a harness-local
+  # name, not a `ZEROSHIP_*` setting -- nothing but `zeroship join-token`
+  # itself reads a signer credential, and that binary takes it as a CLI flag,
+  # never an environment name.
+  E2E_JOIN_SIGNER_CREDENTIAL="${E2E_JOIN_SIGNER_CREDENTIAL:-$secret_dir/join-signer.json}"
+  ZEROSHIP_CONTROL_JOIN_SIGNERS_FILE="${ZEROSHIP_CONTROL_JOIN_SIGNERS_FILE:-$secret_dir/join-signers.json}"
+  if [ ! -s "$E2E_JOIN_SIGNER_CREDENTIAL" ] || [ ! -s "$ZEROSHIP_CONTROL_JOIN_SIGNERS_FILE" ]; then
+    _e2e_write_join_signer "$E2E_JOIN_SIGNER_CREDENTIAL" \
+      "$ZEROSHIP_CONTROL_JOIN_SIGNERS_FILE" || return 1
+  fi
+  # 0600 is a startup requirement, as for the service keys above.
+  chmod 600 "$E2E_JOIN_SIGNER_CREDENTIAL"
   # Auth mints too, and has since the erasure preflight stopped presenting the
   # shared control key. Its private half was already generated by the loop above
   # and its public half already published; only these two settings were missing,
@@ -558,7 +649,8 @@ e2e_export_service_keys() {
   ZEROSHIP_AUTH_SERVICE_PEERS_FILE="${ZEROSHIP_AUTH_SERVICE_PEERS_FILE:-$ZEROSHIP_SERVICE_PEERS_FILE}"
   export ZEROSHIP_SERVICE_PEERS_FILE
   export ZEROSHIP_GATEWAY_SERVICE_KEY_FILE ZEROSHIP_GATEWAY_SERVICE_PEERS_FILE
-  export ZEROSHIP_WORKER_SERVICE_KEY_FILE ZEROSHIP_WORKER_SERVICE_PEERS_FILE
+  export ZEROSHIP_WORKER_SERVICE_PEERS_FILE
+  export E2E_JOIN_SIGNER_CREDENTIAL ZEROSHIP_CONTROL_JOIN_SIGNERS_FILE
   export ZEROSHIP_CONTROL_SERVICE_KEY_FILE ZEROSHIP_CONTROL_SERVICE_PEERS_FILE
   export ZEROSHIP_AUTH_SERVICE_KEY_FILE ZEROSHIP_AUTH_SERVICE_PEERS_FILE
 }
@@ -610,7 +702,7 @@ SVC_ASSERTION_JS
 #
 # Echoes ONE service assertion on stdout, e.g.
 #
-#   e2e_mint_service_assertion "$WORK/svc-worker.pem" svc/worker svc/control
+#   e2e_mint_service_assertion "$WORK/svc-gateway.pem" svc/gateway svc/control
 #
 # The service names are the ones `e2e_export_service_keys` publishes, and the
 # trust domain is prefixed here so a caller cannot spell it two ways.

@@ -235,7 +235,7 @@ pub async fn preflight(
             }
         })
         .collect();
-    let billing_blockers = billing_blockers(db, &principal, invoicing).await?;
+    let billing_blockers = billing_blockers(db, principal, invoicing).await?;
     Ok(ErasurePreflight {
         principal_id: principal.clone(),
         blockers,

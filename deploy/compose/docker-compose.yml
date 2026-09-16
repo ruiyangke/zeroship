@@ -402,14 +402,14 @@ services:
       # byte-identical on control + gateway - both derive the per-app `pws_`.
       # Never rotate without a per-app `pws_` migration.
       ZEROSHIP_PAIRWISE_SALT: ${ZEROSHIP_PAIRWISE_SALT:?run zeroship dev init}
-      # --- the worker-enrolment envelope -------------------------------------
+      # --- the worker-join envelope ------------------------------------------
       #
-      # A worker instance enrols its boot-generated public key here; control
-      # takes the host from the observed peer socket, takes the port from the
-      # body, and refuses anything these two settings do not cover. BOTH halves
-      # must be non-empty or the envelope counts as undeclared and every
-      # enrolment is refused `envelope_unset` with a 503 - absence refuses, it
-      # does not default open.
+      # A worker joins with its boot-generated public key here; control takes
+      # the host from the observed peer socket, takes the port from the body,
+      # and refuses anything these two settings do not cover. BOTH halves must
+      # be non-empty or the envelope counts as undeclared and every join is
+      # refused `envelope_unset` with a 503 - absence refuses, it does not
+      # default open.
       #
       # Neither value is written out here. The network list is the pinned
       # subnet of the default network below, and the port range is the worker
@@ -418,6 +418,33 @@ services:
       # longer exists.
       ZEROSHIP_CONTROL_WORKER_ENROLMENT_NETWORKS: *compose-subnet
       ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS: *worker-port
+      # The JOIN SIGNERS this deployment trusts: the public half of each
+      # signer's key, its id, and the execution zones it may mint for. Imported
+      # at every boot and only ever ADDED from - a revoked signer stays revoked
+      # however long its line stays in the file. `zeroship dev init` writes this
+      # deployment's entry; docs/runbooks/worker-join-signers.md covers the two
+      # revocation verbs.
+      ZEROSHIP_CONTROL_JOIN_SIGNERS_FILE: /etc/zeroship/secrets/join-signers.json
+      # --- control as the single-host MINTER ----------------------------------
+      #
+      # Nobody is present when a container restarts at three in the morning, so
+      # control mints its own zone's join tokens: short-lived, use-capped, and
+      # rotated into a volume the workers read at boot. A multi-host deployment
+      # leaves these unset and mints with `zeroship join-token` instead, so its
+      # control plane verifies without holding a key that can mint.
+      #
+      # THE TOKEN FILE IS A BEARER ARTIFACT. Whoever can read that volume can
+      # join a worker in that zone for the token's remaining life, up to the
+      # uses it has left. Rotation bounds the window and the use cap bounds the
+      # blast radius; the trust boundary is the volume, which is not the same
+      # boundary as "the worker".
+      #
+      # The signer credential is the SAME file `zeroship dev init` wrote and
+      # whose public half the import above names - control would refuse its own
+      # tokens otherwise.
+      ZEROSHIP_CONTROL_JOIN_TOKEN_SIGNER_FILE: /etc/zeroship/secrets/join-signer.json
+      ZEROSHIP_CONTROL_JOIN_TOKEN_FILE: /var/lib/zeroship/join/token
+      ZEROSHIP_CONTROL_JOIN_TOKEN_ZONE: default
       # --- Console runtime env: NOTHING FORWARDS THESE ANY MORE --------------
       # These were read from THIS process env at install time by the console
       # seed, which wrote them onto the console app's env store. That seed was
@@ -457,6 +484,14 @@ services:
       # per-service assertion now, so control cannot answer them without both.
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}/svc-control.pem:/etc/zeroship/secrets/svc-control.pem:ro
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}/service-peers.json:/etc/zeroship/secrets/service-peers.json:ro
+      # The trusted-signer import file. Public keys only, but mounted from the
+      # same directory so one provisioning step owns every file.
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/join-signers.json:/etc/zeroship/secrets/join-signers.json:ro
+      # The signer credential control mints this zone's join tokens with, and
+      # the volume it rotates them into. Control WRITES that volume; the workers
+      # mount it read-only.
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/join-signer.json:/etc/zeroship/secrets/join-signer.json:ro
+      - join-tokens:/var/lib/zeroship/join
       # mounted at the well-known path => auto-discovered, no --config needed
       - ../ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
     security_opt:
@@ -707,9 +742,9 @@ services:
     # Worker defaults to binding 127.0.0.1 for safety. In the Docker
     # network the gateway reaches the worker via the `worker` DNS name,
     # so we explicitly opt in to 0.0.0.0. What makes that safe is the
-    # service key material below: dispatch carries an ed25519 assertion the
-    # worker verifies under the peer document, and an unconfigured worker
-    # REFUSES every caller rather than admitting one.
+    # key material below: dispatch carries an ed25519 assertion the worker
+    # verifies under the peer document, and a worker that cannot join
+    # REFUSES to start rather than admitting a caller.
     # No secret is a flag; each arrives under its own canonical ZEROSHIP_ name
     # in the `environment:` block below. The worker logs in as the
     # constrained zeroship_worker role.
@@ -764,7 +799,13 @@ services:
         mode = "standalone"
         endpoint = "redis:6379"
       ZEROSHIP_CONTROL_KEY: ${ZEROSHIP_CONTROL_KEY:?run zeroship dev init}
-      ZEROSHIP_WORKER_SERVICE_KEY_FILE: /etc/zeroship/secrets/svc-worker.pem
+      # The JOIN TOKEN this worker presents at boot, read FRESH on every start
+      # so a container restarted days after provisioning gets a token control
+      # minted minutes ago. It is not a signing key and this process cannot mint
+      # anything with it: the keypair it registers is drawn in memory at boot
+      # and the join request is signed with it, so presenting this file without
+      # that key registers nothing. No worker holds a svc/worker role key.
+      ZEROSHIP_WORKER_JOIN_TOKEN_FILE: /var/lib/zeroship/join/token
       ZEROSHIP_WORKER_SERVICE_PEERS_FILE: /etc/zeroship/secrets/service-peers.json
       ZEROSHIP_OBSERVABILITY_LOG_FILTER: info,zeroship_=debug
       ZEROSHIP_OBSERVABILITY_LOG_FORMAT: json
@@ -777,14 +818,20 @@ services:
       # pattern (mirrors how `bundles` is shared for deploy blobs). S3/R2
       # replaces this in prod behind the same Backend trait.
       - app-storage:/data/app-storage
-      # This worker's OWN assertion key and the public halves of its peers.
-      # Without both it refuses every dispatch and cannot read an app's
-      # environment from control - absence is a closed door, not an open one.
-      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/svc-worker.pem:/etc/zeroship/secrets/svc-worker.pem:ro
+      # The minted join token and the public halves of its peers. Without both
+      # it cannot join, so it refuses to start rather than serving - absence is
+      # a closed door, not an open one. READ-ONLY: control is the only writer.
+      - join-tokens:/var/lib/zeroship/join:ro
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}/cdc-cert.pem:/etc/zeroship/secrets/cdc-cert.pem:ro
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}/service-peers.json:/etc/zeroship/secrets/service-peers.json:ro
     deploy:
       replicas: 3
+    # A stopped worker drains for up to `worker.shutdown_timeout` (its default:
+    # the command above does not set it) and then retires its own instance at
+    # control. Docker's own stop timeout is shorter than that default, and a
+    # worker killed mid-drain leaves its row `active`, so the grace period
+    # covers the drain and the retirement call.
+    stop_grace_period: 45s
     security_opt:
       - seccomp:unconfined
     depends_on:
@@ -1068,4 +1115,7 @@ volumes:
   redis-data:
   # Persisted Redpanda log for billing stream development.
   redpanda-data:
+  # The join token control rotates and the workers read. Control mounts it
+  # read-write and every worker read-only, so nothing but the minter writes it.
+  join-tokens:
   verdaccio_storage:

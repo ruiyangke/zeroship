@@ -14,6 +14,8 @@ use zeroship_id::AppId;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BlobError {
+    #[error("blob or manifest exceeds its byte budget")]
+    TooLarge,
     #[error("blob not found: {0}")]
     NotFound(String),
     #[error("hash mismatch: expected {expected}, got {got}")]
@@ -68,7 +70,8 @@ pub trait BlobStore: Send + Sync + std::fmt::Debug {
     /// for any backend that has a working streaming put.
     async fn put_blob(&self, hash: &str, data: &[u8]) -> Result<PutOutcome, BlobError> {
         let mut cursor = std::io::Cursor::new(data);
-        self.put_blob_stream(hash, data.len() as u64, &mut cursor).await
+        self.put_blob_stream(hash, data.len() as u64, &mut cursor)
+            .await
     }
 
     /// Stream a blob into storage. The reader is consumed up to
@@ -137,11 +140,8 @@ pub trait BlobStore: Send + Sync + std::fmt::Debug {
         json: &[u8],
     ) -> Result<(), BlobError>;
 
-    async fn get_manifest(
-        &self,
-        app_id: &AppId,
-        deploy_hash: &str,
-    ) -> Result<Bytes, BlobError>;
+    /// Read a manifest, enforcing `MAX_MANIFEST_BYTES` before allocating its body.
+    async fn get_manifest(&self, app_id: &AppId, deploy_hash: &str) -> Result<Bytes, BlobError>;
 
     /// Delete one per-deploy manifest object. Returns `true` when an object was
     /// present and removed, `false` when it was already absent.
@@ -350,8 +350,7 @@ impl BlobStore for LocalDiskBlobStore {
                 // write (64 KiB allocations are cheap, ~hundreds of ns).
                 let mut chunk: Vec<u8> = Vec::with_capacity(n);
                 chunk.extend_from_slice(&scratch[..n]);
-                let compio::BufResult(res, _returned) =
-                    (&file).write_all_at(chunk, offset).await;
+                let compio::BufResult(res, _returned) = (&file).write_all_at(chunk, offset).await;
                 res.map_err(BlobError::Io)?;
                 offset += n as u64;
             }
@@ -457,9 +456,7 @@ impl BlobStore for LocalDiskBlobStore {
             }
             offset += n as u64;
             if offset > max_bytes {
-                return Err(BlobError::Backend(format!(
-                    "blob exceeds max_bytes {max_bytes}"
-                )));
+                return Err(BlobError::TooLarge);
             }
             if let Some(exp) = expected_size {
                 if offset > exp {
@@ -475,8 +472,7 @@ impl BlobStore for LocalDiskBlobStore {
             // ref and borrow it mutably (the OS file offset is irrelevant —
             // positional writes).
             let mut wref: &compio::fs::File = out;
-            let compio::BufResult(wres, _) =
-                wref.write_all_at(chunk, offset - n as u64).await;
+            let compio::BufResult(wres, _) = wref.write_all_at(chunk, offset - n as u64).await;
             wres.map_err(BlobError::Io)?;
         }
 
@@ -517,19 +513,24 @@ impl BlobStore for LocalDiskBlobStore {
         Ok(())
     }
 
-    async fn get_manifest(
-        &self,
-        app_id: &AppId,
-        deploy_hash: &str,
-    ) -> Result<Bytes, BlobError> {
+    async fn get_manifest(&self, app_id: &AppId, deploy_hash: &str) -> Result<Bytes, BlobError> {
+        use compio::io::AsyncReadAtExt;
         let path = self.manifest_path(app_id, deploy_hash);
-        match compio::fs::read(&path).await {
-            Ok(v) => Ok(Bytes::from(v)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(BlobError::NotFound(
-                format!("{}/{deploy_hash}", app_id.as_str()),
-            )),
-            Err(e) => Err(BlobError::Io(e)),
+        let file = match compio::fs::File::open(&path).await {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(BlobError::NotFound(format!("{}/{deploy_hash}", app_id.as_str())));
+            }
+            Err(e) => return Err(BlobError::Io(e)),
+        };
+        let size = file.metadata().await?.len();
+        if size > crate::MAX_MANIFEST_BYTES {
+            return Err(BlobError::TooLarge);
         }
+        let size = usize::try_from(size).map_err(|_| BlobError::TooLarge)?;
+        let (result, bytes) = file.read_exact_at(vec![0; size], 0).await.into();
+        result?;
+        Ok(Bytes::from(bytes))
     }
 
     async fn delete_manifest(&self, app_id: &AppId, deploy_hash: &str) -> Result<bool, BlobError> {
@@ -542,10 +543,7 @@ impl BlobStore for LocalDiskBlobStore {
     }
 
     async fn delete_app_manifests(&self, app_id: &AppId) -> Result<(), BlobError> {
-        let dir = self
-            .root
-            .join("manifests")
-            .join(app_id.as_str());
+        let dir = self.root.join("manifests").join(app_id.as_str());
         // `remove_dir_all` removes the whole `manifests/<app_id>/` subtree.
         // An absent directory is success (idempotent). Content-addressed
         // blobs live under `blobs/` and are untouched. compio::fs has no

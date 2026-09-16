@@ -374,13 +374,16 @@ describe("devServerPlugin", () => {
       // half is crates/zeroship-cli/tests/parent_death_test.rs; the two of them meeting
       // on a real dev server is step 7d of tests/golden_path.sh.
       assert.equal(runtime.env.ZEROSHIP_DIE_WITH_PARENT, String(process.pid));
-      assert.deepEqual(runtime.argv.slice(0, 5), [
+      assert.deepEqual(runtime.argv, [
         "serve",
-        BOOTSTRAP_SHIM_PATH,
+        resolve(harness.root, ".zeroship/app.zship"),
         "--port=3901",
         "--workers=1",
+        `--dev-bootstrap=${BOOTSTRAP_SHIM_PATH}`,
         "--dev-entry-loader=createDevEntryLoader",
       ]);
+      const archive = resolve(harness.root, ".zeroship/app.zship");
+      assert.ok((await fs.stat(archive)).size > 0);
     } finally {
       await harness.close();
     }
@@ -388,6 +391,43 @@ describe("devServerPlugin", () => {
     assert.equal(process.listenerCount("exit"), beforeExitListeners);
     assert.equal(process.listenerCount("SIGINT"), beforeSigintListeners);
     assert.equal(process.listenerCount("SIGTERM"), beforeSigtermListeners);
+  });
+
+  test("restarts the app runtime after publishing changed dependencies", async () => {
+    const harness = await startHarness();
+    try {
+      const before = await harness.runtimeLog();
+      const { zstdDecompressSync } = await import("node:zlib");
+      const path = resolve(harness.root, ".zeroship/app.zship");
+      await fs.writeFile(resolve(harness.root, "src/value.ts"), 'export const answer = "updated-from-dependency";');
+      await waitFor(async () => {
+        assert.match(zstdDecompressSync(await fs.readFile(path)).toString(), /updated-from-dependency/);
+      });
+      await waitFor(async () => {
+        const after = await harness.runtimeLog();
+        assert.notEqual(after.pid, before.pid);
+        assert.ok(after.spawnCount > before.spawnCount);
+      });
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("runtime recovery keeps the retained workflow archive when current sources do not build", async () => {
+    const harness = await startHarness();
+    try {
+      const path = resolve(harness.root, ".zeroship/app.zship");
+      const retained = await fs.readFile(path);
+      const before = await harness.runtimeLog();
+      await fs.writeFile(resolve(harness.root, "src/value.ts"), 'import "./missing-dependency.js";');
+      await harness.triggerUnexpectedExit();
+      await waitFor(async () => {
+        assert.ok((await harness.runtimeLog()).spawnCount > before.spawnCount);
+      });
+      assert.deepEqual(await fs.readFile(path), retained);
+    } finally {
+      await harness.close();
+    }
   });
 
   test("serves versioned procedure bindings to the runtime loader", async () => {

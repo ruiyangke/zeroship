@@ -1,5 +1,93 @@
 use compio_postgres::error::SqlState;
 
+/// Operation failures shared by embedded callers and remote clients.
+///
+/// HTTP status codes and response bodies are translated by the client adapter;
+/// embedded storage and execution do not manufacture transport failures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkflowServiceError {
+    InvalidRequest(String),
+    Unauthenticated,
+    PermissionDenied,
+    NotFound(String),
+    Conflict(String),
+    ResourceExhausted(String),
+    PayloadTooLarge,
+    Unavailable(String),
+    Timeout,
+    /// Ingress acceptance needs an open manager epoch above the carried one.
+    /// Retry after establishing it; `None` means no epoch was held and the
+    /// journal has closed none. It is never a durable customer refusal.
+    IngressFenced(Option<zeroship_core::workflow_coordination::Revision>),
+    Internal(String),
+}
+
+impl WorkflowServiceError {
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidRequest(_) => "workflow_invalid_request",
+            Self::Unauthenticated => "workflow_unauthenticated",
+            Self::PermissionDenied => "workflow_permission_denied",
+            Self::NotFound(_) => "workflow_not_found",
+            Self::Conflict(_) => "workflow_conflict",
+            Self::ResourceExhausted(_) => "workflow_resource_exhausted",
+            Self::PayloadTooLarge => "workflow_payload_too_large",
+            Self::Unavailable(_) => "workflow_unavailable",
+            Self::Timeout => "workflow_timeout",
+            Self::IngressFenced(_) => "workflow_ingress_fenced",
+            Self::Internal(_) => "workflow_internal_error",
+        }
+    }
+}
+
+impl std::fmt::Display for WorkflowServiceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidRequest(message)
+            | Self::NotFound(message)
+            | Self::Conflict(message)
+            | Self::ResourceExhausted(message)
+            | Self::Unavailable(message)
+            | Self::Internal(message) => f.write_str(message),
+            Self::Unauthenticated => f.write_str("workflow credentials are missing or expired"),
+            Self::PermissionDenied => f.write_str("workflow operation is not permitted"),
+            Self::PayloadTooLarge => f.write_str("workflow payload exceeds the configured limit"),
+            Self::Timeout => f.write_str("workflow operation timed out"),
+            Self::IngressFenced(_) => {
+                f.write_str("workflow ingress requires a newer recovery epoch")
+            }
+        }
+    }
+}
+
+impl std::error::Error for WorkflowServiceError {}
+
+impl From<zeroship_core::workflow_policy::InvalidPolicy> for WorkflowServiceError {
+    fn from(error: zeroship_core::workflow_policy::InvalidPolicy) -> Self {
+        Self::InvalidRequest(error.to_string())
+    }
+}
+
+impl From<zeroship_workflow_calendar::CalendarError> for WorkflowServiceError {
+    fn from(error: zeroship_workflow_calendar::CalendarError) -> Self {
+        Self::InvalidRequest(error.to_string())
+    }
+}
+
+impl From<zeroship_core::workflow_deployments::Error> for WorkflowServiceError {
+    fn from(error: zeroship_core::workflow_deployments::Error) -> Self {
+        match error {
+            zeroship_core::workflow_deployments::Error::InvalidHolder => {
+                Self::InvalidRequest("invalid deployment holder".into())
+            }
+            zeroship_core::workflow_deployments::Error::GenerationExhausted => {
+                Self::ResourceExhausted("deployment hold generation exhausted".into())
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum WorkflowError {
     Invalid(String),

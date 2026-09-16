@@ -96,24 +96,35 @@ describe("op.* runtime schema descriptor bundling", () => {
     }
   });
 
-  test("packing rejects collections without a sole required id primary key", async () => {
-    const id = { type: "string", required: true, primaryKey: true };
-    for (const fields of [{}, { key: id }, { id: { ...id, required: false } }, { id, tenant: id }]) {
+  test("packing enforces the shared collection identity contract", async () => {
+    const corpus = JSON.parse(await fs.readFile(
+      new URL("../../../tests/fixtures/data/collection-identity.json", import.meta.url), "utf8",
+    )) as {
+      valid: Record<string, {fields:unknown}>;
+      invalid: Record<string, {fields:unknown; error:string}>;
+    };
+    for (const sample of [...Object.values(corpus.valid), ...Object.values(corpus.invalid)]) {
       const descriptor = JSON.parse(RUNTIME_DESCRIPTOR);
-      descriptor.collections.notes.fields = fields;
+      descriptor.collections.notes.fields = sample.fields;
       const fx = await makeFixture({
         "dist/server/index.js": "export default { fetch(){ return new Response('ok'); } }\n",
         "generated/zeroship/schema.runtime.json": JSON.stringify(descriptor),
       });
       try {
-        await assert.rejects(() => emitZship({
+        const pack = () => emitZship({
           root: fx.root,
           distDir: "dist",
           silent: true,
           userHasDefaultFetch: false,
           migrations: { dir: "migrations", genTypesOut: "generated/zeroship" },
-        }), /runtime_descriptor collection "notes".*id/);
-        await assert.rejects(fs.access(join(fx.root, "dist/app.zship")), { code: "ENOENT" });
+        });
+        if ("error" in sample) {
+          await assert.rejects(pack, /runtime_descriptor collection "notes"/);
+          await assert.rejects(fs.access(join(fx.root, "dist/app.zship")), { code: "ENOENT" });
+        } else {
+          assert.ok((await pack()).manifest.runtime_descriptor);
+          await fs.access(join(fx.root, "dist/app.zship"));
+        }
       } finally {
         await fx.cleanup();
       }

@@ -108,7 +108,7 @@ mod tests {
     use super::*;
     use ntex::http::StatusCode;
     use ntex::web::test;
-    use zeroship_bundle::{BlobStore, LocalDiskBlobStore, LocalWorkflowBlobStore};
+    use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
     use zeroship_core::readiness::staleness_budget;
 
     fn config(root: &std::path::Path) -> Arc<WorkerConfig> {
@@ -119,20 +119,12 @@ mod tests {
             service_auth: crate::identity_fixture::service_auth(),
             control_url: "http://127.0.0.1:1".to_owned(),
             control_key: String::new(),
-            db_url: None,
             kv_store: None,
             storage_backend: None,
             max_isolates: 1,
-            max_pinned_isolates_per_app: 1,
             poll_interval_secs: 60,
             shutdown_timeout_secs: 0,
             blob_store,
-            workflow_blob_store: Arc::new(
-                LocalWorkflowBlobStore::new(root.to_owned())
-                    .expect("create test workflow blob store"),
-            ),
-            max_step_blob_bytes: 1024,
-            workflow_advance_unsigned: false,
         })
     }
 

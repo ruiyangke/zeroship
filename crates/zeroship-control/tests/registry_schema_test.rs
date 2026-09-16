@@ -126,6 +126,7 @@ async fn create_app_neither_returns_nor_stores_an_app_level_key() {
             &zeroship_control::plan_catalog::free_plan_id(),
             &owner_id,
             None,
+            None,
         )
         .await
         .expect("create_app");

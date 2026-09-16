@@ -1,0 +1,16 @@
+{
+  "$schema": "https://zeroship.ai/schema/project-v1.json",
+  "name": "workflows-order",
+  "control": "http://localhost:9090",
+  "runtime_date": "2026-09-14",
+  "build": {
+    "serverEntry": "src/index.ts",
+    "mode": "full",
+    "dist": "dist",
+    "output": "dist/app.zship"
+  },
+  "migrations": {
+    "dir": "migrations",
+    "out": "generated/zeroship"
+  }
+}

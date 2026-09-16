@@ -17,6 +17,7 @@
     }
   },
   "workflows": [
+    "HostIngressWorkflow",
     "KeystoneWorkflow",
     "SignalWorkflow",
     "TopicSignalWorkflow",
@@ -58,11 +59,7 @@
       "schedule": {
         "kind": "cron",
         "cron_expr": "* * * * *",
-        "tz": "UTC",
-        "overlap": "allow",
-        "catchUp": {
-          "mode": "skip"
-        }
+        "tz": "UTC"
       }
     }
   ],

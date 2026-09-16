@@ -50,6 +50,10 @@ the name lookup; `deploy_app` creates that name when it does not exist.
 - `get_app` - get an app by its explicit target.
 - `create_app` - create an app.
 - `deploy_app` - deploy a local `.zship`, creating a missing named app first.
+  Each call is a new deploy command. When a call reports that the deploy
+  outcome is unknown, call it again with the reported `commandId` and the same
+  `zshipPath`: the control plane answers the repeat with the original result
+  and never deploys it twice.
 - `app_logs` - read recent worker logs for an app.
 - `archive_app` - stop serving an app while preserving its history and data.
 - `restore_app` - restore an archived app by its explicit target.

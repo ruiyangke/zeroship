@@ -1,0 +1,27 @@
+[package]
+name = "zeroship-workflow-manager"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native workflow scheduling and durable metadata queue"
+
+[dependencies]
+compio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+rusqlite = { workspace = true, features = ["bundled"] }
+thiserror = { workspace = true }
+zeroship-core = { workspace = true }
+zeroship-bundle = { workspace = true }
+zeroship-data-orm = { workspace = true }
+zeroship-workflow-calendar = { workspace = true }
+
+[dev-dependencies]
+compio-postgres = { workspace = true }
+futures = { workspace = true }
+tempfile = { workspace = true }
+testcontainers = { version = "0.28", default-features = false, features = ["blocking"] }
+
+[lints]
+workspace = true

@@ -230,6 +230,84 @@ fn dynamic_only_adapter_import_instantiates_its_dependency_graph() {
 }
 
 #[test]
+fn nested_lazy_bundle_and_adapter_imports_share_evaluation_and_identity() {
+    let runtime = runtime(
+        r#"
+        const initial = await import('./app/chunks/lazy.js');
+        export default { async fetch() {
+            const repeated = await import('./app/chunks/lazy.js');
+            const adapter = await import('zeroship:fixture/adapter');
+            return Response.json({
+                same: initial === repeated,
+                token: initial.token === adapter.token,
+                value: await initial.read(),
+                evaluations: globalThis.lazyEvaluations,
+            });
+        } };
+    "#,
+        &[
+            JavaScriptModule {
+                specifier: "zeroship:fixture/adapter",
+                source: r#"
+                    import { token } from './value';
+                    export { token };
+                    export async function read() {
+                        const value = await import('./value');
+                        const { env } = await import('zeroship');
+                        const { AsyncLocalStorage } = await import('node:async_hooks');
+                        const local = new AsyncLocalStorage();
+                        return local.run(value.token === token, () => ({
+                            same: local.getStore(), value: env.fixture.value(),
+                        }));
+                    }
+                "#,
+            },
+            JavaScriptModule {
+                specifier: "zeroship:fixture/value",
+                source: "await Promise.resolve(); export const token = {};",
+            },
+        ],
+        vec![
+            ModuleEntry {
+                specifier: "app/chunks/lazy.js".into(),
+                source: r#"
+                    import { token, read as readAdapter } from 'zeroship:fixture/adapter';
+                    import label from '../label.js';
+                    await Promise.resolve().then(() => {});
+                    globalThis.lazyEvaluations = (globalThis.lazyEvaluations ?? 0) + 1;
+                    export { token };
+                    export async function read() { return { label, adapter: await readAdapter() }; }
+                "#
+                .into(),
+            },
+            ModuleEntry {
+                specifier: "app/label.js".into(),
+                source: "export default 'nested';".into(),
+            },
+            ModuleEntry {
+                specifier: "label.js".into(),
+                source: "throw new Error('root fallback must never execute');".into(),
+            },
+            ModuleEntry {
+                specifier: "unused.js".into(),
+                source: "this source is deliberately invalid JavaScript".into(),
+            },
+        ],
+    );
+    let (status, body) = call(&runtime);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({
+            "same":true,
+            "token":true,
+            "value":{"label":"nested","adapter":{"same":true,"value":42}},
+            "evaluations":1,
+        })
+    );
+}
+
+#[test]
 fn dynamic_core_facade_import_resolves_without_plugin_adapters() {
     let runtime = runtime(
         r#"
@@ -399,6 +477,40 @@ fn adapter_dependencies_cannot_be_supplied_by_the_creator_artifact() {
             source: "export const token = {};".into(),
         }],
         "cannot import creator module",
+    );
+}
+
+#[test]
+fn dynamic_adapter_dependencies_cannot_be_supplied_by_the_creator_artifact() {
+    let runtime = runtime(
+        r#"
+        import 'app-helper.js';
+        export default { async fetch() {
+            const adapter = await import('zeroship:fixture/adapter');
+            try { await adapter.read(); }
+            catch (error) { return Response.json({ name: error.name, message: error.message }); }
+            return new Response('unexpected creator dependency');
+        } };
+    "#,
+        &[JavaScriptModule {
+            specifier: "zeroship:fixture/adapter",
+            source: "export async function read() { return import('app-helper.js'); }",
+        }],
+        vec![ModuleEntry {
+            specifier: "app-helper.js".into(),
+            source: "export const token = {};".into(),
+        }],
+    );
+    let (status, body) = call(&runtime);
+    assert_eq!(status, 200, "{body}");
+    let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(value["name"], "TypeError");
+    assert!(
+        value["message"]
+            .as_str()
+            .unwrap()
+            .contains("cannot import creator module"),
+        "{body}"
     );
 }
 

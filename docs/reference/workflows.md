@@ -9,11 +9,36 @@ The SDK types live in `packages/workflows/`. The native `env.workflows` binding
 starts and controls runs from app code, and the control client exposes the
 token and topic broadcast helpers used by systems outside the app.
 
-This reference describes the current implementation. The finalized
-[workflow server design](../proposals/2026-09-11-workflow-server.md) replaces
-Control/Gateway workflow dispatch with a dedicated server and polling workers,
-and embeds the shared engine in local development. That refactor is pending;
-the local limitations and provisioning instructions below still apply today.
+This reference describes the current implementation. The revised
+[manager and job queue design](../proposals/2026-09-11-workflow-worker.md) assigns
+cron, timers and durable job delivery to the workflow server. Workers consume
+jobs and keep execution history and payloads in creator storage. Native manager
+scheduling and creator Cron acceptance exist; production and local host
+composition remain incomplete. The creator calendar loop has been removed,
+so the current CLI task loop does not generate scheduled jobs.
+
+## Workflow class exports
+
+The retained app entry names workflows through its named class exports or an
+explicit `default.workflows` dictionary. The export key is the workflow name;
+the constructor's JavaScript `name` property has no routing meaning. Synthetic
+entries can preserve named exports with `export *` from the creator entry.
+
+`step.call(Child, input)` and `step.startMany(Child, items)` resolve the actual
+constructor against these bindings before producing a child frontier. Frozen
+classes and minified identifiers work without renaming the constructor. An
+unexported constructor cannot select another workflow by copying its name.
+Each constructor must have an unambiguous export name, and each name must select
+the same constructor wherever it is declared. Repeating the same binding in
+named exports and `default.workflows` is allowed. Resolving a conflicting binding
+fails dispatch. Unrelated callable exports are not instantiated during lookup.
+Both prototype methods and instance-field implementations of `run` are supported.
+Inherited dictionary properties and a bare default constructor do not
+declare workflows, and a missing name never falls back to another class.
+
+Development workflow execution uses the retained normal app bundle. Live
+HTTP/RPC development snapshots do not supply workflow lookup, so reloading the
+page handler does not replace the code selected by an existing workflow run.
 
 ## Workflow class exports
 
@@ -38,10 +63,26 @@ page handler does not replace the code selected by an existing workflow run.
 
 ## Rust integration
 
-`zeroship-workflow` owns the journal engine, claim/apply protocol, PostgreSQL
-store, scoped HTTP client, and local SQLite persistence. It has no V8 dependency.
+`zeroship-workflow` owns the journal engine, claim/apply protocol, scoped HTTP
+client, and customer persistence through `zeroship-data-orm`. It has no V8 dependency.
 `zeroship-workflow-v8` installs `env.workflows` and supplies the V8 executor
 used by the local engine. The control plane uses the Rust engine directly.
+
+The replacement service accepts an `OrmStore` built from the host's `OrmContext`,
+`DbBinding` and `BackendHandle`. The ORM selects the configured database and owns
+transactions. Journal operations use ORM collections and migration-derived Rust
+models. Rust and creator ORM access permits workflow table
+names within the bound customer schema; prefixes are not an authorization check.
+`AppWorkflows::into_backend` exposes a bounded client for V8 and Rust callers on
+other runtime threads; database operations remain on the engine's owning thread.
+The existing Control PostgreSQL store remains until production cutover.
+
+The replacement service retains accepted app-operation `RequestId` receipts in
+the creator journal. Retrying the same request returns its original result even
+after later lifecycle changes; changing its operation or body conflicts. These
+receipts have no time-based expiry. A signal-token retry returns the original
+token and preserves its expiration and revocation rules. Safe receipt retirement
+requires a protocol that fences future retries.
 
 A trusted Rust host can use `HttpWorkflowBackend` through `WorkflowBackend`
 to start runs, read status, signal, restart, or change lifecycle state. Construct
@@ -49,9 +90,86 @@ it with `WorkflowClientConfig`, binding the app identity and its scoped token
 once. Individual operations cannot select another app. The control plane still
 authorizes the request; possession of a Rust handle does not bypass it.
 
+The `operations` module defines typed requests and responses for these calls:
+`StartOptions`, `SignalOptions`, `RestartOptions`, `RunOperation` and `RunState`.
+Only workflow input, output and signal payloads are arbitrary JSON. Transport
+serialization belongs to the HTTP client and V8 binding.
+Operations return `WorkflowServiceError`, so Rust callers can match not-found,
+conflict, authorization and capacity failures without interpreting HTTP status
+codes. The V8 adapter exposes the corresponding `workflow_*` error codes.
+
 `WorkflowBinding` performs the same binding for JavaScript. The host derives
 its app-scoped credential with `app_scoped_token`; the control key stays outside
 V8. Workflow execution remains replay of the deployed JavaScript class.
+
+Native executors receive `WorkflowInvocation` and return `WorkflowExecution`
+outcomes. Local development and deployed workers use the same replay input,
+journal types and outcome decoder. The invocation carries no lease credential;
+the Rust host binds outcomes to its claimed run before applying them. Run IDs
+or nonces returned by JavaScript do not select the mutation target.
+
+## Local development
+
+Workflows belong to the app's normal `.zship` deployment. Runs pin that app
+deployment and load its code and runtime descriptor through the app bundle
+loader. Activation acquires a durable deployment hold before selecting code;
+replay verifies the held app manifest and its referenced blobs. Republishing
+supersedes that deployment, and both its holders give it back once nothing needs
+it: the manager releases the queue hold, then asks the engine to release the
+journal hold, which it refuses while any run or retained generation still names
+the deployment. Local development uses the same app build and retains normal
+deployment metadata beside the artifacts. The
+[worker design](../proposals/2026-09-11-workflow-worker.md) describes the
+remaining production retention cutover, which keeps platform bundle collection
+independent of customer SQL.
+
+The CLI runs workflows through the same native manager and delivered jobs as a
+deployment, independently of HTTP requests. `zeroship serve dist/app.zship`
+loads the app's server modules for HTTP and workflow execution. Vite builds and
+publishes the local app artifact automatically while serving client assets and
+live modules through its dev bridge, and restarts the CLI when the artifact
+changes. There is no workflow-only archive argument or TOML bundle setting.
+Workflow execution reads from the retained app bundle store without making
+separate executable copies.
+
+A manager thread owns the local platform metadata file,
+`.zeroship/platform/metadata.sqlite`, which holds both the normal deployment
+catalog and the manager's queue, placement, scheduling and recovery records.
+Starting the CLI with an archive records that deployment, registers its
+schedules and activates it unless it is already selected; each restart with a
+new archive activates the new deployment while existing runs keep their pinned
+code. The creator applies the activation as a delivered job, and the CLI accepts
+requests only after that activation has committed. A second thread runs the
+ordinary job consumer over the app database with a trusted local worker
+identity. Starts, signals and settled jobs publish their pending jobs
+immediately; periodic manager reconciliation publishes anything a crash left
+behind, and periodic collection removes abandoned payload uploads. Restart keeps
+queued jobs, timers, receipts and retained bundles.
+
+The CLI resolves one app identity for HTTP handlers, workflow execution and app
+storage. A configured `APP_ID` must be canonical; when absent, the CLI uses the
+shared `local_dev_app_id()` identity. Restart with the same configuration selects
+the same app and rediscovers its durable work.
+
+The journal uses the app database selected by `DATABASE_URL`, and payloads use
+the app's normal storage configuration. With default SQLite configuration, the
+ORM places the app tables and workflow journal in `.zeroship/zs-<app_id>.sqlite`;
+object storage defaults to `.zeroship/storage`. Workflow execution uses this
+host-selected identity without a separate identity file, database or object
+directory. Incompatible journals are refused without resetting them, and
+initialization preserves business tables. An incompatible platform metadata file
+is likewise refused without being rewritten.
+
+`--workflow-config=workflow.toml` configures native execution limits. Its optional
+`consumer` table bounds execution slots, claim polling, backoff, execution and
+per-operation time; `manager` bounds delivery leases, the worker's placement
+lifetime, maintenance cadence and lanes, the minimum time the manager keeps a
+deployment held before it may release one a republished archive replaced
+(`hold_grace_ms`), and the reconciliation and collection interval; `payloads`
+configures `TaskPayloadLimits`. Database paths and object
+storage belong to normal app configuration; workflow TOML rejects separate
+`journal`, `objects` and database settings. The CLI has no dedicated workflow
+reset command.
 
 ## Testing
 
@@ -67,20 +185,37 @@ builds the example and platform binaries before starting its services.
 
 ## Journal provisioning
 
-Before starting deployed workflows, provision their app journal through the
-migration service:
+Nothing you run provisions a journal. It happens on its own, and the reason is
+worth knowing when you are reading a log.
 
-```http
-POST /v1/apps/{app_id}/workflows/provision
-Authorization: Bearer <creator-access-token>
-```
+The journal is a platform-owned schema inside your creator database. The
+migration service installs it, but it does not know what a workflow is: it
+receives a **schema bundle** - an ordered series of versions, the policy the
+bundle runs under, and where its stamp lives - and installs or upgrades the
+schema the bundle names. The workflow manager holds the journal's artifacts and
+sends that bundle.
 
-The caller needs deployment permission for that app. The operation is
-idempotent and creates no creator database tables. Applying creator migrations
-also provisions the journal schema, so apps already using that path need no
-additional request. The control origin routes this endpoint to the migration
-service; control and workers only create journal tables inside the provisioned
-schema. Local workflows create their SQLite journal automatically.
+Two things trigger it, and both are idempotent:
+
+- **Deploy.** A deploy of an app that declares a workflow brings that app's
+  journal to the current version BEFORE it answers, so the first run never waits
+  on provisioning and an app that is deployed and not yet run still has one. A
+  deploy that cannot provision is refused rather than accepted: you see the
+  fault in the deploy, not in the first run. An app that declares no workflow
+  provisions nothing. This is why a schema change rolls out without a migration
+  step on your side - a redeploy carries it.
+- **A host that refuses a journal.** A worker verifies the journal against the
+  fingerprint it was built with. If it finds an older one, or none, it asks the
+  manager to provision and retries once. This is the repair path for an app that
+  has not redeployed since the schema moved.
+
+The stamp is one row per creator database, not per app, so an upgrade moves every
+app in that database at once and does so in a single transaction: an upgrade that
+fails part way leaves the journal at the version that is actually installed. A
+journal a NEWER platform installed is never downgraded.
+
+Local workflows create their SQLite journal automatically, from the same ordered
+series.
 
 ## Model
 
@@ -371,7 +506,9 @@ the child is cancelled, the parent receives `ChildCancelledError`. If the child
 does not finish before `timeout`, the parent receives `ChildTimeoutError`.
 
 `cascade: true` means cancelling the parent also requests cancellation of a live
-child. Without it, the child remains independent.
+child. Without it, the child remains independent. The request reaches children
+in bounded batches after the parent settles; a cascading child cannot continue as
+new or restart while its parent's cancellation is still reaching its children.
 
 `step.startMany(WorkflowClass, items, opts?)` is the in-workflow fan-out helper:
 
@@ -434,7 +571,9 @@ const status = await run.status();
 
 `start({ input, key, onConflict })` creates a run and returns a `WorkflowRun`.
 `key` is optional. When present, it deduplicates starts for the same app,
-workflow, and key.
+workflow, and key while the run is live. Once that run is completed, failed or
+cancelled, an app start may reuse the key. This does not make the key a
+permanent receipt for retrying an ambiguous transport request.
 
 `onConflict` accepts:
 
@@ -485,13 +624,21 @@ without running compensators, and ends it as `cancelled`.
 > options object and ignores it, so `{ mode: "compensate" }` aborts exactly
 > like `{ mode: "abort" }` and no rollback runs. This is not a gap at one call
 > site: the backend contract is
-> `transition(run_id, op: &'static str)`, so there is nowhere for a
+> `transition(run_id, op: RunOperation)`, so there is nowhere for a
 > runtime-chosen mode to travel. Implementing it means changing that contract,
 > not forwarding an argument. Until then, do not read a `compensate` cancel as
 > a rollback: to roll back completed steps, let the run FAIL, which is the
 > path that does run compensators.
 
 `restart(opts?)` requeues the same run ID:
+
+The SQLite and PostgreSQL adapters share deploy-policy and quiescence checks.
+A restart rejects live execution leases, active descendants, active
+compensation, and a cascading child whose parent's cancellation is still
+propagating. A partial restart retains the prefix and its original deploy;
+it cannot retain steps whose compensation already finished. SQLite rewrites
+the discarded checkpoints, their signal consumption and run state in a
+transaction, so a failed restart preserves the previous journal.
 
 ```ts
 interface RestartTarget {
@@ -520,6 +667,11 @@ It uses the same `@zeroship/workflows` SDK surface and the same runtime replay
 shim as deployed runs, but stores the journal in a dev-local SQLite database
 owned by the local process.
 
+Local `start()`, `signal()` and `restart()` return after their journal
+transaction commits. The local runner executes accepted work separately;
+execution failure does not turn an accepted start into a failed API call.
+Checkpoint batches and their resulting run state also commit together.
+
 The local engine is dev-only by construction: the CLI serve path is the only
 construction vector that can create the SQLite backend. Production workers build
 `env.workflows` with the HTTP control-plane backend and never select the local
@@ -533,15 +685,6 @@ Intentional local divergences:
   routes and topic ingress are deployed-only features.
 - SQLite lifetime is local to the dev process and configured file path. Deleting
   the file deletes the local workflow journal.
-- **Compensators do not run locally.** A failed run ends `failed` without rolling
-  anything back. The local engine records which completed steps declared
-  `compensate` and reports them instead of running them: the failure error
-  carries a `compensation` object with `supported: false`, `outcome:
-  "not-attempted"`, `type: "WorkflowUnsupportedError"`, and the `steps` that were
-  left un-rolled-back. Deployed, that same `compensation` slot carries the real
-  rollback summary (`outcome: "completed"` or `"partial"`). Rollback logic is
-  therefore written locally but verified on a deploy.
-- `step.call` (child workflows) fails locally with `WorkflowUnsupportedError`.
 - Schedules and large workflow blobs are deployed-engine parity items unless
   explicitly listed as local support.
 
@@ -574,8 +717,12 @@ schedule({ name: "heartbeat", schedule: cronExpr("*/5 * * * *"), workflow: Heart
 ```
 
 Schedule registrations are discovered at build time and stored in the deploy
-manifest. The engine sweeps the normalized schedule rows and starts ordinary
-workflow runs.
+manifest. The manager evaluates calendar metadata and persists each occurrence
+with its deployment, activation revision and run identity. The creator worker
+verifies that deployment, resolves its static input and atomically accepts the
+occurrence with a run and Advance publication intent. It performs no calendar
+evaluation. Completed acceptance and overlap skips survive redelivery;
+unavailable prerequisites and capacity failures remain retryable.
 
 Supported schedule forms:
 
@@ -782,10 +929,21 @@ compensators.
 rollback. They indicate the engine cannot trust replay enough to safely rebuild
 the compensator registry.
 
-Compensators do not run under `zeroship serve` / `pnpm dev`. A local run that
-fails reports the compensators it did not run, in the same `error.compensation`
-field the deployed engine uses for its rollback summary — see
-[Local Development](#local-development). Deploy the app to exercise rollback.
+When rollback finishes, the run keeps the failure that started it: `error.type`
+and `error.message` are the creator's original error. The same object carries a
+`compensation` summary:
+
+```ts
+interface CompensationSummary {
+  total: number;      // compensators that ran to a final result
+  completed: number;
+  failed: number;
+  outcome: "completed" | "partial";
+}
+```
+
+A `partial` rollback always ends the run `failed`. Local development and deployed
+apps run compensators the same way.
 
 ## Errors
 

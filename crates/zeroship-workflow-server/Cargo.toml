@@ -1,0 +1,45 @@
+[package]
+name = "zeroship-workflow-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Workflow worker registry, placement and management coordinator"
+
+[[package.metadata.zeroship-config.targets]]
+target = "zeroship-workflow-server"
+class = "platform"
+reason = "Metadata coordinator with a dedicated platform database login and generated settings."
+
+[dependencies]
+async-trait = { workspace = true }
+clap = { workspace = true }
+futures = { workspace = true }
+compio = { workspace = true }
+compio-postgres = { workspace = true }
+ntex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+zeroship-core = { workspace = true }
+zeroship-authn = { workspace = true }
+zeroship-data-orm = { workspace = true }
+zeroship-workflow-manager = { workspace = true }
+# The journal artifacts, as a LEAF crate: it carries the generated SQL, the
+# version series and the stamp descriptor, and depends on nothing else in the
+# workspace, so the manager can send a journal bundle without reaching the
+# creator workflow engine.
+zeroship-workflow-schema = { workspace = true }
+zeroship-workflow-client = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+toml = { workspace = true }
+testcontainers = { version = "0.28", default-features = false, features = ["blocking"] }
+# The journal bundle's declared charter is only meaningful against the service
+# that composes it. `vet_schema_bundle` answers "would this service accept every
+# step" with no database, so the manager can prove the artifact it ships is
+# installable instead of finding out against a creator database.
+zeroship-migrate-server = { workspace = true }
+
+[lints]
+workspace = true

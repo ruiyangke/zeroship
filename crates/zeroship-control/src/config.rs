@@ -46,17 +46,6 @@ pub struct ControlSettings {
     #[config(shared = OBSERVABILITY_LOG_FORMAT, default = LogFormat::Auto)]
     pub log_format: Operational<LogFormat>,
 
-    /// Test harness only: do not spawn durable-workflow background work.
-    /// The e2e harness drives the scheduler path explicitly from its test
-    /// process while this control process serves sync/deploy state.
-    ///
-    /// `env = false` keeps the pre-conversion supply set: a harness passes an
-    /// argument deliberately, whereas an exported variable disables the engine
-    /// for every control process that inherits it.
-    #[arg(hide = true)]
-    #[config(name = "control.disable_workflow_engine", env = false)]
-    pub disable_workflow_engine: BootstrapControl<bool>,
-
     /// Permit an evaluation-grade billing provider such as `lite` in production.
     #[config(name = "control.allow_unsupported_billing")]
     pub allow_unsupported_billing: BootstrapControl<bool>,
@@ -77,9 +66,21 @@ pub struct ControlSettings {
     #[config(shared = WORKER_URLS, default = "http://localhost:8080".to_owned())]
     pub worker_urls: Operational<String>,
 
-    /// Gateway internal base URL used by the workflow engine dispatch seam.
-    #[config(name = "control.gateway_url", default = "http://localhost".to_owned())]
-    pub gateway_url: Operational<String>,
+    /// Workflow coordinator used to verify app placement and queue management,
+    /// and to publish app lifecycle intents. An origin the manager client
+    /// would refuse refuses the boot.
+    #[config(name = "control.workflow_coordinator_url", default = "http://127.0.0.1:9093".to_owned())]
+    pub workflow_coordinator_url: Operational<String>,
+
+    /// Catalog sessions the whole process may hold at once, each on a thread
+    /// of its own, and so also the catalog transactions that run at once.
+    /// Deploy, archive and restore share them with the lifecycle publisher and
+    /// wait for a free one beyond the bound. Must be positive.
+    #[config(
+        name = "control.catalog_max_connections",
+        default = crate::publication::shared::DEFAULT_MAX_CONNECTIONS.get()
+    )]
+    pub catalog_max_connections: Operational<usize>,
 
     /// Provider used as the usage meter.
     #[config(name = "control.meter_provider", default = "lite".to_owned())]
@@ -227,7 +228,7 @@ pub struct ControlSettings {
     #[config(name = "control.app_base_domain", default = "zeroship.ai".to_owned())]
     pub app_base_domain: Operational<String>,
 
-    /// Comma-separated CIDRs a worker instance may enrol FROM.
+    /// Comma-separated CIDRs a worker instance may join FROM.
     ///
     /// Half of the enrolment envelope. Control derives a worker's advertised
     /// host from the observed peer address of the enrolment connection and
@@ -252,6 +253,56 @@ pub struct ControlSettings {
     /// for the reason above; so does a range containing port zero.
     #[config(name = "control.worker_enrolment_ports", default = String::new())]
     pub worker_enrolment_ports: Operational<String>,
+
+    /// JSON FILE naming every JOIN SIGNER this deployment trusts: one id, the
+    /// execution zones it may mint for, and its Ed25519 PUBLIC key.
+    ///
+    /// Read once at startup and only ever ADDED from: a signer Control has not
+    /// recorded is inserted active, a recorded one is left as it is - a REVOKED
+    /// one stays revoked however long its line stays in the file - and a file
+    /// that disagrees with any recorded signer, in key OR in permitted zones,
+    /// refuses the boot and writes nothing.
+    /// `crates/zeroship-control/src/worker_join.rs` (`import_join_signers`)
+    /// carries the shape; `docs/runbooks/worker-join-signers.md` carries the
+    /// operator procedure and both revocation verbs.
+    ///
+    /// Empty (the default) imports nothing. Every join then refuses, because no
+    /// signer resolves, unless the signers were recorded by an earlier boot.
+    #[config(name = "control.join_signers_file", default = PathBuf::new())]
+    pub join_signers_file: Operational<PathBuf>,
+
+    /// The signer CREDENTIAL this control plane mints join tokens with, on a
+    /// single-host deployment where nobody is present to mint by hand.
+    ///
+    /// Empty (the default) is the multi-host shape: Control verifies join
+    /// tokens without holding any key that can make one, and the operator mints
+    /// with `zeroship join-token` per provisioning. Setting it makes THIS
+    /// process a candidate minter - one replica is elected, see
+    /// `crate::join_minter`.
+    ///
+    /// A PATH, not a `Secret<String>`: the loader refuses a group- or
+    /// world-readable file, which is not possible once the material has become
+    /// an in-memory `String`. The signer's public half must also appear in
+    /// `control.join_signers_file`, or Control would refuse its own tokens.
+    #[config(name = "control.join_token_signer_file", default = PathBuf::new())]
+    pub join_token_signer_file: Operational<PathBuf>,
+
+    /// Where the minted join token is written for the worker containers to
+    /// read. Empty (the default) mints nothing.
+    ///
+    /// The file is a BEARER ARTIFACT valid for its TTL: whoever can read that
+    /// volume can join a worker in that zone. Rotation bounds the window and the
+    /// use cap bounds the blast radius; the trust boundary is the volume.
+    #[config(name = "control.join_token_file", default = PathBuf::new())]
+    pub join_token_file: Operational<PathBuf>,
+
+    /// The execution zone the minted token admits into. Defaults to the zone
+    /// every deployment declares.
+    #[config(
+        name = "control.join_token_zone",
+        default = zeroship_core::worker_join::DEFAULT_EXECUTION_ZONE.to_owned()
+    )]
+    pub join_token_zone: Operational<String>,
 
     /// Retention horizon (months) for the append-only audit tables
     /// `zeroship.app_audit` + `zeroship.authz_decisions`. Rows older than this
@@ -398,35 +449,31 @@ mod tests {
     use super::{ControlSettings, ControlSettingsSources, DEFAULT_LOG_FILTER};
 
     #[test]
-    fn the_two_safety_controls_keep_their_flag_spellings_and_gain_an_env() {
-        // `--disable-workflow-engine` and `--allow-unsupported-billing` are
-        // driven by e2e scripts and compose; the canonical `control.` prefix is
-        // stripped by the binary scope, so the flag an operator types is
-        // unchanged while the environment name becomes reserved-prefixed.
+    fn the_billing_safety_control_keeps_its_flag_spelling_and_gains_an_env() {
+        // `--allow-unsupported-billing` is driven by e2e scripts and compose;
+        // the canonical `control.` prefix is stripped by the binary scope, so
+        // the flag an operator types is unchanged while the environment name
+        // becomes reserved-prefixed.
         // Does not cover: whether those scripts were updated. That is a grep
         // over tests/, not something a clap Command can answer.
         let command = ControlSettingsSources::command();
-        for (id, long, env) in [
-            (
-                "disable_workflow_engine",
-                "disable-workflow-engine",
-                // `env = false`: the hidden harness switch keeps its flag-only
-                // supply set, so no inherited variable can disable the engine.
-                None,
-            ),
-            (
-                "allow_unsupported_billing",
-                "allow-unsupported-billing",
-                Some("ZEROSHIP_CONTROL_ALLOW_UNSUPPORTED_BILLING"),
-            ),
-        ] {
+        // One assertion per setting rather than a table: the legacy settings
+        // this used to iterate were retired with the workflow engine, and a
+        // `for` over a single-element array is both a clippy error and a
+        // misleading shape. Adding a setting adds a line here.
+        let assert_flag = |id: &str, long: &str, env: Option<&str>| {
             let arg = command
                 .get_arguments()
                 .find(|arg| arg.get_id() == id)
                 .unwrap_or_else(|| panic!("no argument {id}"));
             assert_eq!(arg.get_long(), Some(long));
             assert_eq!(arg.get_env().and_then(std::ffi::OsStr::to_str), env);
-        }
+        };
+        assert_flag(
+            "allow_unsupported_billing",
+            "allow-unsupported-billing",
+            Some("ZEROSHIP_CONTROL_ALLOW_UNSUPPORTED_BILLING"),
+        );
     }
 
     #[test]
@@ -486,7 +533,6 @@ mod tests {
 
         assert_eq!(resolved.log_filter.get(), DEFAULT_LOG_FILTER);
         assert_eq!(resolved.check_config_format.get(), &CheckFormat::Text);
-        assert!(!*resolved.disable_workflow_engine.get());
         assert!(!*resolved.allow_unsupported_billing.get());
     }
 }

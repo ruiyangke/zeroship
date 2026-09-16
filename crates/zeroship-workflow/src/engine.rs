@@ -709,7 +709,7 @@ impl StepResult {
         }
     }
 
-    fn from_outcomes(
+    pub(crate) fn from_outcomes(
         run_id: String,
         dispatch_nonce: String,
         outcomes: Vec<StepOutcome>,

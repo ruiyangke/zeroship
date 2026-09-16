@@ -12,9 +12,9 @@
 //! content-addressed round-trip. Migration documents are applied through the
 //! migration service and are rejected if a legacy manifest still carries them.
 
-use zeroship_id::AppId;
 use std::path::PathBuf;
 use std::sync::Arc;
+use zeroship_id::AppId;
 
 use serde_json::json;
 use uuid::Uuid;
@@ -22,10 +22,7 @@ use zeroship_bundle::blob::{sha256_hex, BlobStore, LocalDiskBlobStore};
 use zeroship_bundle::{ingest, IngestError, Manifest, RuntimeDescriptorEntry};
 
 fn tmpdir() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "zeroship-rtd-ingest-{}",
-        Uuid::new_v4().simple()
-    ));
+    let dir = std::env::temp_dir().join(format!("zeroship-rtd-ingest-{}", Uuid::new_v4().simple()));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -81,6 +78,39 @@ fn base_manifest() -> Manifest {
 }
 
 #[compio::test]
+async fn stored_manifest_preserves_the_fields_used_for_deployment_identity() {
+    let root = tmpdir();
+    let store: Arc<dyn BlobStore> = Arc::new(LocalDiskBlobStore::new(root.clone()).unwrap());
+    let app = AppId::mint();
+    let original = json!({
+        "version":1,
+        "metadata":{"built_at":"fixture"},
+        "build_metadata":{"origin":"archive", "nested":{"z":true,"a":false}},
+    });
+    let archive = pack_raw_manifest(&serde_json::to_vec(&original).unwrap(), &[]);
+    let installed = ingest(&store, &app, &archive).await.unwrap();
+    let stored = store
+        .get_manifest(&app, &installed.deploy_hash)
+        .await
+        .unwrap();
+    let mut expected = original.clone();
+    expected["deploy_hash"] = json!(installed.deploy_hash);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&stored).unwrap(),
+        expected
+    );
+    assert_eq!(stored.as_ref(), installed.manifest_json.as_bytes());
+
+    let reordered = br#"{ "build_metadata": { "nested": { "a": false, "z": true }, "origin": "archive" }, "metadata": { "built_at": "fixture" }, "version": 1 }"#;
+    let retry = ingest(&store, &app, &pack_raw_manifest(reordered, &[]))
+        .await
+        .unwrap();
+    assert_eq!(retry.deploy_hash, installed.deploy_hash);
+    assert_eq!(retry.manifest_json, installed.manifest_json);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[compio::test]
 async fn descriptor_survives_pack_then_ingest_byte_identical() {
     // The exact JSON gen-types' `schema.runtime.json` emits:
     // RuntimeSchemaDescriptor v2.
@@ -92,7 +122,10 @@ async fn descriptor_survives_pack_then_ingest_byte_identical() {
         hash: descriptor_hash.clone(),
     });
 
-    let archive = pack(&manifest, &[(descriptor_hash.clone(), descriptor_bytes.clone())]);
+    let archive = pack(
+        &manifest,
+        &[(descriptor_hash.clone(), descriptor_bytes.clone())],
+    );
 
     let store: Arc<dyn BlobStore> =
         Arc::new(LocalDiskBlobStore::new(tmpdir()).expect("local store"));
@@ -113,7 +146,10 @@ async fn descriptor_survives_pack_then_ingest_byte_identical() {
     );
 
     // And the descriptor blob is retrievable byte-identical from the store.
-    let fetched = store.get_blob(&descriptor_hash).await.expect("blob present");
+    let fetched = store
+        .get_blob(&descriptor_hash)
+        .await
+        .expect("blob present");
     assert_eq!(
         fetched.as_ref(),
         descriptor_bytes.as_slice(),
@@ -124,7 +160,8 @@ async fn descriptor_survives_pack_then_ingest_byte_identical() {
 #[compio::test]
 async fn workflow_declarations_survive_pack_then_ingest() {
     let mut manifest = base_manifest();
-    manifest.workflows = Some(json!(["ContinueAsNewWorkflow", {"name": "CompensableCarryWorkflow"}]));
+    manifest.workflows =
+        Some(json!(["ContinueAsNewWorkflow", {"name": "CompensableCarryWorkflow"}]));
 
     let archive = pack(&manifest, &[]);
     let store: Arc<dyn BlobStore> =

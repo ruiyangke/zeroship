@@ -5,15 +5,22 @@ edition = "2021"
 description = "V8 binding and local executor for zeroship workflows"
 
 [dependencies]
+zeroship-bundle = { workspace = true }
 zeroship-workflow = { workspace = true }
 zeroship-runtime = { workspace = true }
 zeroship-runtime-macros = { workspace = true }
 async-trait = { workspace = true }
 compio = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 v8 = { workspace = true }
 
 [dev-dependencies]
+zeroship-workflow-manager = { workspace = true }
+zeroship-data-orm = { workspace = true }
+zeroship-core = { workspace = true }
+zeroship-storage = { workspace = true }
+sha2 = { workspace = true }
 zeroship-id = { workspace = true }
 tempfile = { workspace = true }
 rusqlite = { workspace = true, features = ["bundled"] }

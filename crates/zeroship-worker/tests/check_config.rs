@@ -80,6 +80,150 @@ fn check_config_reports_json_without_contacting_control_or_creating_blob_state()
 }
 
 #[test]
+fn check_config_reports_whether_a_join_token_is_configured() {
+    // Presence only: a dry run never opens the token, so a path that does not
+    // exist still reports as configured.
+    const KEY: &str = "join_token_file_configured";
+    let configured = |output: &Output| {
+        assert_success(output);
+        report(&output.stdout).get(KEY).cloned()
+    };
+
+    // The control: nothing supplies the token, so a report that always said
+    // `true` fails here.
+    let unset = run(&["--check-config", "--check-config-format", "json"]);
+    assert_eq!(configured(&unset), Some(serde_json::Value::Bool(false)));
+
+    let flagged = run(&[
+        "--check-config",
+        "--check-config-format",
+        "json",
+        "--join-token-file",
+        "/flag/worker-join-token",
+    ]);
+    assert_eq!(configured(&flagged), Some(serde_json::Value::Bool(true)));
+
+    let from_env = Command::new(env!("CARGO_BIN_EXE_zeroship-worker"))
+        .env_clear()
+        .env("ZEROSHIP_CONTROL_KEY", STRONG_HEX)
+        .env("ZEROSHIP_WORKER_JOIN_TOKEN_FILE", "/env/worker-join-token")
+        .args(["--check-config", "--check-config-format", "json"])
+        .output()
+        .expect("spawn zeroship-worker");
+    assert_eq!(configured(&from_env), Some(serde_json::Value::Bool(true)));
+}
+
+/// A refusal exiting `code` whose diagnostic names `setting`.
+fn assert_refusal(output: &Output, code: i32, setting: &str) {
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.status.code(), Some(code), "{text}");
+    assert!(
+        text.contains(setting),
+        "the refusal must name {setting}:\n{text}"
+    );
+}
+
+/// `--check-config` with the workflow host settings under test.
+fn workflow_host_dry_run(settings: &[&str]) -> Output {
+    let mut args = vec!["--check-config", "--check-config-format", "json"];
+    args.extend_from_slice(settings);
+    run(&args)
+}
+
+/// The workflow host is optional, and a configured one must be able to run.
+///
+/// Every manager exchange is signed with this instance's enrolled key, so the
+/// origin is part of that credential's trust boundary; and the host prepares
+/// creator journals in the worker's own database and stages payloads in its own
+/// object store. A worker that bound its port and then registered capacity it
+/// could never serve would strand every placement the manager gave it, so each
+/// of these is a refusal, not a warning. `--check-config` reaches the same gate,
+/// which is why the refusals are observable without binding anything.
+#[test]
+fn a_workflow_host_is_refused_without_a_usable_manager_origin_or_creator_resources() {
+    let scratch = tempfile::tempdir().expect("create workflow host scratch directory");
+    let dsn = scratch.path().join("worker-dsn");
+    let dsn_arg = dsn.to_str().expect("UTF-8 scratch path");
+    let objects = scratch.path().join("objects");
+    let objects_arg = objects.to_str().expect("UTF-8 scratch path");
+    let loopback = "http://127.0.0.1:9095";
+
+    // A plaintext origin anywhere but this machine would hand the instance's
+    // signed assertions to the network.
+    assert_refusal(
+        &workflow_host_dry_run(&["--workflow-manager-url", "http://workflow.example"]),
+        2,
+        "worker.workflow_manager_url",
+    );
+
+    // A usable origin still needs both creator resources.
+    assert_refusal(
+        &workflow_host_dry_run(&["--workflow-manager-url", loopback]),
+        1,
+        "worker.database_url",
+    );
+    assert_refusal(
+        &workflow_host_dry_run(&[
+            "--workflow-manager-url",
+            loopback,
+            "--database-url-file",
+            dsn_arg,
+        ]),
+        1,
+        "worker.storage_url",
+    );
+
+    // The control: with both resources the dry run reports the host it would
+    // start, carrying the bounds it was given rather than the defaults.
+    let configured = workflow_host_dry_run(&[
+        "--workflow-manager-url",
+        loopback,
+        "--database-url-file",
+        dsn_arg,
+        "--storage-url",
+        objects_arg,
+        "--workflow-capacity",
+        "12",
+        "--workflow-slots",
+        "3",
+    ]);
+    assert_success(&configured);
+    let host = report(&configured.stdout);
+    assert_eq!(
+        host.get("workflow_host_configured"),
+        Some(&serde_json::Value::Bool(true))
+    );
+    assert_eq!(
+        host.get("workflow_manager_url")
+            .and_then(serde_json::Value::as_str),
+        Some(loopback)
+    );
+    assert_eq!(
+        host.get("workflow_capacity")
+            .and_then(serde_json::Value::as_u64),
+        Some(12)
+    );
+    assert_eq!(
+        host.get("workflow_slots")
+            .and_then(serde_json::Value::as_u64),
+        Some(3)
+    );
+
+    // The second control: the default deployment runs no host at all, so a
+    // report that always said `true` fails here.
+    let unset = workflow_host_dry_run(&[]);
+    assert_success(&unset);
+    assert_eq!(
+        report(&unset.stdout).get("workflow_host_configured"),
+        Some(&serde_json::Value::Bool(false))
+    );
+}
+
+#[test]
 fn worker_rejects_shared_overlay_selectors() {
     for args in [
         ["--check-config", "--config", "ignored.toml"].as_slice(),

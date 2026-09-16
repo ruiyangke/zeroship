@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use zeroship_bundle::{BlobStore, Manifest};
 use zeroship_core::app_id::AppId;
 use zeroship_core::types::{AppVersionInfo, VersionMap};
 use zeroship_runtime::{EnvSnapshot, RuntimeLimits};
@@ -11,65 +10,7 @@ use crate::{cache, WorkerConfig};
 
 const CONTROL_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Resolve the worker-entry blob hash from a manifest. Returns `None` for
-/// SSG-only deploys (worker missing) and logs+returns `None` if the
-/// manifest is malformed (entry not in modules) so the worker stays
-/// loud rather than silently running stale code.
-pub(crate) fn worker_entry_hash(manifest: &Manifest, app_id: &AppId) -> Option<String> {
-    let worker = manifest.worker.as_ref()?;
-    match worker.modules.get(&worker.entry) {
-        Some(h) => Some(h.clone()),
-        None => {
-            tracing::warn!(
-                app_id = app_id.as_str(),
-                entry = ?worker.entry,
-                "worker-sync: manifest.worker.entry missing from modules"
-            );
-            None
-        }
-    }
-}
-
-/// Resolve the bundled `RuntimeSchemaDescriptor` JSON (`schema.runtime.json`)
-/// for an app from its `manifest.runtime_descriptor` slot. The descriptor is a
-/// separate content-addressed blob; the worker reads it through `BlobStore` and
-/// hands it to native runtime startup.
-///
-/// Returns `Ok(None)` when no descriptor is present (schema-less app). A missing
-/// descriptor blob or non-UTF-8 descriptor bytes is a hard load error.
-pub(crate) async fn runtime_descriptor_json(
-    manifest: &Manifest,
-    blob_store: &Arc<dyn BlobStore>,
-    app_id: &AppId,
-) -> Result<Option<String>, String> {
-    let Some(desc) = manifest.runtime_descriptor.as_ref() else {
-        return Ok(None);
-    };
-    let hash = desc.hash.clone();
-    match blob_store.get_blob(&hash).await {
-        Ok(bytes) => match String::from_utf8(bytes.to_vec()) {
-            Ok(s) => Ok(Some(s)),
-            Err(e) => {
-                tracing::error!(
-                    app_id = app_id.as_str(),
-                    descriptor_hash = %hash,
-                    error = %e,
-                    "worker-sync: runtime_descriptor blob is not UTF-8; refusing to load app"
-                );
-                Err(format!("runtime_descriptor blob {hash} is not UTF-8: {e}"))
-            }
-        },
-        Err(e) => {
-            tracing::error!(
-                app_id = app_id.as_str(),
-                descriptor_hash = %hash,
-                error = %e,
-                "worker-sync: runtime_descriptor blob fetch failed; refusing to load app"
-            );
-            Err(format!("runtime_descriptor blob {hash} fetch failed: {e}"))
-        }
-    }
-}
+use crate::executable::load_executable;
 
 /// Process-wide snapshot of `/internal/versions`, refreshed by a single
 /// background poller regardless of how many ntex worker threads are running.
@@ -214,10 +155,9 @@ fn version_poll_authorization(config: &WorkerConfig) -> Option<String> {
 
 async fn poll_versions(config: &WorkerConfig) -> Result<VersionMap, String> {
     let url = format!("{}/internal/versions", config.control_url);
-    let response =
-        http_get(&url, version_poll_authorization(config).as_deref())
-            .await
-            .map_err(|e| format!("fetch versions: {e}"))?;
+    let response = http_get(&url, version_poll_authorization(config).as_deref())
+        .await
+        .map_err(|e| format!("fetch versions: {e}"))?;
     serde_json::from_str(&response).map_err(|e| format!("parse versions: {e}"))
 }
 
@@ -307,7 +247,11 @@ pub fn needs_reload(
     hash_changed || limits_changed || env_changed || net_policy_changed
 }
 
-async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &SharedEnvs) -> Result<(), String> {
+async fn reconcile_once(
+    config: &WorkerConfig,
+    versions: &VersionMap,
+    envs: &SharedEnvs,
+) -> Result<(), String> {
     // PHASE 1: env-only refresh for any app whose env is in SharedEnvs
     // (not just locally cached). Without this, an app loaded only on
     // thread A would have stale env until thread A's next reconcile
@@ -322,12 +266,17 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
         .map(|e| e.keys().cloned().collect())
         .unwrap_or_default();
     for app_id in &env_app_ids {
-        let Some(info) = versions.get(app_id) else { continue };
+        let Some(info) = versions.get(app_id) else {
+            continue;
+        };
         let cached_version = cached_env_version(envs, app_id);
-        if cached_version == Some(info.env_version) { continue; }
+        if cached_version == Some(info.env_version) {
+            continue;
+        }
         match fetch_app_env(&config.control_url, &config.service_auth, app_id).await {
             Ok(env_json) => {
-                if let Err(e) = put_env_from_json(envs, app_id.clone(), &env_json, info.env_version) {
+                if let Err(e) = put_env_from_json(envs, app_id.clone(), &env_json, info.env_version)
+                {
                     tracing::warn!(app_id = app_id.as_str(), error = %e, "worker-sync: env parse failed");
                 }
             }
@@ -349,29 +298,16 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
                 let loaded = cache::get_loaded_meta(local_id);
                 let local_limits = cache::get_limits(local_id);
                 if needs_reload(loaded.as_ref(), local_limits, info) {
-                    // Resolve the worker-bundle blob hash from the manifest
-                    // shipped in `info`. The platform's invariant is that
-                    // a deployed app has `manifest.worker.modules[entry]` —
-                    // anything else is either an undeployed app (manifest
-                    // is None) or an SSG-only deploy (worker is None);
-                    // neither needs a V8 isolate.
-                    let bundle_hash = match info
-                        .manifest
-                        .as_ref()
-                        .and_then(|m| worker_entry_hash(m, local_id))
-                    {
-                        Some(h) => h,
-                        None => {
-                            // No worker code → drop any cached isolate so
-                            // the LRU slot is freed and on-demand load
-                            // doesn't fall back to a stale runtime.
+                    let manifest = match info.manifest.as_ref() {
+                        Some(manifest) if manifest.worker.is_some() => manifest,
+                        _ => {
                             cache::evict_app(local_id);
                             cache::remove_loaded_meta(local_id);
                             continue;
                         }
                     };
-                    match config.blob_store.get_blob(&bundle_hash).await {
-                        Ok(bytes) => {
+                    match load_executable(manifest, &config.blob_store).await {
+                        Ok(executable) => {
                             // Order: make sure SharedEnvs is current BEFORE
                             // the V8 swap. Otherwise concurrent dispatches
                             // on the same thread between cache::load_app and
@@ -383,7 +319,13 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
                             let shared_env_stale =
                                 cached_env_version(envs, local_id) != Some(info.env_version);
                             let env_for_load: Option<String> = if shared_env_stale {
-                                match fetch_app_env(&config.control_url, &config.service_auth, local_id).await {
+                                match fetch_app_env(
+                                    &config.control_url,
+                                    &config.service_auth,
+                                    local_id,
+                                )
+                                .await
+                                {
                                     Ok(json) => Some(json),
                                     Err(e) => {
                                         crate::metrics::inc(&crate::metrics::ENV_FETCH_FAILURES);
@@ -396,61 +338,52 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
                             };
 
                             if let Some(env_json) = env_for_load.as_deref() {
-                                if let Err(e) = put_env_from_json(envs, local_id.clone(), env_json, info.env_version) {
+                                if let Err(e) = put_env_from_json(
+                                    envs,
+                                    local_id.clone(),
+                                    env_json,
+                                    info.env_version,
+                                ) {
                                     tracing::warn!(app_id = local_id.as_str(), error = %e, "worker-sync: env parse failed");
                                     continue;
                                 }
                             }
 
-                            // Resolve the bundled RuntimeSchemaDescriptor (if
-                            // any) so the runtime sources the schema from the
-                            // migration fold. Absent → schema-less app.
-                            let descriptor_json = match info.manifest.as_ref() {
-                                Some(m) => match runtime_descriptor_json(m, &config.blob_store, local_id).await {
-                                    Ok(json) => json,
-                                    Err(e) => {
-                                        tracing::warn!(app_id = local_id.as_str(), error = %e, "worker-sync: descriptor load failed");
-                                        continue;
-                                    }
-                                },
-                                None => None,
-                            };
                             let Some(env_entry) = get_env(envs, local_id) else {
-                                tracing::warn!(app_id = local_id.as_str(), "worker-sync: env cache missing before app load");
+                                tracing::warn!(
+                                    app_id = local_id.as_str(),
+                                    "worker-sync: env cache missing before app load"
+                                );
                                 continue;
                             };
-                            // The manifest is always `Some` here: the
-                            // `worker_entry_hash` resolution above `continue`d
-                            // on `None`, so an app with no manifest never
-                            // reaches this load. The fallback exists so the
-                            // declared policy is EMPTY rather than absent if
-                            // that ever stops holding - an empty tree declares
-                            // nothing and refuses nothing, which is the same
-                            // posture the worker had before it enforced at all.
-                            let declared = info.manifest.clone().unwrap_or_default();
                             match cache::load_app(
                                 local_id.clone(),
-                                &bytes,
+                                executable.modules,
                                 info.runtime.clone(),
                                 info.net_policy.clone(),
                                 info.deploy_hash.as_deref(),
-                                descriptor_json.as_deref(),
-                                &declared,
+                                executable.descriptor.as_deref(),
+                                manifest,
                                 &env_entry.snapshot,
-                            ).await {
+                            )
+                            .await
+                            {
                                 Ok(()) => {
                                     // Record what the fresh isolate was loaded
                                     // against — the reload decision above keys
                                     // off this on the next cycle.
-                                    cache::set_loaded_meta(local_id.clone(), cache::LoadedMeta {
-                                        deploy_hash: info.deploy_hash.clone(),
-                                        env_version: info.env_version,
-                                        net_policy: info.net_policy.clone(),
-                                    });
+                                    cache::set_loaded_meta(
+                                        local_id.clone(),
+                                        cache::LoadedMeta {
+                                            deploy_hash: info.deploy_hash.clone(),
+                                            env_version: info.env_version,
+                                            net_policy: info.net_policy.clone(),
+                                        },
+                                    );
                                     tracing::info!(
                                         app_id = local_id.as_str(),
                                         plan_id = %info.plan_id,
-                                        blob_prefix = &bundle_hash[..bundle_hash.len().min(8)],
+                                        deploy_hash = ?info.deploy_hash,
                                         "worker-sync: app updated"
                                     );
                                 }
@@ -469,7 +402,10 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
             }
             // App deleted from control plane — evict
             None => {
-                tracing::info!(app_id = local_id.as_str(), "worker-sync: evicting deleted app");
+                tracing::info!(
+                    app_id = local_id.as_str(),
+                    "worker-sync: evicting deleted app"
+                );
                 cache::evict_app(local_id);
                 cache::remove_loaded_meta(local_id);
                 // Env entry GC'd centrally by version_poll_loop's
@@ -510,9 +446,26 @@ pub async fn fetch_app_env(
     service_auth: &zeroship_core::service_peers::ServiceAuth,
     app_id: &AppId,
 ) -> Result<String, String> {
+    fetch_app_env_supplying(
+        url_base,
+        service_auth,
+        app_id,
+        crate::cache::project_keys().as_deref(),
+    )
+    .await
+}
+
+/// [`fetch_app_env`] for a thread without the HTTP kernel, such as the
+/// workflow host: `keys` is the database service's process-wide key source.
+pub async fn fetch_app_env_supplying(
+    url_base: &str,
+    service_auth: &zeroship_core::service_peers::ServiceAuth,
+    app_id: &AppId,
+    keys: Option<&zeroship_data_orm::encryption::SuppliedProjectKeys>,
+) -> Result<String, String> {
     // Resolve host material before publishing the environment or creating an
     // isolate. Every thread uses the database service's shared source.
-    if let Some(keys) = crate::cache::project_keys() {
+    if let Some(keys) = keys {
         let app = app_id.as_str();
         if !keys.is_bound(app).map_err(|error| error.to_string())? {
             let url = format!("{url_base}/internal/apps/{}/data-key", app_id.as_str());
@@ -639,9 +592,12 @@ fn this_thread_control_client() -> cyper::Client {
 /// come from `BlobStore` directly — see `reconcile_once` and
 /// `handler::load_on_demand`.
 async fn http_get_bytes(url: &str, authorization: Option<&str>) -> Result<Vec<u8>, String> {
-    compio::time::timeout(CONTROL_REQUEST_TIMEOUT, http_get_bytes_inner(url, authorization))
-        .await
-        .map_err(|_| control_timeout_error())?
+    compio::time::timeout(
+        CONTROL_REQUEST_TIMEOUT,
+        http_get_bytes_inner(url, authorization),
+    )
+    .await
+    .map_err(|_| control_timeout_error())?
 }
 
 fn control_timeout_error() -> String {
@@ -651,10 +607,7 @@ fn control_timeout_error() -> String {
     )
 }
 
-async fn http_get_bytes_inner(
-    url: &str,
-    authorization: Option<&str>,
-) -> Result<Vec<u8>, String> {
+async fn http_get_bytes_inner(url: &str, authorization: Option<&str>) -> Result<Vec<u8>, String> {
     let client = this_thread_control_client();
     let mut builder = client
         .get(url)

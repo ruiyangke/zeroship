@@ -134,10 +134,6 @@ impl Fixture {
         let deploy_tmp_dir = tmpdir(&format!("deploy-{label}"));
         let blob_store: Arc<dyn BlobStore> =
             Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
-        let workflow_blob_store: Arc<dyn zeroship_bundle::WorkflowBlobStore> = Arc::new(
-            zeroship_bundle::LocalWorkflowBlobStore::new(blob_root.clone())
-                .expect("workflow blob store"),
-        );
         let auth_provider = Arc::new(AuthProvider::supabase(SupabaseProvider::new(
             SupabaseConfig::new(
                 SUPABASE_URL,
@@ -158,19 +154,17 @@ impl Fixture {
             env_store,
             stripe_store,
             blob_store,
-            workflow_blob_store,
             control_key: SecretString::new("test-control-key".to_string()),
             master_key: SecretString::new(TEST_MASTER_KEY.to_string()),
             stripe_webhook_secret: SecretString::new(String::new()),
             stripe_secret_key: SecretString::new(String::new()),
             stripe_base_url: "https://api.stripe.com".to_string(),
-            gateway_url: "http://127.0.0.1:9".to_string(),
             worker_urls: Vec::new(),
             admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
             webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
             origin_scheme: zeroship_core::config::OriginScheme::Https,
             trust_proxy: false,
-            worker_enrolment: zeroship_control::worker_enrolment::EnrolmentEnvelope::closed(),
+            worker_enrolment: zeroship_control::worker_join::EnrolmentEnvelope::closed(),
             deploy_tmp_dir: deploy_tmp_dir.clone(),
             control_pg: Arc::new(control_pg_client),
             app_base_domain: "zeroship.localhost".to_string(),
@@ -252,6 +246,7 @@ impl Fixture {
                 &format!("{label}-{}", Uuid::new_v4().simple()),
                 &zeroship_control::plan_catalog::free_plan_id(),
                 owner_id,
+                None,
                 None,
             )
             .await

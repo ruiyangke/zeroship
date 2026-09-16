@@ -57,8 +57,9 @@ const WEAK_LITERALS: &[&str] = &[
 ];
 
 pub(crate) fn cmd_dev(args: &[String]) -> Result<(), String> {
-    if args.get(2).map(String::as_str) != Some("init") {
-        return Err(dev_init_usage().to_string());
+    match args.get(2).map(String::as_str) {
+        Some("init") => {}
+        _ => return Err(dev_init_usage().to_string()),
     }
 
     let options = parse_init_options(args)?;
@@ -186,12 +187,16 @@ fn init_dev_secrets(secrets_dir: &Path, env_file: &Path) -> Result<InitOutcome, 
         validate_existing_secret(&secrets_dir.join(name), name, *validate)?;
     }
 
-    // A service key file that parses is not thereby a service key: four paths
-    // holding ONE key is the shape that collapses four issuers onto one. It is
-    // a property OF THE SET, so no per-file validator above can see it. Refused
-    // here, in the same before-anything-is-created phase, because the run that
-    // would proceed publishes the collapsed document.
+    // A service key file that parses is not thereby a service key: several
+    // paths holding ONE key is the shape that collapses several identities
+    // onto one. It is a property OF THE SET, so no per-file validator above can
+    // see it. Refused here, in the same before-anything-is-created phase,
+    // because the run that would proceed publishes the collapsed document.
     reject_shared_service_keys(&existing_service_public_keys(secrets_dir)?)?;
+    // The trusted-signer import file is judged against the signer credential
+    // before anything is created, for the same reason: a run that would refuse
+    // it afterwards has already written everything else.
+    check_join_signers(secrets_dir)?;
 
     let mut desired_env = existing_env.clone();
     for name in env_keys() {
@@ -213,6 +218,7 @@ fn init_dev_secrets(secrets_dir: &Path, env_file: &Path) -> Result<InitOutcome, 
     }
     ensure_pairwise_file(&pairwise_path, pairwise.as_bytes(), &mut outcome)?;
     write_service_peers(secrets_dir)?;
+    write_join_signers(secrets_dir)?;
 
     let missing_env = env_keys()
         .filter(|name| !existing_env.contains_key(*name))
@@ -271,21 +277,26 @@ fn validate_migrate_dsn(bytes: &[u8]) -> Result<(), String> {
 /// The services that hold a per-service assertion key, and the file each one
 /// reads.
 ///
-/// Four keys and not one shared file, because the whole point of the mechanism
-/// is that a peer can VERIFY a service without being able to IMPERSONATE it.
-/// One key held by four processes would put every service's identity in every
-/// service's memory and turn the assertion back into a shared secret with more
-/// ceremony.
+/// Separate keys and not one shared file, because the whole point of the
+/// mechanism is that a peer can VERIFY a service without being able to
+/// IMPERSONATE it. One key held by several processes would put every service's
+/// identity in every service's memory and turn the assertion back into a shared
+/// secret with more ceremony.
+///
+/// THE WORKER IS NOT HERE, and that is the join design rather than an
+/// omission. No worker holds a `svc/worker` role key: a worker joins with a
+/// TOKEN a trusted signer minted and mints under an instance key it draws in
+/// memory at boot, so the peer document publishes no worker key at all.
 ///
 /// THAT PARAGRAPH WAS A COMMENT AND NOTHING ELSE UNTIL 2026-09-07, and the
 /// difference was reachable with this very command. `ensure_secret_file` keeps
 /// whatever file it finds and `validate_signing_key` only asks whether it
-/// parses, so one key copied to all four paths - the shape a secret manager or
-/// a compose override produces when it maps one secret onto the four
-/// `ZEROSHIP_*_SERVICE_KEY_FILE` mounts - exited 0, printed "kept" four times
-/// and published that key under all four issuers. `reject_shared_service_keys`
-/// now refuses it, before anything is created and again before the document is
-/// written.
+/// parses, so one key copied to every path - the shape a secret manager or a
+/// compose override produces when it maps one secret onto every
+/// `ZEROSHIP_*_SERVICE_KEY_FILE` mount - exited 0, printed "kept" for each and
+/// published that key under every issuer. `reject_shared_service_keys` now
+/// refuses it, before anything is created and again before the document is
+/// written, and it judges the join signer key in the same set.
 ///
 /// Why refuse rather than warn: the run EMITS A CREDENTIAL DOCUMENT. Under a
 /// one-key document every issuer resolves to the same key, so a peer holding
@@ -296,16 +307,42 @@ fn validate_migrate_dsn(bytes: &[u8]) -> Result<(), String> {
 /// The names match `zeroship_core::service_peers`, and
 /// `tests/lib/runtime_secrets.sh` writes the same set under the same names for
 /// the end-to-end harnesses.
-const SERVICE_KEY_FILES: [(&str, &str); 4] = [
+const SERVICE_KEY_FILES: [(&str, &str); 3] = [
     ("svc-gateway.pem", "svc/gateway"),
-    ("svc-worker.pem", "svc/worker"),
     ("svc-control.pem", "svc/control"),
     ("svc-auth.pem", "svc/auth"),
 ];
 
+/// This deployment's OPERATOR SIGNER credential: the `wjs_` id and the Ed25519
+/// PKCS#8 PEM private key that mints join tokens, in the document
+/// `zeroship_core::service_peers::load_join_signer_credential` reads.
+///
+/// NO WORKER MOUNTS THIS, and that is the whole point of the shape. A worker
+/// carries a TOKEN, never a signing key: the key belongs to whoever decides a
+/// worker should exist, which on a single host is the control plane
+/// (`control.join_token_signer_file`) and on a fleet is the operator running
+/// `zeroship join-token`.
+///
+/// Private, like every key file here. Generated once and never rotated in
+/// place: re-keying is provisioning a NEW signer, because Control refuses a
+/// changed key for a recorded id (`docs/runbooks/worker-join-signers.md`).
+const JOIN_SIGNER_FILE: &str = "join-signer.json";
+
+/// The trusted-signer import document Control reads at startup
+/// (`control.join_signers_file`), naming the PUBLIC half of this deployment's
+/// signer and the execution zones it may mint for.
+///
+/// DERIVED from [`JOIN_SIGNER_FILE`] and ADDITIVE: an entry an operator added
+/// for another signer is kept, and this deployment's entry is added when it is
+/// missing. An entry that names this signer's id under a different key, or its
+/// key under another id, is refused rather than rewritten - the file and the
+/// credential disagreeing is an operator decision, not something to guess at.
+/// Not private: it holds public keys, exactly like [`SERVICE_PEERS_FILE`].
+const JOIN_SIGNERS_FILE: &str = "join-signers.json";
+
 /// The JWKS-shaped document naming every service's PUBLIC key.
 ///
-/// DERIVED from the four private keys above rather than generated, so it cannot
+/// DERIVED from the private keys above rather than generated, so it cannot
 /// drift from them: rotating a key and forgetting to republish it would leave
 /// every peer refusing that service, and the failure would look like a network
 /// problem. Written on every run for that reason - it is not a secret and it
@@ -330,11 +367,7 @@ fn secret_specs() -> [SecretSpec; 10] {
             generate_signing_key,
             validate_signing_key,
         ),
-        (
-            SERVICE_KEY_FILES[3].0,
-            generate_signing_key,
-            validate_signing_key,
-        ),
+        (JOIN_SIGNER_FILE, generate_join_signer, validate_join_signer),
         (
             "auth-signing.pem",
             generate_signing_key,
@@ -675,8 +708,12 @@ fn write_service_peers(secrets_dir: &Path) -> Result<(), String> {
     // the one `init_dev_secrets` runs. That one rules on the directory it
     // FOUND; this one rules on the bytes about to be published, so no future
     // caller of this function can emit a document with one key under two
-    // issuers by reaching it another way.
-    reject_shared_service_keys(&keys)?;
+    // issuers by reaching it another way. The join signer key is in the set it
+    // rules on even though it is never published here.
+    let signer = secrets_dir.join(JOIN_SIGNER_FILE);
+    let mut judged = keys.clone();
+    judged.push((signer.clone(), read_join_signer(&signer)?.1));
+    reject_shared_service_keys(&judged)?;
 
     let entries = SERVICE_KEY_FILES
         .iter()
@@ -727,6 +764,14 @@ fn existing_service_public_keys(secrets_dir: &Path) -> Result<Vec<(PathBuf, [u8;
             keys.push((path, public));
         }
     }
+    // The signer key joins the set: a signer key equal to a service key would
+    // let whoever holds it present as that service, and the signer key is the
+    // one that decides which processes become workers at all.
+    let signer = secrets_dir.join(JOIN_SIGNER_FILE);
+    if signer.exists() {
+        let (_, public) = read_join_signer(&signer)?;
+        keys.push((signer, public));
+    }
     Ok(keys)
 }
 
@@ -772,6 +817,145 @@ fn reject_shared_service_keys(keys: &[(PathBuf, [u8; 32])]) -> Result<(), String
          ZEROSHIP_*_SERVICE_KEY_FILE paths. Nothing was created or changed.",
         collisions.join("; ")
     ))
+}
+
+/// Mint a new signer: a fresh `wjs_` id and a fresh Ed25519 key, as one
+/// credential document.
+///
+/// ONE document rather than a key file and a separate id setting, because the
+/// two are one credential: Control verifies a token against the key it recorded
+/// FOR THAT ID, so an id and a key that drifted apart would refuse every join
+/// while each half looked configured.
+fn generate_join_signer() -> Result<Vec<u8>, String> {
+    let private_key = String::from_utf8(generate_signing_key()?)
+        .map_err(|error| format!("encode the signer key: {error}"))?;
+    let document = zeroship_core::worker_join::render_join_signer_credential(
+        &zeroship_core::typed_id::new_join_signer_id(),
+        &private_key,
+    )?;
+    Ok(document.into_bytes())
+}
+
+fn validate_join_signer(bytes: &[u8]) -> Result<(), String> {
+    parse_join_signer(bytes).map(|_| ())
+}
+
+/// The signer id and the PUBLIC half of its key.
+///
+/// The parse is `zeroship_core::worker_join::parse_join_signer_credential`, the
+/// one Control's minter reads the same file with, so a document this command
+/// writes and a document Control accepts are one definition rather than two
+/// that agree today.
+fn parse_join_signer(bytes: &[u8]) -> Result<(String, [u8; 32]), String> {
+    let (signer_id, key) = zeroship_core::worker_join::parse_join_signer_credential(bytes)
+        .map_err(|error| format!("join signer credential: {error}"))?;
+    Ok((signer_id, key.verifying_key_bytes()))
+}
+
+fn read_join_signer(path: &Path) -> Result<(String, [u8; 32]), String> {
+    let bytes = std::fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    parse_join_signer(&bytes).map_err(|error| format!("{}: {error}", path.display()))
+}
+
+fn read_join_signer_import(
+    path: &Path,
+) -> Result<Vec<zeroship_core::worker_join::JoinSignerRecord>, String> {
+    let bytes = std::fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    zeroship_core::worker_join::parse_join_signer_import(&bytes).map_err(|error| {
+        format!(
+            "existing join signer import file {} is invalid and was not replaced: {error}",
+            path.display()
+        )
+    })
+}
+
+/// The import records with this deployment's signer present, and whether they
+/// changed.
+///
+/// ADDITIVE: every other entry is kept as it is. This deployment's entry is
+/// appended when absent; when present it must name the credential's own key,
+/// and a record naming that key under ANOTHER id is refused too - Control would
+/// refuse either at its next boot, so this refuses it first and names the file.
+///
+/// A recorded entry whose ZONES differ is refused for the same reason and it is
+/// not the same reason as the key: a signer's zones ARE its authority, so
+/// widening them is provisioning a new signer rather than editing a line.
+fn with_this_deployments_signer(
+    mut records: Vec<zeroship_core::worker_join::JoinSignerRecord>,
+    signer_id: &str,
+    public_key: [u8; 32],
+) -> Result<(Vec<zeroship_core::worker_join::JoinSignerRecord>, bool), String> {
+    let zones = vec![zeroship_core::worker_join::DEFAULT_EXECUTION_ZONE.to_owned()];
+    if let Some(existing) = records.iter().find(|record| record.id == signer_id) {
+        if existing.public_key != public_key {
+            return Err(format!(
+                "{JOIN_SIGNERS_FILE} names signer {signer_id} under a different public key than \
+                 {JOIN_SIGNER_FILE} holds; neither file was changed. A changed key is a new \
+                 signer: see docs/runbooks/worker-join-signers.md"
+            ));
+        }
+        if existing.zones != zones {
+            return Err(format!(
+                "{JOIN_SIGNERS_FILE} records signer {signer_id} for zones {}, not {}; neither \
+                 file was changed. A signer's zones are its authority, so widening them is a new \
+                 signer with a new id",
+                existing.zones.join(", "),
+                zones.join(", ")
+            ));
+        }
+        return Ok((records, false));
+    }
+    if let Some(existing) = records.iter().find(|record| record.public_key == public_key) {
+        return Err(format!(
+            "{JOIN_SIGNERS_FILE} names the key in {JOIN_SIGNER_FILE} under signer {}, not \
+             {signer_id}; neither file was changed",
+            existing.id
+        ));
+    }
+    records.push(zeroship_core::worker_join::JoinSignerRecord {
+        id: signer_id.to_owned(),
+        zones,
+        public_key,
+    });
+    Ok((records, true))
+}
+
+/// Judge an existing import file against an existing credential BEFORE
+/// anything is created. A missing credential cannot conflict: the one this run
+/// generates is fresh.
+fn check_join_signers(secrets_dir: &Path) -> Result<(), String> {
+    let import = secrets_dir.join(JOIN_SIGNERS_FILE);
+    reject_symlink(&import, "join signer import file")?;
+    let credential = secrets_dir.join(JOIN_SIGNER_FILE);
+    if !import.exists() || !credential.exists() {
+        return Ok(());
+    }
+    let (signer_id, public_key) = read_join_signer(&credential)?;
+    with_this_deployments_signer(read_join_signer_import(&import)?, &signer_id, public_key)
+        .map(|_| ())
+}
+
+/// Write the import file Control reads, with this deployment's signer in it.
+///
+/// Written only when it changes, so a re-run leaves an operator's file
+/// byte-for-byte alone.
+fn write_join_signers(secrets_dir: &Path) -> Result<(), String> {
+    let (signer_id, public_key) = read_join_signer(&secrets_dir.join(JOIN_SIGNER_FILE))?;
+    let import = secrets_dir.join(JOIN_SIGNERS_FILE);
+    let existing = if import.exists() {
+        read_join_signer_import(&import)?
+    } else {
+        Vec::new()
+    };
+    let (records, changed) = with_this_deployments_signer(existing, &signer_id, public_key)?;
+    if !changed {
+        return Ok(());
+    }
+    std::fs::write(
+        &import,
+        zeroship_core::worker_join::render_join_signer_import(&records),
+    )
+    .map_err(|error| format!("write {}: {error}", import.display()))
 }
 
 fn generate_signing_key() -> Result<Vec<u8>, String> {
@@ -1076,5 +1260,160 @@ mod tests {
             "the control came out 0600 too, so this run's umask hides the \
              difference and the assertion above proves nothing"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// zeroship join-token
+// ---------------------------------------------------------------------------
+
+fn join_token_usage() -> &'static str {
+    "Usage: zeroship join-token --credential=PATH [--zone=NAME] [--ttl=SECONDS] [--uses=N] \
+     [--confirm=KEY] [--audience=URI]"
+}
+
+/// The default lifetime of a minted token, in seconds.
+///
+/// MINUTES, not days, and that is the difference between this command and the
+/// token a single-host Control rotates into a shared volume. An operator running
+/// this is present: they mint, they provision, the workers join, and what is
+/// left over expires before anyone could carry it anywhere. A token that lives
+/// long enough to be convenient is a standing bearer credential wearing a
+/// short-lived name.
+const DEFAULT_JOIN_TOKEN_TTL_SECONDS: u64 = 600;
+
+/// The default use budget.
+///
+/// A scaled service shares ONE token and each worker consumes a use of its own,
+/// so this is "how many workers am I bringing up", not a fleet size. It is small
+/// because the cost of being wrong is one more `join-token` call.
+const DEFAULT_JOIN_TOKEN_USES: u32 = 4;
+
+/// Mint one join token from an operator-held signer credential and print it.
+///
+/// THE MULTI-HOST PATH. A single-host deployment has Control mint for its own
+/// zone, because nobody is present when a container restarts at three in the
+/// morning; a fleet provisions workers deliberately, so the token is minted
+/// deliberately too, per provisioning, and never mounted as a standing file.
+///
+/// Printed on STDOUT with nothing else, so `zeroship join-token ... > token` is
+/// the whole of the plumbing and every diagnostic stays on stderr.
+pub(crate) fn cmd_join_token(args: &[String]) -> Result<(), String> {
+    let mut credential = None;
+    let mut zone = None;
+    let mut ttl = None;
+    let mut uses = None;
+    let mut confirm = None;
+    let mut audience = None;
+    // Both spellings `dev init` takes: `--name=value` and `--name value`.
+    let mut index = 2;
+    while index < args.len() {
+        let arg = &args[index];
+        let (name, inline_value) = arg
+            .split_once('=')
+            .map_or((arg.as_str(), None), |(name, value)| (name, Some(value)));
+        let slot = match name {
+            "--credential" => &mut credential,
+            "--zone" => &mut zone,
+            "--ttl" => &mut ttl,
+            "--uses" => &mut uses,
+            "--confirm" => &mut confirm,
+            "--audience" => &mut audience,
+            "--help" => return Err(join_token_usage().to_string()),
+            _ => return Err(format!("unknown argument {arg:?}. {}", join_token_usage())),
+        };
+        if slot.is_some() {
+            return Err(format!("{name} was supplied more than once"));
+        }
+        let value = if let Some(value) = inline_value {
+            value.to_string()
+        } else {
+            index += 1;
+            args.get(index)
+                .filter(|value| !value.starts_with("--"))
+                .cloned()
+                .ok_or_else(|| format!("{name} requires a value"))?
+        };
+        if value.is_empty() {
+            return Err(format!("{name} requires a non-empty value"));
+        }
+        *slot = Some(value);
+        index += 1;
+    }
+    let Some(credential) = credential else {
+        return Err(join_token_usage().to_string());
+    };
+    let grant = zeroship_core::worker_join::JoinTokenGrant {
+        zone: zone
+            .unwrap_or_else(|| zeroship_core::worker_join::DEFAULT_EXECUTION_ZONE.to_owned()),
+        lifetime: std::time::Duration::from_secs(parse_number(
+            ttl.as_deref(),
+            "--ttl",
+            DEFAULT_JOIN_TOKEN_TTL_SECONDS,
+        )?),
+        uses: u32::try_from(parse_number(
+            uses.as_deref(),
+            "--uses",
+            u64::from(DEFAULT_JOIN_TOKEN_USES),
+        )?)
+        .map_err(|_| "--uses is too large".to_owned())?,
+        // The joining key, when the issuer knows it in advance. A token that
+        // names one admits that key and no other, which removes even the
+        // "workers the captor controls" a captured token otherwise buys.
+        confirm: match confirm.as_deref() {
+            None => None,
+            Some(encoded) => Some(parse_confirmation(encoded)?),
+        },
+    };
+    // The audience is the control plane the token will be presented to, and it
+    // is checked there: a token minted for another deployment's issuer is
+    // refused rather than admitted into this one.
+    let audience = match audience {
+        Some(uri) => zeroship_core::service_assertion::ServiceIssuer::parse(&uri)
+            .map_err(|error| format!("--audience {uri:?} is not a service issuer: {error}"))?,
+        None => zeroship_core::service_peers::service_issuer(
+            zeroship_core::service_peers::CONTROL_SERVICE_NAME,
+        )
+        .map_err(|error| format!("the control service issuer is malformed: {error}"))?,
+    };
+    let (signer_id, key) =
+        zeroship_core::service_peers::load_join_signer_credential(Path::new(&credential))
+            .map_err(|error| format!("join signer credential: {error}"))?;
+    let token = zeroship_core::worker_join::mint_join_token(&signer_id, &key, &audience, &grant)?;
+    eprintln!(
+        "zeroship join-token: signer {signer_id}, zone {:?}, {} uses, valid {}s{}",
+        grant.zone,
+        grant.uses,
+        grant.lifetime.as_secs(),
+        if grant.confirm.is_some() {
+            ", bound to one key"
+        } else {
+            ""
+        }
+    );
+    println!("{token}");
+    Ok(())
+}
+
+/// The raw Ed25519 public key `--confirm` names.
+///
+/// Base64url without padding, the spelling a worker posts its own key in, so an
+/// operator can copy it straight out of a provisioning step rather than
+/// re-encoding it.
+fn parse_confirmation(encoded: &str) -> Result<[u8; 32], String> {
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded.trim())
+        .map_err(|error| format!("--confirm is not base64url: {error}"))?;
+    <[u8; 32]>::try_from(raw.as_slice())
+        .map_err(|_| "--confirm is not a raw ed25519 public key".to_owned())
+}
+
+/// One numeric option, or its default.
+fn parse_number(raw: Option<&str>, name: &str, default: u64) -> Result<u64, String> {
+    match raw {
+        None => Ok(default),
+        Some(text) => text
+            .parse()
+            .map_err(|error| format!("{name} {text:?} is not a number: {error}")),
     }
 }

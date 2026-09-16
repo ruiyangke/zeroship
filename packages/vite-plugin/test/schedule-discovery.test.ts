@@ -93,8 +93,6 @@ schedule({
             kind: "cron",
             cron_expr: "30 2 * * *",
             tz: "America/New_York",
-            overlap: "skipIfRunning",
-            catchUp: { mode: "backfill", max: 3 },
           },
         },
       ]);
@@ -118,6 +116,8 @@ schedule({
   schedule: cronExpr("* * * * * *"),
   workflow: HeartBeat,
 });
+
+
 `;
       getHandler(plugin).call(makeCtx("ssr"), code, `${root}/src/schedules.ts`);
 
@@ -132,5 +132,21 @@ schedule({
         /invalid workflow schedule "bad-cron".*sub-minute cron is unsupported/s,
       );
     });
+  });
+});
+
+test("compiled schedule policies match the native engine wire contract", async () => {
+  const path = new URL("../../../crates/zeroship-workflow/tests/fixtures/bundle-schedules.json", import.meta.url);
+  const fixtures = JSON.parse(await fs.readFile(path, "utf8"));
+  await withRoot(async root => {
+    const extras = await computeManifestExtras({
+      root,
+      procedures: [],
+      schedules: fixtures.map((schedule: Record<string, unknown>) => ({
+        filePath: "src/server.ts", ...schedule,
+      })),
+      mode: "development",
+    });
+    assert.deepEqual(extras.schedules, fixtures);
   });
 });

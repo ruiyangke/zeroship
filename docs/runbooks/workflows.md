@@ -44,41 +44,42 @@ refused, schedule fan-out is skipped, and scheduler dispatch no longer advances
 queued, sleeping, waiting, or compensating runs for that app. Existing journal
 rows are left in place.
 
-## Current scheduler placement
+## Where the scheduler runs
 
-Control currently hosts timer dispatch, acknowledgement registration, inflight
-recovery and journal reconciliation in
-`crates/zeroship-control/src/cron/workflow_engine.rs`. It also runs workflow
-schedules, signal fan-out and retention sweeps. Recovery includes startup and
-periodic reconciliation against app journals.
+The workflow manager (`zeroship-workflow-server`, over
+`crates/zeroship-workflow-manager/`) owns calendar evaluation, the durable job
+queue, delivery attempts, placement and recovery responsibility. It reads the
+platform database under its own login and holds no creator database connection.
 
-`zeroship-workflow-scheduler` is an unfinished standalone host. Its executable
-supports configuration checks but refuses runtime startup because dispatch and
-acknowledgement processing still live in Control. It is not a deployable
-replacement for the Control loops. The implementation is explicit in
-`crates/zeroship-workflow-scheduler/src/main.rs`.
+A creator run is executed by the `zeroship-worker` that the manager placed the
+app on (`crates/zeroship-worker/src/workflow_host.rs`). That host owns the
+creator journal in the app database and its payloads in the app object store.
+It receives work only as a job the manager delivered; it runs no due-work scan
+and no maintenance loop of its own.
 
-The current timer tables, `zeroship.workflow_scheduler_timers` and
-`zeroship.workflow_scheduler_inflight`, are created by
-`db/migrations-ts/20260811000100_workflow_scheduler_store.ts`. Runtime scheduler
-code verifies their presence rather than creating them. Workers commit journal
-progress separately from Control's timer acknowledgements; recovery repairs
-that gap.
+Control publishes deployment lifecycle intents to the manager and arbitrates
+deployment holds. It reaches no creator journal, and there is no advance
+transport through the gateway.
 
-The finalized [workflow server design](../proposals/2026-09-11-workflow-server.md)
-replaces this arrangement with a dedicated workflow server, polling workers and
-atomic journal/frontier updates. It also specifies shared local execution. The
-replacement is not implemented yet; these operational instructions describe the
-current Control-hosted implementation.
 
 ## Dispatch Pause
+
+The workflow manager's policy provider requires a provisioned global
+`source_validity_ms` and complete `plans.workflow_policy_json` values. Choose the
+finite validity as an operator bound on stale authority, then use native
+`ControlPolicyStore::set_rollout` and `set_plan_policy`, or explicit SQL
+provisioning. Plan policy follows the closed `AppPolicy` contract in
+`crates/zeroship-core/src/workflow_policy.rs`. Missing fields are not defaulted.
+The SQL placeholders below require that chosen validity when inserting the global
+row; updates preserve its current bound. Manager and worker caches retain their
+original lease deadlines, so a switch update does not prove execution quiescence.
 
 Use this when the replay engine is suspect.
 
 ```sql
 INSERT INTO zeroship.workflow_rollout_config
-       (id, dispatch_paused, ingress_disabled, updated_by)
-VALUES ('global', true, false, :operator)
+       (id, dispatch_paused, ingress_disabled, source_validity_ms, updated_by)
+VALUES ('global', true, false, :source_validity_ms, :operator)
 ON CONFLICT (id) DO UPDATE SET
   dispatch_paused = true,
   updated_at = now(),
@@ -103,8 +104,8 @@ Use this when the public signal edge is suspect.
 
 ```sql
 INSERT INTO zeroship.workflow_rollout_config
-       (id, dispatch_paused, ingress_disabled, updated_by)
-VALUES ('global', false, true, :operator)
+       (id, dispatch_paused, ingress_disabled, source_validity_ms, updated_by)
+VALUES ('global', false, true, :source_validity_ms, :operator)
 ON CONFLICT (id) DO UPDATE SET
   ingress_disabled = true,
   updated_at = now(),
@@ -119,9 +120,9 @@ UPDATE zeroship.workflow_rollout_config
  WHERE id = 'global';
 ```
 
-Effect: the gateway forwards the public signal route to control and returns the
-control 503 response. The control terminus rejects before token verification or
-journal writes. App-credentialed `run.signal` remains available.
+Effect: the manager refuses to grant an ingress capability and the worker host
+refuses ingestion for every app, before token verification or any journal write.
+App-credentialed `run.signal` remains available.
 
 ## Drain
 
@@ -133,135 +134,39 @@ UPDATE zeroship.workflow_rollout_config
  WHERE id = 'global';
 ```
 
-Wait for live leases to clear:
+When the manager reports no delivery in flight for the app, no execution is
+running. Queued, sleeping, waiting and compensating work stays durable in the
+creator journal and resumes after the switch is cleared.
 
-```sql
-SELECT state, count(*) AS runs
-  FROM zeroship.workflow_runs
- WHERE claimed_by IS NOT NULL
-   AND lease_expires > now()
- GROUP BY state
- ORDER BY state;
-```
+## Inspecting a run, restarting one, and reading GC state
 
-When this returns no rows, no dispatch is in flight. Queued, sleeping, waiting,
-and compensating rows remain durable and resume after the switch is cleared.
+There is no platform-side journal to query. Each app's runs, steps, signals,
+subscriptions and staged payload references live in that app's own creator
+schema, reached only by the worker hosting it; the durable job queue, delivery
+attempts and deadlines live in the manager's `workflow_manager` schema in the
+platform database. Neither is an operator SQL surface.
 
-## Restart A Run
-
-Preferred path is the control API restart operation with operator credentials.
-Use full restart unless support has identified a safe step boundary.
-
-Inspect restart state:
-
-```sql
-SELECT id, state, workflow_name, restart_count, restarted_at,
-       restarted_from_ordinal, restarted_by
-  FROM zeroship.workflow_runs
- WHERE id = :run_id;
-```
-
-If using direct SQL during incident response, do not rewrite journal rows by
-hand. Use the control restart path so blob refcounts, signal epoch, audit fields,
-and wake state are updated together.
-
-## Read A Journal
-
-Run summary:
-
-```sql
-SELECT id, app_id, workflow_name, state, wake_at, claimed_by, lease_expires,
-       next_ordinal, stuck_strikes, compensation_target,
-       compensation_outcome, output_kind, error
-  FROM zeroship.workflow_runs
- WHERE id = :run_id;
-```
-
-Step prefix:
-
-```sql
-SELECT ordinal, name, name_occurrence, kind, state, output_kind,
-       signal_type, consumed_signal_id, child_run_id,
-       compensation_state, compensation_attempts, error
-  FROM zeroship.workflow_steps
- WHERE run_id = :run_id
- ORDER BY ordinal, name_occurrence;
-```
-
-Signals:
-
-```sql
-SELECT id, type, origin, delivery, topic, consumed_by, created_at
-  FROM zeroship.workflow_signals
- WHERE run_id = :run_id
- ORDER BY created_at, id;
-```
-
-## GC Status
-
-Workflow blob table:
-
-```sql
-SELECT count(*) AS blobs,
-       sum(size) AS bytes,
-       sum(CASE WHEN refcount = 0 THEN 1 ELSE 0 END) AS unreferenced
-  FROM zeroship.workflow_blobs;
-```
-
-Terminal-run retention backlog:
-
-```sql
-SELECT state, count(*) AS runs, min(terminal_at) AS oldest_terminal
-  FROM zeroship.workflow_runs
- WHERE state IN ('completed', 'failed', 'cancelled', 'stalled')
-   AND terminal_at IS NOT NULL
- GROUP BY state
- ORDER BY oldest_terminal;
-```
-
-The retention sweep prunes only terminal runs whose `terminal_at` is older than
-the operator-tunable `CONTROL_WORKFLOW_RETENTION_WINDOW_MS`; the code default is
-`DEFAULT_RETENTION_WINDOW_MS` (7 days). `compensating` is not terminal and is
-never eligible. Each tick logs counters for reaped runs, steps, signals,
-subscriptions, broadcasts, and blobs.
-
-Largest apps by retained workflow bytes:
-
-```sql
-SELECT r.app_id, sum(r.journal_bytes) AS journal_bytes,
-       sum(r.blob_bytes) AS blob_bytes
-  FROM zeroship.workflow_runs r
- GROUP BY r.app_id
- ORDER BY sum(r.journal_bytes + r.blob_bytes) DESC
- LIMIT 20;
-```
-
-Expired broadcast/subscription backlog:
-
-```sql
-SELECT
-  (SELECT count(*) FROM zeroship.workflow_broadcasts
-    WHERE expires_at < now()) AS expired_broadcasts,
-  (SELECT count(*) FROM zeroship.workflow_subscriptions
-    WHERE expires_at IS NOT NULL AND expires_at < now()) AS expired_subscriptions;
-```
+- Run state, outputs and restart go through the creator-authorized handle:
+  `env.workflows` in app code, and the manager's management commands
+  (`crates/zeroship-workflow-manager/`) for operator-initiated control. Do not
+  rewrite journal rows by hand: restart updates payload references, the signal
+  epoch, audit fields and wake state together.
+- Payload and deployment retention run as delivered jobs
+  (`crates/zeroship-workflow/src/service/deployment_retention.rs` and the
+  manager's retention lane), fenced by the deployment holds Control arbitrates.
 
 ## Dashboards And Alerts
 
-- Lease-reclaim rate: count dispatches that claim rows with expired leases in
-  the scheduler dispatch path. Alert on sustained elevation.
-- `stuck_strikes` / stalled rate: query rows with `stuck_strikes > 0` and count
-  terminal `state = 'stalled'` per window. Alert on any unexplained stalled run.
-- Sweep lag: track oldest due item for scheduler timers, schedules, fan-out,
-  and GC sweeps. Timer lag is `min(wake_at)` in `zeroship.workflow_scheduler_timers`;
-  schedule lag is `min(next_fire_at)` for eligible schedules; fan-out lag is
-  oldest pending broadcast; GC lag is oldest unreferenced blob past grace. To
-  add: per-sweep lag gauges emitted after each tick.
-- Journal and blob growth: sum `workflow_runs.journal_bytes`,
-  `workflow_runs.blob_bytes`, and `workflow_blobs.size` by app and total.
+- Delivery retry rate: count job delivery attempts that follow an expired
+  execution lease. Alert on sustained elevation.
+- `stuck_strikes` / stalled rate: count terminal `state = 'stalled'` runs per
+  window. Alert on any unexplained stalled run.
+- Queue lag: track the oldest due job the manager has not delivered, and the
+  oldest pending fanout page. To add: per-lane lag gauges emitted after each
+  drain.
+- Journal and payload growth: per-app journal size and staged payload bytes.
   Alert on growth rate outside the measured launch envelope.
-- Ingress reject rate: count public ingress 4xx/5xx outcomes by reason. To add:
-  counters in the gateway public signal handler and control ingress terminus.
+- Ingress reject rate: count creator signal ingress 4xx/5xx outcomes by reason.
 - Partial compensation rate: count terminal runs with
   `compensation_outcome = 'partial'`. Alert immediately; this means at least one
   compensator failed and operator review is required.

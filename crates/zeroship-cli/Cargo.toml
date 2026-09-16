@@ -14,6 +14,7 @@ name = "zeroship"
 path = "src/main.rs"
 
 [dependencies]
+async-trait = { workspace = true }
 zeroship-core = { workspace = true }
 uuid = { workspace = true }
 zeroship-runtime = { workspace = true }
@@ -24,6 +25,9 @@ zeroship-storage-v8 = { workspace = true }
 zeroship-kv = { workspace = true, features = ["redis", "redb"] }
 zeroship-kv-v8 = { workspace = true }
 zeroship-workflow-v8 = { workspace = true }
+zeroship-workflow = { workspace = true }
+zeroship-workflow-manager = { workspace = true }
+zeroship-bundle = { workspace = true }
 zeroship-metering = { workspace = true }
 libc = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
@@ -35,9 +39,12 @@ base64 = { workspace = true }
 ed25519-dalek = { workspace = true, features = ["pkcs8", "pem", "rand_core"] }
 hex = { workspace = true }
 rand = "0.8"
-
-[dev-dependencies]
+compio = { workspace = true }
+flume = { workspace = true }
+futures = { workspace = true }
 tempfile = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
 
 [lints]
 workspace = true

@@ -145,6 +145,88 @@ fn platform_corpus_records_applies_and_reapplies_without_changes() {
     );
 }
 
+#[test]
+fn deployment_holds_are_platform_metadata_with_scoped_identity() {
+    fixture::Platform::with_database(async |db| {
+        // The primary key is the row id (table_identity.rs); a holder acquires
+        // under the scoped unique key.
+        let unique_keys = db
+            .query(
+                "SELECT ARRAY(SELECT a.attname::text \
+                     FROM unnest(i.indkey::int2[]) WITH ORDINALITY AS key(attnum, position) \
+                     JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = key.attnum \
+                     ORDER BY key.position) \
+             FROM pg_index i \
+             WHERE i.indrelid = 'zeroship.app_deploy_holds'::regclass \
+             AND i.indisunique AND NOT i.indisprimary AND i.indpred IS NULL",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            unique_keys
+                .iter()
+                .map(|row| row.get::<_, Vec<String>>(0))
+                .collect::<Vec<_>>(),
+            [["app_id", "deploy_id", "holder_id"]]
+        );
+        let foreign_key = db
+            .query_one(
+                "SELECT confrelid = 'zeroship.app_deploys'::regclass AS targets_deployment, \
+                    cardinality(conkey) AS scoped_columns, confdeltype::text AS deletion \
+             FROM pg_constraint WHERE conrelid = 'zeroship.app_deploy_holds'::regclass \
+             AND contype = 'f'",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(foreign_key.get::<_, bool>("targets_deployment"));
+        assert_eq!(foreign_key.get::<_, i32>("scoped_columns"), 2);
+        assert_eq!(foreign_key.get::<_, String>("deletion"), "r");
+        let collations = db
+            .query(
+                "SELECT attname, attcollation = 'pg_catalog.\"C\"'::regcollation AS bytewise \
+             FROM pg_attribute WHERE attrelid = 'zeroship.app_deploy_holds'::regclass \
+             AND attname IN ('deploy_id', 'holder_id') ORDER BY attname",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            collations
+                .iter()
+                .map(|row| (
+                    row.get::<_, String>("attname"),
+                    row.get::<_, bool>("bytewise")
+                ))
+                .collect::<Vec<_>>(),
+            [("deploy_id".into(), true), ("holder_id".into(), true)]
+        );
+        for role in [
+            "zeroship_control",
+            "zeroship_worker",
+            "zeroship_gateway",
+            "zeroship_app",
+            "zeroship_workflow",
+        ] {
+            for permission in ["SELECT", "INSERT", "UPDATE", "DELETE"] {
+                let row = db
+                    .query_one(
+                        "SELECT has_table_privilege($1, 'zeroship.app_deploy_holds', $2)",
+                        &[&role, &permission],
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    row.get::<_, bool>(0),
+                    role == "zeroship_control",
+                    "{role}: {permission}"
+                );
+            }
+        }
+    });
+}
+
 fn corpus_ledger() -> Vec<Migration> {
     let corpus = fixture::root().join("db/migrations-ts");
     let ledger: Vec<Migration> =

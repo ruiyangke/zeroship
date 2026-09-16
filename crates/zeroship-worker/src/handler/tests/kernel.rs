@@ -47,8 +47,7 @@ async fn dispatch_resolves_full_kernel_kv_storage_db_auth() {
     let worker = Worker::with_kernel(
         10,
         crate::cache::KernelConfig {
-            control_url: "http://127.0.0.1:1".to_string(),
-            control_key: String::new(),
+            workflows: Default::default(),
             // This case checks DB namespace registration; PostgreSQL operations
             // are exercised by the database and workflow fixtures.
             db_service: Some(crate::cache::fixture::database_service(

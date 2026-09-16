@@ -677,10 +677,11 @@ fn close_iterator(scope: &mut v8::PinScope, iterator: &mut IteratorState) {
         let Ok(method) = v8::Local::<v8::Function>::try_from(value) else {
             return;
         };
-        if let Some(result) = method.call(tc, local.into(), &[]) {
-            if let Ok(promise) = v8::Local::<v8::Promise>::try_from(result) {
-                promise.mark_as_handled();
-            }
+        if let Some(promise) = method
+            .call(tc, local.into(), &[])
+            .and_then(|result| v8::Local::<v8::Promise>::try_from(result).ok())
+        {
+            promise.mark_as_handled();
         }
     });
 }

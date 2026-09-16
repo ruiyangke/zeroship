@@ -96,9 +96,9 @@ pub struct FileConfig {
     /// Platform-schema migrate one-shot settings.
     #[serde(default)]
     pub platform_migrate: PlatformMigrateSection,
-    /// Standalone workflow-scheduler settings.
+    /// Workflow authority settings.
     #[serde(default)]
-    pub workflow_scheduler: SchedulerSection,
+    pub workflow: WorkflowSection,
     /// CDC relay settings.
     #[serde(default)]
     pub data_cdc_server: CdcServerSection,
@@ -110,14 +110,17 @@ pub struct FileConfig {
 /// `[control]` table and still rejects a typo inside it; the values come from
 /// the generated declarations walking the same canonical paths.
 ///
-/// The two `BootstrapControl` fields on that declaration -
-/// `disable_workflow_engine` and `allow_unsupported_billing` - are deliberately
-/// ABSENT. A bootstrap control has no overlay tier, so a key here would be
-/// accepted by the parser and then ignored by the resolver, which is worse than
-/// being rejected.
+/// The `BootstrapControl` field on that declaration -
+/// `allow_unsupported_billing` - is deliberately ABSENT. A bootstrap control
+/// has no overlay tier, so a key here would be accepted by the parser and then
+/// ignored by the resolver, which is worse than being rejected.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ControlSection {
+    /// Workflow coordinator origin used by Control's metadata client.
+    pub workflow_coordinator_url: Option<String>,
+    /// Catalog sessions the Control process may hold at once.
+    pub catalog_max_connections: Option<usize>,
     /// `PostgreSQL` DSN for control-plane data. A DSN grammar admits userinfo,
     /// so it is secret-classed regardless of whether a given value carries a
     /// password.
@@ -181,10 +184,20 @@ pub struct ControlSection {
     pub supabase_jwt_issuer: Option<String>,
     /// Apex domain hosted creator apps serve under.
     pub app_base_domain: Option<String>,
-    /// Comma-separated CIDRs a worker instance may enrol from.
+    /// Comma-separated CIDRs a worker instance may join from.
     pub worker_enrolment_networks: Option<String>,
     /// Listening ports a worker instance may claim, as `<low>-<high>`.
     pub worker_enrolment_ports: Option<String>,
+    /// Trusted JOIN SIGNER import FILE: the id, permitted execution zones and
+    /// Ed25519 public key of every signer this deployment trusts.
+    pub join_signers_file: Option<std::path::PathBuf>,
+    /// The signer CREDENTIAL this control plane mints join tokens with, on a
+    /// single-host deployment. Empty is the multi-host shape.
+    pub join_token_signer_file: Option<std::path::PathBuf>,
+    /// Where the minted join token is written for the workers to read.
+    pub join_token_file: Option<std::path::PathBuf>,
+    /// The execution zone the minted join token admits into.
+    pub join_token_zone: Option<String>,
     /// Audit retention horizon in months.
     pub audit_retention_months: Option<u32>,
     /// Audit retention cron tick in seconds.
@@ -243,8 +256,6 @@ pub struct GatewaySection {
 
 /// Worker operational values supplied by the overlay. See [`ControlSection`].
 ///
-/// `workflow_advance_unsigned` is deliberately absent for the same reason the
-/// control safety controls are: it is a `BootstrapControl` with no overlay tier.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerSection {
@@ -256,9 +267,10 @@ pub struct WorkerSection {
     pub cdc_relay_ca_file: Option<std::path::PathBuf>,
     /// TOML configuration for the app-runtime KV deployment. May carry credentials.
     pub kv_config: Option<String>,
-    /// This worker's OWN ed25519 assertion key FILE. See
-    /// `AuthSection::service_key_file` for why the pair lives here.
-    pub service_key_file: Option<std::path::PathBuf>,
+    /// The JOIN TOKEN file this worker reads at boot. A worker holds no key of
+    /// its own on disk: it joins with a token a trusted signer minted and
+    /// mints under an instance key it draws in memory.
+    pub join_token_file: Option<std::path::PathBuf>,
     /// See `AuthSection::service_key_file`.
     pub service_peers_file: Option<std::path::PathBuf>,
     /// HTTP listen port.
@@ -279,6 +291,12 @@ pub struct WorkerSection {
     pub storage_url: Option<String>,
     /// Maximum persisted bytes for one workflow step output blob.
     pub max_step_blob_bytes: Option<u64>,
+    /// Workflow manager origin; absent runs no workflow host.
+    pub workflow_manager_url: Option<String>,
+    /// App placements advertised to the workflow manager.
+    pub workflow_capacity: Option<usize>,
+    /// Delivered workflow jobs executing at once.
+    pub workflow_slots: Option<usize>,
 }
 
 /// Migration-service operational values supplied by the overlay.
@@ -323,41 +341,61 @@ pub struct PlatformMigrateSection {
     pub cluster_lock_database: Option<String>,
 }
 
-/// Workflow-scheduler operational values supplied by the overlay.
-///
-/// Like [`ObsSection`], this exists so `deny_unknown_fields` still ACCEPTS a
-/// `[workflow_scheduler]` table and still rejects a typo inside it. The values
-/// each binary uses come from the generated declarations, which walk the same
-/// overlay by canonical path, so the key spellings here and there are the same
-/// by construction.
+/// Workflow coordinator metadata values supplied by the shared overlay.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
-pub struct SchedulerSection {
-    /// `PostgreSQL` DSN for the scheduler timer and inflight tables.
+pub struct WorkflowSection {
+    /// HTTP listener address.
+    pub listen: Option<String>,
+    /// Issuer-bound peer verification keys.
+    pub service_peers_file: Option<PathBuf>,
+    /// Workflow service signing key for authenticated Control requests.
+    pub service_key_file: Option<PathBuf>,
+    /// Control origin for deployment queue retention.
+    pub control_url: Option<String>,
+    /// HTTP worker threads.
+    pub http_threads: Option<usize>,
+    /// Maximum connections per HTTP thread.
+    pub max_connections: Option<usize>,
+    /// Maximum cached app policy observations per HTTP thread.
+    pub policy_cache_entries: Option<usize>,
+    /// Maximum metadata JSON request size.
+    pub max_request_bytes: Option<usize>,
+    /// Metadata database connections per HTTP thread.
+    pub database_connections: Option<usize>,
+    /// Maximum wait to acquire a metadata connection.
+    pub database_acquire_timeout_ms: Option<u64>,
+    /// Deadline for a complete metadata transaction.
+    pub database_command_timeout_ms: Option<u64>,
+    /// Worker registration lifetime between heartbeats.
+    pub worker_ttl_ms: Option<u64>,
+    /// Placement lifetime between authorized renewals.
+    pub assignment_ttl_ms: Option<u64>,
+    /// Maximum records in a metadata response page.
+    pub batch_limit: Option<usize>,
+    /// Maximum pending lifecycle commands per app.
+    pub max_pending_management: Option<usize>,
+    /// Interval between expired service-assertion cleanup sweeps.
+    pub replay_sweep_ms: Option<u64>,
+    /// Delay between completed native manager passes.
+    pub driver_interval_ms: Option<u64>,
+    /// Deadline for each lane in a native manager pass.
+    pub driver_lane_timeout_ms: Option<u64>,
+    /// Inactivity after which an app's recovery responsibility may close.
+    pub closing_idle_ms: Option<u64>,
+    /// Bound on a closing attempt's delivery before responsibility reopens.
+    pub closing_timeout_ms: Option<u64>,
+    /// Delay before retrying a closing attempt that did not retire.
+    pub closing_backoff_ms: Option<u64>,
+    /// Ceiling of the doubling closing backoff.
+    pub closing_backoff_max_ms: Option<u64>,
+    /// Platform coordination metadata login; no customer database credentials.
     pub database_url: Option<String>,
-    /// Schema holding the scheduler timer and inflight tables.
-    pub schema: Option<String>,
-    /// Gateway internal base URL the dispatch seam posts to.
-    pub gateway_url: Option<String>,
-    /// Control-plane apply endpoint the scheduler acknowledges through.
-    pub control_apply_url: Option<String>,
-    /// Timer-wheel tick interval in seconds.
-    pub tick_secs: Option<u64>,
-    /// Interval in seconds between inflight-lease reaper sweeps.
-    pub reaper_interval_secs: Option<u64>,
-    /// Horizon in milliseconds within which a timer is loaded into the wheel.
-    pub near_horizon_ms: Option<i64>,
-    /// Maximum timers held in the in-memory wheel.
-    pub max_loaded_timers: Option<i64>,
-    /// Maximum due timers claimed per tick.
-    pub max_due_per_tick: Option<usize>,
-    /// Inflight-lease time-to-live in milliseconds.
-    pub inflight_ttl_ms: Option<i64>,
 }
 
 /// CDC relay values supplied by the overlay.
 ///
-/// Like [`SchedulerSection`], this exists so `deny_unknown_fields` still ACCEPTS
+/// Like [`ObsSection`], this exists so `deny_unknown_fields` still ACCEPTS
 /// a `[data_cdc_server]` table and still rejects a typo inside it. The value the
 /// binary uses comes from its generated declaration, which walks the same
 /// overlay by canonical path.
@@ -698,7 +736,7 @@ impl FileConfig {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::{ConfigError, FileConfig};
@@ -1137,9 +1175,6 @@ port = 9091
 mutation_rate_limit_burst = 2
 mutation_rate_limit_per_minute = 3
 
-[workflow_scheduler]
-tick_secs = 1
-
 [data_cdc_server]
 database_url = "postgres://relay@db/zeroship"
 
@@ -1160,7 +1195,6 @@ relay_smtp_tls = "starttls"
             config.migrate_server.mutation_rate_limit_per_minute,
             Some(3)
         );
-        assert_eq!(config.workflow_scheduler.tick_secs, Some(1));
         assert_eq!(
             config.data_cdc_server.database_url.as_deref(),
             Some("postgres://relay@db/zeroship")
@@ -1185,11 +1219,82 @@ relay_smtp_tls = "starttls"
         // section exists to prevent.
         let control = TempFile::write(
             "per-binary-bootstrap.toml",
-            "[worker]\nworkflow_advance_unsigned = true\n",
+            "[control]\nallow_unsupported_billing = true\n",
         );
         let err = FileConfig::load(Some(&control.path))
             .expect_err("a bootstrap control has no overlay tier");
         assert!(matches!(err, ConfigError::Parse { .. }));
+    }
+
+    // Control's trusted-signer import, its optional minter credential and the
+    // worker's join token are overlay leaves their resolvers walk, so the
+    // schema must accept all of them. A worker reads no assertion key file of
+    // its own, so that key in the worker table is refused rather than accepted
+    // and ignored.
+    #[test]
+    fn the_join_files_parse_and_the_worker_table_has_no_service_key_file() {
+        let file = TempFile::write(
+            "join-files.toml",
+            "[control]\njoin_signers_file = \"/etc/zeroship/secrets/join-signers.json\"\n\
+             join_token_signer_file = \"/etc/zeroship/secrets/join-signer.json\"\n\
+             join_token_file = \"/var/lib/zeroship/join/token\"\n\
+             join_token_zone = \"default\"\n\
+             [worker]\njoin_token_file = \"/var/lib/zeroship/join/token\"\n",
+        );
+        let config = FileConfig::load(Some(&file.path)).expect("the join files parse");
+        assert_eq!(
+            config.control.join_signers_file.as_deref(),
+            Some(Path::new("/etc/zeroship/secrets/join-signers.json"))
+        );
+        assert_eq!(
+            config.control.join_token_signer_file.as_deref(),
+            Some(Path::new("/etc/zeroship/secrets/join-signer.json"))
+        );
+        assert_eq!(config.control.join_token_zone.as_deref(), Some("default"));
+        assert_eq!(
+            config.worker.join_token_file.as_deref(),
+            Some(Path::new("/var/lib/zeroship/join/token"))
+        );
+
+        let key_file = TempFile::write(
+            "worker-service-key-file.toml",
+            "[worker]\nservice_key_file = \"/etc/zeroship/secrets/worker.pem\"\n",
+        );
+        let err = FileConfig::load(Some(&key_file.path))
+            .expect_err("the worker table has no service key file");
+        let ConfigError::Parse { source, .. } = &err else {
+            panic!("expected a parse error, got {err}");
+        };
+        assert!(
+            source.to_string().contains("unknown field"),
+            "the key must be rejected AS AN UNKNOWN FIELD: {source}"
+        );
+    }
+
+    // The worker's workflow host settings are overlay leaves of the worker
+    // table, so the shared schema must accept them with their natural types.
+    #[test]
+    fn the_worker_table_accepts_its_workflow_host_settings() {
+        let file = TempFile::write(
+            "worker-workflow-host.toml",
+            "[worker]\nworkflow_manager_url = \"https://workflow.example\"\n\
+             workflow_capacity = 8\nworkflow_slots = 2\n",
+        );
+        let config = FileConfig::load(Some(&file.path)).expect("the workflow settings parse");
+        assert_eq!(
+            config.worker.workflow_manager_url.as_deref(),
+            Some("https://workflow.example")
+        );
+        assert_eq!(config.worker.workflow_capacity, Some(8));
+        assert_eq!(config.worker.workflow_slots, Some(2));
+
+        // The control: a misspelled leaf is still refused.
+        let misspelled = TempFile::write(
+            "worker-workflow-misspelled.toml",
+            "[worker]\nworkflow_manager = \"https://workflow.example\"\n",
+        );
+        let err = FileConfig::load(Some(&misspelled.path)).expect_err("unknown worker key");
+        assert!(matches!(err, ConfigError::Parse { .. }), "{err}");
     }
 
     // Split out from the case above because it asserts a REJECTION per key and a

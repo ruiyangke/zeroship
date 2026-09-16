@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
+import { generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -8,11 +8,12 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { zstdCompressSync, zstdDecompressSync } from "node:zlib";
+import { zstdDecompressSync } from "node:zlib";
 import { generate } from "selfsigned";
 import { stringify } from "smol-toml";
-import { create as tarCreate, Parser } from "tar";
+import { Parser } from "tar";
 import { GenericContainer, Wait, type StartedTestContainer } from "testcontainers";
+import { parseTypedId, typedIdFromStableSeed } from "@zeroship/server/typed-id";
 import type { Target } from "../targets";
 import { issuer } from "./issuer";
 import { Processes } from "./processes";
@@ -117,7 +118,7 @@ export class Platform {
     console.info("Workflow fixture: build platform binaries and workflow");
     const artifacts = await processes.run("cargo", process.env.CARGO ?? "cargo", [
       "build", "--message-format=json", "--locked", "--bins",
-      ...["zeroship-cli", "zeroship-worker", "zeroship-control", "zeroship-gateway", "zeroship-data-cdc-server", "zeroship-migrate-server"].flatMap((name) => ["-p", name]),
+      ...["zeroship-cli", "zeroship-worker", "zeroship-control", "zeroship-gateway", "zeroship-data-cdc-server", "zeroship-migrate-server", "zeroship-workflow-server"].flatMap((name) => ["-p", name]),
     ], root, process.env);
     const binaries = new Map<string, string>();
     for (const line of artifacts.split("\n")) {
@@ -134,20 +135,7 @@ export class Platform {
     await symlink(join(example, "node_modules"), join(app, "node_modules"), "dir");
     const vite = join(app, "node_modules/vite/bin/vite.js");
     await processes.run("app-build", process.execPath, [vite, "build"], app);
-    const directory = join(app, "dist");
-    const source = await readFile(join(directory, "index.js"));
-    const hash = createHash("sha256").update(source).digest("hex");
-    await mkdir(join(directory, "blobs"));
-    await writeFile(join(directory, "blobs", hash), source);
-    await writeFile(join(directory, "manifest.json"), JSON.stringify({
-      version: 1, resources: { "/[...rest]": { auth: "anonymous", publicly_accessible: true } }, assets: {}, runtime_assets: {},
-      worker: { entry: "index.js", modules: { "index.js": hash } }, workflows: ["OrderWorkflow", "RiskReviewWorkflow"],
-      metadata: { compiler: "workflows-order-fixture", built_at: new Date().toISOString() },
-    }));
-    const archive: Buffer[] = [];
-    for await (const chunk of tarCreate({ cwd: directory, portable: true }, ["manifest.json", "blobs/" + hash])) archive.push(Buffer.from(chunk));
-    const bundle = join(directory, "app.zship");
-    await writeFile(bundle, zstdCompressSync(Buffer.concat(archive)));
+    const bundle = join(app, "dist/app.zship");
     await checkManifest(bundle);
 
     console.info("Workflow fixture: start backing containers and apply platform migrations");
@@ -167,7 +155,7 @@ export class Platform {
     const identity = issuer();
     const jwks = await this.container(identity.container);
     const issuerUrl = `http://${jwks.getHost()}:${jwks.getMappedPort(80)}`;
-    const owner = randomUUID();
+    const owner = typedIdFromStableSeed("usr", "workflows-order-fixture-owner");
     const seeded = await postgres.exec(["psql", "-U", "postgres", "-d", "workflow_fixture", "-v", "ON_ERROR_STOP=1", "-c",
       `INSERT INTO zeroship.users (id, email, name, email_verified_at) VALUES ('${owner}', 'probe-${owner}@zeroship.test', 'Workflow fixture owner', NOW())`]);
     assert.equal(seeded.exitCode, 0, `Seed authenticated fixture owner: ${seeded.output}`);
@@ -175,12 +163,28 @@ export class Platform {
 
     const keys: Record<string, string> = {};
     const peerKeys = [];
-    for (const service of ["control", "worker", "gateway"]) {
+    for (const service of ["control", "gateway", "workflow"]) {
       const { publicKey, privateKey } = generateKeyPairSync("ed25519");
       peerKeys.push({ ...publicKey.export({ format: "jwk" }), iss: `spiffe://zeroship.ai/svc/${service}` });
       keys[service] = await this.secret(`${service}.pem`, privateKey.export({ format: "pem", type: "pkcs8" }).toString());
     }
     const peers = await this.secret("peers.json", JSON.stringify({ keys: peerKeys }));
+    // The worker holds no service key: it joins with a token a trusted signer
+    // minted. Control mints for its own zone here, exactly as a single-host
+    // deployment configures it, so this fixture writes the signer's
+    // credential and the import document Control reads at startup, and hands
+    // the worker the path Control mints the token into.
+    const { publicKey: signerPublicKey, privateKey: signerPrivateKey } = generateKeyPairSync("ed25519");
+    const signerId = typedIdFromStableSeed("wjs", "workflows-order-fixture-signer");
+    const signerPublicKeyX = (signerPublicKey.export({ format: "jwk" }).x) as string;
+    const joinSigner = await this.secret("join-signer.json", JSON.stringify({
+      signer_id: signerId,
+      private_key: signerPrivateKey.export({ format: "pem", type: "pkcs8" }).toString(),
+    }));
+    const joinSigners = await this.secret("join-signers.json", JSON.stringify({
+      signers: [{ id: signerId, zones: ["default"], public_key: signerPublicKeyX }],
+    }));
+    const joinToken = join(work, "join-token");
     const masterKey = randomBytes(32).toString("hex");
     const broker = await this.secret("broker", masterKey);
     const shared = {
@@ -195,11 +199,14 @@ export class Platform {
     const cert = await this.secret("relay-cert.pem", certificate.cert);
     const key = await this.secret("relay-key.pem", certificate.private);
     const blobs = join(work, "blobs");
+    const payloads = join(work, "objects");
+    await mkdir(payloads, { recursive: true });
     const control = await this.port();
     const worker = await this.port();
     const gateway = await this.port();
     const relay = await this.port();
     const migrationServer = await this.port();
+    const manager = await this.port();
     const service = async (name: string, executable: string, port: typeof relay, args: string[], env: NodeJS.ProcessEnv) => {
       await port.release();
       return processes.start(name, binary(executable), args, work, { ...shared, ...env });
@@ -215,17 +222,44 @@ export class Platform {
       socket.once("error", () => done(false));
       socket.setTimeout(1000, () => done(false));
     }));
-    await service("control", "zeroship-control", control, ["--no-config", "--port", `${control.number}`, "--blob-store", blobs, "--gateway-url", gateway.url, "--worker-urls", worker.url], {
+    await service("control", "zeroship-control", control, ["--no-config", "--port", `${control.number}`, "--blob-store", blobs, "--worker-urls", worker.url], {
       ZEROSHIP_CONTROL_DATABASE_URL: dsn, ZEROSHIP_CONTROL_MASTER_KEY: masterKey,
       ZEROSHIP_CONTROL_ALLOW_UNSUPPORTED_BILLING: "true", ZEROSHIP_CONTROL_WORKER_ENROLMENT_NETWORKS: "127.0.0.1/32",
       ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS: `${worker.number}`,
       ZEROSHIP_CONTROL_SERVICE_KEY_FILE: keys.control, ZEROSHIP_CONTROL_SERVICE_PEERS_FILE: peers,
+      ZEROSHIP_CONTROL_JOIN_SIGNERS_FILE: joinSigners,
+      ZEROSHIP_CONTROL_JOIN_TOKEN_SIGNER_FILE: joinSigner,
+      ZEROSHIP_CONTROL_JOIN_TOKEN_FILE: joinToken,
+      ZEROSHIP_CONTROL_JOIN_TOKEN_ZONE: "default",
+      ZEROSHIP_CONTROL_WORKFLOW_COORDINATOR_URL: manager.url,
     });
     await this.waitFor("control", () => this.httpReady(`${control.url}/readyz`));
-    await service("worker", "zeroship-worker", worker, ["--port", `${worker.number}`, "--threads", "1", "--control-url", control.url, "--blob-store", blobs, "--poll-interval", "1", "--workflow-advance-unsigned"], {
+
+    // The workflow manager owns placement: a deployed app reaches env.workflows
+    // only once the manager's placement lane has given it an owner, so the
+    // deployed tier needs one. It holds no creator database - it reads the
+    // platform metadata under its own login, which the migration creates
+    // without a password.
+    const managerRole = await postgres.exec(["psql", "-U", "postgres", "-d", "workflow_fixture", "-v", "ON_ERROR_STOP=1", "-c",
+      "ALTER ROLE zeroship_workflow WITH PASSWORD 'zeroship_workflow'"]);
+    assert.equal(managerRole.exitCode, 0, `Give the manager role a fixture password: ${managerRole.output}`);
+    await service("workflow", "zeroship-workflow-server", manager, ["--no-config", "--listen", `127.0.0.1:${manager.number}`], {
+      ZEROSHIP_WORKFLOW_DATABASE_URL: `postgres://zeroship_workflow:zeroship_workflow@${authority}`,
+      ZEROSHIP_WORKFLOW_CONTROL_URL: control.url,
+      ZEROSHIP_WORKFLOW_SERVICE_KEY_FILE: keys.workflow, ZEROSHIP_WORKFLOW_SERVICE_PEERS_FILE: peers,
+      // The manager sends the journal bundle here when a host reports a refusal.
+      ZEROSHIP_WORKFLOW_MIGRATE_URL: migrationServer.url,
+    });
+    await this.waitFor("workflow manager", () => this.httpReady(`${manager.url}/readyz`));
+    await service("worker", "zeroship-worker", worker, ["--port", `${worker.number}`, "--threads", "1", "--control-url", control.url, "--blob-store", blobs, "--poll-interval", "1"], {
       ZEROSHIP_WORKER_DATABASE_URL: `postgres://zeroship_worker:zeroship_worker@${authority}`,
-      ZEROSHIP_WORKER_SERVICE_KEY_FILE: keys.worker, ZEROSHIP_WORKER_SERVICE_PEERS_FILE: peers,
+      ZEROSHIP_WORKER_JOIN_TOKEN_FILE: joinToken, ZEROSHIP_WORKER_SERVICE_PEERS_FILE: peers,
       ZEROSHIP_WORKER_CDC_RELAY_URL: `wss://localhost:${relay.number}/internal/v1/cdc/subscribe`, ZEROSHIP_WORKER_CDC_RELAY_CA_FILE: cert,
+      // A workflow host keeps creator journals in the app database and stages
+      // payloads in the app object store, so the worker needs both.
+      ZEROSHIP_WORKER_WORKFLOW_MANAGER_URL: manager.url,
+      ZEROSHIP_WORKER_WORKFLOW_CAPACITY: "8", ZEROSHIP_WORKER_WORKFLOW_SLOTS: "2",
+      ZEROSHIP_WORKER_STORAGE_URL: payloads,
     });
     await this.waitFor("worker", () => this.httpReady(`${worker.url}/readyz`));
     await service("gateway", "zeroship-gate", gateway, ["--no-config", "--port", `${gateway.number}`, "--control-url", control.url, "--worker-urls", worker.url, "--blob-store", blobs, "--poll-interval", "1", "--broker-secret-file", broker], {
@@ -239,6 +273,9 @@ export class Platform {
     ], {
       ZEROSHIP_MIGRATE_SERVER_DATABASE_URL: dsn, ZEROSHIP_MIGRATE_SERVER_PROVISION_DATABASE_URL: dsn,
       ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY: randomBytes(32).toString("hex"),
+      // Without a peer bundle the schema-bundle endpoint verifies nobody and
+      // refuses every caller, so no journal would ever be installed.
+      ZEROSHIP_MIGRATE_SERVER_SERVICE_PEERS_FILE: peers,
     });
     await this.waitFor("migrate-server", () => this.httpReady(migrationServer.url + "/readyz"));
 
@@ -250,42 +287,90 @@ export class Platform {
     assert(created.ok, `Create app: HTTP ${created.status}: ${created.ok ? "" : await created.text()}`);
     const { id } = await created.json();
     assert.equal(typeof id, "string", "Created app must have an id");
-    assert.match(id, /^[0-9a-f-]{36}$/);
-    const provisionUrl = migrationServer.url + "/v1/apps/" + id + "/workflows/provision";
-    const anonymous = await fetch(provisionUrl, { method: "POST" });
-    assert.equal(anonymous.status, 401, "Provisioning requires creator authorization");
-    await anonymous.arrayBuffer();
-    const outsiderId = randomUUID();
-    const outsiderSeed = await postgres.exec(["psql", "-U", "postgres", "-d", "workflow_fixture", "-v", "ON_ERROR_STOP=1", "-c",
-      "INSERT INTO zeroship.users (id, email, name, email_verified_at) VALUES ('" + outsiderId + "', 'outsider-" + outsiderId + "@zeroship.test', 'Other creator', NOW())"]);
-    assert.equal(outsiderSeed.exitCode, 0, outsiderSeed.output);
-    const outsider = identity.bearer(issuerUrl, outsiderId);
-    const denied = await fetch(provisionUrl, { method: "POST", headers: { authorization: "Bearer " + outsider } });
-    assert.equal(denied.status, 403, "Another creator cannot provision this app");
-    await denied.arrayBuffer();
-    // Retrying the lifecycle operation must preserve the existing journal.
-    for (let attempt = 0; attempt < 2; attempt++) {
-      await this.httpReady(provisionUrl, { method: "POST", headers: { authorization: "Bearer " + bearer } });
-    }
-    // Workflow rollout and plan capabilities are operator-owned.
+    parseTypedId(id, "app");
+    // THERE IS NO PROVISIONING CALL HERE ANY MORE, and its absence is the
+    // change rather than a gap. The journal used to be installed through a
+    // creator-authorized endpoint on the migration service, which is why this
+    // fixture drove that endpoint's authorization. The migration service no
+    // longer knows what a workflow is: the manager holds the journal artifacts
+    // and sends them as a schema bundle, and the trigger is the WORKER, whose
+    // host asks for a repair when it finds no journal it will use. So the app
+    // below gets its journal by running, which is the path production takes.
+    // Workflow rollout and plan capabilities are operator-owned. A plan carries
+    // the policy the manager grants an app's host under, and Control's startup
+    // seeding leaves that column null, which refuses every policy lease. This is
+    // the catalog default an operator publishes: the complete raw value of
+    // zeroship_core::workflow_policy::AppPolicy::default(), which refuses
+    // unknown and missing fields, so a change to that type fails here rather
+    // than drifting.
+    const policy = JSON.stringify({
+      admission: true, dispatch: true, ingress: true,
+      maxLiveRuns: 10000, maxChildDepth: 16, maxRunning: 16,
+      maxInputBytes: 1048576, maxFrontier: 256, maxJournalBytes: 16777216,
+      maxPayloadBytes: 67108864, maxPayloadObjects: 100000,
+      maxPayloadStorageBytes: 1073741824, payloadStagingRetentionMs: 86400000,
+      maxCompensationAttempts: 8, compensationRetryMs: 1000,
+      maxSchedules: 64, maxScheduleBackfill: 32, minScheduleIntervalMs: 1000,
+      maxSignalTokenLifetimeSeconds: 86400, leaseMs: 60000,
+    });
     const plan = await postgres.exec(["psql", "-U", "postgres", "-d", "workflow_fixture", "-v", "ON_ERROR_STOP=1", "-qtAc",
       "UPDATE zeroship.apps SET workflows_enabled = true, plan_id = (SELECT id FROM zeroship.plans WHERE name = 'unlimited' AND NOT archived) WHERE id = '" + id + "' RETURNING id"]);
     assert.equal(plan.exitCode, 0, plan.output);
     assert.equal(plan.output.trim(), id, "Operator must enable the workflow test plan");
     const rollout = await postgres.exec(["psql", "-U", "postgres", "-d", "workflow_fixture", "-v", "ON_ERROR_STOP=1", "-c",
-      "UPDATE zeroship.plans SET workflows_allowed = true; INSERT INTO zeroship.workflow_rollout_config (id, dispatch_paused, ingress_disabled, updated_by) VALUES ('global', false, false, 'workflow-fixture') ON CONFLICT (id) DO UPDATE SET dispatch_paused = false, ingress_disabled = false"]);
+      `UPDATE zeroship.plans SET workflows_allowed = true, workflow_policy_json = '${policy}'; INSERT INTO zeroship.workflow_rollout_config (id, dispatch_paused, ingress_disabled, source_validity_ms, updated_by) VALUES ('global', false, false, 30000, 'workflow-fixture') ON CONFLICT (id) DO UPDATE SET dispatch_paused = false, ingress_disabled = false, source_validity_ms = EXCLUDED.source_validity_ms`]);
     assert.equal(rollout.exitCode, 0, rollout.output);
     await processes.run("deploy", binary("zeroship"), ["deploy", bundle, `--app=${id}`, `--control=${control.url}`, `--token=${bearer}`], work, { HOME: work });
 
-    console.info("Workflow fixture: start the raw JavaScript app locally");
+    console.info("Workflow fixture: serve the app bundle locally");
     const dev = await this.port();
     await dev.release();
-    processes.start("dev", binary("zeroship"), ["serve", join(app, "dist/index.js"), "--port", String(dev.number)], app, {});
+    processes.start("dev", binary("zeroship"), ["serve", bundle, "--port", String(dev.number)], app, {});
     const targets = [
       { name: "local", apiUrl: dev.url, uiUrl: dev.url },
       { name: "deployed", apiUrl: gateway.url + "/apps/orders", uiUrl: "http://orders.localhost:" + gateway.number },
     ];
     for (const target of targets) await this.waitFor(target.name, () => this.httpReady(target.apiUrl + "/"));
+    // Serving the app is not yet serving workflows. A deployed app reaches
+    // env.workflows only once the manager has placed it and the worker host has
+    // published its backend, which is later than the gateway route table.
+    //
+    // An accepted start proves only the ACCEPTANCE half of that chain: a
+    // request isolate writing to the creator journal. DELIVERY - the manager
+    // handing the job back to a worker consumer - is a separate chain that
+    // becomes ready later, so a gate that stopped at an accepted start let the
+    // first timed assertion in the suite measure cold delivery.
+    //
+    // This order workflow parks on its payment signal and so never completes
+    // unattended; `sleeping` is the reachable proof instead, and a strong one.
+    // Reaching it requires the child risk review to have been delivered and to
+    // have completed, and the parent to have been resumed after it - two
+    // deliveries, without needing a signal this readiness run will never get.
+    for (const target of targets) {
+      let runId: string | null = null;
+      await this.waitFor(target.name + " workflows accept a start", async () => {
+        const response = await fetch(target.apiUrl + "/orders", {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ orderId: randomUUID(), sku: "readiness", quantity: 1 }),
+          signal: AbortSignal.any([this.processes.signal, AbortSignal.timeout(15_000)]),
+        });
+        const body = await response.json().catch(() => null);
+        if (!response.ok || typeof body?.runId !== "string") return false;
+        runId = body.runId as string;
+        return true;
+      });
+      await this.waitFor(target.name + " workflows deliver a run", async () => {
+        const response = await fetch(target.apiUrl + "/orders/" + runId, {
+          signal: AbortSignal.any([this.processes.signal, AbortSignal.timeout(15_000)]),
+        });
+        const body = await response.json().catch(() => null);
+        // `sleeping` ONLY. `waiting` is also what the parent reports while it
+        // awaits the child, so accepting it here would pass on the single
+        // delivery this gate exists to look past. The sleep is orders of
+        // magnitude wider than the poll interval, so it cannot be stepped over.
+        return response.ok && body?.state === "sleeping";
+      });
+    }
     return targets;
   }
 

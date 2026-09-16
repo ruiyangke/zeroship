@@ -5,21 +5,102 @@ export type ValueProvider<T> = T | (() => MaybePromise<T>);
 export type AppId = `app_${string}`;
 /** A canonical platform user id: `usr_` followed by the fixed-width lowercase base36 UUIDv7 body. */
 export type UserId = `usr_${string}`;
+/**
+ * A deploy command id: `dcm_` followed by the fixed-width lowercase base36
+ * UUIDv7 body. It names one logical deploy, not its artifact.
+ */
+export type DeployCommandId = `dcm_${string}`;
+/** An immutable app deployment id. */
+export type DeploymentId = `dep_${string}`;
 
-const APP_ID_PATTERN = /^app_([0-9a-z]{25})$/;
+const TYPED_ID_BODY = /^[0-9a-z]{25}$/;
+const TYPED_ID_MAX = (1n << 128n) - 1n;
 
-/** Check the complete runtime shape and numeric range of an AppId. */
-export function isAppId(value: string): value is AppId {
-  const body = APP_ID_PATTERN.exec(value)?.[1];
-  if (body === undefined) return false;
+/** Check the complete runtime shape and numeric range of a typed id. */
+function isTypedId(value: unknown, prefix: string): boolean {
+  if (typeof value !== "string" || !value.startsWith(`${prefix}_`)) return false;
+  const body = value.slice(prefix.length + 1);
+  if (!TYPED_ID_BODY.test(body)) return false;
 
   let decoded = 0n;
   for (const character of body) {
-    const digit = Number.parseInt(character, 36);
-    decoded = decoded * 36n + BigInt(digit);
-    if (decoded > (1n << 128n) - 1n) return false;
+    decoded = decoded * 36n + BigInt(Number.parseInt(character, 36));
+    if (decoded > TYPED_ID_MAX) return false;
   }
   return true;
+}
+
+/** Check the complete runtime shape and numeric range of an AppId. */
+export function isAppId(value: string): value is AppId {
+  return isTypedId(value, "app");
+}
+
+/** Check the complete runtime shape and numeric range of a DeployCommandId. */
+export function isDeployCommandId(value: string): value is DeployCommandId {
+  return isTypedId(value, "dcm");
+}
+
+/**
+ * Mint a fresh deploy command id. Mint one per logical deploy - redeploying an
+ * earlier artifact is a new deploy - and reuse it only to resend that deploy.
+ */
+export function mintDeployCommandId(): DeployCommandId {
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  let millis = BigInt(Date.now());
+  for (let index = 5; index >= 0; index -= 1) {
+    bytes[index] = Number(millis & 0xffn);
+    millis >>= 8n;
+  }
+  // UUIDv7: version 7 in the high nibble of byte 6, RFC 9562 variant in byte 8.
+  bytes[6] = (bytes[6]! & 0x0f) | 0x70;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  let value = 0n;
+  for (const byte of bytes) value = (value << 8n) | BigInt(byte);
+  return `dcm_${value.toString(36).padStart(25, "0")}`;
+}
+
+/** The bytes a deploy uploads. */
+export type DeployArchive = ArrayBuffer | ArrayBufferView | Blob;
+
+/**
+ * One deploy: its command id and an immutable snapshot of the archive.
+ *
+ * Send the same command again after a lost reply, a network failure or a 5xx:
+ * Control answers an exact repeat with the original acceptance and never
+ * publishes the command twice. The same id with a different archive, app or
+ * caller is refused with `409 idempotency_key_conflict`.
+ */
+export interface DeployCommand {
+  readonly id: DeployCommandId;
+  readonly archive: Blob;
+}
+
+/**
+ * Snapshot `archive` into a deploy command. Later writes to the caller's
+ * buffer do not reach the command, so every send of it uploads the same bytes.
+ * Pass `id` only to resend a deploy whose outcome was not observed.
+ */
+export async function createDeployCommand(
+  archive: DeployArchive,
+  id: DeployCommandId = mintDeployCommandId(),
+): Promise<DeployCommand> {
+  if (!isDeployCommandId(id)) {
+    throw new TypeError(`a deploy command id must be a canonical dcm_ id, not ${String(id)}`);
+  }
+  const bytes = await snapshotArchive(archive);
+  return Object.freeze({ id, archive: new Blob([bytes]) });
+}
+
+async function snapshotArchive(archive: DeployArchive): Promise<ArrayBuffer> {
+  if (typeof Blob !== "undefined" && archive instanceof Blob) {
+    return archive.arrayBuffer();
+  }
+  if (archive instanceof ArrayBuffer) return archive.slice(0);
+  if (ArrayBuffer.isView(archive)) {
+    return new Uint8Array(archive.buffer, archive.byteOffset, archive.byteLength).slice().buffer;
+  }
+  throw new TypeError("a deploy archive is an ArrayBuffer, a typed array or a Blob");
 }
 
 export interface ControlClientOptions {
@@ -108,12 +189,48 @@ export interface AppRecord {
 export interface CreateAppInput {
   name: string;
   plan_id?: string;
+  /**
+   * The NAME of the execution zone the app runs in, fixed at creation and
+   * never editable afterwards. Omit it in a deployment that declares one
+   * zone; a deployment that declares several refuses an app that does not
+   * name one, because moving an app between zones is a data migration of its
+   * creator storage rather than a metadata edit.
+   */
+  execution_zone?: string;
 }
 
+/** Control's acceptance of one deploy command. */
 export interface DeployAppResult {
+  command_id: DeployCommandId;
+  deploy_id: DeploymentId;
   deploy_hash: string;
-  blobs_uploaded?: number;
-  blobs_deduped?: number;
+  blobs_uploaded: number;
+  blobs_deduped: number;
+  /**
+   * The app lifecycle revision that activates this deployment, or `null` when
+   * the app is archived and the deployment is staged until it is restored.
+   */
+  lifecycle_revision: number | null;
+  /** True when this answers a repeat of a command Control had already accepted. */
+  replayed: boolean;
+}
+
+/**
+ * A deploy whose result did not arrive: the request failed in transit or
+ * Control answered with a 5xx, so the command may or may not have been
+ * accepted. Resend the same {@link DeployCommand} to learn the outcome.
+ */
+export class DeployOutcomeUnknownError extends Error {
+  readonly commandId: DeployCommandId;
+
+  constructor(commandId: DeployCommandId, cause: unknown) {
+    super(
+      `the outcome of deploy command ${commandId} is unknown; resend the same deploy command to learn it`,
+      { cause },
+    );
+    this.name = "DeployOutcomeUnknownError";
+    this.commandId = commandId;
+  }
 }
 
 export interface SetPlanInput {
@@ -271,42 +388,6 @@ export interface ListAuditResult {
 export interface SetKeyValueInput {
   key: string;
   value: string;
-}
-
-export type DeployBody =
-  | string
-  | ArrayBuffer
-  | ArrayBufferView
-  | Blob
-  | FormData
-  | URLSearchParams
-  | ReadableStream<Uint8Array>;
-
-export interface DeployOptions {
-  contentType?: string;
-}
-
-export interface WorkflowSignalTokenInput {
-  appId: AppId;
-  types: string[];
-  ttl: string;
-}
-
-export interface WorkflowSignalTokenResult {
-  token: string;
-  expiresAt: string;
-}
-
-export interface WorkflowTopicBroadcastInput {
-  appId: AppId;
-  type: string;
-  payload?: unknown;
-  idempotencyKey?: string;
-}
-
-export interface WorkflowTopicBroadcastResult {
-  id: string;
-  topic: string;
 }
 
 /**
@@ -541,6 +622,9 @@ export class ControlClient {
         body: {
           name: input.name,
           plan_id: input.plan_id ?? "free",
+          ...(input.execution_zone === undefined
+            ? {}
+            : { execution_zone: input.execution_zone }),
         },
       }),
     archive: (id: AppId): Promise<AppRecord> =>
@@ -559,16 +643,13 @@ export class ControlClient {
      */
     delete: (id: AppId): Promise<void> =>
       this.request(`/api/apps/${pathPart(id)}`, { method: "DELETE" }),
-    deploy: (
-      id: AppId,
-      artifact: DeployBody,
-      options: DeployOptions = {},
-    ): Promise<DeployAppResult> =>
-      this.request(`/api/apps/${pathPart(id)}/deploy`, {
-        method: "POST",
-        body: artifact,
-        contentType: options.contentType ?? "application/x-zship",
-      }),
+    /**
+     * Send one deploy command. A refusal is a {@link ControlError}; a network
+     * failure or a 5xx is a {@link DeployOutcomeUnknownError}, after which the
+     * same command can be sent again.
+     */
+    deploy: (id: AppId, command: DeployCommand): Promise<DeployAppResult> =>
+      this.#deploy(id, command),
     setPlan: (id: AppId, input: SetPlanInput): Promise<SetPlanResult> =>
       this.request(`/api/apps/${pathPart(id)}/plan`, {
         method: "PUT",
@@ -878,46 +959,6 @@ export class ControlClient {
       ),
   };
 
-  readonly workflows = {
-    createSignalToken: (
-      runId: string,
-      input: WorkflowSignalTokenInput,
-    ): Promise<WorkflowSignalTokenResult> =>
-      this.request(`/internal/workflows/runs/${pathPart(runId)}/signal-token`, {
-        method: "POST",
-        headers: { "x-zeroship-app-id": input.appId },
-        body: {
-          types: input.types,
-          ttl: input.ttl,
-        },
-      }),
-    createTopicSignalToken: (
-      topic: string,
-      input: WorkflowSignalTokenInput,
-    ): Promise<WorkflowSignalTokenResult> =>
-      this.request(`/internal/workflows/topics/${pathPart(topic)}/signal-token`, {
-        method: "POST",
-        headers: { "x-zeroship-app-id": input.appId },
-        body: {
-          types: input.types,
-          ttl: input.ttl,
-        },
-      }),
-    publishTopic: (
-      topic: string,
-      input: WorkflowTopicBroadcastInput,
-    ): Promise<WorkflowTopicBroadcastResult> =>
-      this.request(`/internal/workflows/topics/${pathPart(topic)}/broadcast`, {
-        method: "POST",
-        headers: { "x-zeroship-app-id": input.appId },
-        body: {
-          type: input.type,
-          payload: input.payload,
-          idempotencyKey: input.idempotencyKey,
-        },
-      }),
-  };
-
   constructor(options: ControlClientOptions) {
     if (!options.baseUrl) {
       throw new Error("createControlClient requires a baseUrl");
@@ -934,6 +975,14 @@ export class ControlClient {
     path: string,
     options: ControlRequestOptions = {},
   ): Promise<T> {
+    const { body } = await this.#exchange(path, options);
+    return body as T;
+  }
+
+  async #exchange(
+    path: string,
+    options: ControlRequestOptions,
+  ): Promise<{ response: Response; body: unknown }> {
     const headers = await this.#headers(options);
     const body = encodeBody(options.body, headers, options.contentType);
 
@@ -949,7 +998,49 @@ export class ControlClient {
     if (!response.ok) {
       throw new ControlError(response, parsed);
     }
-    return parsed as T;
+    return { response, body: parsed };
+  }
+
+  async #deploy(id: AppId, command: DeployCommand): Promise<DeployAppResult> {
+    if (
+      !isDeployCommandId(command?.id) ||
+      typeof Blob === "undefined" ||
+      !(command.archive instanceof Blob)
+    ) {
+      throw new TypeError("apps.deploy takes a DeployCommand from createDeployCommand");
+    }
+    let exchange: { response: Response; body: unknown };
+    try {
+      // Both headers override any client-wide default: the content type and
+      // the command id are bound into Control's receipt for this command.
+      exchange = await this.#exchange(`/api/apps/${pathPart(id)}/deploy`, {
+        method: "POST",
+        headers: {
+          "content-type": ZSHIP_CONTENT_TYPE,
+          "idempotency-key": command.id,
+        },
+        body: command.archive,
+      });
+    } catch (error) {
+      if (error instanceof ControlError && error.status < 500) throw error;
+      throw new DeployOutcomeUnknownError(command.id, error);
+    }
+    const accepted = exchange.body;
+    if (!isAcceptance(accepted, command.id)) {
+      throw new DeployOutcomeUnknownError(
+        command.id,
+        new Error("control answered the deploy with an unrecognized acceptance"),
+      );
+    }
+    return {
+      command_id: accepted.command_id,
+      deploy_id: accepted.deploy_id,
+      deploy_hash: accepted.deploy_hash,
+      blobs_uploaded: accepted.blobs_uploaded,
+      blobs_deduped: accepted.blobs_deduped,
+      lifecycle_revision: accepted.lifecycle_revision,
+      replayed: exchange.response.headers.get("idempotent-replayed") === "true",
+    };
   }
 
   async #headers(options: ControlRequestOptions): Promise<Headers> {
@@ -1085,6 +1176,25 @@ function errorMessage(response: Response, body: unknown): string {
 
 function isRecord(value: unknown): value is ControlErrorBody {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+const ZSHIP_CONTENT_TYPE = "application/x-zship";
+
+/** A well-formed acceptance of exactly `commandId`. */
+function isAcceptance(
+  value: unknown,
+  commandId: DeployCommandId,
+): value is Omit<DeployAppResult, "replayed"> {
+  if (!isRecord(value)) return false;
+  const revision = value.lifecycle_revision;
+  return (
+    value.command_id === commandId &&
+    isTypedId(value.deploy_id, "dep") &&
+    typeof value.deploy_hash === "string" &&
+    Number.isSafeInteger(value.blobs_uploaded) &&
+    Number.isSafeInteger(value.blobs_deduped) &&
+    (revision === null || (Number.isSafeInteger(revision) && (revision as number) > 0))
+  );
 }
 
 function pathPart(value: string): string {

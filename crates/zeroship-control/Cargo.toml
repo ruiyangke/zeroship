@@ -7,6 +7,10 @@ description = "zeroship control plane — admin API, internal API, Postgres, VFS
 # their Testcontainers fixtures; shared service suites remain grouped.
 autotests = false
 
+[[test]]
+name = "workflow_policy_catalog"
+path = "tests/workflow_policy_catalog.rs"
+
 [[package.metadata.zeroship-config.targets]]
 target = "zeroship-control"
 class = "platform"
@@ -59,7 +63,9 @@ zeroship-auth = { workspace = true }
 # un-wired; this is the wiring.
 zeroship-mailer = { workspace = true }
 zeroship-workflow = { workspace = true }
-zeroship-workflow-scheduler = { workspace = true }
+zeroship-workflow-client = { workspace = true }
+zeroship-workflow-manager = { workspace = true }
+zeroship-data-orm = { workspace = true }
 zeroship-stream = { workspace = true }
 zeroship-metering = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
@@ -113,6 +119,7 @@ chrono = { version = "0.4", default-features = false, features = ["std", "serde"
 chrono-tz = "0.10"
 
 [dev-dependencies]
+zeroship-workflow-server = { path = "../zeroship-workflow-server" }
 rcgen = "0.14"
 testcontainers = { version = "0.28", features = ["blocking"] }
 zeroship-workflow-v8 = { workspace = true }
@@ -141,6 +148,11 @@ zeroship-runtime = { workspace = true }
 # of their own, so the seeded app carries production's privilege shape (owner
 # `zeroship_workflow_owner`) instead of a test-only one.
 zeroship-migrate-server = { workspace = true }
+# The journal's generated artifacts, read as the ORACLE for what a deploy must
+# leave behind: the deploy-path test compares the stamp it finds in the creator
+# database against the version and fingerprint this build carries, rather than
+# against the reply the call returned.
+zeroship-workflow-schema = { workspace = true }
 rusqlite = { workspace = true, features = ["bundled"] }
 tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -165,16 +177,12 @@ name = "workflow_e2e"
 path = "tests/workflow_e2e.rs"
 
 [[test]]
-name = "workflow_api"
-path = "tests/workflow_api.rs"
-
-[[test]]
-name = "workflow_engine_test"
-path = "tests/workflow_engine_test.rs"
-
-[[test]]
 name = "no_liquibase_residue_test"
 path = "tests/no_liquibase_residue_test.rs"
 
 [lints]
 workspace = true
+
+[[test]]
+name = "deployment_holds"
+path = "tests/deployment_holds.rs"

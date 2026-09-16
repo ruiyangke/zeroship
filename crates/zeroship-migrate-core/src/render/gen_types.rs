@@ -2280,6 +2280,45 @@ mod tests {
     }
 
     #[test]
+    fn runtime_json_marks_author_owned_identity_columns_as_generated() {
+        let effective = crate::test_fixtures::no_inject("app");
+        for name in ["id", "record_key"] {
+            let mut key = column(name, ColType::BigInt);
+            key.nullable = Some(false);
+            key.identity = Some(crate::IdentityCol { always: true });
+            let ops = vec![Op::CreateTable {
+                attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
+                name: "records".into(),
+                columns: vec![key, column("manual", ColType::Text)],
+                primary_key: Some(vec![name.into()]),
+                constraints: Vec::new(),
+                indexes: Vec::new(),
+                partition_by: None,
+                runtime_options: None,
+                schema: None,
+                existence_guard: None,
+            }];
+            let artifacts = render_artifacts(
+                crate::test_fixtures::VENDORS,
+                &ops,
+                &POSTGRES,
+                DEFAULT_PROJECT_SCHEMA,
+                &effective,
+            )
+            .unwrap();
+            let descriptor: Value = serde_json::from_str(&artifacts.runtime_json).unwrap();
+            let fields = &descriptor["collections"]["records"]["fields"];
+            assert_eq!(
+                fields[name]["assign"],
+                serde_json::json!({"by":"identity", "on":"insert"})
+            );
+            assert_eq!(fields[name]["writable"], false);
+            assert_eq!(fields[name]["primaryKey"], true);
+            assert!(fields["manual"].get("assign").is_none());
+        }
+    }
+
+    #[test]
     fn runtime_json_no_inject_preserves_uuid_column_named_id() {
         let effective = crate::test_fixtures::no_inject("app");
         let ops = vec![Op::CreateTable {

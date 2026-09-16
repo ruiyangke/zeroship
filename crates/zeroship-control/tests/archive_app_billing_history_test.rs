@@ -30,7 +30,7 @@ async fn pg(db_url: &str) -> Client {
 const FX_SCALE: i64 = 1_000_000_000_000;
 
 #[compio::test]
-async fn archive_migration_removes_hard_delete_capability_and_grants_only_the_worker_fence() {
+async fn archive_migration_removes_hard_delete_capability_and_keeps_the_worker_out_of_the_catalog() {
     let url = db_url();
     let client = pg(&url).await;
     let row = client
@@ -49,7 +49,14 @@ async fn archive_migration_removes_hard_delete_capability_and_grants_only_the_wo
         .expect("inspect archive privileges");
     assert!(!row.get::<_, bool>("control_can_delete"));
     assert!(row.get::<_, bool>("control_can_update"));
-    assert!(row.get::<_, bool>("worker_can_read_archive"));
+    // INVERTED by the legacy-path removal, and deliberately so. The worker used
+    // to read `archived_at` as its own archive fence, which required reaching
+    // the platform catalog. It no longer reaches that catalog at all: the
+    // cutover revoked `USAGE ON SCHEMA zeroship` from `zeroship_worker`, and
+    // `crates/zeroship-worker/src/db_posture.rs` refuses to boot against a
+    // login that can see the platform schema. A worker that could still read
+    // this column would mean that revocation had been undone.
+    assert!(!row.get::<_, bool>("worker_can_read_archive"));
 
     drop(client);
     common::drain_pg().await;
@@ -91,6 +98,7 @@ async fn archive_preserves_finalized_invoice_history() {
             &format!("archive-inv-{}", Uuid::new_v4().simple()),
             &plan_id,
             &owner,
+            None,
             None,
         )
         .await
@@ -173,6 +181,7 @@ async fn archive_preserves_custom_metric_and_usage() {
             &plan_id,
             &owner,
             None,
+            None,
         )
         .await
         .expect("create app");
@@ -221,7 +230,7 @@ async fn archive_with_plan_change_history_is_idempotent_and_reversible() {
     let (owner, plan_id) = seed_owner_and_plan(&client).await;
     let name = format!("archive-pce-{}", Uuid::new_v4().simple());
     let app = registry
-        .create_app(&name, &plan_id, &owner, None)
+        .create_app(&name, &plan_id, &owner, None, None)
         .await
         .expect("create app");
     let event_id = format!("pce_{}", Uuid::new_v4().simple());
@@ -273,7 +282,7 @@ async fn archive_with_plan_change_history_is_idempotent_and_reversible() {
     );
     assert!(
         matches!(
-            registry.create_app(&name, &plan_id, &owner, None).await,
+            registry.create_app(&name, &plan_id, &owner, None, None).await,
             Err(RegistryError::AlreadyExists(_))
         ),
         "an archived app retains its routable name"
@@ -308,18 +317,21 @@ async fn archived_app_can_stage_a_deploy_without_becoming_routable() {
             &plan_id,
             &owner,
             None,
+            None,
         )
         .await
         .expect("create app");
-    let old_hash = "1".repeat(64);
-    let staged_hash = "2".repeat(64);
-    let old_manifest = manifest_json(&old_hash, "before-archive");
-    let staged_manifest = manifest_json(&staged_hash, "staged-while-archived");
-
-    assert!(registry
-        .set_deploy_with_manifest(&app.id, &old_hash, &old_manifest, None)
-        .await
-        .expect("set initial deploy"));
+    let old_hash = common::deployments::deploy(
+        &registry,
+        &app.id,
+        &owner,
+        common::deployments::labelled("before-archive"),
+    )
+    .await
+    .expect("set initial deploy")
+    .result()
+    .deploy_hash
+    .clone();
     let initial_route = registry
         .get_routes()
         .await
@@ -345,10 +357,20 @@ async fn archived_app_can_stage_a_deploy_without_becoming_routable() {
         "archive must remove the app from the gateway projection"
     );
 
-    assert!(registry
-        .set_deploy_with_manifest(&app.id, &staged_hash, &staged_manifest, None)
-        .await
-        .expect("stage deploy while archived"));
+    let staged = common::deployments::deploy(
+        &registry,
+        &app.id,
+        &owner,
+        common::deployments::labelled("staged-while-archived"),
+    )
+    .await
+    .expect("stage deploy while archived");
+    assert_eq!(
+        staged.result().lifecycle_revision,
+        None,
+        "a deploy while archived stages code without publishing an activation"
+    );
+    let staged_hash = staged.result().deploy_hash.clone();
     assert!(
         !registry
             .get_routes()
@@ -396,14 +418,18 @@ async fn restore_requires_a_staged_deploy_matching_the_latest_applied_schema() {
             &plan_id,
             &owner,
             None,
+            None,
         )
         .await
         .expect("create app");
-    let old_hash = "4".repeat(64);
-    assert!(registry
-        .set_deploy_with_manifest(&app.id, &old_hash, &manifest_json(&old_hash, "old"), None)
-        .await
-        .expect("set schema-less deploy"));
+    common::deployments::deploy(
+        &registry,
+        &app.id,
+        &owner,
+        common::deployments::labelled("old"),
+    )
+    .await
+    .expect("set schema-less deploy");
     registry
         .archive_app(&app.id)
         .await
@@ -445,22 +471,16 @@ async fn restore_requires_a_staged_deploy_matching_the_latest_applied_schema() {
         "a schema mismatch must leave the app archived"
     );
 
-    let staged_hash = "6".repeat(64);
     let mut staged_manifest = Manifest::passthrough();
-    staged_manifest.deploy_hash = Some(staged_hash.clone());
     staged_manifest.runtime_descriptor = Some(zeroship_bundle::RuntimeDescriptorEntry {
         hash: descriptor_hash.clone(),
     });
-    let staged_manifest = serde_json::to_string(&staged_manifest).expect("serialize manifest");
-    assert!(registry
-        .set_deploy_with_manifest(
-            &app.id,
-            &staged_hash,
-            &staged_manifest,
-            Some(&descriptor_hash),
-        )
+    let staged_hash = common::deployments::deploy(&registry, &app.id, &owner, staged_manifest)
         .await
-        .expect("stage schema-compatible deploy"));
+        .expect("stage schema-compatible deploy")
+        .result()
+        .deploy_hash
+        .clone();
     assert!(!registry
         .get_routes()
         .await
@@ -491,13 +511,6 @@ async fn restore_requires_a_staged_deploy_matching_the_latest_applied_schema() {
     drop(client);
     drop(registry);
     common::drain_pg().await;
-}
-
-fn manifest_json(deploy_hash: &str, compiler: &str) -> String {
-    let mut manifest = Manifest::passthrough();
-    manifest.deploy_hash = Some(deploy_hash.to_string());
-    manifest.metadata.compiler = Some(compiler.to_string());
-    serde_json::to_string(&manifest).expect("serialize manifest")
 }
 
 async fn count(client: &Client, table: &str, column: &str, app_id: &zeroship_core::AppId) -> i64 {

@@ -7,14 +7,18 @@ use serde_json::json;
 use uuid::Uuid;
 use zeroship_authn::rate_limit::RateLimitDecision;
 use zeroship_authz::Action;
-use zeroship_core::app_derivation;
 use zeroship_id::AppId;
+
+use zeroship_core::schema_bundle::{SchemaBundle, MIGRATE_AUDIENCE};
+use zeroship_core::service_assertion::presented_issuer;
+use zeroship_core::service_identity::{endpoints, verify_service_call};
 
 use crate::apply::{
     apply_error_kind, apply_ir_documents, ApplyMigrationsRequest, ApplyRequestError,
 };
 use crate::auth::AuthError;
-use crate::provisioning::{provision_database, provision_workflow_journal_schema};
+use crate::bundle::{apply_schema_bundle, BundleError};
+use crate::provisioning::provision_app_database;
 use crate::session::CompioPgSession;
 use crate::MigrationServiceState;
 
@@ -23,6 +27,12 @@ use crate::MigrationServiceState;
 /// The CLI posts its generated IR envelope verbatim, so this route needs an
 /// explicit budget above Ntex's small default while retaining a bounded body.
 const APPLY_REQUEST_BODY_BYTES: usize = 8 * 1024 * 1024;
+
+/// JSON extractor budget for a schema bundle.
+///
+/// A bundle carries the whole ordered series as SQL, so it is large but bounded
+/// by what the platform itself generates, not by anything a creator writes.
+const SCHEMA_BUNDLE_BODY_BYTES: usize = 4 * 1024 * 1024;
 
 /// THE APPROVAL AND POLICY ENDPOINTS ARE GONE, and their absence is the change
 /// rather than a gap.
@@ -47,8 +57,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route(web::post().to(apply)),
     )
     .service(
-        web::resource("/v1/apps/{app_id}/workflows/provision")
-            .route(web::post().to(provision_workflows)),
+        web::resource(endpoints::MIGRATE_SCHEMA_BUNDLE.path_template())
+            .state(web::types::JsonConfig::default().limit(SCHEMA_BUNDLE_BODY_BYTES))
+            .route(web::post().to(schema_bundle)),
     )
     .service(web::resource("/v1/apps/{app_id}/migrations/plan").route(web::post().to(stub_phase2)))
     .service(web::resource("/v1/apps/{app_id}/migrations/status").route(web::get().to(stub_phase2)))
@@ -57,41 +68,104 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     .service(web::resource("/readyz").route(web::get().to(readyz)));
 }
 
-/// Provision a workflow-only app without requiring creator database migrations.
-/// The authenticated app deployer selects the app; schema authority stays here.
-pub async fn provision_workflows(
+/// Install or upgrade a PLATFORM-owned schema inside a creator database.
+///
+/// # There is no app in this request, and that is the shape
+///
+/// A creator database holds the schemas of every app in it, so the target is not
+/// derivable from an app id and none is carried. Authorization is therefore not
+/// "does this creator own that app" - there is no creator here. It is "is this a
+/// platform service the allowlist grants this endpoint", decided on the service
+/// assertion alone.
+///
+/// # It is not throttled by the mutation rate limiter
+///
+/// That limiter is a per-source-IP control over creator-driven DDL, and a
+/// platform caller is ONE address issuing provisioning for the whole fleet;
+/// applying it here would throttle the fleet to a creator's quota. Replay of an
+/// assertion is already refused by the single-use claim store, and the operation
+/// is idempotent.
+pub async fn schema_bundle(
     req: web::HttpRequest,
     state: State<Arc<MigrationServiceState>>,
-    app_id: Path<AppId>,
+    body: Json<SchemaBundle>,
 ) -> web::HttpResponse {
-    let app_id = app_id.into_inner();
-    let caller = match authorize_mutation(&req, &state, &app_id).await {
+    let caller = match authorize_platform_service(&req, &state).await {
         Ok(caller) => caller,
         Err(response) => return response,
     };
-    let result = async {
-        let session = CompioPgSession::connect(&state.provision_dsn).await?;
-        provision_workflow_journal_schema(session.client(), &app_id).await
-    }
-    .await;
-    match result {
-        Ok(()) => {
+    match apply_schema_bundle(&state.provision_dsn, &body).await {
+        Ok(outcome) => {
             tracing::info!(
-                app_id = app_id.as_str(),
-                principal_id = caller.principal_id.as_str(),
-                "workflow journal schema provisioned"
+                schema = %outcome.schema,
+                bundle = %outcome.bundle,
+                version = outcome.version,
+                action = ?outcome.action,
+                caller = %caller,
+                "migrate-server: applied schema bundle"
             );
-            web::HttpResponse::Ok().json(&json!({"app_id": app_id}))
+            web::HttpResponse::Ok().json(&outcome)
         }
-        Err(error) => {
-            tracing::error!(app_id = app_id.as_str(), %error, "workflow journal schema provisioning failed");
-            database_infrastructure_response()
-        }
+        Err(error) => schema_bundle_error_response(&error),
     }
 }
 
-/// Explicitly create the data schema and migrator role for an app-derived
-/// database id.
+/// Authorize a platform service for the schema-bundle endpoint.
+///
+/// Returns the verified issuer so the log line names WHICH service provisioned.
+async fn authorize_platform_service(
+    req: &web::HttpRequest,
+    state: &MigrationServiceState,
+) -> Result<String, web::HttpResponse> {
+    let Some(peers) = state.peers.as_ref() else {
+        tracing::error!(
+            "migrate-server: schema bundle refused - no peer bundle is configured; set \
+             migrate_server.service_peers_file"
+        );
+        return Err(web::HttpResponse::ServiceUnavailable().json(&json!({
+            "error": "schema_bundle_unconfigured",
+            "detail": "this service verifies no platform peers",
+        })));
+    };
+    let header = req
+        .headers()
+        .get("authorization")
+        .and_then(|value| value.to_str().ok());
+    let issuer = presented_issuer(header).ok_or_else(|| {
+        web::HttpResponse::Unauthorized().json(&json!({"error": "unauthenticated"}))
+    })?;
+    verify_service_call(
+        peers.as_ref(),
+        header,
+        MIGRATE_AUDIENCE,
+        endpoints::MIGRATE_SCHEMA_BUNDLE,
+    )
+    .await
+    .map_err(|error| {
+        tracing::debug!(?error, "migrate-server: schema bundle assertion rejected");
+        web::HttpResponse::Unauthorized().json(&json!({"error": "unauthenticated"}))
+    })?;
+    Ok(issuer.as_str().to_owned())
+}
+
+fn schema_bundle_error_response(error: &BundleError) -> web::HttpResponse {
+    let (status, kind) = error.kind();
+    if status.is_server_error() {
+        tracing::error!(%error, "migrate-server: schema bundle failed");
+        return web::HttpResponse::build(status).json(&json!({
+            "error": kind,
+            "detail": "schema bundle service unavailable",
+        }));
+    }
+    tracing::warn!(%error, "migrate-server: schema bundle refused");
+    web::HttpResponse::build(status).json(&json!({
+        "error": kind,
+        "detail": error.to_string(),
+    }))
+}
+
+/// Explicitly create an app's database: its data schema, the migrator role that
+/// owns it, and the runtime role the worker opens it under.
 ///
 /// The path segment IS the app id, which is why it authorizes against the app
 /// and provisions the app's derived schema. Keeping the database route lets the
@@ -123,8 +197,7 @@ pub async fn create_database(
             return database_infrastructure_response();
         }
     };
-    let schema = app_derivation::schema_name(&database_id);
-    if let Err(error) = provision_database(session.client(), &schema).await {
+    if let Err(error) = provision_app_database(session.client(), &database_id).await {
         tracing::error!(
             error = %error,
             database_id = database_id.as_str(),

@@ -27,6 +27,7 @@ zeroship-stream = { workspace = true }
 zeroship-storage = { workspace = true, features = ["s3"] }
 zeroship-storage-v8 = { workspace = true }
 zeroship-workflow = { workspace = true }
+zeroship-workflow-client = { workspace = true }
 zeroship-workflow-v8 = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 ntex = { workspace = true }
@@ -45,6 +46,10 @@ cyper = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+# Creator execution fixtures keep their deployment catalog in a separate ORM database.
+zeroship-workflow-manager = { workspace = true }
+# Shared deployment fixtures implement the native hold-client test adapter.
+async-trait = { workspace = true }
 # The fixture uses the migration service's journal schema provisioner.
 zeroship-migrate-server = { workspace = true }
 # Parse generated configuration and compose private migration host settings.

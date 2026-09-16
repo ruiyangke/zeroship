@@ -251,8 +251,8 @@ jobs:
         run: cargo xtask test repository
       # deploy/compose/docker-compose.yml HAS NO AUTOMATED CHECK as of
       # 2026-08-21. Four steps stood here - named volumes on stateful services,
-      # 0.0.0.0 published only by the edge, secret strength, and the unsigned
-      # workflow-advance flag below - and were deleted with the
+      # 0.0.0.0 published only by the edge, secret strength, and a worker flag
+      # that no longer exists - and were deleted with the
       # crates/zeroship-gatekit gates behind them, as a complexity-budget
       # decision about that crate rather than a finding that the checks were
       # wrong. The properties they held are unguarded; each had caught a real
@@ -1085,7 +1085,7 @@ jobs:
           tests/e2e_gateway_path_backslash.sh 2>&1 | tee "$RUNNER_TEMP/dvd-backslash.log"
         env:
           ZS_FRESHNESS_STRICT: 1
-      # Control refuses every worker enrolment unless an operator DECLARED an
+      # Control refuses every worker join unless an operator DECLARED an
       # address envelope, and no file in this repository declared one until
       # tests/lib/e2e_stack.sh did - so the endpoint was unreachable in every
       # deployment here while its unit tests, which supply their own envelope,
@@ -1100,10 +1100,10 @@ jobs:
       #
       # Starts its own Postgres through tests/lib/e2e_stack.sh, so PG_CONTAINER
       # is deliberately not set here.
-      - name: Worker enrolment (the declared envelope admits, an undeclared one refuses)
+      - name: Worker join (the declared envelope admits, an undeclared one refuses)
         run: |
           set -o pipefail
-          tests/e2e_worker_enrolment.sh 2>&1 | tee "$RUNNER_TEMP/dvd-enrolment.log"
+          tests/e2e_worker_join.sh 2>&1 | tee "$RUNNER_TEMP/dvd-join.log"
       - name: Workflow crates and examples
         run: cargo xtask test workflow
       - name: Workflow test logs

@@ -84,7 +84,10 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::{Rc, Weak};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
 
 use futures::stream::FuturesUnordered;
@@ -106,6 +109,14 @@ use crate::transport::net_policy::NetPolicy;
 use crate::channel::{
     self, CancelFlag, ResultSender,
 };
+
+/// Specifier of the host-only module that owns durable workflow replay.
+///
+/// `WorkflowBinding` in `zeroship-workflow-v8` supplies the source through
+/// `NativePlugin::host_javascript_modules`; the runtime knows only this name
+/// and the `dispatch` export it calls. A runtime that registers no plugin
+/// supplying it cannot dispatch workflows, and creator code cannot import it.
+pub const WORKFLOW_DISPATCH_MODULE: &str = "zeroship:workflows/dispatch";
 
 /// Count of near-heap-limit callback invocations across every isolate in this
 /// process, since start. Monotonic; never reset.
@@ -169,6 +180,25 @@ impl From<String> for DispatchError {
 impl From<&str> for DispatchError {
     fn from(s: &str) -> Self {
         Self { message: s.into(), status: 500 }
+    }
+}
+
+/// Thread-safe, permanent interruption of an exclusive runtime. The owning
+/// thread must still quarantine and join native work through `Runtime::shutdown`.
+#[derive(Clone)]
+pub struct RuntimeInterrupt {
+    handle: v8::IsolateHandle,
+    cancelled: Arc<AtomicBool>,
+}
+impl std::fmt::Debug for RuntimeInterrupt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeInterrupt").finish_non_exhaustive()
+    }
+}
+impl RuntimeInterrupt {
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.handle.terminate_execution();
     }
 }
 
@@ -348,6 +378,17 @@ impl Runtime {
         self.limits.cpu_limit
     }
 
+    /// Obtain a permanent interrupt for a trusted host's deadline watchdog.
+    /// This does not grant another thread access to the isolate or its state.
+    #[must_use]
+    pub fn interrupt_handle(&self) -> RuntimeInterrupt {
+        let inner = self.inner.borrow();
+        RuntimeInterrupt {
+            handle: inner.isolate.thread_safe_handle(),
+            cancelled: inner.host_interrupt.clone(),
+        }
+    }
+
     /// Module list this runtime was built with.
     pub fn modules(&self) -> &[ModuleEntry] {
         self.modules.as_ref().as_slice()
@@ -512,9 +553,9 @@ impl Runtime {
         )
     }
 
-    /// Durable-workflow replay dispatch. Invokes the embedded workflow
-    /// bridge's `default.workflow(envelope, ctx)` entry and returns the JSON
-    /// StepResult object it produced.
+    /// Durable-workflow replay dispatch. Invokes the `dispatch` export of the
+    /// host-only [`WORKFLOW_DISPATCH_MODULE`] against the creator entry's own
+    /// namespace and returns the JSON `StepResult` object it produced.
     pub fn call_workflow_dispatch(
         &self,
         envelope_json: &str,
@@ -561,6 +602,48 @@ impl Runtime {
     /// Clones `self` internally; callers don't need to juggle `Rc<RefCell>`.
     pub fn start_pump(&self) {
         RuntimeInner::start_pump(self.inner.clone());
+    }
+
+    /// Permanently stop app dispatch and cancel this isolate's native work.
+    /// Native task teardown retains the isolate until its futures are destroyed.
+    /// Hosts may call this synchronously when a workflow loses its authority.
+    pub fn quarantine(&self) {
+        let tasks = self.state().borrow().tasks.clone();
+        if !tasks.cancel() {
+            return;
+        }
+        let queued = {
+            let mut inner = self.inner.borrow_mut();
+            inner.fail_startup("runtime has been quarantined".into());
+            inner.advance_startup();
+            for request in inner.pending_requests.values() {
+                request.cancel.cancel();
+            }
+            inner.cleanup_cancelled_requests();
+            let mut state = inner.state.borrow_mut();
+            state.spawned_timers.clear();
+            state.ready_timers.clear();
+            std::mem::take(&mut state.spawned_ops)
+        };
+        drop(queued);
+        self.close_native_sockets_for_eviction();
+        if !tasks.is_idle() {
+            let keep_alive = self.clone();
+            // The supervisor is outside the cancelled group. It preserves V8
+            // until pump and socket futures have dropped their native handles.
+            compio::runtime::spawn(async move {
+                tasks.join().await;
+                drop(keep_alive);
+            }).detach();
+        }
+    }
+
+    /// Join native task teardown after permanently quarantining the isolate.
+    /// Cancelling this wait leaves quarantine in force and a later call can join.
+    pub async fn shutdown(&self) {
+        self.quarantine();
+        let tasks = self.state().borrow().tasks.clone();
+        tasks.join().await;
     }
 
     /// Number of times the per-isolate idle-GC ticker has fired
@@ -837,8 +920,8 @@ enum PendingOrigin {
     Fetch,
     /// A native procedure call is waiting for its loader or handler promise.
     Rpc,
-    /// Promise came from `default.workflow` — resolved value is the
-    /// StepResult object the embedded workflow bridge returns.
+    /// Promise came from the host workflow bridge — resolved value is the
+    /// `StepResult` object its `dispatch` export returns.
     Workflow,
 }
 
@@ -905,7 +988,13 @@ pub(crate) struct RuntimeInner {
     /// A dispatch holds this snapshot while later loading can replace it.
     pub(crate) application: Option<Rc<super::application_entry::ApplicationEntry>>,
 
-    pub(crate) workflow_fn: Option<v8::Global<v8::Function>>,
+    /// The creator entry module, retained from compilation so startup can
+    /// publish its namespace without evaluating the entry a second time.
+    pub(crate) creator_entry: Option<v8::Global<v8::Module>>,
+    /// The creator entry's module namespace, published only once startup has
+    /// evaluated it. Workflow replay passes this to the host bridge, so the
+    /// module instance it sees is the one request dispatch imported.
+    pub(crate) creator_namespace: Option<v8::Global<v8::Value>>,
     startup: StartupState,
     dev_entry_factory: Option<String>,
     dev_entry_loader: Option<super::dev_entry::DevEntryLoader>,
@@ -951,6 +1040,9 @@ pub(crate) struct RuntimeInner {
     /// Which limit set `terminated_note`. Only the CPU timer writes `true`
     /// here, so an unset value with the note set means the heap callback.
     cpu_note: Arc<std::sync::atomic::AtomicBool>,
+
+    /// Host interruption is permanent; limit recovery cannot resume app code.
+    host_interrupt: Arc<AtomicBool>,
 
     /// Cause of the most recent detected termination, set by
     /// `check_v8_terminated` so call sites report the right limit.
@@ -1219,6 +1311,7 @@ impl RuntimeInner {
         // during native startup.
         state.borrow_mut().runtime_descriptor = runtime_descriptor;
         isolate.set_slot(state.clone());
+        isolate.set_slot(crate::plugin::RuntimeAppIdentity(app_id.clone()));
 
         let context = {
             v8::scope!(let handle_scope, &mut isolate);
@@ -1230,7 +1323,8 @@ impl RuntimeInner {
             isolate,
             context,
             application: None,
-            workflow_fn: None,
+            creator_entry: None,
+            creator_namespace: None,
             startup: StartupState::Uninitialized,
             dev_entry_factory: None,
             dev_entry_loader: None,
@@ -1253,6 +1347,7 @@ impl RuntimeInner {
             wall_timeout,
             terminated_note: heap_terminated,
             cpu_note: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            host_interrupt: Arc::new(AtomicBool::new(false)),
             last_termination_was_heap: false,
             #[cfg(target_os = "linux")]
             cpu_timer: None,
@@ -1316,6 +1411,7 @@ impl RuntimeInner {
     /// on the public handle — it hides the `Rc<RefCell<_>>` plumbing.
     pub(crate) fn start_pump(self_ref: Rc<RefCell<Self>>) {
         if self_ref.borrow().pump_notify_tx.is_some() { return; }
+        let tasks = self_ref.borrow().state.borrow().tasks.clone();
         let (notify_tx, notify_rx) = futures::channel::mpsc::channel::<()>(1);
         let idle_gc_after = {
             let mut rt = self_ref.borrow_mut();
@@ -1334,24 +1430,22 @@ impl RuntimeInner {
         // the pump upgrades transiently per iteration and exits the moment
         // `upgrade()` returns `None`.
         let weak = Rc::downgrade(&self_ref);
-        compio::runtime::spawn(async move {
+        tasks.spawn(async move {
             crate::panic_util::guard("pump_loop", async move {
                 Self::pump_loop(weak, notify_rx).await;
             }).await;
-        })
-        .detach();
+        });
 
         // Idle-GC ticker — sibling task with a Weak handle so isolate
         // teardown drops it without a join. `idle_gc_after == 0` opts
         // out (used by tests that don't want the timer at all).
         if !idle_gc_after.is_zero() {
             let weak = Rc::downgrade(&self_ref);
-            compio::runtime::spawn(async move {
+            tasks.spawn(async move {
                 crate::panic_util::guard("idle_gc_ticker", async move {
                     Self::idle_gc_ticker(weak, idle_gc_after).await;
                 }).await;
-            })
-            .detach();
+            });
         }
     }
 
@@ -1467,6 +1561,10 @@ impl RuntimeInner {
                         }))
                         .chain(crate::streams::response_forwarder::next_deadline(&rt.state))
                         .min();
+                }
+
+                if runtime.borrow().host_interrupt.load(Ordering::Acquire) {
+                    return;
                 }
 
                 // PHASE 1 — drain new spawned ops/timers/fetches + flush
@@ -1711,6 +1809,9 @@ impl RuntimeInner {
                     let mut rt = runtime.borrow_mut();
                     rt.enter_isolate();
                     for ev in batch {
+                        if rt.host_interrupt.load(Ordering::Acquire) {
+                            break;
+                        }
                         rt.handle_async_event(ev, &mut work);
                     }
                     rt.advance_startup();
@@ -1787,10 +1888,6 @@ impl RuntimeInner {
     }
 
     // -----------------------------------------------------------------------
-    // Initialization
-    // -----------------------------------------------------------------------
-
-    // -----------------------------------------------------------------------
     // CPU timer arm/disarm
     // -----------------------------------------------------------------------
 
@@ -1853,35 +1950,12 @@ impl RuntimeInner {
         }
     }
 
-    /// Check whether V8 execution was terminated. If so, cancel the
-    /// termination so the isolate can continue serving other requests, disarm
-    /// the CPU timer if one is armed, and return true.
-    ///
-    /// Does NOT drain pending requests — the caller decides which request
-    /// to error (only the one that was executing when termination fired).
-    ///
-    /// TWO things terminate execution, not one:
-    ///
-    ///   the CPU timer (`cpu_timer.rs`), Linux-only, and
-    ///   `near_heap_limit_callback`, on every platform, once an isolate has
-    ///   hit its heap cap `MAX_HEAP_LIMIT_HITS` times.
-    ///
-    /// This used to return early unless a CPU timer was configured, on the
-    /// stated grounds that "other code paths never call terminate_execution".
-    /// The heap-limit callback does, and an app can carry a heap cap with no
-    /// CPU limit at all - so a heap-terminated isolate went undetected, the
-    /// dispatch never settled, and the request hung indefinitely rather than
-    /// failing. The same reasoning made the whole check compile to `false` off
-    /// Linux, where the heap callback still fires.
-    ///
-    /// There is no timer-shaped fast path to keep: whether the isolate is
-    /// terminating is exactly the question, and `is_execution_terminating` is
-    /// a plain isolate flag read.
-    /// Message for the limit that caused the most recent detected
-    /// termination. Only meaningful right after `check_v8_terminated`
-    /// returned true.
+    /// Report the detected termination cause. Host interruption is permanent;
+    /// CPU and heap terminations can be recovered for an ordinary cached runtime.
     fn termination_message(&self) -> &'static str {
-        if self.last_termination_was_heap {
+        if self.host_interrupt.load(Ordering::Acquire) {
+            "runtime execution interrupted"
+        } else if self.last_termination_was_heap {
             "memory limit exceeded"
         } else {
             "CPU time limit exceeded"
@@ -1900,14 +1974,15 @@ impl RuntimeInner {
             .swap(false, std::sync::atomic::Ordering::Relaxed);
 
         let v8_terminating = self.isolate.is_execution_terminating();
-        if !heap_terminated && !cpu_terminated && !v8_terminating {
+        let host_interrupted = self.host_interrupt.load(Ordering::Acquire);
+        if !host_interrupted && !heap_terminated && !cpu_terminated && !v8_terminating {
             return false;
         }
         // Recorded so the call sites can name the actual cause. They all used
         // to say "CPU time limit exceeded", which is now reachable by a second
         // route and would misreport a heap kill as a CPU kill.
         self.last_termination_was_heap = heap_terminated && !cpu_terminated;
-        if v8_terminating {
+        if v8_terminating && !host_interrupted {
             self.isolate.cancel_terminate_execution();
         }
         #[cfg(target_os = "linux")]
@@ -1928,9 +2003,9 @@ impl RuntimeInner {
     // Kernel dispatch primitive — call_fetch_handler
     // -----------------------------------------------------------------------
 
-    /// Kernel durable-workflow replay primitive. The worker passes the
-    /// control-plane StepRequest as JSON; the workflow bridge returns a StepResult
-    /// object, which this method serializes back to JSON for the worker.
+    /// Kernel durable-workflow replay primitive. The trusted host passes replay
+    /// input as JSON; both the interpreter and native failures return an outcome
+    /// batch. Lease authority stays outside the isolate.
     pub fn call_workflow_dispatch(
         &mut self,
         modules: &[crate::ModuleEntry],
@@ -1942,18 +2017,17 @@ impl RuntimeInner {
         crate::node::net::state::reset_dispatch_egress(&self.state);
 
         let init_result = self.initialize_modules(modules, env);
-        if self.workflow_fn.is_none() {
+        if self.creator_namespace.is_none() || self.host_interrupt.load(Ordering::Acquire) {
             let msg = match init_result {
                 Err(err) => err,
-                Ok(true) => "No default.workflow handler exported".to_string(),
+                Ok(_) if self.host_interrupt.load(Ordering::Acquire) => {
+                    self.termination_message().to_string()
+                }
+                Ok(true) => "Startup published no creator module for workflow dispatch".to_string(),
                 Ok(false) => "Runtime startup is pending; await initialize before workflow dispatch".to_string(),
             };
             return crate::WorkflowOutcome::Response {
-                json: serde_json::json!({
-                    "kind": "RunFailed",
-                    "error": { "type": "Error", "message": msg },
-                })
-                .to_string(),
+                json: workflow_failure_json(&msg),
                 logs: vec![],
             };
         }
@@ -1973,7 +2047,7 @@ impl RuntimeInner {
         let dispatch_result: Result<Result<String, DispatchError>, v8::Global<v8::Promise>> =
             enter_v8!(self, |scope| {
                 crate::core::invocation::with_context(scope, &invocation_context, |scope| {
-                    let workflow_fn = v8::Local::new(scope, self.workflow_fn.as_ref().unwrap());
+                    let creator = v8::Local::new(scope, self.creator_namespace.as_ref().unwrap());
                     match parse_workflow_envelope(scope, envelope_json) {
                         Ok(envelope_arg) => {
                             let ctx_arg: v8::Local<v8::Value> = {
@@ -1983,7 +2057,7 @@ impl RuntimeInner {
                                     None => v8::Object::new(scope).into(),
                                 }
                             };
-                            call_workflow_inner(scope, workflow_fn, envelope_arg, ctx_arg)
+                            call_workflow_inner(scope, creator, envelope_arg, ctx_arg)
                         }
                         Err(e) => Ok(Err(e)),
                     }
@@ -1995,11 +2069,7 @@ impl RuntimeInner {
             self.clear_executing_request();
             self.discard_request_state(request_id);
             return crate::WorkflowOutcome::Response {
-                json: serde_json::json!({
-                    "kind": "RunFailed",
-                    "error": { "type": "Error", "message": self.termination_message() },
-                })
-                .to_string(),
+                json: workflow_failure_json(self.termination_message()),
                 logs: vec![],
             };
         }
@@ -2015,11 +2085,7 @@ impl RuntimeInner {
                 self.clear_executing_request();
                 self.discard_request_state(request_id);
                 crate::WorkflowOutcome::Response {
-                    json: serde_json::json!({
-                        "kind": "RunFailed",
-                        "error": { "type": "Error", "message": e.message },
-                    })
-                    .to_string(),
+                    json: workflow_failure_json(&e.message),
                     logs: vec![],
                 }
             }
@@ -2144,7 +2210,7 @@ impl RuntimeInner {
 
         // NOTE: the env JSON is NOT marshalled here. Every tier that needs
         // the env reads the cached `state.env_obj` V8 global (built once in
-        // `ensure_initialized`). The raw JSON is only touched in the slow
+        // `initialize_modules`). The raw JSON is only touched in the slow
         // path's *uncached* fallback (env_obj == None), where it is read
         // lazily via `env.as_json()` (a borrow, no per-request String clone).
         // Headers likewise need no JSON marshalling — the kernel-side
@@ -2354,7 +2420,7 @@ impl RuntimeInner {
                         };
 
                         // Reuse the frozen ctx singleton built in
-                        // ensure_initialized. Same V8 Object across every
+                        // initialize_modules. Same V8 Object across every
                         // fetch request — no map transitions, no per-
                         // request Function allocations.
                         let ctx_val: v8::Local<v8::Value> = {
@@ -2607,6 +2673,9 @@ impl RuntimeInner {
     /// Drain newly spawned ops/timers from RuntimeState into the external
     /// `AsyncWork` (for the pump task).
     pub fn drain_new_tasks_into(&mut self, work: &mut AsyncWork) {
+        if self.host_interrupt.load(Ordering::Acquire) {
+            return;
+        }
         // Fast path
         {
             let s = self.state.borrow();
@@ -2642,6 +2711,9 @@ impl RuntimeInner {
     /// path. It settles promises resolved by callbacks and drains cleanup work
     /// before the pump can park again.
     fn service_forwarder_resumes(&mut self, work: &mut AsyncWork) {
+        if self.host_interrupt.load(Ordering::Acquire) {
+            return;
+        }
         let pending: Vec<u32> = {
             let mut state = self.state.borrow_mut();
             if state.forwarder_resumes.is_empty() { return; }
@@ -2669,6 +2741,9 @@ impl RuntimeInner {
     /// creator runtimes leave `RuntimeState::js_driver` empty, so this hook is a
     /// no-op and the associated globals are never installed.
     fn service_js_driver_commands(&mut self, work: &mut AsyncWork) {
+        if self.host_interrupt.load(Ordering::Acquire) {
+            return;
+        }
         loop {
             let next = {
                 let mut s = self.state.borrow_mut();
@@ -2709,6 +2784,9 @@ impl RuntimeInner {
     /// Enters V8 briefly to resolve the op/timer, checks settled promises,
     /// and sends results via oneshot channels.
     pub fn handle_async_event(&mut self, event: AsyncEvent, work: &mut AsyncWork) {
+        if self.host_interrupt.load(Ordering::Acquire) {
+            return;
+        }
         // Pump-driven activity counts — a long-running async procedure
         // resetting the idle clock keeps the GC ticker from firing while
         // user JS is making forward progress.
@@ -4159,6 +4237,16 @@ fn parse_rpc_body<'s>(
     }
 }
 
+fn workflow_failure_json(message: &str) -> String {
+    let error = serde_json::json!({"type": "Error", "message": message});
+    serde_json::json!({
+        "kind": "RunFailed",
+        "error": error,
+        "outcomes": [{"kind": "RunFailed", "error": error}],
+    })
+    .to_string()
+}
+
 fn parse_workflow_envelope<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     json: &str,
@@ -4192,51 +4280,45 @@ fn workflow_rejection_to_error(
     }
 }
 
+/// Replay one dispatch through the host-only workflow bridge.
+///
+/// The bridge is a plugin-registered host module, so it is outside the
+/// creator's module graph and nothing in that graph instantiates it.
+/// `invoke_module_export` links and evaluates it before invoking, so a dispatch
+/// cannot run against an uninstantiated module even if it is the first one this
+/// isolate serves. `creator` is the creator entry's own namespace, which the
+/// bridge reads workflow classes from.
 fn call_workflow_inner<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    workflow_fn: v8::Local<'s, v8::Function>,
+    creator: v8::Local<'s, v8::Value>,
     envelope_arg: v8::Local<'s, v8::Value>,
     ctx_arg: v8::Local<'s, v8::Value>,
 ) -> Result<Result<String, DispatchError>, v8::Global<v8::Promise>> {
-    let undefined: v8::Local<v8::Value> = v8::undefined(scope).into();
-    let (result_val, caught_exception) = {
-        v8::tc_scope!(let tc, scope);
-        let r = workflow_fn.call(tc, undefined, &[envelope_arg, ctx_arg]);
-        if tc.has_caught() {
-            let exc = tc.exception();
-            let exc_global = exc.map(|e| v8::Global::new(tc, e));
-            (None, exc_global)
-        } else {
-            (r.map(|v| v8::Global::new(tc, v)), None)
-        }
+    let invoked = crate::core::modules::invoke_module_export(
+        scope,
+        crate::WORKFLOW_DISPATCH_MODULE,
+        "dispatch",
+        &[creator, envelope_arg, ctx_arg],
+    );
+    let promise = match invoked {
+        Ok(promise) => promise,
+        Err(error) => return Ok(Err(DispatchError::new(error, 500))),
     };
 
     crate::core::init::perform_microtask_checkpoint(scope);
 
-    if let Some(exc_global) = caught_exception {
-        let exc_local = v8::Local::new(scope, &exc_global);
-        return Ok(Err(workflow_rejection_to_error(scope, exc_local)));
+    let promise = v8::Local::new(scope, &promise);
+    match promise.state() {
+        v8::PromiseState::Fulfilled => {
+            let resolved = promise.result(scope);
+            Ok(stringify_json_value(scope, resolved))
+        }
+        v8::PromiseState::Rejected => {
+            let exc = promise.result(scope);
+            Ok(Err(workflow_rejection_to_error(scope, exc)))
+        }
+        v8::PromiseState::Pending => Err(v8::Global::new(scope, promise)),
     }
-
-    let Some(result_global) = result_val else {
-        return Ok(Err(DispatchError::new("workflow dispatch returned no value", 500)));
-    };
-    let result = v8::Local::new(scope, &result_global);
-    if result.is_promise() {
-        let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
-        return match promise.state() {
-            v8::PromiseState::Fulfilled => {
-                let resolved = promise.result(scope);
-                Ok(stringify_json_value(scope, resolved))
-            }
-            v8::PromiseState::Rejected => {
-                let exc = promise.result(scope);
-                Ok(Err(workflow_rejection_to_error(scope, exc)))
-            }
-            v8::PromiseState::Pending => Err(v8::Global::new(scope, promise)),
-        };
-    }
-    Ok(stringify_json_value(scope, result))
 }
 
 fn settle_workflow_promise(

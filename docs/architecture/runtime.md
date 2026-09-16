@@ -12,7 +12,9 @@ worker thread
   -> return response, stream, websocket upgrade, or pending receiver
 ```
 
-The worker is responsible for fetching the worker-entry blob from `BlobStore` and building the `Vec<ModuleEntry>` passed into `Runtime::builder()`.
+The worker loads the complete module graph and runtime descriptor through
+`zeroship_bundle::LoadedWorker`, then passes the entry module first to
+`Runtime::builder()`.
 
 ## Layout
 
@@ -37,6 +39,8 @@ src/storage.rs                app-storage abstraction
 - `RuntimeInner` tracks `enter_depth`; isolates are entered for a V8 turn and exited afterwards so multiple isolates can live on one worker thread.
 - `build()` leaves a new isolate entered, and the worker exits it after caching so later requests can re-enter it just in time for dispatch.
 - Async native work resolves through the per-isolate pump started by `Runtime::start_pump()`.
+- Trusted hosts can permanently quarantine an isolate and await `Runtime::shutdown()` before reusing execution capacity. The native task scope cancels the pump and socket roots, joins their child tasks, and keeps V8 alive until native futures have been destroyed.
+- `Runtime::interrupt_handle()` lets a trusted watchdog permanently interrupt synchronous app execution from another thread. Interruption preserves V8 thread ownership; the owning thread still quarantines and joins native work before releasing capacity.
 - The pump batches ready timer and op completions into a single V8 re-entry so one burst of settled work does not pay one enter/exit cycle per completion.
 - Initialization failures are stored on `RuntimeInner::init_error`; `call_fetch_handler` surfaces them as a 500 instead of pretending no handler exists.
 
@@ -73,9 +77,19 @@ Stream responses are pumped by [response_forwarder.rs](../../crates/zeroship-run
 
 See `docs/reference/runtime-limits.md` for the operator-facing contract.
 
-## Current bundle shape
+## Module loading
 
-The runtime accepts many `ModuleEntry` values, but the current worker path still loads a single `index.js` module from `manifest.worker.modules[manifest.worker.entry]`. Multi-module manifests are represented on the wire and can be passed through once the worker-side loader starts materializing them.
+Active and pinned worker isolates load the manifest's module graph with its
+original paths. The host prepends its bootstrap without renaming creator modules.
+Relative imports resolve against the importing module, including imports back
+to the entry. An absent relative dependency does not fall back to a similarly
+named module at the bundle root.
+
+The runtime compiles static dependencies before instantiation. Dynamic imports
+compile their dependency closure on demand from the retained bundle sources and
+share module records with static imports. Import promises settle after module
+evaluation, including top-level await, completes. Unknown imports cannot fetch
+code outside the bundle.
 
 ## Where to start
 

@@ -5,4 +5,3 @@ mod parity;
 mod plugin_modules;
 mod roles;
 mod transactions;
-mod workflow;

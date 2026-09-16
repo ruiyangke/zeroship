@@ -41,7 +41,6 @@ pub mod router;
 pub mod session_token;
 pub mod sessions;
 pub mod signing;
-pub mod signal_ingress;
 pub mod sync;
 
 use std::sync::Arc;
@@ -272,11 +271,12 @@ pub struct GateState {
     /// DISTINCT from `signing_key`, which signs an END-USER session cookie. One
     /// key doing both jobs is the shape this change removes.
     ///
-    /// Two edges use it, at two profiles. The inbound workflow-advance handler
-    /// verifies control under the FULL profile, because that edge fires per
-    /// advance. The outbound dispatch hop MINTS under the transport-only
-    /// profile, because that hop is the app data path and a single-use claim
-    /// there would be a shared-store write per end-user request.
+    /// Two edges use it, at two profiles. The inbound backchannel-logout
+    /// handler verifies the auth service under the FULL profile, because that
+    /// edge fires per logout. The outbound dispatch hop MINTS under the
+    /// transport-only profile, because that hop is the app data path and a
+    /// single-use claim there would be a shared-store write per end-user
+    /// request.
     ///
     /// It also holds the gateway's signer for the `ZeroShip-User` identity
     /// envelope, which is the same ed25519 key under a second use: what the

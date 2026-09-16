@@ -15,7 +15,7 @@ e2e_start_cdc_relay() {
     echo "relay fixture requires the harness PIDFILE or PIDS cleanup registry" >&2
     return 1
   fi
-  directory="$(dirname "${ZEROSHIP_WORKER_SERVICE_KEY_FILE:?worker service key is required}")/cdc"
+  directory="$(dirname "${E2E_JOIN_SIGNER_CREDENTIAL:?a join signer credential is required}")/cdc"
   bash "$E2E_ROOT/deploy/ops/init-cdc-tls.sh" "$directory" localhost >"${directory%/cdc}/cdc-tls.log" 2>&1 || return 1
   if ! declare -F zs_ports_reserve >/dev/null; then
     source "$E2E_ROOT/tests/lib/e2e_ports.sh"

@@ -1,4 +1,5 @@
-//! What may open `/internal/apps/{id}/env` and `/internal/apps/{id}`.
+//! What may open `/internal/apps/{id}/env` and `/internal/apps/{id}`, the
+//! signer cascade that reaches them, and an instance retiring itself.
 //!
 //! These are the privileged internal reads: the first returns an app's
 //! DECRYPTED environment. Before this suite they were opened by a bearer equal
@@ -29,25 +30,28 @@ use uuid::Uuid;
 
 use zeroship_authn::service_replay::SharedClientReplayStore;
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
-use zeroship_control::worker_enrolment::{enrol, EnrolmentEnvelope, WorkerEnrolmentRequest};
+use zeroship_control::worker_join::{join, EnrolmentEnvelope, WorkerJoinRequest};
 use zeroship_control::{
     internal, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
 use zeroship_core::service_assertion::{
-    ServiceAssertionVerifier, ServiceIssuer, ServiceSigningKey,
+    ServiceAssertionVerifier, ServiceIssuer, ServiceSigningKey, ServiceTrustBundle,
 };
 use zeroship_core::service_peers::{
     load_peer_bundle, service_issuer, InstanceSigningKey, ServiceAuth, ServiceKeyring,
     CONTROL_SERVICE_NAME, GATEWAY_SERVICE_NAME, SERVICE_TRUST_DOMAIN, WORKER_SERVICE_NAME,
 };
 use zeroship_core::typed_id::new_worker_instance_id;
+use zeroship_core::worker_join::{
+    join_proof_message, mint_join_token, JoinTokenGrant, DEFAULT_EXECUTION_ZONE,
+};
 
 use crate::common;
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 const CONTROL_KEY: &str = "test-control-key";
 
-/// The enrolment declaration this fixture carries, and a peer inside it.
+/// The join declaration this fixture carries, and a peer inside it.
 ///
 /// The instance arms need a row written by the PRODUCTION writer rather than an
 /// INSERT of their own, so the key control resolves is the one a real worker
@@ -57,8 +61,12 @@ const ENROLMENT_PORTS: &str = "8080-8090";
 const ENROLMENT_PEER: &str = "10.7.3.9:51314";
 const ADVERTISED_PORT: u16 = 8080;
 
+/// The deployment's single execution zone, seeded by
+/// `db/migrations-ts/20260914000450_execution_zones_default_zone.ts`.
+const DEFAULT_ZONE_ID: &str = "ezn_default000000000000000000";
+
 /// An instance identifier the OPERATOR'S peer document publishes a key for, and
-/// that nothing ever enrols.
+/// that nothing ever joins.
 ///
 /// It exists so one arm can rule on the half of this design a registry lookup
 /// alone cannot state: the operator file is the source of ROLE keys and of
@@ -80,15 +88,26 @@ fn tmpdir(label: &str) -> PathBuf {
 /// half - the same shape `tests/lib/runtime_secrets.sh` writes for the
 /// end-to-end harnesses, so this suite and those harnesses exercise one format.
 ///
-/// It also publishes ONE key under an INSTANCE issuer
-/// ([`PLANTED_INSTANCE_ID`]), and returns its private half. That entry is
-/// well formed - `load_peer_bundle` admits any issuer identifier, and an
-/// instance identifier is one - so nothing in the loader refuses a deployment
-/// whose operator files an instance key by hand. What must refuse it is the
-/// verification path, and it cannot be shown to unless the key is really there.
+/// It ALSO publishes keys this deployment must never trust, and returns what
+/// the arms need to present them:
+///
+/// - ONE key under an INSTANCE issuer ([`PLANTED_INSTANCE_ID`]). That entry is
+///   well formed - `load_peer_bundle` admits any issuer identifier, and an
+///   instance identifier is one - so nothing in the loader refuses a deployment
+///   whose operator files an instance key by hand. What must refuse it is the
+///   verification path, and it cannot be shown to unless the key is really
+///   there.
+/// - A key under the bare `svc/worker` ROLE: the stale file of a deployment
+///   that once shipped a shared worker role key. No process holds one any more,
+///   and Control must refuse it at role arity even though the file publishes
+///   it - which, again, is only measurable while the key is really there.
 fn write_service_keys(dir: &Path) -> (PathBuf, ServiceSigningKey) {
     let mut entries = Vec::new();
-    for name in [CONTROL_SERVICE_NAME, WORKER_SERVICE_NAME, GATEWAY_SERVICE_NAME] {
+    for name in [
+        CONTROL_SERVICE_NAME,
+        WORKER_SERVICE_NAME,
+        GATEWAY_SERVICE_NAME,
+    ] {
         let mut seed = [0_u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut seed);
         let signing = ed25519_dalek::SigningKey::from_bytes(&seed);
@@ -122,6 +141,71 @@ fn instance_issuer(instance_id: &str) -> ServiceIssuer {
     .expect("an instance issuer parses")
 }
 
+/// A TRUSTED SIGNER as Control records it, with the private half this suite
+/// mints join tokens with.
+///
+/// The row is inserted directly - the import that would write it is measured in
+/// `join_signer_import_test` - so an arm here can choose a signer's status
+/// without going through a file.
+struct Signer {
+    id: String,
+    key: ServiceSigningKey,
+}
+
+impl Signer {
+    /// A token this signer may mint, for the deployment's one zone.
+    fn token(&self, uses: u32) -> String {
+        mint_join_token(
+            &self.id,
+            &self.key,
+            &service_issuer(CONTROL_SERVICE_NAME).expect("control issuer"),
+            &JoinTokenGrant {
+                zone: DEFAULT_EXECUTION_ZONE.to_owned(),
+                lifetime: std::time::Duration::from_secs(300),
+                uses,
+                confirm: None,
+            },
+        )
+        .expect("the grant mints")
+    }
+}
+
+/// Insert one ACTIVE signer permitted for the deployment's one zone.
+async fn seed_signer(pg: &compio_postgres::Client) -> Signer {
+    let id = zeroship_core::typed_id::new_join_signer_id();
+    let key = ServiceSigningKey::generate();
+    pg.execute(
+        "INSERT INTO zeroship.worker_join_signers (id, public_key, status) \
+         VALUES ($1, $2, 'active')",
+        &[&id, &key.verifying_key_bytes().as_slice()],
+    )
+    .await
+    .expect("insert signer row");
+    pg.execute(
+        "INSERT INTO zeroship.worker_join_signer_zones (signer_id, execution_zone_id) \
+         VALUES ($1, $2)",
+        &[&id, &DEFAULT_ZONE_ID],
+    )
+    .await
+    .expect("permit the signer for the default zone");
+    Signer { id, key }
+}
+
+async fn forget_signer(pg: &compio_postgres::Client, signer_id: &str) {
+    pg.execute(
+        "DELETE FROM zeroship.worker_join_signer_zones WHERE signer_id = $1",
+        &[&signer_id],
+    )
+    .await
+    .expect("probe zone grants removed");
+    pg.execute(
+        "DELETE FROM zeroship.worker_join_signers WHERE id = $1",
+        &[&signer_id],
+    )
+    .await
+    .expect("probe signer row removed");
+}
+
 fn keyring_for(name: &str, dir: &Path, peers: &Path) -> ServiceKeyring {
     ServiceKeyring::load(
         service_issuer(name).expect("service issuer parses"),
@@ -133,7 +217,16 @@ fn keyring_for(name: &str, dir: &Path, peers: &Path) -> ServiceKeyring {
 
 struct Fixture {
     state: Arc<AppState>,
+    /// A joined, ACTIVE worker instance: what every worker presents after its
+    /// boot-time join, written by the production join path under
+    /// [`Fixture::signer`].
     worker: ServiceKeyring,
+    worker_instance_id: String,
+    signer: Signer,
+    /// A keyring minting under the bare `svc/worker` ROLE, on the key the
+    /// operator's peer document publishes for it. The credential a shared role
+    /// key used to be, and one Control must now refuse outright.
+    stale_worker_role: ServiceKeyring,
     gateway: ServiceKeyring,
     /// A keyring minting under [`PLANTED_INSTANCE_ID`] on the key the peer
     /// document publishes for it. Built with `from_parts` rather than
@@ -156,12 +249,28 @@ impl Drop for Fixture {
 }
 
 impl Fixture {
-    /// The header a worker presents. A FRESH assertion each call, because the
-    /// full profile burns the `jti` and a cached one is exactly what the store
-    /// refuses.
+    /// The header a joined worker presents. A FRESH assertion each call,
+    /// because the full profile burns the `jti` and a cached one is exactly
+    /// what the store refuses.
     fn worker_header(&self) -> String {
         let control = service_issuer(CONTROL_SERVICE_NAME).expect("control issuer");
         self.worker.mint_for(&control).map(|a| format!("Bearer {a}")).expect("mint")
+    }
+
+    fn stale_worker_role_header(&self) -> String {
+        let control = service_issuer(CONTROL_SERVICE_NAME).expect("control issuer");
+        self.stale_worker_role
+            .mint_for(&control)
+            .map(|a| format!("Bearer {a}"))
+            .expect("mint")
+    }
+
+    /// Remove the rows this fixture created. Called at the end of each arm:
+    /// `live_db.rs` shares one database, and an `active` instance left behind
+    /// would be probed by every later liveness sweep.
+    async fn release(&self) {
+        forget(&self.state.control_pg, &self.worker_instance_id).await;
+        forget_signer(&self.state.control_pg, &self.signer.id).await;
     }
 
     fn gateway_header(&self) -> String {
@@ -190,10 +299,6 @@ async fn build_fixture() -> Fixture {
     let stripe_store = StripeStore::new(registry.clone());
     let blob_store: Arc<dyn BlobStore> =
         Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
-    let workflow_blob_store: Arc<dyn zeroship_bundle::WorkflowBlobStore> = Arc::new(
-        zeroship_bundle::LocalWorkflowBlobStore::new(blob_root.clone())
-            .expect("workflow blob store"),
-    );
 
     let (control_pg_client, control_pg_conn) =
         compio_postgres::connect(&db_url, compio_postgres::NoTls)
@@ -217,28 +322,25 @@ async fn build_fixture() -> Fixture {
         Arc::new(ServiceAssertionVerifier::new(bundle, replay)),
     ));
 
-    Fixture {
-        state: Arc::new(AppState {
+    let state = Arc::new(AppState {
             service_auth,
             registry,
             env_store,
             stripe_store,
             blob_store,
-            workflow_blob_store,
             control_key: SecretString::new(CONTROL_KEY.to_string()),
             master_key: SecretString::new(TEST_MASTER_KEY.to_string()),
             stripe_webhook_secret: SecretString::new(String::new()),
             stripe_secret_key: SecretString::new(String::new()),
             stripe_base_url: "https://api.stripe.com".to_string(),
-            gateway_url: "http://127.0.0.1:9".to_string(),
             worker_urls: vec![],
             admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
             webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
             origin_scheme: zeroship_core::config::OriginScheme::Https,
             trust_proxy: false,
-            // DECLARED, not closed: the instance arms below enrol through the
+            // DECLARED, not closed: the instance arms below join through the
             // production writer, so this fixture has to be a control plane that
-            // can enrol at all.
+            // can join at all.
             worker_enrolment: EnrolmentEnvelope::parse(
                 ENROLMENT_NETWORKS,
                 ENROLMENT_PORTS,
@@ -269,8 +371,26 @@ async fn build_fixture() -> Fixture {
             projected_charge_cache: std::sync::Arc::new(
                 zeroship_control::billing_read::ProjectedChargeCache::default(),
             ),
-        }),
-        worker: keyring_for(WORKER_SERVICE_NAME, &key_dir, &peers),
+        });
+
+    // The worker every arm presents is a REAL joined instance: a signer row, a
+    // token that signer minted, then the production join path, then the keyring
+    // the worker builds on the key it registered.
+    let signer = seed_signer(&state.control_pg).await;
+    let joiner = Joiner::random();
+    let worker_instance_id = join_instance(&state, &signer.token(1), &joiner).await;
+    let worker = joiner
+        .into_keyring(
+            instance_issuer(&worker_instance_id),
+            load_peer_bundle(&peers).expect("peer bundle loads"),
+        );
+
+    Fixture {
+        state,
+        worker,
+        worker_instance_id,
+        signer,
+        stale_worker_role: keyring_for(WORKER_SERVICE_NAME, &key_dir, &peers),
         gateway: keyring_for(GATEWAY_SERVICE_NAME, &key_dir, &peers),
         planted_instance: ServiceKeyring::from_parts(
             instance_issuer(PLANTED_INSTANCE_ID),
@@ -302,6 +422,18 @@ macro_rules! internal_app {
                 .service(
                     web::resource("/internal/apps/{app_id}")
                         .route(web::get().to(internal::get_app_version)),
+                )
+                .service(
+                    web::resource("/internal/workers/join")
+                        .route(web::post().to(internal::join_worker_instance)),
+                )
+                .service(
+                    web::resource("/internal/workers/renew")
+                        .route(web::post().to(internal::renew_worker_instance)),
+                )
+                .service(
+                    web::resource("/internal/workers/retire")
+                        .route(web::post().to(internal::retire_worker_instance)),
                 ),
         )
         .await
@@ -342,10 +474,11 @@ async fn the_shared_control_key_no_longer_opens_the_app_environment() {
             .to_request(),
     )
     .await;
+    fixture.release().await;
     assert_eq!(
         admitted.status(),
         StatusCode::BAD_REQUEST,
-        "a worker assertion must reach the handler"
+        "a joined worker instance's assertion must reach the handler"
     );
 }
 
@@ -372,6 +505,7 @@ async fn the_shared_control_key_no_longer_opens_the_app_version_read() {
             .to_request(),
     )
     .await;
+    fixture.release().await;
     assert_eq!(admitted.status(), StatusCode::BAD_REQUEST);
 }
 
@@ -380,17 +514,17 @@ async fn an_absent_credential_is_refused() {
     let fixture = build_fixture().await;
     let app = internal_app!(Arc::clone(&fixture.state));
 
+    let mut statuses = Vec::new();
     for header in [None, Some(String::new()), Some("Bearer ".to_string())] {
         let mut request = test::TestRequest::get().uri(&format!("/internal/apps/{BAD_APP_ID}/env"));
         if let Some(value) = header.clone() {
             request = request.header("authorization", value);
         }
-        let response = test::call_service(&app, request.to_request()).await;
-        assert_eq!(
-            response.status(),
-            StatusCode::UNAUTHORIZED,
-            "header {header:?} must be refused"
-        );
+        statuses.push((header, test::call_service(&app, request.to_request()).await.status()));
+    }
+    fixture.release().await;
+    for (header, status) in statuses {
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "header {header:?} must be refused");
     }
 }
 
@@ -436,6 +570,7 @@ async fn a_captured_assertion_cannot_be_presented_twice() {
             .to_request(),
     )
     .await;
+    fixture.release().await;
     assert_eq!(fresh.status(), StatusCode::BAD_REQUEST);
 }
 
@@ -467,6 +602,7 @@ async fn a_valid_assertion_from_the_wrong_service_is_refused() {
             .to_request(),
     )
     .await;
+    fixture.release().await;
     assert_eq!(admitted.status(), StatusCode::BAD_REQUEST);
 }
 
@@ -474,7 +610,7 @@ async fn a_valid_assertion_from_the_wrong_service_is_refused() {
 // Worker INSTANCE assertions
 // ---------------------------------------------------------------------------
 //
-// A worker mints under `svc/worker/<wkr_id>` after it enrols, on a key that
+// A worker mints under `svc/worker/<wkr_id>` after it joins, on a key that
 // exists nowhere but its own memory and the row control wrote. The operator's
 // peer document therefore cannot carry that key, and `keys_for` is an exact
 // string lookup, so control has to resolve it from `zeroship.worker_instances`
@@ -487,7 +623,7 @@ async fn a_valid_assertion_from_the_wrong_service_is_refused() {
 // So each refusal below is paired with an acceptance one variable away, and the
 // variable is the column.
 
-/// The response body of an admitted enrolment, drained so the fixture's
+/// The response body of an admitted join, drained so the fixture's
 /// Postgres client is not still borrowed when the test ends.
 async fn body_json(mut response: web::HttpResponse) -> serde_json::Value {
     use ntex::util::{stream_recv, BytesMut};
@@ -499,25 +635,72 @@ async fn body_json(mut response: web::HttpResponse) -> serde_json::Value {
     serde_json::from_slice(&buf).expect("body is JSON")
 }
 
-/// Enrol one instance through the PRODUCTION writer and return its id.
+/// A worker's boot-drawn keypair, as this suite needs it: reusable, so one key
+/// can both be presented at the join and mint assertions afterwards.
+///
+/// `InstanceSigningKey` deliberately cannot be cloned or re-read, which is right
+/// for the worker and wrong for a fixture that must build the join proof and
+/// then a keyring from one key. The wire shape is the same:
+/// `crates/zeroship-worker/src/join.rs` builds the identical body from
+/// `join_proof_message`.
+struct Joiner {
+    key: ed25519_dalek::SigningKey,
+}
+
+impl Joiner {
+    fn random() -> Self {
+        let mut seed = [0_u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut seed);
+        Self {
+            key: ed25519_dalek::SigningKey::from_bytes(&seed),
+        }
+    }
+
+    fn public(&self) -> [u8; 32] {
+        self.key.verifying_key().to_bytes()
+    }
+
+    fn request(&self, token: &str) -> WorkerJoinRequest {
+        use ed25519_dalek::Signer as _;
+        let message = join_proof_message(token, &self.public(), ADVERTISED_PORT);
+        WorkerJoinRequest {
+            port: ADVERTISED_PORT,
+            public_key: URL_SAFE_NO_PAD.encode(self.public()),
+            proof: URL_SAFE_NO_PAD.encode(self.key.sign(&message).to_bytes()),
+        }
+    }
+
+    /// The keyring this process would mint under once Control admitted it.
+    fn into_keyring(self, issuer: ServiceIssuer, bundle: ServiceTrustBundle) -> ServiceKeyring {
+        let der = self.key.to_pkcs8_der().expect("encode PKCS#8 DER");
+        ServiceKeyring::from_parts(
+            issuer,
+            ServiceSigningKey::from_pkcs8_der(der.as_bytes())
+                .expect("the same key, read back by the assertion layer"),
+            bundle,
+        )
+        .expect("a boot-drawn key the document does not publish builds a keyring")
+    }
+}
+
+/// Join one instance through the PRODUCTION writer with `token`, and return its
+/// id.
 ///
 /// Not an INSERT of this suite's own: the id, the ring key and the row shape
 /// are control's, and a hand-written row would let these arms pass against a
-/// registry the enrolment path never produces.
-async fn enrol_instance(state: &Arc<AppState>, public_key: &[u8; 32]) -> String {
-    let response = enrol(
+/// registry the join path never produces.
+async fn join_instance(state: &Arc<AppState>, token: &str, joiner: &Joiner) -> String {
+    let response = join(
         state,
         Some(ENROLMENT_PEER.parse().expect("peer socket parses")),
-        WorkerEnrolmentRequest {
-            port: ADVERTISED_PORT,
-            public_key: URL_SAFE_NO_PAD.encode(public_key),
-        },
+        token,
+        joiner.request(token),
     )
     .await;
     assert_eq!(
         response.status(),
         StatusCode::CREATED,
-        "the fixture must be able to enrol at all"
+        "the fixture must be able to join at all"
     );
     body_json(response).await["instance_id"]
         .as_str()
@@ -546,7 +729,7 @@ async fn forget(pg: &compio_postgres::Client, instance_id: &str) {
     .expect("probe row removed");
 }
 
-/// THE BEFORE/AFTER PAIR. One enrolled instance, one key, one route; the only
+/// THE BEFORE/AFTER PAIR. One joined instance, one key, one route; the only
 /// thing that moves is `status`.
 ///
 /// EVERY PRESENTATION MINTS A FRESH ASSERTION, and that is not tidiness. The
@@ -558,16 +741,14 @@ async fn forget(pg: &compio_postgres::Client, instance_id: &str) {
 async fn marking_an_instance_draining_or_gone_stops_its_assertions_verifying() {
     let fixture = build_fixture().await;
     let app = internal_app!(Arc::clone(&fixture.state));
+    let signer = seed_signer(&fixture.state.control_pg).await;
 
-    let key = InstanceSigningKey::generate();
-    let public = *key.public_key();
-    let instance_id = enrol_instance(&fixture.state, &public).await;
-    let keyring = key
-        .into_keyring(
-            instance_issuer(&instance_id),
-            load_peer_bundle(&fixture.peers).expect("peer bundle loads"),
-        )
-        .expect("a boot-drawn key the document does not publish builds a keyring");
+    let joiner = Joiner::random();
+    let instance_id = join_instance(&fixture.state, &signer.token(1), &joiner).await;
+    let keyring = joiner.into_keyring(
+        instance_issuer(&instance_id),
+        load_peer_bundle(&fixture.peers).expect("peer bundle loads"),
+    );
 
     let control = service_issuer(CONTROL_SERVICE_NAME).expect("control issuer");
     let header = || {
@@ -602,6 +783,8 @@ async fn marking_an_instance_draining_or_gone_stops_its_assertions_verifying() {
     // anything after it, which is how a probe row survives exactly the runs
     // that matter.
     forget(pg, &instance_id).await;
+    forget_signer(pg, &signer.id).await;
+    fixture.release().await;
 
     assert_eq!(
         active,
@@ -660,24 +843,574 @@ async fn an_instance_with_no_active_row_is_refused_and_never_resolved_from_the_p
         }
     };
 
+    let stranger = get(stranger_header).await;
+    let planted = get(fixture.planted_instance_header()).await;
+    // THE CONTROL: a joined instance of the same role, on the same route.
+    let joined = get(fixture.worker_header()).await;
+    fixture.release().await;
+
     assert_eq!(
-        get(stranger_header).await,
+        stranger,
         StatusCode::UNAUTHORIZED,
-        "an instance that never enrolled holds no credential here"
+        "an instance that never joined holds no credential here"
     );
     assert_eq!(
-        get(fixture.planted_instance_header()).await,
+        planted,
         StatusCode::UNAUTHORIZED,
         "an instance key published in the OPERATOR'S peer document must not \
          authenticate without a row: the file carries no status, so a key \
          resolved from it could never be revoked"
     );
-
-    // THE CONTROL. The operator file is still the source of ROLE keys, and the
-    // role path is untouched by any of the above.
     assert_eq!(
-        get(fixture.worker_header()).await,
+        joined,
         StatusCode::BAD_REQUEST,
-        "svc/worker itself must still authenticate from the operator file"
+        "an instance answered from the registry must still authenticate, or the \
+         two refusals above prove only that instances never do"
     );
+}
+
+/// The worker role has NO role arity: a `svc/worker` assertion minted under the
+/// BARE role is refused, even though the operator's peer document publishes a
+/// key for it.
+///
+/// This is the fence that makes "no process holds a `svc/worker` role key" a
+/// property of Control rather than of every deployment's key hygiene. Before
+/// it, a stale peer document still carrying the old shared role key let the
+/// holder of its private half read any app's environment with no join, no
+/// status, no lease and nothing a revocation could reach.
+///
+/// Each refusal is paired with the joined instance of the same role on the same
+/// route, and the gateway's role-arity assertion is the control for the fence
+/// itself: a role that does authenticate at role arity still verifies against
+/// the SAME document (and is refused only by its missing grant), so the
+/// refusals are about the worker role and not about role arity in general.
+#[ntex::test]
+async fn a_bare_worker_role_assertion_is_refused_although_the_peer_file_publishes_its_key() {
+    let fixture = build_fixture().await;
+    let app = internal_app!(Arc::clone(&fixture.state));
+
+    let read_env = |header: String| {
+        let app = &app;
+        async move {
+            test::call_service(
+                app,
+                test::TestRequest::get()
+                    .uri(&format!("/internal/apps/{BAD_APP_ID}/env"))
+                    .header("authorization", header)
+                    .to_request(),
+            )
+            .await
+            .status()
+        }
+    };
+    let renew_with = |header: String| {
+        let app = &app;
+        async move {
+            test::call_service(
+                app,
+                test::TestRequest::post()
+                    .uri("/internal/workers/renew")
+                    .header("authorization", header)
+                    .to_request(),
+            )
+            .await
+            .status()
+        }
+    };
+
+    let stale_role_env = read_env(fixture.stale_worker_role_header()).await;
+    let joined_env = read_env(fixture.worker_header()).await;
+    let stale_role_renew = renew_with(fixture.stale_worker_role_header()).await;
+    // THE PAIRED CONTROL for renewal: the fixture's own live instance renews on
+    // the same route, so the refusal above is the role arity rather than a
+    // route that refuses everyone.
+    let joined_renew = renew_with(fixture.worker_header()).await;
+    let gateway = read_env(fixture.gateway_header()).await;
+    fixture.release().await;
+
+    assert_eq!(
+        stale_role_env,
+        StatusCode::UNAUTHORIZED,
+        "a bare svc/worker assertion must be refused even with its key published"
+    );
+    assert_eq!(joined_env, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        stale_role_renew,
+        StatusCode::UNAUTHORIZED,
+        "a bare svc/worker assertion must not renew an instance lease"
+    );
+    assert_eq!(joined_renew, StatusCode::OK);
+    assert_eq!(
+        gateway,
+        StatusCode::UNAUTHORIZED,
+        "the gateway verifies at role arity and holds no grant here"
+    );
+}
+
+/// The JOIN route is not behind the assertion allowlist at all, and a service
+/// assertion is not a join token.
+///
+/// A joining process has no service identity yet, so the route reads a bearer
+/// join token under its own `typ`. That makes two refusals worth binding: a
+/// verified service assertion presented as a token, and the shared control key.
+/// The control is the same route admitting a real token.
+#[ntex::test]
+async fn the_join_route_takes_a_token_and_never_a_service_assertion() {
+    let fixture = build_fixture().await;
+    let app = internal_app!(Arc::clone(&fixture.state));
+    let signer = seed_signer(&fixture.state.control_pg).await;
+    let token = signer.token(2);
+
+    let attempt = |header: String, joiner: &Joiner| {
+        let app = &app;
+        let request = joiner.request(&token);
+        let body = serde_json::json!({
+            "port": request.port,
+            "public_key": request.public_key,
+            "proof": request.proof,
+        })
+        .to_string();
+        async move {
+            test::call_service(
+                app,
+                test::TestRequest::post()
+                    .uri("/internal/workers/join")
+                    .header("authorization", header)
+                    .header("content-type", "application/json")
+                    .set_payload(body)
+                    .to_request(),
+            )
+            .await
+            .status()
+        }
+    };
+
+    let as_assertion = attempt(fixture.gateway_header(), &Joiner::random()).await;
+    let as_shared_key = attempt(format!("Bearer {CONTROL_KEY}"), &Joiner::random()).await;
+    // THE CONTROL: the same route, the same body shape, a real token. This
+    // request carries no observable peer (`TestRequest` drops it), so a token
+    // that PASSES the token checks is refused 403 on the ADDRESS instead - a
+    // verdict distinct from a refused credential, and reached only after the
+    // token verified.
+    let with_token = attempt(format!("Bearer {token}"), &Joiner::random()).await;
+    let body = {
+        let joiner = Joiner::random();
+        let request = joiner.request(&token);
+        let response = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/internal/workers/join")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .set_payload(
+                    serde_json::json!({
+                        "port": request.port,
+                        "public_key": request.public_key,
+                        "proof": request.proof,
+                    })
+                    .to_string(),
+                )
+                .to_request(),
+        )
+        .await;
+        let bytes = test::read_body(response).await;
+        serde_json::from_slice::<serde_json::Value>(&bytes).expect("json")
+    };
+    forget_signer(&fixture.state.control_pg, &signer.id).await;
+    fixture.release().await;
+
+    assert_eq!(
+        as_assertion,
+        StatusCode::FORBIDDEN,
+        "a service assertion carries the wrong typ and is not a join token"
+    );
+    assert_eq!(as_shared_key, StatusCode::FORBIDDEN);
+    assert_eq!(
+        with_token,
+        StatusCode::FORBIDDEN,
+        "a real token reaches the address check"
+    );
+    assert_eq!(
+        body["reason"], "peer_address_unobservable",
+        "the token verified and the refusal is the address: {body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// An instance retiring itself
+// ---------------------------------------------------------------------------
+
+async fn instance_status(pg: &compio_postgres::Client, instance_id: &str) -> Option<String> {
+    pg.query_opt(
+        "SELECT status FROM zeroship.worker_instances WHERE id = $1",
+        &[&instance_id],
+    )
+    .await
+    .expect("read instance status")
+    .map(|row| row.get(0))
+}
+
+/// A worker's graceful exit: the instance declares itself `gone`, and from
+/// then on its key authenticates nothing - including a second retirement.
+///
+/// The retirement is SELF-SCOPED: a sibling instance admitted by the same
+/// signer, joined beside it, is the paired control and must be untouched, which
+/// is what shows the endpoint retires the caller rather than the signer's whole
+/// fleet.
+#[ntex::test]
+async fn an_instance_retires_itself_and_only_itself() {
+    let fixture = build_fixture().await;
+    let app = internal_app!(Arc::clone(&fixture.state));
+    let pg = &fixture.state.control_pg;
+
+    let sibling_joiner = Joiner::random();
+    let sibling_id =
+        join_instance(&fixture.state, &fixture.signer.token(1), &sibling_joiner).await;
+    let sibling = sibling_joiner.into_keyring(
+        instance_issuer(&sibling_id),
+        load_peer_bundle(&fixture.peers).expect("peer bundle loads"),
+    );
+    let control = service_issuer(CONTROL_SERVICE_NAME).expect("control issuer");
+    let sibling_header = || format!("Bearer {}", sibling.mint_for(&control).expect("mint"));
+
+    let retire = |header: String| {
+        let app = &app;
+        async move {
+            test::call_service(
+                app,
+                test::TestRequest::post()
+                    .uri("/internal/workers/retire")
+                    .header("authorization", header)
+                    .to_request(),
+            )
+            .await
+            .status()
+        }
+    };
+    let read_env = |header: String| {
+        let app = &app;
+        async move {
+            test::call_service(
+                app,
+                test::TestRequest::get()
+                    .uri(&format!("/internal/apps/{BAD_APP_ID}/env"))
+                    .header("authorization", header)
+                    .to_request(),
+            )
+            .await
+            .status()
+        }
+    };
+
+    let before = instance_status(pg, &fixture.worker_instance_id).await;
+    let retired = retire(fixture.worker_header()).await;
+    let after = instance_status(pg, &fixture.worker_instance_id).await;
+    let read_after = read_env(fixture.worker_header()).await;
+    let second = retire(fixture.worker_header()).await;
+    let sibling_status = instance_status(pg, &sibling_id).await;
+    let sibling_read = read_env(sibling_header()).await;
+    forget(pg, &sibling_id).await;
+    fixture.release().await;
+
+    assert_eq!(before.as_deref(), Some("active"));
+    assert_eq!(retired, StatusCode::NO_CONTENT);
+    assert_eq!(
+        after.as_deref(),
+        Some("gone"),
+        "the retirement must be recorded on the caller's own row"
+    );
+    assert_eq!(
+        read_after,
+        StatusCode::UNAUTHORIZED,
+        "a retired instance's key must stop authenticating at once"
+    );
+    assert_eq!(
+        second,
+        StatusCode::UNAUTHORIZED,
+        "a retired instance cannot retire again: its key no longer verifies"
+    );
+    assert_eq!(
+        sibling_status.as_deref(),
+        Some("active"),
+        "retirement is the caller's alone, never its signer's whole fleet"
+    );
+    assert_eq!(sibling_read, StatusCode::BAD_REQUEST);
+}
+
+/// Only a joined INSTANCE may retire, and only itself: every other
+/// credential that verifies here is refused at the guard, and the instance row
+/// is untouched. The control is the fixture's own instance retiring
+/// successfully at the end, so the refusals are about the credentials and not
+/// a route that refuses everyone.
+#[ntex::test]
+async fn no_other_credential_can_retire_an_instance() {
+    let fixture = build_fixture().await;
+    let app = internal_app!(Arc::clone(&fixture.state));
+    let pg = &fixture.state.control_pg;
+    let signer = seed_signer(pg).await;
+    let join_token = signer.token(1);
+
+    let retire = |header: String| {
+        let app = &app;
+        async move {
+            test::call_service(
+                app,
+                test::TestRequest::post()
+                    .uri("/internal/workers/retire")
+                    .header("authorization", header)
+                    .to_request(),
+            )
+            .await
+            .status()
+        }
+    };
+    let mut refused = Vec::new();
+    for (label, header) in [
+        ("the shared control key", format!("Bearer {CONTROL_KEY}")),
+        ("the gateway", fixture.gateway_header()),
+        ("a bare svc/worker role key", fixture.stale_worker_role_header()),
+        ("a join token", format!("Bearer {join_token}")),
+        ("an unrecorded instance key", fixture.planted_instance_header()),
+    ] {
+        refused.push((label, retire(header).await));
+    }
+    let untouched = instance_status(pg, &fixture.worker_instance_id).await;
+    let own = retire(fixture.worker_header()).await;
+    forget_signer(pg, &signer.id).await;
+    fixture.release().await;
+
+    for (label, status) in refused {
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{label} must not retire an instance");
+    }
+    assert_eq!(untouched.as_deref(), Some("active"));
+    assert_eq!(own, StatusCode::NO_CONTENT);
+}
+
+// ---------------------------------------------------------------------------
+// The signer cascade: what rotate reaches and what purge reaches
+// ---------------------------------------------------------------------------
+
+/// The two signer verbs do NOT imply each other, measured on the credential
+/// that matters: whether the instances a signer admitted can still read an
+/// app's environment.
+///
+/// ROTATE is the hygiene path. It stops further tokens being minted under the
+/// key and leaves the fleet serving, because one signer covers many deployment
+/// units and retiring a key must not take all of them down.
+///
+/// PURGE is the incident path, for a key believed to have leaked: it retires
+/// every instance the signer admitted in one transaction, so an operator is not
+/// retiring instances one at a time while an attacker's workers keep serving.
+///
+/// Signer F is the paired control throughout - untouched, and unaffected by
+/// either verb - which is what shows each refusal is about the signer acted on
+/// rather than a fault that would refuse everyone.
+#[ntex::test]
+async fn rotating_a_signer_spares_its_fleet_and_purging_one_retires_it() {
+    let fixture = build_fixture().await;
+    let app = internal_app!(Arc::clone(&fixture.state));
+    let pg = &fixture.state.control_pg;
+
+    let signer_e = seed_signer(pg).await;
+    let signer_f = seed_signer(pg).await;
+    let rotate_token = signer_e.token(2);
+
+    let joiner_e = Joiner::random();
+    let instance_e = join_instance(&fixture.state, &rotate_token, &joiner_e).await;
+    let keyring_e = joiner_e.into_keyring(
+        instance_issuer(&instance_e),
+        load_peer_bundle(&fixture.peers).expect("peer bundle loads"),
+    );
+
+    let joiner_f = Joiner::random();
+    let instance_f = join_instance(&fixture.state, &signer_f.token(1), &joiner_f).await;
+    let keyring_f = joiner_f.into_keyring(
+        instance_issuer(&instance_f),
+        load_peer_bundle(&fixture.peers).expect("peer bundle loads"),
+    );
+
+    let control = service_issuer(CONTROL_SERVICE_NAME).expect("control issuer");
+    let read_env = |keyring: &ServiceKeyring| {
+        let app = &app;
+        let header = format!("Bearer {}", keyring.mint_for(&control).expect("mint"));
+        async move {
+            test::call_service(
+                app,
+                test::TestRequest::get()
+                    .uri(&format!("/internal/apps/{BAD_APP_ID}/env"))
+                    .header("authorization", header)
+                    .to_request(),
+            )
+            .await
+            .status()
+        }
+    };
+
+    // BEFORE: both instances reach the handler (400 on the malformed id, which
+    // is the point - the guard admitted them).
+    assert_eq!(read_env(&keyring_e).await, StatusCode::BAD_REQUEST);
+    assert_eq!(read_env(&keyring_f).await, StatusCode::BAD_REQUEST);
+
+    pg.execute(
+        "SELECT zeroship.rotate_worker_join_signer($1)",
+        &[&signer_e.id],
+    )
+    .await
+    .expect("rotate_worker_join_signer runs");
+
+    // AFTER ROTATE: E's instance is UNAFFECTED. This is the half a reader is
+    // most likely to get wrong, so it is asserted rather than left implied.
+    assert_eq!(
+        read_env(&keyring_e).await,
+        StatusCode::BAD_REQUEST,
+        "rotating a signer must not take down the fleet it admitted"
+    );
+    // But a token already minted under the rotated key admits nobody new: the
+    // signer no longer resolves, whatever uses that token had left.
+    let refused = join(
+        &fixture.state,
+        Some(ENROLMENT_PEER.parse().expect("peer socket parses")),
+        &rotate_token,
+        Joiner::random().request(&rotate_token),
+    )
+    .await;
+    assert_eq!(
+        refused.status(),
+        StatusCode::FORBIDDEN,
+        "a rotated signer must not be able to admit a fresh instance"
+    );
+
+    pg.execute(
+        "SELECT zeroship.purge_worker_join_signer($1)",
+        &[&signer_e.id],
+    )
+    .await
+    .expect("purge_worker_join_signer runs");
+
+    // AFTER PURGE: E's instance loses the credential, and F's is exactly as it
+    // was throughout.
+    assert_eq!(
+        read_env(&keyring_e).await,
+        StatusCode::UNAUTHORIZED,
+        "a purged signer's instances must lose CONTROL_APP_ENV access"
+    );
+    assert_eq!(
+        read_env(&keyring_f).await,
+        StatusCode::BAD_REQUEST,
+        "an untouched signer's instance must be unaffected by a sibling's purge"
+    );
+
+    forget(pg, &instance_e).await;
+    forget(pg, &instance_f).await;
+    forget_signer(pg, &signer_e.id).await;
+    forget_signer(pg, &signer_f.id).await;
+    fixture.release().await;
+}
+
+/// A worker serves one execution zone, so Control narrows its host app reads
+/// to that zone.
+///
+/// The refusal and the acceptance differ in exactly one variable: the same
+/// joined instance, the same route and the same process, against two apps
+/// that differ only in the zone they were created in. An app's environment is
+/// its decrypted secrets and its project data key is a decryption capability,
+/// so a read that crossed zones would hand both to a fleet that must never
+/// reach them.
+#[ntex::test]
+async fn host_app_reads_are_narrowed_to_the_callers_execution_zone() {
+    let fixture = build_fixture().await;
+    let service = internal_app!(Arc::clone(&fixture.state));
+    let pg = &fixture.state.control_pg;
+    // `execution_zones_id_shape` demands exactly 25 base36 characters after
+    // the prefix, the width the typed-id encoder emits. Every other zone
+    // literal in the tree is a copy of the seeded default, so this one - the
+    // only hand-authored second zone - is the only place a miscount can hide.
+    let away_zone = "ezn_awayzone00000000000000000";
+    pg.execute(
+        "INSERT INTO zeroship.execution_zones(id, name, status) \
+         VALUES ($1, 'away', 'active') ON CONFLICT (id) DO NOTHING",
+        &[&away_zone],
+    )
+    .await
+    .expect("declare a second execution zone");
+    // `free_plan_id` names a catalog row rather than creating one, and
+    // `apps.plan_id` is a RESTRICT foreign key, so the seed below fails unless
+    // something has already stocked the catalog in this database.
+    common::ensure_builtin_plans(&fixture.state.registry).await;
+    let plan = zeroship_control::plan_catalog::free_plan_id();
+    let home = common::seed_app_in_zone(
+        pg,
+        &format!("zone-home-{}", &Uuid::new_v4().simple().to_string()[..10]),
+        &plan,
+        common::DEFAULT_EXECUTION_ZONE_ID,
+    )
+    .await;
+    let away = common::seed_app_in_zone(
+        pg,
+        &format!("zone-away-{}", &Uuid::new_v4().simple().to_string()[..10]),
+        &plan,
+        away_zone,
+    )
+    .await;
+
+    // THE REFUSAL: the away app is in a zone this instance does not belong to,
+    // so neither its environment nor its data key is answered.
+    for path in [
+        format!("/internal/apps/{}/env", away.as_str()),
+        format!("/internal/apps/{}", away.as_str()),
+    ] {
+        let refused = test::call_service(
+            &service,
+            test::TestRequest::get()
+                .uri(&path)
+                .header("authorization", fixture.worker_header())
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            refused.status(),
+            StatusCode::FORBIDDEN,
+            "{path} must refuse an app outside the caller's execution zone"
+        );
+    }
+
+    // THE CONTROL: the same instance, the same routes, an app in its own zone.
+    // The handler answers for itself, so the 403 above is the zone check's
+    // verdict rather than anything about this caller or these routes.
+    for path in [
+        format!("/internal/apps/{}/env", home.as_str()),
+        format!("/internal/apps/{}", home.as_str()),
+    ] {
+        let admitted = test::call_service(
+            &service,
+            test::TestRequest::get()
+                .uri(&path)
+                .header("authorization", fixture.worker_header())
+                .to_request(),
+        )
+        .await;
+        assert_ne!(
+            admitted.status(),
+            StatusCode::FORBIDDEN,
+            "{path} must admit an app in the caller's own execution zone"
+        );
+    }
+
+    // REMOVE THE SECOND ZONE. Control requires an app to name its zone once a
+    // deployment declares more than one, so a leaked `away` row makes every
+    // later `create_app` that does not name one fail - measured as 22 failures
+    // across ten unrelated suites, from billing to reserved names. The apps go
+    // first: `apps.execution_zone_id` references the zone.
+    for app in [&home, &away] {
+        pg.execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app.as_str()])
+            .await
+            .expect("remove the fixture app");
+    }
+    pg.execute(
+        "DELETE FROM zeroship.execution_zones WHERE id = $1",
+        &[&away_zone],
+    )
+    .await
+    .expect("remove the second execution zone");
+    fixture.release().await;
 }

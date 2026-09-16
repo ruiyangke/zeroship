@@ -4,12 +4,6 @@
 //! registry + env store + handler types. The `zeroship-control` binary
 //! (`src/main.rs`) is a thin wrapper around these modules.
 
-// `cron::workflow_engine::register_run_timer_in_tx` is a long async fn whose
-// generated future nests deeply enough that computing its layout exceeds
-// rustc's default query depth: on rustc 1.94.0 this crate does not compile at
-// all without the raise, and the error names this crate and this function.
-// `tests/workflow_engine_test.rs` has carried the same line for the same
-// reason; the LIBRARY needs it too.
 #![recursion_limit = "256"]
 
 pub mod account_status;
@@ -49,6 +43,7 @@ pub mod plan_catalog;
 pub mod pricing;
 pub mod pricing_store;
 pub mod proration;
+pub mod publication;
 pub mod refund;
 pub mod registry;
 pub mod reserved_names;
@@ -59,11 +54,10 @@ pub mod stripe_store;
 pub mod tax;
 mod user_id;
 pub mod void_reissue;
-pub mod worker_enrolment;
+pub mod join_minter;
+pub mod worker_join;
 pub mod worker_health;
-pub mod workflow_instance_api;
-pub(crate) mod workflow_limits;
-pub(crate) mod workflow_rollout;
+pub mod deployment_hold_api;
 
 #[cfg(test)]
 mod test_database;
@@ -73,7 +67,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use zeroize::Zeroizing;
-use zeroship_bundle::{BlobStore, WorkflowBlobStore};
+use zeroship_bundle::BlobStore;
 use zeroship_stream::{StreamConfig, StreamError, StreamRegistry, StreamTransport};
 
 pub use env_store::EnvStore;
@@ -471,10 +465,9 @@ pub struct AppState {
     /// fixture built without keys cannot accidentally exercise an open door.
     ///
     /// It carries the ROLE keys and nothing else. An assertion whose issuer
-    /// names a worker INSTANCE is verified against a key resolved from
-    /// `zeroship.worker_instances` instead - see
-    /// `internal::check_service_auth` - because no peer document has ever
-    /// held one.
+    /// names an INSTANCE is verified against a key resolved from
+    /// `zeroship.worker_instances` instead, and the worker role is refused at
+    /// role arity outright - see `internal::verify_service_caller`.
     pub service_auth: Arc<zeroship_core::service_peers::ServiceAuth>,
     pub registry: Registry,
     pub env_store: EnvStore,
@@ -485,10 +478,6 @@ pub struct AppState {
     /// keyspace so unarchive can restore the retained live deploy without a
     /// second upload. Database and blob teardown are separate lifecycles.
     pub blob_store: Arc<dyn BlobStore>,
-    /// Content-addressed workflow output store. This is intentionally separate
-    /// from deploy bundle blobs so workflow-output GC can never delete deploy
-    /// artifacts.
-    pub workflow_blob_store: Arc<dyn WorkflowBlobStore>,
     pub control_key: SecretString,
     pub master_key: SecretString,
     /// Stripe webhook signing secret. An empty value makes every webhook fail
@@ -501,10 +490,6 @@ pub struct AppState {
     /// `https://api.stripe.com`; the integration tests override it to point the
     /// REAL `cyper` client at a localhost mock-Stripe server.
     pub stripe_base_url: String,
-    /// Gateway internal base URL used by the workflow engine to dispatch
-    /// claimed runs through the spend/account-gated edge before they reach a
-    /// worker replay host.
-    pub gateway_url: String,
     /// Worker HTTP base URLs used for admin log fan-out.
     pub worker_urls: Vec<String>,
     /// Per-IP rate limiter for mutating admin endpoints. Burst 30,
@@ -521,15 +506,15 @@ pub struct AppState {
     /// XFF; otherwise an attacker with direct network reach can spoof
     /// audit log IPs and rate-limit buckets.
     pub trust_proxy: bool,
-    /// Where a worker instance may enrol FROM, and on what port it may claim to
+    /// Where a worker instance may join FROM, and on what port it may claim to
     /// be listening. Operator-declared, held here because nothing on the wire
-    /// may widen it; see [`worker_enrolment::EnrolmentEnvelope`] for why an
+    /// may widen it; see [`worker_join::EnrolmentEnvelope`] for why an
     /// undeclared envelope refuses instead of defaulting open.
     ///
     /// It is a field on this struct rather than per-resource ntex state so a
     /// route registered without it is a compile error rather than a 500 nobody
     /// reads as a policy that stopped being enforced.
-    pub worker_enrolment: worker_enrolment::EnrolmentEnvelope,
+    pub worker_enrolment: worker_join::EnrolmentEnvelope,
     /// Directory where in-flight `.zship` deploy bodies are streamed
     /// before mmap+ingest. Defaults to `std::env::temp_dir()`. Operators
     /// may pin it to a fast local disk (`--deploy-tmp-dir`) so deploy

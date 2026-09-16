@@ -233,6 +233,27 @@ pub const USER_PREFIX: &str = "usr";
 /// `String` returned from here would reach all of them with no type saying
 /// which of those it was.
 pub const APP_PREFIX: &str = "app";
+
+/// Immutable normal app deployment identity.
+pub const DEPLOYMENT_PREFIX: &str = "dep";
+
+/// Normal deploy command identity.
+///
+/// The client sends it as the deploy request's `Idempotency-Key`; retries reuse
+/// it and a new deploy, including a rollback to an earlier artifact, mints
+/// another. Minted only by [`crate::deploy_command::DeployCommandId::mint`].
+pub const DEPLOY_COMMAND_PREFIX: &str = "dcm";
+
+/// Control's lifecycle publication intent: one row per app lifecycle revision,
+/// delivered to the workflow manager in revision order.
+pub const LIFECYCLE_INTENT_PREFIX: &str = "lci";
+
+/// Generate a new lifecycle intent ID: `lci_{base36(uuidv7)}`.
+#[must_use]
+pub fn new_lifecycle_intent_id() -> String {
+    generate(LIFECYCLE_INTENT_PREFIX)
+}
+
 pub const SESSION_PREFIX: &str = "ses";
 
 /// Grant typed-id prefix: one row per (person, audience) in `zeroship.grants`,
@@ -560,6 +581,9 @@ pub fn new_reconcile_finding_id() -> String {
 /// `run_<base36>` string because workflow runs are creator-visible handles.
 pub const WORKFLOW_RUN_PREFIX: &str = "run";
 
+/// Logical workflow queue job identity, independent of its delivery attempt.
+pub const WORKFLOW_JOB_PREFIX: &str = "wjb";
+
 /// Workflow-signal typed-id prefix. `zeroship.workflow_signals.id` stores the
 /// full `sig_<base36>` string.
 pub const WORKFLOW_SIGNAL_PREFIX: &str = "sig";
@@ -567,13 +591,23 @@ pub const WORKFLOW_SIGNAL_PREFIX: &str = "sig";
 /// Workflow cron handle typed-id prefix, distinct from the workflow-schedule prefix.
 pub const WORKFLOW_CRON_PREFIX: &str = "cron";
 
-/// Workflow-schedule typed-id prefix. `zeroship.workflow_schedules.id` stores
-/// the full `sch_<base36>` string.
+/// Workflow-schedule typed-id prefix: the logical schedule identity
+/// ([`crate::workflow::ScheduleId`]) the manager retains across deployment
+/// revisions.
 pub const WORKFLOW_SCHEDULE_PREFIX: &str = "sch";
 
 /// Workflow dispatch/batch typed-id prefix. Deliberately `wfd`, not `dsp`
 /// (billing disputes).
 pub const WORKFLOW_DISPATCH_PREFIX: &str = "wfd";
+
+/// Workflow operation retry identity, distinct from a live business key.
+pub const WORKFLOW_REQUEST_PREFIX: &str = "wreq";
+
+/// Workflow capability identity for issuance and audit provenance.
+pub const WORKFLOW_CAPABILITY_PREFIX: &str = "wcap";
+
+/// A workflow-owned staged payload.
+pub const WORKFLOW_PAYLOAD_PREFIX: &str = "wpl";
 
 /// Workflow inbound-signal signing-key typed-id prefix.
 pub const WORKFLOW_SIGNAL_KEY_PREFIX: &str = "wsk";
@@ -584,6 +618,9 @@ pub const WORKFLOW_SUBSCRIPTION_PREFIX: &str = "wsb";
 
 /// Workflow broadcast typed-id prefix.
 pub const WORKFLOW_BROADCAST_PREFIX: &str = "wbc";
+
+/// Creator-owned workflow dependency propagation obligation prefix.
+pub const WORKFLOW_PROPAGATION_PREFIX: &str = "wdp";
 
 /// Stateless per-run/per-topic signal capability token prefix. Unlike normal
 /// row ids, `wst_…` is not UUID-backed; it encodes signed claims.
@@ -605,11 +642,6 @@ pub fn new_workflow_signal_id() -> String {
 /// Generate a new workflow cron ID: `cron_{base36(uuidv7)}`.
 pub fn new_workflow_cron_id() -> String {
     generate(WORKFLOW_CRON_PREFIX)
-}
-
-/// Generate a new workflow-schedule ID: `sch_{base36(uuidv7)}`.
-pub fn new_workflow_schedule_id() -> String {
-    generate(WORKFLOW_SCHEDULE_PREFIX)
 }
 
 /// Generate a new workflow dispatch/batch ID: `wfd_{base36(uuidv7)}`.
@@ -651,13 +683,14 @@ pub fn new_provider_dead_letter_id() -> String {
 /// MINTED BY CONTROL AT ENROLMENT, never by the registrant. The worker presents
 /// its boot-generated Ed25519 public key and its listening port; control assigns
 /// the id, the ring key and the address. An instance is a CHILD of the
-/// `svc/worker` role it enrols under: it mints under `svc/worker/<wkr_id>` and
-/// is addressed as `svc/worker`.
+/// `svc/worker` role: it mints under `svc/worker/<wkr_id>` and is addressed as
+/// `svc/worker`.
 ///
-/// Because enrolment authenticates with the SHARED role key, a holder of that
-/// key can enrol many instances. The id is therefore a DISTINGUISHER against a
-/// role-key holder, not a boundary: what it buys is attribution, per-instance
-/// revocation, and a countable event.
+/// Joining authenticates with a JOIN TOKEN a trusted signer (a
+/// [`JOIN_SIGNER_PREFIX`] row) minted, plus a signature by the very keypair
+/// being registered, so a token alone admits nobody. The id is minted per
+/// process and the key never leaves memory, which is what makes per-instance
+/// retirement a real boundary here rather than only attribution.
 pub const WORKER_INSTANCE_PREFIX: &str = "wkr";
 
 /// Generate a new worker-instance ID: `wkr_{base36(uuidv7)}`. Minted by the
@@ -666,6 +699,25 @@ pub const WORKER_INSTANCE_PREFIX: &str = "wkr";
 /// CHECK, with no SQL `DEFAULT` because there is no in-database base36 generator.
 pub fn new_worker_instance_id() -> String {
     generate(WORKER_INSTANCE_PREFIX)
+}
+
+/// Join-signer typed-id prefix: one row in `zeroship.worker_join_signers` per
+/// trusted signer, each permitted to mint join tokens for a declared set of
+/// execution zones.
+///
+/// MINTED BY THE OPERATOR'S PROVISIONING STEP, never by a worker. The signer's
+/// PRIVATE half stays with whoever decides a worker should exist; Control
+/// learns the id, the public half and the zones from its import file at
+/// startup. A signer mints under `svc/worker-join-signer/<wjs_id>`, and one
+/// signer covers as many deployment units as its zones do, so adding a unit is
+/// not a Control-side operation.
+pub const JOIN_SIGNER_PREFIX: &str = "wjs";
+
+/// Generate a new join-signer ID: `wjs_{base36(uuidv7)}`. The
+/// `zeroship.worker_join_signers.id` column stores the full typed-id string
+/// under a `worker_join_signers_id_shape` CHECK.
+pub fn new_join_signer_id() -> String {
+    generate(JOIN_SIGNER_PREFIX)
 }
 
 #[cfg(test)]
@@ -948,7 +1000,6 @@ mod tests {
             (new_workflow_run_id as fn() -> String, WORKFLOW_RUN_PREFIX),
             (new_workflow_signal_id as fn() -> String, WORKFLOW_SIGNAL_PREFIX),
             (new_workflow_cron_id as fn() -> String, WORKFLOW_CRON_PREFIX),
-            (new_workflow_schedule_id as fn() -> String, WORKFLOW_SCHEDULE_PREFIX),
             (new_workflow_dispatch_id as fn() -> String, WORKFLOW_DISPATCH_PREFIX),
             (new_workflow_signal_key_id as fn() -> String, WORKFLOW_SIGNAL_KEY_PREFIX),
             (new_workflow_subscription_id as fn() -> String, WORKFLOW_SUBSCRIPTION_PREFIX),
@@ -978,6 +1029,7 @@ mod tests {
             ("workflow_signal_keys", WORKFLOW_SIGNAL_KEY_PREFIX),
             ("workflow_subscriptions", WORKFLOW_SUBSCRIPTION_PREFIX),
             ("workflow_broadcasts", WORKFLOW_BROADCAST_PREFIX),
+            ("workflow_propagations", WORKFLOW_PROPAGATION_PREFIX),
             ("workflow_signal_tokens", WORKFLOW_SIGNAL_TOKEN_PREFIX),
         ];
         for (i, (name_a, pa)) in prefixes.iter().enumerate() {
@@ -1015,27 +1067,35 @@ mod tests {
         assert_ne!(prefix, ORGANIZATION_BILLING_HISTORY_PREFIX);
     }
 
-    /// `wkr` must collide with nothing, and the sweep is over the WHOLE
-    /// registry rather than a family, because a worker instance is not a member
-    /// of one: it is addressed by the control plane and by nothing else.
+    /// `wkr` and `wjs` must collide with nothing, and the sweep is over the
+    /// WHOLE registry rather than a family, because neither a worker instance
+    /// nor the signer that admitted it is a member of one: both are addressed by the control
+    /// plane and by nothing else. Each is also swept against the other.
     ///
     /// WHAT THIS DOES NOT CATCH: a prefix added to the module after this list
     /// was written is not in the list, so this test cannot see it. Adding a
     /// prefix means adding it here; the failure of that is silent.
     #[test]
-    fn worker_instance_prefix_is_three_chars_and_disjoint() {
-        assert_eq!(
-            WORKER_INSTANCE_PREFIX.len(),
-            3,
-            "worker-instance prefix must be 3 chars (R16-API2)"
-        );
-        let w = new_worker_instance_id();
-        assert!(w.starts_with("wkr_"), "got {w}");
-        assert_eq!(w.len(), 29, "wkr_ + 25 base36 = 29 chars");
-        let (prefix, _) = parse(&w).expect("new_worker_instance_id must roundtrip");
-        assert_eq!(prefix, "wkr");
+    fn worker_instance_and_join_signer_prefixes_are_three_chars_and_disjoint() {
+        for (prefix, minted) in [
+            (WORKER_INSTANCE_PREFIX, new_worker_instance_id()),
+            (JOIN_SIGNER_PREFIX, new_join_signer_id()),
+        ] {
+            assert_eq!(prefix.len(), 3, "{prefix} must be 3 chars (R16-API2)");
+            assert!(minted.starts_with(&format!("{prefix}_")), "got {minted}");
+            assert_eq!(minted.len(), 29, "{prefix}_ + 25 base36 = 29 chars");
+            let (parsed, _) = parse(&minted).expect("a minted id must roundtrip");
+            assert_eq!(parsed, prefix);
+        }
+        // The control: the two are not one prefix spelled twice.
+        assert_ne!(WORKER_INSTANCE_PREFIX, JOIN_SIGNER_PREFIX);
 
         let registry = [
+            ("deployments", DEPLOYMENT_PREFIX),
+            ("workflow_jobs", WORKFLOW_JOB_PREFIX),
+            ("workflow_requests", WORKFLOW_REQUEST_PREFIX),
+            ("workflow_capabilities", WORKFLOW_CAPABILITY_PREFIX),
+            ("workflow_payloads", WORKFLOW_PAYLOAD_PREFIX),
             ("users", USER_PREFIX),
             ("apps", APP_PREFIX),
             ("sessions", SESSION_PREFIX),
@@ -1065,15 +1125,78 @@ mod tests {
             ("workflow_signal_keys", WORKFLOW_SIGNAL_KEY_PREFIX),
             ("workflow_subscriptions", WORKFLOW_SUBSCRIPTION_PREFIX),
             ("workflow_broadcasts", WORKFLOW_BROADCAST_PREFIX),
+            ("workflow_propagations", WORKFLOW_PROPAGATION_PREFIX),
             ("workflow_signal_tokens", WORKFLOW_SIGNAL_TOKEN_PREFIX),
             ("provider_dead_letter", PROVIDER_DEAD_LETTER_PREFIX),
         ];
         for (owner, other) in registry {
-            assert_ne!(
-                WORKER_INSTANCE_PREFIX, other,
-                "wkr must be disjoint from every registered prefix; {owner} already uses it"
-            );
+            for prefix in [WORKER_INSTANCE_PREFIX, JOIN_SIGNER_PREFIX] {
+                assert_ne!(
+                    prefix, other,
+                    "{prefix} must be disjoint from every registered prefix; {owner} already uses it"
+                );
+            }
         }
+    }
+
+    /// Deploy commands and lifecycle intents are named by Control and by the
+    /// clients that retry deploys. The sweep covers the whole registry because a
+    /// command id arrives from outside and must not parse as any other entity.
+    #[test]
+    fn deploy_publication_prefixes_are_three_chars_and_disjoint() {
+        let intent = new_lifecycle_intent_id();
+        assert!(intent.starts_with("lci_"), "got {intent}");
+        assert_eq!(parse(&intent).expect("intent id must roundtrip").0, "lci");
+        let registry = [
+            ("users", USER_PREFIX),
+            ("apps", APP_PREFIX),
+            ("app_deploys", DEPLOYMENT_PREFIX),
+            ("sessions", SESSION_PREFIX),
+            ("grants", GRANT_PREFIX),
+            ("organizations", ORGANIZATION_PREFIX),
+            ("projects", PROJECT_PREFIX),
+            ("organization_invites", INVITE_PREFIX),
+            ("wake_jobs", WAKE_PREFIX),
+            ("app_oauth_clients", APP_OAUTH_CLIENT_PREFIX),
+            ("plans", PLAN_PREFIX),
+            ("invoices", INVOICE_PREFIX),
+            ("invoice_payments", INVOICE_PAYMENT_PREFIX),
+            ("credit_ledger", CREDIT_PREFIX),
+            ("refunds", REFUND_PREFIX),
+            ("plan_change_events", PLAN_CHANGE_EVENT_PREFIX),
+            ("spend_state_history", SPEND_HISTORY_PREFIX),
+            ("organization_billing_status_history", ORGANIZATION_BILLING_HISTORY_PREFIX),
+            ("billing_disputes", DISPUTE_PREFIX),
+            ("payout_failures", PAYOUT_FAILURE_PREFIX),
+            ("connect_checkout_failures", CHECKOUT_FAILURE_PREFIX),
+            ("billing_reconciliation_findings", RECONCILE_FINDING_PREFIX),
+            ("workflow_runs", WORKFLOW_RUN_PREFIX),
+            ("workflow_jobs", WORKFLOW_JOB_PREFIX),
+            ("workflow_signals", WORKFLOW_SIGNAL_PREFIX),
+            ("workflow_crons", WORKFLOW_CRON_PREFIX),
+            ("workflow_schedules", WORKFLOW_SCHEDULE_PREFIX),
+            ("workflow_dispatches", WORKFLOW_DISPATCH_PREFIX),
+            ("workflow_requests", WORKFLOW_REQUEST_PREFIX),
+            ("workflow_capabilities", WORKFLOW_CAPABILITY_PREFIX),
+            ("workflow_payloads", WORKFLOW_PAYLOAD_PREFIX),
+            ("workflow_signal_keys", WORKFLOW_SIGNAL_KEY_PREFIX),
+            ("workflow_subscriptions", WORKFLOW_SUBSCRIPTION_PREFIX),
+            ("workflow_broadcasts", WORKFLOW_BROADCAST_PREFIX),
+            ("workflow_propagations", WORKFLOW_PROPAGATION_PREFIX),
+            ("workflow_signal_tokens", WORKFLOW_SIGNAL_TOKEN_PREFIX),
+            ("provider_dead_letter", PROVIDER_DEAD_LETTER_PREFIX),
+            ("worker_instances", WORKER_INSTANCE_PREFIX),
+        ];
+        for prefix in [DEPLOY_COMMAND_PREFIX, LIFECYCLE_INTENT_PREFIX] {
+            assert_eq!(prefix.len(), 3, "{prefix} prefix must be 3 chars");
+            for (owner, other) in registry {
+                assert_ne!(
+                    prefix, other,
+                    "{prefix} must be disjoint from every registered prefix; {owner} uses it"
+                );
+            }
+        }
+        assert_ne!(DEPLOY_COMMAND_PREFIX, LIFECYCLE_INTENT_PREFIX);
     }
 
     #[test]

@@ -57,10 +57,6 @@ async fn build_test_state(db_url: &str, worker_urls: Vec<String>) -> Fixture {
     let stripe_store = StripeStore::new(registry.clone());
     let blob_store: Arc<dyn BlobStore> =
         Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
-    let workflow_blob_store: Arc<dyn zeroship_bundle::WorkflowBlobStore> = Arc::new(
-        zeroship_bundle::LocalWorkflowBlobStore::new(blob_root.clone())
-            .expect("workflow blob store"),
-    );
 
     let (control_pg_client, control_pg_conn) =
         compio_postgres::connect(db_url, compio_postgres::NoTls)
@@ -79,19 +75,17 @@ async fn build_test_state(db_url: &str, worker_urls: Vec<String>) -> Fixture {
             env_store,
             stripe_store,
             blob_store,
-            workflow_blob_store,
             control_key: SecretString::new("test-control-key".to_string()),
             master_key: SecretString::new(TEST_MASTER_KEY.to_string()),
             stripe_webhook_secret: SecretString::new(String::new()),
             stripe_secret_key: SecretString::new(String::new()),
             stripe_base_url: "https://api.stripe.com".to_string(),
-            gateway_url: "http://127.0.0.1:9".to_string(),
             worker_urls,
             admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
             webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
             origin_scheme: zeroship_core::config::OriginScheme::Https,
             trust_proxy: false,
-            worker_enrolment: zeroship_control::worker_enrolment::EnrolmentEnvelope::closed(),
+            worker_enrolment: zeroship_control::worker_join::EnrolmentEnvelope::closed(),
             deploy_tmp_dir: deploy_tmp_dir.clone(),
             control_pg,
             app_base_domain: "zeroship.localhost".to_string(),
@@ -140,6 +134,9 @@ async fn app_logs_route_proxies_worker_lines() {
     // no app row and no membership, which reached the worker proxy only because
     // the caller held the deleted universal-allow platform role.
     let pat = common::authz_fixture::seeded_principal(&fixture.state).await;
+    // `create_app` validates its plan against the catalog, which this database
+    // only has once something seeds it.
+    common::ensure_builtin_plans(&fixture.state.registry).await;
     let app_id = fixture
         .state
         .registry
@@ -147,6 +144,7 @@ async fn app_logs_route_proxies_worker_lines() {
             &format!("logs-{}", &Uuid::new_v4().simple().to_string()[..10]),
             &zeroship_control::plan_catalog::free_plan_id(),
             &pat.user_id,
+            None,
             None,
         )
         .await

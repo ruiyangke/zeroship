@@ -20,19 +20,14 @@ test("the raw order app joins duplicate starts and handles the approval signal",
     expect(started.runId).toMatch(/^run_/);
     expect((await request(target, "/orders", input)).runId).toBe(started.runId);
     const path = "/orders/" + started.runId;
-    if (target.name === "local") {
-      await expect.poll(async () => (await request(target, path)).state, { timeout: 30_000 }).toBe("failed");
-      expect((await request(target, path)).error).toMatchObject({ type: "WorkflowUnsupportedError" });
-    } else {
-      // The parent first waits for its child, then sleeps before awaiting payment.
-      await expect.poll(async () => (await request(target, path)).state, { timeout: 60_000 }).toBe("sleeping");
-      await expect.poll(async () => (await request(target, path)).state, { timeout: 60_000 }).toBe("waiting");
-      await request(target, path + "/approve", { approved: true, approvalCode: "approved-" + orderId });
-      await expect.poll(async () => (await request(target, path)).state, { timeout: 30_000 }).toBe("completed");
-      const result = await request(target, path);
-      expect(result.output).toMatchObject({ orderId, status: "ready_to_ship", shipmentId: "shp_" + orderId });
-      expect(result.output.riskScore).toBeGreaterThanOrEqual(0);
-      expect(result.output.riskScore).toBeLessThan(100);
-    }
+    // The parent first waits for its child, then sleeps before awaiting payment.
+    await expect.poll(async () => (await request(target, path)).state, { timeout: 60_000 }).toBe("sleeping");
+    await expect.poll(async () => (await request(target, path)).state, { timeout: 60_000 }).toBe("waiting");
+    await request(target, path + "/approve", { approved: true, approvalCode: "approved-" + orderId });
+    await expect.poll(async () => (await request(target, path)).state, { timeout: 30_000 }).toBe("completed");
+    const result = await request(target, path);
+    expect(result.output).toMatchObject({ orderId, status: "ready_to_ship", shipmentId: "shp_" + orderId });
+    expect(result.output.riskScore).toBeGreaterThanOrEqual(0);
+    expect(result.output.riskScore).toBeLessThan(100);
   }
 });

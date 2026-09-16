@@ -5,13 +5,11 @@ use super::*;
 pub struct Kernel(std::marker::PhantomData<Rc<()>>);
 
 impl Kernel {
-    pub(crate) fn new(max_pinned: usize, url: &str, meter: Arc<zeroship_metering::Meter>) -> Self {
+    pub(crate) fn new(url: &str, meter: Arc<zeroship_metering::Meter>) -> Self {
         Self::install(
             10,
-            max_pinned,
             KernelConfig {
-                control_url: "http://127.0.0.1:1".into(),
-                control_key: String::new(),
+                workflows: ReadyApps::default(),
                 db_service: Some(database_service(url)),
                 kv_store: None,
                 storage_backend: None,
@@ -20,13 +18,13 @@ impl Kernel {
         )
     }
 
-    pub(crate) fn install(max_size: usize, max_pinned: usize, config: KernelConfig) -> Self {
+    pub(crate) fn install(max_size: usize, config: KernelConfig) -> Self {
         assert!(
             CACHE.with(|slot| slot.borrow().is_none()),
             "a previous case retained its worker cache"
         );
         let kernel = Self(std::marker::PhantomData);
-        init_cache(max_size, max_pinned, config);
+        init_cache(max_size, config);
         kernel
     }
 }
@@ -36,7 +34,6 @@ async fn unwinding_releases_the_thread_kernel_and_its_database_service() {
     let service = RefCell::new(None);
     let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _kernel = Kernel::new(
-            1,
             "postgresql://fixture:fixture@localhost/unused",
             Arc::new(zeroship_metering::Meter::new()),
         );
@@ -62,8 +59,7 @@ impl Drop for Kernel {
         DB_SERVICE.with(|slot| slot.borrow_mut().take());
         KV_STORE.with(|slot| slot.borrow_mut().take());
         STORAGE_BACKEND.with(|slot| slot.borrow_mut().take());
-        CONTROL_URL.with(|slot| slot.borrow_mut().take());
-        CONTROL_KEY.with(|slot| slot.borrow_mut().take());
+        WORKFLOWS.with(|slot| slot.borrow_mut().take());
         METER.with(|slot| slot.borrow_mut().take());
         LOADED_META.with(|slot| slot.borrow_mut().clear());
     }
