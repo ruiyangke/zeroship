@@ -201,16 +201,17 @@ impl Fixture {
         rows.remove(0)
     }
     pub async fn scan(&self) -> Scan {
-        use crate::service::models::collection_scans;
+        self.scan_for(self.scope.app_id()).await
+    }
+    pub async fn scan_for(&self, app: &AppId) -> Scan {
+        use crate::service::models::app_state;
         let tx = self.store.begin().await.unwrap();
         let mut rows = tx
             .database()
-            .entity::<collection_scans::Entity>()
+            .entity::<app_state::Entity>()
             .unwrap()
             .find::<Scan>(
-                collection_scans::id
-                    .eq(self.scope.app_id().as_str())
-                    .unwrap(),
+                app_state::app_id.eq(app.as_str()).unwrap(),
                 FindOptions::default(),
             )
             .await
@@ -260,12 +261,12 @@ pub(super) struct Page {
     pub next_index: i64,
 }
 #[derive(Debug, PartialEq, Eq, FromRow)]
-#[orm(entity = crate::service::models::collection_scans)]
+#[orm(entity = crate::service::models::app_state)]
 pub(super) struct Scan {
-    pub revision: i64,
-    pub after_id: Option<String>,
-    pub upper_id: Option<String>,
-    pub observed_at: Option<i64>,
+    pub collection_revision: i64,
+    pub collection_after_id: Option<String>,
+    pub collection_upper_id: Option<String>,
+    pub collection_observed_at: Option<i64>,
 }
 
 #[derive(Debug)]

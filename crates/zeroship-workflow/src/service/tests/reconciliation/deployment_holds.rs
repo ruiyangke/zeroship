@@ -707,9 +707,9 @@ async fn phase_substitution(store: Rc<OrmStore>) {
     let tx = service.begin().await.unwrap();
     journal_update(
         &tx,
-        "reconciliation_scans",
-        json!({"id":app.as_str()}),
-        json!({"phase":"publications"}),
+        "app_state",
+        json!({"app_id":app.as_str()}),
+        json!({"reconciliation_phase":"publications"}),
     )
     .await;
     tx.commit().await.unwrap();
@@ -735,9 +735,9 @@ async fn phase_substitution(store: Rc<OrmStore>) {
     let tx = service.begin().await.unwrap();
     journal_update(
         &tx,
-        "reconciliation_scans",
-        json!({"id":app.as_str()}),
-        json!({"phase":"deployment_holds"}),
+        "app_state",
+        json!({"app_id":app.as_str()}),
+        json!({"reconciliation_phase":"deployment_holds"}),
     )
     .await;
     tx.commit().await.unwrap();

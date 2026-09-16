@@ -74,18 +74,13 @@ async fn snapshot(tx: &Transaction, app: &AppId) -> Snapshot {
         "job_publications",
         "occurrences",
         "activations",
-        "reconciliation_scans",
+        "app_state",
         "deployment_holds",
         "management_receipts",
     ] {
-        let filter = if table == "reconciliation_scans" {
-            json!({"id":app.as_str()})
-        } else {
-            json!({"app_id":app.as_str()})
-        };
         result.insert(
             table,
-            journal_rows(tx, table, filter)
+            journal_rows(tx, table, json!({"app_id":app.as_str()}))
                 .await
                 .into_iter()
                 .map(|row| row.0)

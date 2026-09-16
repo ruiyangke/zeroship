@@ -1,28 +1,31 @@
 use super::{invalid, CollectionOptions, Transaction, WorkflowServiceError};
-use crate::service::models::{collection_pages, collection_scans, payloads};
+use crate::service::models::{app_state, collection_pages, payloads};
 use serde::{Deserialize, Serialize};
 use zeroship_core::app_id::AppId;
 use zeroship_data_orm::orm::{FindOptions, FromRow, Insertable};
 
-#[derive(FromRow, Insertable)]
-#[orm(entity = collection_scans)]
+/// The app's collection sweep, held on its locked `app_state` row.
+#[derive(FromRow)]
+#[orm(entity = app_state)]
 pub(super) struct Scan {
-    pub id: String,
-    pub revision: i64,
-    pub after_id: Option<String>,
-    pub upper_id: Option<String>,
-    pub observed_at: Option<i64>,
+    pub app_id: String,
+    pub collection_revision: i64,
+    pub collection_after_id: Option<String>,
+    pub collection_upper_id: Option<String>,
+    pub collection_observed_at: Option<i64>,
 }
 impl Scan {
     pub fn validate(&self, app: &AppId) -> Result<(), WorkflowServiceError> {
-        if self.id != app.as_str()
-            || self.revision <= 0
-            || self.observed_at.is_some_and(|value| value < 0)
-            || (self.observed_at.is_none() && (self.after_id.is_some() || self.upper_id.is_some()))
-            || self
-                .after_id
-                .as_ref()
-                .is_some_and(|after| self.upper_id.as_ref().is_none_or(|upper| after >= upper))
+        if self.app_id != app.as_str()
+            || self.collection_revision <= 0
+            || self.collection_observed_at.is_some_and(|value| value < 0)
+            || (self.collection_observed_at.is_none()
+                && (self.collection_after_id.is_some() || self.collection_upper_id.is_some()))
+            || self.collection_after_id.as_ref().is_some_and(|after| {
+                self.collection_upper_id
+                    .as_ref()
+                    .is_none_or(|upper| after >= upper)
+            })
         {
             return Err(invalid());
         }
@@ -72,11 +75,11 @@ impl Plan {
         Ok(())
     }
     pub fn check_scan(&self, scan: &Scan) -> Result<(), WorkflowServiceError> {
-        if scan.revision < self.revision
-            || (scan.revision == self.revision
-                && (scan.after_id != self.after
-                    || scan.upper_id != self.upper
-                    || scan.observed_at != Some(self.observed_at)))
+        if scan.collection_revision < self.revision
+            || (scan.collection_revision == self.revision
+                && (scan.collection_after_id != self.after
+                    || scan.collection_upper_id != self.upper
+                    || scan.collection_observed_at != Some(self.observed_at)))
         {
             return Err(invalid());
         }
@@ -93,15 +96,14 @@ pub(super) struct Page {
     pub next_index: i64,
 }
 
-pub(super) async fn read(
-    tx: &Transaction,
-    app: &AppId,
-) -> Result<Option<Scan>, WorkflowServiceError> {
+/// Read the sweep from the app's locked state row. Registration creates that
+/// row, and every caller locks it first, so its absence is a damaged journal.
+pub(super) async fn read(tx: &Transaction, app: &AppId) -> Result<Scan, WorkflowServiceError> {
     let row = tx
         .database()
-        .entity::<collection_scans::Entity>()?
+        .entity::<app_state::Entity>()?
         .find::<Scan>(
-            collection_scans::id.eq(app.as_str())?,
+            app_state::app_id.eq(app.as_str())?,
             FindOptions {
                 limit: Some(1),
                 ..Default::default()
@@ -109,10 +111,9 @@ pub(super) async fn read(
         )
         .await?
         .into_iter()
-        .next();
-    if let Some(row) = &row {
-        row.validate(app)?;
-    }
+        .next()
+        .ok_or_else(invalid)?;
+    row.validate(app)?;
     Ok(row)
 }
 
@@ -121,37 +122,23 @@ pub(super) async fn initialize(
     app: &AppId,
     now: i64,
 ) -> Result<Scan, WorkflowServiceError> {
-    let mut scan = if let Some(scan) = read(tx, app).await? {
-        scan
-    } else {
-        tx.database()
-            .entity::<collection_scans::Entity>()?
-            .insert::<_, Scan>(Scan {
-                id: app.as_str().to_owned(),
-                revision: 1,
-                after_id: None,
-                upper_id: None,
-                observed_at: None,
-            })
-            .await?
-    };
-    scan.validate(app)?;
-    if scan.observed_at.is_none() {
-        scan.upper_id = ids(tx, app, now, None, None, 1, true)
+    let mut scan = read(tx, app).await?;
+    if scan.collection_observed_at.is_none() {
+        scan.collection_upper_id = ids(tx, app, now, None, None, 1, true)
             .await?
             .into_iter()
             .next();
-        scan.observed_at = Some(now);
+        scan.collection_observed_at = Some(now);
         super::changed_once(
             tx.database()
-                .entity::<collection_scans::Entity>()?
+                .entity::<app_state::Entity>()?
                 .update_many(
-                    collection_scans::id
+                    app_state::app_id
                         .eq(app.as_str())?
-                        .and(collection_scans::revision.eq(scan.revision)?),
-                    collection_scans::upper_id
-                        .set(scan.upper_id.as_deref())?
-                        .and(collection_scans::observed_at.set(Some(now))?)?,
+                        .and(app_state::collection_revision.eq(scan.collection_revision)?),
+                    app_state::collection_upper_id
+                        .set(scan.collection_upper_id.as_deref())?
+                        .and(app_state::collection_observed_at.set(Some(now))?)?,
                 )
                 .await?,
         )?;
@@ -166,13 +153,13 @@ pub(super) async fn plan(
     scan: &Scan,
     options: CollectionOptions,
 ) -> Result<Plan, WorkflowServiceError> {
-    let observed_at = scan.observed_at.ok_or_else(invalid)?;
-    let ids = if let Some(upper) = scan.upper_id.as_deref() {
+    let observed_at = scan.collection_observed_at.ok_or_else(invalid)?;
+    let ids = if let Some(upper) = scan.collection_upper_id.as_deref() {
         ids(
             tx,
             app,
             observed_at,
-            scan.after_id.as_deref(),
+            scan.collection_after_id.as_deref(),
             Some(upper),
             options.page_size,
             false,
@@ -182,13 +169,15 @@ pub(super) async fn plan(
         Vec::new()
     };
     let more = ids.len() == options.page_size as usize
-        && ids
-            .last()
-            .is_some_and(|last| scan.upper_id.as_ref().is_some_and(|upper| last < upper));
+        && ids.last().is_some_and(|last| {
+            scan.collection_upper_id
+                .as_ref()
+                .is_some_and(|upper| last < upper)
+        });
     let plan = Plan {
-        revision: scan.revision,
-        after: scan.after_id.clone(),
-        upper: scan.upper_id.clone(),
+        revision: scan.collection_revision,
+        after: scan.collection_after_id.clone(),
+        upper: scan.collection_upper_id.clone(),
         observed_at,
         ids,
         more,

@@ -840,7 +840,7 @@ table has the `__zeroship_workflow_` prefix; none belongs in Control's schema.
 | Table suffix | Customer-owned content and target treatment |
 | --- | --- |
 | `schema_version` | Creator journal schema fingerprint, installed by creator-side provisioning. |
-| `app_state` | App serialization, journal counters and the highest ingress epoch a delivered Close fenced. Trusted admission policy remains outside customer SQL. |
+| `app_state` | App serialization, journal counters, the highest ingress epoch a delivered Close fenced, and the app's two paged sweeps. Trusted admission policy remains outside customer SQL. |
 | `deploys` | Locally accepted immutable app deployment and availability state. |
 | `deployment_holds` | Customer dependency intent and observed hold generation; not the platform hold ledger. |
 | `activations` | Immutable readiness per manager activation job, app revision and deployment; committed with the logical job receipt. |
@@ -861,9 +861,14 @@ table has the `__zeroship_workflow_` prefix; none belongs in Control's schema.
 | `outbox` | Customer events and their payloads; distinct from manager queue metadata. |
 | `job_publications` | Closed immutable Advance, Fanout or Propagate specifications, validated operation-specific projections and manager confirmation time. Pending Advance records retain deployment dependencies; publications survive history removal. |
 | `job_receipts` | Immutable logical job specification and committed semantic outcome, retained independently of run history and delivery attempts. App-wide reconciliation records a selected page and its durable attempt offset; its run identity is absent. |
-| `reconciliation_scans` | App-owned scan revision, publication/hold phase, ordering cursor and captured upper boundary. It schedules no work and grants no ingress authority. |
-| `collection_scans` | App-owned collection revision, expiry cutoff, ordering cursor and captured upper payload identity. |
 | `collection_pages` | Immutable bounded payload identity plan and reserved item offset, scoped to its logical job receipt. |
+
+The two app-wide sweeps are columns of `app_state` rather than tables of their
+own. `reconciliation_*` holds the scan revision, publication/hold phase,
+ordering cursor and captured upper boundary; `collection_*` holds the collection
+revision, expiry cutoff, ordering cursor and captured upper payload identity.
+Each is a per-app singleton read and compare-and-set under the lock the sweep
+already holds, and neither schedules work nor grants ingress authority.
 
 ### How a job kind extends its receipt
 
@@ -2379,8 +2384,8 @@ admission disabled permits cleanup. Missing, replaced or expired authority
 cannot authorize fresh deletion; an exact committed receipt remains readable
 without fresh authority or a configured object store.
 
-The creator journal owns `collection_scans` and immutable `collection_pages`,
-both under its `__zeroship_workflow_` table prefix. Each page has a scoped foreign
+The creator journal owns the `collection_*` columns of `app_state` and immutable
+`collection_pages`, both under its `__zeroship_workflow_` table prefix. Each page has a scoped foreign
 key to its job receipt and no run reference. The manager's `recovery_scopes`
 retains activation provenance; `recovery_duties` owns independent per-app/kind
 deadlines and pending jobs, with a sole typed `id` primary key and scoped uniqueness.

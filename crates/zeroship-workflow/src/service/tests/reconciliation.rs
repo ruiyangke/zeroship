@@ -118,7 +118,7 @@ async fn start(app: &AppWorkflows, count: usize) -> Vec<JobSpec> {
 
 async fn scans(service: &WorkflowService, app: &AppId) -> Vec<super::super::store::Row> {
     let tx = service.begin().await.unwrap();
-    let rows = journal_rows(&tx, "reconciliation_scans", json!({"id":app.as_str()})).await;
+    let rows = journal_rows(&tx, "app_state", json!({"app_id":app.as_str()})).await;
     tx.commit().await.unwrap();
     rows
 }
@@ -260,9 +260,15 @@ async fn assert_explicit_empty_phase_transitions(
     publisher: &Publisher,
 ) {
     let state = scans(service, scope.app_id()).await;
-    assert_eq!(state[0].integer("revision").unwrap(), 4);
-    assert!(state[0].optional_text("after_id").unwrap().is_none());
-    assert_eq!(state[0].text("phase").unwrap(), "deployment_holds");
+    assert_eq!(state[0].integer("reconciliation_revision").unwrap(), 4);
+    assert!(state[0]
+        .optional_text("reconciliation_after_id")
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        state[0].text("reconciliation_phase").unwrap(),
+        "deployment_holds"
+    );
     let empty = Grant::new(seed);
     assert_eq!(
         scope
@@ -274,13 +280,13 @@ async fn assert_explicit_empty_phase_transitions(
     );
     assert_eq!(
         scans(service, scope.app_id()).await[0]
-            .integer("revision")
+            .integer("reconciliation_revision")
             .unwrap(),
         5
     );
     assert_eq!(
         scans(service, scope.app_id()).await[0]
-            .text("phase")
+            .text("reconciliation_phase")
             .unwrap(),
         "publications"
     );
@@ -452,8 +458,13 @@ async fn policy(store: Rc<OrmStore>) {
 }
 
 async fn concurrency(store: Rc<OrmStore>) {
-    let (service, app, _, _deployments) = registered_service(store).await;
+    let (service, app, other, _deployments) = registered_service(store).await;
     let scope = service.fixture_app(app.clone());
+    let untouched: Vec<_> = scans(&service, &other)
+        .await
+        .into_iter()
+        .map(|row| row.0)
+        .collect();
     let jobs = start(&scope, 2).await;
     let mut publisher = Publisher::new(&app).await;
     let (entered, waiting) = flume::bounded(2);
@@ -478,9 +489,21 @@ async fn concurrency(store: Rc<OrmStore>) {
     );
     assert_eq!(a.unwrap().outcome, JobOutcome::Waiting {});
     assert_eq!(b.unwrap().outcome, JobOutcome::Waiting {});
+    // Both pages planned at the same revision; the compare-and-set lets exactly
+    // one advance land, and it reaches only the app it names.
     assert_eq!(
-        scans(&service, &app).await[0].integer("revision").unwrap(),
+        scans(&service, &app).await[0]
+            .integer("reconciliation_revision")
+            .unwrap(),
         2
+    );
+    assert_eq!(
+        scans(&service, &other)
+            .await
+            .into_iter()
+            .map(|row| row.0)
+            .collect::<Vec<_>>(),
+        untouched
     );
     publisher.barrier = None;
     assert_eq!(
@@ -579,8 +602,11 @@ async fn receipt_rollback(store: Rc<OrmStore>, fault: ReceiptFault) {
         .is_none());
     assert!(confirmed(&service, &app, &jobs[0].id).await);
     let state = scans(&service, &app).await;
-    assert_eq!(state[0].integer("revision").unwrap(), 1);
-    assert!(state[0].optional_text("after_id").unwrap().is_none());
+    assert_eq!(state[0].integer("reconciliation_revision").unwrap(), 1);
+    assert!(state[0]
+        .optional_text("reconciliation_after_id")
+        .unwrap()
+        .is_none());
     fault.set(false).await;
     let receipt = scope
         .reconcile_job(&grant.retry(), &publisher, options(1))
@@ -593,7 +619,9 @@ async fn receipt_rollback(store: Rc<OrmStore>, fault: ReceiptFault) {
         "retry resumes finalization without publishing again"
     );
     assert_eq!(
-        scans(&service, &app).await[0].integer("revision").unwrap(),
+        scans(&service, &app).await[0]
+            .integer("reconciliation_revision")
+            .unwrap(),
         2
     );
     assert_eq!(
@@ -608,10 +636,16 @@ async fn receipt_rollback(store: Rc<OrmStore>, fault: ReceiptFault) {
         .await
         .is_err());
     let unchanged = scans(&service, &app).await;
-    assert_eq!(unchanged[0].integer("revision").unwrap(), 2);
-    assert_eq!(unchanged[0].text("phase").unwrap(), "publications");
+    assert_eq!(unchanged[0].integer("reconciliation_revision").unwrap(), 2);
     assert_eq!(
-        unchanged[0].optional_text("after_id").unwrap().as_deref(),
+        unchanged[0].text("reconciliation_phase").unwrap(),
+        "publications"
+    );
+    assert_eq!(
+        unchanged[0]
+            .optional_text("reconciliation_after_id")
+            .unwrap()
+            .as_deref(),
         Some(jobs[0].id.as_str())
     );
     assert!(confirmed(&service, &app, &jobs[1].id).await);
@@ -625,9 +659,15 @@ async fn receipt_rollback(store: Rc<OrmStore>, fault: ReceiptFault) {
         JobOutcome::Waiting {}
     );
     let advanced = scans(&service, &app).await;
-    assert_eq!(advanced[0].integer("revision").unwrap(), 3);
-    assert_eq!(advanced[0].text("phase").unwrap(), "deployment_holds");
-    assert!(advanced[0].optional_text("after_id").unwrap().is_none());
+    assert_eq!(advanced[0].integer("reconciliation_revision").unwrap(), 3);
+    assert_eq!(
+        advanced[0].text("reconciliation_phase").unwrap(),
+        "deployment_holds"
+    );
+    assert!(advanced[0]
+        .optional_text("reconciliation_after_id")
+        .unwrap()
+        .is_none());
     assert_eq!(
         publisher.calls.borrow().len(),
         jobs.len(),

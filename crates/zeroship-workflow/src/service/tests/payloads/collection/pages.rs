@@ -48,13 +48,19 @@ pub(super) async fn pages(store: Rc<OrmStore>) {
     );
     assert_eq!(fixture.backend.calls(), old[..2]);
     let captured = fixture.scan().await;
-    assert_eq!(captured.after_id.as_deref(), Some(old[1].as_str()));
-    assert_eq!(captured.upper_id.as_deref(), Some(old[2].as_str()));
+    assert_eq!(
+        captured.collection_after_id.as_deref(),
+        Some(old[1].as_str())
+    );
+    assert_eq!(
+        captured.collection_upper_id.as_deref(),
+        Some(old[2].as_str())
+    );
     let late = fixture.stage().await;
     fixture.expire(&late).await;
     // The earlier observation owns eligibility even if the object becomes due later.
     fixture
-        .set_expiry(&future, captured.observed_at.unwrap() + 1)
+        .set_expiry(&future, captured.collection_observed_at.unwrap() + 1)
         .await;
     let reopened = fixture.reopen(true).await;
     let second = Grant::new(fixture.scope.app_id());
@@ -71,7 +77,11 @@ pub(super) async fn pages(store: Rc<OrmStore>) {
     assert!(fixture.exists(fixture.scope.app_id(), &late).await);
     assert!(fixture.exists(&fixture.other, &foreign.id).await);
     let closed = fixture.scan().await;
-    assert!(closed.after_id.is_none() && closed.upper_id.is_none() && closed.observed_at.is_none());
+    assert!(
+        closed.collection_after_id.is_none()
+            && closed.collection_upper_id.is_none()
+            && closed.collection_observed_at.is_none()
+    );
     fixture.expire(&future).await;
     assert_eq!(
         reopened
@@ -90,7 +100,10 @@ pub(super) async fn pages(store: Rc<OrmStore>) {
         .await
         .unwrap()
         .is_some());
-    assert_eq!(fixture.scan().await.revision, closed.revision + 1);
+    assert_eq!(
+        fixture.scan().await.collection_revision,
+        closed.collection_revision + 1
+    );
 }
 
 pub(super) async fn replay(store: Rc<OrmStore>) {
@@ -107,7 +120,7 @@ pub(super) async fn replay(store: Rc<OrmStore>) {
     let mut wrong_outcome = plan.clone();
     wrong_outcome["more"] = json!(true);
     let mut future_revision = plan;
-    future_revision["revision"] = json!(before.revision + 1);
+    future_revision["revision"] = json!(before.collection_revision + 1);
     for damaged in [
         unknown.to_string(),
         wrong_outcome.to_string(),
@@ -318,4 +331,49 @@ pub(super) async fn expired_replay(store: Rc<OrmStore>) {
     assert_eq!(fixture.payload(&id).await, payload);
     assert_eq!(fixture.scan().await, scan);
     assert_eq!(fixture.backend.calls(), [id]);
+}
+
+/// Two sweeps of one app that both planned at the same scan revision, settling
+/// in order. The compare-and-set lets exactly one of them advance the scan, so
+/// the later sweep cannot write its stale cursor over the earlier one's. It
+/// also reaches only the app it names: a second app in the same schema keeps
+/// the sweep state its own registration left.
+pub(super) async fn lost_update(store: Rc<OrmStore>) {
+    let fixture = Fixture::new(store).await;
+    let app = fixture.scope.app_id().clone();
+    let id = fixture.stage().await;
+    fixture.expire(&id).await;
+    let opening = fixture.scan().await.collection_revision;
+    let untouched = fixture.scan_for(&fixture.other).await;
+    let (first_entered, first_resume) = fixture.backend.gate(&id);
+    let (second_entered, second_resume) = fixture.backend.gate(&id);
+    let other_host = fixture.reopen(true).await;
+    let (finished, first_done) = flume::bounded(1);
+    let first = async {
+        let receipt = fixture
+            .scope
+            .collect_job(&Grant::new(&app), options(1))
+            .await;
+        finished.send_async(()).await.unwrap();
+        receipt
+    };
+    // Plans while the first sweep is held in its object delete, so both pages
+    // carry the revision the first sweep read.
+    let second = async {
+        first_entered.recv_async().await.unwrap();
+        other_host.collect_job(&Grant::new(&app), options(1)).await
+    };
+    let order = async {
+        second_entered.recv_async().await.unwrap();
+        first_resume.send_async(()).await.unwrap();
+        first_done.recv_async().await.unwrap();
+        second_resume.send_async(()).await.unwrap();
+    };
+    let (first, second, ()) = futures::join!(first, second, order);
+    assert_eq!(first.unwrap().outcome, JobOutcome::Completed {});
+    assert_eq!(second.unwrap().outcome, JobOutcome::Completed {});
+    let settled = fixture.scan().await;
+    assert_eq!(settled.collection_revision, opening + 1);
+    assert!(settled.collection_after_id.is_none() && settled.collection_upper_id.is_none());
+    assert_eq!(fixture.scan_for(&fixture.other).await, untouched);
 }

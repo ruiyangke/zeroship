@@ -9,6 +9,10 @@ import { dialect, table, t } from "../../../packages/zero-migrate/dist/index.js"
 // in a cursor or range scan, not by being text, and it is NOT closed over the
 // foreign keys that reference it.
 const bytewiseColumns = {
+  app_state: [
+    "collection_after_id", "collection_upper_id",
+    "reconciliation_after_id", "reconciliation_upper_id",
+  ],
   job_publications: ["id", "app_id", "run_id", "deploy_id", "broadcast_id"],
   fanout_pages: ["id", "app_id", "broadcast_id"],
   propagation_pages: ["id", "app_id"],
@@ -17,14 +21,12 @@ const bytewiseColumns = {
   deployment_holds: ["deploy_id"],
   job_receipts: ["id", "app_id", "run_id"],
   collection_pages: ["id", "app_id"],
-  collection_scans: ["id", "after_id", "upper_id"],
   payloads: ["id", "app_id"],
   activations: ["id", "app_id", "deploy_id"],
   activation_scopes: ["id", "activation_id"],
   management_receipts: ["id", "app_id", "run_id", "request_id"],
   schedules: ["id", "app_id", "name"],
   occurrences: ["id", "app_id", "schedule_id", "job_id", "run_id"],
-  reconciliation_scans: ["id", "after_id", "upper_id"],
   tasks: ["job_id"],
 };
 
@@ -94,12 +96,25 @@ export function workflowSchema(namespace) {
   // closed_epoch is the highest manager ingress epoch a delivered Close fenced.
   // Ingress acceptance requires its captured epoch to exceed it under this
   // row's lock; it never moves backwards.
+  //
+  // The collection_* and reconciliation_* columns are this app's two paged
+  // sweeps. Each is a per-app singleton read and compare-and-set under the same
+  // lock the sweep already takes, so it is a column of the locked row rather
+  // than a satellite table keyed by the app id. Their defaults are the state a
+  // sweep starts from, so registering the app is the only write that creates
+  // one.
   create("app_state", {
     ...identity(), signal_epoch: integer().default(0),
     last_polled_at: integer().default(0),
     subscription_sequence: integer().default(0),
     signal_sequence: integer().default(0),
     closed_epoch: integer().default(0),
+    collection_revision: integer().default(1),
+    collection_after_id: t.text(), collection_upper_id: t.text(),
+    collection_observed_at: t.bigInt(),
+    reconciliation_revision: integer().default(1),
+    reconciliation_phase: text().default("publications"),
+    reconciliation_after_id: t.text(), reconciliation_upper_id: t.text(),
   }, ["app_id"]);
   create("deploys", {
     ...identity(), id: text(), hash: text(), manifest: text(), created_at: integer(),
@@ -190,9 +205,6 @@ export function workflowSchema(namespace) {
     appFk("collection_pages"),
     fk("collection_page_receipt", ["app_id", "id"], "job_receipts", ["app_id", "id"]),
   ]);
-  create("collection_scans", {
-    revision: integer(), after_id: t.text(), upper_id: t.text(), observed_at: t.bigInt(),
-  }, ["id"], [fk("collection_scan_app", ["id"], "app_state", ["app_id"])]);
   create("activations", {
     ...identity(), deploy_id: text(), revision: integer(),
   }, ["app_id", "revision"], [
@@ -333,9 +345,6 @@ export function workflowSchema(namespace) {
     fk("propagation_page_publication", ["app_id", "id"], "job_publications", ["app_id", "id"]),
     fk("propagation_page_obligation", ["app_id", "propagation_id"], "propagations", ["app_id", "id"]),
   ], [{ name: "propagation_page_revision", columns: ["app_id", "propagation_id", "revision"] }]);
-  create("reconciliation_scans", {
-    revision: integer(), phase: text(), after_id: t.text(), upper_id: t.text(),
-  }, ["id"], [fk("reconciliation_scan_app", ["id"], "app_state", ["app_id"])]);
   // A map entry naming a table this schema does not create would pin nothing and
   // say so nowhere, so the unconsumed keys are an error rather than a no-op.
   if (bytewisePending.size) {
