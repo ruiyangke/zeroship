@@ -855,8 +855,7 @@ table has the `__zeroship_workflow_` prefix; none belongs in Control's schema.
 | `propagations` | Dependency propagation obligations: kind, source run and generation, cursor, next page revision and finished state. An unfinished cascade obligation fences its source generation's cascading children. |
 | `propagation_pages` | Exact delivered propagation page, cursor transition, closed result and successor specifications linked to the retained job receipt and publication. |
 | `requests` | Durable app-operation request identity, body digest and original result. Age alone cannot retire an accepted request. |
-| `management_receipts` | Exact delivered job identity, requested run, management revision and durable lifecycle outcome, independently scoped from app requests. |
-| `management_scopes` | Last applied management revision per app/requested run, linked to retained command history without requiring that the run exists. |
+| `management_receipts` | Exact delivered job identity, requested run, management revision and durable lifecycle outcome, independently scoped from app requests. Its app/run/revision uniqueness carries the run's applied revision as the highest it holds, so the ordering fence reads the history itself. |
 | `schedules`, `occurrences` | Existing customer schedule definitions and accepted occurrences. Calendar discovery moves to the manager; customer acceptance, overlap state and input references remain customer-side. |
 | `payloads`, `payload_refs` | Prepared upload metadata, ownership, integrity and committed references. |
 | `outbox` | Customer events and their payloads; distinct from manager queue metadata. |
@@ -865,6 +864,30 @@ table has the `__zeroship_workflow_` prefix; none belongs in Control's schema.
 | `reconciliation_scans` | App-owned scan revision, publication/hold phase, ordering cursor and captured upper boundary. It schedules no work and grants no ingress authority. |
 | `collection_scans` | App-owned collection revision, expiry cutoff, ordering cursor and captured upper payload identity. |
 | `collection_pages` | Immutable bounded payload identity plan and reserved item offset, scoped to its logical job receipt. |
+
+### How a job kind extends its receipt
+
+A column lives on `job_receipts` if and only if code that has not yet determined
+the job's kind reads it. All kind-specific state lives in that kind's own table,
+keyed `id` (the job id), with `(app_id, id)` unique and a foreign key to
+`job_receipts(app_id, id)`. A kind with no extension state gets no table; that is
+the rule returning zero columns rather than an exception to it.
+
+The rule exists because the alternative cannot be adopted. Folding kind state
+inline would make `fanout_pages` and `propagation_pages` part of `job_receipts`,
+and both carry a foreign key into `job_publications` on columns that are never
+null, so the constraint could not be skipped for the kinds that are never
+published. Inlining would have to delete two foreign keys that both dialects
+enforce today, replacing a write-time refusal with a read-time validator on a
+journal that creator code can reach.
+
+`job_receipts.reconciliation` and `reconciliation_next` are the one violation
+still present. They are the reason `delivery.rs` carries a validator that matches
+every job operation solely to assert which columns are null, and they duplicate
+the shape `collection_pages` already stores. They move to a side table.
+`job_publications` carries the same violation for its own three operations and is
+converted with them, so that the journal's two job tables answer this question
+the same way.
 
 Publication intents now use dedicated journal records. The scoped unique index
 binds run, generation, frontier revision and due time; `id` remains the sole
@@ -1955,13 +1978,13 @@ and uses unique indexes for scoped domain identities.
 | Manager `management` | Job identity as `id`, with scoped job linkage. Original request and actor remain separate from the resolved job command. Required run identity and management revision, unique app/request and app/run/revision, derived `blocks_execution` and closed outcome. Queue settlement owns acknowledgement; separate run-state and inbox-ACK fields are removed. |
 | Manager `management_scopes` | Opaque typed `id`, unique app/run identity, accepted revision and settled revision. It has no creator-run foreign key. |
 | Manager `jobs` | Native operation-kind, optional run identity and optional management request identity. Validate these projections against the immutable specification and digest. Unique app/management-request supplies an independent replay anchor; the linked command supplies management revision. |
-| Creator `management_receipts` | Job identity linked to the exact job receipt, app/request uniqueness, required requested-run identity and management revision, unique app/run/revision. Retains the resolved identity digest and closed outcome. Requested-run identity has no run foreign key, so `NotFound` needs no invented run. |
-| Creator `management_scopes` | Opaque typed `id`, unique app/requested-run identity and the last applied management revision, linked to retained command history. It survives run and execution-history retention. |
+| Creator `management_receipts` | Job identity linked to the exact job receipt, app/request uniqueness, required requested-run identity and management revision, unique app/run/revision. Retains the resolved identity digest and closed outcome. Requested-run identity has no run foreign key, so `NotFound` needs no invented run. The app/run/revision unique index also orders the applied-revision lookup, so the highest revision it holds is the fence a creator run applies against. |
 
 Creator application advances its management revision for both applied commands
 and durable lifecycle refusals. Gaps, substituted identities and unknown older
 commands cannot advance it. Completed job replay must find matching management
-history, while allowing the scope to have advanced since that receipt. Missing
+history, while allowing the applied revision to have advanced since that
+receipt. Missing
 history is corruption, never permission to reapply a lifecycle change.
 
 Pause/cancel/restart can provisionally block conflicting execution jobs. Management

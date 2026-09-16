@@ -7,6 +7,12 @@
 //! this unchanged, which is the test of whether the boundary is real: if adding
 //! one required a line here, the boundary would be decoration.
 //!
+//! It does establish the IDENTITIES a schema needs around the install - the
+//! migrator role before it and the per-app runtime role after it - because
+//! those are this SERVICE's capability and every one of their names derives
+//! from the target schema, never from an app. [`apply_schema_bundle`] carries
+//! why the runtime role cannot be provisioned any earlier.
+//!
 //! # Why the bundle carries SQL rather than recorded operations
 //!
 //! Because the engine cannot represent these names. A platform-owned schema
@@ -42,8 +48,9 @@ use zeroship_core::schema_name::SchemaName;
 use zeroship_migrate_backend::guard::{GuardConfig, MigrationGuard};
 use zeroship_migrate_postgres::{PgGuard, DIALECT as POSTGRES};
 
+use crate::apply::{provision_runtime_app_role, ProvisionRuntimeRoleError};
 use crate::policy::{bundle_policy_for_schema, ManagedPolicyError};
-use crate::provisioning::{provision_database, ProvisionDatabaseError};
+use crate::provisioning::{migrator_executor_config, provision_database, ProvisionDatabaseError};
 use crate::session::CompioPgSession;
 
 /// The one dialect this host applies. The engine is multi-dialect; this service
@@ -85,6 +92,10 @@ pub enum BundleError {
     /// Provisioning the schema or its migrator role failed.
     #[error(transparent)]
     Provision(#[from] ProvisionDatabaseError),
+    /// The per-app runtime role the worker opens the schema under could not be
+    /// provisioned after the bundle installed.
+    #[error(transparent)]
+    RuntimeRole(#[from] ProvisionRuntimeRoleError),
     /// The database refused a statement, or was unreachable.
     #[error("schema bundle database error: {0}")]
     Database(#[from] compio_postgres::Error),
@@ -104,7 +115,10 @@ impl BundleError {
             Self::Guarded { .. } => (StatusCode::UNPROCESSABLE_ENTITY, "bundle_refused"),
             Self::Corrupt { .. } => (StatusCode::CONFLICT, "schema_corrupt"),
             Self::Behind { .. } => (StatusCode::CONFLICT, "bundle_behind"),
-            Self::Policy(_) | Self::Provision(_) | Self::Database(_) => (
+            Self::Policy(_)
+            | Self::Provision(_)
+            | Self::RuntimeRole(_)
+            | Self::Database(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "schema_bundle_infrastructure",
             ),
@@ -140,7 +154,24 @@ pub async fn apply_schema_bundle(
     // capability, not the bundle's domain, and both steps are idempotent. A
     // bundle therefore never has to be sequenced behind a separate create call.
     provision_database(session.client(), schema.as_str()).await?;
-    apply_within_transaction(session.client_mut(), bundle, &schema, &guard).await
+    let (_, migrator) = migrator_executor_config(schema.as_str())
+        .map_err(|error| BundleError::Provision(error.into()))?;
+    let outcome = apply_within_transaction(session.client_mut(), bundle, &schema, &guard).await?;
+    // AFTER the install, never before it, and that ordering is the whole of this
+    // step. The runtime role's grant set is `GRANT ... ON ALL TABLES IN SCHEMA`,
+    // which is a SNAPSHOT of the tables that exist when it runs, and
+    // `apply_within_transaction` executes the bundle's DDL on THIS admin session
+    // with no `SET ROLE`, so the tables it creates are owned by the admin
+    // principal and the migrator's `ALTER DEFAULT PRIVILEGES` does not reach
+    // them. Provisioning inside `provision_database` would therefore create a
+    // role that can open the schema and read nothing in it.
+    //
+    // The role is derived from the SCHEMA, so this path needs no app identity.
+    // A bundle targeting a schema that is not a creator tenant would get an
+    // unused `app_<schema>_role`: `SchemaBundle` carries no tenant flag, and
+    // that cost is accepted rather than designed around.
+    provision_runtime_app_role(session.client(), &schema, &migrator).await?;
+    Ok(outcome)
 }
 
 /// Compose the bundle's declared policy against this service's ceiling and build

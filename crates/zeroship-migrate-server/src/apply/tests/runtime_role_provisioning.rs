@@ -104,7 +104,7 @@ async fn repeated_runtime_provisioning_preserves_creator_migration_authority() {
         .unwrap();
     for round in 0..3 {
         assert_owner(&fixture.admin, &schema, &role).await;
-        provision_runtime_app_role(&fixture.admin, &app, &schema, &role)
+        provision_runtime_app_role(&fixture.admin, &schema, &role)
             .await
             .unwrap();
         assert_owner(&fixture.admin, &schema, &role).await;

@@ -244,6 +244,7 @@ export type {
   // sensitive-data column facets (#173/#174/#178)
   MaskKind,
   Classification,
+  ColumnCollation,
   VectorMetric,
   ValueFormat,
   PerRowGenerator,
