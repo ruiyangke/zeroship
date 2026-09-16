@@ -76,23 +76,11 @@ pub(super) async fn receipt(
     else {
         return Err(invalid());
     };
-    let record = delivery::read(tx, job).await?;
-    let page = tx
-        .database()
-        .entity::<models::propagation_pages::Entity>()?
-        .find::<Page>(
-            models::propagation_pages::id
-                .eq(job.id.as_str())?
-                .and(models::propagation_pages::app_id.eq(job.app_id.as_str())?),
-            one(),
-        )
-        .await?
-        .into_iter()
-        .next();
-    let (record, page) = match (record, page) {
-        (None, None) => return Ok(None),
-        (Some(record), Some(page)) => (record, page),
-        _ => return Err(invalid()),
+    let Some((record, page)) =
+        delivery::read_extended::<models::propagation_pages::Entity, Page>(tx, job, invalid)
+            .await?
+    else {
+        return Ok(None);
     };
     publication::exact(tx, job).await?;
     if page.id != job.id.as_str()

@@ -73,7 +73,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_steps_scope_key" ON "__ze
 
 ALTER TABLE "__zeroship_workflow_schema"."__zeroship_workflow_steps" ADD CONSTRAINT "__zeroship_workflow_step_child_linkage" CHECK (((("kind" = 'child') AND ("child_member_id" IS NOT NULL)) OR ((("kind" <> 'child') AND ("child_member_id" IS NULL)) AND ("child_result_member_id" IS NULL))));
 
-CREATE TABLE "__zeroship_workflow_schema"."__zeroship_workflow_job_receipts" ("id" text COLLATE "C" PRIMARY KEY NOT NULL, "app_id" text COLLATE "C" NOT NULL, "run_id" text COLLATE "C", "specification" text NOT NULL, "outcome" text, "reconciliation" text, "reconciliation_next" bigint, "created_at" bigint NOT NULL, "completed_at" bigint, CONSTRAINT "__zeroship_workflow_job_receipts_app" FOREIGN KEY ("app_id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_app_state" ("app_id") ON DELETE RESTRICT);
+CREATE TABLE "__zeroship_workflow_schema"."__zeroship_workflow_job_receipts" ("id" text COLLATE "C" PRIMARY KEY NOT NULL, "app_id" text COLLATE "C" NOT NULL, "run_id" text COLLATE "C", "specification" text NOT NULL, "outcome" text, "created_at" bigint NOT NULL, "completed_at" bigint, CONSTRAINT "__zeroship_workflow_job_receipts_app" FOREIGN KEY ("app_id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_app_state" ("app_id") ON DELETE RESTRICT);
 
 CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_job_receipts_scope_key" ON "__zeroship_workflow_schema"."__zeroship_workflow_job_receipts" ("app_id", "id");
 
@@ -82,6 +82,10 @@ CREATE INDEX IF NOT EXISTS "__zeroship_workflow_job_receipts_run_idx" ON "__zero
 CREATE TABLE "__zeroship_workflow_schema"."__zeroship_workflow_collection_pages" ("id" text COLLATE "C" PRIMARY KEY NOT NULL, "app_id" text COLLATE "C" NOT NULL, "plan" text NOT NULL, "next_index" bigint NOT NULL, CONSTRAINT "__zeroship_workflow_collection_page_receipt" FOREIGN KEY ("app_id", "id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_job_receipts" ("app_id", id) ON DELETE RESTRICT, CONSTRAINT "__zeroship_workflow_collection_pages_app" FOREIGN KEY ("app_id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_app_state" ("app_id") ON DELETE RESTRICT);
 
 CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_collection_pages_scope_key" ON "__zeroship_workflow_schema"."__zeroship_workflow_collection_pages" ("app_id", "id");
+
+CREATE TABLE "__zeroship_workflow_schema"."__zeroship_workflow_reconciliation_pages" ("id" text COLLATE "C" PRIMARY KEY NOT NULL, "app_id" text COLLATE "C" NOT NULL, "plan" text NOT NULL, "next_index" bigint NOT NULL, CONSTRAINT "__zeroship_workflow_reconciliation_page_receipt" FOREIGN KEY ("app_id", "id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_job_receipts" ("app_id", id) ON DELETE RESTRICT, CONSTRAINT "__zeroship_workflow_reconciliation_pages_app" FOREIGN KEY ("app_id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_app_state" ("app_id") ON DELETE RESTRICT);
+
+CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_reconciliation_pages_scope_key" ON "__zeroship_workflow_schema"."__zeroship_workflow_reconciliation_pages" ("app_id", "id");
 
 CREATE TABLE "__zeroship_workflow_schema"."__zeroship_workflow_activations" ("id" text COLLATE "C" PRIMARY KEY NOT NULL, "app_id" text COLLATE "C" NOT NULL, "deploy_id" text COLLATE "C" NOT NULL, "revision" bigint NOT NULL, CONSTRAINT "__zeroship_workflow_activation_deploy" FOREIGN KEY ("app_id", "deploy_id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_deploys" ("app_id", id) ON DELETE RESTRICT, CONSTRAINT "__zeroship_workflow_activation_receipt" FOREIGN KEY ("app_id", "id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_job_receipts" ("app_id", id) ON DELETE RESTRICT);
 
@@ -189,19 +193,31 @@ CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_outbox_scope_key" ON "__z
 
 CREATE INDEX IF NOT EXISTS "__zeroship_workflow_outbox_delivery_idx" ON "__zeroship_workflow_schema"."__zeroship_workflow_outbox" ("delivered_at", "created_at");
 
-CREATE TABLE "__zeroship_workflow_schema"."__zeroship_workflow_job_publications" ("id" text COLLATE "C" PRIMARY KEY NOT NULL, "app_id" text COLLATE "C" NOT NULL, "run_id" text COLLATE "C", "deploy_id" text COLLATE "C", "generation" bigint, "frontier_revision" bigint, "broadcast_id" text COLLATE "C", "broadcast_revision" bigint, "propagation_id" text, "propagation_revision" bigint, "available_at" bigint NOT NULL, "specification" text NOT NULL, "created_at" bigint NOT NULL, "confirmed_at" bigint, CONSTRAINT "__zeroship_workflow_job_publications_app" FOREIGN KEY ("app_id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_app_state" ("app_id") ON DELETE RESTRICT);
-
-CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_job_publication_fanout" ON "__zeroship_workflow_schema"."__zeroship_workflow_job_publications" ("app_id", "broadcast_id", "broadcast_revision");
-
-CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_job_publication_frontier" ON "__zeroship_workflow_schema"."__zeroship_workflow_job_publications" ("app_id", "run_id", "generation", "frontier_revision", "available_at");
-
-CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_job_publication_propagation" ON "__zeroship_workflow_schema"."__zeroship_workflow_job_publications" ("app_id", "propagation_id", "propagation_revision");
+CREATE TABLE "__zeroship_workflow_schema"."__zeroship_workflow_job_publications" ("id" text COLLATE "C" PRIMARY KEY NOT NULL, "app_id" text COLLATE "C" NOT NULL, "specification" text NOT NULL, "created_at" bigint NOT NULL, "confirmed_at" bigint, CONSTRAINT "__zeroship_workflow_job_publications_app" FOREIGN KEY ("app_id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_app_state" ("app_id") ON DELETE RESTRICT);
 
 CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_job_publications_scope_key" ON "__zeroship_workflow_schema"."__zeroship_workflow_job_publications" ("app_id", "id");
 
 CREATE INDEX IF NOT EXISTS "__zeroship_workflow_job_publications_pending_idx" ON "__zeroship_workflow_schema"."__zeroship_workflow_job_publications" ("app_id", "confirmed_at", "id");
 
-CREATE INDEX IF NOT EXISTS "__zeroship_workflow_job_publications_deployment_idx" ON "__zeroship_workflow_schema"."__zeroship_workflow_job_publications" ("app_id", "deploy_id", "confirmed_at");
+CREATE TABLE "__zeroship_workflow_schema"."__zeroship_workflow_advance_publications" ("id" text COLLATE "C" PRIMARY KEY NOT NULL, "app_id" text COLLATE "C" NOT NULL, "deploy_id" text COLLATE "C" NOT NULL, "run_id" text COLLATE "C" NOT NULL, "generation" bigint NOT NULL, "frontier_revision" bigint NOT NULL, "available_at" bigint NOT NULL, CONSTRAINT "__zeroship_workflow_advance_publication_intent" FOREIGN KEY ("app_id", "id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_job_publications" ("app_id", id) ON DELETE RESTRICT, CONSTRAINT "__zeroship_workflow_advance_publications_app" FOREIGN KEY ("app_id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_app_state" ("app_id") ON DELETE RESTRICT);
+
+CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_advance_publication_frontier" ON "__zeroship_workflow_schema"."__zeroship_workflow_advance_publications" ("app_id", "run_id", "generation", "frontier_revision", "available_at");
+
+CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_advance_publications_scope_key" ON "__zeroship_workflow_schema"."__zeroship_workflow_advance_publications" ("app_id", "id");
+
+CREATE INDEX IF NOT EXISTS "__zeroship_workflow_advance_publications_deployment_idx" ON "__zeroship_workflow_schema"."__zeroship_workflow_advance_publications" ("app_id", "deploy_id");
+
+CREATE TABLE "__zeroship_workflow_schema"."__zeroship_workflow_fanout_publications" ("id" text COLLATE "C" PRIMARY KEY NOT NULL, "app_id" text COLLATE "C" NOT NULL, "broadcast_id" text COLLATE "C" NOT NULL, "revision" bigint NOT NULL, CONSTRAINT "__zeroship_workflow_fanout_publication_intent" FOREIGN KEY ("app_id", "id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_job_publications" ("app_id", id) ON DELETE RESTRICT, CONSTRAINT "__zeroship_workflow_fanout_publications_app" FOREIGN KEY ("app_id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_app_state" ("app_id") ON DELETE RESTRICT);
+
+CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_fanout_publication_broadcast" ON "__zeroship_workflow_schema"."__zeroship_workflow_fanout_publications" ("app_id", "broadcast_id", "revision");
+
+CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_fanout_publications_scope_key" ON "__zeroship_workflow_schema"."__zeroship_workflow_fanout_publications" ("app_id", "id");
+
+CREATE TABLE "__zeroship_workflow_schema"."__zeroship_workflow_propagation_publications" ("id" text COLLATE "C" PRIMARY KEY NOT NULL, "app_id" text COLLATE "C" NOT NULL, "propagation_id" text NOT NULL, "revision" bigint NOT NULL, CONSTRAINT "__zeroship_workflow_propagation_publication_intent" FOREIGN KEY ("app_id", "id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_job_publications" ("app_id", id) ON DELETE RESTRICT, CONSTRAINT "__zeroship_workflow_propagation_publications_app" FOREIGN KEY ("app_id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_app_state" ("app_id") ON DELETE RESTRICT);
+
+CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_propagation_publication_obligation" ON "__zeroship_workflow_schema"."__zeroship_workflow_propagation_publications" ("app_id", "propagation_id", "revision");
+
+CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_propagation_publications_scope_key" ON "__zeroship_workflow_schema"."__zeroship_workflow_propagation_publications" ("app_id", "id");
 
 CREATE TABLE "__zeroship_workflow_schema"."__zeroship_workflow_fanout_pages" ("id" text COLLATE "C" PRIMARY KEY NOT NULL, "app_id" text COLLATE "C" NOT NULL, "broadcast_id" text COLLATE "C" NOT NULL, "revision" bigint NOT NULL, "result" text NOT NULL, CONSTRAINT "__zeroship_workflow_fanout_page_broadcast" FOREIGN KEY ("app_id", "broadcast_id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_broadcasts" ("app_id", id) ON DELETE RESTRICT, CONSTRAINT "__zeroship_workflow_fanout_page_publication" FOREIGN KEY ("app_id", "id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_job_publications" ("app_id", id) ON DELETE RESTRICT, CONSTRAINT "__zeroship_workflow_fanout_page_receipt" FOREIGN KEY ("app_id", "id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_job_receipts" ("app_id", id) ON DELETE RESTRICT);
 
@@ -220,4 +236,4 @@ CREATE TABLE "__zeroship_workflow_schema"."__zeroship_workflow_propagation_pages
 CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_propagation_page_revision" ON "__zeroship_workflow_schema"."__zeroship_workflow_propagation_pages" ("app_id", "propagation_id", "revision");
 
 CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_propagation_pages_scope_key" ON "__zeroship_workflow_schema"."__zeroship_workflow_propagation_pages" ("app_id", "id");
-INSERT INTO "__zeroship_workflow_schema".__zeroship_workflow_schema_version (id, version, fingerprint) VALUES ('workflow', 1, '7f81fff2615a5959486c162ad8fc0d6b9cf95a71d55e4eb7fca8b6c858c32113');
+INSERT INTO "__zeroship_workflow_schema".__zeroship_workflow_schema_version (id, version, fingerprint) VALUES ('workflow', 1, '54a26e1b42031f387adde9aa9ab0b661826980e5136d37bafb7e1de5e7f12b17');

@@ -890,6 +890,9 @@ async fn ingress_state(
         "requests",
         "outbox",
         "job_publications",
+        "advance_publications",
+        "fanout_publications",
+        "propagation_publications",
     ] {
         snapshot.push(
             journal_rows(&tx, table, json!({"app_id":app.as_str()}))
