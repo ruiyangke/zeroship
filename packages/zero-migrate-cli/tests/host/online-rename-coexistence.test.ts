@@ -1,8 +1,8 @@
-// The security model's coexistence guarantees for a PostgreSQL online rename,
+// The coexistence guarantees for a PostgreSQL online rename,
 // measured against a live server.
 //
-// `docs/security-model.md` makes four precise promises about the window between
-// starting a rename and resolving it. They are the promises an application relies on
+// Four precise promises govern the window between starting a rename and
+// resolving it. They are the promises an application relies on
 // while it moves from the old column name to the new one, and getting any of them
 // wrong diverges data silently rather than failing:
 //
@@ -15,8 +15,8 @@
 // table are blocked until an approved apply or abort resolution succeeds. This
 // prevents a later schema change from racing an unresolved application transition."
 //
-// None of this was covered. `pg_scenarios.rs` exercises backfills and the rename
-// machinery, but nothing anywhere wrote through BOTH names in one statement - the
+// `pg_scenarios.rs` exercises backfills and the rename machinery; this suite
+// writes through BOTH names in one statement - the
 // case where the promise is a tie-break rather than a copy, and the only one where a
 // wrong answer picks the wrong data.
 //
@@ -189,10 +189,10 @@ test("during an online rename both names stay aligned, and the destination wins 
 
 // What the destination column does NOT inherit, and what still binds anyway.
 //
-// `docs/node-api.md`: "The rename does not transfer `NOT NULL`, defaults, unique
-// or primary-key rules, indexes, comments, or dependent objects."
+// The rename does not transfer `NOT NULL`, defaults, unique
+// or primary-key rules, indexes, comments, or dependent objects.
 //
-// Measured, that is exactly right - the destination comes out nullable, with no
+// That is exactly right - the destination comes out nullable, with no
 // default, no unique constraint, no index and no comment. But an operator reading
 // only that sentence draws the wrong conclusion, because it describes the COLUMN
 // and not the WRITES. The dual-write trigger copies every write to the source, so

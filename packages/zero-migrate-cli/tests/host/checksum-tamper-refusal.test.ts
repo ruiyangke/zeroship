@@ -1,7 +1,7 @@
 // Editing a migration that has already been applied, measured against a live server.
 //
-// `docs/security-model.md` states it as a guarantee of apply: "a reused identity
-// with a different checksum fails". That is the tamper property. It is what stops
+// Apply guarantees that a reused identity with a different checksum fails.
+// That is the tamper property. It is what stops
 // an edited migration from being replayed against a database that already ran the
 // original, whether the edit came from a bad rebase, a hand-fix on a hotfix
 // branch, or someone changing history deliberately.
@@ -29,11 +29,11 @@
 //
 // BOTH DIALECTS, because the checksum being dialect-neutral does not make the
 // REFUSAL dialect-neutral: the comparison runs through each backend's journal
-// read, and F596 is a standing reminder that MySQL's leaf can differ from
-// PostgreSQL's in ways the shared code does not reveal.
+// read, and MySQL's leaf can differ from PostgreSQL's in ways the shared code
+// does not reveal.
 //
 // The third test pins the neutrality itself. `e2e-pg` pins "the same artifact
-// folds the same anchor" WITHIN PostgreSQL; nothing pinned that PostgreSQL and
+// folds the same anchor" WITHIN PostgreSQL; this arm pins that PostgreSQL and
 // MySQL agree, which is what makes one checksum column meaningful across a fleet
 // running both. It compares the two servers' recorded checksums to EACH OTHER
 // rather than to a literal, so a legitimate IR change moves both and the test
@@ -66,7 +66,7 @@ const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
 const OWNER_APP = "app_tamper";
 /** The identity. It is the FILENAME that fixes the version, so writing a different
  *  body to this same path is precisely "a reused identity with a different
- *  checksum" - the case the security model says must fail. */
+ *  checksum" - the case apply must refuse. */
 const MIGRATION_FILE = "20260101000000_create_things.ts";
 
 function uniqueNamespace(prefix: string): string {
@@ -351,10 +351,10 @@ test("MySQL refuses an edited already-applied migration, and lands nothing", asy
 });
 
 // This arm compares the two servers to EACH OTHER, so it needs both DSNs and a
-// missing one leaves it nothing to compare. It used to `ctx.skip` for that, which
-// is the shape its two siblings above already refused: a skip and a pass print
-// the same exit code, so a machine with only PostgreSQL configured reported the
-// cross-dialect agreement as established when it had never been asked.
+// missing one leaves it nothing to compare. It must fail rather than skip in
+// that case: a skip and a pass print the same exit code, so a machine with only
+// PostgreSQL configured would report the cross-dialect agreement as established
+// when it had never been asked.
 test("the recorded checksum is the same on both servers", async () => {
   requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
