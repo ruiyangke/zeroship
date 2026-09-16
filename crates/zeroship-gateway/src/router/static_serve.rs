@@ -318,7 +318,7 @@ async fn serve_static_streaming(
         Some(RangeSpec::Unsatisfiable) => return build_range_not_satisfiable(chosen.size, etag),
         Some(RangeSpec::Single(start, end)) => {
             let length = end - start + 1;
-            // Stream-delivered egress metering (finding #2): bill bytes the
+            // Stream-delivered egress metering: bill bytes the
             // drain actually writes to the socket, not the intended `length`.
             let rx = chunk_stream_from_path_range(
                 path,
@@ -351,7 +351,7 @@ async fn serve_static_streaming(
         _ => {}
     }
 
-    // Stream-delivered egress metering (finding #2): the drain bills bytes
+    // Stream-delivered egress metering: the drain bills bytes
     // actually written to the client; a disconnect mid-download bills only
     // what was delivered, not the full asset size.
     let rx = chunk_stream_from_path(
@@ -399,7 +399,7 @@ fn apply_variant_headers(resp: &mut ntex::web::HttpResponseBuilder, chosen: &Cho
 ///
 /// Dispatches on `hit.size`:
 ///
-/// * Below `STREAM_THRESHOLD_BYTES`: the legacy buffered path —
+/// * Below `STREAM_THRESHOLD_BYTES`: the buffered path —
 ///   mem LRU → disk LRU (mmap) → backend, then write the full body
 ///   in one go. `Bytes` is `Arc`-refcounted so concurrent requests
 ///   for the same hash share the buffer.
@@ -411,7 +411,7 @@ fn apply_variant_headers(resp: &mut ntex::web::HttpResponseBuilder, chosen: &Cho
 ///   bother. The kernel page cache is the warm path here, just as
 ///   it is for the mmap-buffered path.
 ///
-/// Tier 4a additions (HTTP completeness):
+/// HTTP completeness:
 ///
 /// * `If-None-Match` → 304 short-circuit BEFORE any blob fetch. Saves
 ///   the byte transfer entirely on warm-cache clients.
@@ -946,8 +946,7 @@ mod tests {
         }
     }
 
-    /// REGRESSION (remote panic on a hostile manifest): `AssetEntry.size` is
-    /// copied verbatim out of the creator's manifest
+    /// `AssetEntry.size` is copied verbatim out of the creator's manifest
     /// (`lookup_static_hit`, `size: entry.size`) and is validated NOWHERE —
     /// not by `Manifest::validate`, not by deploy ingest. `parse_range`
     /// clamps the requested range to that DECLARED size, and
@@ -1079,9 +1078,8 @@ mod tests {
 
     /// Build a `GateState` with a swappable blob store. Pulled out so
     /// the `serve_static_*` tests aren't constructing it inline. The
-    /// 8 MiB mem-cache budget is generous enough that the buffered
-    /// path's insert won't no-op for the test payloads we care about
-    /// (the production default is 256 MiB).
+    /// mem-cache budget is generous enough that the buffered path's
+    /// insert won't no-op for the test payloads we care about.
     fn make_state(
         store: Arc<dyn zeroship_bundle::BlobStore>,
         disk: crate::blob_cache::DiskBlobCache,
@@ -1309,15 +1307,10 @@ mod tests {
         (body, got)
     }
 
-    /// FINDING #2 (RED→GREEN): a streamed static asset whose client DISCONNECTS
-    /// after part of the body bills ~the delivered bytes, NOT the full asset
-    /// size. The drain meters delivered bytes (final delta on disconnect); the
-    /// up-front intended size is never billed for the streamed path.
-    ///
-    /// RED pre-fix: `serve_static_hit` (streaming) recorded nothing itself and
-    /// the dispatch step-8b recorded the full intended `size` up front — so an
-    /// aborted download billed the whole file. GREEN post-fix: only delivered
-    /// bytes are billed.
+    /// A streamed static asset whose client DISCONNECTS after part of the body
+    /// bills the delivered bytes, NOT the full asset size. The drain meters
+    /// delivered bytes (final delta on disconnect); the up-front intended size
+    /// is never billed for the streamed path.
     #[compio::test]
     async fn streamed_static_disconnect_bills_delivered_not_intended() {
         let (disk, root) =
@@ -1443,7 +1436,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tier 4a — HTTP completeness tests
+    // HTTP completeness tests
     //   * If-None-Match → 304 (with no blob fetch)
     //   * Range: parsing + 206/416 responses on buffered + streaming paths
     //   * Cache-Control extensions (stale-if-error)
@@ -1802,7 +1795,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tier 4b — Accept-Encoding negotiation: end-to-end serve path
+    // Accept-Encoding negotiation: end-to-end serve path
     // -----------------------------------------------------------------------
     //
     // Pure unit tests for `pick_variant` live in `variants.rs::tests`;
