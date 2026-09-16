@@ -59,13 +59,13 @@ impl Log for PanicOnTransactionLog {
 
 /// Require the caught panic to be THE INJECTED ONE.
 ///
-/// The three tests below asserted `panic.is_err()` until 2026-08-23 - "a panic
-/// occurred". Any panic from the operation satisfies that, including one the
-/// arming never caused: a failed `expect` inside the driver, or the arm never
-/// firing at all while something else went wrong. And when the arm does not
-/// fire it stays SET, because `replace(false)` only runs on the path that
-/// panics, so the next test to run on this thread inherits it. Naming the
-/// payload is what makes these tests about the injection they perform.
+/// Asserting only that a panic occurred is too weak: any panic from the
+/// operation satisfies it, including one the arming never caused - a failed
+/// `expect` inside the driver, or the arm never firing while something else went
+/// wrong. And when the arm does not fire it stays SET, because `replace(false)`
+/// only runs on the path that panics, so the next test to run on this thread
+/// inherits it. Naming the payload is what makes these tests about the injection
+/// they perform.
 #[track_caller]
 fn assert_injected_panic<T>(outcome: Result<T, Box<dyn std::any::Any + Send>>, expected: &str) {
     let payload = outcome.err().unwrap_or_else(|| {
@@ -126,12 +126,10 @@ async fn connect(url: &str) -> Result<Client, Error> {
 /// siblings do: as an `Err`, not a panic, and not a `Portal` bound to the
 /// wrong shape.
 ///
-/// The doc comment on `bind` claimed a panic until 2026-08-21 and the code
-/// never panicked. Making the code match the comment was the wrong direction:
-/// `query`, `execute` and the `_raw` forms all return `Error::parameters` for
-/// the identical mistake, so panicking here would have made the outcome depend
-/// on which method the caller reached for. The comment was corrected instead,
-/// and this test is what keeps the two from drifting apart again.
+/// A panic here would be the wrong direction: `query`, `execute` and the `_raw`
+/// forms all return `Error::parameters` for the identical mistake, so panicking
+/// would make the outcome depend on which method the caller reached for. This
+/// test keeps the doc comment and the code from drifting apart.
 ///
 /// `catch_unwind` is deliberate. Asserting only on the `Err` would still pass
 /// if someone reintroduced the panic, because the panic would abort the test
@@ -516,8 +514,8 @@ async fn abandoning_bind_before_bind_complete_closes_the_server_portal() {
         // reports them, neither of which the test controls. If either stopped
         // matching, the count would be 0 for a reason that has nothing to do
         // with cleanup and the test would pass while measuring nothing. So
-        // bind one and require the probe to find it. Measured 2026-08-23: it
-        // does, and this now fails rather than going quiet if that changes.
+        // bind one and require the probe to find it: the test fails rather than
+        // going quiet if either stops matching.
         {
             let live = transaction
                 .bind(&statement, &[])
