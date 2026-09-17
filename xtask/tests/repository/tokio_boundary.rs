@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Command;
 
-// Update these sets and the AGENTS.md invariant together when the accepted
+// Update these sets and the zero-tokio invariant together when the accepted
 // transitive dependency changes. They describe linked dependencies, not which
 // runtime drives the application's I/O.
 const CARRIERS: &[&str] = &["cyper", "cyper-core", "hyper", "hyper-util"];
