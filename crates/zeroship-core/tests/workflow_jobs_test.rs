@@ -1061,3 +1061,44 @@ fn only_intent_producing_operations_can_re_establish_responsibility() {
     }
     assert!(producing > 0 && maintenance > 0);
 }
+
+/// Queries that select live runs by state string read `RunState::TERMINAL`, and
+/// code that decides whether a run is at rest reads `is_terminal`. A state in
+/// only one of them is a run the platform stops dispatching but keeps counting
+/// as live, so the two must enumerate the same set.
+#[test]
+fn the_terminal_state_names_and_the_terminal_predicate_agree() {
+    let all = [
+        RunState::Queued,
+        RunState::Running,
+        RunState::Sleeping,
+        RunState::Waiting,
+        RunState::Paused,
+        RunState::Stalled,
+        RunState::Compensating,
+        RunState::Completed,
+        RunState::Failed,
+        RunState::Cancelled,
+    ];
+    // Every declared variant is covered, so a new one cannot slip past unnamed.
+    for name in RunState::TERMINAL {
+        assert!(
+            all.iter().any(|state| state.as_str() == name),
+            "terminal name is not a run state: {name}"
+        );
+    }
+    let mut terminal = 0;
+    let mut live = 0;
+    for state in all {
+        let named = RunState::TERMINAL.contains(&state.as_str());
+        assert_eq!(named, state.is_terminal(), "{}", state.as_str());
+        assert_eq!(state.as_str().parse::<RunState>().unwrap(), state);
+        if state.is_terminal() {
+            terminal += 1;
+        } else {
+            live += 1;
+        }
+    }
+    assert_eq!(terminal, RunState::TERMINAL.len());
+    assert!(live > 0);
+}

@@ -310,6 +310,7 @@ export class Platform {
       maxPayloadBytes: 67108864, maxPayloadObjects: 100000,
       maxPayloadStorageBytes: 1073741824, payloadStagingRetentionMs: 86400000,
       maxCompensationAttempts: 8, compensationRetryMs: 1000, maxDeliveryAttempts: 8,
+      maxStuckDispatches: 4,
       maxSchedules: 64, maxScheduleBackfill: 32, minScheduleIntervalMs: 1000,
       maxSignalTokenLifetimeSeconds: 86400, leaseMs: 60000,
     });
