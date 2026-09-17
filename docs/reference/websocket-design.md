@@ -1,127 +1,171 @@
 # WebSocket Runtime
 
-Current zeroship WebSocket behavior, as implemented in [`crates/zeroship-runtime/src/web/websocket/`](../../crates/zeroship-runtime/src/web/websocket/).
+The runtime exposes a standards-based `WebSocket` global: the browser WebSocket
+API shape (defined by the WHATWG standards body) speaking the RFC 6455 wire
+protocol. Creator code uses two surfaces:
 
-## Scope
+- **client sockets** opened with `new WebSocket(url, ...)`, and
+- **server-initiated upgrades** through `WebSocketPair` plus
+  `Response { status: 101, webSocket }`.
 
-The runtime now ships a native WebSocket implementation. The old JS polyfill is gone.
+This page describes the calls a creator makes, their defaults and limits, the
+shape of the errors they see, and where each surface is served.
 
-Two surfaces matter:
+Client sockets work everywhere your app runs. Server-initiated upgrades are
+completed only by the single-tenant local dev server today; a deployed app's
+gateway does not proxy an upgraded connection. See "Where sockets are served".
 
-- client sockets: `new WebSocket(url, protocols?, init?)`
-- server-side upgrades: `WebSocketPair` plus `Response { status: 101, webSocket }`
+## Client sockets
 
-## Public API
+### `new WebSocket(url, protocols?, init?)`
 
-### `WebSocket`
+`url` is required. It must use a `ws:` or `wss:` scheme — `http:` and `https:`
+are normalized to `ws:` and `wss:` respectively — and it must not contain a
+fragment. A missing `url`, a `url` that does not parse, a scheme that is not
+`ws:`/`wss:` after normalization, or a fragment all throw a `TypeError`.
 
-Implemented in [`mod.rs`](../../crates/zeroship-runtime/src/web/websocket/mod.rs).
+`protocols` is an optional string or array of subprotocol strings. Each must be
+a non-empty token with no duplicate entries. An invalid or duplicated
+subprotocol, or a value that is neither a string nor a sequence of strings,
+throws a `TypeError`.
 
-- constructor: `new WebSocket(url, protocols?, init?)`
-- getters: `url`, `readyState`, `bufferedAmount`, `protocol`, `extensions`, `binaryType`
-- event handlers: `onopen`, `onmessage`, `onerror`, `onclose`
-- methods: `send(data)`, `close(code?, reason?)`
+The optional `init` dictionary accepts:
 
-Current behavior:
+- `origin` — the `Origin` header sent on the connection. It is sent only when
+  you set it here; otherwise no `Origin` header is sent. There is no allow-list
+  on the creator's side: the value you set is sent as-is, and whether the server
+  accepts it is the server's decision.
+- `maxMessageSize` — the largest message the client will accept, in bytes.
+  Default `4194304` (4 MiB).
+- `maxFrameSize` — the largest single frame the client will accept, in bytes.
+  Default `1048576` (1 MiB).
+- `pingIntervalMs` — how often the client sends a keepalive ping, in
+  milliseconds. Default `30000` (30 s).
 
-- `binaryType` defaults to `"blob"` and also accepts `"arraybuffer"`.
-- `send()` accepts strings, `Blob`, `ArrayBuffer`, and `ArrayBufferView`.
-- user-facing `close()` only accepts code `1000` or `3000-4999`, with a UTF-8 reason capped at 123 bytes.
-- `WebSocketInit` currently supports `origin`, `maxMessageSize`, `maxFrameSize`, and `pingIntervalMs`.
+### Properties and events
 
-### `WebSocketPair`
+A socket exposes `url`, `readyState`, `bufferedAmount`, `protocol`, `extensions`
+and `binaryType`. `binaryType` defaults to `"blob"` and also accepts
+`"arraybuffer"`; assigning any other value is a silent no-op that keeps the
+current value. `binaryType` controls the type of the `data` field on incoming
+binary `message` events: `"blob"` delivers a `Blob`, `"arraybuffer"` an
+`ArrayBuffer`. Text messages always deliver a string.
 
-Implemented in [`pair.rs`](../../crates/zeroship-runtime/src/web/websocket/pair.rs).
+`readyState` is one of `WebSocket.CONNECTING` (0), `OPEN` (1), `CLOSING` (2) or
+`CLOSED` (3).
 
-- `new WebSocketPair()` returns an object with `0` and `1` properties.
-- pair sockets start in `CONNECTING`.
-- `accept()` is required before a pair socket begins local message delivery.
-- calling `accept()` on a client-created socket throws.
+Events arrive through the `onopen`, `onmessage`, `onerror` and `onclose`
+handlers, or through `addEventListener`. Their payload shapes are:
+
+- `open` — a plain `Event`, no data.
+- `message` — a `MessageEvent`. `data` is a string for text frames, and a
+  `Blob` or `ArrayBuffer` for binary frames depending on `binaryType`. `origin`
+  is also present.
+- `error` — a plain `Event` with **no** payload: it carries no message, code or
+  reason. The only channel for detail is the `close` event that follows.
+- `close` — a `CloseEvent` with `code`, `reason` and `wasClean`.
+
+### `send(data)`
+
+`send()` accepts strings, `Blob`, `ArrayBuffer` and `ArrayBufferView`. Calling
+it while the socket is still `CONNECTING` throws; the caught error's message
+begins with `InvalidStateError`. After the socket has entered `CLOSING` or
+`CLOSED` it is a no-op. Queued bytes accumulate in `bufferedAmount`.
+
+Once the queue reaches the 16 MiB cap, further sends are dropped silently: the
+call returns normally, no event fires, and `bufferedAmount` stops rising and
+holds. Sending resumes once the queue drains below half the cap.
+
+### `close(code?, reason?)`
+
+`close()` starts the closing handshake. When given, `code` must be `1000` or a
+value from `3000` to `4999`; any other value throws, and the caught error's
+message begins with `InvalidAccessError`. `reason` must be no more than 123
+bytes when UTF-8 encoded; longer throws with a message beginning `SyntaxError`.
+
+Calling `close()` on a still-`CONNECTING` socket fails the connection rather
+than sending a close frame: the socket fires `error`, then `close` with code
+`1006` and `wasClean` `false`.
+
+## Server upgrades: `WebSocketPair`
+
+`new WebSocketPair()` returns an object with a `0` and a `1` property, each a
+WebSocket. The `0` socket is the one you hand back to the client; the `1` socket
+is the one your code holds. Both start in `CONNECTING`. Call `accept()` on the
+socket your code holds before it starts delivering messages to your handlers;
+`accept()` takes no arguments and returns nothing. `accept()` on a
+client-created socket throws a `TypeError`.
 
 ## Upgrade path
 
-The HTTP upgrade handoff is:
+To upgrade an incoming request to a WebSocket, return a Response whose
+`webSocket` carries the client socket from the pair:
 
-1. JS returns `new Response(null, { status: 101, webSocket: client })`.
-2. [`crates/zeroship-runtime/src/transport/handler.rs`](../../crates/zeroship-runtime/src/transport/handler.rs) extracts the native `ws_id`.
-3. The runtime converts that to `FetchOutcome::WebSocketUpgrade`.
-4. The kernel-side server path completes the wire handshake and pumps frames.
+```ts
+const { 0: client, 1: server } = new WebSocketPair();
+server.accept();
+return new Response(null, { status: 101, webSocket: client });
+```
 
-RPC subscriptions use a native upgrade path and do not construct a creator
-`Response`; see
-[`rpc/subscription.rs`](../../crates/zeroship-runtime/src/rpc/subscription.rs).
+This upgrade is completed to the connecting client only in single-tenant local
+dev. Where this fits in a deployed app, see "Where sockets are served".
 
-## Transport architecture
+## Outbound sockets and egress
 
-### Client handshake
+An outbound `new WebSocket(url)` is governed by the same egress rules as every
+other raw byte stream your app can open. A rule is an accept or reject verdict
+for a destination (a DNS name or an address range in CIDR form) plus a port; a
+rule that accepts a host and port admits that destination, and an app with no
+matching accept rule opens no outbound socket at all. `fetch()` is the only
+outbound path with no egress rule at all.
 
-[`handshake.rs`](../../crates/zeroship-runtime/src/web/websocket/handshake.rs) performs the RFC 6455 client handshake directly:
+A refusal fires an `error` event (which, as above, carries no detail) and then a
+`close` event with code `1006`; the close `reason` is the refusal, written as a
+code and message. `ERR_NET_SSRF` names the platform-wide server-side
+request-forgery (SSRF) floor that blocks private and reserved addresses;
+`ERR_NET_EGRESS_DENIED` names a refusal by your app's own rules.
 
-- `Sec-WebSocket-Accept` is recomputed and verified
-- echoed subprotocols must have been offered
-- non-empty `Sec-WebSocket-Extensions` is rejected
-- permessage-deflate is not negotiated
+## Client handshake
 
-The handshake also returns any bytes pipelined after the `101` response so the frame reader does not lose the first frame.
+When `new WebSocket(url)` connects, the client speaks RFC 6455 directly:
 
-### Outbound WebSocket is gated by the app's egress rules
+- the server's `Sec-WebSocket-Accept` is recomputed and verified;
+- a subprotocol the server echoes must have been offered by the client;
+- the server must not return a non-empty `Sec-WebSocket-Extensions`;
+- `permessage-deflate` (the compression extension) is not negotiated.
 
-An outbound `new WebSocket(url)` is a raw bidirectional byte stream the moment the upgrade completes, so it is subject to the app's egress rule set exactly as `node:net` is, and through the same evaluator ([`transport/egress.rs`](../../crates/zeroship-runtime/src/transport/egress.rs)). One rule set covers both: a rule accepting `api.example.com:443` admits that destination over either transport, and an app that holds no accept rule opens no WebSocket at all.
-
-The connect task resolves the verdict before the handshake runs and hands `run_handshake` an address that is already authorized; the handshake makes no policy decision of its own. A refusal fires `error` and then `close` with code `1006`; because the `error` event carries no payload by spec, the reason on the close event names which check refused — `ERR_NET_SSRF` for the platform SSRF floor, `ERR_NET_EGRESS_DENIED` for the app's own rules. These are the same codes `node:net` reports, from the same classifier.
-
-`fetch` remains ungated. It is the only outbound path an app can use with no rule at all. Writing egress rules: [`control.md`](control.md).
-
-### Runtime event flow
-
-[`network.rs`](../../crates/zeroship-runtime/src/web/websocket/network.rs) owns the per-socket state and queues `WsEvent`s. Each queued event triggers `OpResult::WebSocketEvent { ws_id }`; [`dispatch.rs`](../../crates/zeroship-runtime/src/web/websocket/dispatch.rs) drains the queue on the V8 thread and dispatches native `open`, `message`, `error`, and `close` events.
-
-For `ws://`, reads and writes run as separate compio tasks on the same `TcpStream`. For `wss://`, the runtime uses a single-owner loop because `TlsStream` is not aliasable.
-
-### Pair sockets
-
-`WebSocketPair` does not use the network stack. [`pair.rs`](../../crates/zeroship-runtime/src/web/websocket/pair.rs) moves queued frames directly onto the peer's event queue and reuses the same native dispatch path.
-
-## Subscription transport
-
-The native RPC subscription transport uses the `zs.v1` subprotocol:
-
-- client must send a `hello` frame before `HELLO_TIMEOUT`
-- server sends `ping` on `PING_INTERVAL`
-- missing `pong` at `PONG_TIMEOUT` closes the socket
-- streamed frames are JSON envelopes carrying `data`, `error`, or `end`
-
-Rust resolves the string-keyed procedure, retains the returned iterator and
-pulls it under the captured request context. It requests the next item only
-after the kernel writer completes the prior frame, so socket progress controls
-producer progress. Disconnect closes the session and calls the iterator's
-`return()` method. See
-[`crates/zeroship-runtime/src/rpc/subscription.rs`](../../crates/zeroship-runtime/src/rpc/subscription.rs)
-for the exact wire behavior.
+If any check fails, the connection fails the same way a network error does: the
+socket fires `error`, then `close` with code `1006` and `wasClean` `false`.
 
 ## Where sockets are served
 
-Single-tenant `zeroship serve` speaks WebSocket directly.
+The two surfaces are served differently today, and the difference is worth
+knowing before you build around a socket.
 
-Behind the multi-node gateway, **subscription routes return `501 Not
-Implemented`** - the gateway does not proxy an upgraded connection today. This
-is why [`rpc.md`](rpc.md) lists `subscription` as not part of the public client
-surface and points you at `stream(...)` for live feeds that ship.
+- **Client sockets** (`new WebSocket(url)`) are opened by your app's own code
+  and work everywhere your app runs, subject only to the egress rules above.
+- **Server-initiated upgrades** (`WebSocketPair` + `Response { status: 101,
+  webSocket }`) are completed only by the single-tenant local dev server, which
+  speaks WebSocket directly to the connecting client. A deployed app is fronted
+  by a gateway that does not proxy an upgraded connection, so an upgrade your
+  handler returns is not served there; the upgrade attempt is answered with an
+  HTTP `500` instead of a live socket.
+
+Plan server-driven sockets for local development, or open the connection from
+the client with `new WebSocket(url)` where it must work in a deployed app.
 
 ## Authentication
 
-A WebSocket upgrade goes through the same gateway auth gate as any other
-request: the upgrade check only rejects non-upgrade traffic on a socket route,
-and the request then reaches `resolve_auth` exactly as an HTTP call would. So a
-socket opened from your own app's origin authenticates on the session cookie,
-which the browser attaches automatically.
+A WebSocket upgrade request passes through the same authentication as any other
+request into your app, so a route that requires a signed-in user is not upgraded
+for a caller the platform cannot authenticate.
 
-**A cross-origin socket cannot authenticate today.** The cookie is not sent
-cross-origin, and there is no alternative credential: under the BFF model the
-browser never holds a token it could offer in a subprotocol. This is a
-consequence of that design rather than a gap in the socket implementation, and
-nothing in the platform will report it as an auth failure - the socket simply
-arrives unauthenticated, and an `auth: "user"` procedure behind it refuses.
-
-If you need a socket from another origin, put it behind your own same-origin
-endpoint rather than pointing a browser at the app directly.
+A browser socket opened from your app's own origin authenticates on the session
+cookie, which the browser attaches automatically — the same `HttpOnly` cookie
+that authorizes your RPC and API calls. A socket opened from a different origin
+does not send that cookie, and the browser holds no token it could offer in the
+subprotocol handshake, so it arrives without an identity. A route declared
+`auth: "user"` (the fail-closed default for procedures) refuses such a caller
+rather than serving it silently. Keep browser sockets same-origin; anything
+cross-origin that must authenticate should go through a same-origin endpoint on
+your app.
