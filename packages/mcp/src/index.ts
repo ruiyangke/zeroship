@@ -193,7 +193,7 @@ export function createZeroshipMcpServer(
       inputSchema: {
         ...appTargetInput,
         limit: z
-          .double()
+          .number()
           .int()
           .positive()
           .optional()
