@@ -21,8 +21,8 @@ mkdir -p bundles
 ./target/release/zeroship dev init
 ```
 
-`zeroship dev init` creates the seven file-backed platform secrets in the
-gitignored `deploy/compose/secrets` directory and the nine generated scalar
+`zeroship dev init` creates the eleven file-backed platform secrets in the
+gitignored `deploy/compose/secrets` directory and the seven generated scalar
 values in `deploy/compose/.env`. Rerunning validates and keeps existing values;
 it never rotates them implicitly. The commands below use those default paths;
 for another layout, source its env overlay and replace every file path below.

@@ -62,12 +62,12 @@ Verify before pushing. An image that builds is not an image that is correct:
 
 ```bash
 docker run --rm --entrypoint sh "$REG:$SHA" -c 'ls /usr/local/bin; ls /db/migrations-ts | wc -l'
-# expect 6 binaries: zeroship zeroship-auth zeroship-control zeroship-gate
-#                    zeroship-migrate-server zeroship-worker
+# expect 7 binaries: zeroship zeroship-auth zeroship-control zeroship-gate
+#                    zeroship-migrate-server zeroship-worker zeroship-data-cdc-server
 # THIS LINE READ `zeroship-platform-migrate` UNTIL 2026-09-04, so the check it
 # describes could never pass: that binary was deleted on 2026-08-28 and the
 # platform one-shot is now the Node `zero-migrate` CLI in the SEPARATE `migrate`
-# image (`docker build --target migrate`). The six here are the ones the
+# image (`docker build --target migrate`). The seven here are the ones the
 # `runtime` stage copies (deploy/Dockerfile).
 # expect 33 (or however many db/migrations-ts/*.ts you have)
 docker run --rm --entrypoint zeroship "$REG:$SHA" --version

@@ -21,8 +21,13 @@ Current internal endpoints are:
 - `GET /internal/apps/{app_id}`
 - `GET /internal/apps/{app_id}/env`
 - `GET /internal/apps/{app_id}/data-key`
-- `POST /internal/usage`
+- `POST /internal/workers/join`, `POST /internal/workers/renew`, `POST /internal/workers/retire`
+- `POST /internal/billing/reconcile`
+- `POST /internal/spend/reconcile`
 - `POST /internal/webhooks/stripe`
+
+`erasure`, `deployment_hold_api`, and `health` register further `/internal/*`
+routes through `configure`.
 
 Mutating `/api/*` endpoints are authorized per request through the Cedar
 `AuthzGuard` against the caller OAuth access token. Worker and gateway reads
@@ -49,11 +54,19 @@ secret_cipher.rs   shared control-owned secret wrapping keyring
 registry.rs        PostgreSQL-backed app registry
 stripe_handlers.rs Stripe-facing HTTP routes
 stripe_store.rs    Stripe/account persistence
-metering.rs        usage aggregation helpers
+metering/           usage aggregation and role-addressed billing providers
 audit.rs           audit logging helpers
-rate_limit.rs      control-plane rate limiting
 http_util.rs       shared HTTP helpers
 deploy.rs          re-exports `.zship` ingest limits/types from `zeroship_bundle`
+
+`rate_limit.rs` no longer exists: control-plane rate limiting is
+`zeroship_authn::rate_limit`, re-exported through `lib.rs`. The control crate
+has also grown modules the map above predates — organizations and billing
+(`organizations.rs`, `billing_read.rs`, `cron/`, `pricing*.rs`, `spend.rs`,
+`openmeter_client.rs`, `tax.rs`), deploy publication (`publication/`,
+`deploy_inflight.rs`, `deployment_hold_api.rs`), worker instances
+(`worker_join.rs`, `join_minter.rs`, `worker_health.rs`), and account/erasure
+(`erasure.rs`, `device_handlers.rs`, `account_status.rs`).
 ```
 
 ## `AppState`
@@ -63,19 +76,23 @@ deploy.rs          re-exports `.zship` ingest limits/types from `zeroship_bundle
 - `registry: Registry`
 - `env_store: EnvStore`
 - `stripe_store: StripeStore`
-- `auth: AuthService`
-- `google_oauth: Option<GoogleConfig>`
-- `vfs: Arc<dyn BundleStore + Send + Sync>` currently backed by `zeroship_bundle::LocalFs`
 - `blob_store: Arc<dyn BlobStore>` currently backed by `zeroship_bundle::LocalDiskBlobStore`
 - secret-bearing config wrapped in `SecretString`
 - admin + webhook rate limiters
 - `deploy_tmp_dir` for streamed `.zship` uploads
 
+The former `auth: AuthService`, `google_oauth: Option<GoogleConfig>`, and
+`vfs: ... BundleStore` fields are gone. `AppState` now also carries the
+coordination, authorization, and billing dependencies the deploy-publication
+and metering paths need: `service_auth`, `control_pg`, `auth_provider`,
+`static_policies`, `provider_registry`/`billing_stack`, `tax_provider`,
+`notifier`, `mailer`, `worker_enrolment`, and `pairwise_salt`.
+
 The `apps` table currently carries the routing/deploy state the rest of the platform consumes:
 
 ```sql
 apps(
-  id uuid primary key default gen_random_uuid(),
+  id text primary key,
   name text not null unique,
   plan_id text not null default 'free',
   deploy_hash text,
@@ -215,8 +232,8 @@ See `docs/reference/auth.md` for the full flow.
 ## Notes
 
 - `EnvStore` uses `zeroship_core::crypto` for encrypted-at-rest secrets, with primary + previous master-key support for rotation.
-- `BundleStore` is still present on `AppState`, but deploy ingestion and runtime asset serving use `BlobStore`.
-- Stripe support lives in `stripe_handlers.rs` and `stripe_store.rs`; worker metering still arrives through `/internal/usage`.
+- `BundleStore` is gone from `AppState`; deploy ingestion and runtime asset serving both use `BlobStore`.
+- Stripe support lives in `stripe_handlers.rs` and `stripe_store.rs`; worker metering is emitted through the `zeroship_metering` usage outbox and reconciled through the billing stream, not `POST /internal/usage`.
 
 ## Related docs
 
