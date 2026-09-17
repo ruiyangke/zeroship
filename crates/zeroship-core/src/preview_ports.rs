@@ -4,8 +4,7 @@
 //! a preview before it ever signs an outbound request to the agent.
 //! The agent (`zeroship-sandbox-agent`) uses the EXACT same constants
 //! before dialing `127.0.0.1:{port}` inside the VM. Sharing them via
-//! this module is the defense-in-depth invariant from § II.1 / I9 of
-//! `docs/archive/sandbox-preview-urls.md`: a controller bug that
+//! this module is a defense-in-depth invariant: a controller bug that
 //! lets a denied port through still bounces at the agent.
 //!
 //! ## What lives here
