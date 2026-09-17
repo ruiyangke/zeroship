@@ -1,6 +1,6 @@
 //! # `zeroship-migrate-sqlite` - the SQLite backend
 //!
-//! One vendor, no engine. This crate holds BOTH halves of SQLite now:
+//! One vendor, no engine. This crate holds BOTH halves of SQLite:
 //!
 //! * the RENDER half - DML, schema, DDL and value-format renderers plus the line-1
 //!   guard, all registered through [`VENDOR`]; and

@@ -469,18 +469,16 @@ fn a_forced_cleanup_on_a_poisoned_block_keeps_a_healthy_connection() {
 }
 
 /// **`WithdrawSession` genuinely withdraws - and this is the arm that says
-/// what still reaches it now that forced cleanup CANCELS.**
+/// what reaches it when forced cleanup CANCELS.**
 ///
 /// The disposition SC-1 gives unknown backend health is to destroy the
 /// physical connection rather than return it, and on PostgreSQL that is not
 /// what a drop does: `PoolConnection::drop` calls
 /// `pool.return_client(entry)`, which republishes the lease as idle.
 ///
-/// **The route changed and the name did not, so the route is asserted.**
-/// This arm used to reach withdrawal through "the driver cannot reach the
-/// session, so it cannot roll back" - which is precisely the answer
-/// `cancel_and_reclaim` replaced. What it reaches now is the *best-effort*
-/// half of PostgreSQL cancellation, and it is a case that matters more:
+/// **The route is what the name does not say, so the route is asserted.**
+/// Forced cleanup reaches this withdrawal through the *best-effort* half of
+/// PostgreSQL cancellation, and it is a case that matters:
 ///
 /// 1. `HeldSession` takes the session out of the slot with **no statement
 ///    running on it**. The backend is idle inside its transaction block.
