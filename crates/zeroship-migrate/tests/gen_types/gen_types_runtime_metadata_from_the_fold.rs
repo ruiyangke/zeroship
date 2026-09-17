@@ -1071,3 +1071,37 @@ fn the_refusal_probes_still_exercise_the_named_type_arms() {
          make the two above pass for the wrong reason"
     );
 }
+
+/// Regenerates the corpus golden. Run explicitly:
+///   cargo test -p zeroship-migrate --test gen_types -- --ignored update_runtime_metadata_from_the_fold_goldens
+/// The leading '#' comment block is preserved verbatim, and data lines keep the
+/// golden's existing order (new keys append, removed keys drop), so running this
+/// on an unchanged tree rewrites byte-identically.
+#[test]
+#[ignore = "regenerates the corpus golden; run explicitly with `cargo test -p zeroship-migrate --test gen_types -- --ignored update_runtime_metadata_from_the_fold_goldens`, then commit the file"]
+fn update_runtime_metadata_from_the_fold_goldens() {
+    let path = manifest_path(CORPUS_GOLDEN);
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let header: String = existing
+        .lines()
+        .take_while(|line| line.trim_start().starts_with('#') || line.is_empty())
+        .map(|line| format!("{line}\n"))
+        .collect();
+    let measured: std::collections::BTreeSet<String> = measure_corpus().into_iter().collect();
+    let mut body = String::new();
+    let mut written: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for line in existing.lines().filter(|l| !l.is_empty() && !l.starts_with('#')) {
+        if measured.contains(line) && written.insert(line.to_string()) {
+            body.push_str(line);
+            body.push('\n');
+        }
+    }
+    for line in &measured {
+        if written.insert(line.clone()) {
+            body.push_str(line);
+            body.push('\n');
+        }
+    }
+    std::fs::write(&path, format!("{header}{body}"))
+        .unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+}
