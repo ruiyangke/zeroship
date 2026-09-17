@@ -119,9 +119,11 @@ fn relational_limits_and_capability_ceiling_keep_their_boundaries() {
 /// delivery ceiling is refused rather than silently stranding every hung run.
 #[test]
 fn stuck_dispatch_limit_stays_under_the_delivery_ceiling() {
-    let mut policy = AppPolicy::default();
-    policy.max_delivery_attempts = 3;
-    policy.max_stuck_dispatches = 2;
+    let mut policy = AppPolicy {
+        max_delivery_attempts: 3,
+        max_stuck_dispatches: 2,
+        ..AppPolicy::default()
+    };
     policy.validate().unwrap();
     policy.max_stuck_dispatches = 3;
     assert_eq!(policy.validate(), Err(InvalidPolicy));
