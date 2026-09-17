@@ -11,10 +11,9 @@
 //! vendor adds a knob by adding one `AttrDef` to its own [`AttributeVocabulary`]; nothing
 //! in the neutral crates changes, and no `match` anywhere gains an arm.
 //!
-//! That is the whole point of the design. The alternative - the one the tree already has
-//! in `IndexStorageParams`, now retired - was a vendor's
-//! knobs as named fields in the neutral IR, which requires editing the neutral crate to
-//! add one backend's storage parameter.
+//! That is the whole point of the design. The alternative - a vendor's knobs as named
+//! fields in the neutral IR - requires editing the neutral crate to add one backend's
+//! storage parameter.
 //!
 //! # Two failures that must not read alike
 //!
@@ -386,10 +385,9 @@ impl AttributeVocabulary {
     /// lookup was key-unique, so the second declaration was unreachable and the
     /// workspace census counted it a duplicate.
     ///
-    /// That is not a nicety. It is the hard prerequisite for retiring
-    /// `IndexStorageParams`, now retired, whose
-    /// `fillfactor` must be declared at Index scope alongside the Table-scoped one that
-    /// already ships.
+    /// That is not a nicety. `fillfactor` must be declared at Index scope alongside the
+    /// Table-scoped one, so a key-unique lookup would make the second declaration
+    /// unreachable and count it a duplicate.
     #[must_use]
     pub fn get(&self, key: &AttrKey, op: &str) -> Option<&'static AttrDef> {
         self.defs

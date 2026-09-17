@@ -57,20 +57,15 @@
 //! the two fixtures identical, and every claim here would hold vacuously. They FAIL
 //! rather than skip, for the reason `injected_column_collation.rs` records.
 //!
-//! The red was MEASURED, by mutation, and the first mutation was a false green worth
-//! recording. Flipping the agreement test's SQLITE leg to the unpinned fixture left it
-//! PASSING - correctly, because SQLite's `BINARY` default is already bytewise, so that
-//! leg's observed value does not move between the two fixtures at all. Flipping the
-//! POSTGRESQL leg failed it, with the split named:
-//! `["postgres"] -> [aaa, AAA, zzz, Zzz]` against `["mysql", "sqlite"] -> creation
-//! order`. Only two of the three legs are capable of moving this fixture, and a
-//! mutation test that picks the third one measures nothing.
-//!
-//! Measured on the servers this suite runs against: under the UNPINNED fixture,
-//! PostgreSQL (`en_US.utf8`) and MySQL (`utf8mb4_0900_as_cs`) return the SAME wrong
-//! sequence as each other, and SQLite returns creation order. The split is
-//! `{postgres, mysql}` against `{sqlite}`, not a three-way one. Two backends agreeing
-//! on a wrong answer is exactly the case the section below is about.
+//! The live red must be provoked on a leg that CAN move. SQLite's `BINARY` default is
+//! already bytewise, so its observed value does not move between the pinned and
+//! unpinned fixtures at all; flipping the agreement test's SQLite leg therefore leaves
+//! it passing. Only the PostgreSQL and MySQL legs are capable of moving this fixture,
+//! and a mutation test that picks the third one measures nothing. Under the unpinned
+//! fixture those two return the same wrong sequence as each other while SQLite returns
+//! creation order, so the split is `{postgres, mysql}` against `{sqlite}` - two
+//! backends agreeing on a wrong answer, which is exactly the case the section below is
+//! about.
 //!
 //! # What this observation CANNOT see
 //!
@@ -162,16 +157,12 @@ impl Pin {
 /// (`bytewise`), so this fixture is exactly what a user could write, which is the
 /// proposal's requirement that fixtures be authored through the public path.
 ///
-/// The key column is a BOUNDED `string`, not `text`, and that was measured rather
-/// than chosen. The first version of this fixture keyed an unbounded `text` column,
-/// and the engine refused it on MySQL before any server was touched:
-/// `DIALECT_UNSUPPORTED` / "createTable.primaryKey keys t.id, which renders as MySQL
-/// TEXT storage; MySQL refuses a key over a TEXT or BLOB column with no prefix
-/// length". PostgreSQL and SQLite both accepted the same op. That is a legitimate
-/// capability difference, it is layer 1's business rather than layer 2's - an
-/// observation needs a fixture that APPLIES on every backend before it can compare
-/// anything - and a fixture that trips it would have measured the refusal, not the
-/// ordering.
+/// The key column is a BOUNDED `string`, not `text`. MySQL refuses a key over a
+/// `TEXT` or `BLOB` column with no prefix length (`DIALECT_UNSUPPORTED`), while
+/// PostgreSQL and SQLite accept it. That is a legitimate capability difference,
+/// and layer 1's business rather than layer 2's: an observation needs a fixture
+/// that APPLIES on every backend before it can compare anything, so a fixture
+/// that trips the refusal would have measured the refusal, not the ordering.
 fn ddl_envelope(pin: Pin) -> String {
     let collation = match pin {
         Pin::Bytewise => r#","collation":"bytewise""#,
@@ -327,9 +318,7 @@ struct Observed {
 /// per occurrence.
 ///
 /// There is deliberately no exception channel here. The proposal's `[[case.differs]]`
-/// belongs at the fixture, and this spike has one fixture that needs none; a
-/// suppression seam built before a case that needs it is a seam nobody has measured.
-/// See this file's report for why `ALLOWANCES` is the wrong host for it.
+/// belongs at the fixture, and this fixture needs none.
 fn oracle(observations: &[Observed]) -> Result<Vec<String>, String> {
     assert!(
         observations.len() >= 2,

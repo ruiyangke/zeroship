@@ -9,13 +9,11 @@
 //! it only happens if something polls the task afterwards.
 //!
 //! Nothing guarantees anything will. compio's `Runtime::drop` reclaims a task
-//! only when the runtime's `Rc` is uniquely held
-//! (`compio-runtime-0.11.0/src/runtime/mod.rs:392`), and a task parked on an
-//! io_uring submission holds a clone of that `Rc` inside the pending `Submit`
-//! (`compio-runtime-0.11.0/src/runtime/future.rs:46`). A parked connection task
-//! is therefore exactly the case the reclaim skips: the runtime, its driver,
-//! the task and the socket all leak, and the server-side backend stays live for
-//! the rest of the PROCESS. Measured in
+//! only when the runtime's `Rc` is uniquely held, and a task parked on an
+//! io_uring submission holds a clone of that `Rc` inside the pending `Submit`.
+//! A parked connection task is therefore exactly the case the reclaim skips:
+//! the runtime, its driver, the task and the socket all leak, and the
+//! server-side backend stays live for the rest of the PROCESS. See
 //! `tests/suite/integration.rs::a_connection_does_not_outlive_the_runtime_that_opened_it`.
 //!
 //! So the socket's release cannot be left to a future. It has to be a plain
@@ -227,42 +225,31 @@ fn send_close_notify_on(
 /// (`BorrowedFd` / `BorrowedSocket`) and both offer `try_clone_to_owned` - so
 /// neither arm needs `unsafe`, which this crate denies.
 ///
-/// NOTHING IN THIS REPOSITORY EVER COMPILES THE `cfg(windows)` ARM. CI is
-/// `ubuntu-latest` on every job and names no `--target`, and the only
-/// installed std is `x86_64-unknown-linux-gnu`, so that arm is not
-/// type-checked by CI, by a local build, or by the clippy gate's
-/// `--all-features` sweep. Checked 2026-08-26.
+/// The `cfg(windows)` arm is compiled by nothing in this repository: CI is
+/// Linux-only and no job names a Windows target, so neither a local build nor
+/// the clippy gate's `--all-features` sweep type-checks it. Keep the blind arm
+/// as SMALL as possible rather than merely watched. It holds a trait bound, an
+/// accessor and a `map`; the struct literal - the part a new field changes -
+/// lives once in [`ConnectionRelease::from_owned`], which Linux compiles, so
+/// adding a field fails the build at exactly ONE site. What is left blind is a
+/// bound and an accessor, which break loudly against a changed `std` or
+/// `socket2` API rather than quietly. Read both arms when touching either.
 ///
-/// So the blind arm is kept as SMALL as possible rather than merely watched.
-/// It holds a trait bound, an accessor and a `map`; the struct literal - the
-/// part a new field changes - lives once in
-/// [`ConnectionRelease::from_owned`], which Linux compiles. Adding a field
-/// now fails the build at exactly ONE site, measured 2026-08-26 by adding a
-/// throwaway field and reading the `E0063` list. Before the split it failed at
-/// one site and silently skipped the other.
-///
-/// What is left blind is a bound and an accessor, which break loudly against a
-/// changed `std` or `socket2` API rather than quietly. Still: read both arms
-/// when touching either.
-///
-/// The `cfg(not(target_os = "linux"))` send in `send_close_notify_on` is
-/// better off - it CAN be checked here by flipping its `cfg` to `all()` and
-/// building, because it calls a `socket2` method that exists on Linux too.
-/// That was done and it compiles. The `cfg(windows)` arm cannot be, because
-/// `std::os::windows` does not exist on this target.
+/// The `cfg(not(target_os = "linux"))` send in `send_close_notify_on` can be
+/// checked here by flipping its `cfg` to `all()` and building, because it calls
+/// a `socket2` method that exists on Linux too. The `cfg(windows)` arm cannot
+/// be, because `std::os::windows` does not exist on this target.
 impl ConnectionRelease {
     /// Build one from an owned handle, whatever the platform calls it.
     ///
     /// THE STRUCT LITERAL LIVES HERE AND NOWHERE ELSE, deliberately: this is
     /// the part that changes when a field is added, and the `cfg(windows)`
-    /// arm below is compiled by nothing in this repository. Adding
-    /// `tls_session` on 2026-08-26 meant editing both copies by hand, and only
-    /// one of them could go red. Now each arm carries a bound, an accessor and
-    /// a `map`, so the next field cannot diverge between them.
+    /// arm below is compiled by nothing in this repository. Each arm carries a
+    /// bound, an accessor and a `map`, so a new field cannot diverge between
+    /// them.
     ///
-    /// One `Into` bound covers both because socket2 0.6.3 - the resolved
-    /// version - implements `From<OwnedFd>` and `From<OwnedSocket>` for
-    /// `Socket` in `sys/unix.rs` and `sys/windows.rs` respectively.
+    /// One `Into` bound covers both because socket2 implements `From<OwnedFd>`
+    /// and `From<OwnedSocket>` for `Socket` on Unix and Windows respectively.
     fn from_owned(owned: impl Into<socket2::Socket>) -> Self {
         Self {
             socket: Arc::new(owned.into()),
