@@ -136,7 +136,7 @@ export function colTypeFromDbField(field: DbSchemaField): ColType {
       return "bytes";
     case "geoPoint":
       return "geoPoint";
-    // `dbType.id(...)` is the internal platform ID field. The runtime mints
+    // `dbType.typedId(...)` is the internal platform ID field. The runtime mints
     // `<prefix>_<25 base36 UUIDv7>` values; this is neither TypeID nor a public
     // migration-column shortcut. Its bridge carrier is neutral `uuid`.
     case "id":

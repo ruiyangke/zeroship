@@ -37,7 +37,7 @@ test("ONE lexicon: a db field reduces to the same ColType the migration t.* prod
   assert.deepEqual(colTypeFromDbField(dbT.double()), migrateColType(t.double()));
   // The separate db schema's legacy internal platform ID reduces to its
   // historical neutral `uuid` bridge carrier; it is not TypeID or migration sugar.
-  assert.equal(colTypeFromDbField(dbT.id("post")), "uuid");
+  assert.equal(colTypeFromDbField(dbT.typedId("post")), "uuid");
 });
 
 test("the legacy dbType.ref bridge remains distinct from typed migration references", () => {

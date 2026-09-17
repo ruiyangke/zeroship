@@ -5,9 +5,9 @@ import { normalizeSchema } from "../../../crates/zeroship-data-v8/js/testing.js"
 
 describe("assignment builders", () => {
   test("ID type carries its prefix without assigning a value", () => {
-    assert.deepEqual(t.id("post").toFieldDef(), { type: "id", idPrefix: "post" });
-    assert.throws(() => t.id(""), { code: "ID_INVALID_PREFIX" });
-    assert.throws(() => t.id("Post-Type"), { code: "ID_INVALID_PREFIX" });
+    assert.deepEqual(t.typedId("post").toFieldDef(), { type: "id", idPrefix: "post" });
+    assert.throws(() => t.typedId(""), { code: "ID_INVALID_PREFIX" });
+    assert.throws(() => t.typedId("Post-Type"), { code: "ID_INVALID_PREFIX" });
   });
 
   test("timestamp modifiers declare their generator and event", () => {

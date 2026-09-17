@@ -95,7 +95,7 @@ export const schema = {
     .softDelete()
     .index("users_email_idx", ["email"]),
   posts: defineSchema({
-    id: t.id("post"),
+    id: t.typedId("post"),
     title: t.string().required(),
     authorId: t.ref("users", { column: "id" }),
     authorHandle: t.ref("users", { column: "handle" }),
@@ -310,7 +310,7 @@ describe("NormalizedSchema -> CollectionDescriptorDto mapping", () => {
     const builder = defineSchema({
       name: t.string().required().unique(),
       count: t.double(),
-      handle: t.id("handle"),
+      handle: t.typedId("handle"),
       owner: t.ref("users", { column: "account_key" }),
     });
     const fields = builder.fields as Record<string, { toFieldDef(): import("@zeroship/db").FieldDef }>;

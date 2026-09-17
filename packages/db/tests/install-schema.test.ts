@@ -22,10 +22,10 @@ describe("normalizeSchema — minimal smoke", () => {
   });
 });
 
-describe("normalizeSchema — P7 typed-id prefix (id: t.id(prefix))", () => {
-  test("retains an id:t.id(prefix) field with its idPrefix", () => {
+describe("normalizeSchema — P7 typed-id prefix (id: t.typedId(prefix))", () => {
+  test("retains an id:t.typedId(prefix) field with its idPrefix", () => {
     const out = normalizeSchema({
-      id: t.id("blog"),
+      id: t.typedId("blog"),
       title: t.string(),
     });
     // The id prefix declaration survives normalization so the runtime
