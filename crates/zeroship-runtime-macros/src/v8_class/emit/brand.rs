@@ -1,6 +1,5 @@
 //! Brand-check helper codegen.
 //!
-//! Split out from the old monolithic emit assembly.
 //! Emits the per-class `__brand_check_<Class>` fn used by every
 //! method/getter/setter callback prologue (via
 //! `shared::recover_box`) before the unsafe internal-field deref.
@@ -57,7 +56,7 @@ pub(super) fn gen_brand_check_helpers(cfg: &ClassConfig) -> TokenStream2 {
         /// pathological case for which "false" is the conservative
         /// answer.
         ///
-        /// The cost is dwarfed by the ~100ns V8 callback overhead —
+        /// The cost is dwarfed by the V8 callback overhead —
         /// the brand check itself is O(depth) Local pointer
         /// comparisons.
         ///
@@ -98,10 +97,7 @@ pub(super) fn gen_brand_check_helpers(cfg: &ClassConfig) -> TokenStream2 {
             // Steady-state: the slot holds an `Eternal<Object>` whose
             // `get(scope)` materialises a `Local` directly from the
             // isolate-lifetime cell — NO `GlobalHandles::Create` and
-            // NO matching `Release` on drop. Replaces the previous
-            // `slot.0.clone()` of a `Global<Object>`, which allocated
-            // a fresh GlobalHandles slot per call (~22 % of CPU on
-            // the httpGet bench across all callers).
+            // NO matching `Release` on drop.
             //
             // Cache-miss path: walk the install slot to materialise
             // the prototype, then write a populated `Eternal` into a
@@ -122,8 +118,7 @@ pub(super) fn gen_brand_check_helpers(cfg: &ClassConfig) -> TokenStream2 {
                         // own lazy-init path always populates before
                         // `set_slot`, so this branch is unreachable in
                         // practice — but returning false is the safe
-                        // answer if it ever happens (matches the
-                        // pre-Eternal "install slot missing" fallback).
+                        // answer if it ever happens.
                         None => return false,
                     }
                 } else {
