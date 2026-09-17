@@ -667,7 +667,7 @@ function requirePlainObject(v: unknown, what: string): asserts v is Record<strin
 
 /** Validate the persisted TypeID 0.3 prefix at the authoring boundary. The
  * Rust validator repeats this check for hand-authored IR envelopes. */
-function requireTypeIdPrefix(v: unknown, what = "ids.typeId({ prefix })"): asserts v is string {
+function requireTypeIdPrefix(v: unknown, what = "a TypeID prefix"): asserts v is string {
   requireString(v, what);
   if (v.length > 63 || (v !== "" && !/^[a-z](?:[a-z_]*[a-z])?$/.test(v))) {
     throw structuredError(
@@ -866,7 +866,7 @@ class ColumnDefImpl implements ColumnDefType {
   readonly _unique: boolean;
   readonly _reference: ColumnReferenceFacet | undefined;
   // Semantic facets carried on the IrColumn: canonical value format
-  // (`ids.typeId({prefix})`), pgvector distance metric, and the remaining
+  // (`t.typedId(prefix)`), pgvector distance metric, and the remaining
   // standalone column facets.
   // Absent ⇒ omitted on the wire.
   readonly _valueFormat: ValueFormat | undefined;
@@ -1762,13 +1762,6 @@ export function interval(duration: Duration): ExprChainType {
 /** Validated textual ID formats. These helpers select storage + format only;
  * ordinary `ColumnDef` modifiers opt into nullability/key constraints. */
 export const ids: IdFormats = {
-  typeId: (opts: TypeIdOptions) => {
-    requirePlainObject(opts, "ids.typeId(opts)");
-    requireTypeIdPrefix(opts.prefix);
-    return new ColumnDefImpl("text", {
-      valueFormat: { typeId: { prefix: opts.prefix } },
-    });
-  },
   ulid: () => new ColumnDefImpl("text", { valueFormat: "ulid" }),
 };
 
@@ -1809,6 +1802,12 @@ export const t: TypeLexicon = {
   },
   timestamp: () => new ColumnDefImpl("timestamp"),
   calendarDate: () => new ColumnDefImpl("date" as ColType),
+  typedId: (prefix: string) => {
+    requireTypeIdPrefix(prefix, "t.typedId(prefix)");
+    return new ColumnDefImpl("text", {
+      valueFormat: { typeId: { prefix } },
+    });
+  },
   uuid: () => new ColumnDefImpl("uuid"),
   bytes: () => new ColumnDefImpl("bytes"),
   boolean: () => new ColumnDefImpl("boolean"),

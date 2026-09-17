@@ -1251,13 +1251,13 @@ fn render_column(
 
 fn render_column_base(column: &IrColumn) -> String {
     if let Some(ValueFormat::TypeId { prefix }) = &column.value_format {
-        return format!("ids.typeId({{ prefix: {} }})", js_str(prefix));
+        return format!("t.typedId({})", js_str(prefix));
     }
     if matches!(column.value_format, Some(ValueFormat::Ulid)) {
         return "ids.ulid()".to_string();
     }
     if let Some(prefix) = &column.id_prefix {
-        return format!("ids.typeId({{ prefix: {} }})", js_str(prefix));
+        return format!("t.typedId({})", js_str(prefix));
     }
     render_col_type(&column.ty, column.case_sensitive, column.vector_metric)
 }
@@ -1861,7 +1861,7 @@ mod tests {
         });
         assert_eq!(
             render_column(&type_id, true, None),
-            "ids.typeId({ prefix: \"usr\" }).primaryKey()"
+            "t.typedId(\"usr\").primaryKey()"
         );
 
         let mut ulid = column("trace_id", ColType::Text);
@@ -1872,7 +1872,7 @@ mod tests {
         prefixed.id_prefix = Some("post".to_string());
         assert_eq!(
             render_column(&prefixed, true, None),
-            "ids.typeId({ prefix: \"post\" }).primaryKey()"
+            "t.typedId(\"post\").primaryKey()"
         );
 
         let mut counter = column("counter", ColType::BigInt);

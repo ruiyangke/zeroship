@@ -231,9 +231,9 @@ test("Live MySQL TypeID CHECK enforces the official fixtures and empty-prefix fo
       schema() {
         table("type_id_samples").create({
           columns: {
-            bare: ids.typeId({ prefix: "" }),
-            prefixed: ids.typeId({ prefix: "prefix" }),
-            split: ids.typeId({ prefix: "pre_fix" }),
+            bare: t.typedId("" ),
+            prefixed: t.typedId("prefix" ),
+            split: t.typedId("pre_fix" ),
           },
         });
       },

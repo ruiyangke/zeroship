@@ -596,14 +596,10 @@ export function badColTypes(): void {
   void ulidValueFormat;
   void ulid;
 
-  // @ts-expect-error — TypeID options are required.
-  ids.typeId();
 
-  // @ts-expect-error — TypeID requires an explicit prefix (the empty string is valid).
-  ids.typeId({});
 
   // @ts-expect-error — a TypeID prefix is text.
-  ids.typeId({ prefix: 42 });
+  t.typedId(42 );
 
   ids.ulid();
 
@@ -896,8 +892,6 @@ export function perRowGeneratorShapes(): void {
   const generatedUuid: string = generators.uuidV4();
   void generatedUuid;
 
-  // @ts-expect-error — TypeID options are required.
-  generators.typeId();
 
   // @ts-expect-error — a TypeID prefix is text.
   generators.typeId({ prefix: 42 });

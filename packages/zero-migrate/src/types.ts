@@ -118,7 +118,6 @@ export interface TypeIdOptions {
  * and validation only; they remain nullable and carry no generator or key
  * semantics unless the ordinary {@link ColumnDef} modifiers opt in. */
 export interface IdFormats {
-  typeId(options: TypeIdOptions): ColumnDef;
   ulid(): ColumnDef;
 }
 
@@ -284,7 +283,7 @@ export interface ColumnDef {
    * comparison that must not move when the database's default collation does.
    *
    * REFUSED on a non-text type, alongside `caseSensitive: false` (the opposite
-   * ordering), and alongside a value format (`ids.typeId()` / `ids.ulid()`,
+   * ordering), and alongside a value format (`t.typedId()` / `ids.ulid()`,
    * which pin bytewise comparison already). Create-table-only, like
    * {@link ColumnDef.references}: add/rename/set-type and nested type positions
    * reject the facet instead of dropping it. Returns a fresh def.
@@ -322,6 +321,7 @@ export interface TypeLexicon {
   timestamp(): ColumnDef;
   /** Portable SQL DATE: PostgreSQL `date`, MySQL `DATE`, SQLite `TEXT` date affinity. */
   calendarDate(): ColumnDef;
+  typedId(prefix: string): ColumnDef;
   uuid(): ColumnDef;
   bytes(): ColumnDef;
   boolean(): ColumnDef;

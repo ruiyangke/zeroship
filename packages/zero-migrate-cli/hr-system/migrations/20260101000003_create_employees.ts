@@ -10,7 +10,7 @@ export default {
   schema() {
     table("employees").create({
       columns: {
-        id: ids.typeId({ prefix: "emp" }).primaryKey(),
+        id: t.typedId("emp" ).primaryKey(),
         dept_id: ids
           .typeId({ prefix: "dept" })
           .required()

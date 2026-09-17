@@ -1,5 +1,5 @@
 // Artifact-identity parity for the column-level facets (column facets +
-// generated/identity): typed `.references()`, `ids.typeId({ prefix })`, `ids.ulid()`,
+// generated/identity): typed `.references()`, `t.typedId(prefix)`, `ids.ulid()`,
 // `t.vector({ dimensions, metric })`, standalone
 // `t.text().mask({ kind, classification })`, `.generated(...)`, and `.identity(...)`.
 //
@@ -77,7 +77,7 @@ function authorWith({ begin, drain, ids, t, table }: Rec): any[] {
   begin();
   // createTable carrying the column facets:
   //  - t.*.references(table, column, actions) -> IrColumn.references
-  //  - ids.typeId({ prefix })      → IrColumn.valueFormat.typeId
+  //  - t.typedId(prefix)         → IrColumn.valueFormat.typeId
   //  - ids.ulid()                  → IrColumn.valueFormat "ulid"
   //  - t.vector({ dimensions, metric }) → IrColumn.vectorMetric (closed cosine|l2|innerProduct)
   //  - t.text().mask({ kind, classification }) → IrColumn.mask:{kind,classification}
@@ -85,9 +85,9 @@ function authorWith({ begin, drain, ids, t, table }: Rec): any[] {
   //  - t.bigInt().identity(opts)   → IrColumn.identity:{always}
   table("documents").create({
     columns: {
-      id: ids.typeId({ prefix: "doc" }).primaryKey(),
-      public_id: ids.typeId({ prefix: "document" }).required().unique(),
-      opaque_id: ids.typeId({ prefix: "" }),
+      id: t.typedId("doc" ).primaryKey(),
+      public_id: t.typedId("document" ).required().unique(),
+      opaque_id: t.typedId("" ),
       event_id: ids.ulid().required().unique(),
       owner_id: t.uuid().references("accounts", "id", {
         onDelete: "cascade",
@@ -114,7 +114,7 @@ function authorWith({ begin, drain, ids, t, table }: Rec): any[] {
   });
   // addColumn carries valueFormat + vectorMetric + mask:
   table("documents").column("summary_vec").add({ type: t.vector({ dimensions: 768, metric: "innerProduct" }) });
-  table("documents").column("external_id").add({ type: ids.typeId({ prefix: "external" }) });
+  table("documents").column("external_id").add({ type: t.typedId("external" ) });
   table("documents").column("external_event_id").add({ type: ids.ulid() });
   table("documents").column("phone").add({ type: t.text().mask({ kind: "last4" }) });
   table("documents").column("added_total").add({

@@ -2660,7 +2660,7 @@ impl<'a> CatalogFold<'a> {
                     // BOUNDED string column never reaches here: `tracks_id_default`
                     // needs `id_default` set, which only the value-format path does,
                     // and both value-format builders declare base type `text`
-                    // (`ids.typeId` and `ids.ulid` in the authoring DSL). `valueFormat`
+                    // (`t.typedId` and `ids.ulid` in the authoring DSL). `valueFormat`
                     // has no public setter, so it cannot be attached to a `t.string()`.
                     // The other route in, `identity`/`nextval`, is integer-typed.
                     //
