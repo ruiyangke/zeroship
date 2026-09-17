@@ -17,8 +17,8 @@ export default {
         // `sku` is indexed below and `kind` carries a create-time default, so both
         // are bounded `t.string({ length })`: MySQL refuses a key over an unbounded
         // TEXT column with no prefix length, and refuses a literal DEFAULT on one.
-        sku: t.string({ length: 64 }).notNull(),
-        kind: t.string({ length: 32 }).notNull().default("widget"),
+        sku: t.string({ length: 64 }).required(),
+        kind: t.string({ length: 32 }).required().default("widget"),
       },
     });
     // 2. addColumn — an ALTER add on the same table.

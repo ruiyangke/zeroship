@@ -63,9 +63,9 @@ export default {
 
     table("service_assertion_replay", { schema: SCHEMA }).create({
       columns: {
-        id: t.bigInt().notNull().identity(),
-        replay_key: t.text().notNull(),
-        expires_at: t.timestamp().notNull(),
+        id: t.bigInt().required().identity(),
+        replay_key: t.text().required(),
+        expires_at: t.timestamp().required(),
       },
       primaryKey: ["id"],
     });

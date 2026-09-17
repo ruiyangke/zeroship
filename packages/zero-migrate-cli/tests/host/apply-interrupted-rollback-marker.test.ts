@@ -23,7 +23,7 @@ const MIGRATION = `import { table, t } from "@zeroship/migrate";
 export const name = "create_parent";
 export default {
   schema() {
-    table("parent").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+    table("parent").create({ columns: { id: t.int().required() }, primaryKey: ["id"] });
   },
 };
 `;

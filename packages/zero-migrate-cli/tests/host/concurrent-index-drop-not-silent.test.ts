@@ -83,7 +83,7 @@ export const name = "a";
 export default {
   schema() {
     table("cc_t").create({
-      columns: { id: t.int().notNull(), e: t.text() },
+      columns: { id: t.int().required(), e: t.text() },
       primaryKey: ["id"],
     });
     table("cc_t").index("cc_ix").add({ on: ["e"] });

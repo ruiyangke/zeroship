@@ -81,10 +81,10 @@ export default {
     table("users").create({
       columns: {
         id: ids.typeId({ prefix: "user" }).primaryKey(),
-        email: t.string({ length: 254 }).notNull(),
+        email: t.string({ length: 254 }).required(),
         display_name: t.string({ length: 255 }),
-        state: t.string({ length: 32 }).notNull().default("invited"),
-        created_at: t.timestamp().notNull().default(now()),
+        state: t.string({ length: 32 }).required().default("invited"),
+        created_at: t.timestamp().required().default(now()),
       },
     });
 

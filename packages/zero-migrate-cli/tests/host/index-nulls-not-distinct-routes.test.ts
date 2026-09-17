@@ -64,7 +64,7 @@ function uniqueNamespace(prefix: string): string {
 /** The same index, authored inline and via the add op, plus a no-option control. */
 const SOURCE = `import { table, t } from "@zeroship/migrate";
 export const name = "a";
-const cols = { id: t.int().notNull(), c: t.text() };
+const cols = { id: t.int().required(), c: t.text() };
 export default {
   schema() {
     table("nd_inline").create({

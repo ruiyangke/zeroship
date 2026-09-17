@@ -59,9 +59,9 @@ const migration = {
     enumType("issue_status").create({ values: MEMBERS });
     table("issues").create({
       columns: {
-        status: t.enum("issue_status").notNull().default("UNCONFIRMED"),
-        summary: t.text().notNull(),
-        weight: t.int().notNull().default(0),
+        status: t.enum("issue_status").required().default("UNCONFIRMED"),
+        summary: t.text().required(),
+        weight: t.int().required().default(0),
       },
     });
   },

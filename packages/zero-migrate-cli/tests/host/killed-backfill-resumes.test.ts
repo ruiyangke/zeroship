@@ -61,7 +61,7 @@ export const name = "kb_create";
 export default {
   schema() {
     table("${TABLE}").create({
-      columns: { id: t.int().notNull(), val: t.int(), filled: t.int() },
+      columns: { id: t.int().required(), val: t.int(), filled: t.int() },
       primaryKey: ["id"],
     });
   },

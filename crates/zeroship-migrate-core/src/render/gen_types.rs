@@ -1197,7 +1197,7 @@ fn render_column(
 ) -> String {
     let mut chain = render_column_base(column);
     if column.nullable == Some(false) && !primary_key {
-        chain.push_str(".notNull()");
+        chain.push_str(".required()");
     }
     if primary_key {
         chain.push_str(".primaryKey()");
@@ -1822,7 +1822,7 @@ mod tests {
         text.unique = Some(true);
         assert_eq!(
             render_column(&text, false, None),
-            "t.text().notNull().unique()"
+            "t.text().required().unique()"
         );
         assert_eq!(render_column_base(&column("n", ColType::Int)), "t.int()");
         assert_eq!(

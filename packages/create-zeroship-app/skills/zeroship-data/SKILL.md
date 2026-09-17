@@ -21,17 +21,17 @@ export default {
   schema() {
     table("users").create({
       columns: {
-        email: t.text().notNull().unique(),
-        name: t.text().notNull(),
+        email: t.text().required().unique(),
+        name: t.text().required(),
       },
     });
 
     table("notes").create({
       columns: {
-        userId: t.text().notNull().references("users", "id", { relation: "author" }),
-        title: t.text().notNull(),
+        userId: t.text().required().references("users", "id", { relation: "author" }),
+        title: t.text().required(),
         body: t.text(),
-        pinned: t.boolean().notNull().default(false),
+        pinned: t.boolean().required().default(false),
       },
       indexes: [{ name: "notes_user_idx", on: ["userId"] }],
     });
@@ -41,7 +41,7 @@ export default {
 
 Column builders on `t` include `text`, `string`, `boolean`, `int`, `bigInt`,
 `smallInt`, `real`, `numeric`, `timestamp`, `date`, `uuid`, `json`, `bytes`,
-`textArray`, `vector`, `geoPoint`. Modifiers chain: `.notNull()`, `.default()`,
+`textArray`, `vector`, `geoPoint`. Modifiers chain: `.required()`, `.default()`,
 `.unique()`, `.primaryKey()`, `.references()`, `.mask()`, `.generated()`.
 
 To change the schema, add a migration. Never hand-edit anything under

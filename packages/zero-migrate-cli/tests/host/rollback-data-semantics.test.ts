@@ -58,7 +58,7 @@ function authoredSchema(name: string, schema: () => void): NamedMigration {
 function tableAndRow(): readonly [NamedMigration, NamedMigration] {
   const create = authoredSchema("seed", () => {
     table("acct").create({
-      columns: { id: t.int().notNull(), secret: t.string({ length: 20 }) },
+      columns: { id: t.int().required(), secret: t.string({ length: 20 }) },
       primaryKey: ["id"],
     });
   });
@@ -259,14 +259,14 @@ test("only a migration that lowers to ONE journaled step can be rolled back", as
     [
       "one createTable",
       () => {
-        table("x").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+        table("x").create({ columns: { id: t.int().required() }, primaryKey: ["id"] });
       },
       true,
     ],
     [
       "createTable + createIndex",
       () => {
-        table("x").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+        table("x").create({ columns: { id: t.int().required() }, primaryKey: ["id"] });
         table("x").index("x_id_idx").add({ on: [{ column: "id" }] });
       },
       false,
@@ -275,7 +275,7 @@ test("only a migration that lowers to ONE journaled step can be rolled back", as
       "one createTable declaring an index",
       () => {
         table("x").create({
-          columns: { id: t.int().notNull(), a: t.int() },
+          columns: { id: t.int().required(), a: t.int() },
           primaryKey: ["id"],
           indexes: [{ name: "x_a_idx", on: [{ column: "a" }] }],
         });

@@ -90,13 +90,13 @@ export default {
   schema() {
     table("worker_instances", { schema: "zeroship" }).create({
       columns: {
-        id: t.text().notNull(),
-        ring_key: t.bytes().notNull(),
-        public_key: t.bytes().notNull(),
-        advertise_host: t.inet().notNull(),
-        advertise_port: t.int().notNull(),
-        registered_at: t.timestamp().notNull().default(now()),
-        status: t.text().notNull(),
+        id: t.text().required(),
+        ring_key: t.bytes().required(),
+        public_key: t.bytes().required(),
+        advertise_host: t.inet().required(),
+        advertise_port: t.int().required(),
+        registered_at: t.timestamp().required().default(now()),
+        status: t.text().required(),
       },
       primaryKey: ["id"],
     });

@@ -60,23 +60,23 @@ export default {
     // ---- grants ------------------------------------------------------------
     table("grants", { schema: "zeroship" }).create({
       columns: {
-        id: t.text().notNull(),
-        person_id: t.text().notNull(),
-        audience_kind: t.text().notNull(),
+        id: t.text().required(),
+        person_id: t.text().required(),
+        audience_kind: t.text().required(),
         client_id: t.text(),
         // The subject this person presents to this audience. Derived, never
         // supplied: the platform audience stores the person's own id, an app
         // audience stores the pairwise subject computed over the client's
         // sector identifier. Storing it is what removes the reverse-lookup
         // table.
-        subject: t.text().notNull(),
-        scopes: t.textArray().notNull().default([]),
+        subject: t.text().required(),
+        scopes: t.textArray().required().default([]),
         relay_email: t.text(),
-        subject_status: t.text().notNull().default("active"),
+        subject_status: t.text().required().default("active"),
         suspended_at: t.timestamp(),
         suspended_cause: t.text(),
-        first_consented_at: t.timestamp().notNull().default(now()),
-        updated_at: t.timestamp().notNull().default(now()),
+        first_consented_at: t.timestamp().required().default(now()),
+        updated_at: t.timestamp().required().default(now()),
       },
       primaryKey: ["id"],
     });
@@ -158,21 +158,21 @@ export default {
     // ---- sessions ----------------------------------------------------------
     table("sessions", { schema: "zeroship" }).create({
       columns: {
-        id: t.text().notNull(),
-        person_id: t.text().notNull(),
-        audience_kind: t.text().notNull(),
+        id: t.text().required(),
+        person_id: t.text().required(),
+        audience_kind: t.text().required(),
         client_id: t.text(),
-        grant_id: t.text().notNull(),
+        grant_id: t.text().required(),
         parent_session_id: t.text(),
-        kind: t.text().notNull(),
+        kind: t.text().required(),
         // Per-session. Narrowing this session's scopes bumps `epoch`; ending
         // the session sets `revoked_at`. Without the separation those are the
         // same operation and consent narrowing has to log the human out.
-        epoch: t.bigInt().notNull().default(0),
+        epoch: t.bigInt().required().default(0),
         // Copied from `users.credential_version` at creation and compared on
         // every validating read, so a password change kills every session as a
         // data dependency rather than as an enumeration.
-        credential_epoch: t.bigInt().notNull(),
+        credential_epoch: t.bigInt().required(),
         // NULLABLE, and the null case is a real one rather than a slack
         // constraint. A token exchange that was not granted `offline_access`
         // issues no rotating credential, so its session has no secret anybody
@@ -187,14 +187,14 @@ export default {
         rotated_at: t.timestamp(),
         idem_response_enc: t.bytes(),
         idem_expires_at: t.timestamp(),
-        amr: t.textArray().notNull().default([]),
+        amr: t.textArray().required().default([]),
         acr: t.text(),
-        auth_time: t.timestamp().notNull().default(now()),
-        scopes: t.textArray().notNull().default([]),
+        auth_time: t.timestamp().required().default(now()),
+        scopes: t.textArray().required().default([]),
         label: t.text(),
-        created_at: t.timestamp().notNull().default(now()),
-        idle_expires_at: t.timestamp().notNull(),
-        absolute_expires_at: t.timestamp().notNull(),
+        created_at: t.timestamp().required().default(now()),
+        idle_expires_at: t.timestamp().required(),
+        absolute_expires_at: t.timestamp().required(),
         revoked_at: t.timestamp(),
       },
       primaryKey: ["id"],

@@ -78,9 +78,9 @@ const created = {
     schema() {
       table("items").create({
         columns: {
-          tenant_id: t.int().notNull(),
-          id: t.int().notNull(),
-          label: t.string({ length: 32 }).notNull(),
+          tenant_id: t.int().required(),
+          id: t.int().required(),
+          label: t.string({ length: 32 }).required(),
         },
         primaryKey: ["tenant_id", "id"],
         // The replacement target needs a pre-existing UNIQUE candidate: the fold

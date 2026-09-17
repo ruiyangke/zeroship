@@ -164,8 +164,8 @@ function compositePrimaryKeyMigration(): NamedMigration {
   return authoredMigration("id_lifecycle_composite_primary_key", () => {
     table("composite_pk_items").create({
       columns: {
-        a: t.int().notNull(),
-        b: t.int().notNull(),
+        a: t.int().required(),
+        b: t.int().required(),
         payload: t.text(),
       },
       primaryKey: ["a", "b"],
@@ -177,8 +177,8 @@ function compositeForeignKeyMigration(): NamedMigration {
   return authoredMigration("id_lifecycle_composite_foreign_key", () => {
     table("composite_fk_parents").create({
       columns: {
-        a: t.int().notNull(),
-        b: t.int().notNull(),
+        a: t.int().required(),
+        b: t.int().required(),
         payload: t.text(),
       },
       primaryKey: null,
@@ -217,8 +217,8 @@ function primaryKeyBaseMigration(): NamedMigration {
     table("replace_pk_items").create({
       columns: {
         id: t.int().autoIncrement().primaryKey(),
-        tenant_id: t.int().notNull(),
-        external_id: t.int().notNull(),
+        tenant_id: t.int().required(),
+        external_id: t.int().required(),
         payload: t.text(),
       },
       indexes: [
@@ -231,8 +231,8 @@ function primaryKeyBaseMigration(): NamedMigration {
     });
     table("add_pk_items").create({
       columns: {
-        a: t.int().notNull(),
-        b: t.int().notNull(),
+        a: t.int().required(),
+        b: t.int().required(),
         payload: t.text(),
       },
       primaryKey: null,
@@ -246,8 +246,8 @@ function primaryKeyBaseMigration(): NamedMigration {
     });
     table("drop_pk_items").create({
       columns: {
-        a: t.int().notNull(),
-        b: t.int().notNull(),
+        a: t.int().required(),
+        b: t.int().required(),
         payload: t.text(),
       },
       primaryKey: ["a", "b"],

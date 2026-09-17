@@ -71,12 +71,12 @@ function ownership(...tables: string[]): Record<string, string> {
 function baseMigration(): NamedMigration {
   return authoredMigration("guard_index_scope_base", () => {
     table(TABLE_A).create({
-      columns: { id: t.int().notNull(), bucket: t.int() },
+      columns: { id: t.int().required(), bucket: t.int() },
       primaryKey: ["id"],
       indexes: [{ name: SHARED_INDEX, on: ["bucket"] }],
     });
     table(TABLE_B).create({
-      columns: { id: t.int().notNull(), bucket: t.int() },
+      columns: { id: t.int().required(), bucket: t.int() },
       primaryKey: ["id"],
     });
   });

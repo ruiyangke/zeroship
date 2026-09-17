@@ -158,7 +158,7 @@ test("a create-time unique facet can be dropped by its derived name", async (ctx
   requireLiveDb(process.env.ZERO_MIGRATE_TEST_PG_URL, PG_URL_ENV, "PostgreSQL");
   await run(
     `table("${TABLE}").create({
-       columns: { id: t.int().notNull(), e: t.text().unique() },
+       columns: { id: t.int().required(), e: t.text().unique() },
        primaryKey: ["id"],
      });
      table("${TABLE}").constraint("${DERIVED}").drop({});`,
@@ -187,7 +187,7 @@ test("CONTROL: the addColumn route still drops by the same name", async (ctx) =>
   // This route already produced a real constraint, so it must keep working -- the
   // tolerant path must not disturb the case that was never broken.
   await run(
-    `table("${TABLE}").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+    `table("${TABLE}").create({ columns: { id: t.int().required() }, primaryKey: ["id"] });
      table("${TABLE}").column("e").add({ type: t.text().unique() });
      table("${TABLE}").constraint("${DERIVED}").drop({});`,
     async (client, namespace, applied) => {
@@ -205,7 +205,7 @@ test("CONTROL: a name that is neither constraint nor index is STILL refused", as
   // would become a silent no-op -- a far worse defect than the one being fixed.
   await run(
     `table("${TABLE}").create({
-       columns: { id: t.int().notNull(), e: t.text().unique() },
+       columns: { id: t.int().required(), e: t.text().unique() },
        primaryKey: ["id"],
      });
      table("${TABLE}").constraint("no_such_thing").drop({});`,

@@ -70,7 +70,7 @@ function ownership(...tables: string[]): Record<string, string> {
 function baseMigration(): NamedMigration {
   return authoredMigration("inline_index_base", () => {
     table(TABLE_A).create({
-      columns: { id: t.int().notNull(), bucket: t.int() },
+      columns: { id: t.int().required(), bucket: t.int() },
       primaryKey: ["id"],
       indexes: [{ name: SHARED_INDEX, on: ["bucket"] }],
     });
@@ -87,7 +87,7 @@ function createTableWithInlineIndex(
 ): NamedMigration {
   return authoredMigration(migrationName, () => {
     table(TABLE_C).create({
-      columns: { id: t.int().notNull(), bucket: t.int() },
+      columns: { id: t.int().required(), bucket: t.int() },
       primaryKey: ["id"],
       indexes: [{ name: indexName, on: ["bucket"] }],
     });

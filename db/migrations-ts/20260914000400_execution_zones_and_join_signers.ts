@@ -28,9 +28,9 @@ export default {
     // ---- execution_zones ---------------------------------------------------
     table("execution_zones", { schema: "zeroship" }).create({
       columns: {
-        id: t.text().notNull(),
-        name: t.text().notNull(),
-        status: t.text().notNull().default("active"),
+        id: t.text().required(),
+        name: t.text().required(),
+        status: t.text().required().default("active"),
       },
       primaryKey: ["id"],
     });
@@ -70,21 +70,21 @@ export default {
     // ---- worker_join_signers ------------------------------------------------
     table("worker_join_signers", { schema: "zeroship" }).create({
       columns: {
-        id: t.text().notNull(),
-        public_key: t.bytes().notNull(),
+        id: t.text().required(),
+        public_key: t.bytes().required(),
         // `active` | `revoked`. Revoked is terminal: there is no way back to
         // `active` for a given id, only a newly provisioned signer. Two
         // operator verbs reach it and they differ in what ELSE they do --
         // zeroship.rotate_worker_join_signer leaves the fleet running, and
         // zeroship.purge_worker_join_signer retires every instance the signer
         // admitted. Both are in 20260914000500_worker_join_bindings.ts.
-        status: t.text().notNull(),
-        created_at: t.timestamp().notNull().default(now()),
+        status: t.text().required(),
+        created_at: t.timestamp().required().default(now()),
         // The guarded-no-op-update lock target: a join holds this row's lock
         // for the span of its own insert, and a concurrent revocation's first
         // UPDATE waits on the same lock, so revocation always observes every
         // join that committed before it.
-        lock_version: t.int().notNull().default(0),
+        lock_version: t.int().required().default(0),
       },
       primaryKey: ["id"],
     });

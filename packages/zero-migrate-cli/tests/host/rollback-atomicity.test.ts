@@ -70,7 +70,7 @@ const migration = {
   name: "create_widgets",
   default: {
     schema() {
-      table("widgets").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+      table("widgets").create({ columns: { id: t.int().required() }, primaryKey: ["id"] });
     },
   },
 } as MigrationModule;
@@ -195,7 +195,7 @@ test("an authored down() is refused, not silently ignored", async () => {
           default: {
             schema() {
               table("widgets").create({
-                columns: { id: t.int().notNull() },
+                columns: { id: t.int().required() },
                 primaryKey: ["id"],
               });
             },

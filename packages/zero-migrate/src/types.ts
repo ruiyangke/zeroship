@@ -224,19 +224,19 @@ export interface NextvalDefault {
 
 /**
  * A chainable column definition produced by the fluent `t.*` lexicon.
- * NULLABLE BY DEFAULT; `.notNull()`/`.default(x)`/`.primaryKey()`/`.unique()`
+ * NULLABLE BY DEFAULT; `.required()`/`.default(x)`/`.primaryKey()`/`.unique()`
  * opt in. ONE column-type representation — every column-type
  * position (`create.columns`/`.column().add()`/`.column().rename()`/
  * `.column().setType()`) takes a `ColumnDef`.
  *
  * **IMMUTABLE:** every modifier returns a FRESH `ColumnDef` — it does NOT
- * mutate the receiver — so a hoisted type var (`const t1 = t.text().notNull()`)
+ * mutate the receiver — so a hoisted type var (`const t1 = t.text().required()`)
  * is safe to reuse across multiple columns without aliasing (`t1.unique()` leaves
  * `t1` untouched). This is the contract behind the var-assign authoring style.
  */
 export interface ColumnDef {
   /** Mark the column `NOT NULL` (the rarer, riskier opt-in). Returns a fresh def. */
-  notNull(): ColumnDef;
+  required(): ColumnDef;
   /** A structured default — a typed scalar/container literal, `nextval(...)`, a
    *  top-level value constructor (`now()`, `uuidV4()`, `uuidV7()`), or a narrow
    *  expression callback. NEVER raw SQL (property A).

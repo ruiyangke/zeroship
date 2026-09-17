@@ -14,10 +14,10 @@ export const name = "ddl_create";
 export function schema() {
   table("orders").create({
     columns: {
-      total: t.int().notNull().default(0),
+      total: t.int().required().default(0),
       note: t.text(),
     },
   });
   table("orders").index("orders_total_idx").add({ on: ["total"] });
-  table("orders").column("status").add({ type: t.text().notNull().default("new") });
+  table("orders").column("status").add({ type: t.text().required().default("new") });
 }

@@ -50,7 +50,7 @@ export const name = "create_dupes";
 export default {
   schema() {
     table("dupes").create({
-      columns: { id: t.int().notNull(), tag: t.string({ length: 32 }) },
+      columns: { id: t.int().required(), tag: t.string({ length: 32 }) },
       primaryKey: ["id"],
     });
   },
@@ -75,7 +75,7 @@ const FILE_B = `import { table, t } from "@zeroship/migrate";
 export const name = "survivor_then_unique";
 export default {
   schema() {
-    table("survivor").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+    table("survivor").create({ columns: { id: t.int().required() }, primaryKey: ["id"] });
     table("dupes").index("dupes_tag_key").add({ on: [{ column: "tag" }], unique: true });
   },
 };

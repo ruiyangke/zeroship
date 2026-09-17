@@ -75,7 +75,7 @@ const WITH_SEQUENCE: MigrationModule = {
     schema() {
       sequence("item_ids").create({ as: t.bigInt() });
       table("items").create({
-        columns: { id: t.bigInt().notNull().default(nextval("item_ids")), label: t.text() },
+        columns: { id: t.bigInt().required().default(nextval("item_ids")), label: t.text() },
         primaryKey: ["id"],
       });
     },
@@ -87,7 +87,7 @@ const DEFAULT_ONLY: MigrationModule = {
   default: {
     schema() {
       table("items").create({
-        columns: { id: t.bigInt().notNull().default(nextval("item_ids")), label: t.text() },
+        columns: { id: t.bigInt().required().default(nextval("item_ids")), label: t.text() },
         primaryKey: ["id"],
       });
     },

@@ -82,7 +82,7 @@ const SCHEMA_MIGRATION: MigrationModule = {
     schema() {
       table("items").create({
         columns: {
-          id: t.int().notNull(),
+          id: t.int().required(),
           grp: t.text(),
           n: t.int(),
         },

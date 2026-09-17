@@ -91,7 +91,7 @@ export const name = "base";
 export default {
   schema() {
     table("${TABLE}").create({
-      columns: { id: t.int().notNull(), ts: t.bigInt() },
+      columns: { id: t.int().required(), ts: t.bigInt() },
       primaryKey: ["id"],
     });
   },
@@ -237,7 +237,7 @@ export const name = "a";
 export default {
   schema() {
     table("part_t").create({
-      columns: { id: t.int().notNull(), ms: t.bigInt().notNull() },
+      columns: { id: t.int().required(), ms: t.bigInt().required() },
       primaryKey: ["id", "ms"],
       partitionBy: { range: ["ms"] },
     });

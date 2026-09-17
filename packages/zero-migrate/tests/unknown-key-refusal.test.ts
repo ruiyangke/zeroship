@@ -38,7 +38,7 @@ import { domain, enumType, extension, role, schema, sequence, t, table, view } f
 /** The one bogus key, so every failure message reads identically. */
 const UNKNOWN = { zzUnknownKey: 1 };
 
-const COLUMNS = { id: t.int().notNull(), v: t.int().notNull() };
+const COLUMNS = { id: t.int().required(), v: t.int().required() };
 const BASE = { columns: COLUMNS, primaryKey: ["id"] as string[] };
 
 /** Re-declared per case: recording is eager, so each case needs its own table. */
@@ -59,7 +59,7 @@ const ENTRY_POINTS: ReadonlyArray<readonly [string, (extra: object) => void]> = 
 
   ["column().add", (x) => { seed(); table("a").column("w").add({ type: t.int(), ...x }); }],
   ["column().drop", (x) => { seed(); table("a").column("v").drop({ ...x }); }],
-  ["column().rename", (x) => { seed(); table("a").column("v").rename({ to: "w", type: t.int().notNull(), ...x }); }],
+  ["column().rename", (x) => { seed(); table("a").column("v").rename({ to: "w", type: t.int().required(), ...x }); }],
   ["column().setType", (x) => { seed(); table("a").column("v").setType({ to: t.text(), ...x }); }],
   ["column().setNotNull", (x) => { seed(); table("a").column("v").setNotNull({ ...x }); }],
   ["column().dropNotNull", (x) => { seed(); table("a").column("v").dropNotNull({ ...x }); }],
@@ -118,7 +118,7 @@ const TRIGGER_STATEMENTS: ReadonlyArray<readonly [string, (extra: object) => voi
 ] as const;
 
 function triggerBody(body: (b: any) => unknown[]): void {
-  table("a").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+  table("a").create({ columns: { id: t.int().required() }, primaryKey: ["id"] });
   table("a").trigger("tg").create({ timing: "before", events: ["insert"], body } as never);
 }
 

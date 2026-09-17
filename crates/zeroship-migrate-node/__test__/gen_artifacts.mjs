@@ -143,7 +143,7 @@ assert(Array.isArray(widgets.indexes), 'indexes is an array');
 assert(gen.envDbTs.includes('from "@zeroship/migrate";'), 'imports @zeroship/migrate');
 assert(gen.envDbTs.includes('const schema = {'), 'has the schema const');
 assert(gen.envDbTs.includes('label: t.text(),'), 'renders label builder chain');
-assert(gen.envDbTs.includes('count: t.int().notNull(),'), 'renders count builder chain');
+assert(gen.envDbTs.includes('count: t.int().required(),'), 'renders count builder chain');
 assert(gen.envDbTs.includes('satisfies Record<string, CreateTableArgs>'), 'checks table payloads against CreateTableArgs');
 assert(gen.envDbTs.includes('export { schema };'), 'exports the passive schema map');
 for (const s of injectedFields) {

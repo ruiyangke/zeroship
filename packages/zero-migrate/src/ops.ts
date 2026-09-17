@@ -946,7 +946,7 @@ class ColumnDefImpl implements ColumnDefType {
     return this.with({ vectorMetric: metric });
   }
 
-  notNull(): ColumnDefImpl {
+  required(): ColumnDefImpl {
     return this.with({ nullable: false });
   }
   default(value: DefaultValue | DefaultExprFn | ExprChainType | Expr): ColumnDefImpl {
@@ -2122,7 +2122,7 @@ export function raw(args: RawArgs): Node {
  * schema lowers through the IDENTICAL `ColType` path a hand-written migration
  * column does (one shared lexicon). The TYPE is bridged via the
  * single-source {@link colTypeFromDbField} reduction; the column's NULLABILITY is
- * carried over (`db` `.required()` → migration `.notNull()`). Table/
+ * carried over (`db` `.required()` → migration `.required()`). Table/
  * column NAMES are NEVER bound to the live schema. Returns a chainable
  * (immutable) `ColumnDef`, so a caller can still layer migration modifiers on top.
  */
@@ -2130,7 +2130,7 @@ export function fromDb(field: DbSchemaField): ColumnDefType {
   let def: ColumnDefImpl = new ColumnDefImpl(colTypeFromDbField(field));
   const fd = field instanceof DbTypeBuilder ? field.toFieldDef() : field;
   if (fd && typeof fd === "object" && (fd as { required?: boolean }).required === true) {
-    def = def.notNull();
+    def = def.required();
   }
   if (fd && typeof fd === "object" && (fd as { unique?: boolean }).unique === true) {
     def = def.unique();

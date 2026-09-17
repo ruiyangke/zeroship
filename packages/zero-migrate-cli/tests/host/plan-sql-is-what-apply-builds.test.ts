@@ -88,11 +88,11 @@ export default {
   schema() {
     table("${TABLE}").create({
       columns: {
-        id: t.int().notNull(),
-        email: t.text().notNull(),
+        id: t.int().required(),
+        email: t.text().required(),
         rank: t.int(),
         total: t.numeric({ precision: 12, scale: 2 }),
-        created: t.timestamp().notNull(),
+        created: t.timestamp().required(),
         tags: t.textArray(),
         meta: t.json(),
       },

@@ -58,7 +58,7 @@ const created: NamedMigration = {
   default: {
     schema() {
       table("acct").create({
-        columns: { id: t.int().notNull(), label: t.string({ length: 20 }) },
+        columns: { id: t.int().required(), label: t.string({ length: 20 }) },
         primaryKey: ["id"],
       });
     },
@@ -380,7 +380,7 @@ test("SQLite: a recorded inverse is what a rollback runs", async () => {
 export const name = "create_acct";
 export default {
   schema() {
-    table("acct").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+    table("acct").create({ columns: { id: t.int().required() }, primaryKey: ["id"] });
   },
 };
 `,

@@ -8,37 +8,37 @@ export default {
   schema() {
     table("workspaces").create({
       columns: {
-        slug: t.text().notNull().unique(),
-        name: t.text().notNull(),
-        tier: t.text().notNull().default("free"),
-        region: t.text().notNull(),
+        slug: t.text().required().unique(),
+        name: t.text().required(),
+        tier: t.text().required().default("free"),
+        region: t.text().required(),
       },
       indexes: [{ name: "workspaces_tier_idx", on: ["tier"] }],
     });
 
     table("users").create({
       columns: {
-        workspaceId: t.text().notNull().references("workspaces", "id", { relation: "workspace" }),
-        handle: t.text().notNull().unique(),
-        fullName: t.text().notNull(),
-        email: t.text().notNull().unique(),
+        workspaceId: t.text().required().references("workspaces", "id", { relation: "workspace" }),
+        handle: t.text().required().unique(),
+        fullName: t.text().required(),
+        email: t.text().required().unique(),
         contactEmail: t.encrypted({ of: t.text() }).mask({ kind: "email", classification: "pii" }),
         ssn: t.encrypted({ of: t.text() }).mask({ kind: "last4", classification: "spi" }),
-        city: t.text().notNull(),
+        city: t.text().required(),
       },
       indexes: [{ name: "users_workspace_idx", on: ["workspaceId"] }],
     });
 
     table("tasks").create({
       columns: {
-        workspaceId: t.text().notNull().references("workspaces", "id", { relation: "workspace" }),
-        ownerId: t.text().notNull().references("users", "id", { relation: "owner" }),
-        title: t.text().notNull(),
-        description: t.text().notNull(),
-        status: t.text().notNull().default("open"),
-        priority: t.double().notNull(),
-        score: t.double().notNull(),
-        category: t.text().notNull(),
+        workspaceId: t.text().required().references("workspaces", "id", { relation: "workspace" }),
+        ownerId: t.text().required().references("users", "id", { relation: "owner" }),
+        title: t.text().required(),
+        description: t.text().required(),
+        status: t.text().required().default("open"),
+        priority: t.double().required(),
+        score: t.double().required(),
+        category: t.text().required(),
         tags: t.json(),
       },
       indexes: [
@@ -49,13 +49,13 @@ export default {
 
     table("places").create({
       columns: {
-        workspaceId: t.text().notNull().references("workspaces", "id", { relation: "workspace" }),
-        name: t.text().notNull(),
-        description: t.text().notNull(),
-        category: t.text().notNull(),
-        loc: t.geoPoint().notNull(),
+        workspaceId: t.text().required().references("workspaces", "id", { relation: "workspace" }),
+        name: t.text().required(),
+        description: t.text().required(),
+        category: t.text().required(),
+        loc: t.geoPoint().required(),
         embedding: t.vector({ dimensions: 4, metric: "cosine" }),
-        open: t.boolean().notNull().default(true),
+        open: t.boolean().required().default(true),
       },
       indexes: [
         { name: "places_workspace_category_idx", on: ["workspaceId", "category"] },

@@ -256,8 +256,8 @@ test("e2e-pg: multi-op apply + journal + status/history + drift, real addon + pg
       schema() {
         table("gadgets").create({
           columns: {
-            sku: t.text().notNull(),
-            kind: t.text().notNull().default("widget"),
+            sku: t.text().required(),
+            kind: t.text().required().default("widget"),
             note: t.text(),
           },
         });

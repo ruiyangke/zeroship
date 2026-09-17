@@ -55,7 +55,7 @@ export const name = "keys_a_text_column";
 export default {
   schema() {
     table("docs").create({
-      columns: { id: t.int().notNull(), body: t.text().notNull() },
+      columns: { id: t.int().required(), body: t.text().required() },
       primaryKey: ["id"],
     });
     table("docs").index("docs_body_idx").add({ on: [{ column: "body" }] });
@@ -68,7 +68,7 @@ export const name = "plain_table";
 export default {
   schema() {
     table("widgets").create({
-      columns: { id: t.int().notNull(), label: t.string({ length: 64 }) },
+      columns: { id: t.int().required(), label: t.string({ length: 64 }) },
       primaryKey: ["id"],
     });
   },

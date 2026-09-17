@@ -70,7 +70,7 @@ scope = "all"
 export const name = "a";
 export default {
   schema() {
-    table("${TABLE}").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+    table("${TABLE}").create({ columns: { id: t.int().required() }, primaryKey: ["id"] });
   },
 };
 `,

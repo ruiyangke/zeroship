@@ -16,7 +16,7 @@ export default {
   schema() {
     table("posts").create({
       columns: {
-        title: t.text().notNull(),
+        title: t.text().required(),
         // t.vector({ dimensions, metric }) → IrColumn.vectorMetric (the closed cosine|l2|
         // innerProduct set) — the other declared-only hint.
         embedding: t.vector({ dimensions: 1536, metric: "cosine" }),

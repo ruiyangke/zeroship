@@ -4,7 +4,7 @@ export default {
   name: "project_data_keys",
   schema() {
     table("project_data_keys", { schema: "zeroship" }).create({
-      columns: { id: t.bigInt().notNull().identity(), project_id: t.text().notNull(), ciphertext: t.bytes().notNull() },
+      columns: { id: t.bigInt().required().identity(), project_id: t.text().required(), ciphertext: t.bytes().required() },
       primaryKey: ["id"],
     });
     table("project_data_keys", { schema: "zeroship" }).unique("project_data_keys_natural_key").add({ columns: ["project_id"] });

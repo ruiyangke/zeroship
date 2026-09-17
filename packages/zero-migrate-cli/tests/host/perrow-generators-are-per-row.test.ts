@@ -96,7 +96,7 @@ export default {
   schema() {
     table("${TABLE}").create({
       columns: {
-        id: t.int().notNull(),
+        id: t.int().required(),
         u4: t.uuid(),
         u7: t.uuid(),
         u7b: t.uuid(),

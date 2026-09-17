@@ -79,7 +79,7 @@ export const name = "create_things";
 export default {
   schema() {
     table("${tableName}").create({
-      columns: { id: t.int().notNull()${extraColumn} },
+      columns: { id: t.int().required()${extraColumn} },
       primaryKey: ["id"],
     });
   },

@@ -77,7 +77,7 @@ test("refuses empty and incomplete schema recordings", () => {
   assert.throws(() => compileSchema(() => {}), /recorder is empty/);
   assert.throws(() => compileSchema(namespace => {
     table("queue_scopes", { schema: namespace }).create({
-      columns: { id: t.text().notNull() }, primaryKey: ["id"],
+      columns: { id: t.text().required() }, primaryKey: ["id"],
     });
   }), /unexpected collections/);
 });

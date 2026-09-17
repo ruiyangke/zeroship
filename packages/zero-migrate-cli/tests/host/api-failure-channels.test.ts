@@ -138,7 +138,7 @@ test("control: a valid migration returns ok:true, so neither channel fires by de
       name: "m",
       default: {
         schema() {
-          table("t").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+          table("t").create({ columns: { id: t.int().required() }, primaryKey: ["id"] });
         },
       },
     } as MigrationModule),
@@ -161,7 +161,7 @@ test("history() returns bigint eventSeq, so plain JSON.stringify throws", async 
         name: "create_t",
         default: {
           schema() {
-            table("t").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+            table("t").create({ columns: { id: t.int().required() }, primaryKey: ["id"] });
           },
         },
       } as MigrationModule,

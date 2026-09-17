@@ -15,7 +15,7 @@
 // migrations clean, so the cost was a green CI followed by a broken deploy -- the
 // exact false green `lint-dialect-verdicts.test.ts` names as the failure that
 // matters. Three of the four cases in that class behaved this way; only
-// `geoPoint().notNull()` applied, because MySQL's SPATIAL requirement happens to be
+// `geoPoint().required()` applied, because MySQL's SPATIAL requirement happens to be
 // satisfied by NOT NULL while the vector BLOB rule is not satisfiable at all.
 //
 // So the index is no longer emitted on MySQL. The COLUMN still is: dropping the
@@ -65,7 +65,7 @@ const OWNER_APP = "app_ann_index";
 const CASES = [
   { what: "vector", column: `t.vector({ dimensions: 3, metric: "cosine" })`, table: "ann_vec" },
   { what: "geoPoint", column: "t.geoPoint()", table: "ann_geo" },
-  { what: "geoPoint notNull", column: "t.geoPoint().notNull()", table: "ann_geo2" },
+  { what: "geoPoint notNull", column: "t.geoPoint().required()", table: "ann_geo2" },
 ] as const;
 
 function uniqueNamespace(prefix: string): string {
@@ -98,7 +98,7 @@ export const name = "base";
 export default {
   schema() {
     table("${table}").create({
-      columns: { id: t.int().notNull(), payload: ${column} },
+      columns: { id: t.int().required(), payload: ${column} },
       primaryKey: ["id"],
     });
   },

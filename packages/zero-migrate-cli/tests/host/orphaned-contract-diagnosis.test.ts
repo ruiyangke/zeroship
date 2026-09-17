@@ -65,7 +65,7 @@ export const name = "create_people";
 export default {
   schema() {
     table("people").create({
-      columns: { id: t.int().notNull(), email: t.text() },
+      columns: { id: t.int().required(), email: t.text() },
       primaryKey: ["id"],
     });
   },
