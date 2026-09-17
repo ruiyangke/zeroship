@@ -2,17 +2,15 @@
 //!
 //! # Why this is in the migration backend and not in the data plane
 //!
-//! Until this module existed, `zeroship-data-v8`'s `crud/unmask.rs` issued
-//! `CREATE TABLE IF NOT EXISTS` + three `CREATE INDEX IF NOT EXISTS` on EVERY
-//! `unmask()` call, on both dialects, from inside the worker. That is eight DDL
-//! statements on the privileged read path, executed by the process that runs
-//! creator code - and it is the last live DDL the data plane emitted. Schema
-//! change belongs to `zeroship-migrate`; the data plane emits none.
+//! Schema change belongs to `zeroship-migrate`; the data plane emits no DDL.
+//! Issuing this table's `CREATE TABLE` / `CREATE INDEX` from inside the worker on
+//! every `unmask()` would put DDL on the privileged read path, executed by the
+//! process that runs creator code.
 //!
-//! The table could not simply be DELETED with the DDL. The audit row is where
-//! authorization and provenance for a plaintext read live, so removing the
-//! writer's dependency without giving the table a creator would keep the writer
-//! and drop the guarantee. This module IS that creator, for SQLite.
+//! The table could not simply be deleted. The audit row is where authorization
+//! and provenance for a plaintext read live, so removing the writer's dependency
+//! without giving the table a creator would keep the writer and drop the
+//! guarantee. This module IS that creator, for SQLite.
 //!
 //! # Why the shape is NOT shared with the Postgres half
 //!
