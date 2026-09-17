@@ -195,8 +195,8 @@ impl DialectScope {
 /// asked whether the target was SQLite, so a MySQL rename fell through to the
 /// expand-contract author and
 /// was wrapped in a variant named for PostgreSQL. That is a MISSING PLAN-TIME
-/// REFUSAL, not MySQL support - `docs/dialects.md`, MySQL's registered validation
-/// policy, and `lower_ir_rename` all declare MySQL column rename unsupported, and the
+/// REFUSAL, not MySQL support - MySQL's registered validation
+/// policy and `lower_ir_rename` declare MySQL column rename unsupported, and the
 /// declarative differ is the lone dissenter. The strategy names are honest about
 /// what each arm IS without re-encoding a dialect claim the type cannot keep.
 #[allow(clippy::large_enum_variant)]

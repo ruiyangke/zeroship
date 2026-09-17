@@ -1809,8 +1809,8 @@ impl DesiredSchema {
 ///   `REFERENCES` grammar does not accept a database/schema qualifier.
 ///
 /// Full-text search is not folded here: FTS is not an atomic type and is composed
-/// from smaller primitives instead (see `docs/proposals/fts-macro.md`). There is no
-/// `.fts()` facet, so no code path produces an FTS shape.
+/// from smaller primitives instead. There is no `.fts()` facet, so no code path
+/// produces an FTS shape.
 pub fn desired_snapshot_for_dialect(
     vendors: VendorSet,
     project_schema: &str,

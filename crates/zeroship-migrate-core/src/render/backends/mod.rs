@@ -2,8 +2,7 @@
 //!
 //! The vendors themselves are sibling crates - `zeroship-migrate-postgres`,
 //! `zeroship-migrate-sqlite` and `zeroship-migrate-mysql` - implementing the
-//! `zeroship-migrate-backend` contract (`docs/proposals/pluggable-backends.md`);
-//! what lives here is the composition.
+//! `zeroship-migrate-backend` contract; what lives here is the composition.
 //!
 //! # What belongs in a backend crate
 //!

@@ -1,6 +1,5 @@
 //! `zeroship-migrate-core` - the ENGINE of a versioned DB migration system for **creator
-//! project databases**. The shipped design docs are under `docs/`; start at
-//! `docs/architecture.md`.
+//! project databases**.
 //!
 //! # It names no backend, and it cannot
 //!
