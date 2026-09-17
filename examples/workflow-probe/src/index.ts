@@ -9,8 +9,8 @@ import { Workflow, type WorkflowStep, type WorkflowTrigger } from "@zeroship/wor
 
 // `@zeroship/types` declares `env` as `[key: string]: unknown`, so there is no
 // `env.workflows` type today (checked: packages/types/zeroship.d.ts has no
-// `workflows` mention). The cast below is the shape docs/reference/workflows.md
-// documents; keeping it in one place makes the missing declaration obvious
+// `workflows` mention). The cast below is the shape `env.workflows` exposes;
+// keeping it in one place makes the missing declaration obvious
 // rather than scattering `as any` through the handlers.
 interface ProbeRun {
   readonly id: string;
@@ -46,9 +46,9 @@ const kv = (env as unknown as { kv: ProbeKv }).kv;
 // examples/kv-dashboard/tests/rpc.test.ts, so a difference here is a workflow
 // difference and not a kv one.
 const TRAIL_KEY = "wfprobe:trail";
-// Compensation is at-least-once: docs/reference/workflows.md states a
-// compensator may run again after a crash, a retry or a lease handoff, and the
-// platform mints `ctx.idempotencyKey` so the undo effect can dedupe on it. A
+// Compensation is at-least-once: a compensator may run again after a crash, a
+// retry or a lease handoff, and the platform mints `ctx.idempotencyKey` so the
+// undo effect can dedupe on it. A
 // key under this prefix means that occurrence's undo has already landed.
 const COMPENSATED_PREFIX = "wfprobe:compensated:";
 // The claim expires, so a compensated run does not leave a key behind for the
@@ -189,10 +189,8 @@ const CASES: Record<string, { workflow: string; input: unknown }> = {
   compensate: { workflow: "CompensateCase", input: { label: "probe" } },
 };
 
-// Every procedure below is ONE short operation. An earlier version of this app
-// polled to completion inside a single `wf.run` mutation, which worked under
-// `pnpm dev` and returned `{"message":"request timed out"}` on every case
-// deployed: `zeroship serve` leaves the per-request wall clock unbounded
+// Every procedure below is ONE short operation. `zeroship serve` leaves the
+// per-request wall clock unbounded
 // (crates/zeroship-runtime/src/core/serve.rs, `wall_timeout: None`) while a deployed app
 // inherits FREE_TIER_RUNTIME_LIMITS -- 5s wall, 50ms CPU
 // (crates/zeroship-core/src/types.rs). Driving the poll loop from the caller keeps every

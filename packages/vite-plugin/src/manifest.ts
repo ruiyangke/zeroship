@@ -2,15 +2,14 @@
 //
 // Compute the manifest's resource tree:
 //
-//   - resources    flat map of `<key> -> resource` per
-//                  `docs/proposals/rpc.md` §7
+//   - resources    flat map of `<key> -> resource`
 //   - transformer  always "json" by default
 //
 // Validation is wired into the runtime dispatch — the synthetic SSR
 // entry calls `proc.config.input.parse(args)` before invoking the
 // user handler. The manifest never carries JSONSchemas.
 //
-// Wire identity (from `docs/proposals/rpc.md` §2): a pure function
+// Wire identity: a pure function
 // of current source.
 //
 //   1. fn.config.id (explicit) wins.
@@ -22,8 +21,6 @@
 //
 // No previous-build alias state. No persistence. The wireId is always
 // what the current source says.
-//
-// Wireshape: see `docs/proposals/rpc.md` §7.
 
 import { promises as fs } from "node:fs";
 import { resolve } from "node:path";
@@ -327,7 +324,7 @@ type WireIdResolution = {
 
 /**
  * Pick the wireId for a procedure. Resolution order (highest priority
- * first; see `docs/proposals/rpc.md` §2):
+ * first):
  *
  *   1. `proc.config.id` (explicit, set on the procedure or on the
  *      module).
@@ -356,8 +353,7 @@ function pickWireId(proc: DiscoveredProcedure): WireIdResolution {
 const KEY_FORMAT_RE = /^(?:\*|rpc:[a-zA-Z0-9._*-]+|\/[\w\-/.\[\]:*]*)$/;
 
 /**
- * Validate the authored, flattened resource map against the rules in
- * `docs/proposals/rpc.md` §7 ("Validation"). Throws (production) or
+ * Validate the authored, flattened resource map. Throws (production) or
  * warns (dev) on failure.
  */
 function validateResources(
@@ -428,7 +424,7 @@ function validateResources(
   // it would emit a manifest the gateway cannot compile.
   //
   // `"admin"` gets its own message rather than the generic one: there is no
-  // platform-admin principal (`docs/architecture/control-plane.md`), and the
+  // platform-admin principal, and the
   // gateway enforced that level identically to `user`, so a route gated with it
   // was reachable by every signed-in end user.
   for (const [key, node] of Object.entries(flat)) {
@@ -620,8 +616,7 @@ function isCompiledCatchUp(
  * segment (`/api/admin/users` → `/api/admin`). For RPC ids we drop the
  * last dot segment (`rpc:todos.delete` → `rpc:todos`). The bare `*`
  * is everyone's ultimate parent — but we don't infer it as a parent
- * for this check; `docs/proposals/rpc.md` §7 talks about explicit
- * parent declarations.
+ * for this check; parents must be declared explicitly.
  */
 function parentResourceKey(key: string): string | null {
   if (key === "*") return null;

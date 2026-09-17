@@ -22,10 +22,8 @@
 //! `ColType::Domain { name, schema }` carries the NAME only, and the base type lives in
 //! a separate `Op::CreateDomain`. The resolution has to happen where the op stream is in
 //! scope, so the fold behind the `FieldDef` map does it through the same
-//! `NamedTypeRegistry` the DDL lower and the snapshot fold already use. (That registry
-//! belonged to the standalone `FieldDef` walker until
-//! `docs/proposals/single-fold-and-effects.md`
-//! deleted it; the registry is carried on `FoldedSchema` now and
+//! `NamedTypeRegistry` the DDL lower and the snapshot fold already use. (The registry
+//! is carried on `FoldedSchema`, and
 //! `project_field_defs` reads it, so the claim - one registry, three resolvers, no
 //! fourth opinion - is unchanged and is in fact stronger.)
 //!
@@ -206,7 +204,7 @@ fn a_domain_column_reports_its_base_type_on_every_dialect() {
         // rediscovered: the domain's own `CHECK (VALUE > 0)` reaches no descriptor
         // slot. `min`/`max` are INCLUSIVE bounds, so `min: 0` would tell the runtime to
         // accept a row the database rejects; an arbitrary predicate has no image at
-        // all. Recorded in `docs/review-log.md` as a separate defect.
+        // all.
         assert_eq!(
             fields["amount"].get("min"),
             None,

@@ -1,7 +1,6 @@
 "use server";
 
-// auth-probe - the AUTH leg of the dev-vs-deployed seam comparison
-// (docs/pilot/e2e-scenarios.md scenario 6 / scenario 11).
+// auth-probe - the AUTH leg of the dev-vs-deployed seam comparison.
 //
 // Sibling of `examples/storage-probe` and `examples/workflow-probe`: a
 // deliberately boring app whose only job is to let `tests/e2e_dev_vs_deployed_auth.sh`
@@ -99,9 +98,9 @@ export const requireGatedProbe = query(
 );
 
 /**
- * `probe.appGate` - the pattern `docs/reference/auth.md` tells creators to use
- * when they want their own 401: gate on `getUser()` and throw a status-bearing
- * error. Pure handler code with no platform gate involved, so it is the CONTROL
+ * `probe.appGate` - the pattern for a creator-owned 401: gate on `getUser()`
+ * and throw a status-bearing error. Pure handler code with no platform gate
+ * involved, so it is the CONTROL
  * for every other row: if this one diverges too, the finding is not about auth
  * postures.
  */

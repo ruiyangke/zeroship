@@ -29,7 +29,7 @@ export type RequiredPrincipal = "anonymous" | "user";
  *
  * The five kinds split into two axes:
  *
- *  - **Capability** (B3 from `docs/archive/zeroship-db.md`):
+ *  - **Capability** (B3):
  *    - `query`     — DB reads only, no `fetch()`.
  *    - `mutation`  — DB read + write, no `fetch()`.
  *    - `action`    — full surface: `fetch()`, `ctx.runQuery`,
@@ -144,10 +144,9 @@ export interface StaticAction {
 }
 
 /**
- * One node in the authoring resource tree. Mirrors the manifest shape
- * described in `docs/proposals/rpc.md` §7. Children are an
- * authoring convenience; the build flattens them to fully-qualified
- * keys.
+ * One node in the authoring resource tree. Mirrors the manifest shape.
+ * Children are an authoring convenience; the build flattens them to
+ * fully-qualified keys.
  *
  * Mutually exclusive routing actions: `redirect`, `rewrite`, `static`.
  */
@@ -190,8 +189,7 @@ export interface Timeout {
 
 /**
  * App-level RPC defaults. Procedures inherit these unless overridden by
- * `fn.config` / module-level `$config`. `docs/proposals/rpc.md` §1
- * defines the resolution order:
+ * `fn.config` / module-level `$config`. The resolution order is:
  * `fn.config` → module `$config` → `defineApp({ rpc: { defaults } })` →
  * built-in defaults.
  */
@@ -210,8 +208,7 @@ export interface RpcConfig {
    * If `true`, error redaction is disabled in production builds —
    * thrown errors keep their full message on the wire. Useful for
    * staging environments where you want production-like routing but
-   * readable errors. See `docs/proposals/rpc.md` §16 for the
-   * production redaction rule.
+   * readable errors.
    */
   dev?: boolean;
 }
