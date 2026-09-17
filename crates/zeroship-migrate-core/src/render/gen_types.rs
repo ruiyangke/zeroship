@@ -1287,7 +1287,7 @@ fn render_col_type(
         ColType::Date => "t.calendarDate()".to_string(),
         ColType::Uuid => "t.uuid()".to_string(),
         ColType::Inet => "t.inet()".to_string(),
-        ColType::TextArray => "t.textArray()".to_string(),
+        ColType::TextArray => "t.array(t.text(), { storage: \"native\" })".to_string(),
         ColType::Bytes => "t.bytes()".to_string(),
         ColType::Char { length } => format!("t.char({{ length: {length} }})"),
         ColType::Ref { .. } => "t.text()".to_string(),

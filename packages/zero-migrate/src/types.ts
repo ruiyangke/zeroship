@@ -313,7 +313,7 @@ export interface TypeLexicon {
    *  SQLite). `length` defaults to 255 when omitted. */
   string(opts?: StringOptions): ColumnDef;
   /** PostgreSQL `text[]` column. Non-PG backends store the array payload as JSON text. */
-  textArray(): ColumnDef;
+  array(item: ColumnDef, opts?: { storage?: "json" | "native" }): ColumnDef;
   /** Fixed-precision decimal (default (38, 9)). */
   numeric(opts?: NumericOptions): ColumnDef;
   /** Fixed-length character string (`character(n)` / `CHAR(n)`). */

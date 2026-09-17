@@ -125,6 +125,7 @@ import type {
   RoleSetOptionsArgs,
   RefAction,
   Row,
+  ColumnDef,
   Scalar,
   ScalarValue,
   SchemaCreateArgs,
@@ -1785,7 +1786,16 @@ export const perRow: PerRowGenerators = Object.freeze({
 export const t: TypeLexicon = {
   text: (opts?: TextOptions) => textColumn(opts),
   string: (opts?: StringOptions) => stringColumn(opts),
-  textArray: () => new ColumnDefImpl("textArray"),
+  array: (item: ColumnDef, opts?: { storage?: "json" | "native" }) => {
+    const storage = opts?.storage ?? "native";
+    if (storage !== "native") {
+      throw structuredError("OP_INVALID", "t.array(item, { storage: json }): the migration DSL expresses native text arrays only");
+    }
+    if ((item as { _type?: string })._type !== "text") {
+      throw structuredError("OP_INVALID", "t.array(item): native array storage supports string elements only - use t.text()");
+    }
+    return new ColumnDefImpl("textArray");
+  },
   numeric: (opts = {}) => {
     requirePlainObject(opts, "t.numeric(opts)");
     const precision = requireOptionalPositiveInteger(opts.precision, "t.numeric({ precision })") ?? 38;

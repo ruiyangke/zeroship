@@ -250,7 +250,7 @@ test(".collation() refuses an out-of-set token and every type that cannot carry 
     t.bytes(),
     t.boolean(),
     t.json(),
-    t.textArray(),
+    t.array(t.text(), { storage: "native" }),
     t.char({ length: 3 }),
     t.numeric(),
     t.inet(),
@@ -579,9 +579,9 @@ test("public and engine recorders match for t.text({ caseSensitive:false })", ()
   assert.equal(publicOps[1].caseSensitive, false);
 });
 
-test("t.textArray() records the textArray column type", () => {
+test("t.array records the textArray column type", () => {
   const ops = record(() => {
-    table("u").create({ columns: { scopes: t.textArray().required() } });
+    table("u").create({ columns: { scopes: t.array(t.text(), { storage: "native" }).required() } });
   });
   const col = ops[0].columns[0];
   assert.equal(col.type, "textArray");
@@ -1791,7 +1791,7 @@ test("empty object and array defaults record as container defaults", () => {
       columns: {
         settings: t.json().default({}),
         events: t.json().default([]),
-        scopes: t.textArray().default([]),
+        scopes: t.array(t.text(), { storage: "native" }).default([]),
       },
     }),
   );
@@ -1890,7 +1890,7 @@ test("empty container defaults record byte-identically to engine recorder", () =
       columns: {
         settings: t.json().default({}),
         events: t.json().default([]),
-        scopes: t.textArray().default([]),
+        scopes: t.array(t.text(), { storage: "native" }).default([]),
       },
     }),
   );
@@ -1899,7 +1899,7 @@ test("empty container defaults record byte-identically to engine recorder", () =
       columns: {
         settings: t.json().default({}),
         events: t.json().default([]),
-        scopes: t.textArray().default([]),
+        scopes: t.array(t.text(), { storage: "native" }).default([]),
       },
     }),
   );

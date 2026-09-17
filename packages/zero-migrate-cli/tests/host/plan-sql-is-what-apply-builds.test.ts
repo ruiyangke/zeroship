@@ -93,7 +93,7 @@ export default {
         rank: t.int(),
         total: t.numeric({ precision: 12, scale: 2 }),
         created: t.timestamp().required(),
-        tags: t.textArray(),
+        tags: t.array(t.text(), { storage: "native" }),
         meta: t.json(),
       },
       primaryKey: ["id"],
