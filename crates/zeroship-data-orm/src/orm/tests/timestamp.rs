@@ -2,7 +2,7 @@ use super::fixtures::CollectionFixture;
 use super::*;
 
 fn fields() -> Value {
-    value!({"instant":{"type":"date", "nullable":true,"unique":true}})
+    value!({"instant":{"type":"timestamp", "nullable":true,"unique":true}})
 }
 
 #[compio::test]

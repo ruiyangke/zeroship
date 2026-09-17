@@ -153,7 +153,7 @@ import type {
 } from "./types.js";
 import { flattenVendorAttributes, type VendorAttributeArgs } from "./vendor-attributes.js";
 
-import { TypeBuilder as DbTypeBuilder } from "./db-types.js";
+import { TypeBuilder as DbTypeBuilder } from "@zeroship/schema";
 
 import { colTypeFromDbField, type DbSchemaField } from "./db-lexicon.js";
 

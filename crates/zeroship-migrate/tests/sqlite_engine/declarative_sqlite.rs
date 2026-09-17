@@ -771,7 +771,7 @@ fn spelling_gap_desc() -> CollectionDescriptor {
             // `timestamp with time zone` (desired) vs `text` (live SQLite).
             FieldDescriptor {
                 name: "occurred_at".into(),
-                ty: "date".into(),
+                ty: "timestamp".into(),
                 required: true,
                 ..Default::default()
             },

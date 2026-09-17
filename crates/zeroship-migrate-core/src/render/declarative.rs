@@ -732,7 +732,7 @@ fn field_type_token_is_supported(f: &FieldDescriptor) -> bool {
             | "smallInt"
             | "bigInt"
             | "boolean"
-            | "date"
+            | "timestamp"
             | "calendarDate"
             | "json"
             | "object"
@@ -8264,7 +8264,7 @@ mod mysql_storage_agreement_tests {
             (field("n", "int"), None, None),
             (field("big", "bigInt"), None, None),
             (field("flag", "boolean"), None, None),
-            (field("at", "date"), None, None),
+            (field("at", "timestamp"), None, None),
             (field("host", "inet"), None, None),
         ];
 

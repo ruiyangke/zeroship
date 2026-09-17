@@ -798,6 +798,9 @@ pub fn mysql_base_column_type_for_def(def: &serde_json::Value) -> String {
         Some("number") => "DOUBLE".to_string(),
         Some("real") => "FLOAT".to_string(),
         Some("boolean") => "TINYINT(1)".to_string(),
+        Some("timestamp") => "DATETIME(6)".to_string(),
+        // Retired spelling, kept explicit so a stray legacy descriptor does not
+        // fall into the silent VARCHAR(191) fallback at the end of this match.
         Some("date") => "DATETIME(6)".to_string(),
         Some("calendarDate") => "DATE".to_string(),
         Some("json") | Some("object") | Some("array") | Some("union") => "JSON".to_string(),

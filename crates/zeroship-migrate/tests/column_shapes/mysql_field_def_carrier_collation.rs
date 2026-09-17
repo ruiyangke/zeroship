@@ -174,7 +174,7 @@ fn no_non_character_spelling_takes_a_collation() {
             serde_json::json!({ "type": "boolean" }),
             "TINYINT(1)",
         ),
-        ("date", serde_json::json!({ "type": "date" }), "DATETIME(6)"),
+        ("date", serde_json::json!({ "type": "timestamp" }), "DATETIME(6)"),
         (
             "calendarDate",
             serde_json::json!({ "type": "calendarDate" }),

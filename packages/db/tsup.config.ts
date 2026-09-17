@@ -4,7 +4,7 @@ import { defineConfig } from "tsup";
 // assembly belongs to the zeroship-data-v8 crate and is built separately.
 export default defineConfig({
   format: ["esm"],
-  dts: true,
+  dts: { resolve: true },
   target: "es2022",
   outDir: "dist",
   sourcemap: true,

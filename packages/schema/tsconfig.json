@@ -1,0 +1,23 @@
+{
+  // `"types": []` is load-bearing, not tidiness: it removes every ambient type
+  // package (including @types/node), so a reference to `process`, `Buffer` or a
+  // `node:*` module fails to compile here. Without it the leaf is still
+  // zero-DEPENDENCY, but not compiler-enforced - and the package header claims
+  // the stronger property. Anything needing `@zeroship/types` stays in
+  // `@zeroship/db` (for example `IsolationLevel = ZeroshipIsolationLevel`).
+  "compilerOptions": {
+    "types": [],
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "outDir": "dist",
+    "rootDir": "src",
+    "skipLibCheck": true
+  },
+  "include": ["src"]
+}

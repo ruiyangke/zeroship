@@ -1037,7 +1037,6 @@ export function dbFieldTypeExhaustiveness(token: DbFieldType): void {
     case "string":
     case "number":
     case "boolean":
-    case "date":
     case "json":
     case "bytes":
     case "geoPoint":
@@ -1048,8 +1047,12 @@ export function dbFieldTypeExhaustiveness(token: DbFieldType): void {
     case "union":
     case "literal":
     case "array":
-    case "actor":
     case "calendarDate":
+    case "int":
+    case "integer":
+    case "bigInt":
+    case "float":
+    case "timestamp":
       return;
     default: {
       const _exhaustive: never = token;

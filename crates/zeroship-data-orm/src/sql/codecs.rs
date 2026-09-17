@@ -380,7 +380,7 @@ mod tests {
             "active": { "type": "boolean" },
             "prefs": { "type": "object" },
             "avatar": { "type": "bytes" },
-            "published_at": { "type": "date" }
+            "published_at": { "type": "timestamp" }
         }))
         .unwrap()
         .into_fields();
@@ -461,7 +461,7 @@ mod tests {
         let schema = crate::schema::CollectionSchema::from_fields(&crate::value!({
             "created_at":{"type":"string"},
             "updated_at":{"type":"int"},
-            "occurred_at":{"type":"date"}
+            "occurred_at":{"type":"timestamp"}
         }))
         .unwrap()
         .into_fields();
@@ -592,7 +592,7 @@ mod timestamp_tests {
     #[test]
     fn protected_fields_keep_their_storage_shape_until_protection_decodes_them() {
         let schema = crate::schema::CollectionSchema::from_fields(&value!({
-            "masked":{"type":"date", "mask":{"kind":"full"}},
+            "masked":{"type":"timestamp", "mask":{"kind":"full"}},
             "encrypted":{"type":"string", "encrypted":true},
         }))
         .unwrap()

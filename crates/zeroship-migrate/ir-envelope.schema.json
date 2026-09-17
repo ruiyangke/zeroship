@@ -173,7 +173,7 @@
               ]
             },
             "attributes": {
-              "description": "Backend-specific table options, keyed `<dialect>.<name>`.\n\nThe extension point for knobs the closed `Op` set does not model and should\nnot: `postgres.fillfactor`, `mysql.row_format`, `sqlite.strict`. Which keys\nexist is declared by each vendor crate, not here - this crate carries them\nwithout interpreting them. See [`crate::attribute`].\n\n`skip_serializing_if` is load-bearing, not tidiness: an empty set is omitted\nentirely, so adding this field changed the wire form - and therefore the\nchecksum - of NO migration that carries no attributes, which is every\nmigration authored before it existed.",
+              "description": "Backend-specific table options, keyed `<dialect>.<name>`.\n\nThe extension point for knobs the closed `Op` set does not model and should\nnot: `postgres.fillfactor`, `mysql.row_format`, `sqlite.strict`. Which keys\nexist is declared by each vendor crate, not here - this crate carries them\nwithout interpreting them. See [`crate::attribute`].\n\n`skip_serializing_if` is load-bearing, not tidiness: an empty set is omitted\nentirely, so a migration that carries no attributes is unchanged on the wire\nand in the checksum.",
               "$ref": "#/$defs/CreateTableAttributes"
             },
             "op": {
@@ -223,7 +223,7 @@
               ]
             },
             "attributes": {
-              "description": "Backend-specific options, keyed `<dialect>.<name>`.\n\nA partition IS a table and takes its own storage options; PostgreSQL lets a partition override what its parent declared.\n\nWhich keys exist is declared by each vendor crate, not here. An empty set is\nomitted entirely, so adding this field changed the wire form of no migration\nthat carries no attributes. See [`crate::attribute`].",
+              "description": "Backend-specific options, keyed `<dialect>.<name>`.\n\nA partition IS a table and takes its own storage options; PostgreSQL lets a partition override what its parent declared.\n\nWhich keys exist is declared by each vendor crate, not here. An empty set is\nomitted entirely, so a migration that carries no attributes is unchanged on\nthe wire. See [`crate::attribute`].",
               "$ref": "#/$defs/CreatePartitionAttributes"
             },
             "op": {
@@ -382,7 +382,7 @@
               ]
             },
             "attributes": {
-              "description": "Backend-specific options, keyed `<dialect>.<name>`.\n\nThis is how a table option is CHANGED after creation. Without it `postgres.fillfactor` could be set at create and never altered, which would make the knob write-once for no reason the server imposes.\n\nWhich keys exist is declared by each vendor crate, not here. An empty set is\nomitted entirely, so adding this field changed the wire form of no migration\nthat carries no attributes. See [`crate::attribute`].",
+              "description": "Backend-specific options, keyed `<dialect>.<name>`.\n\nThis is how a table option is CHANGED after creation. Without it `postgres.fillfactor` could be set at create and never altered, which would make the knob write-once for no reason the server imposes.\n\nWhich keys exist is declared by each vendor crate, not here. An empty set is\nomitted entirely, so a migration that carries no attributes is unchanged on\nthe wire. See [`crate::attribute`].",
               "$ref": "#/$defs/SetTableOptionsAttributes"
             },
             "op": {
@@ -529,7 +529,7 @@
               ]
             },
             "vectorMetric": {
-              "description": "**#173** - the pgvector distance metric for a `t.vector(n, { metric })` added\ncolumn (the same DECLARED-ONLY facet `IrColumn` carries on createTable).\nMeaningful on an added column (a vector ADD COLUMN renders the metric opclass),\nso it is carried here. Validated to co-occur ONLY with a [`ColType::Vector`]\ntype (`validate_column_facets`). Default-absent + `skip_serializing_if` =>\nbyte-identical when absent. (No `id_prefix` slot: an added column is NEVER the\nsystem PK, so the legacy internal platform-ID prefix is meaningless - the\nrecorder keeps that fail-closed.)",
+              "description": "The pgvector distance metric for a `t.vector(n, { metric })` added\ncolumn (the same DECLARED-ONLY facet `IrColumn` carries on createTable).\nMeaningful on an added column (a vector ADD COLUMN renders the metric opclass),\nso it is carried here. Validated to co-occur ONLY with a [`ColType::Vector`]\ntype (`validate_column_facets`). Default-absent + `skip_serializing_if` =>\nbyte-identical when absent. (No `id_prefix` slot: an added column is NEVER the\nsystem PK, so the legacy internal platform-ID prefix is meaningless - the\nrecorder keeps that fail-closed.)",
               "anyOf": [
                 {
                   "$ref": "#/$defs/VectorMetric"
@@ -540,14 +540,14 @@
               ]
             },
             "caseSensitive": {
-              "description": "Case-sensitivity facet for a text added column. Only `Some(false)` is\nmeaningful; absent/true omits the key and preserves the old wire image.",
+              "description": "Case-sensitivity facet for a text added column. Only `Some(false)` is\nmeaningful; absent/true omits the key, so the wire image is unchanged\nfor a column that does not declare it.",
               "type": [
                 "boolean",
                 "null"
               ]
             },
             "mask": {
-              "description": "**#173** - a STANDALONE column mask for a masked added column (the same facet\n`IrColumn` carries). Meaningful on an added column (a masked ADD COLUMN emits\nthe `zero-migrate:mask` sentinel + `_masked` sibling). Default-absent +\n`skip_serializing_if` => byte-identical when absent.",
+              "description": "A STANDALONE column mask for a masked added column (the same facet\n`IrColumn` carries). Meaningful on an added column (a masked ADD COLUMN emits\nthe `zero-migrate:mask` sentinel + `_masked` sibling). Default-absent +\n`skip_serializing_if` => byte-identical when absent.",
               "anyOf": [
                 {
                   "$ref": "#/$defs/IrMask"
@@ -598,7 +598,7 @@
               ]
             },
             "attributes": {
-              "description": "Backend-specific options, keyed `<dialect>.<name>`.\n\nPer-column vendor options - PostgreSQL's STORAGE and COMPRESSION, MySQL's per-column character set.\n\nWhich keys exist is declared by each vendor crate, not here. An empty set is\nomitted entirely, so adding this field changed the wire form of no migration\nthat carries no attributes. See [`crate::attribute`].",
+              "description": "Backend-specific options, keyed `<dialect>.<name>`.\n\nPer-column vendor options - PostgreSQL's STORAGE and COMPRESSION, MySQL's per-column character set.\n\nWhich keys exist is declared by each vendor crate, not here. An empty set is\nomitted entirely, so a migration that carries no attributes is unchanged on\nthe wire. See [`crate::attribute`].",
               "$ref": "#/$defs/AddColumnAttributes"
             },
             "op": {
@@ -1235,7 +1235,7 @@
               ]
             },
             "attributes": {
-              "description": "Backend-specific options, keyed `<dialect>.<name>`.\n\n`IrConstraint` is `{name, kind}` and models no deferrability, so DEFERRABLE / INITIALLY DEFERRED - which PostgreSQL and SQLite have and MySQL does not - is a genuine vendor surface here rather than a duplicate.\n\nWhich keys exist is declared by each vendor crate, not here. An empty set is\nomitted entirely, so adding this field changed the wire form of no migration\nthat carries no attributes. See [`crate::attribute`].",
+              "description": "Backend-specific options, keyed `<dialect>.<name>`.\n\n`IrConstraint` is `{name, kind}` and models no deferrability, so DEFERRABLE / INITIALLY DEFERRED - which PostgreSQL and SQLite have and MySQL does not - is a genuine vendor surface here rather than a duplicate.\n\nWhich keys exist is declared by each vendor crate, not here. An empty set is\nomitted entirely, so a migration that carries no attributes is unchanged on\nthe wire. See [`crate::attribute`].",
               "$ref": "#/$defs/AddConstraintAttributes"
             },
             "op": {
@@ -3793,7 +3793,7 @@
           ]
         },
         {
-          "description": "A regular-expression match predicate. Each backend spells its own\noperator - `(<expr> ~ <pattern>)` on `PostgreSQL`, `(<expr> REGEXP\n<pattern>)` on `MySQL` - through `DmlRenderer::render_regex_match`.\n\nNOT vendor-only, despite what this node used to be called. A backend\nwithout a stock regex operation refuses it by answering\n[`ExprDialectFeature::RegexMatch`](crate::validate::ExprDialectFeature::RegexMatch),\nwhich is how `SQLite` (no built-in `REGEXP`) declines it while `MySQL`\naccepts. That gate was already neutral; only the node name was not.",
+          "description": "A regular-expression match predicate. Each backend spells its own\noperator - `(<expr> ~ <pattern>)` on `PostgreSQL`, `(<expr> REGEXP\n<pattern>)` on `MySQL` - through `DmlRenderer::render_regex_match`.\n\nNOT vendor-only. A backend without a stock regex operation refuses it by\nanswering\n[`ExprDialectFeature::RegexMatch`](crate::validate::ExprDialectFeature::RegexMatch),\nwhich is how `SQLite` (no built-in `REGEXP`) declines it while `MySQL`\naccepts.",
           "type": "object",
           "properties": {
             "expr": {
@@ -4210,7 +4210,7 @@
       ]
     },
     "ExtractField": {
-      "description": "The CLOSED field set for SQL `EXTRACT(<field> FROM <expr>)`.\n\nONE set for one SQL construct. This used to be two enums - a six-member\n`ExtractField` and a fifteen-member `PgExtractField` - split on a claim about\nwhich parts are portable. That claim is not core's to make: it is a fact\nabout the shipping backends, it cannot be right for a backend that does not\nexist yet, and it was already wrong (MySQL renders `QUARTER`, `WEEK` and\n`MICROSECOND` natively, all three of which sat under the PostgreSQL name).\n\nWhich parts a target can actually render is asked per field, per backend,\nthrough\n[`ExprDialectFeature::Extract`](crate::validate::ExprDialectFeature::Extract),\nand spelled by that backend's `DmlRenderer::render_extract`.",
+      "description": "The CLOSED field set for SQL `EXTRACT(<field> FROM <expr>)`.\n\nONE set for one SQL construct. Which fields are portable is not core's\nclaim to make: it is a fact about the shipping backends, and it cannot be\nright for a backend that does not exist yet (MySQL, for instance, renders\n`QUARTER`, `WEEK` and `MICROSECOND` natively).\n\nWhich parts a target can actually render is asked per field, per backend,\nthrough\n[`ExprDialectFeature::Extract`](crate::validate::ExprDialectFeature::Extract),\nand spelled by that backend's `DmlRenderer::render_extract`.",
       "oneOf": [
         {
           "description": "Calendar year.",
@@ -4584,7 +4584,7 @@
       ]
     },
     "IrMask": {
-      "description": "A column-masking facet (`.mask({ kind, classification })`) carried on the IR.\n\n**Why CARRIED, not recovered (unlike the runtime path).** The runtime recovers a\nmask from the LIVE `zero-migrate:mask` COMMENT sentinel on the `_masked` sibling\n(`crates/plugin-db .../introspect_schema.rs`). But the OFFLINE op fold - the wire\n`FieldDef` map, produced by `zeroship_migrate`'s single-fold `project_field_defs`\nprojection that replaced a deleted op-stream `FieldDef` walker\n(`docs/proposals/single-fold-and-effects.md`) - and `gen-types` have NO live DB, so there\nis no sentinel to read. So a STANDALONE `.mask()` on a plaintext column must be carried\non the IR or it is DROPPED through author->generate->fold (the creator's\n`MaskedValue<T>` silently downgrades to `T`, and the runtime - which DOES read the\nsentinel - never gets a sentinel emitted because the op lower had no mask to emit).\nCarrying it closes BOTH the gen-types type-fidelity gap and the runtime\nmasking-fidelity gap in one move (the lower stamps the `zero-migrate:mask` sentinel from\nthis facet).\n\nAn ENCRYPTED column's fail-safe auto-mask (`{ full, pii }`) is IMPLIED by the\n`ColType::Encrypted` carrier (recovered in [`crate::ir_author::ir_column_to_field`]),\nso it is NOT carried here; an explicit `.mask()` here OVERRIDES that auto-mask.\n\nDefault-absent + `skip_serializing_if` so a column declaring no mask is\nBYTE-IDENTICAL on the wire and in the checksum to the pre-mask image.",
+      "description": "A column-masking facet (`.mask({ kind, classification })`) carried on the IR.\n\n**Why CARRIED, not recovered (unlike the runtime path).** The runtime recovers a\nmask from the LIVE `zero-migrate:mask` COMMENT sentinel on the `_masked` sibling\n(`crates/zeroship-data-orm` `introspect_schema`). But the OFFLINE op fold - the wire\n`FieldDef` map, produced by the single fold's `project_field_defs`\nprojection - and `gen-types` have NO live DB, so there\nis no sentinel to read. So a STANDALONE `.mask()` on a plaintext column must be carried\non the IR or it is DROPPED through author->generate->fold (the creator's\n`MaskedValue<T>` silently downgrades to `T`, and the runtime - which DOES read the\nsentinel - never gets a sentinel emitted because the op lower had no mask to emit).\nCarrying it closes BOTH the gen-types type-fidelity gap and the runtime\nmasking-fidelity gap in one move (the lower stamps the `zero-migrate:mask` sentinel from\nthis facet).\n\nAn ENCRYPTED column's fail-safe auto-mask (`{ full, pii }`) is IMPLIED by the\n`ColType::Encrypted` carrier (recovered in [`crate::ir_author::ir_column_to_field`]),\nso it is NOT carried here; an explicit `.mask()` here OVERRIDES that auto-mask.\n\nDefault-absent + `skip_serializing_if` so a column declaring no mask is\nBYTE-IDENTICAL on the wire and in the checksum to the pre-mask image.",
       "type": "object",
       "properties": {
         "kind": {
@@ -5042,7 +5042,7 @@
       ]
     },
     "IrIndex": {
-      "description": "An index definition inside a `createTable` op.\n\n`rename_all` is not decoration here. Every other field on this struct is a\nsingle word, so camelCase and snake_case coincide and the attribute changes\nnothing for them; `nulls_not_distinct` is the only multi-word field, and\nwithout the rename its wire name was snake_case while the DSL (and the add-op\nroute, whose `Op::CreateIndex` inherits `rename_all_fields` from the enclosing\nenum) both spell it camelCase. With `deny_unknown_fields` that made the option\nunreachable through `create({ indexes })` alone: it typechecked and then failed\nas `unknown field nullsNotDistinct`. Because the field is\n`skip_serializing_if = \"Option::is_none\"` and nothing could ever set it on this\nroute, no envelope carrying the old spelling can exist, so the rename is\nbyte-neutral for existing content.",
+      "description": "An index definition inside a `createTable` op.\n\n`rename_all` is not decoration here. Every other field on this struct is a\nsingle word, so camelCase and snake_case coincide and the attribute changes\nnothing for them; `nulls_not_distinct` is the only multi-word field, and the\nDSL (and the add-op route, whose `Op::CreateIndex` inherits\n`rename_all_fields` from the enclosing enum) spells it camelCase. Without the\nrename, `deny_unknown_fields` would make the option unreachable through\n`create({ indexes })` alone: it typechecks and then fails as\n`unknown field nullsNotDistinct`.",
       "type": "object",
       "properties": {
         "name": {
