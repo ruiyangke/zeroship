@@ -32,6 +32,11 @@ use zeroship_data_orm::{
 
 use crate::service::tests::deployment_fixture as deployments;
 
+/// The delivery lease this fixture's manager transport grants and renews.
+/// Tests that turn on the ratio between a lease and an execution bound derive
+/// their bound from it rather than restating it.
+const MANAGER_LEASE: Duration = Duration::from_secs(20);
+
 #[derive(Clone)]
 struct Lease {
     delivery: Delivery,
@@ -84,7 +89,7 @@ impl JobTransport for Metadata {
             return Err(WorkflowServiceError::PermissionDenied);
         }
         let mut renewed = lease.clone();
-        renewed.expires = Instant::now() + Duration::from_secs(20);
+        renewed.expires = Instant::now() + MANAGER_LEASE;
         if self.substitute_renewal.get() {
             renewed.delivery.worker_id = WorkerId::mint();
         }
@@ -326,7 +331,7 @@ impl Fixture {
                 attempt: Revision::try_from(1).unwrap(),
                 deadline: 1.try_into().unwrap(),
             },
-            expires: Instant::now() + Duration::from_secs(20),
+            expires: Instant::now() + MANAGER_LEASE,
         };
         Self {
             directory,
@@ -531,6 +536,50 @@ async fn paired_renewal_reaches_creator_before_execution_continues() {
     assert!(fixture.metadata.renewals.get() > 0);
     assert!(fixture.probe.creator_renewed.get());
     assert_eq!(fixture.probe.stops.get(), 1);
+}
+
+/// The manager counts an attempt into its delivery ceiling on that attempt's
+/// first renewal, so a renewal has to land inside every attempt that outlives
+/// its own renewal delay, whatever execution bound the host was configured
+/// with. It does, because the delay is a fraction of the smallest bound that
+/// can end the attempt and the execution bound is one of them. A delay derived
+/// from the lease alone would fall past the end of an attempt whose execution
+/// bound is the shorter of the two, and the ceiling would stop advancing while
+/// redelivery continued.
+#[compio::test]
+async fn an_execution_bound_below_the_lease_still_renews_inside_the_attempt() {
+    let fixture = Fixture::new(AppPolicy::default()).await;
+    fixture.probe.mode.set(Mode::Pending);
+    // Far below the fraction of the lease at which a lease-derived delay would
+    // put the first renewal, and below the creator task lease as well.
+    let mut slot = fixture.slot(MANAGER_LEASE / 32);
+    assert_eq!(
+        slot.run(&fixture.app, fixture.lease.clone())
+            .await
+            .unwrap_err(),
+        WorkflowServiceError::Timeout
+    );
+    assert!(
+        fixture.metadata.renewals.get() > 0,
+        "an attempt that outlived its renewal delay reported nothing to the manager"
+    );
+    assert!(fixture.metadata.requests.borrow().is_empty());
+}
+
+/// The control for the renewal above, differing only in whether the attempt
+/// outlives its renewal delay. An attempt that resolves first reports nothing,
+/// which is what makes a renewal evidence that an execution began rather than
+/// evidence that a delivery was made.
+#[compio::test]
+async fn an_attempt_resolved_before_its_renewal_delay_reports_no_renewal() {
+    let fixture = Fixture::new(AppPolicy::default()).await;
+    fixture.probe.mode.set(Mode::Complete);
+    let mut slot = fixture.slot(MANAGER_LEASE / 32);
+    assert!(matches!(
+        slot.run(&fixture.app, fixture.lease.clone()).await.unwrap(),
+        DeliveryOutcome::Settled { .. }
+    ));
+    assert_eq!(fixture.metadata.renewals.get(), 0);
 }
 
 #[compio::test]
