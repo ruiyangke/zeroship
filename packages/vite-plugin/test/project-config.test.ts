@@ -7,8 +7,8 @@
  *   contracts from the shared schema, and each owning suite exercises the
  *   committed cross-tool fixture.
  * - They do not run a real `vite build`, so nothing here proves the plugin
- *   actually threads the resolved config into the packer. That is the
- *   end-to-end harness's job (`tests/e2e_project_config.sh`).
+ *   actually threads the resolved config into the packer. That is an
+ *   end-to-end check's job.
  * - The escape-hatch tests prove the deny-list REFUSES; they do not prove the
  *   deny-list is complete, because completeness is a property of the schema's
  *   `x-cli-read` markers, not of this file. `deny_list_is_generated_not_typed`

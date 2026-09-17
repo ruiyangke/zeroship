@@ -13,9 +13,8 @@ import { grant, now, raw, t, table } from "@zeroship/migrate";
 // another unit is not a Control-side operation at all.
 //
 // See crates/zeroship-control/src/worker_join.rs for the verification and the
-// import, crates/zeroship-core/src/worker_join.rs for the token and the
-// documents, and docs/proposals/2026-09-11-workflow-worker.md ("Enrollment
-// bootstrap and revocation") for the contract.
+// import, and crates/zeroship-core/src/worker_join.rs for the token and the
+// documents.
 //
 // THE ZONES TABLE IS SHARED WITH DECISION 2 (placement eligibility and
 // capacity), which is NOT built yet. An execution zone is an operator-declared

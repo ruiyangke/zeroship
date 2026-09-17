@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# External build-local chain proof (gap #1: SDK distribution).
+# External build-local chain proof (SDK distribution).
 #
 # Proves an app OUTSIDE this monorepo can install @zeroship/* from the local
 # Verdaccio registry, then run the real Vite plugin build to produce
@@ -274,10 +274,10 @@ log "5. Apply the scaffolded app's migrations"
 # link reads correctly -- and until now NOTHING ran it, so all five were
 # spelling rather than behaviour (docs/pilot/e2e-scenarios.md, scenario 1).
 #
-# golden_path.sh cannot cover this: it runs inside the monorepo, where the bin
-# resolves through workspace linking, so the check would pass even if the
-# PUBLISHED package were broken -- which is the only failure a creator can hit.
-# Its own migrate step sidesteps the bin deliberately, invoking
+# The monorepo harnesses cannot cover this: they run inside the workspace, where
+# the bin resolves through workspace linking, so the check would pass even if
+# the PUBLISHED package were broken -- which is the only failure a creator can
+# hit. Their migrate steps sidestep the bin deliberately, invoking
 # `node <dist>/cli/migrate-dev.js` by path. Here the app was installed from the
 # registry, outside the tree, so `npm run migrate` exercises what a creator
 # actually types.

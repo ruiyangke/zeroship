@@ -287,7 +287,7 @@ impl Host {
 
     async fn claim_as(&self, worker: &WorkerId, scope: &AssignedScope) -> Option<DeliveryGrant> {
         self.coordinator
-            .claim_job(worker, scope, || ready(Ok(worker.clone())))
+            .claim_job(worker, scope, support::delivery_ceiling(), || ready(Ok(worker.clone())))
             .await
             .unwrap()
     }
@@ -570,7 +570,7 @@ async fn claim_rearm(fixture: &Fixture) {
     let checks = Cell::new(0);
     let refused = host
         .coordinator
-        .claim_job(&host.worker, &host.scope, || {
+        .claim_job(&host.worker, &host.scope, support::delivery_ceiling(), || {
             checks.set(checks.get() + 1);
             ready(if checks.get() >= 2 {
                 Err(Error::Denied)

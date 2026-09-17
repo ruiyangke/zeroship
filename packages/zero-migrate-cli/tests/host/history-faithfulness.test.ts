@@ -13,20 +13,19 @@
 // first time it drifted. Reading both sides means the test says "these agree",
 // which is the actual property.
 //
-// TWO DOCUMENTED BOUNDARIES ride along, both easy to get wrong in the direction
+// TWO BEHAVIORAL BOUNDARIES ride along, both easy to get wrong in the direction
 // that looks fine:
 //
-//   - `history` is PostgreSQL-only (`docs/cli.md`). A SQLite or MySQL target must
+//   - `history` is PostgreSQL-only. A SQLite or MySQL target must
 //     be refused by name, not silently return an empty stream, which is what an
 //     operator would read as "nothing has been deployed".
 //
 //   - `status` and `history` are NOT strictly read-only. Both bootstrap the
 //     journal, so a first call against a project that has never deployed CREATES
-//     the meta schema. `docs/operations.md` and `docs/node-api.md` both say so,
-//     and it is worth pinning because it decides whether these verbs can be run
-//     by a role without DDL rights. `plan` and `lint` create nothing, which is
-//     the contrast that makes the statement meaningful rather than a blanket
-//     "everything touches the database".
+//     the meta schema, and it is worth pinning because it decides whether these
+//     verbs can be run by a role without DDL rights. `plan` and `lint` create
+//     nothing, which is the contrast that makes the statement meaningful rather
+//     than a blanket "everything touches the database".
 //
 // GATE: `ZERO_MIGRATE_TEST_PG_URL`; the MySQL arm additionally needs
 // `ZERO_MIGRATE_MYSQL_URL`. SQLite always runs.
@@ -277,9 +276,9 @@ test("history refuses a MySQL target by name rather than reporting an empty stre
 test("status and history bootstrap the journal on a fresh project; plan and lint do not", async (ctx) => {
   const client = await connectLivePg();
 
-  // `docs/operations.md`: "do not assume the first call is physically
-  // read-only". This pins which verbs that covers, because it decides whether
-  // they can be run by a role without DDL rights.
+  // The first call is not necessarily physically read-only. This pins which
+  // verbs that covers, because it decides whether they can be run by a role
+  // without DDL rights.
   const bootstraps = async (argv: string[]): Promise<number> => {
     const schema = uniqueNamespace("histboot");
     const meta = `${schema}_migrations`;

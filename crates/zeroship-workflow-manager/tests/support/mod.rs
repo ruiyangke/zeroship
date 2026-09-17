@@ -14,6 +14,7 @@ use zeroship_core::{
     schema_name::SchemaName,
     workflow_deployments::{HoldGeneration, HoldReceipt, HoldScope, HoldState},
     workflow_jobs::DeploymentId,
+    workflow_policy::AppPolicy,
 };
 use zeroship_data_orm::{
     binding::DbBinding, encryption::ProjectKeySource, orm::Database, ConnectOptions,
@@ -278,4 +279,11 @@ pub async fn connect(url: &str) -> compio_postgres::Client {
     })
     .detach();
     client
+}
+
+/// The app's configured delivery budget, for cases that exercise something
+/// other than the ceiling itself.
+#[allow(dead_code, reason = "each integration target uses its own fixtures")]
+pub fn delivery_ceiling() -> i64 {
+    AppPolicy::default().max_delivery_attempts
 }

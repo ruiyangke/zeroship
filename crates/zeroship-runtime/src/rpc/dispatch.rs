@@ -1,9 +1,8 @@
 //! RPC v2 ALS plumbing for the per-request `ctx`.
 //!
-//! See `docs/proposals/rpc.md` §3 (Ambient context). The per-request
-//! `ctx` itself is now a native `RpcCtx` v8_class with lazy accessors —
-//! see `crate::rpc::ctx_holder`. This file keeps the small surface that
-//! pumps the holder into V8's `ContinuationPreservedEmbedderData` slot
+//! The per-request `ctx` itself is a native `RpcCtx` v8_class with lazy
+//! accessors — see `crate::rpc::ctx_holder`. This file keeps the small
+//! surface that pumps the holder into V8's `ContinuationPreservedEmbedderData` slot
 //! for the duration of the user procedure. The native `zeroship` module reads
 //! the slot directly; creator code has no global callback for this state.
 //!

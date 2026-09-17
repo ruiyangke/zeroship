@@ -1,6 +1,6 @@
 //! Native `node:os`.
 //!
-//! Wave #192 — npm packages probe `os.platform()` / `os.arch()` /
+//! npm packages probe `os.platform()` / `os.arch()` /
 //! `os.cpus().length` / `os.EOL` to gate code paths (e.g. picking a
 //! native binary, deciding whether to thread-pool a workload, choosing
 //! line endings on file output). The runtime is single-tenant Linux
@@ -102,7 +102,7 @@ fn populate<'s>(scope: &mut v8::PinScope<'s, '_>, obj: v8::Local<v8::Object>) {
     let eol_v = v8::String::new(scope, "\n").unwrap();
     obj.set(scope, eol_k.into(), eol_v.into());
 
-    // constants — Node ships ~30 of these. Apps that read os.constants
+    // constants — Node ships a table of these. Apps that read os.constants
     // overwhelmingly grab `signals.SIGINT` / `signals.SIGTERM` and
     // `errno.E*`; the full table mirrors `node/lib/internal/constants.js`.
     let constants = v8::Object::new(scope);

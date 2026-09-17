@@ -35,7 +35,7 @@ const WORKFLOW_BASE_NAME = "Workflow";
 /** Wrapper-marker discriminator. `procedure` is generic; the others
  *  imply a kind the transform reads statically.
  *
- *  B3 capability mapping (see `docs/archive/zeroship-db.md` §B3):
+ *  B3 capability mapping:
  *    - `query`  → DB-read tx, no fetch
  *    - `mutation` → DB-write tx, no fetch
  *    - `action` / `stream` / `subscription` / `procedure` →
@@ -83,7 +83,7 @@ export interface DiscoveredProcedureRecord {
   isStream: boolean;
   config?: Record<string, unknown>;
   moduleConfig?: Record<string, unknown>;
-  /** Wave #188 — opt-in lazy procedure flag, set when the procedure's
+  /** Opt-in lazy procedure flag, set when the procedure's
    *  config carries `lazy: true` as a literal boolean (either via
    *  `<fn>.config.lazy = true` or the `query(handler, { lazy: true })`
    *  wrapper option). Drives the synthetic-entry generator's
@@ -119,8 +119,7 @@ export interface TransformState {
   /**
    * Durable workflow classes exported by server modules, in EXPORT-name
    * form. The manifest emitter turns these into `manifest.workflows`, which
-   * the control plane requires before it will start a run
-   * (`crates/zeroship-control/src/workflow_instance_api.rs` `active_deploy_for_workflow`).
+   * the control plane requires before it will start a run.
    */
   discoveredWorkflows: DiscoveredWorkflowRecord[];
 }
@@ -179,10 +178,9 @@ export function detectFileLevelUseServer(ast: { body?: unknown[] }): boolean {
 /**
  * Function-level `"use server"` directive detector.
  *
- * `docs/proposals/rpc.md` §1 says that a function whose first
- * statement is the string
- * literal `"use server"` is a server function regardless of whether
- * the enclosing file carries a file-level directive. The function may
+ * A function whose first statement is the string literal
+ * `"use server"` is a server function regardless of whether the
+ * enclosing file carries a file-level directive. The function may
  * be declared via:
  *
  *   - `function name() { "use server"; ... }` (FunctionDeclaration)
@@ -704,8 +702,8 @@ function literalize(node: any, opts?: { allowSchemaProps?: boolean }): unknown {
 
 /**
  * Inspect an ObjectExpression-typed AST node for a `lazy` key and
- * classify its value. Used by Wave #188 to decide whether a procedure
- * opts into the dynamic-import wrapper emission.
+ * classify its value. Used by the synthetic-entry generator to decide
+ * whether a procedure opts into the dynamic-import wrapper emission.
  *
  *   { lazy: true }   → "true"
  *   { lazy: false }  → "false"
@@ -1106,7 +1104,7 @@ function collectConfig(astBody: any[]): {
   perFn: Map<string, Record<string, unknown>>;
   moduleConfig: Record<string, unknown> | undefined;
   /** Per-fn AST node for the legacy `<fn>.config = { ... }` RHS. Kept
-   *  alongside the literalized `perFn` so Wave #188's lazy detector can
+   *  alongside the literalized `perFn` so the lazy detector can
    *  classify non-literal `lazy` expressions without re-walking the body. */
   perFnNode: Map<string, any>;
 } {
@@ -1334,7 +1332,7 @@ export function transformPlugin(state: TransformState): Plugin {
            *  with `allowSchemaProps: true` so Zod `input` / `output`
            *  call expressions survive as schema markers. */
           wrapperConfig: Record<string, unknown> | undefined;
-          /** Wrapper's second-arg AST (raw) — kept for Wave #188's
+          /** Wrapper's second-arg AST (raw) — kept for the
            *  lazy detection. The literalized `wrapperConfig` already
            *  carries `lazy: true` for the literal-boolean case; the AST
            *  form lets the lazy inspector classify non-literal `lazy`
@@ -1455,7 +1453,7 @@ export function transformPlugin(state: TransformState): Plugin {
                 ? { ...(fn.wrapperConfig ?? {}), ...(legacyCfg ?? {}) }
                 : undefined;
 
-            // Wave #188 — resolve `lazy` from BOTH legacy assignment and
+            // Resolve `lazy` from BOTH legacy assignment and
             // wrapper config. Legacy wins on conflict (matches the
             // overall config-merge precedence above). Non-literal
             // expressions warn and fall back to false.
@@ -1509,8 +1507,7 @@ export function transformPlugin(state: TransformState): Plugin {
           }
         }
 
-        // Resolve wireId using the order from
-        // `docs/proposals/rpc.md` §2: explicit `id` wins (looked up
+        // Resolve wireId: explicit `id` wins (looked up
         // in both the wrapper's second-arg config and the legacy
         // `<fn>.config = { ... }` assignment); default is the bare
         // export name. The production-only "missing id" check happens

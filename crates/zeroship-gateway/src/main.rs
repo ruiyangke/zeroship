@@ -178,8 +178,7 @@ impl zeroship_core::service_assertion::ReplayStore for PoolReplayStore {
 
 /// Load this gateway's service identity, or refuse to start.
 ///
-/// THERE IS NO UNCONFIGURED ARM, and its absence is the whole of fence F4 in
-/// `docs/proposals/2026-09-05-auth-foundation-redesign.md`. An unconfigured
+/// THERE IS NO UNCONFIGURED ARM. An unconfigured
 /// fallback - every inbound internal edge refuses, every dispatch carries no
 /// credential - would still be the wrong answer even with both halves behaving
 /// as designed: a gateway in that state binds its port, answers a liveness
@@ -303,8 +302,7 @@ fn main() -> std::io::Result<()> {
 
     // THE BOOT GATE. It runs BEFORE the `--check-config` report below, which is
     // what makes a dry run over a placeholder credential exit non-zero instead
-    // of printing a truthful field into a pipe nobody reads
-    // (docs/proposals/2026-08-20-metering-transport-not-configured.md).
+    // of printing a truthful field into a pipe nobody reads.
     let credentials = enforce_gateway_credentials(&settings, &boot.overlay.source, check_config);
 
     // Load the gateway's session-cookie signing key. The setting is optional:

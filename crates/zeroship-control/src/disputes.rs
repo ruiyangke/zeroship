@@ -1,4 +1,4 @@
-//! Disputes / chargebacks — the forced-cash-reversal side facts (billing-ops gap #26,
+//! Disputes / chargebacks — the forced-cash-reversal side facts (billing-ops
 //! PR-8; design `0052 disputes` + flow I + the dispute interaction guard).
 //!
 //! A cardholder disputes a charge; Stripe fires `charge.dispute.created` and DEBITS the

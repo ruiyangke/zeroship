@@ -6,13 +6,12 @@
 //! Account erasure is the auth service's lifecycle -- `POST /me/delete`, the
 //! grace window, `cron::account_reaper`. Ownership is the control plane's. The
 //! question "does deleting this person strand something" can only be answered
-//! where the organization tables are readable, and MEASURED they are not
-//! readable from auth: `zeroship_auth` holds no privilege at all on
+//! where the organization tables are readable, and they are not readable from
+//! auth: `zeroship_auth` holds no privilege at all on
 //! `zeroship.organization_members`, `zeroship.organization_accounts` or
-//! `zeroship.invoices` (`information_schema.role_table_grants`, on a database
-//! with the full corpus applied). The reaper used to ask that question anyway,
-//! on the auth connection, and under the real role it does not fail to
-//! *retain* -- it fails `42501` and takes the whole erasure with it.
+//! `zeroship.invoices` (`information_schema.role_table_grants`). A cross-domain
+//! read there does not fail to *retain* -- it fails `42501` and takes the whole
+//! erasure with it.
 //!
 //! So the question crosses the boundary as an HTTP call rather than a
 //! cross-domain read, and the answer is computed by the process that owns the

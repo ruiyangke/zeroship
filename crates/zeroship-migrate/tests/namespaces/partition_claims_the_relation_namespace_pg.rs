@@ -1,27 +1,15 @@
 //! A partition is a relation: it claims both namespaces, like any table.
 //!
-//! The last name-claiming op the model missed. F714-F717 taught the engine that
-//! tables, views, sequences and indexes share PostgreSQL's relation namespace and
-//! that tables and views also occupy the type namespace via their composite row
-//! type. `createPartition` does all of that - `CREATE TABLE ... PARTITION OF` is
-//! a CREATE TABLE - and was tracked by none of it.
+//! `createPartition` is a `CREATE TABLE ... PARTITION OF`, so it claims the
+//! relation namespace exactly as a table does. It has a composite row type, so
+//! it claims the type namespace too: a name already held by a table collides
+//! first as `type "..." already exists`, because the type check runs before the
+//! relation one.
 //!
-//! MEASURED AGAINST LIVE POSTGRESQL:
-//!
-//!     CREATE TABLE p1 PARTITION OF a ...  x2      relation "p1" already exists
-//!     CREATE TABLE b (...);
-//!     CREATE TABLE b PARTITION OF a ...           relation "b" already exists
-//!     CREATE TYPE e AS ENUM ('a');
-//!     CREATE TABLE e PARTITION OF a ...           type "e" already exists
-//!
-//! That third line is the one that says a partition takes the TYPE namespace too,
-//! not just the relation namespace - it has a composite row type exactly as an
-//! ordinary table does.
-//!
-//! DETACH DOES NOT FREE THE NAME, and that is the control that shapes the fix. A
+//! DETACH DOES NOT FREE THE NAME, and that is the control that shapes the rule. A
 //! detached partition becomes a standalone TABLE under the same name, so the name
-//! stays occupied. Only `dropPartition` releases it. A fix that treated
-//! `detachPartition` as a release would wrongly accept a later create.
+//! stays occupied. Only `dropPartition` releases it. Treating `detachPartition`
+//! as a release would wrongly accept a later create.
 
 use crate::support;
 
@@ -54,9 +42,9 @@ fn tbl(n: &str) -> String {
 
 /// Assert the refusal is the one the test names, not merely that one happened.
 ///
-/// Added when this fixture was audited against F768's rule. Every test below had
-/// a bare `expect_err`, and two of them turned out to be decided by a DIFFERENT
-/// rule than the one their message claimed - see the two `createPartition` tests.
+/// A bare `expect_err` cannot tell the two apart: a sibling rule can satisfy the
+/// assertion while the named rule does nothing - see the two `createPartition`
+/// tests.
 fn expect_refusal_mentioning(ops: &str, needles: &[&str], what: &str) -> String {
     let refusal = verdict(ops).expect_err(what);
     for needle in needles {
@@ -79,10 +67,9 @@ const RELATION_NS: &str = "nothing dropped or renamed it in between";
 
 #[test]
 fn the_same_partition_name_twice_is_refused() {
-    // WAS "the second createPartition retakes a relation name", asserting only
-    // that SOME refusal happened plus the word "already". It is the type rule
-    // that fires. Deleting partition tracking from the relation namespace
-    // entirely would have left this test green.
+    // The type rule fires here, not the relation one. Deleting partition tracking
+    // from the relation namespace entirely would leave this test green, which is
+    // why the `createTable` direction below carries the relation half.
     expect_refusal_mentioning(
         &format!("{PARENT},{},{}", part("p1", 0, 10), part("p1", 10, 20)),
         &[
@@ -96,9 +83,8 @@ fn the_same_partition_name_twice_is_refused() {
 
 #[test]
 fn a_partition_may_not_take_a_live_table_name() {
-    // Same correction: the claim said "share the relation namespace" and the
-    // engine answers from the type namespace, because the table's composite row
-    // type is what the partition collides with first.
+    // The engine answers from the type namespace, because the table's composite
+    // row type is what the partition collides with first.
     expect_refusal_mentioning(
         &format!("{PARENT},{},{}", tbl("b"), part("b", 0, 10)),
         &[
@@ -114,8 +100,7 @@ fn a_partition_may_not_take_a_live_table_name() {
 fn a_table_may_not_take_a_live_partition_name() {
     // THE TEST THAT ACTUALLY COVERS THIS FILE'S TITLE. The reverse direction is
     // decided by the relation namespace, so this is the one that would fail if
-    // partition tracking were removed from it - which is exactly what the two
-    // tests above were wrongly believed to be doing.
+    // partition tracking were removed from it.
     expect_refusal_mentioning(
         &format!("{PARENT},{},{}", part("p1", 0, 10), tbl("p1")),
         &[
@@ -217,23 +202,14 @@ fn a_partition_after_dropping_the_colliding_table_is_allowed() {
 // Dropping the PARENT releases its partitions' names too.
 // ---------------------------------------------------------------------------
 
-/// A FALSE REFUSAL this fixture's own rule introduced, found by probing what
-/// happens when two of the session's rules apply to one envelope.
+/// A partition is a dependent object, so dropping the partitioned parent drops
+/// its partitions with it - and their names become free again.
 ///
-/// A partition is a dependent object: dropping the partitioned parent drops its
-/// partitions with it. Measured against live PostgreSQL:
-///
-///     CREATE TABLE par (...) PARTITION BY RANGE (c0);
-///     CREATE TABLE p1 PARTITION OF par FOR VALUES FROM (0) TO (10);
-///     DROP TABLE par;
-///     -- information_schema now reports 0 tables named p1
-///     CREATE TABLE p1 (c0 int);      -- SUCCEEDS
-///
-/// The relation map released `par` on the drop but kept `p1`, so a later use of
-/// that freed name was refused. The engine was stricter than the database, which
-/// is the failure mode `new_rules_do_not_over_refuse.rs` exists to prevent and
-/// which no single-rule test could surface: it takes a drop AND a later claim in
-/// the same envelope.
+/// The relation map must release a partition when its parent is dropped. If it
+/// releases `par` but keeps `p1`, a later claim on the freed name is refused,
+/// which is the failure mode `new_rules_do_not_over_refuse.rs` exists to
+/// prevent. No single-rule test can surface it: it takes a drop AND a later
+/// claim in the same envelope.
 #[test]
 fn dropping_the_parent_frees_its_partitions_names() {
     verdict(&format!(
@@ -259,7 +235,7 @@ fn a_recreated_parent_may_take_the_same_partition_names() {
 #[test]
 fn dropping_an_unrelated_table_does_not_free_a_partition_name() {
     // THE CONTROL. Releasing every partition on any drop would pass the two tests
-    // above and lose the protection F722 added.
+    // above and lose the parent-tracking protection.
     expect_refusal_mentioning(
         &format!(
             r#"{PARENT},{},{},{{"op":"dropTable","table":"other"}},{}"#,
@@ -278,11 +254,10 @@ fn dropping_an_unrelated_table_does_not_free_a_partition_name() {
     );
 }
 
-/// The partition half of the same defect: a rename must carry parentage.
+/// A rename must carry the partition's parentage.
 ///
 /// See the sibling test in `index_shares_the_relation_namespace.rs` for the
-/// reasoning. Measured live: after `ALTER TABLE par RENAME TO par2` and
-/// `DROP TABLE par2`, `CREATE TABLE p1` succeeds.
+/// reasoning.
 #[test]
 fn a_rename_carries_the_partition_parentage_so_a_later_drop_still_frees_it() {
     verdict(&format!(
@@ -296,25 +271,10 @@ fn a_rename_carries_the_partition_parentage_so_a_later_drop_still_frees_it() {
 /// A DETACHED partition stops being a dependent, so dropping its former parent
 /// must NOT free its name.
 ///
-/// The opposite polarity to the three defects before it. F753-F755 were false
-/// REFUSALS - the engine forbidding what the database allows. This is a false
-/// ACCEPT: the engine permitting an envelope the server rejects.
-///
-/// Measured live:
-///
-///     ALTER TABLE det.par DETACH PARTITION det.p1;
-///     DROP TABLE det.par;
-///     -- information_schema still reports p1: it is a standalone table now
-///     CREATE TABLE det.p1 (c0 int);   -- ERROR: relation "p1" already exists
-///
-/// `detachPartition` already avoided releasing the name from the relation map -
-/// F722 pinned that. What it did not do was remove the partition from its
-/// parent's DEPENDENTS, so the later `dropTable` released a name the database
-/// still holds.
-///
-/// The dependents map introduced this: before it existed there was nothing for a
-/// detach to forget. Each of the three preceding fixes made the next one
-/// possible, and this is the fourth in that chain.
+/// `detachPartition` does not release the name from the relation map, and it
+/// must also remove the partition from its parent's DEPENDENTS: otherwise the
+/// later `dropTable` releases a name the database still holds, because a
+/// detached partition is a standalone TABLE under the same name.
 #[test]
 fn detaching_then_dropping_the_parent_does_not_free_the_detached_name() {
     expect_refusal_mentioning(
@@ -335,21 +295,15 @@ fn detaching_then_dropping_the_parent_does_not_free_the_detached_name() {
 /// ATTACH is the mirror of detach, and the last lifecycle event that can touch
 /// the parentage map.
 ///
-/// Attaching an existing table makes it a dependent: dropping the parent now
-/// drops it too. Measured live - after `ATTACH PARTITION att.t` and
-/// `DROP TABLE att.par`, `information_schema` reports no `t` and the name is
-/// reusable.
+/// Attaching an existing table makes it a dependent: dropping the parent drops
+/// it too, and the name becomes reusable.
 ///
-/// REACHABILITY, measured rather than assumed: `attachPartition` is NOT portable
-/// core. `vendor_capabilities` lists `createPartition`, `detachPartition` and
-/// `dropPartition` as requiring no capability, while attach requires
-/// `partition` - absorbing an EXISTING table is privileged in a way creating a
-/// fresh one is not. So a confined migration cannot reach this at all, and the
-/// test authorises itself with the operator charter to exercise the path a
-/// privileged migration takes.
-///
-/// That gating is why this is the last of the four events to be fixed and the
-/// only one a confined-profile probe could never have surfaced.
+/// REACHABILITY: `attachPartition` is NOT portable core. `vendor_capabilities`
+/// lists `createPartition`, `detachPartition` and `dropPartition` as requiring
+/// no capability, while attach requires `partition` - absorbing an EXISTING
+/// table is privileged in a way creating a fresh one is not. So a confined
+/// migration cannot reach this at all, and the test authorises itself with the
+/// operator charter to exercise the path a privileged migration takes.
 #[test]
 fn attaching_a_table_makes_it_a_dependent_of_the_parent() {
     use zeroship_migrate::model::validate::{validate_ir_authorized, VendorAuthority};

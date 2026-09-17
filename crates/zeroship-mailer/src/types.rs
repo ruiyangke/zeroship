@@ -35,7 +35,7 @@ pub struct Email {
     /// Resend drivers (the loop-protection `X-ZS-Relay` marker rides here).
     pub headers: Vec<(String, String)>,
     pub tags: Vec<String>,
-    /// Provider-side idempotency key (billing-ops gap #26, PR-6, MAJOR-A). When
+    /// Provider-side idempotency key (billing-ops PR-6, MAJOR-A). When
     /// `Some`, a provider that honours per-message dedup (Resend's `Idempotency-Key`
     /// header; SES via a dedup id) drops a duplicate send of the SAME key, so a
     /// re-driven notification (a crash in the send→`sent`-flip window) delivers the

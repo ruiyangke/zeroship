@@ -1,15 +1,12 @@
 //! Native WHATWG Streams implementation.
 //!
 //! Spec: https://streams.spec.whatwg.org/
-//! Design: `docs/archive/streams-native.md`
 //!
-//! # Module layout (per design §I.2)
+//! # Module layout
 //!
 //! - `response_forwarder` — Rust-side pump that locks a Response's
 //!   `body` ReadableStream via `getReader()` and forwards chunks to
-//!   a `StreamWriter` (TCP-bound channel). Replaces the legacy
-//!   `__zsBeginStreamForward` JS shim + the `__streams.*` native
-//!   callbacks that backed it.
+//!   a `StreamWriter` (TCP-bound channel).
 //! - `slots` — V8 private symbol helpers (read/write `[[reader]]`,
 //!   `[[controller]]`, `[[storedError]]` etc).
 //! - `queue` — `VecDeque<QueueEntry>` + `[[queueTotalSize]]` invariant
@@ -28,9 +25,8 @@
 //! - `transform` / `transform_controller`
 //! - `strategies` (ByteLength + Count)
 
-// Rust-side response-body forwarder — replaces the JS pump in
-// `__zsBeginStreamForward`. Used by `http::inspect_response` and
-// `runtime::build_fetch_outcome`.
+// Rust-side response-body forwarder. Used by `http::inspect_response`
+// and `runtime::build_fetch_outcome`.
 pub mod response_forwarder;
 
 // Native classes and primitives installed unconditionally.

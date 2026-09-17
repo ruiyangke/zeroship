@@ -54,8 +54,8 @@ fn workspace_source_digest() -> String {
     // (`zeroship-core/src/config/declared.rs:634`) but UNREACHABLE from here:
     // using it needs `zeroship-core` as a BUILD-dependency, and
     // `cargo tree -p zeroship-core -e normal -i tokio` shows it reaching tokio
-    // through `cyper -> hyper` on two paths. AGENTS.md permits a tokio edge
-    // only for `kind == "dev"`; a build dependency is a hard red.
+    // through `cyper -> hyper` on two paths. A tokio edge is permitted only for
+    // `kind == "dev"`; a build dependency is a hard red.
     //
     // The ban targets application CONFIGURATION, which wants a typed key.
     // `CARGO_MANIFEST_DIR` is build metadata cargo sets itself, has no typed

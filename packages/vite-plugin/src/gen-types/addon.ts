@@ -146,8 +146,7 @@ export type _NoUntriagedAddonReplyKeys = AssertNever<UntriagedReplyKeys>;
  *  `applyIrSqlite` is the dev tier's schema authority: the dev server applies
  *  the committed migrations to the dev SQLite file AHEAD of the worker, in
  *  authored order, exactly as `migrated` does for Postgres at deploy. The
- *  the worker never renders the descriptor into DDL - see
- *  docs/proposals/2026-08-09-dev-sqlite-migration-apply-ahead-of-runtime.md.
+ *  worker never renders the descriptor into DDL.
  *
  *  Its request/reply types are IMPORTED from `zeroship-migrate-node`, never
  *  re-declared here. A hand-mirrored copy is how a field the engine adds turns

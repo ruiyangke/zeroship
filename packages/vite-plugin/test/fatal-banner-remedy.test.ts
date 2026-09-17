@@ -4,11 +4,9 @@ import { test } from "node:test";
 import { formatFatalBanner } from "../src/dev-server.js";
 
 /**
- * The banner used to print the `devServerPort` remedy for EVERY boot failure.
- * After the kv-v8 change that names the process holding `.zeroship/kv.redb`,
- * that made the two halves of one screen contradict each other: the runtime said
- * changing the port would not help, and the banner underneath said to change the
- * port. Task #221.
+ * The banner must not print the `devServerPort` remedy for a boot failure whose
+ * cause is the `.zeroship/kv.redb` state-dir lock: the remedy would contradict
+ * the runtime output, which names the process holding the lock.
  *
  * These two cases differ in ONE variable - whether the captured runtime output
  * carries redb's lock wording. A single case would only prove the banner renders;

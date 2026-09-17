@@ -1,12 +1,12 @@
 // The portable case-insensitive column, on a PostgreSQL that has not installed
 // `citext`.
 //
-// `t.text({ caseSensitive: false })` is what BOTH the documentation and the engine's
-// own refusal message tell an author to write. `docs/dialects.md` says it "renders
-// `citext`/`COLLATE NOCASE`/`utf8mb4_0900_ai_ci` respectively"; the validate error
-// for a bounded case-insensitive string says "declare the column as
-// `t.text({ caseSensitive: false })`". Neither mentions that `citext` is a contrib
-// extension PostgreSQL does not install by default.
+// `t.text({ caseSensitive: false })` is the spelling the engine's own refusal
+// message tells an author to write. It renders `citext`/`COLLATE
+// NOCASE`/`utf8mb4_0900_ai_ci` respectively; the validate error for a bounded
+// case-insensitive string says "declare the column as `t.text({ caseSensitive:
+// false })`". Nothing mentions that `citext` is a contrib extension PostgreSQL
+// does not install by default.
 //
 // On a stock database it therefore fails at APPLY, mid-deploy, with a raw server
 // error rather than an authoring one:
@@ -18,11 +18,9 @@
 // (`support::no_inject_with_extensions(schema, &["citext"])`). The prerequisite is
 // real, it is just always already satisfied where it is tested.
 //
-// This arm asserts the CURRENT behaviour, and it is written to fail loudly when that
-// behaviour improves rather than to bless it. If the engine learns to refuse this at
+// This arm asserts the CURRENT behaviour. If the engine learns to refuse this at
 // validate, or to emit the extension itself under a `code.extension` grant, the
-// assertion below stops matching and this file is the place to record which of those
-// shipped.
+// assertion below stops matching rather than silently blessing the gap.
 //
 // GATE: `connectLivePg` (see `live-db.ts`). This arm also holds the `citext` claim
 // (`extension-claim.ts`) for its whole body, because an absence is what it measures and
@@ -85,10 +83,9 @@ test("the documented case-insensitive spelling fails at apply when citext is not
     // `extension-claim.ts`), which both excludes them for the duration AND drops any
     // leftover, so the absence below is established rather than hoped for.
     //
-    // There used to be a `ctx.skip` here for the installed case. It was the honest
-    // thing to write without the claim and the wrong thing to keep with it: a skip and
-    // a pass print the same exit code, so a suite that quietly stopped asking this
-    // question would report exactly like one that asked it and got the answer.
+    // A skip and a pass print the same exit code, so a suite that quietly stopped
+    // asking this question would report exactly like one that asked it and got the
+    // answer.
     await claim(admin, EXTENSION);
 
     const { rows: installed } = await admin.query(

@@ -244,11 +244,11 @@ export interface BaselineReply {
    * request asked for it.
    *
    * Reported the same way `recorded` is, and that is deliberate rather than
-   * incidental. This field used to be emptied on a dry run, which made a preview
-   * announce a `kind: "squash"` event - an event kind whose entire meaning is the
-   * edges it carries - beside an empty edge list. Supersession is the one part of
-   * an adoption with no undo whatsoever, so it was exactly the part an operator
-   * could not see before approving it.
+   * incidental. A dry run must NOT empty it: that would announce a `kind:
+   * "squash"` event - an event kind whose entire meaning is the edges it carries -
+   * beside an empty edge list. Supersession is the one part of an adoption with no
+   * undo whatsoever, so it is exactly the part an operator must see before
+   * approving it.
    */
   superseded: Array<string>
   /**
@@ -316,8 +316,8 @@ export interface BuildInfo {
   irVersion: number
   /**
    * Lowercase 64-char sha256 over the workspace manifests, `Cargo.lock`, and
-   * every `src` tree under `crates`. This is what tells a pre-fix artifact from a
-   * post-fix one when the version has not moved. It does NOT cover the JS
+   * every `src` tree under `crates`. This is what tells a stale artifact from a
+   * current one when the version has not moved. It does NOT cover the JS
    * packages, the rustc version, the cargo profile, or the enabled features -
    * and NOTHING ELSE IN THIS REPLY COVERS THEM EITHER. The only other fields are
    * `version` (which moves on a release, not on a rebuild) and `ir_version` (a
@@ -363,13 +363,13 @@ export interface CollectionDescriptorDto {
  * It was the MANUAL SOURCE only, and the four fields added since say what that cost:
  * while nothing ever CONSTRUCTED one, a slot the producer defaults or ignores is
  * indistinguishable from a slot nothing needs. Carrying an export outward is what
- * told `reference_column`, `reference_name`, `char_len` and `max_length` apart from
+ * tells `reference_column`, `reference_name`, `char_len` and `max_length` apart from
  * the facets genuinely absent by design - see
- * `tests/collection_export_round_trip.rs`, which was RED on all four.
+ * `tests/collection_export_round_trip.rs`.
  *
- * napi-NEUTRAL (`cfg_attr`), like the reply envelopes and for the same reason: it is
- * no longer inbound-only. `crate::api` builds one on the OUTBOUND export path, and
- * the napi-free `--no-default-features` build is what tests it.
+ * napi-NEUTRAL (`cfg_attr`), like the reply envelopes and for the same reason: it
+ * crosses in BOTH directions. `crate::api` builds one on the OUTBOUND export path,
+ * and the napi-free `--no-default-features` build is what tests it.
  */
 export interface FieldDescriptorDto {
   /** The field (column) name. */
@@ -416,10 +416,9 @@ export interface FieldDescriptorDto {
    *
    * Crosses in BOTH directions, and the inbound half is load-bearing rather than
    * decorative: `string` is a TWO-type token (`ColType::String { length }` and
-   * `ColType::Text` both spell it), so `token_to_col_type` reads this value to pick
-   * between them. It used to ignore it, and a consumer that exported a
-   * `VARCHAR(64)` and fed it back as a manual source got an unbounded `TEXT` - a
-   * column PostgreSQL then stored a 200-character value in
+   * `ColType::Text` both spell it), so `token_to_col_type` must read this value to
+   * pick between them. Ignoring it round-trips a `VARCHAR(64)` as an unbounded
+   * `TEXT`
    * (`zero-migrate/tests/fold_live/pg_bounded_string_producer_live.rs`).
    * Pinned end to end by `tests/collection_export_round_trip.rs`.
    */
@@ -1152,12 +1151,11 @@ export declare function statusIrSqlite(appPath: string, journalPath: string, req
  *
  * **The `mig_...` ids below are LOGICAL PLAN ids, and they are a different namespace
  * from the journal versions [`ApplyReply::applied`] returns.** Both are spelled
- * `mig_...`, so a consumer that correlates the two gets no matches and no error.
- * Measured on live PostgreSQL: one `createTable` applied through the host path put
- * `mig_7n42DGM5RSBfCGYlS39M1y` in the journal and returned it from `apply`, while
- * `status` reported `applied: ["mig_7n42DGM5SrG4j3FrNuIVBe"]` and the same id as
- * `current_version` - correctly identifying the migration as applied, under an id
- * that appears in no journal row.
+ * `mig_...`, so a consumer that correlates the two gets no matches and no error:
+ * one `createTable` applied through the host path records one id in the journal and
+ * returns it from `apply`, while `status` reports a DIFFERENT `mig_...` id in
+ * `applied` and as `current_version` - correctly identifying the migration as
+ * applied, under an id that appears in no journal row.
  *
  * To correlate a status entry with the journal, match on the plan rather than on
  * the string: `plans[]` carries the per-plan detail, and `history` reads journal

@@ -9,10 +9,9 @@
 //! the behaviour a server exhibits are checked against ONE corpus rather than two
 //! that can drift apart.
 //!
-//! This is `docs/proposals/backend-conformance.md` decision 7 ("the corpus is
-//! LIFTED from `dialect_table_faithfulness.rs`, not written fresh") at the
-//! smallest scope that buys it: a `tests/` submodule rather than a crate, because
-//! a crate is only needed once a backend lives outside this repo (its step 7).
+//! The corpus is LIFTED from `dialect_table_faithfulness.rs`, not written fresh,
+//! at the smallest scope that buys it: a `tests/` submodule rather than a crate,
+//! because a crate is only needed once a backend lives outside this repo.
 //!
 //! NOTHING here changed in the lift. The ops are byte-identical to the ones the
 //! faithfulness test built, which is what keeps the bijection it proves meaningful

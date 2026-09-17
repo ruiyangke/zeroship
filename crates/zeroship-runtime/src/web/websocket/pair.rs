@@ -2,14 +2,10 @@
 //! that pass messages directly through the per-WS event queue (no
 //! framer, no network).
 //!
-//! v1 of the polyfill drove this through the `__wsCreatePair` /
-//! `__wsLinkPair` / `__wsAccept` / `__wsSend` / `__wsClose` callbacks
-//! plus the global `__wsRegistry`. The native pair runs on top of the
-//! same `NativeWsState` event channel as client sockets — `send()`
-//! pushes a frame onto the local outbox; the helper here moves it
-//! straight onto the peer's `events` queue and notifies the pump.
-//!
-//! Filled in step 6 — see `docs/archive/websocket-native.md §VI`.
+//! The pair runs on top of the same `NativeWsState` event channel as
+//! client sockets — `send()` pushes a frame onto the local outbox; the
+//! helper here moves it straight onto the peer's `events` queue and
+//! notifies the pump.
 
 #![cfg(feature = "runtime_native_websocket")]
 
@@ -202,8 +198,7 @@ pub fn mint_pair(scope: &mut v8::PinScope, state: &SharedState) -> (u32, u32) {
 
 // ---------------------------------------------------------------------------
 // Native WebSocketPair constructor — installed on globalThis when the
-// `runtime_native_websocket` feature is on (step 6). Replaces the
-// polyfill's `WebSocketPair` for native-WS code paths.
+// `runtime_native_websocket` feature is on.
 // ---------------------------------------------------------------------------
 
 use super::WebSocketImpl;

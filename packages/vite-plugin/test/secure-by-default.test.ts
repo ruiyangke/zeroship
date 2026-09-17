@@ -1,8 +1,7 @@
 /**
  * Secure-by-default validation.
  *
- * `docs/proposals/rpc.md` §7 ("Validation") requires
- * `auth: "anonymous"` to be paired with `publiclyAccessible: true` on the
+ * `auth: "anonymous"` MUST be paired with `publiclyAccessible: true` on the
  * same resource. Build error in production; warning in dev.
  */
 

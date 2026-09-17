@@ -1,4 +1,5 @@
 use super::{models, AppId, Broadcast, Transaction, WorkflowServiceError};
+use crate::operations::RunState;
 
 pub(super) async fn select(
     tx: &Transaction,
@@ -74,7 +75,7 @@ pub(super) async fn select(
                 )
                 .and(
                     run.column(models::runs::state)
-                        .in_values(["completed", "failed", "cancelled"])?
+                        .in_values(RunState::TERMINAL)?
                         .negate(),
                 ),
         )

@@ -31,11 +31,10 @@ const CONTROL_KEY_LABEL: &str = "ZEROSHIP_CONTROL_KEY / --control-key-file";
 ///
 /// THE PER-SUBSYSTEM PROPERTY IS LOAD-BEARING HERE, and this is the row that
 /// shows why the dimension exists. `control_key` is declared, reported and
-/// mounted by `deploy/compose/docker-compose.yml`, and the internal call
-/// inventory in `docs/proposals/2026-08-16-service-identity.md` section 5.2
-/// measured that `core/migrated` makes NO credentialed platform HTTP call at
-/// all - it reads the public auth JWKS and nothing else. Its credential is
-/// therefore gated on `is_configured()`: an operator who supplies it gets it
+/// mounted by `deploy/compose/docker-compose.yml`, and `core/migrated` makes
+/// NO credentialed platform HTTP call at all - it reads the public auth JWKS
+/// and nothing else. Its credential is therefore gated on `is_configured()`:
+/// an operator who supplies it gets it
 /// checked, and one who does not is not blocked on a credential for a
 /// subsystem that does not exist. A blanket `enabled: true` here would refuse
 /// to start a service that needs nothing, which is exactly the outage the

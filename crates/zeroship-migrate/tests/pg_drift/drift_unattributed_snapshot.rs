@@ -184,8 +184,7 @@ fn any_vendor_claims(snapshot: &SchemaSnapshot, name: &str) -> Result<bool, Stri
 /// The table match is ANCHORED on a schema separator rather than a bare suffix, and
 /// that is load-bearing here: `labelled_counters` ends with `counters`, so a suffix
 /// match hands the twin's line back when the unclaimed table has none - which is
-/// exactly the failure this file exists to catch, silently reported as a pass. It was
-/// measured that way before the anchor went in.
+/// exactly the failure this file exists to catch, silently reported as a pass.
 fn default_line<'d>(
     drift: &'d StructuralDrift,
     name: &str,

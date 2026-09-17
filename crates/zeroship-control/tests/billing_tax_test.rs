@@ -1,4 +1,4 @@
-//! PR-5 regression tests for billing-ops gap #26: the `TaxProvider` seam computing tax
+//! PR-5 tests for the `TaxProvider` seam computing tax
 //! at finalize and FREEZING it into the EXISTING `invoices.tax_cents` (code-only — no
 //! changeset; `tax_cents` already exists from the redesign).
 //!

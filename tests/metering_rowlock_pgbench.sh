@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # metering_rowlock_pgbench.sh — ISOLATE the usage_aggregates hot-row UPSERT
-# contention (#29) at the DB level, with PERSISTENT POOLED connections.
+# contention at the DB level, with PERSISTENT POOLED connections.
 #
 # This exists because measuring the same contention THROUGH the control plane
 # masks it. That path opens a fresh PG connection per report via the no-pool

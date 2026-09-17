@@ -19,7 +19,6 @@ fn replay_input_keeps_claim_credentials_in_the_host() {
         started_at: Utc::now(),
         journal: vec![],
         owner_id: "trusted-worker".into(),
-        stuck_strike_limit: config.stuck_strike_limit,
         max_child_depth: config.max_child_depth,
         max_live_descendants: config.max_live_descendants,
         max_start_many_batch: config.max_start_many_batch,

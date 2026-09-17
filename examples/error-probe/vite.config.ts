@@ -6,7 +6,7 @@ import { zeroship } from "@zeroship/vite-plugin";
 //
 // No `devAuth` block on purpose. Every procedure here is `auth: "anonymous"`, so no
 // identity is ever involved and the only thing the two tiers can disagree about
-// is the ERROR ENVELOPE. See `tests/e2e_dev_vs_deployed_errors.sh`.
+// is the ERROR ENVELOPE.
 export default defineConfig({
   plugins: [
     zeroship({

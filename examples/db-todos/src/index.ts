@@ -230,19 +230,15 @@ export const deleteTodo = mutation(
 // Actions -- can call fetch(); cannot directly write the DB (must use
 // runMutation).
 //
-// An earlier version of this comment said "Auto-tx is NOT applied here",
-// implying mutation() gets an implicit transaction and action() does not.
-// It does not, and neither does mutation(). Verified 2026-08-10:
-// `mutation()` is `attach(handler, "mutation", config)` (packages/rpc/src/
-// server.ts:225) -- a capability TAG, nothing more; the dispatcher's only
-// per-call frame is `__zsEnterKind` in native runtime dispatch,
-// which sets a thread-local ProcedureKind; and plugin-db reads that kind in
-// exactly one place, `refuse_if_query_capability` (v8_bridge.rs:82), which
-// matches ONLY `ProcedureKind::Query` in order to refuse writes from a
-// query(). Nothing anywhere opens a BEGIN per dispatch.
-// docs/reference/db.md:898-902 states the same: the wrappers "do not open a
-// transaction implicitly" and top-level `db.<table>.*` calls autocommit per
-// operation.
+// Neither action() nor mutation() opens a transaction implicitly.
+// `mutation()` is `attach(handler, "mutation", config)` -- a capability TAG,
+// nothing more; the dispatcher's only per-call frame is `__zsEnterKind` in
+// native runtime dispatch, which sets a thread-local ProcedureKind; and
+// plugin-db reads that kind in exactly one place, `refuse_if_query_capability`,
+// which matches ONLY `ProcedureKind::Query` in order to refuse writes from a
+// query(). Nothing anywhere opens a BEGIN per dispatch. The wrappers "do not
+// open a transaction implicitly" and top-level `db.<table>.*` calls autocommit
+// per operation.
 //
 // So a multi-step mutation() is NOT atomic unless it calls db.transaction()
 // itself. Note that crates/zeroship-runtime/src/web/fetch/mod.rs:284 still tells
@@ -275,16 +271,11 @@ export const shareToWebhook = action(
 // ---------------------------------------------------------------------------
 // Transactions -- `db.transaction(async tx => ...)`.
 //
-// Added 2026-08-10 for the transaction third of scenario 3. Until then this
-// example had ZERO transaction calls (both greps hit COMMENTS, above), so the
-// dev-vs-deployed harness could not compare commit / rollback / savepoint
-// behaviour on the two backends at all.
-//
 // Why these live HERE and not in `examples/db-e2e` (which has four real
 // `db.transaction()` calls at src/server.ts:644/664/683/696): db-e2e declares
 // its schema INLINE via `schema()`/`t.*`, has no `migrations/` and no
 // `generated/zeroship/`, so its build emits a manifest with NO
-// `runtime_descriptor` (measured 2026-08-10). Runtime boot then installs
+// `runtime_descriptor`. Runtime boot then installs
 // nothing on `env.db` and every handler hits `undefined.find` -- the #209
 // mechanism db-todos itself hit before it was given migrations. Giving db-e2e
 // a migration-first port is a much larger surface (vector/geo columns,
@@ -495,10 +486,9 @@ export const txDepth = mutation(
 // ---------------------------------------------------------------------------
 // CONCURRENT transactions -- the regime an isolation level exists for.
 //
-// Added 2026-08-10. Every probe above is a SINGLE uncontended transaction, so
+// Every probe above is a SINGLE uncontended transaction, so
 // none of them can see what happens when two transactions for the same app are
-// open at once. That is the whole point of `isolationLevel`, and
-// docs/reference/sqlite-divergences.md names it as unmeasured.
+// open at once. That is the whole point of `isolationLevel`.
 //
 // The mechanism under test (crates/zeroship-data-v8/src/context.rs:146 and
 // crates/zeroship-data-orm/src/transaction/mod.rs:227):

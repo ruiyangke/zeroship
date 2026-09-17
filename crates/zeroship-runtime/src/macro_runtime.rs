@@ -29,8 +29,7 @@
 //!
 //! Items here are part of the macro's public emit contract. Renames
 //! / relocations require coordinated PRs across `runtime-macros`
-//! AND `zeroship_runtime`. See design `docs/proposals/runtime-
-//! macros-refactor.md` §3.9 / §3.10.
+//! AND `zeroship_runtime`.
 
 // ----- state -----
 //
@@ -140,8 +139,7 @@ pub mod node_error {
 // Stable typed brand-check entry point per `#[v8_class]`.
 // `<Class>::is_instance` is the inherent method, and the sealed
 // `V8ClassInstance` trait gives downstream code a generic bound
-// (`fn check<T: V8ClassInstance>`). The legacy underscored
-// `__zs_is_<Class>` shim has been removed per the macro's STABILITY.md.
+// (`fn check<T: V8ClassInstance>`).
 //
 // The macro emits BOTH:
 //   1. `impl <Class> { pub fn is_instance(scope, v) -> bool { ... } }`
@@ -213,10 +211,10 @@ pub trait V8ClassInstance: __private::Sealed {
     fn is_instance(scope: &mut ::v8::PinScope, value: ::v8::Local<::v8::Value>) -> bool;
 }
 
-// ----- register_native_classes! (#198) -----
+// ----- register_native_classes! -----
 //
 // Declarative loop over `<Class>::register(scope, global)` for the
-// simple bind-only classes — collapses ~30 individual call sites in
+// simple bind-only classes — collapses individual call sites in
 // `core::init::setup_globals` into a single class-list. Classes with
 // extras (DOMException's legacy code constants, RpcError's wire-string
 // codes, AbortSignal's `onabort` accessor pair, …) keep their hand-
@@ -224,7 +222,7 @@ pub trait V8ClassInstance: __private::Sealed {
 //
 // The expansion is the obvious unrolled sequence — chosen over a
 // runtime-vec dispatch so the per-class register call inlines exactly
-// the same way the manual call did pre-#198 (no Vec, no fn-ptr).
+// the same way a direct call would (no Vec, no fn-ptr).
 
 /// Register a list of `#[v8_class]`-annotated classes on `globalThis`
 /// in source order. Each class must expose a `register(scope, global)`

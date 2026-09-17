@@ -1,7 +1,6 @@
 //! Edge LRU caches for blob bytes, keyed by content hash.
 //!
-//! - `BlobCache` is the in-memory tier (see
-//!   `docs/architecture/blob-store.md`). Bytes are still copied
+//! - `BlobCache` is the in-memory tier. Bytes are still copied
 //!   once on socket write — `Bytes` is `Arc`-refcounted so concurrent
 //!   requests for the same hash share the buffer.
 //! - `DiskBlobCache` is the on-disk tier. Larger blobs that do not fit

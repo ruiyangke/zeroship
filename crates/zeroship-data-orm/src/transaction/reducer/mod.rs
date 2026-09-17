@@ -1,7 +1,7 @@
 //! The SC-1 transaction reducer.
 //!
-//! `docs/proposals/2026-08-26-sc1-transaction-protocol.md` states the contract;
-//! this is the state machine it becomes. The reducer is **pure**: it owns no
+//! SC-1 states the contract; this is the state machine it becomes. The reducer
+//! is **pure**: it owns no
 //! session, no client, no timer and no future. It takes an event and returns
 //! the actions a driver must perform, which is what makes SC-1's invariants
 //! checkable without a database.

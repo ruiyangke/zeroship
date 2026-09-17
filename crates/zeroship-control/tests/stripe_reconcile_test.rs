@@ -1,4 +1,4 @@
-//! Integration tests for the Stripe state-reconciliation cron (#28 "Stripe reconciliation")
+//! Integration tests for the Stripe state-reconciliation cron
 //! — the production backstop that catches drift when Stripe webhooks are
 //! missed/dropped/out-of-order.
 //!
@@ -705,7 +705,7 @@ async fn missing_dispute_backstop_applies_when_enabled_and_linkage_exists() {
 }
 
 // ===========================================================================
-// GAP #31: the backstop must NOT PARK an unresolved missed dispute. With
+// The backstop must NOT PARK an unresolved missed dispute. With
 // `auto_heal_disputes=true` and a du_… whose pi_/ch_ resolves to NO invoice (no linkage
 // exists, and none will ever come — e.g. a Connect end-user charge we never invoiced),
 // `try_backstop_dispute` must return false: the finding STANDS, NOTHING is healed, and
@@ -755,7 +755,7 @@ async fn missing_dispute_backstop_does_not_park_when_unresolved() {
 }
 
 // ===========================================================================
-// GAP #30 (webhook audit): cron-backstop vs live-webhook NO double-apply. The backstop
+// Cron-backstop vs live-webhook NO double-apply. The backstop
 // applies a missed dispute (auto_heal on, linkage exists), THEN the real
 // `charge.dispute.created` cash path arrives for the SAME du_… — it must NOT double-apply:
 // exactly ONE `dispute_debit`, no double cap-tightening. The webhook handler's post-resolution
@@ -850,7 +850,7 @@ async fn side_conn(url: &str) -> compio_postgres::Client {
 }
 
 // ===========================================================================
-// GAP #32: `dispute_status_drift` reconcile half-(a). Seed an OPEN dispute locally, mock
+// `dispute_status_drift` reconcile half-(a). Seed an OPEN dispute locally, mock
 // Stripe `get_dispute` returning a TERMINAL status (won/lost) for it → the status-drift pass
 // (a) must record exactly one `dispute_status_drift` finding (Stripe resolved a dispute we
 // still hold open — a missed `.closed`).

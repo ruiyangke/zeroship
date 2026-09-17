@@ -6,9 +6,7 @@ import { defineApp } from "@zeroship/server";
 // resolves to `auth: "user"`, so forgetting this file is a loud 401 once
 // deployed rather than a silent public endpoint. The trap is that the alarm is
 // inaudible locally -- `pnpm dev` has no gateway and therefore no gate, so an
-// app missing this file is fully green in dev and 100% unreachable deployed.
-// That is how `examples/kv-dashboard` and `examples/auth-uploads-kv` shipped
-// (docs/pilot/e2e-scenarios.md, #163).
+// app missing this file is fully green in dev and unreachable deployed.
 //
 // This app has no users and no per-user data: every key it touches lives under
 // the shared `sp/` prefix in one bucket. So anonymous is the correct posture

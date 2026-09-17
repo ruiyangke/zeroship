@@ -2700,8 +2700,8 @@ async fn billing_setup_requires_money_authority_at_the_named_organization() {
 
 // ===========================================================================
 // On-demand reconcile endpoint (POST /internal/billing/reconcile) — the
-// operator-gated trigger the billing & metering E2E (tests/e2e_metering_billing.sh)
-// drives so it can reconcile a chosen CLOSED period without waiting a month.
+// operator-gated trigger that reconciles a chosen CLOSED period without
+// waiting a month.
 // ===========================================================================
 
 /// Wire the `/internal/billing/reconcile` route onto a test App (same path +

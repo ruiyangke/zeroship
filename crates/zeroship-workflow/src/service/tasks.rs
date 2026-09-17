@@ -177,7 +177,7 @@ impl WorkflowService {
                     run = lock_run(&mut tx, &app, &id).await?;
                     advanced = true;
                 }
-                if !frontier::prepare(&mut tx, &app, &run, now).await? {
+                if !frontier::prepare(&mut tx, &app, &run, &policy, now).await? {
                     super::publication::advance(&tx, &app, &id, now).await?;
                     advanced = true;
                     tx.commit().await?;

@@ -14,7 +14,7 @@ import { defineApp } from "@zeroship/server";
 //
 // When your app has real user data, DROP these entries (or set `auth: "user"`)
 // and read identity inside the handler with `env.auth.getUser()` /
-// `requireUser()`. See docs/reference/rpc.md — "Procedure auth".
+// `requireUser()`.
 export default defineApp({
   resources: {
     "rpc:getMessages": { auth: "anonymous", publiclyAccessible: true },

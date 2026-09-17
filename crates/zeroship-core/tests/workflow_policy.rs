@@ -86,6 +86,8 @@ fn shared_validation_rejects_invalid_resource_limits() {
         ("payloadStagingRetentionMs", json!(0)),
         ("maxCompensationAttempts", json!(0)),
         ("compensationRetryMs", json!(0)),
+        ("maxDeliveryAttempts", json!(0)),
+        ("maxStuckDispatches", json!(0)),
         ("maxScheduleBackfill", json!(0)),
         ("minScheduleIntervalMs", json!(0)),
         ("maxSignalTokenLifetimeSeconds", json!(0)),
@@ -110,6 +112,27 @@ fn relational_limits_and_capability_ceiling_keep_their_boundaries() {
     policy.max_payload_storage_bytes = policy.max_payload_bytes;
     policy.max_signal_token_lifetime_seconds += 1;
     assert_eq!(policy.validate(), Err(InvalidPolicy));
+}
+
+/// The creator engine's stall verdict is only reachable while the manager is
+/// still redelivering, so a policy that puts the strike limit at or past the
+/// delivery ceiling is refused rather than silently stranding every hung run.
+#[test]
+fn stuck_dispatch_limit_stays_under_the_delivery_ceiling() {
+    let mut policy = AppPolicy {
+        max_delivery_attempts: 3,
+        max_stuck_dispatches: 2,
+        ..AppPolicy::default()
+    };
+    policy.validate().unwrap();
+    policy.max_stuck_dispatches = 3;
+    assert_eq!(policy.validate(), Err(InvalidPolicy));
+    policy.max_stuck_dispatches = 4;
+    assert_eq!(policy.validate(), Err(InvalidPolicy));
+    // Raising the ceiling, not lowering the strikes, is equally a repair: the
+    // constraint is the ordering, not either value.
+    policy.max_delivery_attempts = 5;
+    policy.validate().unwrap();
 }
 
 #[test]

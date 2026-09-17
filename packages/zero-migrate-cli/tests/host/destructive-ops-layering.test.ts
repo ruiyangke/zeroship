@@ -1,10 +1,10 @@
 // Who is allowed to authorise a destructive operation.
 //
-// `safety.destructive_ops` is a Global knob that defaults to `forbid`, and
-// `docs/policy.md` says grants "become tighter as they move downward through
-// admission". Together those make one privilege-escalation question concrete:
-// can a LATER layer - a draft an application team writes - grant itself
-// permission to drop things that the operator's root charter never allowed?
+// `safety.destructive_ops` is a Global knob that defaults to `forbid`, and grants
+// become tighter as they move downward through admission. Together those make one
+// privilege-escalation question concrete: can a LATER layer - a draft an
+// application team writes - grant itself permission to drop things that the
+// operator's root charter never allowed?
 //
 // It cannot, and this file is the measurement. `policy-layering.test.ts` covers
 // the same boundary for `[[inject]]`; this covers it for the safety knob, which

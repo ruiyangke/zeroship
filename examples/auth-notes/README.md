@@ -44,7 +44,7 @@ pnpm build      # → dist/app.zship  (4 server functions, 1 worker module)
 
 ## Coverage harness
 
-`tests/e2e_app_primitives_auth.sh` deploys this app to a clean ephemeral stack
-and exercises both the anonymous and the authenticated paths over the worker
-`/dispatch` edge, injecting a request-bound, HMAC-signed `ZeroShip-User` header
-(empty dev `worker_key`) to flow a test identity into `env.auth`.
+This app is built to be deployed to a clean ephemeral stack and exercised on
+both the anonymous and the authenticated paths over the worker `/dispatch`
+edge, with a request-bound, HMAC-signed `ZeroShip-User` header (empty dev
+`worker_key`) flowing a test identity into `env.auth`.

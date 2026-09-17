@@ -1,5 +1,5 @@
 //! Billing-notification seam — map a billing lifecycle/money event to an organization
-//! email, with a provider-side idempotency key (billing-ops gap #26, PR-6; design
+//! email, with a provider-side idempotency key (billing-ops PR-6; design
 //! §"0051 notifications" + flow F + the template inventory).
 //!
 //! ## The [`BillingNotifier`] seam

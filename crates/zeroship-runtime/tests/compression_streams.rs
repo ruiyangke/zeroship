@@ -5,9 +5,6 @@
 //! streams' `WritableStreamDefaultWriter.close()` await flow is still
 //! converging (separate tracker); pipeThrough exercises identical
 //! transform / flush semantics through the readable side.
-//!
-//! Round-trip + edge-case coverage per
-//! `docs/archive/compression-streams-native.md`'s test plan.
 
 use crate::common;
 

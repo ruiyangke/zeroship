@@ -310,11 +310,10 @@ fn require_view_still_paired(drift: &StructuralDrift, view: &str) -> Result<(), 
 ///
 /// Reads the two view bodies off the two snapshots and asserts each against a
 /// literal, so neither representation is normalised into the other by the act of
-/// checking. This is the test that says WHY a naive field compare was never
-/// available, and it must keep passing after the fix: the fix may not smuggle an
-/// `authored_query` onto the introspected side or a `definition` onto the folded
-/// one, because a snapshot that claims to carry both would let a later reader
-/// believe a catalog can yield a typed body.
+/// checking. This is the test that says WHY a naive field compare is not
+/// available: the introspection side must not carry an `authored_query` and the
+/// folded side must not carry a `definition`, because a snapshot that claims to
+/// carry both would let a later reader believe a catalog can yield a typed body.
 #[compio::test]
 async fn both_sides_of_a_view_body_are_measured() {
     let url = require_live_pg!();

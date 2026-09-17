@@ -15,16 +15,12 @@
 //
 // The probe drives env.db so the platform emits DB usage metrics.
 //
-// MIGRATION-FIRST, and it was not always. This app used to declare its schema
-// INLINE (`export default { schema: dbSchema }` built from `schema()`/`t.*`)
-// with no `migrations/` directory at all. That is the #209 mechanism: the
-// installer builds `env.db` from the generated runtime descriptor, which is
-// folded from committed migrations, and an inline `schema` export is not a
-// source for it. The app built and served fine, and EVERY insert failed --
-// measured 2026-08-11, `wrote:false` and `readBack:0` on all 100 requests of
-// tests/e2e_metering_billing.sh, which passed anyway because both of its
-// env.db guards were unfailable (fixed eda51b973). Schema now comes from
-// migrations/, exactly as examples/db-hitcounter does it.
+// MIGRATION-FIRST. This app declares its schema through committed migrations,
+// never an inline `schema` export. The installer builds `env.db` from the
+// generated runtime descriptor, which is folded from committed migrations, so
+// an inline `schema` export is not a source for it: the app builds and serves
+// fine while every insert fails. Schema comes from migrations/, exactly as
+// examples/db-hitcounter does it.
 
 import { env } from "zeroship";
 

@@ -618,7 +618,7 @@ impl ClusterClient {
     /// arrives with a more recent mapping than our cache.
     fn set_slot(&self, slot: u16, addr: &str) {
         let mut b = self.inner.borrow_mut();
-        // CR-CLUSTER-1: checked write (mirrors the safe `.get()` in
+        // Checked write (mirrors the safe `.get()` in
         // `node_for_slot`). An out-of-range slot is silently ignored rather
         // than panicking the worker via a raw `Vec` index. `parse_redirect`
         // already bounds the slot, so this is defense in depth.

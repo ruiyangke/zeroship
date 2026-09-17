@@ -625,12 +625,19 @@ impl ManagerClient {
     }
 
     /// Delivery operations for this worker. Each settled delivery wakes the
-    /// host's publication of creator intents committed by that job.
+    /// host's publication of creator intents committed by that job. The local
+    /// host is its app's platform authority, so its own configured policy
+    /// supplies the delivery ceiling in place of a policy lease.
     #[must_use]
-    pub fn transport(&self, settled: flume::Sender<()>) -> LocalTransport {
+    pub fn transport(
+        &self,
+        settled: flume::Sender<()>,
+        max_delivery_attempts: i64,
+    ) -> LocalTransport {
         LocalTransport {
             client: self.clone(),
             settled,
+            max_delivery_attempts,
         }
     }
 
@@ -660,6 +667,7 @@ impl ManagerClient {
 pub struct LocalTransport {
     client: ManagerClient,
     settled: flume::Sender<()>,
+    max_delivery_attempts: i64,
 }
 
 impl JobTransport for LocalTransport {
@@ -670,12 +678,13 @@ impl JobTransport for LocalTransport {
         scope: &AssignedScope,
     ) -> Result<Option<DeliveryGrant>, WorkflowServiceError> {
         let scope = scope.clone();
+        let ceiling = self.max_delivery_attempts;
         self.client
             .call(move |manager| {
                 async move {
                     manager
                         .coordinator
-                        .claim_job(&manager.worker, &scope, || {
+                        .claim_job(&manager.worker, &scope, ceiling, || {
                             ready(Ok(manager.worker.clone()))
                         })
                         .await

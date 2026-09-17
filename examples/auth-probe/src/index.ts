@@ -1,12 +1,11 @@
 "use server";
 
-// auth-probe - the AUTH leg of the dev-vs-deployed seam comparison
-// (docs/pilot/e2e-scenarios.md scenario 6 / scenario 11).
+// auth-probe - the AUTH leg of the dev-vs-deployed seam comparison.
 //
 // Sibling of `examples/storage-probe` and `examples/workflow-probe`: a
-// deliberately boring app whose only job is to let `tests/e2e_dev_vs_deployed_auth.sh`
-// run ONE identical sequence against `pnpm dev` and against the same `.zship`
-// deployed behind the gateway, and diff the RESULTS.
+// deliberately boring app whose only job is to let ONE identical sequence run
+// against `pnpm dev` and against the same `.zship` deployed behind the gateway,
+// so the RESULTS can be diffed.
 //
 // WHY A NEW EXAMPLE RATHER THAN `examples/auth-notes`. auth-notes stores notes
 // in `env.kv`, so half its procedures need a Redis on the deployed side, and the
@@ -67,7 +66,7 @@ export const publicProbe = query(
  * Do not "fix" this by adding it there. The SEC-5 default resolving it to
  * `auth:"user"` is the behaviour under test: it is the posture every procedure
  * of `examples/kv-dashboard` and `examples/auth-uploads-kv` shipped with, and
- * the one whose dev-vs-deployed answer differs (#163).
+ * the one whose dev-vs-deployed answer differs.
  */
 export const defaultedProbe = query(
   async (): Promise<{ ok: true; user: RawUser }> => ({ ok: true, user: raw() }),
@@ -99,9 +98,9 @@ export const requireGatedProbe = query(
 );
 
 /**
- * `probe.appGate` - the pattern `docs/reference/auth.md` tells creators to use
- * when they want their own 401: gate on `getUser()` and throw a status-bearing
- * error. Pure handler code with no platform gate involved, so it is the CONTROL
+ * `probe.appGate` - the pattern for a creator-owned 401: gate on `getUser()`
+ * and throw a status-bearing error. Pure handler code with no platform gate
+ * involved, so it is the CONTROL
  * for every other row: if this one diverges too, the finding is not about auth
  * postures.
  */

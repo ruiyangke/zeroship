@@ -245,11 +245,10 @@ fn async_response() {
 /// resolves `shared`, settling S's handler promise during R's turn. Both must
 /// be delivered.
 ///
-/// This is the regression guard for the reverted "settle only the owning
-/// request's promise" optimization (commit 0134a13c, reverted in 257bf38c):
-/// that shortcut would check only R on the timer turn and S would hang forever
-/// (the receiver below would time out and FAIL this test). The full
-/// `collect_settled_promises` scan delivers both.
+/// This is the regression guard against a "settle only the owning request's
+/// promise" shortcut: that shortcut would check only R on the timer turn, and
+/// S would hang forever (the receiver below would time out and FAIL this
+/// test). The full `collect_settled_promises` scan delivers both.
 #[test]
 fn cross_request_shared_promise_settles() {
     let modules = m(r#"
@@ -606,14 +605,11 @@ fn websocket_upgrade() {
     }
 }
 
-// Regression guard ported from the deleted `tests/http.rs`. When an async
-// ReadableStream.start() enqueued chunks across timer-driven await points
-// and then called controller.close(), an earlier close implementation
-// removed the stream from outbound_streams before the pump's final flush
-// ran — buffered chunks stayed resident forever, the forwarder never
-// closed, and HTTP clients hung waiting for the chunked-encoding
-// terminator. The SSE [DONE] marker was the canonical symptom. This test
-// rides the same plumbing via call_fetch_handler.
+// An async `ReadableStream.start()` that enqueues chunks across timer-driven
+// await points and then calls `controller.close()` must flush every buffered
+// chunk before the forwarder closes, or HTTP clients hang waiting for the
+// chunked-encoding terminator. The SSE [DONE] marker is the canonical shape.
+// This test rides the same plumbing via `call_fetch_handler`.
 #[test]
 fn streaming_async_closes_cleanly() {
     let modules = m(r#"
@@ -849,8 +845,7 @@ fn zeroship_get_request_returns_request() {
 // ===========================================================================
 //
 // `/__zeroship/v1/<id>` traffic routes through `default.rpc`; everything else
-// hits `default.fetch(request, env, ctx)`. See
-// `docs/reference/zeroship-standard.md` for the full contract.
+// hits `default.fetch(request, env, ctx)`.
 //
 // Fixtures expose procedure references and exercise native dispatch.
 fn synthetic_entry(procs: &str) -> Vec<zeroship_runtime::ModuleEntry> {

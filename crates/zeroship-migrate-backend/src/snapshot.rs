@@ -25,7 +25,7 @@ pub fn quote_constraint_definition_ident(ident: &str) -> String {
 /// `default` is **DDL-emission metadata, not a blanket drift-comparable
 /// attribute**: it
 /// carries the column `DEFAULT` clause the declarative author wants emitted at
-/// CREATE / ADD COLUMN time (#4). It is deliberately EXCLUDED from `PartialEq` /
+/// CREATE / ADD COLUMN time. It is deliberately EXCLUDED from `PartialEq` /
 /// `Eq` (see the manual impl below) because Postgres normalises a
 /// stored default (`'{}'` -> `'{}'::jsonb`, `NOW()` -> `now()`, ...) so a byte
 /// compare of the authored default against the introspected one would
@@ -45,7 +45,7 @@ pub struct ColumnSnapshot {
     pub data_type: String,
     /// `true` if the column is nullable.
     pub nullable: bool,
-    /// The `DEFAULT` clause expression to emit at CREATE / ADD COLUMN (#4), e.g.
+    /// The `DEFAULT` clause expression to emit at CREATE / ADD COLUMN, e.g.
     /// `'active'` or `'{}'::jsonb`. The raw SQL is emission/diagnostic metadata
     /// and is NOT drift-compared (see the type-level note). `None` means no
     /// default. Live introspection may retain a catalog-rendered expression;

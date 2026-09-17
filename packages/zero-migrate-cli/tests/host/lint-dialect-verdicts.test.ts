@@ -11,12 +11,9 @@
 // declared support, so the two move together: if the engine's capability table
 // changes and only one side is updated, one of these files fails.
 //
-// WHAT WAS ALREADY COVERED, and why it is not this. `cli.test.ts` has "lint
-// defaults to all dialects and --dialect narrows", which exercises the plumbing
-// on a migration that passes on all three. Every assertion there holds just as
-// well for a lint whose capability check was wired to the wrong dialect, or
-// skipped entirely - an all-green migration cannot tell those apart. Nothing
-// exercised a verdict that has to come out DIFFERENT per dialect.
+// An all-green migration cannot tell a correct lint from one whose capability
+// check is wired to the wrong dialect, or skipped entirely; the test needs a
+// verdict that has to come out DIFFERENT per dialect.
 //
 // The matrix is deliberately mixed rather than all-or-nothing. `expression` and
 // `partial` are supported on SQLite and not on MySQL, so a lint that ignored the
@@ -54,7 +51,7 @@ const FACETS: ReadonlyArray<readonly [string, string]> = [
   ["non_btree", `{ on: [{ column: "email" }], using: "gin" }`],
 ] as const;
 
-/** Declared support, straight from `docs/support-matrix.md`. */
+/** Declared support per dialect. */
 const SUPPORTED: Readonly<Record<string, ReadonlySet<string>>> = {
   postgres: new Set(FACETS.map(([name]) => name)),
   mysql: new Set<string>(),
@@ -219,13 +216,11 @@ test("an index method the IR does not define is refused with the defined ones na
  *  it is declared by the COLUMN TYPE rather than by an index option - so it gets
  *  its own arm rather than a row in the matrix.
  *
- *  It belongs in this file because it is where lint and apply most recently
- *  disagreed. `lint --dialect mysql` passed these declarations while apply refused
- *  three of the four, since MySQL cannot build an index over a `blob` and cannot
- *  build a SPATIAL one over a nullable column. Apply no longer emits that index on
- *  MySQL, so lint's green is now the CORRECT verdict on every target - and this
- *  arm is what fails if someone later teaches lint to refuse these types without
- *  teaching apply the same thing.
+ *  It belongs in this file because lint and apply must agree here: MySQL cannot
+ *  build an index over a `blob` and cannot build a SPATIAL one over a nullable
+ *  column, so apply emits no such index on MySQL and lint must not refuse the
+ *  declaration. This arm fails if someone teaches lint to refuse these types
+ *  without teaching apply the same thing.
  *
  *  The live half is `ann-index-only-where-buildable.test.ts`, which asserts the
  *  apply side against real databases and that MySQL really carries no index. */

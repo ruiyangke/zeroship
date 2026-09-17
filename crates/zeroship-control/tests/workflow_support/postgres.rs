@@ -29,33 +29,20 @@ fn template() -> &'static Template {
     static TEMPLATE: OnceLock<Template> = OnceLock::new();
     TEMPLATE.get_or_init(|| {
         let root = root();
-        let build = Command::new(env!("CARGO"))
-            .args([
-                "build",
-                "--locked",
-                "-p",
-                "zeroship-control",
-                "--example",
-                "workflow-test-environment",
-                "--message-format=json",
-            ])
-            .current_dir(&root)
-            .output()
-            .expect("build workflow test environment");
-        assert!(
-            build.status.success(),
-            "workflow environment build failed: {}",
-            String::from_utf8_lossy(&build.stderr)
-        );
-        let binary = String::from_utf8_lossy(&build.stdout)
-            .lines()
-            .find_map(|line| {
-                let artifact: serde_json::Value = serde_json::from_str(line).ok()?;
-                (artifact["target"]["name"] == "workflow-test-environment")
-                    .then(|| artifact["executable"].as_str().map(str::to_owned))
-                    .flatten()
-            })
-            .expect("workflow environment executable");
+        // BUILT BY THE SUITE, NOT BY THE TEST. The workflow environment is a
+        // fixture artifact, and building it here would make every run depend on
+        // build locks, feature resolution and the source tree - and let a test
+        // compile its own subject. `cargo test` does not build `[[example]]`
+        // targets and `CARGO_BIN_EXE_` is not set for them, so the path cannot
+        // be derived either; the suite that runs these tests must provide it.
+        let binary = std::env::var("ZEROSHIP_WORKFLOW_TEST_ENVIRONMENT_BIN").unwrap_or_else(|_| {
+            panic!(
+                "ZEROSHIP_WORKFLOW_TEST_ENVIRONMENT_BIN is required: \
+                 `cargo xtask test workflow` builds the workflow environment \
+                 example and passes its path. Running this target directly \
+                 needs that variable set to the built example."
+            )
+        });
         let logs = root.join("target/workflow-tests");
         std::fs::create_dir_all(&logs).expect("workflow environment logs");
         let path = logs.join(format!("environment-{}.log", uuid::Uuid::new_v4()));

@@ -75,7 +75,7 @@ pub struct SetPlanBody {
 }
 
 /// Body for the operator credit-grant endpoint `POST /api/billing/credit`
-/// (billing-ops gap #26, PR-2). The operator supplies the creator, a positive
+/// (PR-2). The operator supplies the creator, a positive
 /// amount, and an optional kind/expiry/note. Currency is USD-pinned (v1) — the
 /// `credit::grant` boundary rejects any other. The idempotency key arrives in the
 /// `Idempotency-Key` header (not the body) so a retried POST is a no-op.
@@ -108,7 +108,7 @@ fn default_credit_currency() -> String {
 }
 
 /// Body for the operator refund endpoint `POST /api/invoices/{id}/refunds`
-/// (billing-ops gap #26, PR-3). The operator supplies the amount + destination; the
+/// (PR-3). The operator supplies the amount + destination; the
 /// tax split is OPTIONAL — when omitted, the endpoint derives it proportionally from
 /// the invoice's frozen `tax_cents`/`total_cents`. The idempotency key arrives in the
 /// `Idempotency-Key` header (not the body) so a retried POST is a no-op.
@@ -563,10 +563,7 @@ pub async fn list_apps(
     // be a fleet-wide cross-tenant read (the exact C1 leak, at the list
     // endpoint).
     //
-    // There is no fleet-wide arm any more. It was selected by a direct SQL read
-    // of `platform_admin_roles` rather than by Cedar - so it was invisible to
-    // every audit of the policy set - and it returned every tenant's apps to any
-    // of the four deleted staff roles. A vendor wanting a fleet-wide list builds
+    // There is no fleet-wide arm here: a vendor wanting a fleet-wide list builds
     // it in the portal against its own copy of the data.
     match state
         .registry
@@ -752,8 +749,7 @@ pub async fn delete_app(
 /// Streaming `.zship` ingest under a stable deploy command identity.
 ///
 /// Deploy bundles arrive as zstd-compressed tar archives carrying
-/// `manifest.json` + `blobs/<sha256>` entries; see `docs/reference/zship.md`
-/// for the wire format and ingestion algorithm.
+/// `manifest.json` + `blobs/<sha256>` entries.
 ///
 /// The request names its deploy command in one `Idempotency-Key` header. An
 /// exact retry - same app, actor, content type and archive bytes under the same
@@ -1433,7 +1429,7 @@ pub async fn set_spend_limit(
                 crate::audit::AuditEntry {
                     app_id: Some(&uid),
                     organization_id: None,
-                    // #7 — populate the actor from the AuthzGuard so a
+                    // Populate the actor from the AuthzGuard so a
                     // billing-write audit row records WHO changed the cap.
                     actor_user_id: Some(&authz.principal_id),
                     action: crate::audit::Action::SetSpendLimit,
@@ -1442,7 +1438,7 @@ pub async fn set_spend_limit(
                 },
                 // Log the resolved `plan_default` bound alongside the requested
                 // cents so the audit row shows the reduction-only ceiling the
-                // override was checked against (#7).
+                // override was checked against.
                 &serde_json::json!({ "cents": body.cents, "plan_default_cents": plan_default }),
             )
             .await;
@@ -1516,7 +1512,7 @@ pub async fn get_spend_limit(
 }
 
 // ---------------------------------------------------------------------------
-// Creator billing READ APIs (billing-ops gap #26, PR-7 — `BillingRead`).
+// Creator billing READ APIs (PR-7 — `BillingRead`).
 //
 // Six creator-scoped read endpoints. The APP-scoped reads (invoice history,
 // projected-charge, billing-status) gate `require(BillingRead, Resource::App{id})`

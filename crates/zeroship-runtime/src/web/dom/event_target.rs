@@ -179,7 +179,7 @@ impl EventTarget {
         local
     }
 
-    /// Macro-shape `register` (#198). Hand-rolled to match
+    /// Macro-shape `register`. Hand-rolled to match
     /// `Self::install` above, so `register_native_classes!` can drive
     /// EventTarget alongside its `#[v8_class]` siblings.
     pub fn register<'s>(
@@ -611,10 +611,6 @@ pub fn remove_internal_listener(
         list.retain(|l| l.capture);
     }
 }
-
-// #198 — `install_global` removed; bind happens via the macro-emitted
-// `EventTarget::register` invoked from `dom::install_globals`'s
-// `register_native_classes!` list.
 
 // ---------------------------------------------------------------------------
 // Hand-rolled callbacks

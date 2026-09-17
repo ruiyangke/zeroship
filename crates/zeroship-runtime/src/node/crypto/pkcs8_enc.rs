@@ -1,16 +1,11 @@
 //! Encrypted PKCS#8 import/export (PBES2 / PBKDF2).
 //!
-//! See `docs/archive/node-crypto-native.md` §IV.4a.
-//!
 //! **Current status:** placeholder. The full PBES2 raw-FFI path is
-//! still deferred — it requires `aws-lc-sys` raw FFI to
+//! deferred — it requires `aws-lc-sys` raw FFI to
 //! `PKCS8_marshal_encrypted_private_key` / `PKCS8_parse_encrypted_private_key`
-//! plus a 12-entry cipher whitelist (RFC 8018). Surfacing it as a
-//! current deliverable would have shipped a 250 LOC FFI block with
-//! limited testing. We surface the spec-correct
-//! `ERR_CRYPTO_UNSUPPORTED_OPERATION` here and leave the real impl as
-//! a later follow-up. Creator apps that need encrypted-PKCS#8
-//! import/export get a clean error rather than a silent failure.
+//! plus a 12-entry cipher whitelist (RFC 8018). Callers get the
+//! spec-correct `ERR_CRYPTO_UNSUPPORTED_OPERATION` rather than a silent
+//! failure.
 
 use crate::state::OpError;
 

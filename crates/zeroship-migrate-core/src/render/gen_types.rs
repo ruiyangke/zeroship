@@ -102,8 +102,7 @@ struct RuntimeCollectionDescriptorV2 {
 ///
 /// A declared field is not always one column. A masked field occupies two: the value a
 /// default projection reads, and the authoritative value behind it. Every consumer that
-/// needs the second name derives it by formatting `"{col}_masked"` - the sites are
-/// enumerated in `docs/reviews/2026-08-27-descriptor-specification.md` - and every
+/// needs the second name derives it by formatting `"{col}_masked"` - and every
 /// derived name is a chance to disagree with the ONE emitter that created the column.
 /// This type is that name, recorded.
 ///
@@ -504,9 +503,8 @@ pub fn render_schema_export(
     )
     .map_err(|error| GenTypesError::Fold(crate::FoldError::Render(error.to_string())))?;
     let ops = resolved.ops.as_slice();
-    // Per `docs/proposals/single-fold-and-effects.md`: EVERY value both
-    // artifacts are rendered from is a PROJECTION of ONE traversal, not a private
-    // replay of the op stream.
+    // EVERY value both artifacts are rendered from is a PROJECTION of ONE
+    // traversal, not a private replay of the op stream.
     //
     // The fold is the fail-closed gate: `single_fold::fold` runs the catalog
     // rules, and the refusal set this projection path admits is pinned as a

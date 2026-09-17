@@ -456,13 +456,10 @@ async fn check_bind_inference_semantics<S: SqlSession>(
         Err(e) => return Err(fail(CHECK, format!("decode nullable tag: {e}"))),
     }
     // MIXED binds in ONE statement: a DECLARED integer key, an INFERRED instant,
-    // and a DECLARED text tag. This is the case the seam could not express while
-    // untypedness was a property of the verb rather than of the value - the old
-    // all-or-nothing spelling forced the key and the tag to go untyped too.
-    //
-    // It is also the sharpest check in this suite, because it fails in BOTH
-    // directions: declare the instant and the server refuses the coercion, infer
-    // everything and a driver that silently drops declared types still passes.
+    // and a DECLARED text tag. It is the sharpest check in this suite, because it
+    // fails in BOTH directions: declare the instant and the server refuses the
+    // coercion, infer everything and a driver that silently drops declared types
+    // still passes.
     let mixed = session
         .exec(
             &format!("INSERT INTO zm_conf_text (id, ts, tag) VALUES ({p1}, {p2}, {p3})"),
@@ -597,7 +594,7 @@ const DECIMAL_PROBE_NEG: &str = "-0.0000000001";
 /// Check 5 - declared-scalar fidelity: [`Bind::Bool`] and [`Bind::Decimal`] carry
 /// their VALUE to the server.
 ///
-/// These are the two variants the other four checks never bind, and both are live:
+/// These are the two variants the other checks never bind, and both are live:
 /// the PostgreSQL backfill progress writer binds `Bind::Bool`, and the MySQL DML
 /// executor binds `Bind::Decimal` for every `BindValue::Decimal` the IR produces.
 /// Because [`Bind`] is `#[non_exhaustive]` every driver's mapping ends in a

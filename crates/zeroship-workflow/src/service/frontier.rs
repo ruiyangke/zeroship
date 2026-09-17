@@ -98,12 +98,119 @@ pub(crate) async fn invocation(
     })
 }
 
+/// Dispatches of this run's current frontier that were reclaimed without the
+/// executor reporting an outcome. Committing a frontier transition advances the
+/// run's revision, so a dispatch that reported anything durable leaves the
+/// strikes behind with the frontier they were counted against.
+async fn stuck_dispatches(
+    tx: &mut Transaction,
+    app: &AppId,
+    run: &Row,
+) -> Result<i64, WorkflowServiceError> {
+    let counted = tx
+        .database()
+        .collection(models::tasks::Entity::COLLECTION)?
+        .execute(Operation::Count {
+            filter: value!({"app_id":app.as_str(), "run_id":run.text("id")?,
+                "generation":run.integer("generation")?,
+                "frontier_revision":run.integer("frontier_revision")?, "state":"expired"}),
+            options: value!({}),
+        })
+        .await?;
+    match counted {
+        zeroship_data_orm::orm::Output::Count(count) => Ok(count),
+        _ => Err(WorkflowServiceError::Internal(
+            "workflow task count returned rows".into(),
+        )),
+    }
+}
+
+/// Bring a run to rest at `stalled` without rolling anything back.
+///
+/// The verdict is the host's, not the body's: the platform gave up on work it
+/// could not get an outcome for, so there is no creator failure to compensate
+/// and no reason to hand a compensator to the same dispatch path that already
+/// failed to report. Compensation stays reserved for outcomes a run reported.
+async fn stall(
+    tx: &mut Transaction,
+    app: &AppId,
+    run: &Row,
+    error: Value,
+    now: i64,
+) -> Result<RunState, WorkflowServiceError> {
+    let update = RunUpdate::Stalled { error };
+    let state = parse_state(update.state())?;
+    finish(tx, app, run, state, None, update.error(), now).await
+}
+
+/// Bring a run whose rollback stopped reporting to rest at the failure it was
+/// rolling back, with the undischarged obligations named.
+///
+/// A run reaches `compensating` because it already failed, and that verdict is
+/// the creator's: it is what their code produced and what they query for. A
+/// rollback the host gave up on does not overturn it, so the run rests at the
+/// state an incomplete rollback always reaches, and the host's liveness verdict
+/// is reported inside the compensation summary instead of replacing it.
+///
+/// The obligations are marked abandoned rather than left pending, because a run
+/// at rest whose journal still claims a pending compensator would read as work
+/// the platform intends to do. What the creator cannot learn is whether an
+/// abandoned compensator applied part of its effect before it stopped
+/// reporting; naming the step is what lets them go and look.
+async fn abandon(
+    tx: &mut Transaction,
+    app: &AppId,
+    run: &Row,
+    reason: Value,
+    now: i64,
+) -> Result<RunState, WorkflowServiceError> {
+    let id = run.text("id")?;
+    let generation = run.integer("generation")?;
+    let mut steps = Vec::new();
+    for mut step in journal::load(tx, app, &id, generation).await?.into_iter().rev() {
+        if !step
+            .compensation_state
+            .as_deref()
+            .is_some_and(|state| matches!(state, "pending" | "running"))
+        {
+            continue;
+        }
+        steps.push(json!({"ordinal":step.ordinal, "name":step.name}));
+        step.compensation_state = Some("abandoned".into());
+        journal::update(tx, app, &id, generation, &step).await?;
+    }
+    if steps.is_empty() {
+        return Err(WorkflowServiceError::Internal(
+            "compensating workflow has no pending operation".into(),
+        ));
+    }
+    let original = original_error(tx, app, &id, generation).await?;
+    let failures = compensation_failures(tx, app, &id, generation).await?;
+    let error = compensated_error(
+        original,
+        &journal::load(tx, app, &id, generation).await?,
+        failures,
+        Some(Abandonment { steps, reason }),
+    );
+    finish(tx, app, run, RunState::Failed, None, Some(error), now).await
+}
+
 /// Reconcile control intent and durable waits before assigning an executor.
 /// A parent's still-propagating cascade counts as recorded cancellation.
+///
+/// A run whose frontier keeps being dispatched and reclaimed with nothing
+/// reported comes to rest here rather than being handed another executor.
+/// This is the creator-facing half of the manager's delivery ceiling: the
+/// manager stops redelivering a job that never finishes, and a job whose run is
+/// terminal settles, so the verdict has to land before that ceiling is spent.
+/// A rollback that stops reporting is the same failure one phase later and the
+/// same strikes bound it, but its resting state is the failure it was rolling
+/// back, not a stall. See [`abandon`].
 pub(crate) async fn prepare(
     tx: &mut Transaction,
     app: &AppId,
     run: &Row,
+    policy: &AppPolicy,
     now: i64,
 ) -> Result<bool, WorkflowServiceError> {
     let intent = super::propagation::effective_control(tx, app, run).await?;
@@ -119,7 +226,18 @@ pub(crate) async fn prepare(
         park(tx, app, run).await?;
         return Ok(false);
     }
-    if run.text("state")? == "compensating" {
+    let compensating = run.text("state")? == "compensating";
+    let stuck = stuck_dispatches(tx, app, run).await?;
+    if stuck >= policy.max_stuck_dispatches {
+        let reason = crate::engine::stalled_error(stuck, policy.max_stuck_dispatches);
+        if compensating {
+            abandon(tx, app, run, reason, now).await?;
+        } else {
+            stall(tx, app, run, reason, now).await?;
+        }
+        return Ok(false);
+    }
+    if compensating {
         return compensation_ready(tx, app, run, now).await;
     }
     let progressed = journal::resolve(tx, app, run, now).await?;
@@ -184,6 +302,9 @@ pub(crate) async fn apply(
     let intent = super::propagation::effective_control(tx, app, run).await?;
     if intent == ControlIntent::Cancel {
         return settle(tx, app, run, RunUpdate::Cancelled, now).await;
+    }
+    if let RunUpdate::Stalled { error } = update {
+        return stall(tx, app, run, error, now).await;
     }
     if matches!(update, RunUpdate::Failed { .. } | RunUpdate::Cancelled) {
         return settle(tx, app, run, update, now).await;
@@ -509,27 +630,7 @@ async fn compensate(
             .await?;
         return Ok(RunState::Compensating);
     }
-    let rows = tx
-        .database()
-        .entity::<models::generations::Entity>()?
-        .find::<models::GenerationOutcome>(
-            models::generations::app_id
-                .eq(app.as_str())?
-                .and(models::generations::run_id.eq(id.as_str())?)
-                .and(models::generations::generation.eq(generation)?),
-            FindOptions {
-                limit: Some(1),
-                ..Default::default()
-            },
-        )
-        .await?;
-    let original: Option<Value> = rows
-        .first()
-        .ok_or_else(|| WorkflowServiceError::Internal("workflow generation is missing".into()))?
-        .error
-        .as_deref()
-        .map(decode)
-        .transpose()?;
+    let original = original_error(tx, app, &id, generation).await?;
     let failures = compensation_failures(tx, app, &id, generation).await?;
     let steps = journal::load(tx, app, &id, generation).await?;
     let state = if failures.is_empty() {
@@ -537,18 +638,59 @@ async fn compensate(
     } else {
         RunState::Failed
     };
-    let error = compensated_error(original, &steps, failures);
+    let error = compensated_error(original, &steps, failures, None);
     finish(tx, app, run, state, None, Some(error), now).await
+}
+
+/// The failure that started this generation's rollback, as `settle` recorded it.
+async fn original_error(
+    tx: &Transaction,
+    app: &AppId,
+    id: &str,
+    generation: i64,
+) -> Result<Option<Value>, WorkflowServiceError> {
+    tx.database()
+        .entity::<models::generations::Entity>()?
+        .find::<models::GenerationOutcome>(
+            models::generations::app_id
+                .eq(app.as_str())?
+                .and(models::generations::run_id.eq(id)?)
+                .and(models::generations::generation.eq(generation)?),
+            FindOptions {
+                limit: Some(1),
+                ..Default::default()
+            },
+        )
+        .await?
+        .first()
+        .ok_or_else(|| WorkflowServiceError::Internal("workflow generation is missing".into()))?
+        .error
+        .as_deref()
+        .map(decode)
+        .transpose()
+}
+
+/// What the host gave up on when it abandoned a rollback: the obligations it
+/// never discharged, newest first, and the liveness verdict that stopped it.
+struct Abandonment {
+    steps: Vec<Value>,
+    reason: Value,
 }
 
 /// Attach the rollback summary to the failure that started compensation.
 ///
 /// The original error keeps its type and message; `compensation` reports how
-/// many compensators ran, and `partial` outcomes list each failed step.
+/// many compensators ran to a final result, and `partial` outcomes list each
+/// failed step. An `abandoned` outcome additionally names the obligations no
+/// compensator ever reported on, and the reason the host stopped waiting. Those
+/// steps reached no final result, so they are outside the counts rather than
+/// inflating them: a compensator that reported a failure and one that reported
+/// nothing are different facts and a creator has to be able to tell them apart.
 fn compensated_error(
     original: Option<Value>,
     steps: &[crate::engine::StepCheckpoint],
     failures: Vec<Value>,
+    abandonment: Option<Abandonment>,
 ) -> Value {
     let count = |state: &str| {
         steps
@@ -557,14 +699,25 @@ fn compensated_error(
             .count()
     };
     let (completed, failed) = (count("completed"), count("failed"));
+    let outcome = if abandonment.is_some() {
+        "abandoned"
+    } else if failures.is_empty() {
+        "completed"
+    } else {
+        "partial"
+    };
     let mut summary = json!({
         "total": completed + failed,
         "completed": completed,
         "failed": failed,
-        "outcome": if failures.is_empty() { "completed" } else { "partial" },
+        "outcome": outcome,
     });
     if !failures.is_empty() {
         summary["failures"] = Value::Array(failures);
+    }
+    if let Some(Abandonment { steps, reason }) = abandonment {
+        summary["abandoned"] = Value::Array(steps);
+        summary["reason"] = reason;
     }
     let mut error = match original {
         Some(Value::Object(error)) => Value::Object(error),

@@ -4,31 +4,15 @@ import { table } from "@zeroship/migrate";
 // rather than by a list the reaper walks.
 //
 // ---------------------------------------------------------------------------
-// WHAT WAS MEASURED, AND WHY A LIST CANNOT BE THE MECHANISM
+// WHY A LIST CANNOT BE THE MECHANISM
 // ---------------------------------------------------------------------------
 //
-// The account reaper carried `ATTRIBUTION_FKS`, a hand-maintained list of the
-// users references PostgreSQL "does not clear by itself", and `SET NULL`ed them
-// from the auth service before the hard DELETE. Its in-file test asserted the
-// list was EXACTLY the blocking set. Read out of `pg_constraint` on a database
-// with the full corpus applied, the blocking set (`confdeltype` in `a`, `r`)
-// was:
-//
-//   app_schema_applies.submitted_by   RESTRICT, NOT NULL
-//   identity_links.principal_id       NO ACTION, NOT NULL
-//   principal_grants.principal_id     NO ACTION, NOT NULL
-//   device_grants.principal_id        NO ACTION, nullable
-//   oauth_clients.created_by          NO ACTION, nullable
-//
-// The list named ONE of those five, and three of the five are NOT NULL -- so
-// `SET NULL` was not even a spelling those columns accept. A creator who had
-// ever deployed a migration, signed in through the CLI, or linked a federated
-// identity could not be erased at all; the DELETE failed on a foreign key and
-// the failure was swallowed one frame up.
-//
-// The list is deleted with this migration, not replaced by a longer one. A list
+// A hand-maintained list of the references PostgreSQL "does not clear by itself"
 // is a second mechanism doing the database's work, and it is wrong exactly when
-// someone adds a reference without reading it. The edge is the declaration.
+// someone adds a reference without reading it. It also cannot express `SET NULL`
+// on a NOT NULL column, which is not even a spelling those columns accept. The
+// list is deleted with this migration, not replaced by a longer one. The edge is
+// the declaration.
 //
 // ---------------------------------------------------------------------------
 // THE RULE, AND WHY EACH EDGE GETS THE ACTION IT GETS

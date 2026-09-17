@@ -31,7 +31,7 @@ use crate::snapshot::PartitionSnapshot;
 use zeroship_migrate_ir::migration::Migration;
 
 /// A net-applied version whose journal checksum no longer matches the supplied
-/// set's checksum for that version - tamper / edited-after-applied (scenario 36).
+/// set's checksum for that version - tamper / edited-after-applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChecksumDrift {
     /// The drifting migration's version (`mig_...`).
@@ -73,9 +73,8 @@ pub enum DriftError {
     Backend(String),
 }
 
-// Like the journal's, this conversion lived in the PostgreSQL `drift_sql` module -
-// the only place that had needed it. Both types are foreign to that module now, so
-// the impl is an orphan there and belongs beside the error it constructs.
+// This conversion belongs beside the error it constructs. Both types are foreign
+// to the PostgreSQL `drift_sql` module, so the impl would be an orphan there.
 impl From<crate::driver::DbError> for DriftError {
     fn from(error: crate::driver::DbError) -> Self {
         Self::Db(error.into())
@@ -106,7 +105,7 @@ impl ChecksumDriftReport {
 /// attribute - an out-of-band `ALTER` that name-only diffing would miss (e.g.
 /// `ALTER COLUMN ... TYPE`, `DROP NOT NULL`, an identity/default generator flip,
 /// an index losing UNIQUE, a rewritten format CHECK, or an FK repoint/action
-/// change). This is the tamper blind spot #1 closes.
+/// change). This is the tamper blind spot that name-only diffing leaves open.
 ///
 /// Names only - never DDL. The caller decides what (if anything) to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,7 +142,7 @@ pub struct StructuralDrift {
     /// out-of-band `ALTER` (type/nullability/identity/default/format/reference/
     /// uniqueness change). The missing/unexpected name buckets cannot see these
     /// because the name still matches; this bucket is the attribute-aware tamper
-    /// surface (#1).
+    /// surface.
     pub altered_objects: Vec<AlteredObject>,
 }
 
@@ -174,7 +173,7 @@ pub struct DriftReport {
     pub missing_objects: Vec<String>,
     /// Live objects absent from the expected snapshot (out-of-band creation).
     pub unexpected_objects: Vec<String>,
-    /// Same-name objects whose attributes diverge (out-of-band `ALTER` - #1).
+    /// Same-name objects whose attributes diverge (out-of-band `ALTER`).
     pub altered_objects: Vec<AlteredObject>,
     /// Net-applied versions with no migration in the supplied set.
     pub orphan_journal: Vec<OrphanJournal>,

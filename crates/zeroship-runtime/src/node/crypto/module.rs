@@ -1,13 +1,8 @@
 //! Native `node:crypto` ESM module.
 //!
-//! See `docs/archive/node-crypto-native.md` §XI.
-//!
 //! The runtime resolves `import { createHash } from "node:crypto"` to a
 //! V8 `SyntheticModule` whose exports are populated lazily by
-//! [`evaluate`] on first import. Earlier versions went through a
-//! `globalThis.__zeroship_node_crypto` boundary object that the
-//! Vite-side virtual module re-exported; native synthetic modules
-//! eliminate the indirection.
+//! [`evaluate`] on first import.
 
 #![allow(unsafe_code)]
 
@@ -36,8 +31,6 @@ fn evaluate<'s>(
 
     // Build a namespace-shaped Object once, then mirror its properties
     // into both the module's named exports and the `default` export.
-    // Using an object as the staging area keeps the per-callback wire
-    // compatible with the previous `__zeroship_node_crypto` shape.
     let ns = v8::Object::new(scope);
     populate(scope, ns);
 

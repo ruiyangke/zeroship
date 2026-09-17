@@ -352,8 +352,8 @@ pub struct PendingContractRecord<'a> {
 /// not yet durably reached a terminal outcome." The deploy's success arm later
 /// promotes it to `committed` (the legit-pending go-live signal; never recovered);
 /// a same-deploy / crash abort closes it `aborted` / `reconciled`. The
-/// crash-recovery leg recovers ONLY net-`in_progress` markers - so a phase-1
-/// promotion FAILURE leaves the marker in the *recoverable* (fail-safe) state, never
+/// crash-recovery leg recovers ONLY net-`in_progress` markers - so a promotion
+/// FAILURE leaves the marker in the *recoverable* (fail-safe) state, never
 /// the *protected* state (the inversion that closes the false-abort).
 #[derive(Debug, Clone, Copy)]
 pub struct DeployRecoveryScope<'a> {
@@ -430,10 +430,8 @@ pub enum JournalError {
     IdentQuote(#[from] crate::dml::IdentQuoteError),
 }
 
-// This conversion used to sit in the PostgreSQL `journal_sql` module, which was
-// the only place that needed it. Both types are now foreign to that module, so
-// the impl is an orphan there; it belongs beside the error it constructs. Every
-// backend's journal reads through the same `DbError` seam, so one home is right.
+// Every backend's journal reads through the same `DbError` seam, so this
+// conversion has one home beside the error it constructs.
 impl From<crate::driver::DbError> for JournalError {
     fn from(error: crate::driver::DbError) -> Self {
         Self::Db(error.into())
@@ -582,8 +580,8 @@ mod tests {
     }
 
     /// A read site (e.g. `history`) maps an unparseable `event_kind` to the
-    /// dedicated `BadEventKind` arm - NOT `BadPhase` (the pre-fix misuse) - so a
-    /// tampered row surfaces a faithful, type-distinct error.
+    /// dedicated `BadEventKind` arm - NOT `BadPhase` - so a tampered row surfaces
+    /// a faithful, type-distinct error.
     #[test]
     fn unparseable_event_kind_is_bad_event_kind_not_bad_phase() {
         let raw = "garbage".to_string();

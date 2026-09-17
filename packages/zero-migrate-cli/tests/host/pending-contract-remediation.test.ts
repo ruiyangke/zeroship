@@ -3,26 +3,19 @@
 //
 // Touching a table that still has an outstanding online-rename contract is
 // fail-closed refused, and the refusal ends by naming the command that unblocks
-// it. That command was `migrate resolve-pending --apply <version>`, of which
-// every part was wrong: there is no `migrate` binary, `resolve-pending` is a
-// verb this project REMOVED - `cli.test.ts` has a test called "removed CLI verbs
-// are unknown and absent from help" asserting exactly that - and the CLI's
-// `resolve` takes an authored migration NAME, not a version, which `docs/cli.md`
-// calls out specifically.
-//
-// So the operator most in need of a way forward, at the one moment the tool has
-// deliberately stopped them, was told to run something that does not exist.
+// it. Every part of a suggestion must be runnable: there is no `migrate` binary,
+// `resolve-pending` is not a verb this project has, and the CLI's `resolve` takes
+// an authored migration NAME, not a version.
 //
 // THIS TEST EXECUTES THE SUGGESTION RATHER THAN SPELL-CHECKING IT. It lifts the
 // command out of the refusal text, substitutes the migration name for the
 // placeholder, runs it, and requires the rename to actually complete. A test that
 // only matched the new string would pass just as happily on the next plausible-
-// looking wrong command, which is how the original defect survived: the string
-// was pinned by a unit test, and the unit test pinned it to the wrong value.
+// looking wrong command.
 //
-// The CONTROL runs the command the refusal used to name and requires it to be
-// rejected as unknown. Without it, the assertion that the message no longer says
-// `resolve-pending` would also pass in a world where every verb was accepted.
+// The CONTROL runs the unrunnable command and requires it to be rejected as
+// unknown. Without it, the assertion that the message does not name that command
+// would also pass in a world where every verb was accepted.
 //
 // GATE: `ZERO_MIGRATE_TEST_PG_URL`. PostgreSQL only - the online rename is
 // PostgreSQL's.

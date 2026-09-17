@@ -53,8 +53,8 @@ scope = "all"
 #   migrated: invalid migration policy seal config: load operator ceiling:
 #   DeclaredOnlyNonDefault { key: "runtime.lock_timeout_ms" }
 #
-# so `zeroship-migrate-server` exited before binding its port and the deployed creator
-# migration path was dead. Found by tests/e2e_dev_vs_deployed_db.sh.
+# so `zeroship-migrate-server` exits before binding its port and the deployed
+# creator migration path is dead.
 #
 # The refusal is CORRECT and is the engine's II.6 gate. Every `runtime.*` knob is
 # registered `DeclaredOnly` in the vendored engine

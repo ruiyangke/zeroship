@@ -279,12 +279,11 @@ pub fn backchannel_logout_uri(scheme: &str, apex_host: &str) -> String {
 // `backchannel_logout_uri` column and no `post_logout_redirect_uris` column,
 // and nothing here computes post-logout redirect targets.
 //
-// The guard that capability owes is already specified:
-// `docs/proposals/2026-06-30-op-p0-spec-threat-model.md` requires that a
-// supplied `post_logout_redirect_uri` MUST exact-match a registered entry for
-// the resolved `client_id`, and on no match the OP renders a local 400 logout
-// confirmation page rather than redirecting to an unvalidated URI. Whoever adds
-// RP-initiated logout adds that check with it, or reintroduces an open redirect.
+// The guard that capability owes: a supplied `post_logout_redirect_uri` MUST
+// exact-match a registered entry for the resolved `client_id`, and on no match
+// the OP renders a local 400 logout confirmation page rather than redirecting
+// to an unvalidated URI. Whoever adds RP-initiated logout adds that check with
+// it, or reintroduces an open redirect.
 
 /// Redirect reconciliation core (spec §1.1). Compare the client's current
 /// redirect_uris against the desired set and return `Some(desired)` only when

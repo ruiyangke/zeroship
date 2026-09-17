@@ -38,11 +38,6 @@
 //! already returns the consumed-offset directly via its `CustomWrite`
 //! contract, so we adopt the same `(produced, consumed)` shape
 //! uniformly.
-//!
-//! ## Design references
-//!
-//! `docs/decisions/2026-05-01-compression-streams-native.md` records
-//! the design tradeoffs that shaped this implementation.
 
 use std::io::Write;
 
@@ -84,13 +79,13 @@ pub enum CodecMode {
 /// *two* wrapper functions (`throw_input_type_error` for the
 /// always-TypeError
 /// cases, `throw_decode_data_error` for the decode-data cases that
-/// flip to `DOMException("DataError")` if whatwg/compression issue #51
+/// flip to `DOMException("DataError")` if the WHATWG Compression spec
 /// lands and we toggle `DECODE_ERROR_USES_DOMEXCEPTION`).
 #[derive(Debug)]
 pub enum CodecError {
     /// Decompression encountered malformed input mid-stream. Maps to
     /// the spec's `decompress-and-enqueue` "throw a TypeError". Will
-    /// flip to `DOMException("DataError")` if whatwg/compression #51
+    /// flip to `DOMException("DataError")` if the WHATWG Compression spec
     /// lands and `DECODE_ERROR_USES_DOMEXCEPTION` is toggled to `true`.
     DecodeData(&'static str),
 
@@ -145,7 +140,7 @@ pub trait Codec: Send {
 // Error-type policy
 // ---------------------------------------------------------------------------
 
-/// When the WHATWG Compression spec issue #51 lands and decode-data
+/// When the WHATWG Compression spec change lands and decode-data
 /// errors flip from `TypeError` to `DOMException("DataError")`, set
 /// this constant to `true`. The codec layer never directly throws
 /// JS exceptions; this constant is read by `throw_decode_data_error`

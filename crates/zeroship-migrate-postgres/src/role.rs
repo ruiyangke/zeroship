@@ -16,22 +16,17 @@
 //! The role is a deterministic `migrator_<project>_<hash>`, created as
 //! **`NOLOGIN`**.
 //!
-//! WHAT THIS MODULE ACTUALLY CONTAINS, because the rest of this header reads like
-//! it describes code that is here and it does not: [`migrator_role_name`], the NAME
-//! derivation, and nothing else. No provisioning routine lives in this repository;
-//! the one this header used to describe ran over a native PostgreSQL client handle
-//! and left with that driver.
-//! **The grant set below is the SPEC the host implements**, and it is kept because
+//! WHAT THIS MODULE ACTUALLY CONTAINS: [`migrator_role_name`], the NAME derivation,
+//! and nothing else. No provisioning routine lives in this repository; the grant set
+//! below is the SPEC the host implements, and it is kept because
 //! `ExecutorConfig::with_migrator_role` is the seam the host's provisioned role
 //! arrives through, so the two halves have to agree on what that role may do.
 //!
-//! Do NOT read that as "this repository never emits `CREATE ROLE`". It does, at
-//! `crate::vendor`'s `CreateRole` arm, which formats a real `CREATE ROLE` (with a
-//! PL/pgSQL `DO` wrapper for `ifNotExists`, since PostgreSQL has no native form).
-//! That is an AUTHORED op a user writes in a migration, and it has nothing to do
-//! with provisioning the migrator role this module names. The two are separate
-//! mechanisms that happen to share a keyword, and conflating them is what put the
-//! wrong claim here in the first place.
+//! This is separate from the `CREATE ROLE` this repository DOES emit: `crate::vendor`'s
+//! `CreateRole` arm formats a real `CREATE ROLE` (with a PL/pgSQL `DO` wrapper for
+//! `ifNotExists`, since PostgreSQL has no native form). That is an AUTHORED op a user
+//! writes in a migration, and it has nothing to do with provisioning the migrator role
+//! this module names. The two mechanisms happen to share a keyword and nothing else.
 //!
 //! The executor connects as the privileged admin/control role and runs each
 //! migration under `SET ROLE` for that role (with `RESET ROLE` on exit, scoped
@@ -182,8 +177,6 @@ pub fn migrator_role_name(project_id: &str) -> Result<String, RoleError> {
     let suffix = base36_encode_bytes(&Sha256::digest(project_id.as_bytes()));
     const PREFIX: &str = "migrator_";
     const SEP_LEN: usize = 1;
-    // Was a third literal `63`. It now reads the one definition, which resolves
-    // the DECLARED identifier cap off the backend's descriptor.
     let prefix_budget = IDENT_MAX_BYTES
         .saturating_sub(PREFIX.len())
         .saturating_sub(SEP_LEN)
@@ -199,11 +192,9 @@ pub fn migrator_role_name(project_id: &str) -> Result<String, RoleError> {
 mod tests {
     use super::{migrator_role_name, quote_ident};
 
-    /// The leg `zero-migrate`'s `dml::tests::all_engine_seams_render_uniformly`
-    /// used to hold for this seam, moved here with the seam. It cannot stay in the
-    /// engine: `quote_ident` is crate-private and this crate is no longer part of
-    /// that one. The invariant is unchanged - the role seam renders BYTE-IDENTICALLY
-    /// to a bare escape-and-quote and fails closed on a NUL.
+    /// The uniformity invariant for this seam: it renders BYTE-IDENTICALLY to a bare
+    /// escape-and-quote and fails closed on a NUL. It lives here because `quote_ident`
+    /// is crate-private to this crate.
     #[test]
     fn the_role_seam_renders_uniformly_and_fails_closed() {
         let schema = "ap\"p"; // a quote-bearing engine schema

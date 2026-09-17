@@ -4,9 +4,7 @@
 //! connection parameters, so a DSN can be as short as `service=prod` and the
 //! host, port, database and user live in one place operators control.
 //!
-//! The rules below were MEASURED against the review container's libpq -
-//! version 18.4, though `psql` there reports 16.14; see
-//! `docs/runbooks/compio-postgres-libpq-parameter-probing.md`. Rather than read off the
+//! The rules below were derived by probing libpq rather than read off the
 //! documentation:
 //!
 //! * An explicitly given parameter beats the service's value for the same key,
@@ -225,9 +223,7 @@ mod tests {
     }
 
     // The whitespace rules below are ASYMMETRIC in a way no reading of the
-    // documentation suggests, and this file asserted the tidy symmetric
-    // version until it was probed. Measured against the review container's libpq, one variable
-    // at a time (`docs/runbooks/compio-postgres-libpq-parameter-probing.md`).
+    // documentation suggests.
 
     #[test]
     fn whitespace_before_the_key_is_allowed() {

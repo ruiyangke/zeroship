@@ -592,8 +592,7 @@ fn dev_init_rejects_an_empty_pairwise_file_before_creating_siblings() {
 /// verifiers resolve material by issuer string alone. Under a one-key document
 /// every issuer resolves to the same key, so the worker's own signer stamps
 /// exactly the key id its own verifier looks up: it can mint the
-/// `ZeroShip-User` envelope it then accepts, which fence F4 of
-/// `docs/proposals/2026-09-05-auth-foundation-redesign.md` exists to forbid.
+/// `ZeroShip-User` envelope it then accepts, which the identity model forbids.
 /// Wider still, possession of any one service key file becomes the ability to
 /// present as any service to any service.
 ///

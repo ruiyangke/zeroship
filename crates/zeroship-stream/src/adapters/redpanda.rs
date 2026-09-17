@@ -138,7 +138,7 @@ impl ProducerContext for DeliveryContext {
 ///
 /// That is the obvious move and it is wrong twice: `default = ["libz",
 /// "tokio"]` in rdkafka 0.36.2, so re-enabling defaults pulls TOKIO back into
-/// a workspace whose whole runtime posture is compio (see AGENTS.md), AND it
+/// a workspace whose whole runtime posture is compio, AND it
 /// still does not enable `ssl`, because ssl was never a default feature. The
 /// absence of TLS here is not a side effect of dropping tokio; it was simply
 /// never turned on.

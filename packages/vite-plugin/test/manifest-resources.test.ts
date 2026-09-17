@@ -1,13 +1,12 @@
 /**
  * Manifest emitter for the unified `resources` block.
  *
- * The new emitter (in `src/manifest.ts`) takes the transform state
+ * The emitter (in `src/manifest.ts`) takes the transform state
  * (discovered procedures + their metadata) plus the `defineApp({ resources })`
  * tree from `src/server/config.ts`, and produces two companion blocks
  * the vite-plugin merges into the existing manifest:
  *
- *   - `manifest.resources`   — flat key map per
- *     `docs/proposals/rpc.md` §7
+ *   - `manifest.resources`   — flat key map
  *   - `manifest.transformer` — `"json"` (the current default)
  *
  * These tests feed the emitter a tmpdir fixture and inspect the output.
@@ -375,12 +374,10 @@ export default defineApp({
     }
   });
 
-  // ── Item #6: src/server/config.ts is the only canonical config path ──
+  // ── src/server/config.ts is the only canonical config path ──
   //
-  // Pre-cleanup the emitter accepted four candidate paths
-  // (src/server/config.{ts,js}, zeroship.config.{ts,js}). v2 collapses
-  // to exactly one — `src/server/config.ts` — to avoid ambiguity about
-  // where app-level RPC defaults live.
+  // Exactly one path is accepted - `src/server/config.ts` - so there is no
+  // ambiguity about where app-level RPC defaults live.
 
   test("src/server/config.ts IS the canonical path", async () => {
     // Sanity-check happy path: the file at src/server/config.ts is read.

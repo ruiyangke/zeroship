@@ -94,7 +94,7 @@ impl TokenBucket {
     /// against a bucket whose capacity is `< DEGRADE_FACTOR` (a tiny-burst
     /// rule) could NEVER be satisfied — Degrade would silently become a hard
     /// Block regardless of refill. Clamping guarantees Degrade is always a
-    /// throttle, never a hard Block, for any `(rate, burst)` config (#6).
+    /// throttle, never a hard Block, for any `(rate, burst)` config.
     fn try_acquire_n(&self, n: u32) -> bool {
         let cost = (u64::from(n.max(1)) * 1000).min(self.capacity);
         loop {
@@ -541,11 +541,9 @@ mod tests {
         }
     }
 
-    /// #6: a Degraded app on a TINY-burst global bucket (capacity <
+    /// A Degraded app on a TINY-burst global bucket (capacity <
     /// DEGRADE_FACTOR) must still be admitted at least once — Degrade is a
-    /// throttle, never a hard Block. Pre-fix, a degraded request cost
-    /// `DEGRADE_FACTOR` tokens against a 1-token bucket and could never be
-    /// satisfied (silent hard Block). The cost-clamp (`min(cost, capacity)`)
+    /// throttle, never a hard Block. The cost-clamp (`min(cost, capacity)`)
     /// guarantees admission regardless of the burst config.
     #[test]
     fn degraded_tiny_burst_still_admits_some_requests() {

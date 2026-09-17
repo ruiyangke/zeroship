@@ -370,14 +370,12 @@ fn limits_without_touching_recency(cache: &AppCache, app_id: &AppId) -> Option<R
 /// costs nothing. An identifier naming a resource SHARED WITH ANOTHER TENANT -
 /// a datastore key, or a database id once databases are shared - must never
 /// enter it, because two apps under one actor that read equal values have
-/// confirmed co-residency. `docs/architecture/data-system.md` requires both of
-/// those ids stay internal.
+/// confirmed co-residency. Both of those ids stay internal.
 ///
 /// Being unforgeable is NOT sufficient to qualify. Creator `vars` cannot shadow
 /// a worker-internal entry, which is why metering is trustworthy, but that is a
 /// forgery property; the concern here is disclosure, and the map is readable
-/// either way. `docs/proposals/2026-08-28-app-database-decoupling.md` section
-/// 2.2(a) records a binding design that was corrected for exactly this reason.
+/// either way.
 ///
 /// `worker_env_is_exactly_the_app_owned_ids` binds the key set. Widening it is
 /// a security decision, so it must be an edit to that test and not a silent

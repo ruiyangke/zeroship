@@ -1,4 +1,4 @@
-//! PR-1 regression tests for billing-ops gap #26: the `0042` partial-unique-index
+//! PR-1 tests for the `0042` partial-unique-index
 //! reshape + the `0046 invoice_payments` append-only side table + the cash-collected
 //! helper.
 //!

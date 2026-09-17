@@ -375,7 +375,15 @@ impl<T: JobTransport> DeliverySlot<T> {
             execution,
             authority,
             guard,
-            phase: Phase::new(self.options.execution_timeout),
+            // The SAME bound the guard holds, so the renewal delay computed
+            // from this phase cannot fall past the end of the attempt. The
+            // delay is a fraction of the smallest bound that can end an
+            // attempt, and captured host authority is one of them: the
+            // manager counts an attempt into its delivery ceiling only on
+            // that attempt's first renewal, so an attempt the authority
+            // window cuts short before any renewal leaves the ceiling where
+            // it was while redelivery continues.
+            phase: Phase::new(timeout),
         });
         let result = Box::pin(run_active(self.transport.as_ref(), active, self.options)).await;
         let lease = active.claims.borrow().lease.clone();

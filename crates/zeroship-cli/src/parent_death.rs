@@ -56,11 +56,10 @@
 /// Opt-in gate. Value is the pid of the spawning process.
 ///
 /// Declared here and mirrored in `packages/vite-plugin/src/constants.ts`
-/// (`ENV_DIE_WITH_PARENT`). Neither side's suite can see the other's spelling,
-/// so the two are held together by behaviour rather than by string comparison:
-/// `tests/golden_path.sh` kills a REAL vite dev server and requires the
-/// runtime it spawned to be gone. A rename on either side alone leaves the
-/// variable unset on the child and fails that check.
+/// (`ENV_DIE_WITH_PARENT`). Neither side's suite can see the other's
+/// spelling, so the two are held together by behaviour: a rename on either
+/// side alone leaves the variable unset on the child, and a runtime a vite
+/// parent spawns then survives the parent's death.
 ///
 /// This constant is the spelling the diagnostics interpolate. The read below
 /// keeps the literal at its call site as required by `declared_env!`. The two

@@ -358,10 +358,8 @@ async fn invoice_paid_webhook_records_app_audit_row() {
             }
         }
     });
-    // Sign it. This hand-built request carried no `stripe-signature` and passed
-    // only while `insecure_dev` skipped verification; once verification became
-    // unconditional it began returning 400, so the test was asserting the
-    // handler's behaviour on a request the handler now rejects at the door.
+    // Sign it: signature verification is unconditional, so an unsigned
+    // request is rejected at the door before any handler runs.
     let req = test::TestRequest::post()
         .uri("/internal/webhooks/stripe")
         .header("content-type", "application/json")
@@ -1697,8 +1695,8 @@ async fn handler_failure_is_retried_not_lost() {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// Webhook follow-ups (0054): charge.refund.updated / payout.failed /
-// payment_intent.payment_failed — the 3 previously-deferred handlers.
+// Webhook follow-ups: charge.refund.updated / payout.failed /
+// payment_intent.payment_failed.
 // ════════════════════════════════════════════════════════════════════════════
 
 /// A fresh OWNED Postgres connection (mutable) — `refund::issue_refund` opens a txn for
@@ -2173,15 +2171,15 @@ async fn payment_intent_failed_surfaces_record_and_notifies_once() {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// HTTP-boundary + signature + dispatch gaps (#9 / #2 / #7 / #12 / #29 / #27)
+// HTTP-boundary + signature + dispatch gaps
 // ════════════════════════════════════════════════════════════════════════════
 //
-// #13 (event_processed Err → 500 fail-CLOSED) and #14 (mark_event_processed Err →
-// log + ack-200 fail-OPEN) are COVERED-BY-REASONING, not by a faithful test —
+// `event_processed` Err → 500 fail-CLOSED and `mark_event_processed` Err →
+// log + ack-200 fail-OPEN are COVERED-BY-REASONING, not by a faithful test —
 // deliberately, because a faithful test is infeasible here WITHOUT an invasive
 // production test-seam, which the brief forbids:
 //
-//   * #13 lives at `process_locked_event`: `event_processed()` Err → `err_json(500)`.
+//   * The fail-closed arm lives at `process_locked_event`: `event_processed()` Err → `err_json(500)`.
 //     `event_processed` is a plain parameterised `SELECT 1 FROM stripe_events_seen
 //     WHERE event_id = $1` on a clean, valid table. Forcing it to ERROR (not just
 //     return a row) needs a DB-level fault (drop/rename/revoke the table, or kill the
@@ -2193,7 +2191,7 @@ async fn payment_intent_failed_surfaces_record_and_notifies_once() {
 //     currency-CHECK violation → 500, event left unclaimed) and by the symmetric
 //     `lock_event` Err → 500 arm immediately above it.
 //
-//   * #14 lives at the tail of `process_locked_event`: `mark_event_processed()` Err is
+//   * The fail-open arm lives at the tail of `process_locked_event`: `mark_event_processed()` Err is
 //     logged and the handler STILL acks 200 (do-NOT-5xx, since the idempotent handler
 //     already applied its effect). `mark_event_processed` is an `INSERT … ON CONFLICT
 //     (event_id) DO NOTHING` on the same two-column table — idempotent, so a duplicate
@@ -2229,7 +2227,7 @@ fn stripe_v1(secret: &str, t: i64, body: &str) -> String {
     hex::encode(mac.finalize().into_bytes())
 }
 
-/// #9 (body cap): a body over MAX_WEBHOOK_BODY_BYTES (256 KiB) is rejected with 413
+/// Body cap: a body over MAX_WEBHOOK_BODY_BYTES is rejected with 413
 /// BEFORE any parse/HMAC/DB work. The fixture still signs the request, but the body
 /// cap runs ahead of signature verification and remains the gate under test.
 #[compio::test]
@@ -2253,8 +2251,8 @@ async fn webhook_oversized_body_rejected_413() {
     common::drain_pg().await;
 }
 
-/// #9 (signature-header cap): a `stripe-signature` header over MAX_SIGNATURE_HEADER_BYTES
-/// (4096) is rejected 400 while signature verification is active.
+/// Signature-header cap: a `stripe-signature` header over
+/// MAX_SIGNATURE_HEADER_BYTES is rejected 400 while signature verification is active.
 #[compio::test]
 async fn webhook_oversized_signature_header_rejected_400() {
     let db_url = db_url();
@@ -2278,7 +2276,7 @@ async fn webhook_oversized_signature_header_rejected_400() {
     common::drain_pg().await;
 }
 
-/// #9 (missing signature header): with a real configured secret, a request carrying NO
+/// Missing signature header: with a real configured secret, a request carrying NO
 /// `stripe-signature` header is rejected 400 (the empty header has
 /// no `t`/`v1` → verify fails). Proves the unsigned request never reaches a handler.
 #[compio::test]
@@ -2308,7 +2306,7 @@ async fn webhook_missing_signature_header_rejected_400() {
     common::drain_pg().await;
 }
 
-/// #2 (multi-v1 OR-fold): a signature header whose FIRST `v1=` is WRONG but a LATER `v1=`
+/// Multi-v1 OR-fold: a signature header whose FIRST `v1=` is WRONG but a LATER `v1=`
 /// MATCHES is ACCEPTED — pins the rotation-window OR-fold (the verifier must not early-exit
 /// on the first mismatch). The event then dispatches and is claimed.
 ///
@@ -2349,7 +2347,7 @@ async fn webhook_second_v1_matches_is_accepted() {
     common::drain_pg().await;
 }
 
-/// #7 (empty signing secret → verify Err): `verify_stripe_signature` with an EMPTY secret
+/// Empty signing secret → verify Err: `verify_stripe_signature` with an EMPTY secret
 /// returns Err — an empty HMAC key is a misconfiguration that must never silently accept.
 /// Unit-level (the function is `pub`), no DB needed.
 #[test]
@@ -2362,7 +2360,7 @@ fn verify_empty_secret_is_err() {
     );
 }
 
-/// #7 (HTTP path, empty secret -> 500): the webhook endpoint with no configured
+/// HTTP path, empty secret -> 500: the webhook endpoint with no configured
 /// signing secret rejects with 500, fails closed, and does not process the event.
 ///
 /// The status alone would also be produced by an unrelated 500 (a DB error, a
@@ -2479,7 +2477,7 @@ async fn webhook_configured_secret_bad_signature_reports_signature_error() {
     common::drain_pg().await;
 }
 
-/// #12 (concurrent dispatch e2e): two CONCURRENT `webhook()` calls for the SAME event_id
+/// Concurrent dispatch e2e: two CONCURRENT `webhook()` calls for the SAME event_id
 /// dispatch the handler EXACTLY ONCE — the per-event advisory lock serializes them, and
 /// the second observes the first's claim and 200-acks as a `duplicate`. End-to-end
 /// exactly-once (the lock PRIMITIVE is unit-tested in `lock_event_serializes_same_event`;
@@ -2539,7 +2537,7 @@ async fn concurrent_same_event_dispatches_once() {
     common::drain_pg().await;
 }
 
-/// #29 (payout.failed with NO connected account): a `payout.failed` carrying neither a
+/// payout.failed with NO connected account: a `payout.failed` carrying neither a
 /// top-level `account` nor a destination → benign 200 ack (`no_connected_account`), no
 /// payout_failures row written.
 #[compio::test]
@@ -2587,7 +2585,7 @@ async fn payout_failed_without_connected_account_acks_no_row() {
     common::drain_pg().await;
 }
 
-/// #29 (payment_intent.payment_failed with NO connected account): a platform (non-Connect)
+/// payment_intent.payment_failed with NO connected account: a platform (non-Connect)
 /// PI failure → benign 200 ack (`no_connected_account`), no connect_checkout_failures row.
 #[compio::test]
 async fn payment_intent_failed_without_connected_account_acks_no_row() {
@@ -2635,7 +2633,7 @@ async fn payment_intent_failed_without_connected_account_acks_no_row() {
     common::drain_pg().await;
 }
 
-/// #27 (account.updated for an UNLINKED account): an `account.updated` for an `acct_…` we
+/// account.updated for an UNLINKED account: an `account.updated` for an `acct_…` we
 /// never linked updates 0 rows → `account_not_linked` ack, no error. The event is still
 /// claimed (it was validly delivered; re-processing it would be a no-op).
 #[compio::test]

@@ -28,10 +28,10 @@
 //! destroy. `WITH (FORCE)` appears nowhere because it TERMINATES every other
 //! backend on the database first -- it exists so a drop cannot fail on a live
 //! connection, which is exactly the wrong property when the live connection is
-//! a peer agent fifteen minutes into its own suite. `tests/lib/scratch_db.sh`
-//! DOES use it, correctly: the database it drops is one this run created for
-//! itself and the only connections left are its own. The sweeper must never use
-//! it, for the same reason this module must never drop.
+//! a peer agent fifteen minutes into its own suite. A per-run scratch drop CAN
+//! use it, correctly: the database it drops is one this run created for itself
+//! and the only connections left are its own. The sweeper must never use it,
+//! for the same reason this module must never drop.
 //!
 //! THE HAZARD THIS DESIGN HAS, which no fingerprint can see: a DATABASE-SCOPED
 //! SINGLETON. The migration set describes the schema; it says nothing about

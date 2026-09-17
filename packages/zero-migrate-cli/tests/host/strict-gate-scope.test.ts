@@ -1,19 +1,16 @@
-// What `status --strict` — the documented CI gate — does and does not watch.
+// What `status --strict` — the CI gate — does and does not watch.
 //
-// `docs/cli.md`: "Strict status exits 1 when anything is pending, drifted, or
-// checksum-mismatched."
+// Strict status exits 1 when anything is pending, drifted, or checksum-mismatched.
 //
 // An operator reads "drifted" as covering the schema. It does not. Drift here is
 // the supplied migration set disagreeing with the JOURNAL; the live schema is a
-// separate comparison that `security-model.md` says "is not automatically run on
-// every JavaScript apply". So the gate someone puts in front of a production
-// deploy exits 0 after the table it manages has been dropped.
+// separate comparison that is not automatically run on every JavaScript apply.
+// So the gate someone puts in front of a production deploy exits 0 after the
+// table it manages has been dropped.
 //
-// That is the documented design, not a defect, and this file is not arguing with
-// it. It exists because the consequence is severe and was stated nowhere an
-// operator would look: `cli.md` described the gate, `security-model.md` described
-// the limitation, and neither pointed at the other. `cli.md` now does, and this
-// pins the behaviour so the two cannot drift apart again.
+// That is the design, not a defect, and this file is not arguing with it. It
+// exists to pin the gate's scope so strict status is not read as a live-schema
+// check.
 //
 // The escalation is deliberate — a column, then an unexpected column, then the
 // whole table. If some middle case ever starts being caught, the arm that catches

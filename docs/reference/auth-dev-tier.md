@@ -51,9 +51,8 @@ only the backend that answers them differs.
 > before your handler runs whether or not you call it.
 >
 > Treat a green `pnpm dev` as saying nothing about whether your auth
-> declarations are correct. `tests/e2e_dev_vs_deployed_auth.sh` measures this
-> divergence directly, including a `declare-defaulted` control that flips one
-> posture and shows only the deployed side move.
+> declarations are correct. The divergence is one-directional: the deployed
+> tier refuses where `pnpm dev` serves.
 
 ### The other three things the dev tier does not enforce
 
@@ -108,9 +107,8 @@ What this means when you build:
   harnesses can diff login, session and signout because both tiers answer them.
   There is no dev result for signup to diff against, so no comparison test can
   cover it and none does.
-- Login *is* comparable and is covered: dev's `/authorize` renders a form and
-  checks `passwords[def.id]`, so both tiers take a credential and return a
-  session. `tests/e2e_dev_vs_deployed_login.sh` walks it end to end.
+- Login *is* comparable: dev's `/authorize` renders a form and checks
+  `passwords[def.id]`, so both tiers take a credential and return a session.
 
 ## The contract (prod tier — unchanged)
 
