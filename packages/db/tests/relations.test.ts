@@ -183,7 +183,7 @@ for (const selectFirst of [true, false]) {
 }
 
 test("reference builders retain scalar storage and named metadata through modifiers", () => {
-  const integer = t.integer().references("people", { column: "id", relation: "author" }).nullable().required();
+  const integer = t.int().references("people", { column: "id", relation: "author" }).nullable().required();
   const bigint = t.bigInt().references("people", { column: "id", relation: "author" }).required();
   assert.deepEqual(integer.toFieldDef(), { type: "integer", refTarget: "people", refColumn: "id", relation: "author", required: true });
   assert.deepEqual(bigint.toFieldDef(), { type: "bigInt", refTarget: "people", refColumn: "id", relation: "author", required: true });

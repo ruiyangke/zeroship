@@ -92,7 +92,7 @@ test("every storage-backed db token reduces to a neutral ColType", () => {
   // proves the bridge accepts the token without a TypeBuilder wrapper.
   assert.equal(colTypeFromDbField(asField("timestamp")), "timestamp");
   assert.equal(colTypeFromDbField(dbT.calendarDate()), "date");
-  assert.equal(colTypeFromDbField(dbT.integer()), "int");
+  assert.equal(colTypeFromDbField(dbT.int()), "int");
   assert.equal(colTypeFromDbField(dbT.bigInt()), "bigInt");
   // Descriptor-only tokens: the runtime descriptor spells integer widths and
   // float precision that no `t.*` factory authors, so they need a raw field.
