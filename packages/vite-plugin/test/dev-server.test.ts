@@ -563,12 +563,10 @@ describe("devServerPlugin", () => {
   });
 
   test("prefers DATABASE_URL from the parent environment over .env", async () => {
-    // sqlite: values, not postgres:// — `resolveDatabaseUrl` now REJECTS a
-    // non-SQLite dev URL outright (SC-4 decision 1,
-    // docs/proposals/2026-08-26-sc4-dev-and-hmr-mechanism.md), so a Postgres
-    // URL here would never reach the runtime at all. Precedence is what this
-    // case tests; the scheme rejection itself is covered directly and far
-    // more cheaply by test/dev-database-url.test.ts.
+    // sqlite: values, not postgres:// — `resolveDatabaseUrl` REJECTS a
+    // non-SQLite dev URL outright, so a Postgres URL here would never reach
+    // the runtime at all. Precedence is what this case tests; the scheme
+    // rejection itself is covered directly by test/dev-database-url.test.ts.
     const harness = await startHarness({
       dotenv: "DATABASE_URL=sqlite:.dotenv-dev.sqlite\n",
       parentDatabaseUrl: "sqlite:.shell-dev.sqlite",

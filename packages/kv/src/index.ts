@@ -11,7 +11,7 @@
 // store with high-frequency ephemeral churn (rate-limit counters, page
 // views, cache fills); TTL as a first-class feature; offloading the
 // source-of-truth DB. Durable idempotency / locks / config / tokens
-// belong in env.db. See docs/reference/kv.md for the full guidance.
+// belong in env.db.
 //
 // Backends (selected by the runtime, identical wire contract): redb
 // (single-process persistent — the default; ZEROSHIP_KV_PATH) and Redis

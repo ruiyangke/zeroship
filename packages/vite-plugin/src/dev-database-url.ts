@@ -118,12 +118,11 @@ export function parseDotenvVars(root: string): Record<string, string> {
 /**
  * Shell env wins, then `.env`, then the dev default.
  *
- * Rejects a non-SQLite result before returning it — SC-4 decision 1
- * (`docs/proposals/2026-08-26-sc4-dev-and-hmr-mechanism.md`). This is the ONE
- * resolution both dev entry points share (`dev-server.ts`, `cli/migrate-dev.ts`);
- * validating here, rather than at each call site, is what keeps a Postgres
- * `DATABASE_URL` from reaching the SQLite-only apply path AND the runtime
- * child with two different silent outcomes.
+ * Rejects a non-SQLite result before returning it — SC-4 decision 1.
+ * This is the ONE resolution both dev entry points share (`dev-server.ts`,
+ * `cli/migrate-dev.ts`); validating here, rather than at each call site, is
+ * what keeps a Postgres `DATABASE_URL` from reaching the SQLite-only apply
+ * path AND the runtime child with two different silent outcomes.
  *
  * @throws {DevDatabaseUrlSchemeError} when the resolved value is not `sqlite:<path>`.
  */

@@ -9,7 +9,7 @@
 //   "superjson"  (opt-in; must match manifest.transformer)
 //      Wraps a value as `{ json, meta? }` so Date / BigInt / Map /
 //      Set / Decimal round-trip across the wire faithfully. Drives
-//      the "lossless" guarantee in `docs/proposals/rpc.md` §6.
+//      the "lossless" guarantee.
 //
 // superjson is an OPTIONAL peer dep. We import it lazily so consumers
 // who only use the "json" transformer (or who compile-time tree-shake)

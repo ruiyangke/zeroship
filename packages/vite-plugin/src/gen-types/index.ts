@@ -121,9 +121,7 @@ const MIGRATION_SOURCE_FAULT = "migration-source";
  * That costs nothing TODAY because the only caller of `applyIrSqlite` is
  * `cli/migrate-dev.ts`, which has no try/catch, so both classes propagate
  * equally loudly. It stops being free the moment the apply is chained into the
- * dev server -- which
- * `docs/proposals/2026-08-09-dev-sqlite-migration-apply-ahead-of-runtime.md`
- * proposes doing. Under this allow-list, a creator's own bad migration would
+ * dev server. Under this allow-list, a creator's own bad migration would
  * then land in the LOUD arm and refuse to boot. Whoever wires that up owes
  * either a tag at that boundary or a deliberate decision that refusing to boot
  * on an invalid migration is the behaviour they want.
@@ -454,9 +452,7 @@ function isGeneratedArtifact(file: string, existing: string): boolean {
  * ours. Pinning this to the current version looks tighter and is actively wrong, because
  * the recogniser gates OVERWRITING - so a version bump would make every committed
  * artifact unrecognisable, and `gen-types` would refuse to regenerate the very files the
- * bump had just made stale. Measured: pinning it to 2 refused all 8 loadable committed
- * artifacts with "refusing to overwrite creator-owned schema.runtime.json", and the only
- * way out was to hand-edit each file to the new version first.
+ * bump had just made stale.
  *
  * "Is this file ours" and "is this file CURRENT" are different questions. The second one
  * belongs to the drift gate (`--check`), which compares bytes and has a fresh render to

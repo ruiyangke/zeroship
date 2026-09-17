@@ -1,13 +1,12 @@
 /**
  * Manifest emitter for the unified `resources` block.
  *
- * The new emitter (in `src/manifest.ts`) takes the transform state
+ * The emitter (in `src/manifest.ts`) takes the transform state
  * (discovered procedures + their metadata) plus the `defineApp({ resources })`
  * tree from `src/server/config.ts`, and produces two companion blocks
  * the vite-plugin merges into the existing manifest:
  *
- *   - `manifest.resources`   — flat key map per
- *     `docs/proposals/rpc.md` §7
+ *   - `manifest.resources`   — flat key map
  *   - `manifest.transformer` — `"json"` (the current default)
  *
  * These tests feed the emitter a tmpdir fixture and inspect the output.

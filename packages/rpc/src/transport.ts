@@ -672,8 +672,8 @@ export function streamCall<TOut = unknown>(
 
 // ── Subscriptions ────────────────────────────────────────────────────────
 //
-// Wire — see `docs/proposals/rpc.md` §6 (Subscription wire) and the
-// runtime's native subscription transport (`rpc/subscription.rs`).
+// Wire — see the runtime's native subscription transport
+// (`rpc/subscription.rs`).
 //
 //   GET wss://.../__zeroship/v1/<id>
 //   Sec-WebSocket-Protocol: zs.v1
@@ -848,13 +848,11 @@ export function subscribeCall<TOut = unknown>(
 
     // A WebSocket upgrade cannot carry an `Authorization` header: the
     // browser `WebSocket` constructor exposes only the URL, the protocol
-    // list, and cookies. This used to smuggle the bearer token through as
-    // an `auth.zsbearer.<token>` subprotocol, on the rationale that the
-    // gateway would lift it. Nothing does. The gateway resolves identity
-    // from `Authorization: Bearer`, the session cookie, then the IP, and
-    // the subscription path runs that same gate, so the token was read by
-    // no one while riding in `Sec-WebSocket-Protocol` -- a request header
-    // proxies and CDNs log by default, unlike `Authorization`, which is
+    // list, and cookies. The gateway resolves identity from
+    // `Authorization: Bearer`, the session cookie, then the IP, and the
+    // subscription path runs that same gate; nothing reads a bearer token
+    // from `Sec-WebSocket-Protocol`, and a request header there is logged
+    // by default by proxies and CDNs, unlike `Authorization`, which is
     // commonly redacted.
     //
     // Subscriptions therefore authenticate by cookie. That is fine

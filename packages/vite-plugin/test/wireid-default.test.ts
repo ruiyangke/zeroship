@@ -1,12 +1,9 @@
 /**
  * wireId default is just `<exportName>`.
  *
- * The earlier default of `<moduleSlug>.<exportName>` leaked file
- * structure to the wire. The corrected default uses just the export
- * name. Path-derived slugs are gone from wireId derivation entirely
- * (they remain only for diagnostic messages).
+ * Path-derived slugs are not part of wireId derivation (they remain
+ * only for diagnostic messages).
  *
- * `docs/proposals/rpc.md` §2:
  *   1. fn.config.id (explicit)            wins
  *   2. <exportName> alone                  — default
  */
