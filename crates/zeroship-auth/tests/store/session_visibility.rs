@@ -286,9 +286,6 @@ async fn revoke_one_idp_session_succeeds() {
 }
 
 /// Gateway revocation preserves other sessions and identifies the app for logout.
-/// The gateway's request enforcement is exercised by
-/// `app_session_revoke_at_the_op_ends_the_gateway_session` in
-/// `crates/zeroship-gateway/tests/oidc_rp_e2e.rs`.
 #[compio::test]
 async fn revoke_one_gateway_session_succeeds() {
     Database::run(async |database| {

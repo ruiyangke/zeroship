@@ -119,8 +119,7 @@ export interface TransformState {
   /**
    * Durable workflow classes exported by server modules, in EXPORT-name
    * form. The manifest emitter turns these into `manifest.workflows`, which
-   * the control plane requires before it will start a run
-   * (`crates/zeroship-control/src/workflow_instance_api.rs` `active_deploy_for_workflow`).
+   * the control plane requires before it will start a run.
    */
   discoveredWorkflows: DiscoveredWorkflowRecord[];
 }

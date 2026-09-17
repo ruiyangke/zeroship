@@ -12,9 +12,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/target/release"
-# shellcheck source=tests/lib/runtime_secrets.sh
 source "$ROOT/tests/lib/runtime_secrets.sh"
-# shellcheck source=tests/lib/e2e_stack.sh
 source "$ROOT/tests/lib/e2e_stack.sh"
 
 # PREFLIGHT. Every service below is started as `"$BIN/name" ... > /dev/null 2>&1 &`,
@@ -29,7 +27,6 @@ source "$ROOT/tests/lib/e2e_stack.sh"
 # so the harness would have silently benchmarked two refused connections.
 #
 # Named here, at the top, rather than diagnosed from a throughput table.
-# (Same shape as the preflight in tests/e2e_metering_billing.sh.)
 for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-bench-server; do
     [ -x "$BIN/$b" ] || {
         echo "FAIL: missing $BIN/$b" >&2

@@ -403,8 +403,7 @@ mod tests {
     use serde_json::json;
 
     /// Test fixture: deterministic Ed25519 keypair + a [`JwksCache`]
-    /// pre-loaded with the matching public key. Mirrors the pattern in
-    /// `crates/zeroship-auth/tests/common/mock_provider.rs` but exposes a direct
+    /// pre-loaded with the matching public key. Exposes a direct
     /// [`JwksCache`] constructor (no live HTTP server) — the cache
     /// already memoises the parsed keys, so feeding it from a test-only
     /// constructor short-circuits the network fetch entirely.

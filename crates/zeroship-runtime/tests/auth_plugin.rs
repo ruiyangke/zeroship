@@ -385,7 +385,7 @@ fn require_user_anonymous_surfaces_as_401_not_masked_500() {
 /// one. Deployed, the gateway's `unauthenticated_response` answers 401 with the
 /// canonical code before the worker ever runs, so the hook fires; in dev this
 /// throw IS the 401 source, so a divergent code silently disables an app's
-/// re-authentication. JS half: `packages/auth/tests/auth-expired-seam.test.ts`.
+/// re-authentication.
 #[test]
 fn require_user_anonymous_code_is_canonical_unauthenticated() {
     let runtime = build_runtime_with_auth(

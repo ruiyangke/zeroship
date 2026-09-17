@@ -3,14 +3,14 @@
 # tests/e2e_browser/scripts/up.sh — bring up the full zeroship stack for the
 # browser-level Playwright E2E and deploy the three render examples.
 #
-# Sources the shared bring-up library (tests/lib/e2e_stack.sh), then:
+# Sources the shared bring-up library, then:
 #   • stack_up        — ephemeral PG + platform migrations + control/worker/gateway
 #   • mint_creator_bearer — platform-admin OAuth bearer from the harness OP
 #   • deploy_zship    — csr-todo / ssr-blog / ssg-docs (slugs ...-bx, disjoint
 #                       from the curl harness's ...-e2e apps)
 #
-# Writes a descriptor JSON to tests/e2e_browser/.stack.json that the Playwright
-# specs read for the dynamic gateway port + per-app slugs. LEAVES THE STACK
+# Writes a descriptor JSON that the Playwright specs read for the dynamic
+# gateway port + per-app slugs. LEAVES THE STACK
 # RUNNING and exits 0 on success (the Playwright globalSetup spawns this; the
 # globalTeardown later runs down.sh against the same descriptor).
 #

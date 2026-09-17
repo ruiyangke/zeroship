@@ -21,7 +21,7 @@ pub enum NodeErrorClass {
 
 /// Look up the exception class for a Node error code. Default is
 /// `Error`. Class assignments are verified against upstream Node's
-/// `lib/internal/errors.js` and `src/node_errors.h`.
+/// error taxonomy.
 pub const fn class_for(code: &str) -> NodeErrorClass {
     match code.as_bytes() {
         // -- TypeError class (per upstream errors.js / node_errors.h) --
