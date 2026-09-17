@@ -624,8 +624,7 @@ impl SqliteSession {
     ///    app B's `db.transaction()` was refused while app A held one, which is
     ///    defect L22b.
     ///
-    /// Both are visible to creators, so they are also written down in
-    /// `docs/reference/sqlite-divergences.md`; keep the two in step.
+    /// Both are visible to creators.
     pub(crate) async fn reserve_transaction(
         self: &Rc<Self>,
         app_id: &str,
