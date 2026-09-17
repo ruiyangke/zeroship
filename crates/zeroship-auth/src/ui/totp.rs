@@ -55,8 +55,8 @@
 //! `cron::audit_retention` sweep bucket, so the trail is kept indefinitely.
 //!
 //! These are the two controls the field converges on, and the teardown is not
-//! one of them: of ten systems surveyed (GitLab, Ory Kratos, Supabase `GoTrue`,
-//! Auth0, Keycloak, Okta, `django-allauth`, Entra ID, AWS IAM, GitHub) none
+//! one of them: none of the systems surveyed (GitLab, Ory Kratos, Supabase `GoTrue`,
+//! Auth0, Keycloak, Okta, `django-allauth`, Entra ID, AWS IAM, GitHub)
 //! revokes other sessions on factor removal, and ASVS 5.0 7.4.3 asks only that
 //! the application OFFER a global sign-out, which `/me/sessions/{id}/revoke`
 //! already is. The full survey, the standards citations and the conditions that

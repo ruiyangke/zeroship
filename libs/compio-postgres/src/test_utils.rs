@@ -2,49 +2,32 @@
 //! that need to synthesise [`Row`] / [`Statement`] / [`Column`] values
 //! without a live Postgres connection.
 //!
-//! `#[doc(hidden)]` rather than feature-gated. It WAS behind a `test-utils`
-//! feature, and that flag quietly split the suite: without it
-//! `tests/serialized_loop.rs` did not build, so the crate's own documented
-//! test command ran 24 fewer tests and covered neither the serialized
-//! transport nor the split refusal that routes onto it. Compiling a
-//! doc-hidden module into release builds is the smaller cost.
+//! `#[doc(hidden)]` rather than feature-gated: gating it stops
+//! `tests/serialized_loop.rs` from building under the plain test command, so
+//! the serialized transport and the split refusal that routes onto it would go
+//! uncovered. Compiling a doc-hidden module into release builds is the smaller
+//! cost.
 //!
 //! TWO HALVES, AND ONLY ONE OF THEM IS FOR THIS CRATE.
 //!
 //! `SerializedSocket` / `connect_serialized` are used by this crate's own
-//! `tests/serialized_loop.rs` (24 tests) and are the reason this module cannot
-//! be feature-gated: gating it stopped that target building under the plain
-//! test command.
+//! `tests/serialized_loop.rs` and are the reason this module cannot be
+//! feature-gated.
 //!
 //! The `*_for_test` synthesisers are used by NOTHING here. Their callers are
-//! all in `plugin-db`, and there are now TWO of them - re-counted 2026-09-02
-//! by grepping CALL sites (`name(`) rather than mentions, because every hit
-//! inside this crate is a doc comment explaining why the code beside it uses
-//! a real row instead:
-//!
-//! * `benches/bench_row_to_json.rs` and `benches/bench_first_row_or_null.rs`,
-//!   which price row decoding and would measure a network round trip instead
-//!   if they had to fetch a real row. Both call `row_for_test` and
-//!   `column_for_test`.
-//!
-//! The third caller this note named on 2026-08-25 - `src/audit.rs`'s
-//! `#[cfg(test)]` module - is GONE; no such file exists in `plugin-db` now.
-//! So the count has been wrong in both directions: two when there were three,
-//! and then three when there were two.
+//! all in `plugin-db`'s benches - `benches/bench_row_to_json.rs` and
+//! `benches/bench_first_row_or_null.rs`, which price row decoding and would
+//! measure a network round trip instead if they had to fetch a real row. Both
+//! call `row_for_test` and `column_for_test`.
 //!
 //! `statement_for_test` has no caller OUTSIDE this module, but it is NOT
 //! dead: `row_for_test` builds its `Statement` with it (below), so deleting
-//! it breaks both benches through their `row_for_test` call. This note said
-//! "ZERO call sites anywhere in the workspace" for one commit, because the
-//! grep behind that claim excluded this file to skip the definition and hid
-//! the call with it. A caller search that cannot see the defining module
-//! cannot answer whether a function is dead.
+//! it breaks both benches through their `row_for_test` call. A caller search
+//! that cannot see the defining module cannot answer whether a function is
+//! dead.
 //!
-//! Keeping them was re-ruled on 2026-08-25. The alternative considered was
-//! having the benches fetch one real row before the timed loop, which would
-//! put a network round trip inside a decode benchmark. That argument stands on
-//! the benches alone now; the audit-decoding leg it also rested on went with
-//! the file.
+//! The benches cannot fetch a real row before the timed loop: that would put
+//! a network round trip inside a decode benchmark.
 //!
 //! `Row::new` is `pub(crate)`, so an external bench cannot build one. Both
 //! places in this crate that could have used them deliberately do not, and
@@ -91,10 +74,7 @@ use postgres_protocol::message::backend::{DataRowBody, Message};
 /// `127.0.0.2` is a race, not a guarantee: the two addresses have independent
 /// port spaces, so a port free on one can be taken on the other. It almost
 /// always works when the test runs alone and fails occasionally inside the
-/// full `--lib` run, where several hundred other tests are churning sockets.
-/// Measured 2026-08-28: the suite went red on `bind TLS replication probe` in
-/// a 519-test run while the same test passed 2 of 2 in isolation on both
-/// servers.
+/// full `--lib` run, where other tests are churning sockets.
 ///
 /// Probe the PAIR and retry instead of asserting the first guess.
 #[cfg(test)]
@@ -161,12 +141,7 @@ pub fn statement_for_test(columns: Vec<Column>) -> Statement {
 /// 4-byte big-endian `i32`, `BOOL` is a single byte (0 or 1), `JSONB`
 /// is a 1-byte version prefix (0x01) followed by UTF-8 JSON text,
 /// `TIMESTAMPTZ` is an 8-byte BE `i64` of microseconds since
-/// 2000-01-01 UTC. See
-/// `crates/zeroship-data-orm/src/backend/postgres/pg_row_json.rs::column_to_json` for the
-/// conversion table. (Cited as `crates/zeroship-data-v8/src/v8_bridge.rs` until
-/// 2026-09-04: the crate is `crates/zeroship-data-v8`, and the function moved
-/// out of `v8_bridge.rs` on the data-plane split - it is now the tree's only
-/// `column_to_json`.)
+/// 2000-01-01 UTC.
 ///
 /// # Errors
 ///
