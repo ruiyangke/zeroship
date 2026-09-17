@@ -264,7 +264,9 @@ derives the assignment metadata from it — the same derivation the fold
 performs today, relocated, not redesigned. `t.id()` and `ids.typeId()` are
 removed with no alias. The prefix stays declarable per field; when omitted,
 the current derivation from the collection name is preserved. `ids.ulid()`
-is untouched by this decision — a different value format, not a typed id.
+retires with the namespace: the `ids` object and `IdFormats` are removed
+outright, and the `ulid` value format goes with them. That is a deliberate
+reversal of the position this paragraph first took.|
 
 ### Numbers — the semantic family
 
