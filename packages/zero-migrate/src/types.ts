@@ -321,7 +321,7 @@ export interface TypeLexicon {
   char(opts: CharOptions): ColumnDef;
   timestamp(): ColumnDef;
   /** Portable SQL DATE: PostgreSQL `date`, MySQL `DATE`, SQLite `TEXT` date affinity. */
-  date(): ColumnDef;
+  calendarDate(): ColumnDef;
   uuid(): ColumnDef;
   bytes(): ColumnDef;
   boolean(): ColumnDef;

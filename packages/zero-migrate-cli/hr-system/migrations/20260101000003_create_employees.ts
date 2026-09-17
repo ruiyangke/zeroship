@@ -26,7 +26,7 @@ export default {
         email: t.string({ length: 254 }).notNull(),
         first_name: t.string({ length: 255 }).notNull(),
         last_name: t.string({ length: 255 }).notNull(),
-        hire_date: t.date().notNull(),
+        hire_date: t.calendarDate().notNull(),
         base_salary: t.numeric({ precision: 12, scale: 2 }).notNull(),
         employment_type: t.string({ length: 32 }).notNull(),
         status: t.string({ length: 32 }).notNull().default("active"),

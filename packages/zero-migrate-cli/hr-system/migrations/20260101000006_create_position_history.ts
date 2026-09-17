@@ -16,8 +16,8 @@ export default {
           .ulid()
           .notNull()
           .references("positions", "id", { onDelete: "restrict" }),
-        effective_from: t.date().notNull(),
-        effective_to: t.date(),
+        effective_from: t.calendarDate().notNull(),
+        effective_to: t.calendarDate(),
       },
       primaryKey: ["employee_id", "effective_from"],
     });

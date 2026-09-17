@@ -1284,7 +1284,7 @@ fn render_col_type(
         ColType::Boolean => "t.boolean()".to_string(),
         ColType::Json => "t.json()".to_string(),
         ColType::Timestamp => "t.timestamp()".to_string(),
-        ColType::Date => "t.date()".to_string(),
+        ColType::Date => "t.calendarDate()".to_string(),
         ColType::Uuid => "t.uuid()".to_string(),
         ColType::Inet => "t.inet()".to_string(),
         ColType::TextArray => "t.textArray()".to_string(),

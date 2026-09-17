@@ -1808,7 +1808,7 @@ export const t: TypeLexicon = {
     return new ColumnDefImpl({ char: { length: n } } as ColType);
   },
   timestamp: () => new ColumnDefImpl("timestamp"),
-  date: () => new ColumnDefImpl("date" as ColType),
+  calendarDate: () => new ColumnDefImpl("date" as ColType),
   uuid: () => new ColumnDefImpl("uuid"),
   bytes: () => new ColumnDefImpl("bytes"),
   boolean: () => new ColumnDefImpl("boolean"),

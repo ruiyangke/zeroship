@@ -1177,7 +1177,7 @@ export const t = {
   /**
    * D3 — calendar-date validator. Accepts a `YYYY-MM-DD` string and
    * stores it as a Postgres `DATE` column (no time, no timezone). This
-   * is distinct from `t.date()` which is a `TIMESTAMPTZ` stored as
+   * is distinct from `t.timestamp()` which is a `TIMESTAMPTZ` stored as
    * Unix-ms numbers at the JS layer.
    *
    * ```ts

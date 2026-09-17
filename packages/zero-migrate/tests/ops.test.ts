@@ -3032,7 +3032,7 @@ test("domain check validation rejects smuggled volatile functions and records ag
 test("chain extract and root interval build extract and interval nodes", () => {
   const ops = record(() => {
     domain("billing_period").create({
-      as: t.date(),
+      as: t.calendarDate(),
       check: (v) => v.extract("day").eq(1),
     });
     table("events").update({
