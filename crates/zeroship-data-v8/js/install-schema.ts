@@ -267,12 +267,11 @@ export function normalizeSchema(input: SchemaInputOrUnion): NormalizedSchema {
 }
 
 /**
- * Expand a top-level `t.union(...)` into a flat `NormalizedSchema`
- * (proposal §C2). See `docs/archive/zeroship-db.md` for the full
- * rules; in short: every non-discriminator field becomes a nullable
- * top-level column, fields shared across variants must agree on
- * `type`, and the discriminator becomes a NOT NULL column with an
- * `enum` constraint listing every variant's literal value.
+ * Expand a top-level `t.union(...)` into a flat `NormalizedSchema`:
+ * every non-discriminator field becomes a nullable top-level column,
+ * fields shared across variants must agree on `type`, and the
+ * discriminator becomes a NOT NULL column with an `enum` constraint
+ * listing every variant's literal value.
  */
 export function expandUnionToFlatColumns(def: FieldDef): NormalizedSchema {
   if (def.type !== "union" || def.variants === undefined || def.discriminator === undefined) {
@@ -386,8 +385,7 @@ export function expandUnionToFlatColumns(def: FieldDef): NormalizedSchema {
  * Nothing here inspects the target for an app prefix, and this check
  * does not run at all for schema applied by the migration engine at
  * deploy. What structurally keeps an FK inside one app is the DDL
- * renderer in `crates/zeroship-migrate-core/src/schema/query.rs` -- see the foreign
- * keys section of `docs/reference/db.md`.
+ * renderer in `crates/zeroship-migrate-core/src/schema/query.rs`.
  */
 export function validateRefTargets(
   schemas: Record<string, unknown>,

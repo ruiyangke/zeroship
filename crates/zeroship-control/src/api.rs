@@ -563,10 +563,7 @@ pub async fn list_apps(
     // be a fleet-wide cross-tenant read (the exact C1 leak, at the list
     // endpoint).
     //
-    // There is no fleet-wide arm any more. It was selected by a direct SQL read
-    // of `platform_admin_roles` rather than by Cedar - so it was invisible to
-    // every audit of the policy set - and it returned every tenant's apps to any
-    // of the four deleted staff roles. A vendor wanting a fleet-wide list builds
+    // There is no fleet-wide arm here: a vendor wanting a fleet-wide list builds
     // it in the portal against its own copy of the data.
     match state
         .registry
@@ -752,8 +749,7 @@ pub async fn delete_app(
 /// Streaming `.zship` ingest under a stable deploy command identity.
 ///
 /// Deploy bundles arrive as zstd-compressed tar archives carrying
-/// `manifest.json` + `blobs/<sha256>` entries; see `docs/reference/zship.md`
-/// for the wire format and ingestion algorithm.
+/// `manifest.json` + `blobs/<sha256>` entries.
 ///
 /// The request names its deploy command in one `Idempotency-Key` header. An
 /// exact retry - same app, actor, content type and archive bytes under the same

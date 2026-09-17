@@ -1,8 +1,6 @@
 //! `.zship` ingestion. Streaming tar.zst → blob store + manifest.
 //!
-//! See `docs/reference/zship.md` for the wire format and the
-//! ingestion algorithm. This is the content-addressed blob-store
-//! ingestion path.
+//! This is the content-addressed blob-store ingestion path.
 //!
 //! # Streaming
 //!

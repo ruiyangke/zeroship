@@ -17,7 +17,7 @@ use crate::rule::{RequiredPrincipal, ResourceEntry};
 /// Reference to the worker-side JS for a deploy. Uniform shape: an
 /// `entry` specifier plus a `modules` map of specifier → blob hash.
 /// Single-bundled servers have one entry in `modules`; code-split
-/// servers have many. See `docs/reference/zship.md` Worker code section.
+/// servers have many.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkerCode {
     /// Specifier V8 evaluates first; must be a key in `modules`.
@@ -27,8 +27,7 @@ pub struct WorkerCode {
 }
 
 /// One per app. Carries everything the gateway needs to route a request
-/// without consulting the control plane on the hot path. Wire format:
-/// see `docs/reference/zship.md`.
+/// without consulting the control plane on the hot path.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
     /// Schema version. Reject unknown values.
@@ -56,10 +55,9 @@ pub struct Manifest {
     /// Unified resource map. Keys are `"rpc:<wireId>"` or `"/<path>"`
     /// or `"*"`.
     ///
-    /// See `docs/proposals/rpc.md` §7 for the full shape and merge
-    /// semantics. The gateway compiles this into per-resource
-    /// `EffectivePolicy` records at app-load time so per-request lookup
-    /// is a single `HashMap::get`.
+    /// The gateway compiles this into per-resource `EffectivePolicy`
+    /// records at app-load time so per-request lookup is a single
+    /// `HashMap::get`.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub resources: HashMap<String, ResourceEntry>,
 
@@ -424,8 +422,7 @@ pub struct ManifestMetadata {
 impl Manifest {
     /// Default schema version for `#[serde(default)]`.
     ///
-    /// v1 is the initial published shape — see `docs/proposals/rpc.md`
-    /// §7. Future breaking changes bump to v2.
+    /// v1 is the initial published shape. Future breaking changes bump to v2.
     fn default_version() -> u16 { 1 }
 
     /// Synthesize the minimal manifest for an app that has not shipped one.

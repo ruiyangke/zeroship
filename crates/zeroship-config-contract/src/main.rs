@@ -50,7 +50,7 @@ fn parse_root_and_check(args: &[String], allow_check: bool) -> (PathBuf, bool) {
     (root, check)
 }
 
-/// Render, or verify, the generated region of `docs/reference/env-vars.md`.
+/// Render, or verify, the generated region of the environment-variables reference.
 fn env_vars_doc(args: &[String]) {
     let (root, check) = parse_root_and_check(args, true);
     let specs = platform_specs();

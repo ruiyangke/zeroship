@@ -2,10 +2,9 @@
 //!
 //! A shared setting has ONE canonical name, ONE supply class and ONE resolved
 //! type across every consumer, because an operator sets it once: there is a
-//! single `ZEROSHIP_*` spelling and a single overlay path behind it. Before this
-//! table existed each consumer repeated the canonical string and the wrapper
-//! type in its own struct, which made two failures representable and neither
-//! detectable:
+//! single `ZEROSHIP_*` spelling and a single overlay path behind it. Restating
+//! the canonical string and the wrapper type in each consumer's own struct
+//! makes two failures representable and neither detectable:
 //!
 //!   * a TYPO de-shared the identity. `observability.log_filtr` in one binary is
 //!     a new, unique canonical name with its own env projection, its own flag
@@ -22,15 +21,14 @@
 //! deliberate. `observability.log_filter` defaults to `info,zeroship_X=debug`
 //! where `X` is the declaring crate; there is no single value that is correct
 //! for every binary, so a rule requiring default agreement would have no
-//! satisfiable form. See the 2026-08-12 amendment to Section 4.1 of
-//! `docs/proposals/2026-08-11-config-name-alignment.md`.
+//! satisfiable form.
 //!
-//! This is not the checked-in name manifest that Section 6 rejects. That
-//! rejection is about a second place a name is spelled, which can be edited to
-//! agree with a typo while the declaration differs. Here the table is the ONLY
-//! place a shared name is spelled: `#[config(name = "...")]` REFUSES a string
-//! that matches a shared canonical name, so there is no second spelling to
-//! drift from.
+//! This is not a checked-in name manifest. What is rejected about one is that
+//! it is a second place a name is spelled, which can be edited to agree with a
+//! typo while the declaration differs. Here the table is the ONLY place a
+//! shared name is spelled: `#[config(name = "...")]` REFUSES a string that
+//! matches a shared canonical name, so there is no second spelling to drift
+//! from.
 
 /// One shared identity: its symbol, canonical name, and required declaration.
 pub(crate) struct SharedIdentity {

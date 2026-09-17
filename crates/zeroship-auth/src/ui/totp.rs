@@ -59,9 +59,7 @@
 //! Auth0, Keycloak, Okta, `django-allauth`, Entra ID, AWS IAM, GitHub)
 //! revokes other sessions on factor removal, and ASVS 5.0 7.4.3 asks only that
 //! the application OFFER a global sign-out, which `/me/sessions/{id}/revoke`
-//! already is. The full survey, the standards citations and the conditions that
-//! would reopen this live in
-//! `docs/decisions/2026-08-21-second-factor-removal-notifies-not-revokes.md`.
+//! already is.
 
 use std::sync::Arc;
 

@@ -89,12 +89,10 @@ struct Tuple {
 
 /// Compare the properties on which consumers of one identity must agree.
 ///
-/// The DEFAULT is not among them, and its absence is the point. Section 4.1 of
-/// `docs/proposals/2026-08-11-config-name-alignment.md` first required default
-/// agreement too; the 2026-08-12 amendment removed that clause because
+/// The DEFAULT is not among them, and its absence is the point:
 /// `observability.log_filter` defaults to a directive naming the declaring
-/// crate, so requiring agreement would have rejected a correct configuration
-/// with no conforming alternative.
+/// crate, so requiring agreement would reject a correct configuration with no
+/// conforming alternative.
 ///
 /// Everything compared here is something an OPERATOR would be misled by: one
 /// `ZEROSHIP_*` spelling and one overlay path must mean one class, one type and

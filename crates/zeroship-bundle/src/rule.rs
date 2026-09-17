@@ -140,10 +140,10 @@ pub struct ResourceEntry {
 /// The wire spelling is the variant name in `snake_case`: `"anonymous"` and
 /// `"user"`. The abbreviation `"anon"` is not accepted.
 ///
-/// ## A third `admin` variant was deleted on 2026-09-05
+/// ## Why there is no `admin` variant
 ///
-/// It named a principal that does not exist. `docs/architecture/control-plane.md`
-/// states there is no platform admin surface, and no site in this tree ever
+/// It named a principal that does not exist. There is no platform admin
+/// surface, and no site in this tree ever
 /// tested for platform-admin identity: the gateway matched `Admin` in the
 /// same arm as `User`, so a route a creator locked down with `admin` was
 /// reachable by every signed-in end user. That was creator-facing — the SDK

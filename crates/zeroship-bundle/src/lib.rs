@@ -1,7 +1,4 @@
 //! `.zship` deploy artifact format.
-//!
-//! Wire format: see `docs/reference/zship.md`.
-//! Storage layer rationale: see `docs/architecture/blob-store.md`.
 
 pub mod asset;
 pub mod blob;

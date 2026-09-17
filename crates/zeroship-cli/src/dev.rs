@@ -317,7 +317,7 @@ const SERVICE_KEY_FILES: [(&str, &str); 3] = [
 ///
 /// Private, like every key file here. Generated once and never rotated in
 /// place: re-keying is provisioning a NEW signer, because Control refuses a
-/// changed key for a recorded id (`docs/runbooks/worker-join-signers.md`).
+/// changed key for a recorded id.
 const JOIN_SIGNER_FILE: &str = "join-signer.json";
 
 /// The trusted-signer import document Control reads at startup
