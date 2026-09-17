@@ -1,10 +1,8 @@
-//! `node:crypto` Stage B smoke tests.
+//! `node:crypto` smoke tests.
 //!
 //! Drives the `__zeroship_node_crypto` boundary object directly in an
 //! isolated V8 context. No Runtime, no Vite synthetic module — those
 //! land on top of this surface.
-//!
-//! Per `docs/archive/node-crypto-native.md` §XVI test plan.
 
 #![allow(unsafe_code, missing_debug_implementations)]
 
@@ -14,14 +12,9 @@ use zeroship_runtime::{crypto_native, crypto_node, dom, init_v8};
 /// crypto + node:crypto installed. Returns the script's last
 /// expression value.
 ///
-/// Earlier versions called `crypto_node::install_globals(scope, global)`
-/// which mounted the surface at `globalThis.__zeroship_node_crypto`.
-/// The production surface is now the export object of the
-/// `node:crypto` SyntheticModule. These tests run raw `script.run`,
-/// not the module loader, so we mint the same boundary object
-/// directly via `populate()` and stash it under the legacy name —
-/// keeps the 97 existing assertions readable; the production path
-/// goes through the synthetic module instead.
+/// These tests run raw `script.run`, not the module loader, so the
+/// `node:crypto` boundary object is minted directly via `populate()`
+/// and stashed as `__zeroship_node_crypto`.
 fn run_js<F, R>(src: &str, f: F) -> R
 where
     F: FnOnce(v8::Local<v8::Value>, &mut v8::PinScope) -> R,
@@ -636,7 +629,7 @@ fn err_code_is_string_literal_match() {
 }
 
 // =============================================================================
-// Stage C — KeyObject + Sign/Verify + Cipher/Decipher + keygen
+// KeyObject + Sign/Verify + Cipher/Decipher + keygen
 // =============================================================================
 
 #[test]

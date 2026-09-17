@@ -3,8 +3,6 @@
 //! Mirrors the DOMException test harness pattern. The class is installed
 //! by the runtime's `setup_globals` path; we drive it through the
 //! synthetic-entry shim so the wire shape matches production.
-//!
-//! See `docs/proposals/rpc.md` §RpcError surface for the contract.
 
 use crate::common;
 use common::{dispatch, m};
