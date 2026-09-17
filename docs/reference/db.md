@@ -424,61 +424,37 @@ Add `onDelete: "cascade"` to the reference options for physical cascade,
 or `{ deferrable: true }` if you need cyclic refs insertable within one
 transaction — that is opt-in, not the default. Cross-app targets are refused;
 FKs stay inside the calling app. See `packages/db/src/types.ts` for the builder,
-and the next section for what does the refusing, which is not what this page
-said until 2026-08-20.
+and the next section for what does the refusing.
 
 ### Can an FK point at another app's table?
 
-No, and it is worth being exact about which code makes that true, because two
-plausible-looking answers are wrong.
+No, and it is worth being exact about which code makes that true, because a
+plausible-looking answer is wrong.
 
-**It was not `crates/zeroship-data-v8/src/cross_app_fk.rs (DELETED)`, and that file no
-longer exists.** It held a `reject_cross_app_fk` validator scanning `refTarget`
-for an `<other_app>.` prefix and returning `cross_app_fk_forbidden`, and it is
-the mechanism this page used to cite. It had **no production call site** -
-only integration tests, calling it directly to pin a refusal nothing reached -
-and it was deleted on 2026-09-02 rather than wired, because the data plane no
-longer emits DDL and so has nowhere to wire it to. Nor is it
-`crates/zeroship-data-orm/src/sql`; migration validation belongs to the
-migration engine.
+**It is not `crates/zeroship-data-v8`.** A `refTarget` validator has no home
+there: the data plane emits no DDL, so it has nowhere to reject a foreign key.
+Nor is it `crates/zeroship-data-orm/src/sql`; migration validation belongs to
+the migration engine.
 
-**Schema is applied by the migration engine at deploy**, and that is where the
-answer lives. Four things hold there, in order:
+**A migration is applied by the migration service at deploy**, and the schema it
+targets is not yours to choose: it is derived from your app. Three refusals follow.
 
-1. A dot-qualified target on a COLUMN-level ref (`t.ref("other.users")`, or
-   `.references("other.users", ...)`) is refused at author time by
-   `reject_cross_app_ref`
-   (`crates/zeroship-migrate-core/src/render/declarative.rs:4606`,
-   reached from the op-DSL lower path at `declarative.rs:3491`), which raises
-   `CrossAppFkForbidden`.
-2. A TABLE-level foreign-key constraint gets no such prefix check. It does not
-   escape anyway: the renderer qualifies every `REFERENCES` with the schema it
-   was called FOR (`fk_definition_for_dialect`, `declarative.rs:4502`), so
-   `"other.users"` renders as `"<app>"."other.users"` -- a table name inside
-   the app's own schema. The differ then rejects it as
-   `CrossAppFkTargetMissing` because no such table is declared or live
-   (`declarative.rs:6080`). So this case is caught, but as a missing target
-   rather than as a boundary violation.
-3. An op-level `schema:` qualifier naming another schema is refused
-   fail-closed under `SchemaScope::Single`
-   (`crates/zeroship-migrate-core/src/model/validate.rs`,
-   `CODE_CROSS_SCHEMA`), and the rendered SQL is swept again by the guard's
-   `check_cross_schema`
-   (`crates/zeroship-migrate-postgres/src/guard/sql.rs:1801`).
-4. Underneath all of it, `crates/zeroship-migrate-server` derives the target schema from the
-   app id server-side (`src/apply.rs:413`) -- no author input reaches it -- and
-   applies under a `NOLOGIN`/`NOSUPERUSER` per-app role whose `search_path` and
-   grants reach that schema only (`src/provisioning.rs:104-208`).
+1. **A dot-qualified target on a column-level reference** — `t.ref("other.users")`
+   or `.references("other.users", ...)` — is refused when the migration is
+   applied, with `CrossAppFkForbidden`.
+2. **A table-level foreign-key constraint naming another app's table** is refused
+   with `CrossAppFkTargetMissing`: the target is resolved inside your own schema,
+   where no such table exists. The refusal reads as a missing table rather than as
+   a boundary violation, but it is still a refusal.
+3. **An op-level `schema:` qualifier naming another schema** is refused with
+   `CODE_CROSS_SCHEMA`.
 
-The `ForeignKeyReference.schema` field in `packages/zero-migrate/src/types.ts` is an
-authoring hint only. It is never serialised into the IR, and when the enclosing
-op carries an explicit schema a mismatch throws `OP_INVALID`; when it does not,
-the hint is accepted and discarded.
+To fix any of these, declare the referenced table in the same app, or model the
+relationship without a database-level foreign key.
 
 What none of this covers: two apps that the control plane assigns the same
-`app_id`. Isolation there is a control-plane property, not a rendering one.
-The differ's own comment at `declarative.rs:6074` makes the matching point
-about inbound-FK consent.
+`app_id`. Isolation there is a control-plane property, not one this contract can
+state.
 
 ## Collection CRUD
 
@@ -1291,8 +1267,7 @@ Implementation: `crates/zeroship-data-orm/src/assignments.rs`,
 **Encryption hides at rest. Masking hides at read time.** They are
 sibling concerns and compose: an `t.encrypted(...)` column without
 an explicit `.mask(...)` declaration is treated as `.mask({ kind:
-"full", classification: "pii" })` by default. The full design lives
-in `docs/archive/sensitive-field-masking.md` (shipped; archived).
+"full", classification: "pii" })` by default.
 
 ### Mental model
 
@@ -1535,7 +1510,7 @@ not make it hidden or append-only.
 
 ## Encrypted and Masked Fields (Shipped Reference)
 
-This section resolves `docs/archive/sensitive-field-masking.md` against the shipped implementation in `packages/db/src/types.ts`, `crates/zeroship-data-orm/src/sql/mapping.rs`, `crates/zeroship-data-orm/src/protection/mask_pass.rs`, `crates/zeroship-data-v8/src/v8_classes/masked_value.rs`, `crates/zeroship-data-orm/src/protection/unmask.rs`, `packages/db/src/collection/masking.ts`, `packages/db/src/policy.ts`.
+This section is grounded in the shipped implementation: `packages/db/src/types.ts`, `crates/zeroship-data-orm/src/sql/mapping.rs`, `crates/zeroship-data-orm/src/protection/mask_pass.rs`, `crates/zeroship-data-v8/src/v8_classes/masked_value.rs`, `crates/zeroship-data-orm/src/protection/unmask.rs`, `packages/db/src/collection/masking.ts`, `packages/db/src/policy.ts`.
 
 The migration engine records physical placement in each field's runtime
 `storage` mapping. Default reads use `storage.valueColumn`; authorized unmasking
