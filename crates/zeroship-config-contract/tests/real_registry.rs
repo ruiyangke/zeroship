@@ -25,14 +25,9 @@ use zeroship_config_contract::registry::{
     declared_binaries, platform_read_sites, platform_specs, DECLARING_BINARIES,
 };
 
-// There is no list of exempt platform targets here any more, and there is not
-// meant to be one. Until 2026-08-21 this file carried
-// `PLATFORM_TARGETS_WITHOUT_A_REGISTRY = ["zeroship-platform-migrate"]`, the
-// one target the design put in scope and had not converted
-// (`docs/proposals/2026-08-11-config-name-alignment.md:55-82`). Converting it
-// left the constant holding nothing, and an empty allowance is worse than none:
-// it reads as a place to add the next exception. The equality below is now
-// between the manifests and the linked declarations, with nothing in between.
+// Every platform target must be registered: the equality below is between the
+// manifests and the linked declarations, with nothing in between. An exemption
+// list would read as a place to add the next exception.
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

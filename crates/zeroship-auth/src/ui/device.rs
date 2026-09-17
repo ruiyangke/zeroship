@@ -4,16 +4,6 @@
 //! This page is the human end of the OP's own device grant: the browser types
 //! the code the CLI printed, the signed-in user is bound to the pending row,
 //! and the CLI redeems it at `/oauth2/token`.
-//!
-//! It used to serve a second audience. Control ran a parallel device flow
-//! whose rows carried `provider = 'platform'`, and under
-//! `AuthProviderKind::Supabase` this page rendered a GoTrue sign-in that
-//! posted the resulting bearer to control's `/api/device/approve` instead of
-//! writing the row itself. Control's flow is gone - `zeroship login` drives
-//! the OP grant - so that page had nothing left to post to and was removed
-//! with it. Supabase survives as an upstream social login
-//! (`docs/decisions/2026-06-30-self-contained-auth-replace-hydra.md`, line 13);
-//! what retired is its DEPLOY path, which line 32 of the same ADR supersedes.
 
 use std::sync::Arc;
 

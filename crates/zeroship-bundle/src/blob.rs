@@ -1,6 +1,4 @@
 //! Content-addressed blob store. The storage layer that backs `.zship`.
-//!
-//! See `docs/architecture/blob-store.md` for the full design.
 
 use std::path::PathBuf;
 
