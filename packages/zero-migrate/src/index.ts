@@ -241,7 +241,7 @@ export type {
   ExclusionOperator,
   RefAction,
   DeterminismFinding,
-  // sensitive-data column facets (#173/#174/#178)
+  // sensitive-data column facets
   MaskKind,
   Classification,
   ColumnCollation,

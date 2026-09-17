@@ -83,7 +83,7 @@ export interface DiscoveredProcedureRecord {
   isStream: boolean;
   config?: Record<string, unknown>;
   moduleConfig?: Record<string, unknown>;
-  /** Wave #188 — opt-in lazy procedure flag, set when the procedure's
+  /** Opt-in lazy procedure flag, set when the procedure's
    *  config carries `lazy: true` as a literal boolean (either via
    *  `<fn>.config.lazy = true` or the `query(handler, { lazy: true })`
    *  wrapper option). Drives the synthetic-entry generator's
@@ -703,8 +703,8 @@ function literalize(node: any, opts?: { allowSchemaProps?: boolean }): unknown {
 
 /**
  * Inspect an ObjectExpression-typed AST node for a `lazy` key and
- * classify its value. Used by Wave #188 to decide whether a procedure
- * opts into the dynamic-import wrapper emission.
+ * classify its value. Used by the synthetic-entry generator to decide
+ * whether a procedure opts into the dynamic-import wrapper emission.
  *
  *   { lazy: true }   → "true"
  *   { lazy: false }  → "false"
@@ -1105,7 +1105,7 @@ function collectConfig(astBody: any[]): {
   perFn: Map<string, Record<string, unknown>>;
   moduleConfig: Record<string, unknown> | undefined;
   /** Per-fn AST node for the legacy `<fn>.config = { ... }` RHS. Kept
-   *  alongside the literalized `perFn` so Wave #188's lazy detector can
+   *  alongside the literalized `perFn` so the lazy detector can
    *  classify non-literal `lazy` expressions without re-walking the body. */
   perFnNode: Map<string, any>;
 } {
@@ -1333,7 +1333,7 @@ export function transformPlugin(state: TransformState): Plugin {
            *  with `allowSchemaProps: true` so Zod `input` / `output`
            *  call expressions survive as schema markers. */
           wrapperConfig: Record<string, unknown> | undefined;
-          /** Wrapper's second-arg AST (raw) — kept for Wave #188's
+          /** Wrapper's second-arg AST (raw) — kept for the
            *  lazy detection. The literalized `wrapperConfig` already
            *  carries `lazy: true` for the literal-boolean case; the AST
            *  form lets the lazy inspector classify non-literal `lazy`
@@ -1454,7 +1454,7 @@ export function transformPlugin(state: TransformState): Plugin {
                 ? { ...(fn.wrapperConfig ?? {}), ...(legacyCfg ?? {}) }
                 : undefined;
 
-            // Wave #188 — resolve `lazy` from BOTH legacy assignment and
+            // Resolve `lazy` from BOTH legacy assignment and
             // wrapper config. Legacy wins on conflict (matches the
             // overall config-merge precedence above). Non-literal
             // expressions warn and fall back to false.

@@ -75,8 +75,7 @@ pub struct PlannedMigration {
     pub report: GuardOutcome,
 }
 
-/// The read-only result of [`MigrationEngine::plan`] - the dry-run / preview
-/// (design scenario 45).
+/// The read-only result of [`MigrationEngine::plan`] - the dry-run / preview.
 ///
 /// A plan is **un-appliable** if [`denied`](Self::denied) is non-empty: the
 /// guard hard-denied at least one migration's `up` (RCE / cross-tenant / file /
@@ -90,7 +89,7 @@ pub struct MigrationPlan {
     pub destructive: bool,
     /// `true` if applying this plan requires explicit approval. Usually tracks
     /// `destructive`, but an author may stamp `flags.requires_approval` on an op
-    /// the guard reads as non-destructive (e.g. a UNIQUE-index DROP, #4) so it is
+    /// the guard reads as non-destructive (e.g. a UNIQUE-index DROP) so it is
     /// gated independently of the SQL-text data-loss judgement.
     pub requires_approval: bool,
     /// Migrations the guard **denied**, as `(version, error)`. A non-empty list
@@ -763,7 +762,7 @@ impl MigrationEngine {
                     // a UNIQUE index reads as a plain (reversible) index drop to the
                     // guard, but it silently removes a data-integrity guarantee, so
                     // the declarative author marks it `destructive + requires_approval`
-                    // (#4) - and the executor's own gate already honours that flag,
+                    // - and the executor's own gate already honours that flag,
                     // so the plan summary must agree (otherwise the engine would
                     // report a non-gated plan that the executor then refuses).
                     destructive |= report.destructive || m.flags.destructive;

@@ -374,12 +374,10 @@ export default defineApp({
     }
   });
 
-  // ── Item #6: src/server/config.ts is the only canonical config path ──
+  // ── src/server/config.ts is the only canonical config path ──
   //
-  // Pre-cleanup the emitter accepted four candidate paths
-  // (src/server/config.{ts,js}, zeroship.config.{ts,js}). v2 collapses
-  // to exactly one — `src/server/config.ts` — to avoid ambiguity about
-  // where app-level RPC defaults live.
+  // Exactly one path is accepted - `src/server/config.ts` - so there is no
+  // ambiguity about where app-level RPC defaults live.
 
   test("src/server/config.ts IS the canonical path", async () => {
     // Sanity-check happy path: the file at src/server/config.ts is read.

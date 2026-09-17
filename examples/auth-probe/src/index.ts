@@ -66,7 +66,7 @@ export const publicProbe = query(
  * Do not "fix" this by adding it there. The SEC-5 default resolving it to
  * `auth:"user"` is the behaviour under test: it is the posture every procedure
  * of `examples/kv-dashboard` and `examples/auth-uploads-kv` shipped with, and
- * the one whose dev-vs-deployed answer differs (#163).
+ * the one whose dev-vs-deployed answer differs.
  */
 export const defaultedProbe = query(
   async (): Promise<{ ok: true; user: RawUser }> => ({ ok: true, user: raw() }),

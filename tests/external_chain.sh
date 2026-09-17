@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# External build-local chain proof (gap #1: SDK distribution).
+# External build-local chain proof (SDK distribution).
 #
 # Proves an app OUTSIDE this monorepo can install @zeroship/* from the local
 # Verdaccio registry, then run the real Vite plugin build to produce
