@@ -48,7 +48,7 @@ const schema = {
     score: t.double().required(),
     category: t.string().required(),
     tags: t.json(),
-  }).index("tasks_workspace_status_idx", ["workspaceId","status"]).index("tasks_workspace_priority_idx", ["workspaceId","priority"]).index("tasks_deleted_at_idx", ["deleted_at"]).index("tasks_updated_at_idx", ["updated_at"]).index("tasks_created_by_idx", ["created_by"]),
+  }).withVersioning().index("tasks_workspace_status_idx", ["workspaceId","status"]).index("tasks_workspace_priority_idx", ["workspaceId","priority"]).index("tasks_deleted_at_idx", ["deleted_at"]).index("tasks_updated_at_idx", ["updated_at"]).index("tasks_created_by_idx", ["created_by"]),
   users: defineSchema({
     id: t.string().required().primaryKey().assigned({"by":"typedId","on":"insert"}),
     created_at: t.timestamp().required().assigned({"by":"now","on":"insert"}),

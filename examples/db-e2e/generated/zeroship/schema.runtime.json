@@ -332,7 +332,8 @@
             "by": "increment(1)",
             "on": "write"
           },
-          "writable": false
+          "writable": false,
+          "concurrency": true
         },
         "deleted_at": {
           "type": "timestamp",
@@ -457,7 +458,7 @@
       },
       "options": {
         "softDelete": false,
-        "versioning": false,
+        "versioning": true,
         "strictness": "strict"
       },
       "indexes": [
