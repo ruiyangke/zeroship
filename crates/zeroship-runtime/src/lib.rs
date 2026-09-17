@@ -7,8 +7,7 @@
 //!
 //! # The REJECTION rules are pinned in `tests/`, not here
 //!
-//! Six rules used to be pinned by `compile_fail` doctests in this
-//! header. They are now trybuild fixtures with `.stderr` snapshots:
+//! Six rules are pinned by trybuild fixtures with `.stderr` snapshots:
 //!
 //!   tests/v8_async_method_compile_fail.rs  + tests/compile_fail_async_method/
 //!   tests/v8_fastcall_compile_fail.rs      + tests/compile_fail_fastcall/

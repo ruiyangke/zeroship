@@ -100,8 +100,7 @@
 //!
 //! # Module split
 //!
-//! This module used to be a single 1,368-LOC file. It is now split
-//! to mirror `v8_class/`'s parse/emit/shared layout:
+//! Split to mirror `v8_class/`'s parse/emit/shared layout:
 //!
 //!   - `parse.rs`         — `IterableAttr`, `ValuePairsSig`, `IterMode`, `extract_iterable`, `inspect_value_pairs`.
 //!   - `value_marshal.rs` — `SupportedTy`, `classify_ty`, `gen_to_v8`.
