@@ -145,10 +145,10 @@ fn collect_indexed_columns_in_node(node: &NodeEnum, cols: &mut Vec<String>) {
             for elt in &create.table_elts {
                 match elt.node.as_ref() {
                     // An inline PRIMARY KEY/UNIQUE on a column definition.
-                    Some(NodeEnum::ColumnDef(col)) => {
-                        if inline_index_constraint_kind(col).is_some() {
-                            cols.push(col.colname.clone());
-                        }
+                    Some(NodeEnum::ColumnDef(col))
+                        if inline_index_constraint_kind(col).is_some() =>
+                    {
+                        cols.push(col.colname.clone());
                     }
                     // A table-level PRIMARY KEY/UNIQUE constraint (keys list).
                     Some(NodeEnum::Constraint(con))
