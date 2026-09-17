@@ -262,7 +262,7 @@ test(".collation() refuses an out-of-set token and every type that cannot carry 
   // The two facets that already decide the column's comparison order.
   refusal(() => t.text({ caseSensitive: false }).collation("bytewise"));
   refusal(() => t.string({ caseSensitive: false }).collation("bytewise"));
-  refusal(() => ids.typeId({ prefix: "doc" }).collation("bytewise"));
+  refusal(() => t.typedId("doc" ).collation("bytewise"));
   refusal(() => ids.ulid().collation("bytewise"));
 });
 
@@ -299,7 +299,7 @@ test("typed references preserve explicit local types and record only the referen
           onDelete: "cascade",
           onUpdate: "noAction",
         }),
-        typed_id: ids.typeId({ prefix: "account" }).references("typed_accounts", "id"),
+        typed_id: t.typedId("account" ).references("typed_accounts", "id"),
         event_id: ids.ulid().references("events", "id"),
       },
     });
@@ -415,17 +415,17 @@ test("references() fails closed outside create-table column positions", () => {
   }
 });
 
-test("ids.typeId records exact text + valueFormat IR and remains constraint-neutral by default", () => {
+test("t.typedId records exact text + valueFormat IR and remains constraint-neutral by default", () => {
   const ops = record(() => {
     table("public_examples").create({
       columns: {
-        typed_id: ids.typeId({ prefix: "example" }),
-        bare_id: ids.typeId({ prefix: "" }).required(),
-        key_id: ids.typeId({ prefix: "key" }).primaryKey(),
+        typed_id: t.typedId("example" ),
+        bare_id: t.typedId("" ).required(),
+        key_id: t.typedId("key" ).primaryKey(),
       },
     });
     table("public_examples").column("candidate_id").add({
-      type: ids.typeId({ prefix: "candidate" }).required().unique(),
+      type: t.typedId("candidate" ).required().unique(),
     });
   });
 
@@ -470,9 +470,9 @@ test("ids.typeId records exact text + valueFormat IR and remains constraint-neut
   ]);
 });
 
-test("ids.typeId validates TypeID 0.3 prefixes at authoring time", () => {
+test("t.typedId validates TypeID 0.3 prefixes at authoring time", () => {
   for (const prefix of ["", "a", "user", "user_account", "a__b", "a".repeat(63)]) {
-    assert.doesNotThrow(() => ids.typeId({ prefix }), JSON.stringify(prefix));
+    assert.doesNotThrow(() => t.typedId(prefix), JSON.stringify(prefix));
   }
 
   for (const prefix of [
@@ -485,18 +485,14 @@ test("ids.typeId validates TypeID 0.3 prefixes at authoring time", () => {
     "a".repeat(64),
   ]) {
     assert.throws(
-      () => ids.typeId({ prefix }),
+      () => t.typedId(prefix),
       (error: any) => error.code === "OP_INVALID" && /lowercase ASCII/.test(error.message),
       JSON.stringify(prefix),
     );
   }
 
   assert.throws(
-    () => (ids.typeId as any)(),
-    (error: any) => error.code === "OP_INVALID",
-  );
-  assert.throws(
-    () => ids.typeId({ prefix: 42 as any }),
+    () => t.typedId(42 as any ),
     (error: any) => error.code === "OP_INVALID" && /must be a string/.test(error.message),
   );
 });

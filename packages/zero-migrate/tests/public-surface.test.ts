@@ -36,7 +36,6 @@ test("published runtime exposes the migration DSL without recorder internals", a
   assert.equal((runtimeRoot.t as unknown as Record<string, unknown>).id, undefined);
   assert.equal((runtimeRoot.t as unknown as Record<string, unknown>).ref, undefined);
   assert.equal(typeof runtimeRoot.t.text().references, "function");
-  assert.equal(typeof runtimeRoot.ids.typeId, "function");
   assert.equal(typeof runtimeRoot.ids.ulid, "function");
   assert.equal(typeof runtimeRoot.perRow, "object");
   assert.equal(typeof runtimeRoot.perRow.uuidV4, "function");

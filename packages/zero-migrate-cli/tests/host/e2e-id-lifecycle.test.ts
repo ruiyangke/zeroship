@@ -299,14 +299,14 @@ function driftFacetMigration(): NamedMigration {
   return authoredMigration("id_lifecycle_drift_facets", () => {
     table("drift_parents").create({
       columns: {
-        id: ids.typeId({ prefix: "parent" }).primaryKey(),
+        id: t.typedId("parent" ).primaryKey(),
         payload: t.text(),
       },
     });
     table("drift_children").create({
       columns: {
         id: t.bigInt().autoIncrement().primaryKey(),
-        parent_id: ids.typeId({ prefix: "parent" }).references(
+        parent_id: t.typedId("parent" ).references(
           "drift_parents",
           "id",
           { onDelete: "cascade", onUpdate: "cascade" },
