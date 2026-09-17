@@ -637,9 +637,14 @@ The call never returns. Use it as the final action in the workflow body. The
 fresh generation starts from ordinal `0`, receives the supplied input as its
 trigger input, and uses the active deploy when the transition is applied.
 
-`step.continueAsNew` cannot be called from inside a step body. If the current
-generation has pending compensators, the transition is rejected with
-`CompensableCarryError` and no successor generation is created.
+`step.continueAsNew` cannot be called from inside a step body. A compensator
+belongs to the generation whose step registered it, and a successor starts from
+an empty journal, so a generation that still owes one cannot carry it across.
+The transition is refused and no successor is created: the pending compensators
+run, and the generation rests `failed` with `CompensableCarryError` on the run.
+Read it from `run.status()`, the same way a `StalledError` is read; the body
+cannot catch it, because the call that asked for the transition already ended
+the dispatch.
 
 ## Instances
 
@@ -1069,8 +1074,15 @@ The SDK exports these workflow error classes:
 | `LimitExceededError` | A platform cap is exceeded, such as `step.startMany` over the batch cap or output over the blob cap. | Once recorded, yes. The `step.startMany` cap cannot be caught in the dispatch that raises it: the catch resumes the body outside the replay boundary and the run fails `NondeterministicError` instead. |
 | `WorkflowTimeoutError` | A `step.waitForSignal` timeout that was recorded against the run rather than resolved to `null`. | Yes around `step.waitForSignal`; if uncaught, normal failure handling applies. |
 | `NestedStepError` | A `step.*` method is called from inside a step body or compensator. | Treat as terminal misuse. Fix the body rather than handling it. |
-| `CompensableCarryError` | `step.continueAsNew` is requested while the current generation still has pending compensators. | No. Finish or clear compensation first; no successor generation is created. |
-| `RestartError` | A run restart request is invalid or cannot be applied. | Outside `run()` only, around `run.restart(...)`. |
+| `CompensableCarryError` | `step.continueAsNew` is requested while the current generation still has pending compensators. | No. It is the platform's verdict: the transition is refused, no successor generation is created, the pending compensators run, and the generation rests `failed` carrying this name. |
+
+Every class above names a condition the platform records on a run or on a step.
+The control operations an app handler calls on a `WorkflowRun` -- `signal`,
+`pause`, `resume`, `cancel`, `restart`, `readStepOutput` -- reject through a
+different path and carry none of these names. A rejected request arrives as a
+built-in `Error` or `TypeError`, the SDK exports no class for it, and the
+message is the engine's own. Branch on the operation you called, not on the
+identity of what it threw.
 
 ### Matching an error
 

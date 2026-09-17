@@ -302,17 +302,6 @@ export class CompensableCarryError extends Error {
   }
 }
 
-export class RestartError extends Error {
-  static [Symbol.hasInstance](value: unknown): value is RestartError {
-    return hasWorkflowErrorName(value, "RestartError");
-  }
-
-  constructor(message = "workflow restart failed") {
-    super(message);
-    this.name = "RestartError";
-  }
-}
-
 export class NondeterministicError extends Error {
   readonly retryable = false;
 
