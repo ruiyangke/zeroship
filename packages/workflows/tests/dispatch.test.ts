@@ -361,14 +361,14 @@ test("a committed failure row is rethrown into the body under its recorded type"
       kind: "run",
       state: "failed",
       error: {
-        type: "WorkflowStepTimeoutError",
-        message: "workflow step timed out after 5ms",
-        retryable: true,
+        type: "PermanentError",
+        message: "card declined",
+        retryable: false,
       },
     },
   ]);
 
-  assertRunFailed(result, "WorkflowStepTimeoutError", "workflow step timed out after 5ms");
+  assertRunFailed(result, "PermanentError", "card declined");
 });
 
 // ---------------------------------------------------------------------------
@@ -1032,42 +1032,110 @@ test("a sideEffect body receives the same context shape", { timeout: TEST_TIMEOU
 });
 
 // ---------------------------------------------------------------------------
-// Gaps. Each case below pins behaviour the dispatcher does NOT have, against a
-// surface the SDK declares. They are here so the gap is visible rather than
-// implied, and so closing one fails loudly at the case that documented it.
+// `StepConfig.timeout`: the bound one step body runs under.
 // ---------------------------------------------------------------------------
 
-test("StepConfig.timeout does not bound a step body", { timeout: TEST_TIMEOUT_MS }, async () => {
-  // `StepConfig.timeout` is declared in the SDK and read by nothing: the
-  // dispatcher inspects only `compensate` and `output`. A body outliving its
-  // configured timeout still commits its output. The worker's own per-job
-  // execution timeout is the only bound a slow step meets.
+/** A body that never settles, and holds no timer that would keep Node alive. */
+function hangs(): Promise<never> {
+  return new Promise<never>(() => {});
+}
+
+test("a step body past its configured timeout fails the step", { timeout: TEST_TIMEOUT_MS }, async () => {
   class Checkout extends Workflow<unknown, unknown> {
     async run(_trigger: WorkflowTrigger<unknown>, step: WorkflowStep) {
-      return await step.run(
-        "slow",
-        { timeout: "5ms" },
-        () => new Promise((resolve) => setTimeout(() => resolve("late"), 60)),
-      );
+      return await step.run("slow", { timeout: "5ms" }, hangs);
     }
   }
 
   const result = await replay(Checkout);
 
-  assertStepCompleted(result.outcomes[0]!, { ordinal: 0, name: "slow", output: "late" }, result);
+  const outcome = result.outcomes[0]!;
+  assert.equal(outcome.kind, "RunFailed", show(result));
+  assert.equal(outcome.ordinal, 0, show(result));
+  assert.equal(outcome.name, "slow", show(result));
+  assert.equal(outcome.error?.type, "StepTimeoutError", show(result));
+  assert.equal(outcome.error?.message, "workflow step timed out after 5ms", show(result));
+  assert.equal(outcome.error?.retryable, true, show(result));
 });
 
-test("a failed step's recorded error carries no retryable flag", { timeout: TEST_TIMEOUT_MS }, async () => {
-  // Every error class the SDK exports declares a `retryable` field, and the
-  // engine's RunFailed shape carries one. The dispatcher's serializer keeps
-  // type, message and stack only, so a creator error's own flag is dropped on
-  // the way to the journal.
+test("a step body inside its configured timeout is untouched", { timeout: TEST_TIMEOUT_MS }, async () => {
+  // The control for the case above, differing only in which way the bound
+  // falls: the same configured step, given a body that settles first.
+  class Checkout extends Workflow<unknown, unknown> {
+    async run(_trigger: WorkflowTrigger<unknown>, step: WorkflowStep) {
+      return await step.run("prompt", { timeout: "30s" }, () => "on-time");
+    }
+  }
+
+  const result = await replay(Checkout);
+
+  assertStepCompleted(result.outcomes[0]!, { ordinal: 0, name: "prompt", output: "on-time" }, result);
+});
+
+test("every documented duration spelling bounds a step body", { timeout: TEST_TIMEOUT_MS }, async () => {
+  // The grammar the reference documents for sleeps and timeouts alike. A
+  // spelling that parsed to nothing would leave the body unbounded, so each one
+  // has to reach the same timeout failure.
+  for (const spelling of ["5ms", "0.005s", "5", "PT0.005S"]) {
+    class Checkout extends Workflow<unknown, unknown> {
+      async run(_trigger: WorkflowTrigger<unknown>, step: WorkflowStep) {
+        return await step.run("slow", { timeout: spelling }, hangs);
+      }
+    }
+
+    const result = await replay(Checkout);
+
+    assert.equal(result.outcomes[0]!.error?.type, "StepTimeoutError", show(result));
+    assert.equal(
+      result.outcomes[0]!.error?.message,
+      `workflow step timed out after ${spelling}`,
+      show(result),
+    );
+  }
+});
+
+test("an unparseable step timeout fails the run before the body runs", { timeout: TEST_TIMEOUT_MS }, async () => {
+  let ran = false;
+  class Checkout extends Workflow<unknown, unknown> {
+    async run(_trigger: WorkflowTrigger<unknown>, step: WorkflowStep) {
+      return await step.run("slow", { timeout: "soon" }, () => {
+        ran = true;
+        return "output";
+      });
+    }
+  }
+
+  const result = await replay(Checkout);
+
+  assertRunFailed(result, "Error", "step.run timeout must be a duration");
+  assert.equal(ran, false, show(result));
+});
+
+test("a committed row answers a configured step without arming its timeout", { timeout: TEST_TIMEOUT_MS }, async () => {
+  // A replay hit never invokes the body, so no bound applies to it and the row
+  // is the answer even under a timeout shorter than the dispatch itself.
+  class Checkout extends Workflow<unknown, unknown> {
+    async run(_trigger: WorkflowTrigger<unknown>, step: WorkflowStep) {
+      return await step.run("slow", { timeout: "1ms" }, hangs);
+    }
+  }
+
+  const result = await replay(Checkout, [completedRow(0, "slow", "committed")]);
+
+  assertRunCompleted(result, "committed");
+});
+
+// ---------------------------------------------------------------------------
+// `retryable`: the flag a recorded failure carries into the journal.
+// ---------------------------------------------------------------------------
+
+test("a failed step's recorded error carries the creator's retryable flag", { timeout: TEST_TIMEOUT_MS }, async () => {
   class Checkout extends Workflow<unknown, unknown> {
     async run(_trigger: WorkflowTrigger<unknown>, step: WorkflowStep) {
       return await step.run("boom", () => {
         const failure = new Error("kaboom") as Error & { retryable?: boolean };
-        failure.name = "WorkflowStepTimeoutError";
-        failure.retryable = true;
+        failure.name = "PermanentError";
+        failure.retryable = false;
         throw failure;
       });
     }
@@ -1075,8 +1143,126 @@ test("a failed step's recorded error carries no retryable flag", { timeout: TEST
 
   const result = await replay(Checkout);
 
-  const error = assertRunFailed(result, "WorkflowStepTimeoutError", "kaboom");
-  assert.equal(error.retryable, undefined, show(result));
+  const error = assertRunFailed(result, "PermanentError", "kaboom");
+  assert.equal(error.retryable, false, show(result));
+});
+
+test("an error declaring no flag records none", { timeout: TEST_TIMEOUT_MS }, async () => {
+  // Absent and `false` are different answers: one is the creator saying
+  // nothing, the other is the creator ruling a retry out.
+  class Checkout extends Workflow<unknown, unknown> {
+    async run(_trigger: WorkflowTrigger<unknown>, step: WorkflowStep) {
+      return await step.run("boom", () => {
+        throw new Error("kaboom");
+      });
+    }
+  }
+
+  const result = await replay(Checkout);
+
+  const error = assertRunFailed(result, "Error", "kaboom");
+  assert.equal("retryable" in error, false, show(result));
+});
+
+test("a dispatcher-raised failure records its own flag", { timeout: TEST_TIMEOUT_MS }, async () => {
+  class Nondeterministic extends Workflow<unknown, unknown> {
+    async run(_trigger: WorkflowTrigger<unknown>, step: WorkflowStep) {
+      const pending = step.run("first", () => "output");
+      await Promise.resolve();
+      return await pending;
+    }
+  }
+
+  const failed = await replay(Nondeterministic);
+  assert.equal(
+    assertRunFailed(
+      failed,
+      "NondeterministicError",
+      "awaited non-step work while a frontier was pending",
+    ).retryable,
+    false,
+    show(failed),
+  );
+
+  class Misused extends Workflow<unknown, unknown> {
+    async run(_trigger: WorkflowTrigger<unknown>, step: WorkflowStep) {
+      return await (step.run as (name: string, fn?: unknown) => Promise<unknown>)("x");
+    }
+  }
+
+  const misused = await replay(Misused);
+  assert.equal(
+    assertRunFailed(misused, "Error", "step.run requires a function body").retryable,
+    false,
+    show(misused),
+  );
+});
+
+test("a replayed failure row rethrows the flag the journal holds", { timeout: TEST_TIMEOUT_MS }, async () => {
+  // The journal is the authority, not the class the dispatcher rebuilds from
+  // `type`. `StepTimeoutError` declares `retryable`, so a row that contradicts
+  // it separates a restored flag from a reconstructed default; `PermanentError`
+  // has no dispatcher class at all, so nothing but the row can supply one.
+  class Checkout extends Workflow<unknown, unknown> {
+    async run(_trigger: WorkflowTrigger<unknown>, step: WorkflowStep) {
+      try {
+        await step.run("slow", () => "unreached");
+        return "no failure";
+      } catch (e) {
+        const failure = e as Error & { retryable?: boolean };
+        return { type: failure.name, retryable: failure.retryable };
+      }
+    }
+  }
+
+  const failureRow = (type: string, retryable: boolean): JournalRow => ({
+    ordinal: 0,
+    name: "slow",
+    nameOccurrence: 0,
+    kind: "run",
+    state: "failed",
+    error: { type, message: "recorded failure", retryable },
+  });
+
+  assertRunCompleted(await replay(Checkout, [failureRow("StepTimeoutError", false)]), {
+    type: "StepTimeoutError",
+    retryable: false,
+  });
+  assertRunCompleted(await replay(Checkout, [failureRow("PermanentError", true)]), {
+    type: "PermanentError",
+    retryable: true,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Gaps. Each case below pins behaviour the dispatcher does NOT have, against a
+// surface the SDK declares. They are here so the gap is visible rather than
+// implied, and so closing one fails loudly at the case that documented it.
+// ---------------------------------------------------------------------------
+
+test("StepConfig.retries and StepConfig.backoff are read by nothing", { timeout: TEST_TIMEOUT_MS }, async () => {
+  // Both are declared in the SDK and inspected by neither the dispatcher nor
+  // the engine: a failing step under `maxAttempts` runs its body once and its
+  // failure is recorded as terminal. Closing this needs per-step attempt state
+  // in the journal, which does not exist.
+  let bodies = 0;
+  class Checkout extends Workflow<unknown, unknown> {
+    async run(_trigger: WorkflowTrigger<unknown>, step: WorkflowStep) {
+      return await step.run(
+        "flaky",
+        { retries: { maxAttempts: 3 }, backoff: { base: "1ms", factor: 2 } },
+        () => {
+          bodies++;
+          throw new Error("kaboom");
+        },
+      );
+    }
+  }
+
+  const result = await replay(Checkout);
+
+  assert.equal(result.outcomes[0]!.kind, "RunFailed", show(result));
+  assert.equal(bodies, 1, show(result));
 });
 
 test("Promise combinators over step promises are not refused", { timeout: TEST_TIMEOUT_MS }, async () => {
