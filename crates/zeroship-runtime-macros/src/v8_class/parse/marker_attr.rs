@@ -1,18 +1,14 @@
-//! `MarkerAttr` trait + driver — closes F5 / H5-H7 (design
-//! `docs/archive/runtime-macros-refactor.md` §3.2).
+//! `MarkerAttr` trait + driver.
 //!
-//! Earlier versions had 12 `extract_*` helpers, each with subtly
-//! different return shapes (`bool` / `Option<T>` / `Result<Option<T>>` /
-//! `HashSet<T>`) and inconsistent error policy (some silently fell back
-//! to None on malformed shape — H5; some emitted `compile_error!`). This
-//! module unifies all of them under a single trait + a single driver.
+//! One trait and one driver handle every `#[v8_*]` marker, so all shapes
+//! share a single extraction path and error policy rather than each
+//! helper choosing its own return type.
 //!
 //! ## Strict-by-default
 //!
-//! Per design §3.2 + critique H5, all marker attributes now emit
-//! `compile_error!` on malformed shape. Previously-silent fallbacks
+//! All marker attributes emit `compile_error!` on malformed shape
 //! (`#[v8_name(foo)]` with no `=`, `#[v8_to_string_tag = 42]` with a
-//! non-string literal) become hard errors. Compile-fail fixtures live in
+//! non-string literal). Compile-fail fixtures live in
 //! `crates/runtime/tests/compile_fail_marker_attr/`.
 //!
 //! ## Repeatable vs. at-most-one
@@ -29,7 +25,7 @@
 //! `FastcallFlag` reads from BOTH `#[v8_method(...)]` AND
 //! `#[v8_getter(...)]` (the fastcall flag is method-or-getter scoped),
 //! so the trait carries `NAMES: &'static [&'static str]` rather than a
-//! single name. Most impls have NAMES = `&["..."]` (1 element).
+//! single name.
 
 use std::collections::HashSet;
 
@@ -143,9 +139,8 @@ fn parse_ident_list(attr: &Attribute, attr_name: &str) -> syn::Result<Vec<syn::I
 
 /// `#[v8_name = "literal"]` on a method.
 ///
-/// Strict-by-default per H5. `#[v8_name(foo)]` (list form, no `=`) and
-/// `#[v8_name = 42]` (non-string literal) now error rather than silently
-/// fall back to None.
+/// `#[v8_name(foo)]` (list form, no `=`) and `#[v8_name = 42]`
+/// (non-string literal) error rather than silently falling back to None.
 #[derive(Default)]
 pub(crate) struct V8NameAttr(pub Option<String>);
 
@@ -267,15 +262,15 @@ pub(crate) struct CallableNoNewFlag(pub bool);
 impl MarkerAttr for CallableNoNewFlag {
     const NAMES: &'static [&'static str] = &["v8_constructor"];
     fn merge(&mut self, attr: &Attribute) -> syn::Result<()> {
-        // Bare `#[v8_constructor]` (no list) — consistent with prior
-        // behaviour, treat as the "no flags" path. parse_args returns
-        // Err in that case; we treat that as "no flags set".
+        // Bare `#[v8_constructor]` (no list) — treat as the "no flags"
+        // path. parse_args returns Err in that case; we treat that as
+        // "no flags set".
         let Ok(metas) = attr.parse_args_with(
             syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated,
         ) else {
             return Ok(());
         };
-        // Strict-by-default per H5: `CallableNoNewFlag` is the
+        // Strict-by-default: `CallableNoNewFlag` is the
         // "validating" reader for `#[v8_constructor(...)]`. It walks
         // every nested meta and enforces the known shapes:
         //   - bare `callable_no_new` (Path)        — sets the flag
@@ -322,7 +317,7 @@ impl MarkerAttr for CallableNoNewFlag {
 
 /// `#[v8_constructor(post_init = "fn_name")]`. Strict by design — silent
 /// no-op on malformed values would be a debugging nightmare given
-/// post_init is semantically load-bearing (design §5.7).
+/// post_init is semantically load-bearing.
 #[derive(Default)]
 pub(crate) struct PostInitAttr(pub Option<syn::Ident>);
 

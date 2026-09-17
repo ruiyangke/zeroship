@@ -1,10 +1,9 @@
 //! Shared brand-check + External-recovery preamble.
 //!
-//! Closes design `docs/archive/runtime-macros-refactor.md` §3.8's
-//! 7-site duplication of the same ~10-LOC prologue across
-//! `gen_method_callback`, `gen_setter_callback`,
-//! `gen_same_object_getter_callback`, `gen_async_method_callback`,
-//! and three sites in `v8_iterable.rs` (factory, forEach, next).
+//! Every callback site emits the same prologue: `gen_method_callback`,
+//! `gen_setter_callback`, `gen_same_object_getter_callback`,
+//! `gen_async_method_callback`, and three sites in `v8_iterable.rs`
+//! (factory, forEach, next).
 //!
 //! The 4 sites in `v8_class/method.rs` collapse to a single
 //! [`gen_recover_box`] call that emits the whole prologue (brand check
@@ -16,8 +15,7 @@
 //!
 //! Byte-identity contract: every helper here emits tokens that are
 //! lexically identical to the hand-rolled prologues they replace. The
-//! insta snapshot suite locks the contract; any drift is treated as a
-//! regression per design §5.1.2's "structural change" classifier.
+//! insta snapshot suite locks the contract; any drift is a regression.
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
@@ -111,13 +109,12 @@ pub(crate) fn gen_recover_external() -> TokenStream2 {
 ///   - `false` → `let __instance = unsafe { &*(__ext.value() as *const Self) }`
 ///     and the re-entry guard is a no-op (re-entry on `&self` is sound,
 ///     multiple aliased shared references do not violate Rust's aliasing
-///     model). Closes NS1 from the v2 code-critic: pre-fix the macro
-///     unconditionally materialised `&mut *(__ext.value() as *mut Self)`
-///     for `&self` methods too, then reborrowed as `&Self` at the
-///     dispatch site. Two simultaneous synchronous re-entries on the
-///     same `&self` callback would manifest two `&mut Self` bindings
-///     from the same External pointer — a stacked-borrows violation
-///     even though the user-visible borrow at dispatch was shared.
+///     model). Materialising `&mut *(__ext.value() as *mut Self)` for a
+///     `&self` method and reborrowing it as `&Self` at the dispatch site
+///     would let two simultaneous synchronous re-entries on the same
+///     callback manifest two `&mut Self` bindings from the same External
+///     pointer — a stacked-borrows violation even though the user-visible
+///     borrow at dispatch was shared.
 pub(crate) fn gen_recover_box(
     class_ty: &syn::Ident,
     state_ty: &syn::Ident,

@@ -1,13 +1,9 @@
 //! `ClassConfig` — the parameter object passed to every codegen helper
-//! after parse + analyse phases (design
-//! `docs/archive/runtime-macros-refactor.md` §3.1, Appendix B).
+//! after the parse and analyse phases.
 //!
-//! Closes F4 (the 10-arg `gen_install` signature) and the cascade of
-//! `(class_ty, state_ty, ...)` repetitions across every codegen helper.
-//!
-//! Adding a new impl-block-level attribute now means one new field here
-//! plus one new emit helper that reads it, never a parameter-list
-//! migration through the call graph.
+//! Adding a new impl-block-level attribute means one new field here plus
+//! one new emit helper that reads it, never a parameter-list migration
+//! through the call graph.
 
 use std::collections::HashMap;
 

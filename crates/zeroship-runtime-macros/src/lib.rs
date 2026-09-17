@@ -280,9 +280,6 @@ pub fn v8_inherit(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Without this attribute the macro behaves exactly as before (state
 /// == marker == receiver). Adding it is opt-in and additive — no
 /// existing class is affected.
-///
-/// See `docs/archive/macro-v8-state.md` for the full design,
-/// substitution table, and migration plan for `Request` / `Response`.
 #[proc_macro_attribute]
 pub fn v8_state_marker(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
@@ -509,11 +506,10 @@ pub fn reject_shared(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
 // Type-classification helpers (is_unit_type, type_ident,
 // is_vec_u8, is_vec_vec_u8, is_byte_string, is_enforce_range_u32 / _u64,
-// is_usv_string, is_option_usv_string, first_generic_arg) moved to
-// `types.rs`. The old clamp_kind / wrap_kind standalone helpers folded
-// into `KnownType::Clamp(ClampInt)` /
-// KnownType::Wrap(WrapInt) (§3.7, closes F10/H8 + the stringly-typed
-// dispatch anti-pattern).
+// is_usv_string, is_option_usv_string, first_generic_arg) live in
+// `types.rs`. `clamp_kind` / `wrap_kind` are folded into
+// `KnownType::Clamp(ClampInt)` / `KnownType::Wrap(WrapInt)`, replacing
+// the stringly-typed dispatch.
 
 // Argument-extraction + return-value codegen +
 // V8-string + OpError-throw helpers all live in `codegen.rs` now.
