@@ -210,7 +210,7 @@ async fn apply_doc(
 /// `CREATE OR REPLACE VIEW` - `view_create_prefix` ignores the flag
 /// (`render/renderer.rs:444-452`) and its replace is carried by a prelude that drops
 /// first - so a faithful restore is DROP + CREATE there and one statement on PostgreSQL.
-#[ignore = "aspirational: a restoring fix would make this pass; today the replace is refused (#209)"]
+#[ignore = "aspirational: a restoring fix would make this pass; today the replace is refused"]
 #[compio::test]
 async fn rolling_back_a_replace_restores_the_previous_body() {
     let p = paths();

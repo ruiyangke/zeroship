@@ -215,11 +215,11 @@ async fn reconcile_tick_writes_enriched_spend_audit() {
     assert_eq!(v["to"], "block", "records the to-state");
     assert_eq!(
         v["spend_cents"], 100,
-        "audit detail carries spend_cents (#8)"
+        "audit detail carries spend_cents"
     );
     assert_eq!(
         v["limit_cents"], 100,
-        "audit detail carries limit_cents (#8)"
+        "audit detail carries limit_cents"
     );
 
     // Teardown: the fixture holds the only handle to this test's Postgres
