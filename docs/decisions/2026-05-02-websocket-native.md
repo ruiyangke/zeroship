@@ -2,7 +2,7 @@
 
 **Status:** Shipped 2026-05-02
 **Long-form design:** [`docs/archive/websocket-native.md`](../archive/websocket-native.md)
-**Companion reference doc:** [`docs/reference/websocket-design.md`](../reference/websocket-design.md)
+**Companion reference doc:** [`docs/reference/websocket.md`](../reference/websocket.md)
 **Implementation:** [`crates/zeroship-runtime/src/web/websocket/`](../../crates/zeroship-runtime/src/web/websocket/) (handshake, frame_reader, frame_writer, dispatch, pair)
 
 ## Context
@@ -29,7 +29,7 @@ WebSockets, RFC 6455, WebIDL).
 
 ## Consequences
 
-- The companion reference doc at `docs/reference/websocket-design.md` documents the user-facing API; the proposal stays as design history.
+- The companion reference doc at `docs/reference/websocket.md` documents the user-facing API; the proposal stays as design history.
 - Gateway upgrade plumbing routes to native pair (`70b856d`).
 - Post-ship fix: `163b248` serve: fix WS echo data loss in gateway upgrade pump.
 

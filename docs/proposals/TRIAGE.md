@@ -17,7 +17,7 @@ Verify every claim against code before promoting. Reference docs must be accurat
 - [x] fetch-native.md → 2026-05-02-fetch-native ADR
 - [x] streams-native.md → 2026-05-02-streams-native ADR
 - [x] webcrypto-native.md → 2026-05-02-webcrypto-native ADR
-- [x] websocket-native.md → 2026-05-02-websocket-native ADR (+ reference/websocket-design.md)
+- [x] websocket-native.md → 2026-05-02-websocket-native ADR (+ reference/websocket.md)
 - [x] macro-constructor-post-init.md → 2026-05-04 ADR
 - [x] macro-v8-state.md → 2026-05-04 ADR
 - [x] node-crypto-native.md → 2026-05-05-node-crypto-native ADR

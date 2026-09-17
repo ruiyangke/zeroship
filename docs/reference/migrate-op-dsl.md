@@ -966,6 +966,30 @@ backends. There is no author-named `split_part` / `instr`: those cross-dialect
 semantics diverge, so the split surface is the built-in `.splitPart(...)` chain
 method.
 
+### Expression slots and context typing
+
+An expression slot accepts three forms:
+
+- a **callback** `(col) => Expr`, where `col` is the injected builder handle;
+- a **pre-built chain value** — `now()`, or a chain saved in a variable; and
+- a **closed expression node object** carrying a `"node"` string field, the
+  escape for machine-generated operations.
+
+`col` is a callable builder: `col("name")` is an unqualified column reference,
+`col("table", "col")` a qualified one, and `col.case({ branches, else? })` the
+searched `CASE` form. Its chain methods are the expression surface below.
+
+**Contexts restrict which nodes are valid**, enforced at validate time,
+fail-closed:
+
+- An **immutable context** — an index expression or predicate, a generated
+  column, a `CHECK` — rejects volatile nodes: `now()`, `uuidV4()` / `uuidV7()`,
+  `currentSetting()` / `currentUser()`, and the PostgreSQL-only nodes, unless a
+  PostgreSQL-immutable allowance applies.
+- A **column-default context** additionally cannot reference a column at all: a
+  default has no row, so `col(...)` is refused. `now()`, `uuidV4()`, `uuidV7()`,
+  `concatWs` and `splitPart` remain permitted there.
+
 ### Determinism: don't bake a clock or RNG into a migration
 
 A migration is recorded whenever build/gen-types needs the operation stream, so
@@ -1312,6 +1336,45 @@ The preview's header and trailing
 `-- preview: N statement(s) rendered, M runtime-resolved` summary make the
 offline-renderable subset and the labeled remainder explicit.
 
+## The recorded operation stream (IR)
+
+A migration never ships SQL. The package records each phase into a
+**dialect-neutral, checksummed JSON operation stream** — the `.ir.json`
+document — and the platform loads that document and lowers each operation to
+per-dialect SQL at apply time. You never hand-write it; the appendix below shows
+the module it is derived from.
+
+The stream is hashed over its neutral operation list, so a single portable
+migration has **one identity checksum** across every render target. Two streams
+carrying the same operations in the same order compare equal by value, not by
+JSON formatting, so a formatting difference never reads as drift.
+
+The document envelope carries:
+
+| Field | Meaning |
+| --- | --- |
+| `ir_version` | the stream's version; a future version is refused fail-closed, a past or equal version validates |
+| `name` | the migration's name |
+| `owner_app` | a hint the server overrides at submit |
+| `ops` | the ordered operation list |
+| `flags` | per-migration flags |
+| `depends_on`, `supersedes` | ordering relationships to other migrations |
+| `preconditions` | state/data conditions checked before apply |
+| `checksum` | an advisory integrity hint the engine recomputes and is authoritative over |
+
+The vocabularies are closed: an operation is tagged by a stable top-level `"op"`
+key, an expression node by a `"node"` key, and an unknown key is refused. Absent
+optional fields are omitted, never written as `null`. Identifier fields are
+plain strings with no binding to the live schema — existence is checked at apply
+time, not at author time.
+
+Numeric leaves are constrained: a fractional or exponential number, or an
+integer at or beyond 2^53, is refused (`EXPR_INVALID_NUMERIC`) before any
+checksum. Carry an exact large integer with `int64(...)` or `decimal(...)`, and
+bytes as a `Uint8Array` or base64 string. Raw SQL appears only in the
+operator-gated vendor islands — a function body, the `raw` escape, a raw view
+body — and a confined creator migration cannot reach them.
+
 ## Appendix: a data migration as IR
 
 A migration is recorded into a dialect-neutral operation stream that the engine
@@ -1344,14 +1407,39 @@ export default {
 You never hand-write the recorded stream; it is derived from your `.ts`. It is
 shown here so the "one script, both backends" claim is concrete.
 
+## The security model
+
+Every migration is treated as **untrusted input** — creator-authored operations
+and prompt-injectable AI output flow through the same pipeline. The model is
+defense-in-depth and untrusted-by-default, with each layer naming the residual
+the next one covers:
+
+1. **Capability gate at load.** A privileged vendor operation is refused with
+   `VENDOR_OP_DENIED`, because a confined creator deploy grants no vendor
+   capability. The import path is not the security boundary; the gate is.
+2. **Parse-time SQL guard.** The SQL the engine does render is parsed and the
+   dangerous surface hard-denied, including inside `DO` blocks and function
+   bodies and constructs carried in string literals.
+3. **Least-privilege role.** Whatever slips past parse — runtime-constructed
+   `EXECUTE format(...)`, dynamic names — fails at execution with
+   `permission denied`, because the migration runs under a role with no grant
+   outside its own schema.
+4. **Immutable journal.** The migration cannot forge or erase its own history:
+   the journal is append-only and written outside the migration's own
+   privilege.
+
+The trust posture is fixed at the call site, never derived from SQL content. A
+creator deploy runs confined — no vendor capability and the project schema
+pinned; platform migrations run under a widened profile. `SUPERUSER` is denied in
+every profile. There is no raw-SQL expression surface for creators: the only raw
+forms are the operator-gated vendor islands named above.
+
 ## Further reading
 
-- **Security / threat model** — [zeroship-migrate-guide.md](./zeroship-migrate-guide.md)
-  covers the authoring sandbox and the apply path.
-- **The operation stream and expression contract** —
-  [zeroship-migrate-guide.md](./zeroship-migrate-guide.md) covers the recorded
-  wire contract, typing stance, closed expression AST, and DML portability
-  boundary.
+- **Engine internals** — [zeroship-migrate-engine.md](../architecture/zeroship-migrate-engine.md)
+  is the long-form engine reference: crate architecture, the IR wire contract,
+  the validate gate, rendering, the apply engine, and the security substrate in
+  full.
 - **SQLite divergences** — intentional PostgreSQL↔SQLite differences in search,
   isolation, locking, and ordering: [sqlite-divergences.md](./sqlite-divergences.md).
 - **The schema SDK** — [db.md](./db.md): the `@zeroship/db` `t.*` lexicon the
