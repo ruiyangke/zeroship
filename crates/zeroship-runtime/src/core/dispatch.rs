@@ -249,12 +249,12 @@ fn is_public_error_code(code: &str) -> bool {
 ///
 /// A database constraint violation is developer-facing in its CLASSIFICATION
 /// and backend-specific in its WORDING, so the two halves need opposite
-/// treatment. plugin-db already classifies all four correctly
+/// treatment. plugin-db classifies all four correctly
 /// (`DbError::{UniqueViolation, FkViolation, NotNullViolation, CheckViolation}`,
-/// stamped in `to_op_error`); before this existed the rail dropped the code on
-/// the floor and a creator inserting a duplicate email got
-/// `{"message":"internal error"}` — indistinguishable from the server falling
-/// over. Measured end to end by `examples/db-todos/tests/database.test.ts`.
+/// stamped in `to_op_error`), so the rail must keep that classification: a
+/// creator inserting a duplicate email must not get
+/// `{"message":"internal error"}`, indistinguishable from the server falling
+/// over.
 ///
 /// The message stays blanked because it is written by the backend, not by us:
 /// Postgres says `duplicate key value violates unique constraint
