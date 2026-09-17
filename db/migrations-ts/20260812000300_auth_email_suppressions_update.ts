@@ -31,7 +31,7 @@ import { grant } from "@zeroship/migrate";
 //   INSERT ... VALUES (...) ON CONFLICT DO UPDATE  -> ERROR: permission denied
 //
 // Scoped to UPDATE on this one table. Whether alias-level suppression should
-// exist at all is a separate open question (#126) and is NOT decided here; this
+// exist at all is a separate open question and is NOT decided here; this
 // only makes the suppression the code already tries to write actually land.
 export default {
   name: "auth_email_suppressions_update",

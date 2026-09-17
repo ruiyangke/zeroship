@@ -267,7 +267,7 @@ export interface ColumnDef {
     },
   ): ColumnDef;
   /**
-   * Declare a STANDALONE column mask (#174) — the field reads back as
+   * Declare a STANDALONE column mask — the field reads back as
    * `MaskedValue<T>` and the op lower emits the `zero-migrate:mask` sentinel + `_masked`
    * sibling (the same shape `t.encrypted()`'s auto-mask uses). `kind` is REQUIRED
    * (closed {@link MaskKind}); `classification` is optional and DEFAULTS to `"pii"`

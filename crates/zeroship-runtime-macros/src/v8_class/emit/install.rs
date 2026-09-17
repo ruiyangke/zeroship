@@ -153,7 +153,7 @@ pub(super) fn gen_install(cfg: &ClassConfig) -> TokenStream2 {
 
 /// Emit the per-class `pub fn register(scope, global)` — the bare
 /// template-build + globalThis-bind path consumed by
-/// `register_native_classes!` from `setup_globals` (#198).
+/// `register_native_classes!` from `setup_globals`.
 ///
 /// The global key is the `set_class_name` literal — i.e. `class_ty`'s
 /// Rust name, which for the no-marker path matches the WebIDL interface

@@ -57,7 +57,7 @@ pub(super) fn assemble_tokens(cfg: &ClassConfig, stripped_impl: &ItemImpl) -> To
     // It stays monolithic for now, but is parameterized by ClassConfig.
     let install = install::gen_install(cfg);
 
-    // The `register(scope, global)` companion (#198). Bare template +
+    // The `register(scope, global)` companion. Bare template +
     // globalThis-bind under `class_ty.to_string()`. Lives in the same
     // impl block as `install` so a single macro list in `setup_globals`
     // can enumerate `<Class>::register` for every simple class.

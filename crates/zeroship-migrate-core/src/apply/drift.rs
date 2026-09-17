@@ -61,22 +61,21 @@ use crate::render::value_format::{
     catalog_id_default, catalog_id_default_for_expected, catalog_text_id_default,
 };
 
-// -- The drift REPORT shapes moved down to the backend contract, whose drift
-// queries return them, and `compare_applied_to_set` has now followed them: it is the
-// checksum/tamper/orphan comparison EVERY backend runs over its own journal read, so
-// it belongs below the vendors with the shapes it produces. The STRUCTURAL
-// comparisons - `diff_snapshots` and every per-vendor catalog normalization below -
-// stay here, because they read the engine's dialect-resolving value-format helpers.
-// Re-exported so each `crate::apply::drift::...` path resolves unchanged.
+// -- The drift REPORT shapes live in the backend contract, whose drift queries
+// return them, and `compare_applied_to_set` sits beside them: it is the
+// checksum/tamper/orphan comparison EVERY backend runs over its own journal read.
+// The STRUCTURAL comparisons - `diff_snapshots` and every per-vendor catalog
+// normalization below - stay here, because they read the engine's
+// dialect-resolving value-format helpers. Re-exported so each
+// `crate::apply::drift::...` path resolves unchanged.
 pub use zeroship_migrate_backend::drift::{
     compare_applied_to_set, AlteredObject, ChecksumDrift, ChecksumDriftReport, DriftError,
     DriftReport, OrphanJournal, StructuralDrift,
 };
-// The one-partition declared-vs-live comparison followed the existence-guard decider
-// down. Both this module's structural differ and that decider read it, and they must
-// read the SAME one - a second, drifting copy in the probe is exactly how a guard and
-// a drift report come to disagree about the same catalog - so it now sits beside the
-// decider rather than one crate above it.
+// The one-partition declared-vs-live comparison sits beside the existence-guard
+// decider. Both this module's structural differ and that decider read it, and they
+// must read the SAME one - a second, drifting copy in the probe is exactly how a
+// guard and a drift report come to disagree about the same catalog.
 pub(crate) use zeroship_migrate_backend::drift::partition_divergences;
 
 // ---------------------------------------------------------------------------
@@ -96,14 +95,14 @@ pub(crate) use zeroship_migrate_backend::drift::partition_divergences;
 /// - `missing_objects` - present in `expected`, absent in `actual` (a declared
 ///   table/column/index/constraint the DB never got).
 /// - `unexpected_objects` - present in `actual`, absent in `expected` (an
-///   out-of-band object created outside the journal - scenario 35).
+///   out-of-band object created outside the journal).
 ///
 /// Object names are qualified for legibility: a table as `"users"`, a column as
 /// `"users.email"`, an index as `"users index orders_email_idx"`, a constraint
 /// as `"users constraint users_pkey"`. Output vectors are sorted + deterministic.
 ///
-/// Same-name objects present on BOTH sides are compared ATTRIBUTE-BY-ATTRIBUTE
-/// (#1): columns include physical type/nullability, identity/auto-increment,
+/// Same-name objects present on BOTH sides are compared ATTRIBUTE-BY-ATTRIBUTE:
+/// columns include physical type/nullability, identity/auto-increment,
 /// semantic ID defaults, and enforced TypeID/ULID format; indexes include unique,
 /// ordered keys, method, predicate, INCLUDE columns, and storage parameters;
 /// constraints include kind plus a comparable definition. Foreign-key definitions

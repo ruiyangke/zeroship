@@ -2,16 +2,9 @@
 //! (which *writes* the sentinel into DDL) and the data plane (which
 //! *reads* it back at runtime to drive the mask read-pass).
 //!
-//! Split out of the original data-plane `crud::mask_backfill` module because
-//! the *codec* (build/parse the `zero-migrate:mask:` sentinel string) is a
-//! schema-shape concern and lives here.
-//!
-//! **This block said the backfill RUNNER - `run_mask_backfill` /
-//! `run_mask_rewrite` - "stays in the data plane". Neither function ever
-//! existed there**; `crud::mask_backfill`'s own header said so in its first
-//! four lines, and three crates repeated the claim anyway. The runner is the
-//! engine's (#30), and that module was deleted on 2026-09-02 with zero
-//! callers.
+//! The *codec* (build/parse the `zero-migrate:mask:` sentinel string) is a
+//! schema-shape concern and lives here. The backfill RUNNER
+//! (`run_mask_backfill` / `run_mask_rewrite`) is the engine's.
 //!
 //! The `(MaskKind, Classification)` types this codec round-trips live in
 //! `crate::schema::diff` (the schema metadata types).
@@ -23,17 +16,11 @@ use crate::schema_error::MaskSentinelError;
 ///
 /// # Why this is a constant and not a knob
 ///
-/// A per-host prefix was never needed. A `SentinelPrefix` knob existed so "a host
-/// that must interoperate with a legacy writer" could inject that writer's prefix,
-/// but nothing ever injected one, and the reader it was meant to interoperate with
-/// simply spells the sentinel differently and never learned this one.
-///
-/// That is what the knob cost. `zeroship_data_orm::protection::protection_floor`
-/// refuses a write whose descriptor dropped a protection the catalog still
-/// records; on every table THIS engine created it introspected, matched no
-/// sentinel, concluded nothing was protected, and permitted the downgrade. The
-/// spellings are converged now, and the knob is gone rather than wired, because
-/// a per-host prefix is precisely the shape that lets them diverge again -
+/// A per-host prefix is precisely the shape that lets sentinel spellings
+/// diverge. `zeroship_data_orm::protection::protection_floor` refuses a write
+/// whose descriptor dropped a protection the catalog still records; a reader
+/// that spells the sentinel differently matches no sentinel on every table THIS
+/// engine created, concludes nothing was protected, and permits the downgrade -
 /// silently, and in the fail-open direction.
 pub const ENC_SENTINEL_PREFIX: &str = "zero-migrate:enc:";
 
@@ -207,10 +194,7 @@ mod tests {
     /// `zeroship-data-sql` already carries the test-only `zeroship-migrate-core`
     /// dev-dependency; this crate has no edge back and must not grow one.
     ///
-    /// **This doc named `zeroship-data-v8`'s `mask_flip.rs` until
-    /// 2026-09-04.** Those catalog tests now live in
-    /// `crates/zeroship-data-orm/src/tests/postgres/protection.rs` and run in
-    /// ordinary ORM tests. This crate's suite still needs its own sentinel guard.
+    /// This crate's suite still needs its own sentinel guard.
     #[test]
     fn the_persisted_sentinel_prefixes_are_the_zero_migrate_brand() {
         assert_eq!(ENC_SENTINEL_PREFIX, "zero-migrate:enc:");

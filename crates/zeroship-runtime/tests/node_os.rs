@@ -1,5 +1,4 @@
 //! `node:os` — platform / arch / cpus / EOL / constants assertions.
-//! Wave #192.
 
 use crate::common;
 use common::{dispatch, m};

@@ -69,9 +69,9 @@ fn evaluate<'s>(
     // tracing libraries asking for `executionAsyncId`) get a clear
     // error rather than `undefined is not a function`.
     //
-    // Task #169: `run(store, fn, ...args)` is now wired via the macro
-    // (variadic param support shipped in the same task). No manual
-    // proto.set step here — `AsyncLocalStorage::install` does it all.
+    // `run(store, fn, ...args)` is wired via the macro, which supports the
+    // variadic param. No manual proto.set step here —
+    // `AsyncLocalStorage::install` does it all.
     let als_tmpl = als::AsyncLocalStorage::install(scope);
     let als_fn = als_tmpl.get_function(scope).unwrap();
 
