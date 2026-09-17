@@ -3,50 +3,33 @@
 // This is the ordinary CI shape - two jobs from the same merge, or a retry that
 // overlaps its predecessor - and it separates cleanly into two questions.
 //
-// THE SAFETY PROPERTY HOLDS. No migration is applied twice, no version is
-// journaled twice, and the schema ends up exactly as one run would have left it.
-// The project lock does its job, and the first test asserts that.
+// THE SAFETY PROPERTY: no migration is applied twice, no version is journaled
+// twice, and the schema ends up exactly as one run would have left it. The
+// project lock does its job, and the first test asserts that.
 //
-// THE ROBUSTNESS PROPERTY NOW HOLDS TOO, and the second test pins it. It did not
-// when this file was written: the journal bootstrap ran BEFORE the project lock
-// serialised anything, so two fresh processes raced to CREATE the journal
-// namespace and its types, and the loser surfaced PostgreSQL's own catalog
-// error:
+// THE ROBUSTNESS PROPERTY: a racing first deploy must not surface PostgreSQL's
+// own catalog error. The journal bootstrap runs BEFORE the project lock
+// serialises anything, so two fresh processes race to CREATE the journal
+// namespace and its types, and the loser can surface errors like:
 //
 //   duplicate key value violates unique constraint "pg_namespace_nspname_index"
 //   duplicate key value violates unique constraint "pg_type_typname_nsp_index"
 //   tuple concurrently updated
 //   trigger "zs_immutable_truncate_trg" for relation "..." already exists
 //
-// None of those tells an operator what happened. They are benign contention -
-// re-running succeeds - but they read like corruption, and nothing in the CLI
-// output or the docs said otherwise.
+// Those are benign contention that a re-run clears, but they read like
+// corruption. The deploy verbs therefore take the project lock first and
+// bootstrap the journal INSIDE that bracket: serializing needs no judgement
+// about which catalog errors are benign, which is what a swallow-list would
+// have to encode.
 //
-// The fix was not to tolerate those codes, and it needed no new lock. `verbs.rs`
-// bootstrapped the journal BEFORE acquiring the project lock, which left the one
-// window nothing serialized; the deploy verbs now take the lock first and
-// bootstrap inside it. Serializing needs no judgement about which catalog errors
-// are benign, and that judgement is what had kept the fix parked.
-//
-// The bootstrap moved INSIDE the lock bracket rather than merely after the
-// acquisition, because the release runs after that block - bootstrapping outside
+// The bootstrap sits inside the lock bracket rather than merely after the
+// acquisition because the release runs after that block - bootstrapping outside
 // it would leak the project lock on any bootstrap failure.
 //
-// MySQL never had this bug: its `ensure_journal` already took a dedicated
-// bootstrap lock. The same race measured 0/3 there against 3/3 on PostgreSQL,
-// which is what identified the missing serialization.
-//
-// FIRST DEPLOY IS NOW THE WHOLE OF IT. This file originally recorded the same
-// errors against a project whose journal ALREADY existed, which made them
-// unavoidable rather than a warm-up problem. That half had a separate cause - an
-// unguarded `CREATE OR REPLACE FUNCTION` rewriting its catalog row on every
-// invocation - and is fixed and pinned in `journal-rebootstrap-noop.test.ts`.
-// What remains here is only the window before the objects exist at all, which is
-// why the second test below deliberately starts from a fresh project.
-//
-// The last test covers the other half of the same window: a non-read-only
-// `status` bootstraps the journal too, so fixing only the deploy verbs left a
-// reader able to break a deploy. Both now take their lock first.
+// A non-read-only `status` bootstraps the journal too, so both verbs take their
+// lock first; fixing only the deploy verbs would leave a reader able to break a
+// deploy.
 //
 // GATE: `ZERO_MIGRATE_TEST_PG_URL`.
 
@@ -218,24 +201,22 @@ test("a racing first deploy no longer fails with a raw PostgreSQL catalog error"
     );
     assert.equal(duplicated[0].n, 0, "even in the bootstrap race, nothing may be applied twice");
 
-    // FIXED by ordering: the deploy verbs acquire the project lock before
-    // bootstrapping the journal, so the bootstrap is serialized by the lock that
-    // already existed. Both processes complete - one bootstraps, the other waits
-    // for the lock and then finds the journal present.
+    // The deploy verbs acquire the project lock before bootstrapping the journal,
+    // so the bootstrap is serialized by the lock that already existed. Both
+    // processes complete - one bootstraps, the other waits for the lock and then
+    // finds the journal present.
     //
-    // Serializing beat tolerating SQLSTATEs, which is what this test used to
-    // record as the open judgement. The set of colliding statements had already
-    // grown once (the `pg_trigger`-guarded CREATE TRIGGER appeared after the
-    // first three), and a swallow-list broad enough to cover an open-ended set
-    // would hide real failures.
+    // Serializing is preferred to tolerating SQLSTATEs: a swallow-list broad
+    // enough to cover the open-ended set of colliding statements would hide real
+    // failures.
     assert.deepEqual(
       failures.map((failure) => failure.err),
       [],
       "a racing first deploy must not surface a raw catalog error",
     );
 
-    // Asserted on the SHAPE the failure used to take, so a regression that
-    // reintroduces it is named rather than just counted.
+    // Asserted on the SHAPE of the failure, so a regression that reintroduces one
+    // is named rather than just counted.
     for (const result of [a, b]) {
       assert.doesNotMatch(
         result.err,
@@ -255,15 +236,13 @@ test("a racing first deploy no longer fails with a raw PostgreSQL catalog error"
   }
 });
 
-/** A reader racing a deploy on a FRESH project, which is the other half of the same
- *  bootstrap window and was left open when the deploy verbs were fixed.
+/** A reader racing a deploy on a FRESH project, the other half of the same
+ *  bootstrap window.
  *
- *  A non-read-only `status` bootstraps the journal too. Serializing only the deploy
- *  verbs left that bootstrap racing, and the raw catalog error landed on the DEPLOY
- *  as readily as on the status - measured four times out of four, once with `apply`
- *  itself exiting 1. Fixing one verb pair while another verb could still break a
- *  deploy is not a fix, which is why this arm exists rather than a note saying
- *  status was out of scope.
+ *  A non-read-only `status` bootstraps the journal too. Serializing only the
+ *  deploy verbs leaves that bootstrap racing, and the raw catalog error lands on
+ *  the DEPLOY as readily as on the status, so this arm covers the reader as well
+ *  as the deploy.
  *
  *  `status` still never waits: it takes the lock without blocking and returns the
  *  busy reply when a deploy holds it. Both outcomes are legitimate here, so the

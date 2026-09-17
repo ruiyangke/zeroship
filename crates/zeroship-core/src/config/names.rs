@@ -1,8 +1,8 @@
-//! Inert canonical naming, source policy, and read-site machinery.
+//! Canonical naming, source policy, and read-site machinery.
 //!
-//! Nothing in this module is wired into a live process in Step 1. It provides
-//! one vocabulary for later conversions and lets the non-shipped contract tool
-//! prove that generated declarations and generated readers agree.
+//! One vocabulary for configuration identities: the `zeroship_config` attribute
+//! generates an identity's spellings from a single declaration, and the read
+//! sites here resolve environment and overlay values against them.
 
 use std::fmt;
 use std::marker::PhantomData;

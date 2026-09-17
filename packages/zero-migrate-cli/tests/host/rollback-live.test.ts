@@ -337,21 +337,18 @@ test("PostgreSQL: rolling back a dropSchema rebuilds the schema its create autho
 });
 
 /** Create an extension, then drop it, so a one-step rollback has a dropExtension to
- *  reverse. Sequence and schema are covered above, in this file, against PostgreSQL.
+ *  reverse. Sequence and schema are covered in this file against PostgreSQL.
  *
- *  VIEW IS NOT COVERED HERE, and this comment used to say it was. What exists is
- *  `crates/zeroship-migrate-node/tests/rollback_sqlite.rs`
- *  (`a_view_dropped_by_a_later_envelope_comes_back_through_the_verb`), which drives the
- *  same re-lowering path this file does but against SQLite, and
- *  `crates/zeroship-migrate/tests/drop_view_rollback_pg.rs`, which is PostgreSQL but calls
- *  the engine directly and never reaches the addon's envelope loop. So the cell this
- *  file would fill - a view rollback on PostgreSQL through the verb - is empty, and
- *  neither of the two tests covers it between them.
+ *  A view rollback on PostgreSQL through the verb is NOT covered here: the SQLite
+ *  suite (`crates/zeroship-migrate-node/tests/rollback_sqlite.rs`,
+ *  `a_view_dropped_by_a_later_envelope_comes_back_through_the_verb`) drives the same
+ *  re-lowering path, and `crates/zeroship-migrate/tests/rollback/drop_view_rollback_pg.rs`
+ *  calls the engine directly without reaching the addon's envelope loop.
  *
- *  `citext` rather than `pgcrypto` or `hstore` for no reason beyond it being available
- *  and absent in the container, so the create is real and the drop leaves no residue.
- *  It is not on FORBIDDEN_EXTENSIONS (crates/zeroship-migrate-postgres/src/guard/denylist.rs:18),
- *  which the guard applies over the allowlist regardless of any grant. */
+ *  `citext` rather than `pgcrypto` or `hstore` because it is available and absent in
+ *  the container, so the create is real and the drop leaves no residue. It is not on
+ *  FORBIDDEN_EXTENSIONS (crates/zeroship-migrate-postgres/src/guard/denylist.rs), which
+ *  the guard applies over the allowlist regardless of any grant. */
 function scaffoldExtensionDrop(projectSchema: string, extensionName: string): string {
   const dir = mkdtempSync(join(HERE, "rollback-live-ext-"));
   writeFileSync(
@@ -598,9 +595,9 @@ test("MySQL: a rollback whose project lock is held fails with the holder named",
   const mysql = (await import("mysql2/promise")).default;
   const schema = uniqueSchema("rb_lock_my");
   const metaSchema = `${schema}_migrations`;
-  // Mirrors `project_lock_name` (crates/zeroship-migrate-mysql/src/backend/session.rs:109):
+  // Mirrors `project_lock_name` (crates/zeroship-migrate-mysql/src/backend/session.rs):
   // `zero_migrate:<project_id>` while that fits in 64 chars, and the CLI passes the project
-  // SCHEMA as the project id (packages/zero-migrate-cli/src/index.ts:544).
+  // SCHEMA as the project id (packages/zero-migrate-cli/src/index.ts).
   //
   // A hand-mirrored derivation cannot go quietly wrong here: if this name stopped matching the
   // engine's, the rollback below would ACQUIRE the lock and succeed, and the refusal assertion

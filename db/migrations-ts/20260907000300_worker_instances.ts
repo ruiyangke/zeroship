@@ -170,15 +170,12 @@ export default {
     // not read this table: control publishes the eligible worker set per app on
     // the feed it already owns.
     //
-    // WHY THERE IS NO REVOKE, STATED CORRECTLY - this comment named the wrong
-    // mechanism until 2026-09-07. `zeroship_worker` is denied by PostgreSQL's
+    // WHY THERE IS NO REVOKE. `zeroship_worker` is denied by PostgreSQL's
     // OWNER-ONLY DEFAULT: a newly created table has a null `relacl` and nobody
     // but the owner holds anything. It is NOT denied by
     // db/migrations-ts/20260818000200_worker_database_authority.ts, whose
     // `ALTER DEFAULT PRIVILEGES ... REVOKE` lines store nothing, because
-    // revoking a privilege that was never in the default set is a no-op -
-    // measured as an empty `pg_default_acl`, with a fresh table in this schema
-    // confirming a null `relacl` and no worker privilege.
+    // revoking a privilege that was never in the default set is a no-op.
     //
     // The distinction is load-bearing rather than pedantic. An ambient default
     // is not a fence: any later migration that grants `zeroship_worker`

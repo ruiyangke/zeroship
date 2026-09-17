@@ -1,8 +1,7 @@
 //! Public brand-check entry point for `#[v8_class]` types.
 //!
 //! This file emits the typed `<Class>::is_instance` API and the sealed
-//! `V8ClassInstance` trait impl. The older underscored
-//! `__zs_is_<Class>` shim has been removed.
+//! `V8ClassInstance` trait impl.
 //!
 //! Symbol matrix:
 //!
@@ -12,7 +11,7 @@
 //! | `<Class>::is_instance` | `pub` (inherent) | typed entry point | stable |
 //! | `<Class> as V8ClassInstance` | trait impl | generic bound | stable |
 //!
-//! See `crates/runtime-macros/STABILITY.md` for the formal contract.
+//! See `crates/zeroship-runtime-macros/STABILITY.md` for the formal contract.
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
@@ -30,10 +29,6 @@ use super::super::shared::class_config::ClassConfig;
 ///      — the sealed-trait pattern that lets generic code bound on
 ///      `T: V8ClassInstance` while preventing third-party impls
 ///      (Sealed lives in a private module).
-///
-/// The legacy `pub fn __zs_is_<Class>` shim is no longer emitted.
-/// `<Class>::is_instance` is the public entry point and now
-/// owns the `try_from` gate and the brand-check call directly.
 pub(super) fn gen_public_is_fn(cfg: &ClassConfig) -> TokenStream2 {
     let class_ty = cfg.class_ty;
     // Brand-check identifier cached on ClassConfig.
