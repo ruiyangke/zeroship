@@ -574,12 +574,11 @@ mod tests {
     #[test]
     fn load_refuses_bare_name_drop_index_fail_closed() {
         // fail-closed: a bare-name DropIndex (`table: None`) has no
-        // ownership-checkable target, so the ownership pass `continue`d over it -
-        // letting a hostile IR envelope `{op:"dropIndex", name:"<other_app_index>"}`
-        // (no table hint) DROP another app's index cross-tenant. The fix refuses a
-        // bare-name DropIndex at validate time (no name->owner registry resolver
-        // exists), so the bypass is closed. An intruder targeting another app's
-        // index by NAME is now REFUSED, not silently applied.
+        // ownership-checkable target (no name->owner registry resolver exists), so
+        // validate refuses it. A hostile IR envelope
+        // `{op:"dropIndex", name:"<other_app_index>"}` (no table hint) cannot drop
+        // another app's index cross-tenant; the intrusion is REFUSED, not silently
+        // applied.
         let ops = r#"[{"op":"dropIndex","name":"victim_secret_idx"}]"#;
         let bytes = envelope_json(ops, "");
         // The registry knows the victim app owns tables; the intruder owns nothing.
@@ -609,10 +608,10 @@ mod tests {
 
     #[test]
     fn load_allows_table_hinted_drop_index_owned_by_deployer() {
-        // The remedy: a DropIndex carrying its owning-table hint IS ownership-
-        // checkable (the table's owner resolves through the registry), so a
-        // table-hinted drop on a table the deployer owns is allowed - the fix
-        // refuses ONLY the un-checkable bare-name form.
+        // A DropIndex carrying its owning-table hint IS ownership-checkable (the
+        // table's owner resolves through the registry), so a table-hinted drop on
+        // a table the deployer owns is allowed; only the un-checkable bare-name
+        // form is refused.
         let ops = r#"[{"op":"dropIndex","name":"mine_idx","table":"mine"}]"#;
         let bytes = envelope_json(ops, "");
         let reg = registry(&[("mine", "app_a")]);
@@ -970,36 +969,16 @@ mod tests {
     /// If this hex changes, the hint-domain wire format drifted - the JS `op.*`
     /// author would emit a hint the engine rejects. Not allowed without a
     /// deliberate, matched break on both sides.
-    ///
-    /// Re-captured when the lock-safety envelope added `lock_timeout_ms` to
-    /// `MigrationFlags`: the hint domain folds `MigrationFlags::default()`, whose
-    /// canonical-JSON image gained the `lock_timeout_ms: null` key, so this hex
-    /// moved BY CONSTRUCTION. The JS author reuses this same Rust crate's
-    /// serialization, so both sides move together - a DELIBERATE, matched break.
     #[test]
     fn load_accepts_a_frozen_checksum_hint_golden() {
         // A fixed dropTable IR with all-default flags/deps/supersedes/precond.
         let ops = r#"[{"op":"dropTable","table":"users"}]"#;
-        // Hard-coded literal - NOT computed by the function under test.
-        // Re-captured when the IR checksum domain-separator tag was set to
-        // `zero-migrate/of_ir/v1` (`model/migration.rs`): the hint-domain fold
-        // hashes that tag, so this hex moved BY CONSTRUCTION. The JS author reuses
+        // Hard-coded literal - NOT computed by the function under test. The
+        // hint-domain fold hashes the IR checksum domain-separator tag
+        // (`zero-migrate/of_ir/v1`) and folds `MigrationFlags::default()`, so any
+        // change to either moves this hex BY CONSTRUCTION. The JS author reuses
         // this same Rust crate's serialization, so both sides move together - a
         // deliberate, matched break.
-        //
-        // Re-captured AGAIN on 2026-08-27, from
-        // `8adb4d9360aa90f73145071a2ce0c769793beee4cc17d136af7e52098c766bb4`,
-        // when full-text search was deleted. That removal took three fields out
-        // of the IR (`zeroship-migrate-ir/src/{ir,load,migration}.rs`), so the
-        // canonical image of an all-default envelope changed and this hex moved
-        // BY CONSTRUCTION again - same matched-break shape as the two above.
-        //
-        // Worth recording HOW it was found, because the deletion updated three
-        // other checksum goldens and missed this one: it survived the FTS
-        // branch's own verification and the branch merge, and surfaced only when
-        // a later merge ran `-p zeroship-migrate-core` for an unrelated reason.
-        // A frozen golden in a crate nobody's verification covers is a guard
-        // that reports nothing until something else trips over it.
         const FROZEN_HINT: &str =
             "67506b3a51dd9633b218bba57fccfd1272bf60bd3b88589009652e5f90641bbc";
         let bytes = envelope_json(ops, &format!(r#", "checksum": "{FROZEN_HINT}""#));

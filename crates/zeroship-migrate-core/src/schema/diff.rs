@@ -1094,7 +1094,6 @@ mod tests {
 
     // -----------------------------------------------------------------
     // Encryption type-transition: TEXT to BYTEA, and back, must NOT silently no-op.
-    // Regression for `bytes-encrypted-transition-silent-noop`.
     // -----------------------------------------------------------------
 
     /// Build a LiveSchema with one collection holding the given columns.

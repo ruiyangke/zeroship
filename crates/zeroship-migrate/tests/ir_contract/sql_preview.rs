@@ -786,14 +786,6 @@ fn malformed_ir_is_error() {
     assert!(err.is_err(), "malformed IR must be an error");
 }
 
-// NOTE: the three offline `plan` CLI-smoke tests that shelled
-// the retired Rust `zero-migrate` binary (`CARGO_BIN_EXE_zero-migrate`) were removed
-// with the bin. The offline SQL-preview surface they exercised — `render_ir_envelope_sql`
-// / `render_set_sql` / `render_plan_sql` + the `-- [runtime-resolved]` labeling — is
-// still fully covered DB-free by the library tests above (goldens, faithfulness,
-// no-fabrication, `render_succeeds_without_a_dsn`). The command-line entry point is
-// now the `zero-migrate-cli` TS CLI (`packages/zero-migrate-cli/src/cli.ts`).
-
 /// `render_set_sql` — the multi-plan renderer. Lower a DB-independent IR to an
 /// `AppliedPlan` in-memory and render it as a one-element set, asserting the summary
 /// line + the lowered DDL surface. Symmetric with the `render_plan_sql` test above.
@@ -1232,23 +1224,22 @@ fn guarded_drop_partition_announces_that_a_run_verdict_destroys_rows() {
 
 /// A retype's blocked-column assertion changes the PLAN and must change no SQL.
 ///
-/// `setColumnType` now carries a `ColumnTypeChangeHasNoBlockers` precondition,
+/// `setColumnType` carries a `ColumnTypeChangeHasNoBlockers` precondition,
 /// evaluated against a live database. Preview has no database, and the question this
 /// settles is whether preview therefore has to say something new. It does not, and
 /// the reason is worth pinning rather than assuming: a precondition GATES a
 /// statement, it is not a statement, so the SQL the engine would run is unchanged
 /// and preview's contract is exactly "the SQL the engine would run".
 ///
-/// The trap this guards against is the shape of `59a0b238`, where a fix that made
-/// apply correct left preview rendering a statement apply no longer emits. Preview
-/// lowers each op IN ISOLATION against an EMPTY `LiveSchema`, so a stamp made
-/// conditional on live state would land in one path and not the other. Both halves
-/// are asserted: the preview text holds the engine's `up` verbatim, and the
-/// single-op lower preview uses stamps the SAME assertion as the whole-envelope
-/// lower apply uses.
+/// The trap this guards against: a stamp made conditional on live state would land
+/// in one path and not the other, leaving preview rendering a statement apply no
+/// longer emits. Preview lowers each op IN ISOLATION against an EMPTY `LiveSchema`,
+/// so both halves are asserted: the preview text holds the engine's `up` verbatim,
+/// and the single-op lower preview uses stamps the SAME assertion as the
+/// whole-envelope lower apply uses.
 ///
-/// It also supplies what F877 recorded as missing outright - no golden in the tree
-/// pinned an `ALTER COLUMN ... TYPE` statement at all.
+/// It also pins an `ALTER COLUMN ... TYPE` statement no other golden in the tree
+/// covers.
 #[test]
 fn a_retype_previews_the_statement_apply_runs_and_nothing_more() {
     let envelope_json = r#"{

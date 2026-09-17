@@ -270,7 +270,7 @@ pub fn render_ir_envelope_sql(
 /// migration in the same directory declares, so every rule keyed on a column's
 /// type is silently unreachable - the `lint` gate reported ok on a backfill whose
 /// cursor type `apply` refuses, because the `createTable` naming that column was
-/// simply not in view (F653).
+/// simply not in view.
 ///
 /// Passing the folded prefix does NOT invent a new rule. It gives the existing
 /// lowering the same schema apply gives it, so lint reaches the planner's own
@@ -412,13 +412,9 @@ fn render_ir_envelope_rendered(
     // Thread the charter this function already holds as VENDOR AUTHORITY.
     //
     // The unauthorised entry derives its capability set from a schema scope, and with
-    // no scope that set is the Confined creator's, which grants NOTHING. So the
-    // preview refused EVERY capability-gated op - a `createFunction`, a `createRole`,
-    // a `createPolicy` - no matter what the operator's charter said, while the very
-    // same `effective_policy` was being trusted two statements above to inject
-    // columns and one statement below to author the SQL. That is not a widening: it
-    // is the same authority, asked the same way the deploy path asks it, instead of a
-    // fallback that could not see the charter at all.
+    // no scope that set is the Confined creator's, which grants NOTHING. Threading the
+    // charter here is not a widening: it is the same authority, asked the same way the
+    // deploy path asks it, instead of a fallback that could not see the charter at all.
     let authority = crate::model::validate::VendorAuthority {
         effective: &opts.effective_policy,
         default_schema: &opts.default_schema,
@@ -451,7 +447,7 @@ fn render_ir_envelope_rendered(
 /// than aborting, which is right for an op whose SQL genuinely depends on catalog
 /// state. It is WRONG for a refusal the author can act on: labeling it turns a
 /// verdict apply will deliver anyway into a line of prose, and the migration
-/// passes lint on its way to failing the deploy (F653).
+/// passes lint on its way to failing the deploy.
 ///
 /// `BackfillCursorUnavailable` is the second kind. It is only ever raised when the
 /// cursor table's snapshot IS known, so reaching it means the checker had the
@@ -520,9 +516,7 @@ fn render_ir_ops(
         // presence forward without inventing catalog snapshots; truly live-state-
         // dependent operations still degrade to a labeled preview line.
         //
-        // Table presence is the FOLD's rule, read rather than restated: this used to
-        // be a local two-arm walker that knew `createTable` and nothing else, so a
-        // dropped table stayed referenceable and a renamed one vanished. The preview
+        // Table presence is the FOLD's rule, read rather than restated: the preview
         // is a surfacing layer, and the lower it surfaces reads the same rule from
         // the same place (`render::lower::lower_one_op`), so the two cannot drift.
         let _ = working_live.advance_logical_columns(vendors, &one, dialect, project_schema, None);
@@ -847,22 +841,11 @@ fn guard_label(vendors: VendorSet, op: &Op, g: ExistenceGuard, dialect: &Dialect
 
 /// The extra plan-time sentence a guarded `dropPartition` carries, or `""`.
 ///
-/// Engines before the shape-aware partition probe resolved a partition guard against
-/// the TOP-LEVEL table list, which never holds a child partition, so a guarded
-/// `dropPartition` read its target as absent, skipped the `DROP TABLE`, and still
-/// journaled the migration completed. Every database that already ran such a
-/// migration keeps its orphan partition under a green journal, and the fix cannot
-/// repair it - but the NEXT environment rebuilt from the same authored history (a
-/// fresh staging DB, a new region, a DR restore, a per-PR database) replays the
-/// identical text and now ACTUALLY drops it. Two environments then diverge in the
-/// destructive direction from migration text that reads as already-proven.
-///
-/// The destructive-approval gate cannot warn about this: a guarded `dropPartition`
-/// already lowers `destructive + requires_approval`, byte-identically to an
-/// unguarded one, and did so throughout the period the drop was being silently
-/// cancelled - so approving it never meant "this will drop". This sentence is the
-/// only place the plan says the guard weakens the drop's PRECONDITION rather than
-/// cancelling the drop.
+/// The destructive-approval gate cannot warn about a guarded `dropPartition`: it
+/// lowers `destructive + requires_approval` byte-identically to an unguarded one,
+/// so approving it does not mean "this will drop". This sentence is the only place
+/// the plan says the guard weakens the drop's PRECONDITION rather than cancelling
+/// the drop.
 ///
 /// Preview text only: it changes no rendered statement and no apply verdict, and it
 /// deliberately does NOT predict WHICH verdict this apply will get - that is decided
@@ -1231,14 +1214,10 @@ mod tests {
         }
     }
 
-    /// The operator preview reads the CHARTER for vendor authority.
-    ///
-    /// It used to derive that authority from a schema scope it never had, so the
-    /// derived set was the Confined creator's and every capability-gated op was
-    /// refused here no matter what the charter granted. The subject is
-    /// `createFunction` rather than any newer gated op precisely because it was
-    /// already gated when the defect was live: it measures the preview seam, not one
-    /// op's capability mapping.
+    /// The operator preview reads the CHARTER for vendor authority: a
+    /// capability-gated op is granted or refused by the charter's capability set.
+    /// The subject is `createFunction` rather than any newer gated op because it
+    /// measures the preview seam, not one op's capability mapping.
     #[test]
     fn the_preview_reads_vendor_authority_off_the_charter_it_was_given() {
         const IR: &str = r#"{"ir_version":1,"name":"n","ops":[

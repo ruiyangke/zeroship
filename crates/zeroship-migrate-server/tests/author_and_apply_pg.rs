@@ -1,6 +1,6 @@
-//! Phase F Stage 2 — prove the monorepo can AUTHOR a `.ts` migration into an
+//! Prove the monorepo can AUTHOR a `.ts` migration into an
 //! `ir_version:1` IR envelope using **zeroship-runtime's V8**, then apply it
-//! end-to-end via Stage 1's native `compio-postgres` seam.
+//! end-to-end via the native `compio-postgres` seam.
 //!
 //! This is the whole native authoring+apply loop with NO Node in it:
 //!
@@ -17,16 +17,15 @@
 //!   fail-closed load gate → IrAuthor::load_and_lower (Postgres)
 //!        │
 //!        ▼
-//!   PostgresBackend::new_generic(&CompioPgSession)  (Stage 1's adapter)
+//!   PostgresBackend::new_generic(&CompioPgSession)
 //!        │
 //!        ▼  compio io_uring, live PG :5440
 //!   engine.apply → real DDL + journal
 //! ```
 //!
-//! The Stage-1 `smoke_apply_pg.rs` HAND-BUILT the envelope JSON; Stage 2 replaces
-//! that literal with an envelope AUTHORED by running the package recorder in
-//! zeroship-runtime's V8. Everything downstream of the envelope is the SAME native
-//! apply path as Stage 1.
+//! The envelope is AUTHORED by running the package recorder in
+//! zeroship-runtime's V8 rather than hand-built; everything downstream of it is
+//! the same native apply path.
 //!
 //! `PostgreSQL` apply owns its server through Testcontainers. V8 authoring is
 //! also tested independently of the database.
@@ -38,9 +37,8 @@ use zeroship_migrate::{
     effective_policy_from_charter_toml, resolve_create_table_policy, Approval, EffectivePolicy,
     ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine, MigrationIr,
 };
-// PG-shaped surfaces live in the vendor crate: the neutrality refactor moved
-// `PostgresBackend`, the dialect id and the journal reader off the facade, and the
-// dialect enum (`SqlDialect::Postgres`) became a `DialectId` const.
+// PG-shaped surfaces live in the vendor crate: `PostgresBackend`, the dialect id
+// and the journal reader are off the facade, and the dialect is a `DialectId` const.
 use zeroship_migrate_postgres::backend::journal_sql::applied as read_journal;
 use zeroship_migrate_postgres::{PostgresBackend, DIALECT as POSTGRES};
 use zeroship_migrate_server::session::CompioPgSession;
@@ -50,15 +48,11 @@ use zeroship_runtime::{ModuleEntry, Runtime};
 /// composition root; a host takes the set rather than naming vendors itself.
 const VENDORS: zeroship_migrate_backend::registry::VendorSet = zeroship_migrate::shipping_vendors();
 
-/// The confined table-shape ceiling composed into an `EffectivePolicy` (the confined
-/// shape is policy data now; the old `PolicyProfile::confined()` is gone).
+/// The confined table-shape ceiling composed into an `EffectivePolicy`.
 ///
 /// Only the GRANTS are written here; the `[[inject]]` rule is the platform-wide
 /// fragment in `policies/`, concatenated in at compile time so this fixture cannot
-/// describe a table shape the deployed server does not produce. See the longer
-/// note on the same constant in `smoke_apply_pg.rs`: while the rule was inlined,
-/// both fixtures missed `ddf636140`'s system-column defaults and went on calling
-/// themselves the confined ceiling.
+/// describe a table shape the deployed server does not produce.
 const CONFINED_CEILING_TOML: &str = concat!(
     r#"policy_version = 1
 

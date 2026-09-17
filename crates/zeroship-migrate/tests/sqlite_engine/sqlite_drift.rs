@@ -479,14 +479,9 @@ async fn uuid_id_defaults_detect_add_remove_and_swap_without_cosmetic_drift() {
         "\"AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA\"",
     );
 
-    // An ordinary (non-ID) default on `label`. This case used to change the
-    // SPELLING and the VALUE at once - `'draft'` against `('published')` - and
-    // assert the pair clean, which could only hold while nothing compared an
-    // ordinary default at all. It cannot distinguish "the parens drifted" from
-    // "the stored value drifted", so it is split into the two questions it was
-    // conflating: redundant grouping is still cosmetic and must stay clean, and a
-    // changed value is a changed default and must now be reported
-    // (`comparable_column_default`).
+    // An ordinary (non-ID) default on `label`. Two questions must stay distinct:
+    // redundant grouping is cosmetic and must stay clean, while a changed value is
+    // a changed default and must be reported (`comparable_column_default`).
     let p = paths("ordinary_default_cosmetic");
     let be = backend(&p);
     be.apply_one_additive(
@@ -1149,11 +1144,10 @@ async fn orphan_journal_detected_when_a_migration_is_deleted_from_the_set() {
 async fn mask_sentinel_recovered_from_sqlite_master() {
     let p = paths("snap_sentinel");
     let be = backend(&p);
-    // After the storage flip the emitter writes the inline mask sentinel onto the
-    // FIELD'S OWN column (it used to ride the `<col>_masked` sibling; the real
-    // value moved the other way, into a `__zs_raw__<col>` sibling instead).
-    // sqlite_master.sql preserves the comment verbatim. We hand-author the exact
-    // shape the emitter produces today.
+    // The emitter writes the inline mask sentinel onto the FIELD'S OWN column; the
+    // real value lives in a `__zs_raw__<col>` sibling instead. sqlite_master.sql
+    // preserves the comment verbatim. We hand-author the exact shape the emitter
+    // produces today.
     let raw = zeroship_migrate::schema::query::raw_column_name("ssn");
     be.apply_one_additive(
         &mig(
