@@ -235,22 +235,6 @@ jobs:
       # green as one that ran.
       - name: edge claimed-host artifact is what caddy makes of the Caddyfile
         run: deploy/ops/caddy-claimed-hosts.sh --check
-      # THE SURVIVING INSTRUMENT'S OWN SELF-TEST. tests/lib/gate_arms.sh gives
-      # the repository gates that remain shell their per-arm floors and failure
-      # propagation. If it regresses, every gate sourcing it keeps printing
-      # confident numbers and no gate anywhere notices - the failure is
-      # invisible by construction, because the thing that broke is the thing
-      # doing the measuring. Pure shell: no services, no build, no database.
-      #
-      # `set -e` is explicit rather than left to the runner default. GitHub's
-      # default shell is documented as `bash -eo pipefail`, but if that were
-      # ever not so, a failing self-test would not reach the step's exit status.
-      # One line converts an inference about a runner default into a property of
-      # the file.
-      - name: Instrument self-test (the harness the surviving shell gates use)
-        run: |
-          set -e
-          tests/lib_gate_arms_selftest.sh
       # Data tests own PostgreSQL containers and run without optional features.
       - run: |
           set -o pipefail

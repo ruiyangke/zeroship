@@ -18,14 +18,6 @@
 
 set -uo pipefail
 
-# Per-arm anti-vacuity accounting, wired on the --range path only (see below).
-# --self-test rules on hand-written fixtures, not real commits, and would
-# refuse for declaring zero arms if it called gate_arms_init/gate_arms_finish
-# at all - the arm contract is about a REAL enumeration collapsing, and
-# --self-test has no enumeration to collapse.
-# shellcheck source=tests/lib/gate_arms.sh
-. "$(git rev-parse --show-toplevel)/tests/lib/gate_arms.sh"
-
 MAX_SUBJECT=100          # measured: accepts 97% of a week of unconstrained
                          # subjects, rejects the multi-clause outliers
 BODY_WARN_LINES=20       # advisory only, never fails
@@ -178,7 +170,6 @@ main() {
       ;;
     --range)
       [ $# -eq 2 ] || usage
-      gate_arms_init commit_msg
       # `--no-merges` IS DELIBERATE, and it is not the gate being lax. git
       # writes its own merge subjects, and the workflow this repo uses tells
       # every agent to `git merge main` before working, so history is full of
@@ -205,21 +196,14 @@ main() {
       done
       # A range that resolves to nothing is not a pass. Same failure shape this
       # repo has hit before: an empty run is indistinguishable from a clean one.
-      #
-      # gate_arm's floor reuses this check's own existing threshold (examined
-      # >= 1) rather than a "well under today's count" number: unlike the other
-      # three gates in this pass, this arm's subject is a CALLER-SUPPLIED range,
-      # not a roughly fixed corpus - CI commonly calls this over a 2-5 commit PR
-      # range, so a floor derived from today's measurement (115 commits on
-      # origin/main..HEAD in this worktree) would refuse a normal small range.
-      # What this arm can honestly guard against is the range enumerating to
-      # NOTHING, which is exactly what already made this a hand-rolled check.
-      if ! gate_arm commits_linted "$n" 1; then
+      # The floor is exactly 1, not a "well under today's count" number: this
+      # arm's subject is a CALLER-SUPPLIED range, not a fixed corpus, so a floor
+      # derived from a measurement would refuse a normal small range.
+      if [ "$n" -lt 1 ]; then
         printf 'commit-msg gate: range %s matched 0 commits; nothing was checked.\n' "$2"
         return 1
       fi
       printf 'commit-msg gate: checked %d commits, %d rejected.\n' "$n" "$fail_count"
-      gate_arms_finish || fail_count=$((fail_count + 1))
       [ "$fail_count" -eq 0 ]
       return
       ;;

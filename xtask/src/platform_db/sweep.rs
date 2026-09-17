@@ -98,8 +98,8 @@ fn parent_of(pid: i32) -> Option<i32> {
 /// How few `/proc` entries a pass may rule on before the pass itself is the
 /// thing in doubt.
 ///
-/// A FLOOR, NOT A TARGET, in the sense `tests/lib/gate_arms.sh` uses the word:
-/// it separates "this box is quiet" from "this scan did not look". Measured
+/// A FLOOR, NOT A TARGET: it separates "this box is quiet" from "this scan
+/// did not look". Measured
 /// 2026-08-20 on the machine the sweeper runs on: 495 entries, of which 109
 /// were ours. Any Linux kernel contributes more than sixteen threads before
 /// userspace starts, so a pass under this saw a process table that is not a
