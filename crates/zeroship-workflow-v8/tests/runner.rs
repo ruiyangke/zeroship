@@ -1411,6 +1411,73 @@ async fn native_runner_timeout_disposes_v8_before_reusing_its_slot() {
     fixture.assert_disposed().await;
 }
 
+/// A step that never settles, under a `StepConfig.timeout` the trigger chooses.
+///
+/// Two bounds can end this body: the step timeout the dispatcher arms, and the
+/// host's per-job execution timeout, which `RunnerSlot` carries and which no
+/// creator can see. The pair below differs only in which of the two is smaller.
+const HANGING_STEP: &str = r"
+    export class Example {
+        async run(trigger, step) {
+            return await step.run('work', {timeout: trigger.input.timeout}, () => new Promise(() => {}));
+        }
+    }
+    export default { workflows: { Example } };
+";
+
+#[compio::test]
+async fn a_step_timeout_under_the_execution_bound_commits_a_step_failure() {
+    let fixture = Fixture::new(HANGING_STEP).await;
+    let run = fixture
+        .app
+        .start(
+            &RequestId::mint(),
+            "Example",
+            StartOptions {
+                input: json!({"timeout":"50ms"}),
+                ..StartOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+    let mut runner = fixture.runner(Duration::from_secs(10));
+    assert_eq!(
+        advance_until_suspended(&mut runner).await.state,
+        RunState::Failed
+    );
+    let error = fixture.app.status(&run.id).await.unwrap().error.unwrap();
+    assert_eq!(error["type"], "StepTimeoutError");
+    assert_eq!(error["retryable"], true);
+    assert_eq!(error["message"], "workflow step timed out after 50ms");
+    fixture.assert_disposed().await;
+}
+
+#[compio::test]
+async fn a_step_timeout_over_the_execution_bound_never_fires() {
+    // The control: same body, same host, and only the step timeout moved past
+    // the execution bound. The host's deadline reaches the job first, so the
+    // step timeout the creator configured is never the reason recorded.
+    let fixture = Fixture::new(HANGING_STEP).await;
+    fixture
+        .app
+        .start(
+            &RequestId::mint(),
+            "Example",
+            StartOptions {
+                input: json!({"timeout":"10m"}),
+                ..StartOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+    let mut runner = fixture.runner(Duration::from_secs(1));
+    assert!(matches!(
+        runner.run_once().await,
+        Err(WorkflowServiceError::Timeout)
+    ));
+    fixture.assert_disposed().await;
+}
+
 #[path = "support/orm.rs"]
 mod orm_fixture;
 
