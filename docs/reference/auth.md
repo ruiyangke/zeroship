@@ -420,7 +420,6 @@ same native-token arm, with local JWKS verification plus the same per-app
 ## See Also
 
 - [Auth deployment runbook](../runbooks/auth-deploy.md)
-- [Auth dev tier](auth-dev-tier.md)
 - [Control plane architecture](../architecture/control-plane.md)
 - [Gateway routing architecture](../architecture/gateway-routing.md)
 - [Historical auth-server design](../archive/auth-server.md)

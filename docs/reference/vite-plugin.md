@@ -69,8 +69,7 @@ It is a local test credential rather than a secret, and the deployed platform's
 signup policy refuses it.
 
 The provider lives in Vite's development middleware and is structurally absent
-from any production `.zship`. Full contract:
-[`auth-dev-tier.md`](auth-dev-tier.md).
+from any production `.zship`.
 
 ## Migration-first type generation (`gen-types`)
 
