@@ -186,3 +186,7 @@ workspace = true
 [[test]]
 name = "deployment_holds"
 path = "tests/deployment_holds.rs"
+
+[[test]]
+name = "control_boot_test"
+path = "tests/control_boot_test.rs"
