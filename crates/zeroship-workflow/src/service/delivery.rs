@@ -761,7 +761,13 @@ pub(super) fn attempt_budget(
     )
 }
 
-async fn creator_deadline(
+/// Re-anchor a creator-clock deadline onto the monotonic clock, never past the
+/// captured authority that authorized the task. The cap is the binding term
+/// only when the creator clock disagrees with the monotonic one: on both call
+/// paths below the deadline is itself derived from the captured lease, and the
+/// clock read converting it back is taken after the read it was built from, so
+/// an agreeing clock always lands inside the cap on its own.
+pub(super) async fn creator_deadline(
     tx: &mut Transaction,
     deadline: i64,
     cap: Instant,
