@@ -4,6 +4,7 @@ use std::time::Duration;
 mod failure;
 mod host_module;
 mod step_context;
+mod step_retries;
 
 use serde_json::Value;
 use zeroship_runtime::plugin::NativePlugin;

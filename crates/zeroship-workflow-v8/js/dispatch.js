@@ -362,6 +362,26 @@ function wfHasCompensator(config) {
     return !!(config && typeof config === "object" && typeof config.compensate === "function");
 }
 
+// `StepConfig.retries.maxAttempts`, as a count of executions rather than of
+// re-executions: one means the step is run once, the shape a step with no
+// declared retries already has. The host checks it against the app's ceiling and
+// owns the attempt count; this only reads what the body declared.
+//
+// An unusable spelling is refused here rather than rounded, so a creator who
+// wrote `maxAttempts: 0` or `"3"` learns it instead of silently getting one
+// attempt.
+function wfRetryMaxAttempts(config) {
+    if (!config || typeof config !== "object" || config.retries == null) return 1;
+    const retries = config.retries;
+    if (typeof retries !== "object" || Array.isArray(retries)) return undefined;
+    const declared = retries.maxAttempts;
+    if (declared === undefined) return 1;
+    if (typeof declared !== "number" || !Number.isSafeInteger(declared) || declared < 1) {
+        return undefined;
+    }
+    return declared;
+}
+
 // Step identity, as the journal records it. `generation` is load-bearing: a
 // restart copies the retained prefix into a new generation and re-executes the
 // rest at the same ordinals, so a key without it would let a creator's
@@ -547,12 +567,22 @@ class ZsJournalBackedStep {
                 ));
             }
         }
+        const maxAttempts = wfRetryMaxAttempts(config);
+        if (maxAttempts === undefined) {
+            return Promise.reject(wfErr(
+                "step.run retries.maxAttempts must be a positive integer",
+                500,
+                "WORKFLOW_DEFINITION_ERROR",
+            ));
+        }
         const issued = this.#issue(name, "run");
         if (issued.record) {
             this.#registerCompensator(issued.record, config);
             return this.#recordPromise(issued.record);
         }
-        return this.#registerFrontier(this.#runFrontier(issued, name, config, fn, timeoutMs));
+        return this.#registerFrontier(
+            this.#runFrontier(issued, name, config, fn, timeoutMs, maxAttempts),
+        );
     }
 
     sideEffect(name, fn) {
@@ -699,7 +729,7 @@ class ZsJournalBackedStep {
         throw new ZsWorkflowContinueAsNewSignal(input);
     }
 
-    async #runFrontier(issued, name, config, fn, timeoutMs) {
+    async #runFrontier(issued, name, config, fn, timeoutMs, maxAttempts) {
         const bodyPromise = this.#invokeStepBody(fn, this.#stepContext(issued, name));
         const bounded = wfBoundStepBody(bodyPromise, timeoutMs, config?.timeout);
         try {
@@ -726,6 +756,7 @@ class ZsJournalBackedStep {
                 nameOccurrence: issued.nameOccurrence,
                 state: "failed",
                 error: wfSerializeError(e),
+                maxAttempts,
             };
         } finally {
             bounded.cancel();
@@ -1161,7 +1192,12 @@ function workflowFrontierResult(envelope, outcome) {
         };
     }
     if (outcome.kind === "run" && outcome.state === "failed") {
-        return { ...base, kind: "RunFailed", error: outcome.error };
+        return {
+            ...base,
+            kind: "RunFailed",
+            error: outcome.error,
+            maxAttempts: outcome.maxAttempts ?? 1,
+        };
     }
     if (outcome.kind === "sleep") {
         return { ...base, kind: "Sleep", wakeAt: outcome.wakeAt };
