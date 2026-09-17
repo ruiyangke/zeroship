@@ -14,7 +14,7 @@ import { table, t, now, grant } from "@zeroship/migrate";
 // is not representable in the egress grammar at all (`*.example.com` does not
 // parse), so there is nothing left for the catalog to answer. That file has been
 // applied to a deployed database and its source bytes are hashed in the journal,
-// so it cannot be edited to say so - see the frozen-migration rule in AGENTS.md.
+// so it cannot be edited to say so.
 //
 // `destination` is TEXT, not `inet`/`cidr`. The native types would need
 // compio-postgres's `with-cidr-0_3` feature, which no workspace crate enables,

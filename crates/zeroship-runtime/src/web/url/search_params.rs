@@ -172,8 +172,8 @@ impl URLSearchParams {
 ///     deref. The wrapper's strong reference keeps the Box<URL> alive
 ///     (its weak finalizer runs only after GC).
 ///   - No concurrent `&mut URL` may exist for the local borrow's
-///     lifetime. V8 is single-threaded per isolate (AGENTS.md key
-///     invariant), so the only risk is reentrance within this thread —
+///     lifetime. V8 is single-threaded per isolate, so the only risk is
+///     reentrance within this thread —
 ///     callers must not call back into JS while the borrow is live.
 ///
 /// The previous API returned `&'a mut URL` with an unbounded `'a`

@@ -44,7 +44,7 @@
 //!
 //! The `zeroship-core` typed-key macro `clippy.toml` points at is not reachable from
 //! this crate for the reason `build.rs` records: it would be a NORMAL dependency here,
-//! and `zeroship-core` reaches tokio through `cyper -> hyper`, which `AGENTS.md` permits
+//! and `zeroship-core` reaches tokio through `cyper -> hyper`, which is permitted
 //! only for `kind == "dev"`. That constraint is why the value is passed in rather than
 //! re-read through a typed key.
 
