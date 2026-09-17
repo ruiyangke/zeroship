@@ -346,7 +346,7 @@ async fn claim_rollback(fixture: &Fixture) {
         assignment_revision: authority.revision,
     };
     let result = queue
-        .claim_authorized(&identity, |tx| {
+        .claim_authorized(&identity, support::delivery_ceiling(), |tx| {
             calls.set(calls.get() + 1);
             let check = calls.get();
             let observed = authority.clone();
