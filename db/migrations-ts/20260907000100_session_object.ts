@@ -5,8 +5,7 @@ const userIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
   sessions: ["person_id"],
 };
 
-// The session object and the grant it hangs off. Step 5 of
-// docs/proposals/2026-09-05-auth-foundation-redesign.md.
+// The session object and the grant it hangs off.
 //
 // ONE ROW IS THE WHOLE CREDENTIAL. A session carries its own rotating secret
 // (`secret_hash` + `secret_key_version`), the predecessor that secret replaced
