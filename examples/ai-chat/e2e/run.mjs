@@ -11,12 +11,11 @@
 //
 // Assumes `pnpm dev` is already serving on http://localhost:5173.
 
-// Locate the `playwright` package from the Nix-provided
-// playwright-test bundle so we don't need to add it to node_modules.
-// The flake's PLAYWRIGHT_BROWSERS_PATH points at the browsers; the JS
-// package sits in a sibling /nix/store/playwright-test-*/lib/node_modules
-// path. We `nix-locate`-style probe by spawning `nix shell
-// nixpkgs#playwright-test --command which playwright`.
+// Locate the `playwright` package without adding it to the example's
+// node_modules. The `playwright` CLI on PATH is resolved to the package
+// that owns it, which works for any install whose CLI sits in `bin/`;
+// otherwise Node resolution finds a package in node_modules. Both prefer
+// the ESM entry, because the CJS one drops the named exports.
 import { readdirSync, existsSync, readlinkSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { createRequire } from "node:module";
@@ -25,42 +24,40 @@ function resolvePlaywrightPath() {
   // 1. Honour explicit PLAYWRIGHT_PATH env if set (override).
   if (process.env.PLAYWRIGHT_PATH) return process.env.PLAYWRIGHT_PATH;
 
-  // 2. Inside the flake's dev shell, the `playwright` CLI is on PATH
-  //    and is a symlink into the playwright-test store path. Resolve
-  //    it and walk up to /lib/node_modules/playwright/index.mjs.
+  // 2. The `playwright` CLI on PATH, resolved to the package that owns
+  //    it. The CLI sits in `bin/` beside `lib/node_modules/`, so
+  //    walking up from the resolved binary finds the ESM entry without
+  //    naming any install root.
   try {
     const cli = execSync("which playwright", { encoding: "utf8" }).trim();
     if (cli) {
-      // Resolve symlinks: e.g. /run/current-system/sw/bin/playwright
-      // → /nix/store/<hash>-playwright-test-*/bin/playwright.
       let real = cli;
       try { real = readlinkSync(cli) || cli; } catch (_) { /* not a symlink */ }
-      // Walk up from `bin/playwright` to the package root.
-      const storeRoot = real.replace(/\/bin\/playwright.*$/, "");
-      const p = `${storeRoot}/lib/node_modules/playwright/index.mjs`;
+      const root = real.replace(/\/bin\/playwright.*$/, "");
+      const p = `${root}/lib/node_modules/playwright/index.mjs`;
       if (existsSync(p)) return p;
     }
   } catch (_) { /* fall through */ }
 
-  // 3. Fallback: scan /nix/store for any playwright-test-* package.
+  // 3. A package installed in node_modules, preferring the ESM entry
+  //    that carries the named exports.
   try {
-    const candidates = readdirSync("/nix/store").filter((d) =>
-      d.startsWith("playwright-test-"),
+    const resolved = createRequire(import.meta.url).resolve("playwright");
+    const esm = resolved.replace(/\.js$/, ".mjs");
+    return existsSync(esm) ? esm : resolved;
+  } catch (_) {
+    throw new Error(
+      "Couldn't locate the `playwright` package: no `playwright` CLI on PATH " +
+        "and it does not resolve from node_modules. Install it " +
+        "(`pnpm add -D playwright`), set PLAYWRIGHT_PATH, or enter `nix develop`.",
     );
-    for (const d of candidates) {
-      const p = `/nix/store/${d}/lib/node_modules/playwright/index.mjs`;
-      if (existsSync(p)) return p;
-    }
-  } catch (_) { /* fall through */ }
-
-  // 4. Last resort: plain Node resolution (works if `playwright` is in
-  //    node_modules — handy outside Nix).
-  const require = createRequire(import.meta.url);
-  return require.resolve("playwright");
+  }
 }
 
 const playwrightPath = resolvePlaywrightPath();
-const { chromium } = await import(playwrightPath);
+const playwright = await import(playwrightPath);
+// The package's CJS entry exposes chromium only under `default`.
+const { chromium } = playwright.chromium ? playwright : playwright.default;
 
 function resolveHeadlessShell() {
   if (process.env.CHROMIUM_PATH) return process.env.CHROMIUM_PATH;
