@@ -264,6 +264,28 @@ impl TaskExecution for Execution {
     }
 }
 
+/// The grant a leased fixture is built under. Host configuration carries no
+/// deadline at all, so a fixture that needs one registers a remote-style lease
+/// instead, long enough that registration, activation and the first claim run
+/// under it. Tests that turn on a shorter window reissue the same policy
+/// through [`Fixture::shorten_authority`].
+const SETUP_GRANT: Duration = Duration::from_secs(3600);
+
+/// Configured policy when `leased` names no window, a remote-style lease ending
+/// that far out when it does. The revision and content are held constant so a
+/// reissue narrows the window and nothing else.
+fn snapshot(policy: &AppPolicy, leased: Option<Duration>) -> PolicySnapshot {
+    let revision = Revision::try_from(1).unwrap();
+    match leased {
+        None => PolicySnapshot::configuration(revision, policy.clone()),
+        Some(remaining) => {
+            PolicySnapshot::lease(revision, policy.clone(), Instant::now() + remaining)
+        }
+    }
+    .unwrap()
+    .with_ingress_epoch(Some(crate::service::tests::open_epoch()))
+}
+
 struct Fixture {
     directory: tempfile::TempDir,
     deployments: deployments::Deployments,
@@ -271,11 +293,22 @@ struct Fixture {
     app: AppWorkflows,
     job: JobSpec,
     lease: Lease,
+    policy: AppPolicy,
     metadata: Rc<Metadata>,
     probe: Rc<Probe>,
 }
 impl Fixture {
     async fn new(policy: AppPolicy) -> Self {
+        Self::build(policy, None).await
+    }
+
+    /// A fixture whose host authority carries a deadline, as a worker's does
+    /// once its policy comes from the manager rather than from configuration.
+    async fn leased(policy: AppPolicy) -> Self {
+        Self::build(policy, Some(SETUP_GRANT)).await
+    }
+
+    async fn build(policy: AppPolicy, leased: Option<Duration>) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let factory = ConnectionFactory::for_url(&format!(
             "sqlite:{}",
@@ -297,12 +330,7 @@ impl Fixture {
             .unwrap()
             .with_deployments(deployments.binding(&[&app_id]));
         service
-            .fixture_register(
-                &app_id,
-                PolicySnapshot::configuration(Revision::try_from(1).unwrap(), policy)
-                    .unwrap()
-                    .with_ingress_epoch(Some(crate::service::tests::open_epoch())),
-            )
+            .fixture_register(&app_id, snapshot(&policy, leased))
             .await
             .unwrap();
         deployments
@@ -340,10 +368,25 @@ impl Fixture {
             app,
             job,
             lease,
+            policy,
             metadata: Rc::new(Metadata::default()),
             probe: Rc::new(Probe::default()),
         }
     }
+
+    /// Reissue this fixture's policy with a shorter window, as a manager does
+    /// when the grant it can still stand behind has narrowed. Only a leased
+    /// fixture can: a binding cannot switch between configured and leased
+    /// authority, and configuration has no window to narrow.
+    fn shorten_authority(&self, remaining: Duration) {
+        self.service
+            .fixture_install(
+                self.app.app_id(),
+                snapshot(&self.policy, Some(remaining)),
+            )
+            .unwrap();
+    }
+
     fn slot(&self, execution_timeout: Duration) -> DeliverySlot<Metadata> {
         DeliverySlot::new(
             self.metadata.clone(),
@@ -575,6 +618,60 @@ async fn an_attempt_resolved_before_its_renewal_delay_reports_no_renewal() {
     let fixture = Fixture::new(AppPolicy::default()).await;
     fixture.probe.mode.set(Mode::Complete);
     let mut slot = fixture.slot(MANAGER_LEASE / 32);
+    assert!(matches!(
+        slot.run(&fixture.app, fixture.lease.clone()).await.unwrap(),
+        DeliveryOutcome::Settled { .. }
+    ));
+    assert_eq!(fixture.metadata.renewals.get(), 0);
+}
+
+/// Captured host authority can end an attempt before either the manager lease
+/// or the configured execution bound would, and the manager counts an attempt
+/// into its delivery ceiling only on that attempt's first renewal. A renewal
+/// therefore has to land inside an attempt the authority window shortens, or
+/// the ceiling stops advancing while redelivery continues and nothing bounds
+/// the retries. Two independent caps hold it: the creator task lease is
+/// capped by the same deadline when the delivery is accepted, and the phase
+/// this delay is a fraction of is built from the capped execution bound.
+#[compio::test]
+async fn authority_ending_before_the_lease_still_renews_inside_the_attempt() {
+    let fixture = Fixture::leased(AppPolicy::default()).await;
+    fixture.probe.mode.set(Mode::Pending);
+    // Well under the fraction of the lease, and of the execution bound below,
+    // at which a delay blind to the authority window would place the first
+    // renewal.
+    let window = MANAGER_LEASE / 8;
+    fixture.shorten_authority(window);
+    let mut slot = fixture.slot(MANAGER_LEASE);
+    let started = Instant::now();
+    slot.run(&fixture.app, fixture.lease.clone())
+        .await
+        .unwrap_err();
+    // An execution that never resolves on its own ends on the authority window
+    // here, not on the execution bound the slot was configured with. Without
+    // this the case would still pass while the window stopped binding anything.
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < MANAGER_LEASE / 2,
+        "the attempt outlived the authority window that had to end it: {elapsed:?}"
+    );
+    assert!(
+        fixture.metadata.renewals.get() > 0,
+        "an attempt that outlived its renewal delay reported nothing to the manager"
+    );
+    assert!(fixture.metadata.requests.borrow().is_empty());
+}
+
+/// The control for the renewal above, differing only in whether the attempt
+/// outlives its renewal delay. An attempt that resolves first reports nothing,
+/// which is what keeps a renewal evidence that an execution began rather than
+/// evidence that a delivery was made.
+#[compio::test]
+async fn authority_shortened_attempt_resolved_first_reports_no_renewal() {
+    let fixture = Fixture::leased(AppPolicy::default()).await;
+    fixture.probe.mode.set(Mode::Complete);
+    fixture.shorten_authority(MANAGER_LEASE / 8);
+    let mut slot = fixture.slot(MANAGER_LEASE);
     assert!(matches!(
         slot.run(&fixture.app, fixture.lease.clone()).await.unwrap(),
         DeliveryOutcome::Settled { .. }
