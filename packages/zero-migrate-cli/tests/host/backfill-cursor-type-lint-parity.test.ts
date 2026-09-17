@@ -1,9 +1,8 @@
 // An unsupported backfill cursor type is refused at LINT, not only at apply.
 //
-// F653. `writing-migrations.md` states the rule plainly: "Floating-point, JSON,
-// binary, and geometric types are not supported backfill cursors." The rule
-// HOLDS at apply -- measured with the cursor column carrying a UNIQUE constraint
-// so its TYPE is the only variable:
+// Floating-point, JSON, binary, and geometric types are not supported backfill
+// cursors. The rule HOLDS at apply -- measured with the cursor column carrying a
+// UNIQUE constraint so its TYPE is the only variable:
 //
 //   double (unique key)  REFUSED  cursor component "c" has unsupported ordered type
 //   int    (unique key)  APPLIED
@@ -13,9 +12,8 @@
 // the `createTable` declaring `c` as `double` sits in the same directory and is
 // available offline. Lint has the information and did not apply the rule.
 //
-// `docs/cli.md` cites closing exactly this shape as a fix -- a migration that
-// "previously passed lint and failed only at apply" now fails lint. F627 was the
-// same shape earlier in this review: green CI, broken deploy.
+// Lint must catch this shape: a migration that would otherwise pass lint and
+// fail only at apply.
 //
 // WHY THIS FILE HAS FOUR ARMS. The reason the finding sat open is a real
 // tension: the refusal comes from the planner, which reads the LIVE catalog, and

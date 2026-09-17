@@ -99,9 +99,9 @@ export type {
 // lowers to a native `DROP VIEW IF EXISTS`, which does not change any of this.
 // Does NOT cover
 // `dropTrigger`'s separate `ifExists` option, which is a native clause on all
-// three targets. See `docs/writing-migrations.md` (existence-guard section).
+// three targets.
 
-// ── Sensitive-data column facets (#173/#174) ──
+// ── Sensitive-data column facets ──
 //
 // The closed token unions (`MaskKind` / `Classification` / `VectorMetric`) are
 // transcribed in the wire layer (`./generated/ir.ts`, mirroring the engine schema)
@@ -1065,10 +1065,10 @@ export interface TableOptions {
 export type ExclusionTarget = string | ExprFn | ExprChain | Expr;
 /** Column index element object form. Use `order: "desc"` to render `col DESC`;
  *  `order: "asc"` and omitted order serialize as the default ASC shape. */
-/** No `nulls`: `dialects.md` states "Per-element `nulls` is unsupported", and the
- *  renderer never read it — a `{ column, nulls }` element emitted plain
- *  `btree (col)`, silently dropping the requested null ordering. `order`,
- *  `opclass` and `collation` DO render here and stay. */
+/** No `nulls`: per-element `nulls` is unsupported, and the renderer never read
+ *  it — a `{ column, nulls }` element emitted plain `btree (col)`, silently
+ *  dropping the requested null ordering. `order`, `opclass` and `collation` DO
+ *  render here and stay. */
 export interface IndexColumnElementArg {
   column: string;
   order?: IndexSortOrder;
@@ -1076,10 +1076,10 @@ export interface IndexColumnElementArg {
   collation?: string;
 }
 
-/** Only `expr`: `dialects.md` states "Expression elements cannot carry their own
- *  order, operator class, collation, or null ordering", and that is exactly what
- *  the renderer does — every one of those four was accepted and discarded, so an
- *  authored `{ expr, order: "desc" }` produced an ASCENDING index. */
+/** Only `expr`: expression elements cannot carry their own
+ *  order, operator class, collation, or null ordering — every one of those four
+ *  was accepted and discarded, so an authored `{ expr, order: "desc" }`
+ *  produced an ASCENDING index. */
 export interface IndexExprElementArg {
   expr: IndexExprFn;
 }
@@ -1296,12 +1296,11 @@ export interface IndexAddArgs extends VendorIndexAttributeArgs {
   nullsNotDistinct?: boolean;
 }
 
-/** No `concurrently`: the engine renders a plain `DROP INDEX`, and
- *  `dialects.md` / `writing-migrations.md` both state that concurrent index drop
- *  is unsupported. Accepting the option and then DISCARDING it at lower time would
- *  give an author who asked for a non-blocking drop the ACCESS EXCLUSIVE one
- *  silently. Refusing the key is the fail-closed behaviour the sibling
- *  `index(n).add(...)` already has. */
+/** No `concurrently`: the engine renders a plain `DROP INDEX`, and concurrent
+ *  index drop is unsupported. Accepting the option and then DISCARDING it at
+ *  lower time would give an author who asked for a non-blocking drop the
+ *  ACCESS EXCLUSIVE one silently. Refusing the key is the fail-closed behaviour
+ *  the sibling `index(n).add(...)` already has. */
 export interface IndexDropArgs {
   ifExists?: boolean;
   schema?: string;

@@ -77,13 +77,12 @@ if [ "$FRESH_RC" = "2" ]; then
 fi
 
 # --- stack ------------------------------------------------------------------
-# PER-RUN ports and a PER-RUN container name. These were the constants
-# 9137/8117/8031/5471 and `zs-e2e-bslash-pg`, and all five are shared state:
-# :5471 is also tests/e2e_metering_billing.sh:102's Postgres, and a second run
-# of THIS harness collides with the first on every one of them. Worse, the
-# constants forced `stack_up` to open by SIGKILLing whatever held them, which
-# on this box means a peer agent's server (tests/lib/e2e_ports.sh has the
-# measurement). Allocated ports have nothing to reclaim, so nothing is killed.
+# PER-RUN ports and a PER-RUN container name. Fixed constants are shared state:
+# a second run of THIS harness collides with the first on every one, and a fixed
+# Postgres port also collides with tests/e2e_metering_billing.sh. Worse, fixed
+# constants force `stack_up` to open by SIGKILLing whatever held them, which on
+# this box means a peer agent's server. Allocated ports have nothing to reclaim,
+# so nothing is killed.
 #
 # `stack_up` reads and re-exports these, and every use of them in this file is
 # AFTER `stack_up` returns, so the allocated values are what the requests go to.
@@ -114,8 +113,8 @@ mint_creator_bearer || { echo "mint_creator_bearer failed"; exit 1; }
 APPJS="$WORK/app.js"
 cat > "$APPJS" <<'JS'
 export default {
-  // `rpc` is the platform-standard surface (docs/reference/zeroship-standard.md
-  // `default = { fetch?, rpc? }`). Native runtime dispatch routes
+  // `rpc` is the platform-standard surface (`default = { fetch?, rpc? }`).
+  // Native runtime dispatch routes
   // `/__zeroship/v1/<id>` from `new URL(request.url).pathname`, so T7 exercises
   // the platform's routing, not this fixture's.
   rpc: {

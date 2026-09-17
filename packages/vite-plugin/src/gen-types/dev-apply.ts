@@ -2,11 +2,10 @@
  * Apply the committed migrations to the dev SQLite file AHEAD of the worker.
  *
  * This makes the dev tier match the platform: on Postgres the `migrated`
- * service applies the schema at deploy, before the app serves. On SQLite the worker used to create the
- * schema itself, lazily, one collection at a time, in registration order —
- * which is backwards, and is the root of the "SCHEMA-INIT" class of dev-only
- * bugs. See
- * docs/proposals/2026-08-09-dev-sqlite-migration-apply-ahead-of-runtime.md.
+ * service applies the schema at deploy, before the app serves. On SQLite the
+ * schema must likewise exist before the app serves — creating it lazily inside
+ * the worker, one collection at a time in registration order, is backwards and
+ * is the root of the "SCHEMA-INIT" class of dev-only bugs.
  *
  * PATHS — these are the exact files the worker opens, verified rather than
  * assumed:
@@ -45,8 +44,8 @@ export const DEV_STATE_DIR = ".zeroship";
  * emit ceiling in `./confined-ceiling.ts` and the deployed server ceiling take.
  * That the three describe the SAME table is load-bearing: if they disagreed,
  * gen-types' descriptor and the applied schema would disagree, and the engine's
- * own contract is that emit and apply are byte-identical. They no longer can:
- * there is one copy of the rule and everything concatenates it.
+ * own contract is that emit and apply are byte-identical. There is one copy of
+ * the rule and everything concatenates it.
  *
  * The grants are what the emit path does NOT need, because emit renders no DDL:
  * creating tables, renaming, and destructive ops. Deliberately ABSENT are
@@ -82,13 +81,7 @@ scope = "all"
  * overridable (shell, then `.env`, then the dev default), and applying to a
  * different file than the worker opens is a silent failure: the apply reports
  * `applied: [...]`, the boot log looks healthy, and every data call still fails
- * with `no such table`. That is exactly what happened to
- * `tests/e2e-browser`, which gives each demo a private state dir via
- * `DATABASE_URL=sqlite:<stateDir>/dev.sqlite` so two runs cannot collide -- the
- * apply wrote to `examples/db-todos/.zeroship` while the worker read
- * `<stateDir>`, and the suite failed with
- *
- *     db: no such table: default.users
+ * with `no such table`.
  *
  * Mirrors `SqliteBackend::open`: a `sqlite:` URL naming a FILE makes that file
  * the session, and `db_dir` its parent. A relative path is relative to `root`,
@@ -147,13 +140,9 @@ export async function applyMigrationsToDevSqlite(opts: {
   // The apply runs BEFORE the runtime spawns, and `.zeroship/` is normally
   // created by the runtime — so on a cold checkout (or after `rm -rf
   // .zeroship`) the directory does not exist yet and SQLite cannot create a
-  // file inside it. Measured, not hypothesised:
-  //
-  //   dev migration apply FAILED: open main (app file):
-  //   unable to open database file: …/.zeroship/zs-<app-id>.sqlite
-  //
-  // Owning the directory here keeps the ordering one-way: the apply depends on
-  // nothing the runtime has done, which is the whole point of applying ahead.
+  // file inside it. Owning the directory here keeps the ordering one-way: the
+  // apply depends on nothing the runtime has done, which is the whole point of
+  // applying ahead.
   await mkdir(dirname(appPath), { recursive: true });
 
   const envelopes = await recordMigrationsDir(opts.migrationsDir);

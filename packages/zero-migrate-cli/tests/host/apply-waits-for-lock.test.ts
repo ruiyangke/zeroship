@@ -2,22 +2,21 @@
 //
 // `cli.test.ts` covers the reader side thoroughly: `status` and `plan` try for
 // the lock without waiting, report the holder, and read nothing. The writer side
-// is the opposite promise, and `docs/cli.md` states it: "apply and squash still
-// wait for the lock: they are the writers the lock exists to serialize, and a
-// writer that gave up would leave the deploy undone."
+// is the opposite promise: `apply` and `squash` wait for the lock. They are the
+// writers the lock exists to serialize, and a writer that gave up would leave
+// the deploy undone.
 //
-// Nothing tested that. It matters more than the reader side does, because the
-// failure modes are worse in both directions: a writer that gave up would leave
-// a deploy half-done, and a writer that waited on the WRONG key would run
-// concurrently with the deploy it was supposed to queue behind.
+// The writer side matters more than the reader side, because the failure modes
+// are worse in both directions: a writer that gave up would leave a deploy
+// half-done, and a writer that waited on the WRONG key would run concurrently
+// with the deploy it was supposed to queue behind.
 //
 // THE LOCK IS HELD BY HAND rather than by a competing apply. A real apply holds
-// it for a few hundred milliseconds - most of a CLI run is process startup and
-// IR lowering, not database work - and a cold CLI takes about a second to reach
-// the acquire. Racing that window would make this test flaky in the direction
-// that matters least: it would pass when it missed. Taking the lock from a known
-// session makes the wait deterministic, and lets the test assert that the key it
-// took really is the one apply contends on.
+// it only briefly - most of a CLI run is process startup and IR lowering, not
+// database work - so racing that window would make this test flaky in the
+// direction that matters least: it would pass when it missed. Taking the lock
+// from a known session makes the wait deterministic, and lets the test assert
+// that the key it took really is the one apply contends on.
 //
 // The key is the two signed halves of `hashtextextended(project_id, 0)`, and the
 // project id is the schema. That is asserted rather than assumed - if it were

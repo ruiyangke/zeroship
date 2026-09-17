@@ -11,8 +11,7 @@
  *   });
  *   handle.unsubscribe();   // or controller.abort()
  *
- * Wire — see `docs/proposals/rpc.md` §6 (Subscription wire) and
- * `crates/zeroship-runtime/src/rpc/subscription.rs`.
+ * Wire — see `crates/zeroship-runtime/src/rpc/subscription.rs`.
  */
 
 import { test, describe } from "node:test";
