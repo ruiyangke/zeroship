@@ -2,9 +2,8 @@
 //!
 //! [`super::names::EnvKey`] covers ONE population: zeroship platform startup
 //! settings, whose environment spelling is derived (`ZEROSHIP_` plus the
-//! canonical identity). Step 4 of
-//! `docs/proposals/2026-08-11-config-name-alignment.md` has to account for
-//! every OTHER first-party read as well - `PATH`, `AWS_ACCESS_KEY_ID`,
+//! canonical identity). Every OTHER first-party read must be accounted for as
+//! well - `PATH`, `AWS_ACCESS_KEY_ID`,
 //! `RUST_LOG`, a test's `PG_TEST_URL`, a build script's `OUT_DIR` - and those
 //! have literal names owned by somebody else. Projecting them from a canonical
 //! identity would be a lie, and leaving them as bare `std::env::var` calls is
