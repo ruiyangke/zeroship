@@ -1,16 +1,15 @@
 // An outstanding rename contract blocks a deploy that touches a DIFFERENT table.
 //
-// WRITTEN TO FAIL WHEN THIS CHANGES, not to bless it. It records today's answer so
-// a change lands with a decision attached, the way
+// WRITTEN TO FAIL WHEN THIS CHANGES, not to bless it. It records the current answer
+// so a change lands with a decision attached, the way
 // `guard-adoption-blind-spot.test.ts` does for its own open question.
 //
 // What is settled and correct: a deploy touching the SAME table as an outstanding
 // contract is refused. `pending-contract-remediation.test.ts` covers that, and it
 // is the behaviour the gate exists for.
 //
-// What this file measures is the neighbouring case nothing covered — a deploy
-// whose new migration creates an unrelated table. Today it is refused too, with
-// the same message:
+// The neighbouring case is a deploy whose new migration creates an unrelated
+// table. It is refused too, with the same message:
 //
 //   table `people` has an in-flight online rename (contract pending from a prior
 //   deploy, version `mig_…`); apply that contract before authoring further changes
@@ -23,11 +22,10 @@
 //
 // WHY IT MIGHT BE WRONG. `PendingContractRefusal`'s own doc says it fires "when the
 // current deploy's op list touches a table that still has an outstanding
-// online-rename contract"; this deploy's op list does not. `docs/troubleshooting.md`
-// titles the section "A TABLE is blocked by a pending rename". And the
-// expand/contract window spans deploys BY DESIGN — so while it is open, a shared
-// migrations directory cannot ship any schema change at all, which is a heavier
-// constraint than the table-scoped one the documentation describes.
+// online-rename contract"; this deploy's op list does not. The refusal is intended
+// to be table-scoped. And the expand/contract window spans deploys BY DESIGN — so
+// while it is open, a shared migrations directory cannot ship any schema change at
+// all, which is a heavier constraint than the table-scoped one.
 //
 // WHY IT MIGHT BE RIGHT. Fail-closed is the house style, the refusal names a
 // concrete remediation, and a bundle-scoped gate cannot be fooled by an op list

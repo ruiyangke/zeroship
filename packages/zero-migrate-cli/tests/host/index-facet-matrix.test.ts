@@ -1,11 +1,11 @@
 // Every index-facet row of the support matrix, checked against a real database.
 //
-// `docs/support-matrix.md` publishes nine index facets across three dialects. The
-// markdown is generated from `model/support.rs` and a committed test keeps the two
-// in sync - but nothing checks that table against a database, so a `No` that was
-// really a silent drop, or a `Yes` that never reached the emitter, would leave
-// every existing gate green. `unsupported-constraints-refuse.test.ts` closed that
-// hole for the integrity-constraint rows; this file closes it for the index rows.
+// The support matrix publishes nine index facets across three dialects. It is
+// generated from `model/support.rs` and a committed test keeps the two in sync -
+// but nothing checks that table against a database, so a `No` that was really a
+// silent drop, or a `Yes` that never reached the emitter, would leave every
+// existing gate green. `unsupported-constraints-refuse.test.ts` closed that hole
+// for the integrity-constraint rows; this file closes it for the index rows.
 //
 // The matrix rows under test:
 //

@@ -1,15 +1,7 @@
 // Composite and non-`id` foreign keys, applied to a real MySQL server.
 //
-// `docs/support-matrix.md` publishes both as `Yes` for all three dialects:
-//
-//   Composite foreign key                    | Yes | Yes | Yes
-//   Foreign key referencing a non-`id` column | Yes | Yes | Yes
-//
-// `TODO.md` said the opposite - "MySQL 8: ... no composite/non-id FK" - and used
-// it to argue where roadmap effort should go. Nothing tested either claim against
-// MySQL, so the contradiction sat there with no way to settle it. The matrix is
-// right: both shapes apply and land as real constraints. The TODO entry was
-// pointing effort at something already shipped, and has been corrected.
+// Both shapes are supported on all three dialects (PostgreSQL, MySQL, SQLite),
+// and both apply and land as real constraints.
 //
 // This is the MySQL counterpart to what `index-facet-matrix.test.ts` does for the
 // index rows: a matrix cell nothing exercises against a server is a claim, not a

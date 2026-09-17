@@ -2,14 +2,11 @@
 //
 // A guard (`ifNotExists`/`ifExists`) is not a native `IF NOT EXISTS` clause. The
 // engine probes the live catalog and then runs, no-ops, or fails on drift - and
-// what that means differs per dialect, sharply enough that
-// `docs/writing-migrations.md` tells authors not to assume and to read the
-// preview label instead.
+// what that means differs per dialect, sharply enough that an author must read
+// the preview label instead of assuming.
 //
-// That instruction named a `--sql` preview. There is no `--sql` flag on any verb:
-// `zero-migrate plan --sql` answers `unknown flag --sql`. So the one sentence
-// telling an author to verify rather than guess pointed at a command that does
-// not exist. The real one is `lint --explain --dialect <target>`.
+// The preview is `lint --explain --dialect <target>`: there is no `--sql` flag on
+// any verb (`zero-migrate plan --sql` answers `unknown flag --sql`).
 //
 // The label is the whole point, and it is what nothing tested. `cli.test.ts` has
 // a `lint --explain` arm, but it asserts the rendered `CREATE TABLE` and the
@@ -18,8 +15,8 @@
 //
 // So this asserts the label, on all three dialects, and asserts that MySQL's
 // differs. Checking only that some label appears would pass on a build that
-// emitted one fixed string everywhere, which is precisely the "assume" the
-// documentation is warning against.
+// emitted one fixed string everywhere, which is exactly the assumption the label
+// exists to prevent.
 //
 // GATE: none. `lint` is offline, so this runs everywhere.
 
@@ -125,8 +122,8 @@ test("lint --explain labels a guarded statement on every dialect", () => {
 
 test("the MySQL label carries a caveat the other two do not", () => {
   // Checking only that SOME label appears would pass on a build emitting one
-  // fixed string everywhere. The documented reason to read the label at all is
-  // that MySQL differs, so the difference is the property worth pinning.
+  // fixed string everywhere. The reason to read the label at all is that MySQL
+  // differs, so the difference is the property worth pinning.
   const work = project(true);
   try {
     const mysql = run(work, ["lint", "--explain", "--dialect", "mysql"]).output;
@@ -174,9 +171,8 @@ test("an unguarded statement gets no runtime-resolved label", () => {
 });
 
 test("no verb accepts the --sql flag the documentation used to name", () => {
-  // Pins the defect that prompted this file. If a `--sql` preview is ever added,
-  // this fails and the documentation can name it again - deliberately, rather
-  // than by describing a flag that was never there.
+  // Pins the current surface: no verb accepts `--sql`. If a `--sql` preview is
+  // ever added, this fails and can be removed deliberately.
   const work = project(true);
   try {
     for (const verb of ["plan", "lint", "apply", "status"]) {

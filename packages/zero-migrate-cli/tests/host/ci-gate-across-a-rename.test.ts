@@ -1,8 +1,4 @@
-// The documented CI gate, through the full life of an online rename.
-//
-// `docs/operations.md` puts `status --strict` in the pipeline:
-//
-//   zero-migrate status --env production --strict --json > status.json || exit 1
+// The CI gate, through the full life of an online rename.
 //
 // `documented-ci-gate.test.ts` covers it idle and under lock contention. Neither
 // it nor anything else follows the gate across a RENAME, and a rename is the one

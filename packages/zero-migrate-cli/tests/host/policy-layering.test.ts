@@ -1,8 +1,7 @@
 // What a later policy layer can and cannot do to the root charter.
 //
-// `docs/policy.md`: "Grants become tighter as they move downward through
-// admission. Requirements and injections accumulate; an untrusted draft cannot
-// remove them."
+// Grants narrow as a policy moves downward; requirements and injections
+// accumulate, and an untrusted draft cannot remove them.
 //
 // That is the security property the whole layered-policy design exists for. The
 // root charter is operator-owned; later layers are project drafts an application

@@ -1,24 +1,19 @@
 // A mandatory table-shape injection lands, and the preview shows the same table
 // apply creates.
 //
-// `docs/cli.md` on `plan`: it prints each pending migration's rendered SQL "with
-// the selected policy's table-shape injection already applied, so the previewed
-// `CREATE TABLE` is the one apply runs."
+// `plan` prints each pending migration's rendered SQL with the selected policy's
+// table-shape injection already applied, so the previewed `CREATE TABLE` is the
+// one apply runs.
 //
-// That is two claims, and neither had a test. A mandatory `[[inject]]` is an
-// operator-enforced invariant - "every table in this schema carries
-// `created_at`" - imposed on migrations the operator did not write. Both failure
-// modes are quiet:
+// A mandatory `[[inject]]` is an operator-enforced invariant - "every table in
+// this schema carries `created_at`" - imposed on migrations the operator did not
+// write. Both failure modes are quiet:
 //
 //   * injection silently not happening on apply voids the mandate, and the
 //     tables that are missing the column look exactly like the ones that are not;
 //   * injection happening on apply but not in the preview means review passes on
 //     a `CREATE TABLE` that is not the one that runs, which is the whole reason
 //     the preview exists.
-//
-// The suite had the opposite case only: `e2e-pg.test.ts` asserts that under
-// `noInjectPolicy` no policy-managed column appears. Nothing exercised an
-// injecting charter end to end.
 //
 // Both halves are read from the places that decide them - the preview from the
 // CLI's own stdout, the result from `information_schema` - and compared on COLUMN

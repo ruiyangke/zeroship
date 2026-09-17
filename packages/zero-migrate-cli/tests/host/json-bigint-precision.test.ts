@@ -1,15 +1,14 @@
 // `history --json` promises exact integers, and only a huge one can prove it.
 //
-// docs/cli.md: "`--json` emits the structured reply and serializes exact integer
-// sequence values without precision loss."
+// `--json` emits the structured reply and serializes exact integer sequence
+// values without precision loss.
 //
 // `event_seq` is a `BIGINT GENERATED ALWAYS AS IDENTITY`, so a real journal
-// reaches large values only after more deploys than any test can perform. Every
-// existing assertion therefore runs in the range where a `Number()` conversion is
-// invisible: 1, 2, 3 survive a round trip through a double unchanged. A build
-// that had lost the bigint somewhere would pass all of them.
+// reaches large values only after more deploys than any test can perform; within
+// test reach, small integers survive a round trip through a double unchanged, so
+// a `Number()` conversion is invisible.
 //
-// So this restarts the identity at 2^53 + 1 - the smallest integer a JavaScript
+// This restarts the identity at 2^53 + 1 - the smallest integer a JavaScript
 // double cannot represent, where `Number(9007199254740993) === 9007199254740992`
 // - and requires the JSON to carry it exactly.
 //
@@ -21,7 +20,7 @@
 //
 // The Node API is a different surface with a different answer: `e2e-pg.test.ts`
 // and `driver-pg.test.ts` assert `typeof eventSeq === "bigint"` there, because
-// napi6 can carry one. Neither says anything about the CLI's JSON.
+// napi6 can carry one.
 //
 // GATE: `ZERO_MIGRATE_TEST_PG_URL`.
 

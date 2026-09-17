@@ -7,14 +7,6 @@
 // implicit in the usage block, which lists `[--json]` for lint, plan, rollback,
 // status and history, and omits it for new, apply and resolve.
 //
-// The second claim was FALSE until this file. `--json` was accepted everywhere.
-// On `apply` it did nothing: the command succeeded, stdout carried the human
-// summary, and a pipeline piping that into a parser got a syntax error naming
-// the summary rather than the flag. Every other verb-inappropriate flag is
-// refused by name - `--dialect`, `--explain`, `--strict`, `--commit`,
-// `--registry`, `--policy`, six of them - so this was the one that did not
-// follow the CLI's own pattern.
-//
 // STDOUT PURITY IS CHECKED WITH LOGGING ON. Off, it proves little: nothing was
 // trying to write. `ZERO_MIGRATE_LOG=1` is the setting the help text is actually
 // promising about, and it is the one a debugging operator turns on while their
@@ -44,9 +36,7 @@ const OWNER_APP = "app_json_contract";
 /**
  * Every command that accepts `--json`. Five come from the usage block; `version`
  * does not appear there as a verb - the usage shows the `--version` FLAG form -
- * and `docs/cli.md` documents it separately ("`--json` without `--verbose`
- * leaves `version` output unchanged"). Deriving this list from the usage block
- * alone missed it, and the existing `version` test caught the omission.
+ * and accepts `--json` without `--verbose`, leaving `version` output unchanged.
  */
 const JSON_VERBS = [
   "lint",

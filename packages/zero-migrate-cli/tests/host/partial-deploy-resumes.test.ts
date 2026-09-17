@@ -1,33 +1,24 @@
-// `docs/troubleshooting.md` §"A later file fails after an earlier file succeeds"
-// makes three claims about what survives a failed deploy. Two were documented and
-// unpinned; the third is the one operators most need and the docs never state.
+// What survives a failed deploy, against a live PostgreSQL.
 //
-//   1. INTER-FILE   "Earlier files can remain applied when a later file fails."
-//   2. INTRA-FILE   "A single file can also contain several database changes that
+//   1. INTER-FILE   Earlier files can remain applied when a later file fails.
+//   2. INTRA-FILE   A single file can contain several database changes that
 //                   commit separately, so an error later in that file can leave
-//                   earlier changes applied."
-//   3. RESUMABLE    (undocumented) re-running the SAME deploy after repairing the
-//                   cause skips the completed steps and runs only the failed one.
+//                   earlier changes applied.
+//   3. RESUMABLE    Re-running the SAME deploy after repairing the cause skips the
+//                   completed steps and runs only the failed one.
 //
-// Claim 2 is the hard one to reach, and the first attempt at it proved nothing:
-// the obvious obstacle (a table the later file re-creates) is caught by the FOLD,
-// which projects the pending schema before anything executes. That run failed with
-// `failed to project pending schema after envelope "file_b"` and left NONE of the
-// file's ops applied — a pre-flight refusal, not a partial application. The fold
-// being that good is why claim 2 needs a failure the fold cannot foresee.
+// Claim 2 needs a failure the FOLD cannot foresee: the fold projects the pending
+// schema before anything executes, so an obstacle it can see (a table the later
+// file re-creates) is a pre-flight refusal that leaves NONE of the file's ops
+// applied. The obstacle here is DATA - a unique index over a column holding
+// duplicate rows - which the fold, seeing schema and not rows, passes through: op
+// 0 commits and op 1 fails at the server.
 //
-// So the obstacle here is DATA: a unique index over a column holding duplicate
-// rows. The fold sees schema, not rows, so it passes the file through, op 0
-// commits, and op 1 fails at the server. That is the only shape that exercises
-// what the sentence describes.
+// Claim 3 is the supported recovery: a deliberate retry after fixing the cause
+// resumes rather than failing with `survivor already exists`. A blind retry loop
+// is still wrong.
 //
-// Claim 3 matters because the docs steer the reader the other way — "stop
-// automatic retries ... use a new forward migration". Stopping a blind retry LOOP
-// is sound advice, but a deliberate retry after fixing the cause is the supported
-// recovery, and this pins it: the retry does not fail with `survivor already
-// exists`, it resumes.
-//
-// The failure this is shaped to catch is a partially-applied file that WEDGES —
+// The failure this is shaped to catch is a partially-applied file that WEDGES -
 // where the completed step is replayed on retry and dies on its own object, so the
 // only way out is hand-editing the journal.
 //

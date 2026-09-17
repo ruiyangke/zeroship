@@ -1,7 +1,7 @@
 // A backfill whose cursor values are far above `u32::MAX` visits every row once.
 //
-// `docs/dialects.md` claims: "Integer and decimal cursor values remain exact across
-// the JavaScript boundary." The existing backfill family
+// Integer and decimal cursor values remain exact across the JavaScript boundary.
+// The existing backfill family
 // (`backfill-cursor-ordering`, `-key-proof`, `-selective-cohort`, `-column-kind`)
 // is thorough about ORDER, COHORT and COLUMN CHOICE, and uses small ids throughout.
 // Nothing exercised a cursor whose MAGNITUDE is interesting.
@@ -11,18 +11,16 @@
 // below that exactly — so within the supported domain there is no rounding to lose.
 // This is NOT a precision test and cannot be one.
 //
-// What it does exercise is REPRESENTATION, which is where the real defect in this
-// class lived: F634 found that an integer above `u32::MAX` crossing napi as a JS
-// value arrived as an f64 and was refused as "fractional", with `lint` passing the
-// same migration. A cursor is the value most likely to make that fatal rather than
-// merely loud, because it is written to the journal and read back between batches:
-// a cursor that failed to round-trip would resume in the wrong place, skipping rows
-// or reprocessing them.
+// What it does exercise is REPRESENTATION, the shape where an integer above
+// `u32::MAX` crossing napi as a JS value can arrive as an f64 and be refused as
+// "fractional" while `lint` passes the same migration. A cursor is the value most
+// likely to make that fatal rather than merely loud, because it is written to the
+// journal and read back between batches: a cursor that failed to round-trip would
+// resume in the wrong place, skipping rows or reprocessing them.
 //
 // `batchSize: 1` is the point of the setup. It forces a cursor save and reload
-// between EVERY row, so six rows mean six round-trips rather than one. The ids are
-// six CONSECUTIVE values near 2^53, so a resume that landed even one position off
-// would be visible immediately.
+// between EVERY row. The ids are six CONSECUTIVE values near 2^53, so a resume
+// that landed even one position off would be visible immediately.
 //
 // The observable is a non-idempotent increment, not a flag: `n` must be exactly 1
 // everywhere. A skipped row leaves 0 and a reprocessed row leaves 2, and neither
@@ -55,8 +53,8 @@ const OWNER_APP = "app_bigcursor";
 const TABLE = "cur_t";
 
 /** Six CONSECUTIVE ids just under 2^53 — the top of the engine's exact-integer
- *  contract, and far above the `u32::MAX` cliff F634 was about. Consecutive so a
- *  resume landing one position off is immediately visible. */
+ *  contract, and far above the `u32::MAX` cliff where representation diverges.
+ *  Consecutive so a resume landing one position off is immediately visible. */
 const IDS = Array.from({ length: 6 }, (_, i) => (9007199254739960 + i).toString());
 
 function uniqueNamespace(prefix: string): string {

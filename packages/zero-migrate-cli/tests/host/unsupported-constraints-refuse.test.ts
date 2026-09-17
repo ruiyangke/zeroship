@@ -1,11 +1,11 @@
 // A support-matrix "No" for an integrity constraint must mean REFUSED, never
 // silently dropped.
 //
-// `docs/support-matrix.md` is generated from `model/support.rs`, and a committed
-// test keeps the markdown in sync with that table. So the markdown cannot drift
-// from the table - but NOTHING checks the table against a database. A row could
-// read `No` while the engine quietly emitted a `CREATE TABLE` with the constraint
-// omitted, and every existing gate would stay green.
+// The support matrix is generated from `model/support.rs`, and a committed test
+// keeps the two in sync. So the matrix cannot drift from the table - but NOTHING
+// checks the table against a database. A row could read `No` while the engine
+// quietly emitted a `CREATE TABLE` with the constraint omitted, and every
+// existing gate would stay green.
 //
 // For an integrity constraint that outcome is the dangerous one, and it is
 // dangerous precisely because it is invisible. A refused migration stops the
@@ -13,10 +13,8 @@
 // that looks right, accepts the duplicate or the negative quantity months later,
 // and nothing ever points back at the migration that failed to carry it.
 //
-// Three rows, all `No`, all integrity constraints:
-//
-//   Table-level unique constraint | Yes | Yes | No[^5]
-//   Table-level check constraint  | Yes | No[^3] | No[^3]
+// The two shapes are a table-level unique constraint and a table-level check
+// constraint; both are unsupported on at least one dialect.
 //
 // THE POSTGRESQL ARM IS THE CONTROL AND IS NOT OPTIONAL. "Refused on SQLite and
 // MySQL" also holds for a build where `uniques:` and `checks:` were broken
