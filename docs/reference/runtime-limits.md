@@ -1,127 +1,148 @@
 # Runtime limits
 
-The worker-facing per-app limit shape is `AppRuntimeLimits` in [crates/zeroship-core/src/types.rs](../../crates/zeroship-core/src/types.rs):
-
-- `cpu_limit_ms`
-- `wall_timeout_ms`
-- `heap_limit_mb`
-
-The runtime-side shape is `RuntimeLimits` in [crates/zeroship-runtime/src/core/runtime.rs](../../crates/zeroship-runtime/src/core/runtime.rs):
-
-- `cpu_limit`
-- `wall_timeout`
-- `heap_limit_bytes`
-
-Idle GC is separate. It is a `RuntimeBuilder` knob, not part of `AppRuntimeLimits`.
-
-## Current knobs
-
-| Knob | Where it lives | Struct default |
-| --- | --- | --- |
-| `cpu_limit_ms` | `AppRuntimeLimits` → `RuntimeLimits.cpu_limit` | unset |
-| `wall_timeout_ms` | `AppRuntimeLimits` → `RuntimeLimits.wall_timeout` | unset |
-| `heap_limit_mb` | `AppRuntimeLimits` → `RuntimeLimits.heap_limit_bytes` | 128 MB when unset |
-| `idle_gc_after_ms(ms)` | `RuntimeBuilder` only | 30 s |
-
-**"Struct default" is not what your app gets.** Those are the `Default` impl's
-values for the Rust type. A deployed app is given its PLAN's limits, and an app
-whose plan row is missing or whose `runtime_limits_json` fails to parse falls
-back to the free tier rather than to unbounded — `FREE_TIER_RUNTIME_LIMITS` in
-[crates/zeroship-core/src/types.rs](../../crates/zeroship-core/src/types.rs) exists precisely so
-"the worker therefore never gets `(None, None, None)` (unbounded) for an unpriced
-app".
+Every request an app serves runs inside a budget defined by its plan: a CPU
+budget, a wall-clock timeout, and a JavaScript-heap cap. This page states the
+built-in tiers, what each limit counts, and the error a caller sees when one
+fires. Where a CPU, wall, or heap limit fires the platform answers a JSON error
+of the form `{"message": "<text>", "name": "Error"}`; the request-size refusals
+below use a different, shorter body.
 
 ## Effective limits per plan
 
-From `builtin_plans` in
-[crates/zeroship-control/src/plan_catalog.rs](../../crates/zeroship-control/src/plan_catalog.rs):
+A plan is the operator-maintained catalog entry that sets your limits; you do
+not author it. You assign a plan and read back the one in force through the
+billing API — see [Billing and metering](billing-metering.md). The built-in
+tiers are `free`, `pro`, and `unlimited`; only `free` and `pro` are
+creator-assignable, and `unlimited` is operator-only.
 
-| Plan | `cpu_limit_ms` | `wall_timeout_ms` | `heap_limit_mb` |
+| Plan | CPU budget | Wall timeout | Heap cap |
 | --- | --- | --- | --- |
-| free (and the fallback for any unpriced app) | **50** | 5 000 | 64 |
-| pro | 30 000 | 30 000 | 256 |
-| unlimited (system/console) | none | none | none |
+| free | 50 ms | 5 s | 64 MB |
+| pro | 30 s | 30 s | 256 MB |
+| unlimited | none | none | none |
 
-Two consequences worth knowing before you design around them:
+- An app with no plan, or whose plan cannot be read, runs at the **free** tier,
+  never unbounded. Read the plan actually in force with
+  `GET /api/apps/{id}/billing-status` before you size behavior to a higher tier.
+- **unlimited** removes all three caps and is assigned by an operator, never by
+  an app.
+- The rows above are built-in defaults. The catalog is operator-maintained and
+  per deployment, so treat these as what the platform ships, not as a value
+  fixed for every deployment.
 
-- **50 ms is a CPU budget, not a wall-clock one.** Time blocked on I/O — a
-  database round trip, an object fetch — does not count against it, and neither
-  does time your request spends descheduled on a busy machine (enforcement is a
-  POSIX timer on `CLOCK_THREAD_CPUTIME_ID`, which counts only CPU the thread
-  actually consumed; see the CPU limit section below). What does count is the
-  work your handler does with the bytes: parsing, copying, encoding.
-- **A per-byte JavaScript pass over a 1 MiB payload does not fit.** Measured
-  against a 1 MiB buffer already in memory, a byte-at-a-time loop doing a
-  multiply and a few modulos costs **30–35 ms of CPU** — 60–70% of the free
-  tier's whole budget, before any I/O. Streaming the same megabyte and only
-  counting its length costs under 0.1 ms, so the cost is the per-byte work, not
-  the size of the object. If you need to hash, transform or re-encode payloads
-  of this size, size the plan for it rather than the transfer.
-- **The step from free to pro is 600x**, with nothing between. If a handler
-  exceeds 50 ms of CPU there is no intermediate tier to move to.
+"None" means no runtime cap of that kind — not a zero-sized one.
 
-A request that exceeds its CPU budget is cancelled and surfaces
-`"CPU time limit exceeded"` for that request.
+The CPU budget deserves care before you design around it:
+
+- **The CPU budget is CPU time, not wall time.** Time spent blocked — waiting on
+  a database round trip, an object fetch, or a busy machine — does not count.
+  What counts is the work your handler does with the bytes: parsing, copying,
+  encoding. Waiting counts toward the wall timeout instead.
+- **CPU time accumulates across the handler's lifetime.** It is not reset on an
+  `await`; a handler that spends 10 ms of CPU after each of five awaits has used
+  50 ms. The wall timeout likewise spans the whole request, waits included.
+- There is no intermediate tier between 50 ms and 30 s. A handler that exceeds
+  the free tier's budget needs the pro tier.
+
+## CPU limit
+
+A handler that exhausts its CPU budget is stopped, and the request fails with a
+JSON error. For an `async` handler — the normal case — the platform answers
+`500`:
+
+```
+500  {"message":"CPU time limit exceeded","name":"Error"}
+```
+
+A synchronous overrun — a handler that returns a response without ever
+`await`ing — is answered `503` with the same envelope but the cause blanked:
+
+```
+503  {"message":"internal error","name":"Error","request_id":"<id>"}
+```
+
+There is no `code`, and the `name` is always `"Error"`. Treat "non-2xx" as the
+contract and let the `message` text (when present) tell you the cause; a
+`"message":"internal error"` at 5xx is the same kind of stop with the detail
+removed.
+
+## Wall timeout
+
+The wall timeout bounds total elapsed time per request, however the handler
+spends it — CPU, I/O, or waiting on a call it made. When it fires, the request
+is answered with
+
+```
+504  {"message":"request timed out","name":"Error"}
+```
+
+### Dev applies no wall timeout and no CPU limit by default
+
+The standalone dev server (`zeroship serve`, and therefore `pnpm dev`) applies
+no wall timeout and no CPU limit unless you set them. A handler that runs longer
+than your plan's wall timeout therefore works locally and fails in production
+with the `504` above, and dev gives no warning. Wall time is not the only limit
+dev relaxes: its CPU limit is off by default and its heap default is above both
+paid tiers (see "Heap limit"). The single limit dev applies *stricter* than
+deployed is request-body size (below).
+
+You can reproduce the deployed behavior for wall time and CPU locally — the dev
+server accepts the same budgets as flags (both in milliseconds):
+
+```bash
+zeroship serve app.js --wall-timeout=5000
+zeroship serve app.js --cpu-limit=50
+```
+
+Neither flag is on by default, and `pnpm dev` does not pass them. If any request
+can run long, exercise it once with your plan's `--wall-timeout` before you
+ship.
 
 ## Request body size
 
-A creator app's inbound request body is capped at **4 MiB**. It is a platform
-constant, not a per-app knob: `MAX_REQUEST_BODY_BYTES` in
-[crates/zeroship-core/src/dispatch_frame.rs](../../crates/zeroship-core/src/dispatch_frame.rs).
+### Deployed
 
-The gateway and the worker both enforce it, and they enforce it at two
-different sizes on purpose. The gateway applies the cap to the request body it
-receives. The worker receives that body wrapped in a dispatch frame - a length
-prefix plus a metadata block carrying method, URL and headers - so its own
-limit, `MAX_DISPATCH_FRAME_BYTES`, is the body cap plus that overhead. A worker
-limit set to the body cap alone would reject requests the gateway had already
-accepted.
+An inbound request body is capped at **4 MiB** per request. It is a
+platform-wide limit, not a per-app knob. A body beyond it is refused with
+**`400`** and a plain-text, non-JSON body — not a `413`, and not a JSON error.
+The body does not name the limit, so do not match on its text; match on the
+`400` and on the body not being your app's JSON. The cap applies before your
+handler runs.
 
-Both tiers buffer the whole body in memory before dispatching. The cap
-multiplied by in-flight concurrency is therefore the worst-case footprint,
-which is what keeps this number modest. Large uploads belong in `env.storage`,
-where the bytes go straight to object storage instead.
+Large uploads do not belong in the request body: send them to object storage
+with `bucket(name).put(key, value)` from `@zeroship/storage` (see
+[Object storage](storage.md)). The object bytes stream to storage instead of
+being buffered in memory, and they never pass through this cap.
 
-Over the cap, the caller gets **`400` with the plain-text body
-`A payload reached size limit.`** — measured against a live gateway at
-4 194 305 bytes. It is not a `413`, and it carries no JSON envelope: the 4 MiB
-limit is applied by the transport layer, which answers in its own words.
-
-**A `413` on this path means a different limit fired.** The gateway also
-enforces a per-resource cap declared in the manifest, and *that* one returns
-`413` with a JSON error envelope. The two are distinguishable by the body, not
-by the status:
+**A `413` on this path means a different limit fired.** A resource — an entry in
+your `defineApp` config (a URL path or an RPC procedure) — can declare its own
+`maxInputBytes` cap, in bytes. That cap answers `413`:
 
 | what fired | status | body |
 | --- | --- | --- |
-| the 4 MiB transport cap | `400` | `A payload reached size limit.` |
-| a per-resource manifest cap | `413` | JSON error envelope |
-| your app rejecting the payload | `400` | your app's JSON, e.g. `{"message":"invalid JSON body",...}` |
+| the 4 MiB request cap | `400` | plain text, no JSON |
+| a per-resource `maxInputBytes` cap | `413` | `{"error":"input exceeds max_input_bytes"}` |
+| your app rejecting the payload | `400` | your app's JSON |
 
-Note the first and third share a status. If you are diagnosing a rejected
-upload, read the body — a `400` alone does not tell you whether the platform
-refused the bytes or your handler did.
+You set `maxInputBytes` on a resource entry
+(`resources: { "<path-or-rpc:…>": { maxInputBytes } }`), as an RPC default
+(`rpc: { defaults: { maxInputBytes } }`), or on a procedure's own config. Note
+the first and third rows share a status: a `400` alone does not tell you whether
+the platform refused the bytes or your handler did.
 
 ### `zeroship serve` caps bodies at 1 MiB, not 4
 
-The standalone server — what `zeroship serve` runs, and therefore what `pnpm dev`
-exercises — is a separate HTTP implementation with its own, smaller cap:
-`MAX_BODY_BYTES` in
-[crates/zeroship-runtime/src/core/serve.rs](../../crates/zeroship-runtime/src/core/serve.rs) is
-**1 MiB**, and it answers `413 Content Too Large`.
+The standalone dev server has its own, smaller cap: **1 MiB**, answered as
+`413 Content Too Large` (empty body). The two tiers therefore disagree by 4x,
+and dev is the stricter one:
 
-This is deliberate rather than an oversight — the standalone server is a
-dev/benchmark entrypoint whose limits are static by design, and the gateway is
-where an operator tunes the real ones. But it means the two tiers disagree by 4x,
-and the direction matters:
+| tier | request body cap |
+| --- | --- |
+| `pnpm dev` / `zeroship serve` | 1 MiB |
+| deployed | 4 MiB |
 
-| tier | request body cap | how established |
-| --- | --- | --- |
-| `pnpm dev` / `zeroship serve` | 1 MiB | measured |
-| deployed (gateway → worker) | 4 MiB | read from source |
-
-The dev boundary is exact, and a body of precisely 1 MiB is accepted — the check
-is `>`, not `>=`:
+The dev boundary is exact, and a body of exactly 1 MiB is accepted — the check
+is "greater than", not "greater than or equal":
 
 | body bytes | response |
 | --- | --- |
@@ -130,84 +151,33 @@ is `>`, not `>=`:
 | 1 048 577 | `413` |
 | 2 097 152 | `413` |
 
-**Dev is the stricter tier**, so this fails in the safe direction: a body your
-app accepts locally will be accepted in production. The trap is the reverse
-reading — a 2 MiB request that answers `413` under `pnpm dev` is not evidence
-that the platform rejects it, and a creator who sizes their upload path against
-the local number will under-use the deployed one by 4x. Route large payloads
-through `env.storage` regardless; the object bytes never pass through this cap.
-
-## CPU limit
-
-CPU enforcement is implemented in [crates/zeroship-runtime/src/core/cpu_timer.rs](../../crates/zeroship-runtime/src/core/cpu_timer.rs).
-
-- Linux uses a POSIX timer on `CLOCK_THREAD_CPUTIME_ID`.
-- When the timer fires, a watchdog thread calls `v8::IsolateHandle::terminate_execution()`.
-- The runtime then cancels the terminating request and surfaces `"CPU time limit exceeded"` for that request.
-
-The fast path is no-op when `cpu_limit` is unset.
-
-## Wall timeout
-
-Wall timeout is stored on `RuntimeLimits` and read through `Runtime::wall_timeout()` in [crates/zeroship-runtime/src/core/runtime.rs](../../crates/zeroship-runtime/src/core/runtime.rs). The serve path applies it while waiting for a request to finish in [crates/zeroship-runtime/src/core/serve.rs](../../crates/zeroship-runtime/src/core/serve.rs).
-
-Unset means there is no runtime wall-clock cap.
-
-### Wall timeout is the one limit where dev is LOOSER than deployed
-
-The body-size section above says dev is the stricter tier, and for bodies it is. **Wall timeout runs
-the other way, and it is the difference most likely to bite you.**
-
-| tier | per-request wall clock |
-| --- | --- |
-| `pnpm dev` / `zeroship serve` | **unbounded** by default (`wall_timeout` is unset) |
-| deployed | **5s** on the free tier (`FREE_TIER_RUNTIME_LIMITS`) |
-
-So a handler that takes longer than 5s **works locally and fails in production**, and dev gives you
-no warning. Deployed, the request is answered by the worker with:
-
-```
-504  {"message":"request timed out"}
-```
-
-Measured on the same 6s handler: `pnpm dev` returns `200` after ~6.0s; deployed returns the `504`
-above at ~5s.
-
-**You can reproduce the deployed behaviour locally.** `zeroship serve` already accepts the cap:
-
-```bash
-zeroship serve app.js --wall-timeout=5000    # 504 at ~5s, same body as deployed
-zeroship serve app.js --cpu-limit=50         # the CPU half of the same budget
-```
-
-Neither flag is applied by default, and `pnpm dev` does not pass them, which is why the divergence
-is invisible until you deploy. If your app has any request that can run long (a slow upstream call,
-a large upload, a heavy loop), run it once with `--wall-timeout` set to your plan's budget before
-you ship.
+This fails in the safe direction: a body your app accepts locally is also
+accepted in production. The trap is the reverse reading — a 2 MiB request that
+answers `413` under `pnpm dev` is not evidence that the platform rejects it:
+deployed accepts up to 4 MiB. The dev body cap has no flag, so the
+dev-vs-deployed body-size difference is the one you cannot reproduce locally.
+Route large payloads through object storage regardless.
 
 ## Heap limit
 
-Heap caps are configured in [crates/zeroship-runtime/src/core/runtime.rs](../../crates/zeroship-runtime/src/core/runtime.rs):
+The heap cap bounds the JavaScript heap — the in-memory objects and strings your
+handler holds. It is not a cap on your bundle size or on request/response body
+bytes. On the built-in tiers, free apps are capped at 64 MB and pro at 256 MB;
+the unlimited plan has no cap.
 
-- `RuntimeBuilder::heap_limit_mb(mb)` converts MB to bytes
-- `RuntimeInner::new_with_plugins(...)` uses `128 * 1024 * 1024` when no cap is supplied
-- a near-heap-limit callback grows the cap modestly and terminates execution after 5 consecutive hits
+A handler that keeps allocating past the cap is stopped, and the request fails
+with a JSON error. For an `async` handler the platform answers `500`:
 
-The regression tests live in [crates/zeroship-runtime/tests/heap_limits.rs](../../crates/zeroship-runtime/tests/heap_limits.rs).
+```
+500  {"message":"memory limit exceeded","name":"Error"}
+```
 
-## Idle GC
+A synchronous overrun is answered `503` with the cause blanked
+(`{"message":"internal error","name":"Error","request_id":"<id>"}`). As with the
+CPU limit, there is no `code`, the `name` is always `"Error"`, and "non-2xx" is
+the contract.
 
-Idle GC is builder-only in [crates/zeroship-runtime/src/core/runtime.rs](../../crates/zeroship-runtime/src/core/runtime.rs):
-
-- `RuntimeBuilder::idle_gc_after_ms(ms)`
-- default constant: `DEFAULT_IDLE_GC_AFTER = 30_000ms`
-- `0` disables the idle-GC ticker
-
-When the runtime stays quiet past the threshold, the ticker calls `Isolate::low_memory_notification()`. The regression tests live in [crates/zeroship-runtime/tests/idle_gc.rs](../../crates/zeroship-runtime/tests/idle_gc.rs).
-
-## Code map
-
-- [crates/zeroship-core/src/types.rs](../../crates/zeroship-core/src/types.rs) — `AppRuntimeLimits`
-- [crates/zeroship-runtime/src/core/runtime.rs](../../crates/zeroship-runtime/src/core/runtime.rs) — `RuntimeLimits`, `RuntimeBuilder`, heap callback, idle GC
-- [crates/zeroship-runtime/src/core/cpu_timer.rs](../../crates/zeroship-runtime/src/core/cpu_timer.rs) — Linux CPU timer plumbing
-- [crates/zeroship-runtime/src/core/serve.rs](../../crates/zeroship-runtime/src/core/serve.rs) — wall-timeout enforcement in the serve path
+The dev server's heap default is 512 MB (`zeroship serve --heap-limit-mb`, or
+the `ZEROSHIP_HEAP_LIMIT_MB` environment variable), so a bundle that loads large
+dependencies can run locally and still exceed the free tier's 64 MB in
+production. Size the plan for what you import.
