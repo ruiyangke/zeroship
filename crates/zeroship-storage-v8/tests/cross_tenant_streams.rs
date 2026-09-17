@@ -289,6 +289,11 @@ fn undrained_get_streams_are_capped_per_app() {
             body.contains("live download streams"),
             "the refusal must name the cap so a creator can act on it; body: {body}"
         );
+        assert!(
+            !body.contains("body.cancel()"),
+            "the refusal must not advise body.cancel(): a stream locked by getReader() \
+             throws on it, and getReader() is how the SDK is drained; body: {body}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     });
