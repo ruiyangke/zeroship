@@ -403,6 +403,9 @@ importers:
       '@zeroship/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@zeroship/server':
+        specifier: workspace:*
+        version: link:../../packages/server
       '@zeroship/vite-plugin':
         specifier: workspace:*
         version: link:../../packages/vite-plugin
