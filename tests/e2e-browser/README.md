@@ -110,6 +110,5 @@ A registry entry with no suite reports `NO RESULT` — it cannot go quiet.
 
 ## Relationship to the other tiers
 
-`tests/golden_path.sh` is the shell-level seam harness (build → deploy → gateway
-serve) and is unchanged by this. This tier is the browser layer above it: the
-golden path proves an artifact deploys, this proves a demo is usable.
+This tier is the browser layer above the build-to-deploy checks: those prove an
+artifact deploys, this proves a demo is usable.

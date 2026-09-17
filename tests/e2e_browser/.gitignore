@@ -1,4 +1,4 @@
-# Runtime-generated stack descriptor (written by scripts/up.sh).
+# Runtime-generated stack descriptor, written by the stack bring-up.
 .stack.json
 
 # @playwright/test symlink to the on-PATH runner's copy, created at setup time

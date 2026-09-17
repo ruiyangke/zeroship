@@ -573,9 +573,6 @@ cargo clippy --workspace --all-targets --all-features
 ./crates/zeroship-runtime/tests/setup-wpt.sh                 # ~930 MB working tree at depth=1
 # Bump the pin via WPT_COMMIT env var; default is the last-known-good
 # commit baked into setup-wpt.sh. Re-run after pulling if the pin moves.
-
-# Benchmarks
-./tests/bench_platform.sh
 ```
 
 Detailed setup: `docs/runbooks/local-dev.md`. Multi-node: `docs/runbooks/docker-compose.md`.
