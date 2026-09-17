@@ -22,14 +22,13 @@
 //!
 //! The asymmetry is the part worth knowing: `stripe_handlers.rs` DOES provision
 //! its provider-side customer - "Ensure a Customer exists (create lazily,
-//! once)" on the billing-setup path. So within one subsystem one provider has a
-//! provisioning trigger and this one has none, and
-//! `docs/reference/billing-metering.md` does not say who is meant to.
+//! once)" on the billing-setup path - and this one has no provisioning trigger
+//! at all.
 //!
 //! Whether the control plane should ensure the Lago customer, or whether that
-//! is deliberately an operator step that wants documenting, is an open decision
-//! (task #309). `tests/e2e_multi_app_attribution.sh` asserts invoiceability and
-//! reproduces the unprovisioned state under `ATTR_SKIP_PROVISION=1`.
+//! is deliberately an operator step, is an OPEN DECISION.
+//! `tests/e2e_multi_app_attribution.sh` asserts invoiceability and reproduces
+//! the unprovisioned state under `ATTR_SKIP_PROVISION=1`.
 
 use std::time::Duration;
 
