@@ -43,6 +43,17 @@ pub struct AppPolicy {
     /// the manager stops redelivering it. Attempts the worker never began, such
     /// as a claim the creator journal deferred, are not counted against it.
     pub max_delivery_attempts: i64,
+    /// How many consecutive dispatches of one run may be reclaimed without the
+    /// executor reporting an outcome before the creator engine gives up and
+    /// settles the run `stalled`. A dispatch that commits a frontier transition
+    /// supersedes the frontier the strikes were counted against, so the count
+    /// starts again from the transition rather than from the run.
+    ///
+    /// Strikes advance no faster than the counted executions bounding
+    /// `max_delivery_attempts`, so keeping this below that ceiling is what
+    /// leaves the engine's verdict reachable at all: past the ceiling the
+    /// manager stops delivering and no dispatch remains to strike.
+    pub max_stuck_dispatches: i64,
     pub max_schedules: usize,
     pub max_schedule_backfill: usize,
     pub min_schedule_interval_ms: i64,
@@ -68,6 +79,7 @@ impl Default for AppPolicy {
             max_compensation_attempts: 8,
             compensation_retry_ms: 1_000,
             max_delivery_attempts: 8,
+            max_stuck_dispatches: 4,
             max_schedules: 64,
             max_schedule_backfill: 32,
             min_schedule_interval_ms: 1_000,
@@ -95,6 +107,8 @@ impl AppPolicy {
             || self.max_compensation_attempts <= 0
             || self.compensation_retry_ms <= 0
             || self.max_delivery_attempts <= 0
+            || self.max_stuck_dispatches <= 0
+            || self.max_stuck_dispatches >= self.max_delivery_attempts
             || self.max_schedule_backfill == 0
             || self.min_schedule_interval_ms <= 0
             || self.max_signal_token_lifetime_seconds <= 0

@@ -159,8 +159,11 @@ platform database. Neither is an operator SQL surface.
 
 - Delivery retry rate: count job delivery attempts that follow an expired
   execution lease. Alert on sustained elevation.
-- `stuck_strikes` / stalled rate: count terminal `state = 'stalled'` runs per
-  window. Alert on any unexplained stalled run.
+- Stalled rate: count terminal `state = 'stalled'` runs per window. Alert on
+  any unexplained stalled run. A run reaches it when the app policy's
+  `maxStuckDispatches` reclaimed dispatches of one frontier report nothing, so
+  a rise here reads as bodies that hang or workers that die mid-dispatch, and
+  the run's recorded `StalledError` carries the count that tripped.
 - Queue lag: track the oldest due job the manager has not delivered, and the
   oldest pending fanout page. To add: per-lane lag gauges emitted after each
   drain.
