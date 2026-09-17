@@ -39,23 +39,11 @@
 //   - SQLite unguarded control: plan MUST still refuse a bare duplicate create, which
 //     isolates the guard as what the SQLite plan path honours.
 //
-// WHICH MUTATIONS THESE ARMS ACTUALLY CATCH -- measured, not claimed, against ONE
-// compiled addon with the projection's ownership check re-introduced behind an env gate
-// in four forms, plus one mutation of the loader:
-//   - refuse whenever dropping the op would CHANGE the registry (the shipped-then-
-//     reverted form): ONLY the parity arm turns red;
-//   - refuse whenever dropping the op would NOT change the registry (inverted): the two
-//     ADOPT arms turn red, PostgreSQL and SQLite, and the parity arm stays GREEN;
-//   - refuse only when the registry EXPLICITLY names another app (narrowed): NOTHING
-//     turns red -- which is the measurement that no input can select that branch;
-//   - no check at all (what ships): every arm green;
-//   - `enforce_ir_ownership` returning Ok unconditionally (the loader gate removed):
-//     ONLY the foreign-owner arm turns red.
-// So the parity arm is NOT a general detector of changes to ownership handling. It
-// catches the refuse-on-any-registry-change form and nothing else; the adopt arms carry
-// the inverted form; the foreign-owner arm pins the LOADER, which is the layer that
-// actually decides ownership. The branch witness and both unguarded controls do not move
-// under any of the five, which is what makes them controls.
+// The arms are not interchangeable. The parity arm catches only the
+// refuse-on-any-registry-change form; the adopt arms carry the inverted form; the
+// foreign-owner arm pins the LOADER, which is the layer that actually decides
+// ownership. The branch witness and both unguarded controls stay green under every
+// mutation, which is what makes them controls.
 //
 // Every arm drives the REAL path: authored through the public `@zeroship/migrate` API,
 // lowered by the native addon, applied through `zero-migrate-cli`'s `apply()` over the
@@ -73,11 +61,8 @@
 // `lower_ordered_envelopes_to_plans` and does. Those arms therefore assert plan and
 // apply AGREE, which is the property a split path can silently lose.
 //
-// Does NOT cover guarded ops other than `createTable`. That gap grew when the
-// projection's ownership check was removed: a guarded `dropTable`/`renameTable` whose
-// guard is satisfied also used to be refused by it, for a registry change that was
-// never about foreign ownership, and no arm here drives one either way. What DOES
-// cover part of it is the projection's own shape: `projection_guard_verdict`
+// Does NOT cover guarded ops other than `createTable`. What DOES cover part of it is
+// the projection's own shape: `projection_guard_verdict`
 // (`crates/zeroship-migrate-node/src/lower.rs`) runs `decide` over every step's probe with
 // no per-op branch, so the `createTable` arms below exercise the identical code path
 // for any op. What NOTHING covers is that a guarded `dropTable`/`renameTable` LOWERS a
