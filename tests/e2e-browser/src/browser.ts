@@ -11,8 +11,8 @@
 //
 // Two things DO work:
 //
-//   1. The SYSTEM chromium (`/run/current-system/sw/bin/chromium`), which Nix
-//      built and patchelf'd against the store. Works unconditionally.
+//   1. A SYSTEM chromium — whatever `chromium` on PATH resolves to. Nix built
+//      and patchelf'd it against the store. Works unconditionally.
 //   2. The Nix `playwright-browsers` derivation, but ONLY when the shell has
 //      PLAYWRIGHT_BROWSERS_PATH pointing at it (i.e. inside `nix develop`).
 //
