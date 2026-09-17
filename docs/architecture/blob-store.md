@@ -8,15 +8,17 @@ Current `BlobStore` methods:
 
 - `get_blob(hash) -> Result<Bytes, BlobError>`
 - `local_path(hash) -> Option<PathBuf>` — `None` for remote backends
-- `put_blob(hash, data) -> Result<PutOutcome, BlobError>`
+- `put_blob(hash, data) -> Result<PutOutcome, BlobError>` (the one default method: wraps a `Cursor` over `put_blob_stream`)
 - `put_blob_stream(hash, expected_size, reader) -> Result<PutOutcome, BlobError>`
 - `has_blob(hash) -> Result<bool, BlobError>`
+- `probe() -> Result<(), BlobError>`
 - `get_blob_to_file(hash, out, expected_size, max_bytes) -> Result<u64, BlobError>` — streams a blob into an already-open temp file while byte-verifying SHA-256; the gateway's hot-path refill primitive (no whole-object buffering)
 - `put_manifest(app_id, deploy_hash, json)`
 - `get_manifest(app_id, deploy_hash)`
+- `delete_manifest(app_id, deploy_hash) -> Result<bool, BlobError>`
 - `delete_app_manifests(app_id)` - deletes the app's `manifests/<app_id>/` keyspace (shared `blobs/` are untouched); archive does not call it
 
-`PutOutcome` is part of the current contract. Ingest uses it to count fresh writes vs dedupe hits without a separate preflight call. There are no default trait methods: every backend implements every method.
+`PutOutcome` is part of the current contract. Ingest uses it to count fresh writes vs dedupe hits without a separate preflight call. `put_blob` is the only method with a default implementation; every other method has no default and each backend implements it.
 
 ## Implementations
 
