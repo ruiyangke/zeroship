@@ -99,7 +99,6 @@ export class OrderWorkflow extends Workflow<OrderInput, OrderOutput> {
     const reservation = await step.run(
       "reserve-inventory",
       {
-        retries: { maxAttempts: 3 },
         timeout: "10s",
         compensate: (output: Reservation, ctx) =>
           releaseInventory(output, ctx.idempotencyKey),
@@ -121,7 +120,6 @@ export class OrderWorkflow extends Workflow<OrderInput, OrderOutput> {
     const shipment = await step.run(
       "create-shipment",
       {
-        retries: { maxAttempts: 3 },
         timeout: "15s",
         compensate: (output: Shipment, ctx) =>
           cancelShipment(output, ctx.idempotencyKey),

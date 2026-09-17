@@ -317,7 +317,7 @@ export class SyncOrder extends Workflow<{ id: string }, unknown> {
 dispatches, the recorded output is replayed and the fetch body does not run.
 
 Use `step.sideEffect(name, fn)` for small inline non-deterministic values that
-do not need retries, timeout, compensation, or blob output:
+do not need a timeout, compensation, or blob output:
 
 ```ts
 const createdAt = await step.sideEffect("created-at", () => Date.now());
@@ -392,7 +392,9 @@ interface BackoffConfig {
 }
 
 interface StepConfig<T = unknown> {
+  /** Declared, and read by nothing. See the note under Semantics. */
   retries?: RetryConfig;
+  /** Declared, and read by nothing. See the note under Semantics. */
   backoff?: BackoffConfig;
   timeout?: string;
   output?:
@@ -450,16 +452,31 @@ Semantics:
 - The first miss runs `fn`, records the result or failure, and suspends the
   dispatch so the control plane can commit the journal row.
 - A replay hit returns the recorded result and does not call `fn`.
-- `timeout` bounds the step body. Timeout failures surface as the step timeout
-  error class.
-- `retries` and `backoff` are step execution policy, not workflow-body control
-  flow.
+- `timeout` bounds the step body. A body still running when the bound expires
+  fails the step with `StepTimeoutError`, and the recorded error is retryable.
+  The body is not cancellable, so it is abandoned rather than stopped: keep the
+  effect idempotent under `ctx.idempotencyKey`. A timeout the runtime cannot
+  read as a duration fails the run before the body is invoked.
 - `output` controls how the step output is represented. Explicit `"ref"`,
   `"blob"`, or `"stream"` returns a `StepOutputRef`.
 - `compensate` attaches a rollback function for terminal failure.
 
+**`retries` and `backoff` are declared and read by nothing.** No component
+inspects either: a step whose body throws records that failure once and the run
+fails. Re-running a step needs per-step attempt state the journal does not
+carry. Do not write a workflow that depends on either field.
+
 Duration strings accepted by workflow sleeps and timeouts include suffixes such
 as `ms`, `s`, `m`, `h`, and `d`; plain positive numbers are milliseconds.
+
+A step timeout is not the only bound a slow step meets. The host that executes
+a delivered job carries its own execution timeout, invisible to app code, and
+whichever bound is smaller ends the step: past the host's, the job is torn down
+and the configured step timeout never fires, so no `StepTimeoutError` is
+recorded. Size step timeouts below the host bound if you want the step's own
+failure in the journal. The pairing is gated in
+`crates/zeroship-workflow-v8/tests/runner.rs`; the host constant is
+`EXECUTION_TIMEOUT` in `crates/zeroship-worker/src/workflow_host.rs`.
 
 ### `step.sideEffect`
 
@@ -947,7 +964,7 @@ Example:
 const reservation = await step.run(
   "reserve-inventory",
   {
-    retries: { maxAttempts: 3 },
+    timeout: "30s",
     compensate: (out: { reservationId: string }, ctx) =>
       releaseReservation(out.reservationId, ctx.idempotencyKey),
   },
@@ -998,7 +1015,7 @@ The SDK exports these workflow error classes:
 | Error | When it fires | Catchable? |
 | --- | --- | --- |
 | `PermanentError` | Business failure that should not retry. If it escapes `run()`, the run fails and eligible compensators run. | Yes, if you intend to handle it and continue. |
-| `StepTimeoutError` | A step exceeds its configured timeout. The replay shim may serialize the internal step-timeout name in stored errors. | Yes around `step.run`; if uncaught, normal failure handling applies. |
+| `StepTimeoutError` | A step body is still running when `StepConfig.timeout` expires. Recorded as retryable. | Yes around `step.run`; if uncaught, normal failure handling applies. |
 | `NondeterministicError` | Bare workflow-body I/O/timers, journal name/kind/order mismatch, or unsupported step-promise control flow. | Treat as terminal misuse; do not swallow it. No rollback. |
 | `StalledError` | The engine detects repeated dispatches with no durable progress. | Terminal engine error. No rollback. |
 | `ChildCancelledError` | A `step.call` child is cancelled before the parent join completes. | Yes around `step.call`; if uncaught, normal failure handling applies. |
@@ -1010,6 +1027,14 @@ The SDK exports these workflow error classes:
 The package also exports compatibility classes for stored wait timeouts and
 definition/runtime misuse. Prefer the specific classes above and branch on
 structured status/error fields for run monitoring.
+
+A recorded failure carries `type`, `message`, an optional `stack`, and
+`retryable` when the thrown error declared one. An error that declares nothing
+records no `retryable` at all, which is a different answer from a declared
+`false`. Replay rethrows the flag the journal holds, so a body that catches a
+replayed failure reads the same value the journal recorded. Errors raised by the
+runtime itself always declare theirs: misuse of the step API is never retryable,
+and `StepTimeoutError` always is.
 
 ## Dos And Donts
 
