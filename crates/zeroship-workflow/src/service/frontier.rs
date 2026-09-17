@@ -367,16 +367,34 @@ pub(crate) async fn apply(
             return journal::invalid("workflow input cannot be both inline and referenced");
         }
         let steps = journal::load(tx, app, &run.text("id")?, run.integer("generation")?).await?;
+        if steps
+            .iter()
+            .any(|step| matches!(step.state.as_str(), "running" | "retrying"))
+        {
+            return journal::invalid("workflow cannot continue with unresolved operations");
+        }
+        // Owing a compensator is the creator's own reachable state, not a
+        // malformed report, so it settles the generation under a name the
+        // creator can read off the run instead of refusing the completion.
+        // Refusing leaves the body producing the same transition on every
+        // redelivery until the liveness ceiling reports a stall, which names
+        // the wrong cause. Settling also discharges the obligations that
+        // blocked the continuation rather than stranding them.
         if steps.iter().any(|step| {
-            matches!(step.state.as_str(), "running" | "retrying")
-                || step
-                    .compensation_state
-                    .as_deref()
-                    .is_some_and(|state| matches!(state, "pending" | "running"))
+            step.compensation_state
+                .as_deref()
+                .is_some_and(|state| matches!(state, "pending" | "running"))
         }) {
-            return journal::invalid(
-                "workflow cannot continue with unresolved work or compensation obligations",
-            );
+            return settle(
+                tx,
+                app,
+                run,
+                RunUpdate::Failed {
+                    error: crate::engine::compensable_carry_error(),
+                },
+                now,
+            )
+            .await;
         }
         admit(policy)?;
         let deploy = active_deploy(tx, app).await?;
