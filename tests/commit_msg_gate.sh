@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Commit-message conventions, enforced. See CONTRIBUTING.md -> Commit messages.
+# Commit-message conventions, enforced.
 #
 # Three call sites, one implementation:
 #   --file <path>       .githooks/commit-msg, at the moment the commit is written
@@ -14,7 +14,7 @@
 #
 # WHAT THIS DOES NOT CATCH. Only the message. It cannot tell whether the
 # subject describes the diff, whether the body's claims are true, or whether a
-# fix carries the regression test CONTRIBUTING.md requires. Those stay human.
+# fix carries the regression test the conventions require. Those stay human.
 
 set -uo pipefail
 
