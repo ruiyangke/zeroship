@@ -262,8 +262,7 @@ pub struct ControlSettings {
     /// that disagrees with any recorded signer, in key OR in permitted zones,
     /// refuses the boot and writes nothing.
     /// `crates/zeroship-control/src/worker_join.rs` (`import_join_signers`)
-    /// carries the shape; `docs/runbooks/worker-join-signers.md` carries the
-    /// operator procedure and both revocation verbs.
+    /// carries the shape, the operator procedure and both revocation verbs.
     ///
     /// Empty (the default) imports nothing. Every join then refuses, because no
     /// signer resolves, unless the signers were recorded by an earlier boot.

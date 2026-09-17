@@ -19,8 +19,7 @@
 //! provisioning a new signer. Revocation is the other direction and is not
 //! configuration at all: `zeroship.rotate_worker_join_signer` stops future
 //! tokens, `zeroship.purge_worker_join_signer` additionally retires everything
-//! the signer admitted, and neither has a runtime EXECUTE grant. See
-//! `docs/runbooks/worker-join-signers.md`.
+//! the signer admitted, and neither has a runtime EXECUTE grant.
 //!
 //! # The order of the checks, and why each is separate
 //!

@@ -39,13 +39,11 @@
 //! # `--check-config` exits non-zero, in every build
 //!
 //! [`CredentialPosture::verdict`] returns [`CredentialVerdict::Refuse`] for a
-//! weak credential on a dry run REGARDLESS of profile, and the reason is
-//! measured rather than stylistic.
-//! `docs/proposals/2026-08-20-metering-transport-not-configured.md` records
-//! that `--check-config` had been truthfully reporting
-//! `usage_stream_configured=false` for 43 days while `deploy-remote.sh` read
-//! only the exit code and threw stdout away, and nothing was metered for the
-//! whole of that time. A posture field that is merely REPORTED is not a gate.
+//! weak credential on a dry run REGARDLESS of profile, and the reason is a
+//! property of the channel rather than a stylistic choice: a posture field that
+//! is merely REPORTED is not a gate. `--check-config` can truthfully report
+//! `usage_stream_configured=false` while `deploy-remote.sh` reads only the exit
+//! code and throws stdout away - so nothing is metered and nothing complains.
 //! The exit code is the only channel that reaches a deploy decision, so the
 //! posture is published in [`crate::config::CheckConfigReport`] AND carried by
 //! the exit code.

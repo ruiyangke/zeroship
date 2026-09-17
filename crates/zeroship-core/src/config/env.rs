@@ -7,11 +7,10 @@
 //! rejects direct `std::env` access, while these crate-private functions feed
 //! the typed configuration APIs.
 //!
-//! The truthiness helpers that used to live here took a `&str` name and read
-//! the environment themselves, which made them a second, unattributable read
-//! surface of exactly the kind Section 4.5 of
-//! `docs/proposals/2026-08-11-config-name-alignment.md` names. They are now
-//! PURE: they classify a value somebody else already read through a typed key.
+//! The truthiness helpers must stay PURE. A helper that took a `&str` name and
+//! read the environment itself would be a second, unattributable read surface,
+//! which is exactly what the typed-key boundary exists to remove. They classify
+//! a value somebody else already read through a typed key.
 
 use std::ffi::OsString;
 
