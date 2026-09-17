@@ -1,11 +1,8 @@
 //! Native URL + URLSearchParams per WHATWG URL Living Standard
 //! (https://url.spec.whatwg.org/).
 //!
-//! Replaces a 127-LOC JS polyfill layered on the `__urlParse` callback
-//! (since deleted) with two `#[v8_class]` types backed by the same
-//! `ada-url::Url` parser.
-//!
-//! The polyfill had three main spec gaps that motivate this rewrite:
+//! Two `#[v8_class]` types backed by the `ada-url::Url` parser, closing
+//! three spec gaps:
 //!
 //! 1. Naive setters: `url.host = "x:y"` split on `:` rather than
 //!    delegating to ada-url's mutation API. Per §4.4.2 the host setter
@@ -38,8 +35,7 @@ pub mod helpers;
 pub mod search_params;
 // Flattening this into `mod.rs` (as done for `web::blob` /
 // `web::fetch::body`) would ripple into `crate::url_native::url::URL`
-// call sites outside this crate slice (e.g. `rpc/superjson.rs`), which
-// is out of scope for this pass.
+// call sites outside this crate slice (e.g. `rpc/superjson.rs`).
 #[allow(clippy::module_inception)]
 pub mod url;
 
@@ -65,19 +61,16 @@ pub struct UrlNativeSlot {
     ///
     /// Storage: `v8::Eternal<v8::Object>` rather than
     /// `v8::Global<v8::Object>`. Set-once at install time; the
-    /// brand-check reader was migrated to the `#[v8_iterable]`
-    /// macro-generated `__BrandSlot_*` (commit 0a61b34, MAC-09) so
-    /// this field is currently unused, but it is still populated for
-    /// any future native brand-check call sites. Eternals are
+    /// `#[v8_iterable]` macro-generated `__BrandSlot_*` performs the
+    /// brand check today, but this field is still populated for any
+    /// future native brand-check call sites. Eternals are
     /// isolate-lifetime handles whose `get(scope)` returns a `Local`
-    /// without allocating. Mirrors the conversions in commits
-    /// b08786a and 6fa5422.
+    /// without allocating.
     pub search_params_prototype: v8::Eternal<v8::Object>,
 }
 
 /// Install `URL` and `URLSearchParams` on `globalThis`. Called from
-/// `init.rs::load_polyfills_and_modules` after the polyfills load
-/// (URL_JS gets removed once this is wired in).
+/// `init.rs::load_polyfills_and_modules` after the polyfills load.
 ///
 /// Order matters: URLSearchParams installs first so its class function
 /// is available when URL.searchParams's getter runs (the getter

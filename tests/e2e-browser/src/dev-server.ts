@@ -117,25 +117,14 @@ export async function startDemo(demo: Demo): Promise<RunningDemo> {
     FORCE_COLOR: "0",
   };
 
-  // APPLY MIGRATIONS BEFORE BOOTING, because since `ee2c352aa` `pnpm dev` no
-  // longer does. That commit split the dev-database apply out of dev-server.ts
-  // into its own `zeroship-dev-migrate` step, deliberately - starting a server
-  // and writing a schema have different blast radii. It updated no harness.
+  // APPLY MIGRATIONS BEFORE BOOTING. `pnpm dev` does not: starting a server and
+  // writing a schema have different blast radii. This tier deletes the state dir
+  // and points DATABASE_URL at a brand new SQLite file every run, so there is
+  // never a leftover schema to coast on and the apply is mandatory.
   //
-  // This tier is hit HARDER by that than most, and by its own correct design:
-  // the block above deletes the state dir and points DATABASE_URL at a brand
-  // new SQLite file every run, so there is never a leftover schema to coast on.
-  // Measured before this call existed, and again by disabling this block:
-  // `db-todos` fails 5 of its 7 tests with
-  //     Error: db: no such table: default.users
-  // while `csr-todo` (7) and `starter` (5) passed, which is the control that
-  // says the browser and the tier are fine and only the schema was missing.
-  //
-  // Invoked as `node <dist>/cli/migrate-dev.js` rather than `pnpm migrate`, for
-  // the reason golden_path.sh step 9 records: the bin is declared in
-  // packages/vite-plugin/package.json but only symlinked by an install post-dating
-  // ee2c352aa, so `pnpm migrate` is "command not found" on an older
-  // node_modules while the dist path works either way.
+  // Invoked as `node <dist>/cli/migrate-dev.js` rather than `pnpm migrate`: the
+  // bin is declared in packages/vite-plugin/package.json but is not reliably on
+  // PATH, while the dist path works either way.
   //
   // A failure here is FATAL and named, never a skip - same rule as
   // `missingRequirements` above. A demo whose migrations do not apply cannot

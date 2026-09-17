@@ -627,15 +627,14 @@ async fn backend_state(admin: &Client, pid: i32) -> Option<String> {
         .get(0)
 }
 
-/// **Forced cleanup CANCELS the running statement; it does not destroy the
+/// **A forced cleanup CANCELS the running statement; it does not destroy the
 /// connection.**
 ///
 /// This is the common case, not an edge. The execution deadline exists to
 /// bound a slow statement, so it fires *because* a statement is slow - and a
-/// slow statement is one whose future is holding the session out of the
-/// slot. Cleanup could not reach the session, could not roll back, answered
-/// `Indeterminate`, and `Indeterminate` withdraws: the mechanism for
-/// bounding a slow statement responded by killing the backend, every time.
+/// slow statement is one whose future is holding the session out of the slot.
+/// Answering `Indeterminate` there would withdraw the session and kill the
+/// backend, which is the opposite of bounding a slow statement.
 ///
 /// A `CancelRequest` needs no session. It travels on its own connection and
 /// names the backend by process id, so the canceller captured at install
@@ -650,10 +649,9 @@ async fn backend_state(admin: &Client, pid: i32) -> Option<String> {
 ///
 /// **Mutation that reddens this arm:** in `driver::cleanup`, answer the
 /// empty-slot `Registry`/`Command` case with `CleanupAck::Indeterminate`
-/// instead of `cancel_and_reclaim(..)` - that is the pre-change behaviour
-/// verbatim. The outcome becomes `Indeterminate(Cancelled)`, the session is
-/// withdrawn, `total_count` drops to 0 and the next checkout is a different
-/// backend.
+/// instead of `cancel_and_reclaim(..)`. The outcome becomes
+/// `Indeterminate(Cancelled)`, the session is withdrawn, `total_count` drops
+/// to 0 and the next checkout is a different backend.
 #[test]
 fn a_forced_cleanup_cancels_the_running_statement_and_keeps_the_connection() {
     Host::test(|host| {
@@ -738,16 +736,13 @@ fn a_forced_cleanup_cancels_the_running_statement_and_keeps_the_connection() {
 /// **A cleanup that outlived its transaction must not roll back the session
 /// it finds in the slot.**
 ///
-/// Cancellation put a second actor in a window that used to have one.
-/// `cleanup` was a straight line with no await between reading the slot and
-/// writing it back, so "the session in the slot" could only be the session
-/// being cleaned up. It now waits for a cancelled statement's holder, and
-/// that wait can outlive the transaction: the `CancellationSql` deadline
-/// fires in its own task, settles `Indeterminate`, withdraws, and releases
-/// the admission - after which the next transaction is admitted, clears the
-/// withdrawal tombstone, and installs ITS session in this very slot. A
-/// resumed cleanup that took whatever it found there would issue `ROLLBACK`
-/// on a healthy, unrelated transaction.
+/// `cleanup` waits for a cancelled statement's holder, and that wait can
+/// outlive the transaction: the `CancellationSql` deadline fires in its own
+/// task, settles `Indeterminate`, withdraws, and releases the admission -
+/// after which the next transaction is admitted, clears the withdrawal
+/// tombstone, and installs ITS session in this very slot. A resumed cleanup
+/// that took whatever it found there would issue `ROLLBACK` on a healthy,
+/// unrelated transaction.
 ///
 /// Two things stop it, and they are not the same thing.
 /// `retire_transaction` wakes the slot waiters, so a cleanup whose
@@ -762,17 +757,12 @@ fn a_forced_cleanup_cancels_the_running_statement_and_keeps_the_connection() {
 /// parked - `settle_now` emits `WithdrawSession` or `ReleaseSession`
 /// immediately before every `ReleaseAdmission`, and there is no second
 /// emission site - so the only way a stale cleanup finds a filled slot is
-/// that the next caller filled it.
+/// that the next caller filled it. `probe::abandon_reducer` re-homes the
+/// session onto a successor lane directly, which reaches the real state
+/// without the race.
 ///
-/// This used to restore the SAME session and say so, on the grounds that a
-/// genuine successor could not be reached deterministically: admitting one
-/// by the ordinary route requires the claim, releasing the claim is what
-/// wakes this waiter, and the waiter resolves before the successor's `BEGIN`
-/// has run. `probe::abandon_reducer` now re-homes the session onto a
-/// successor lane directly, which reaches the real state without the race.
-/// What the arm rules on is unchanged - a filled slot plus a dead identity -
-/// and so is the observable: **the transaction in that slot is still open on
-/// the server afterwards.**
+/// The arm rules on a filled slot plus a dead identity, and the observable is
+/// **the transaction in that slot is still open on the server afterwards.**
 ///
 /// **Mutation that reddens this arm:** delete the post-wait
 /// `identity.is_current(..)` check in `driver::cancel_and_reclaim`. The

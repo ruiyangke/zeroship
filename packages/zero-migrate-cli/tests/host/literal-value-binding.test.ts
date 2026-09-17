@@ -234,26 +234,11 @@ test("MySQL binds literal values and stores a NUL byte exactly", async (ctx) => 
   }
 });
 
-// THE READER USED TO BE THE BUG HERE, NOT THE ENGINE. Worth knowing before
-// changing the assertion back.
-//
-// This test read `SELECT body` and compared the JS string. On Node 22 - which
-// `flake.nix` pins as `pkgs.nodejs_22` and CONTRIBUTING documents - `node:sqlite`
-// stops converting a TEXT value at the first NUL, so `before\0after` came back as
-// `before` and the test failed. On Node 24 it came back whole and the test passed.
-//
-// The stored data was correct the whole time. Writing through the engine (bundled
-// rusqlite) on Node 22 and then reading the same file with both versions:
-//
-//   hex(body)  6265666F7265006166746572   identical on Node 22 and Node 24
-//   SELECT body -> "before"       (Node 22, truncated by the reader)
-//   SELECT body -> "before\0after" (Node 24)
-//
-// So the assertion was measuring `node:sqlite`'s decoding rather than what the
-// engine wrote, and it failed on the supported Node while the bytes on disk were
-// byte-perfect. It now compares `hex()`, which SQLite computes over the stored
-// blob and which is therefore version-independent - and is what "byte for byte"
-// in this test's name was always supposed to mean.
+// The reader, not the engine, is what varies here: `node:sqlite`'s TEXT decoding
+// stops at the first NUL, while the bundled rusqlite the engine writes through
+// stores it correctly. Asserting on the JS string measures the reader, so this
+// test compares the STORED BYTES via `hex()` instead - what "byte for byte" in
+// its name means.
 test("SQLite binds literal values and stores a NUL byte exactly", async () => {
   for (const [label, value] of [...PORTABLE, ["NUL byte", NUL_VALUE] as const]) {
     const work = mkdtempSync(join(HERE, "lit-sq-"));
@@ -281,17 +266,11 @@ test("SQLite binds literal values and stores a NUL byte exactly", async () => {
       const db = new DatabaseSync(dbPath);
       try {
         // Compare the STORED BYTES via `hex()`, not the JS string `node:sqlite`
-        // hands back. The engine writes through bundled rusqlite and stores the
-        // NUL correctly; it is the reader that varies - Node 22's `node:sqlite`
-        // stops converting a TEXT value at the first NUL and returns "before",
-        // while Node 24 returns the whole thing. Asserting on the string measured
-        // the reader's decoding, not what the engine wrote, so this test failed on
-        // the Node the project pins while the data on disk was byte-perfect.
-        //
-        // `hex()` is computed by SQLite over the stored blob, so it is identical
-        // on both versions and is what "byte for byte" in this test's name
-        // actually means. (`length()` is NOT usable here: SQLite's `length()` on
-        // TEXT also stops at the first NUL, reporting 6 for these 12 bytes.)
+        // hands back: the engine stores the NUL correctly, while `node:sqlite`'s
+        // TEXT decoding stops at the first NUL and varies by Node version.
+        // `hex()` is computed by SQLite over the stored blob, so it is
+        // version-independent. (`length()` is NOT usable here: SQLite's
+        // `length()` on TEXT also stops at the first NUL.)
         const row = db.prepare("SELECT hex(body) AS hex FROM items WHERE id = 1").get() as
           | Record<string, unknown>
           | undefined;

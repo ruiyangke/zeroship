@@ -67,8 +67,8 @@ pub fn role_name(app: &AppId) -> Result<String, DerivationError> {
 
 /// The app's logical-replication publication.
 ///
-/// Infallible here where the pre-seam composer was not: its two refusals are an
-/// empty id and an embedded NUL, and an [`AppId`] can be neither.
+/// Infallible because an [`AppId`] can be neither empty nor NUL-bearing - the
+/// two refusals the underlying composer has.
 ///
 /// **Breakage class three has its only typed producer here.** Renaming this
 /// renames every publication and leaks the old ones, which are cluster-wide
@@ -213,12 +213,8 @@ mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
 
-    /// The app-id fixture the rest of these tests derive from.
-    ///
-    /// It is the canonical rendering of `0191e7a2-b3c4-4d5e-8f90-123456789abc`,
-    /// the uuid this crate used as its app-id fixture while the id was a uuid,
-    /// so a reader comparing this file against its history is looking at one
-    /// app throughout and not two.
+    /// The app-id fixture the rest of these tests derive from: the canonical
+    /// rendering of the uuid `0191e7a2-b3c4-4d5e-8f90-123456789abc`.
     const FIXTURE: &str = "app_03cgepu94hyemwpcipafo7264";
 
     fn fixture() -> AppId {

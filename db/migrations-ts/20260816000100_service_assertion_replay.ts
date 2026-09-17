@@ -13,12 +13,9 @@ import { table, t, grant, revoke, schema } from "@zeroship/migrate";
 //
 // WHY ITS OWN SCHEMA, AND NOT `zeroship`. The `zeroship` schema holds platform
 // STATE -- apps, users, deploys, grants, billing -- and authority over it is
-// authority over the platform. That is why
-// crates/zeroship-migrate-adapter/tests/platform_migrate.rs (DELETED 2026-08-28
-// in ccda4bb42, with the platform-migrate binary; nothing asserts this today)
-// asserted a BLANKET
-// invariant: `zeroship_worker`, the login a process running creator code holds,
-// has no write privilege on ANY relation in `zeroship`.
+// authority over the platform. `zeroship_worker`, the login a process running
+// creator code holds, must therefore have no write privilege on ANY relation in
+// `zeroship`.
 //
 // This table records replay claims,
 // conferring nothing (see the grant note below on why a `jti` is not a
@@ -38,10 +35,9 @@ import { table, t, grant, revoke, schema } from "@zeroship/migrate";
 // The schema is on the platform charter's namespace allowlist
 // (crates/zeroship-migrate-server/policies/platform.policy.toml) because
 // lowering refuses a table outside it. That widening is bounded from the other
-// side: platform_migrate.rs asserted this schema holds EXACTLY this table and
-// that the worker holds no CREATE on it, so the second zone could not grow into
-// the collision the first one hit. That bound is UNHELD since the file was
-// deleted; the widening above now rests on review alone.
+// side: this schema holds EXACTLY this table and the worker holds no CREATE on
+// it, so the second zone cannot grow into the collision the first one hit. No
+// test asserts that bound today; it rests on review alone.
 //
 // The replay key and expiry determine whether a claim is still live. The
 // claim statement reports its verdict through the affected row count.
@@ -87,19 +83,12 @@ export default {
     // same class as 20260812000000 and 20260812000200, where insert-only grants
     // made production upserts fail at plan time. DELETE is for the sweep.
     //
-    // SELECT IS ALSO REQUIRED, and an earlier revision of this file argued it
-    // away. PostgreSQL's rule is about COLUMN READS, not about RETURNING:
-    // UPDATE and DELETE need SELECT on every column read in an expression or a
-    // condition. The claim reads `expires_at` in the DO UPDATE arm's WHERE and
-    // the sweep reads it in its own WHERE, so both statements need it. MEASURED
-    // on a scratch database built by zeroship-platform-migrate from this
-    // directory: with insert/update/delete only, every one of the four roles
-    // below got `permission denied for table service_assertion_replay` for BOTH
-    // statements; adding select made all eight succeed. Controls, same role,
-    // one variable each: dropping the WHERE from the upsert is still denied
-    // (the DO UPDATE arm alone needs it), and a DELETE with no WHERE succeeds.
-    // Withholding it would have failed 100% of inbound service-to-service calls
-    // the day a service was wired to PostgresReplayStore, via the verifier's
+    // SELECT IS ALSO REQUIRED. PostgreSQL's rule is about COLUMN READS, not about
+    // RETURNING: UPDATE and DELETE need SELECT on every column read in an
+    // expression or a condition. The claim reads `expires_at` in the DO UPDATE
+    // arm's WHERE and the sweep reads it in its own WHERE, so both statements
+    // need it. Withholding it would fail every inbound service-to-service call
+    // once a service is wired to PostgresReplayStore, through the verifier's
     // fail-closed arm, with a Postgres permission error in the log and nothing
     // naming grants.
     //

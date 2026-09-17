@@ -12,23 +12,18 @@
 //! binary: the creator CLI (`crates/zeroship-cli/src/main.rs`) and the two single-tenant
 //! runtime binaries (`crates/runtime/src/core/{server,echo_server}.rs`) are its
 //! only callers, and they read `RUST_LOG` / `ZEROSHIP_LOG_FORMAT` through it.
-//! Those two reads are now DECLARED keys owned by [`TracingInitConsumer`]
+//! Those two reads are DECLARED keys owned by [`TracingInitConsumer`]
 //! rather than raw `std::env::var` calls: `RUST_LOG` is `external` (the
 //! `tracing`/`env_filter` convention, not ours), and `ZEROSHIP_LOG_FORMAT` is
 //! `cli`.
 //!
-//! `cli` rather than `platform`, and the distinction was argued twice. The
-//! generated `observability.log_format` identity ALREADY exists
-//! (`ZEROSHIP_OBSERVABILITY_LOG_FORMAT`, a shared symbol), and every server
-//! binary resolves it through `config::bootstrap`; none of them reaches
-//! [`init_tracing`]. What is left on this path is the creator-CLI and
-//! single-tenant-runtime vector, which Step 4 of
-//! `docs/proposals/2026-08-11-config-name-alignment.md` says lands as a `CliEnv`
-//! registration without CLI TOML support. Calling it `platform` would have put
-//! it in a debt ledger for a declaration that is not missing. Its exit is that
-//! these three callers grow their own declaration, at which point the spelling
-//! disappears rather than being reclassified. See [`TracingInitConsumer`] for
-//! why the values are not passed in by the caller.
+//! `cli` rather than `platform`: the generated `observability.log_format`
+//! identity ALREADY exists (`ZEROSHIP_OBSERVABILITY_LOG_FORMAT`, a shared
+//! symbol), and every server binary resolves it through `config::bootstrap`;
+//! none of them reaches [`init_tracing`]. What is left on this path is the
+//! creator-CLI and single-tenant-runtime vector, which has no CLI TOML support.
+//! See [`TracingInitConsumer`] for why the values are not passed in by the
+//! caller.
 //!
 //! Calling either init more than once in a process is a no-op after the first
 //! (the global subscriber is locked in by `tracing_subscriber::registry().init()`).
@@ -112,7 +107,7 @@ impl<'de> Deserialize<'de> for LogFormat {
 /// Silent by design: the invalid-filter fallback is surfaced as a STRUCTURED
 /// `tracing::warn!` by [`fn@crate::config::bootstrap`] *after* the subscriber is
 /// initialized, so the warning honors the configured log format (e.g. JSON)
-/// instead of being a pre-tracing `eprintln!` a log pipeline would miss (O3).
+/// instead of being a pre-tracing `eprintln!` a log pipeline would miss.
 #[must_use]
 pub fn resolve_log_filter(candidate: Option<String>, default_filter: &str) -> String {
     let Some(candidate) = candidate else {
@@ -129,16 +124,16 @@ pub fn resolve_log_filter(candidate: Option<String>, default_filter: &str) -> St
 crate::declare_env_consumer!(
     /// The consumer that owns [`init_tracing`]'s own two environment reads.
     ///
-    /// WHY A CONSUMER AND NOT THE CALLER. The obvious shape for Step 4 is to
-    /// delete the reads here and have each caller pass resolved values in -
-    /// that is exactly what [`fn@crate::config::bootstrap`] already does for the
-    /// five server binaries, which resolve the GENERATED
-    /// `observability.log_filter` / `observability.log_format` and call
-    /// [`init_tracing_with`]. It is not available here: `init_tracing`'s only
-    /// callers are `crates/zeroship-cli/src/main.rs` and
+    /// WHY A CONSUMER AND NOT THE CALLER. The obvious shape is to delete the
+    /// reads here and have each caller pass resolved values in - that is exactly
+    /// what [`fn@crate::config::bootstrap`] does for the five server binaries,
+    /// which resolve the GENERATED `observability.log_filter` /
+    /// `observability.log_format` and call [`init_tracing_with`]. It is not
+    /// available here: `init_tracing`'s only callers are
+    /// `crates/zeroship-cli/src/main.rs` and
     /// `crates/runtime/src/core/{server,echo_server}.rs`, none of which has a
     /// `#[zeroship_config]` declaration to resolve from, and all three sit
-    /// outside this crate. Giving them one is Step 3/Step 6 work, not a rename.
+    /// outside this crate.
     ///
     /// The target is the cargo PACKAGE rather than a binary, per
     /// [`crate::config::DeclaredEnvRead::consumer`]: a library function reached
@@ -312,10 +307,9 @@ mod tests {
 
     #[test]
     fn observability_precedence_is_carrier_then_overlay_then_compiled_default() {
-        // The former resolve_observability(flags, file, default) three-tier
-        // merge, restated against the machinery that replaced it. clap has
-        // already merged the flag and the environment into `carrier`, so this
-        // covers carrier > overlay > default and not flag > env.
+        // Precedence is carrier > overlay > compiled default. clap has already
+        // merged the flag and the environment into `carrier`, so this covers
+        // carrier > overlay > default and not flag > env.
         let overlay: toml::Value = toml::from_str(
             "[observability]\nlog_filter = \"info,zeroship_file=debug\"\nlog_format = \"json\"\n",
         )

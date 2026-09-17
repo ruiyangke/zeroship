@@ -223,9 +223,9 @@ fn transaction_status_is_the_oracle_the_cleanup_goals_read() {
             // decrements its in-flight counter when the connection task
             // consumes the trailing `ReadyForQuery`, which is not the moment a
             // failed `await` returns - so this observation is `None`
-            // (unresolved) or `Some(Failed)` depending on scheduling. Measured
-            // here: both occur, `None` when the target runs the `sc1_live`
-            // filter alone and `Some(Failed)` in a full-target run.
+            // (unresolved) or `Some(Failed)` depending on scheduling - both
+            // occur, `None` when the target runs the `sc1_live` filter alone and
+            // `Some(Failed)` in a full-target run.
             //
             // Asserting either literal is an arm whose verdict is noise. What
             // is guaranteed - and what SC-1 actually needs - is the negative:

@@ -392,11 +392,9 @@ fn render_form_with_status(token: &str, error: Option<&str>, status: StatusCode)
 mod tests {
     use super::*;
 
-    /// Regression for the `/reset?t=…` → `/reset?token=…` rename
-    /// (the auth handlers were inconsistent: `/link` used `?token=`,
-    /// every other token-redeem handler used `?t=`). The query struct
-    /// MUST reject the old name — otherwise we'd silently keep a
-    /// back-compat alias in place.
+    /// `ResetQuery` MUST reject the legacy `t=` name. The field is `token`, and
+    /// accepting `t=` would silently keep a back-compat alias in place;
+    /// `/link` and every other token-redeem handler use `?token=`.
     ///
     /// `ResetQuery` is a serde-derived struct deserialised from
     /// `application/x-www-form-urlencoded` query strings. We exercise it
@@ -427,7 +425,7 @@ mod tests {
         );
     }
 
-    /// L3 regression: the `/reset` inline `<script nonce>` must carry an
+    /// L3: the `/reset` inline `<script nonce>` must carry an
     /// independent per-response CSP nonce, NOT the CSRF token. The render
     /// helper (`render_form`) generates a fresh nonce; the template must
     /// emit it (not `{{ csrf }}`).

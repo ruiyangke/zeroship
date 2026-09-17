@@ -2,14 +2,13 @@
 //! Encoding §6 (https://encoding.spec.whatwg.org/#interface-textencoderstream
 //! and §7).
 //!
-//! Replaces the 70-LOC `embed/text-streams.js` shim, which closed only
-//! the streaming-decode behavior and missed every spec contract a
-//! library checks: `Symbol.toStringTag`, brand-checked accessors, the
+//! A JS-side object wrapper cannot supply every spec contract a library
+//! checks: `Symbol.toStringTag`, brand-checked accessors, the
 //! GenericTransformStream `readable` / `writable` getter shape.
 //!
 //! ## Why classes, not just JS-side wrappers
 //!
-//! Two real failure modes the shim left open:
+//! Two real failure modes a JS-side wrapper leaves open:
 //!
 //! 1. `Object.prototype.toString.call(new TextEncoderStream())` returned
 //!    `"[object Object]"`. Libraries (the AI SDK is one) brand-check via
@@ -17,14 +16,15 @@
 //!    raw object survives, but it is detected as foreign. The native
 //!    class installs `Symbol.toStringTag` on the prototype.
 //!
-//! 2. The shim assigned `this.readable = ts.readable; this.writable =
-//!    ts.writable` in the constructor. Per WHATWG GenericTransformStream
-//!    §6.1, those are accessor properties on the prototype that read
-//!    `[[readable]]` / `[[writable]]` internal slots. Libraries that do
+//! 2. A JS-side wrapper that assigns `this.readable = ts.readable;
+//!    this.writable = ts.writable` in the constructor leaves them as own
+//!    data properties. Per WHATWG GenericTransformStream §6.1, those are
+//!    accessor properties on the prototype that read `[[readable]]` /
+//!    `[[writable]]` internal slots. Libraries that do
 //!    `Object.getOwnPropertyDescriptor(Object.getPrototypeOf(ts),
 //!    "readable")` to introspect a stream's pipeline see the descriptor
-//!    is missing on the shim — resulting in fallback paths that allocate
-//!    extra adapters (a measurable hot-path cost in worker tiers).
+//!    is missing — resulting in fallback paths that allocate extra
+//!    adapters (a measurable hot-path cost in worker tiers).
 //!
 //! ## Architecture
 //!
@@ -34,10 +34,10 @@
 //! and `flush` callbacks are FunctionTemplate-backed C functions that
 //! delegate to a heap-allocated native TextEncoder / TextDecoder kept
 //! alive by the External payload. This reuses the well-tested JS-from-
-//! transformer construction path in `streams::transform` rather than
-//! threading the Rust-side `from_native_transformer` (whose driver
-//! algorithms are still placeholders, see comments in
-//! `transform_controller.rs:1335`).
+//!   transformer construction path in `streams::transform` rather than
+//!   threading the Rust-side `from_native_transformer` (whose driver
+//!   algorithms are still placeholders, see comments in
+//!   `transform_controller.rs`).
 //!
 //! The TransformStream wrapper is held as a `v8::Global<v8::Object>` in
 //! the `#[v8_class]`-generated instance state; `readable` and `writable`

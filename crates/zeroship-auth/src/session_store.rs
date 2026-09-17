@@ -24,23 +24,19 @@
 //!
 //! # The refresh family is ONE ROW
 //!
-//! `zeroship.oauth_refresh_tokens` stored a row per token and linked them by
-//! `refresh_family_id`. The family is now the session: the secret rotates IN
-//! PLACE, the superseded hash lives in `prev_secret_hash`, and killing the
-//! family is a write to the row that mints rather than to a sibling table a
-//! reader has to remember to consult. The algorithm is otherwise the one that
-//! was there - rotate on use, serve one idempotent replay of a lost response,
-//! and treat any other presentation of a superseded secret as reuse.
+//! The refresh family is the session: the secret rotates IN PLACE, the
+//! superseded hash lives in `prev_secret_hash`, and killing the family is a
+//! write to the row that mints rather than to a sibling table a reader has to
+//! remember to consult. The algorithm is rotate on use, serve one idempotent
+//! replay of a lost response, and treat any other presentation of a superseded
+//! secret as reuse.
 //!
-//! **The reuse-detection HORIZON narrows, and this is the one behavioural
-//! difference worth knowing.** The old shape retained every historical token
-//! row until a sweep deleted it, so presenting a secret from any past
-//! generation was detected as reuse. One row carries one superseded slot, so
-//! detection now covers the IMMEDIATELY preceding secret - which is the
-//! generation an interception attack actually holds - and a secret two or more
-//! rotations old matches nothing and is refused as unknown rather than killing
-//! the session. The slot is kept for the life of the session, NOT cleared when
-//! the idempotency response expires: those are two different deadlines, and
+//! **The reuse-detection HORIZON is explicit.** One row carries one superseded
+//! slot, so detection covers the IMMEDIATELY preceding secret - the generation
+//! an interception attack actually holds - and a secret two or more rotations
+//! old matches nothing and is refused as unknown rather than killing the
+//! session. The slot is kept for the life of the session, NOT cleared when the
+//! idempotency response expires: those are two different deadlines, and
 //! collapsing them would shrink the horizon to the replay window for no gain.
 //!
 //! # What this module does NOT decide
@@ -217,9 +213,7 @@ impl SessionRow {
     /// moved, updates nothing, and refuses a request that should have been
     /// served the idempotent replay - which is exactly what
     /// `concurrent_refresh_same_token_serializes_to_one_successor_without_family_kill`
-    /// caught. The old shape did not have this hazard, because it re-read the
-    /// row by token hash and asked `rotated_at`; one row per family means the
-    /// question has to be asked of the slots instead.
+    /// caught. One row per family means the question is asked of the slots.
     #[must_use]
     pub fn slot_for(&self, presented: &PeekedSession) -> Option<SecretSlot> {
         if self.secret_hash.as_deref() == Some(presented.hash.as_slice()) {
