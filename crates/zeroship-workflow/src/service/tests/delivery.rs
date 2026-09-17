@@ -5,7 +5,7 @@ use super::{
     *,
 };
 use crate::service::{
-    delivery::{DeliveredTask, JobAcceptance},
+    delivery::{creator_deadline, DeliveredTask, JobAcceptance},
     AppWorkflows, WorkerIdentity,
 };
 use std::time::{Duration, Instant};
@@ -99,6 +99,18 @@ case!(
     sqlite_delivery_creator_policy_bounds_execution,
     postgres_delivery_creator_policy_bounds_execution,
     policy_bounds
+);
+
+case!(
+    sqlite_delivery_caps_a_task_at_its_authority_window,
+    postgres_delivery_caps_a_task_at_its_authority_window,
+    authority_window
+);
+
+case!(
+    sqlite_delivery_caps_a_creator_deadline_at_its_authority,
+    postgres_delivery_caps_a_creator_deadline_at_its_authority,
+    authority_caps_creator_deadline
 );
 
 case!(
@@ -1005,6 +1017,131 @@ async fn checkpoint(store: Rc<OrmStore>) {
         .unwrap();
     assert!(manager.queue.claim(&owner).await.unwrap().is_none());
     assert_eq!(publish(&scope, &manager).await, pending[0]);
+}
+
+/// The authority window the narrowed case runs under. Both the manager grant
+/// and the app lease below sit far outside it, so a task this short cannot be
+/// mistaken for one either of those bounded.
+const AUTHORITY_WINDOW: Duration = Duration::from_secs(5);
+/// The app lease every case here runs under, and the bound the control expects.
+const WINDOWED_LEASE: Duration = Duration::from_secs(60);
+/// The manager grant, outlasting both of the above so it bounds neither.
+const WINDOWED_GRANT: Duration = Duration::from_secs(120);
+/// The control's window, wide enough that the app lease bounds it instead.
+const WIDE_WINDOW: Duration = Duration::from_secs(3_600);
+
+/// Reissue an app's policy with a lease window ending `window` from now. Only
+/// the window moves: revision and policy content are identical for the narrowed
+/// case and its control.
+fn windowed(window: Duration) -> PolicySnapshot {
+    PolicySnapshot::lease(
+        2.try_into().unwrap(),
+        AppPolicy {
+            lease_ms: i64::try_from(WINDOWED_LEASE.as_millis()).unwrap(),
+            ..AppPolicy::default()
+        },
+        Instant::now() + window,
+    )
+    .unwrap()
+    .with_ingress_epoch(Some(super::open_epoch()))
+}
+
+/// Publish one job, claim it under a grant that outlasts every other bound
+/// here, narrow the app's authority to `window`, and report how long the task
+/// the delivery hands back says it may run.
+async fn accept_within(service: &WorkflowService, app: &AppId, window: Duration) -> Duration {
+    let scope = service.fixture_app(app.clone());
+    scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let manager = Manager::with_options(
+        app,
+        Options {
+            lease: WINDOWED_GRANT,
+            ..Default::default()
+        },
+    )
+    .await;
+    let owner = assignment(app);
+    publish(&scope, &manager).await;
+    let grant = manager.queue.claim(&owner).await.unwrap().unwrap();
+    service.fixture_install(app, windowed(window)).unwrap();
+    task(scope.accept_job(&grant).await.unwrap())
+        .remaining()
+        .unwrap()
+}
+
+/// Captured delivery authority is the window the host can still stand behind,
+/// and both the manager grant and the app's own lease may outlast it. The task
+/// a delivery hands back must expire no later than that window, because the
+/// executor reads the task's own expiry and nothing rechecks the authority once
+/// the execution has begun.
+///
+/// This binds the clamp in `CapturedLease::capture`, the one place an accepted
+/// delivery's expiry meets the authority deadline. The delivery runner carries
+/// the same property for an attempt it drives, through the bound it builds its
+/// execution guard and renewal phase from - but a task accepted here is handed
+/// back with no guard around it, so that enforcement point cannot stand in for
+/// this one, and a case placed there passes whether or not this clamp is there.
+///
+/// The two apps differ in exactly one thing, the width of the window. The
+/// control is what stops the narrowed assertion from passing because something
+/// unrelated shortens every delivery.
+async fn authority_window(store: Rc<OrmStore>) {
+    let (service, narrowed, control, _deployments) = registered_service(store).await;
+    let narrow = accept_within(&service, &narrowed, AUTHORITY_WINDOW).await;
+    assert!(
+        narrow <= AUTHORITY_WINDOW,
+        "an accepted task outlived the authority window that had to bound it: {narrow:?}"
+    );
+    let wide = accept_within(&service, &control, WIDE_WINDOW).await;
+    assert!(
+        wide > AUTHORITY_WINDOW,
+        "the control was shortened too, so the narrowed case proves nothing: {wide:?}"
+    );
+    assert!(
+        wide <= WINDOWED_LEASE,
+        "the control outlived the app lease that had to bound it: {wide:?}"
+    );
+}
+
+/// A creator-clock deadline is converted back to the monotonic clock before an
+/// executor is handed it, and captured authority is the ceiling that conversion
+/// may not cross. Only a direct call reaches the ceiling: on the accept and
+/// heartbeat paths the deadline handed over is itself derived from the captured
+/// lease, and the database clock read that converts it back is taken after the
+/// read it was built from, so an agreeing clock lands inside the ceiling on its
+/// own and the clamp is never the binding term there. A creator clock that ran
+/// slow or stepped back across the transaction is the case the clamp is for,
+/// and no fixture here can produce one, so the contract is stated where it is
+/// owned instead of through a path that cannot reach it.
+///
+/// The two calls differ in exactly one thing, the ceiling. Without the far one
+/// the near assertion would also pass if the creator deadline were ignored
+/// altogether.
+async fn authority_caps_creator_deadline(store: Rc<OrmStore>) {
+    let (service, _, _, _deployments) = registered_service(store).await;
+    let mut tx = service.begin().await.unwrap();
+    let creator_window = Duration::from_secs(600);
+    let deadline = tx.now().await.unwrap() + i64::try_from(creator_window.as_millis()).unwrap();
+    let near = Instant::now() + AUTHORITY_WINDOW;
+    let capped = creator_deadline(&mut tx, deadline, near).await.unwrap();
+    assert!(
+        capped <= near,
+        "a creator deadline re-anchored past the captured authority was handed out"
+    );
+    let far = Instant::now() + creator_window * 2;
+    let uncapped = creator_deadline(&mut tx, deadline, far).await.unwrap();
+    assert!(
+        uncapped > near,
+        "the control was capped too, so the near case proves nothing"
+    );
+    assert!(
+        uncapped < far,
+        "the control ignored the creator deadline and took its ceiling instead"
+    );
+    tx.commit().await.unwrap();
 }
 
 async fn policy_bounds(store: Rc<OrmStore>) {
