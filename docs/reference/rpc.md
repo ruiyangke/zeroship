@@ -111,10 +111,13 @@ The active wrapper helpers are:
 - `stream(handler, { id, ... })`
 - `subscription(handler, { id, ... })`
 
-A `query` is read-only and cannot call `fetch()`; reach for `action` when a
-handler needs an outbound HTTP call. `subscription` metadata is recognized by
-discovery, but the public generated/manual client shape does not expose
-subscriptions yet — use `stream(...)` for shipped live feeds.
+Give a handler a required input parameter when the procedure takes an input
+object: an optional parameter (`input?: ...`) makes the wrapper infer a
+no-input procedure, and callers then cannot pass arguments. A `query` is
+read-only and cannot call `fetch()`; reach for `action` when a handler needs an
+outbound HTTP call. `subscription` metadata is recognized by discovery, but the
+public generated/manual client shape does not expose subscriptions yet — use
+`stream(...)` for shipped live feeds.
 
 ## Procedure auth (authenticated by default)
 
@@ -178,7 +181,9 @@ names.
 
 `publiclyAccessible: true` is the deliberate confirmation the build requires
 alongside `auth: "anonymous"` — it makes "this endpoint is intentionally public"
-explicit and reviewable.
+explicit and reviewable. It is a resource-tree field only: the per-procedure
+config accepts `auth` but not `publiclyAccessible`, so a public endpoint is
+declared here in the app config, not on the wrapper.
 
 > **`"anonymous"` and `"user"` are the only two values `auth` accepts.** The
 > build refuses anything else, in dev as well as production. Inheritance is a
@@ -322,9 +327,15 @@ supplies `Authorization: Bearer <token>` when it returns a token.
 
 ## Transformers
 
-Applications speak plain JSON on the wire. The default transformer is `"json"`;
-it is dependency-free and handles normal JSON values, and it is what the server
-always uses. Leave the client's transformer at its default.
+The server always uses the `"json"` transformer; leave the client's at its
+default. A response carries the procedure's return value under `json`, and
+values plain JSON cannot represent exactly — a `Date`, for example — are
+annotated in a sibling `meta` block:
+
+> `{"json": { ... }, "meta": { "values": { "entries.0.modifiedAt": ["Date"] }, "v": 1 }}`
+
+The RPC client decodes this for you; a caller parsing raw responses must read
+`json` and apply `meta`.
 
 `"superjson"` exists as a client option for rich values such as `Date`, `BigInt`,
 `Map`, `Set`, `URL` and typed arrays, but it only round-trips when the server is

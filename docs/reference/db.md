@@ -301,7 +301,7 @@ column definition, so a hoisted builder is safe to reuse.
 | `t.uuid()` | `UUID` | |
 | `t.json()` | `JSONB` | |
 | `t.bytes()` | `BYTEA` | |
-| `t.textArray()` | `TEXT[]` on PG | JSON text on other backends. |
+| `t.textArray()` | `TEXT[]` on PG | JSON text on other backends. The descriptor type it emits is rejected by the runtime database validator, so use `t.json()` to store a list of strings. |
 | `t.char({ length })` | `CHAR(N)` | Fixed-length. |
 | `t.vector({ dimensions, metric? })` | `vector` (pgvector) | See [Vector search](#vector-search). |
 | `t.geoPoint()` | `geography(POINT, 4326)` on PG | See [Geo](#geo-point--radius). |
