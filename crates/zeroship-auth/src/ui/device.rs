@@ -507,8 +507,7 @@ mod tests {
     ///
     /// What this does NOT catch: whether the page ever RECEIVES such a grant.
     /// That is `pending_user_code_details` dropping its `provider = 'op'` filter
-    /// and its inner join, which needs a database, and end to end it is
-    /// `tests/e2e_device_login.sh`. This pins only the rendering.
+    /// and its inner join, which needs a database. This pins only the rendering.
     #[test]
     fn a_platform_grant_names_the_cli_and_discloses_its_deploy_scopes() {
         let pending = device_token::PendingDeviceGrant {

@@ -27,8 +27,6 @@
 //!
 //! Whether the control plane should ensure the Lago customer, or whether that
 //! is deliberately an operator step, is an OPEN DECISION.
-//! `tests/e2e_multi_app_attribution.sh` asserts invoiceability and reproduces
-//! the unprovisioned state under `ATTR_SKIP_PROVISION=1`.
 
 use std::time::Duration;
 

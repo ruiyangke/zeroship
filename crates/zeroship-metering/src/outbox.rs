@@ -814,9 +814,7 @@ pub fn spawn_outbox_task(meter: Arc<Meter>, outbox: UsageOutbox, config: OutboxC
 /// numbers a broken producer would. Refusing to boot is not available (see the
 /// worker's `Ok(None)` arm: a no-metering worker is a supported deployment), so
 /// the guarantee is that the state is ANNOUNCED with a string a harness can
-/// grep. `tests/e2e_metering_billing.sh` and its four siblings assert on it,
-/// and `tests/lib/e2e_stack.sh`'s `e2e_assert_usage_producer` is where they do
-/// it from.
+/// grep.
 pub const OUTBOX_DISABLED_LOG: &str = "usage-event outbox DISABLED";
 
 /// Dev/no-broker mode: keep draining so counters do not grow without bound, but

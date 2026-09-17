@@ -1,16 +1,15 @@
 // The 12-hex fingerprint the branch-keyed suite database is named after.
 //
 // ONE CONSTRUCTION, TWO SOURCES, and they MUST agree byte for byte. [`of_dir`]
-// reads a working tree; [`of_ref`] reads a git tree. `tests/lib/suite_db.sh`
-// names a database with the first and `tests/sweep_test_databases.sh` decides
-// whether that database is still reachable with the second. If they ever
-// disagree, every database on the server matches no reachable branch, the
-// sweeper calls the lot dead, and one `--apply` deletes every agent's work at
-// once. That is the single most destructive bug this design admits, which is
-// why the pair is pinned against the REAL repository rather than a fixture --
-// see `tests/lib_sweep_db_selftest.sh`. A fixture would pin the two
-// implementations to each other and prove nothing about the files the sweeper
-// actually reasons over.
+// reads a working tree; [`of_ref`] reads a git tree. The suite-database
+// provisioner names a database with the first and the sweeper decides whether
+// that database is still reachable with the second. If they ever disagree,
+// every database on the server matches no reachable branch, the sweeper calls
+// the lot dead, and one `--apply` deletes every agent's work at once. That is
+// the single most destructive bug this design admits, which is why the pair is
+// pinned against the REAL repository rather than a fixture. A fixture would
+// pin the two implementations to each other and prove nothing about the files
+// the sweeper actually reasons over.
 //
 // THAT ARGUMENT IS ABOUT THE AGREEMENT, and the fixtures below are not trying
 // to take it over. They cover what the real repository cannot be asked to

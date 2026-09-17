@@ -2,8 +2,7 @@
 // already-large async block, and rustc's layout query for it now exceeds the
 // default 128 depth: "query depth increased by 130 when computing layout of
 // {async block ...dev_provision.rs:92}". RELEASE ONLY - `cargo check` in debug
-// compiles this file fine, which is why nothing caught it until a release build
-// of the six binaries `tests/golden_path.sh` needs.
+// compiles this file fine, so only a release build of this binary shows it.
 #![recursion_limit = "256"]
 
 //! DEV/LOCAL/CI ONLY internal app provisioning tool.

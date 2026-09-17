@@ -5,17 +5,17 @@
 //! caller's other half either connects or does not; these functions produce a
 //! VERDICT, and a wrong verdict is a dropped database.
 //!
-//! THE SWEEPER MUST NEVER DROP `WITH (FORCE)`, and that asymmetry against
-//! `tests/lib/scratch_db.sh` -- which uses it, correctly -- is the whole safety
+//! THE SWEEPER MUST NEVER DROP `WITH (FORCE)`, and that asymmetry against a
+//! per-run scratch drop -- which uses it, correctly -- is the whole safety
 //! model. `WITH (FORCE)` terminates every other backend on the database before
-//! dropping, so the drop cannot fail on a live connection. scratch_db drops a
-//! database THIS RUN created, where the only connections left are its own
-//! stragglers, and a plain DROP would leak the database on them. The sweeper
-//! drops databases OTHER runs created; a live connection there is a peer agent
-//! mid-suite, and `WITH (FORCE)` would kill it. A plain `DROP DATABASE` failing
-//! with "is being accessed by other users" is not an inconvenience for the
-//! sweeper -- it is the answer, and the last line of defence behind the
-//! liveness scan below.
+//! dropping, so the drop cannot fail on a live connection. A per-run scratch
+//! drop targets a database THIS RUN created, where the only connections left
+//! are its own stragglers, and a plain DROP would leak the database on them.
+//! The sweeper drops databases OTHER runs created; a live connection there is
+//! a peer agent mid-suite, and `WITH (FORCE)` would kill it. A plain
+//! `DROP DATABASE` failing with "is being accessed by other users" is not an
+//! inconvenience for the sweeper -- it is the answer, and the last line of
+//! defence behind the liveness scan below.
 //!
 //! WHY A /proc SCAN AND NOT `pg_stat_activity`. A suite run exports
 //! `PG_TEST_URL=postgres://.../<db>`, so the name sits in `/proc/<pid>/environ`

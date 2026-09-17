@@ -103,7 +103,7 @@ fn tmpdir(label: &str) -> PathBuf {
 }
 
 /// One ed25519 key per service plus one peer document naming every public half,
-/// the shape `tests/lib/runtime_secrets.sh` writes for the end-to-end harnesses.
+/// in the shape the runtime credential loader expects.
 fn write_service_keys(dir: &Path) -> PathBuf {
     let mut entries = Vec::new();
     for name in [CONTROL_SERVICE_NAME, WORKER_SERVICE_NAME, GATEWAY_SERVICE_NAME] {

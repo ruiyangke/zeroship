@@ -202,10 +202,9 @@ pub fn is_dot_segment(seg: &str) -> bool {
 ///   `auth: user` resource that answers 401 on its own URL.
 /// * TAB / LF / CR (0x09/0x0A/0x0D) — STRIPPED by the parser before parsing,
 ///   so `adm<TAB>in` reads as `admin` to the worker. Belt-and-braces only: the
-///   HTTP layer already answers 400 for a raw tab in the request target
-///   (`tests/e2e_gateway_path_backslash.sh` T8), so this arm is not reachable
-///   through it. It is here so a future change to the HTTP parser cannot
-///   silently open the same hole.
+///   HTTP layer already answers 400 for a raw tab in the request target, so
+///   this arm is not reachable through it. It is here so a future change to
+///   the HTTP parser cannot silently open the same hole.
 ///
 /// A conforming client percent-encodes all four (`%5C`, `%09`, …), and the
 /// gateway does not decode those, so rejecting the raw bytes costs no
