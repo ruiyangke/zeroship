@@ -12,7 +12,7 @@ executables are gone.
 Do not use the old commands in this snapshot as operational instructions. Current
 platform apply instructions live in [Database migrations](../runbooks/db-migrations.md),
 and the current creator build path is documented in
-[Vite plugin](./vite-plugin.md#migration-first-type-generation-gen-types).
+[Vite plugin](../reference/vite-plugin.md#migration-first-type-generation-gen-types).
 
 **How to read the citations.** An unqualified `file:line` citation names a path
 inside the former `crates/zeroship-migrate/` crate and records what was read
@@ -29,7 +29,7 @@ engine was vendored. Those have been repointed at the in-sourced crates; a
 `data()` plus a non-empty `irreversible` reason. Schema and data cannot share a
 module. The generic forward/reverse phase names discussed in historical engine
 sections below are not aliases and are rejected by the current recorder. For
-current examples, use [the op DSL reference](./migrate-op-dsl.md).
+current examples, use [the op DSL reference](../reference/migrate-op-dsl.md).
 
 ---
 
@@ -137,7 +137,7 @@ The engine is a **generic, standalone-capable engine** with a **thin managed pro
 
 ### 1.8 The "JS DSL is the sole migration source — no raw SQL / no Flyway" stance
 
-Both an authoring mandate and a security property. The platform's own schema has **no** hand-authored SQL/Liquibase — the JS DSL corpus (`db/migrations-ts/`) is the whole source (`AGENTS.md:42`). On the creator surface there is **no raw SQL** — no `Raw` type, no ``sql`` escape, no string fragments; every transform/predicate is a closed `Expr` AST and the engine owns rendering (`migrate-op-dsl.md:22-27`, "property A"). The gated `raw({ sql, reason })` escape is reserved for trusted platform use, carries its `reason` inside the checksummed IR, and is counted against a committed baseline.
+Both an authoring mandate and a security property. The platform's own schema has **no** hand-authored SQL/Liquibase — the JS DSL corpus (`db/migrations-ts/`) is the whole source (`AGENTS.md:42`). On the creator surface there is **no raw SQL** — no `Raw` type, no ``sql`` escape, no string fragments; every transform/predicate is a closed `Expr` AST and the engine owns rendering (`../reference/migrate-op-dsl.md:22-27`, "property A"). The gated `raw({ sql, reason })` escape is reserved for trusted platform use, carries its `reason` inside the checksummed IR, and is counted against a committed baseline.
 
 A migration module separates structural and data intent. `schema()` records DDL
 and receives an engine-synthesized structural inverse. `data()` records DML and
@@ -675,7 +675,7 @@ Every predicate/value position uses a closed expression builder, but the *tier* 
 
 ### 3.19 Companion examples
 
-`docs/reference/migrate-dsl-examples.md` is the cookbook companion for this reference. This guide is the normative source for argument shapes and method names: column-type factories use their documented options objects, table runtime options are set with `.setOptions({...})`, and row deletion is authored with `.delete(args)` (wire tag `"delete"`). Postgres vendor helpers are documented from the JS-author side in [§3.15](#315-the-postgres-vendor-authoring-surface).
+`docs/reference/migrate-dsl-examples.md` is the cookbook companion for the DSL reference. [The op DSL reference](../reference/migrate-op-dsl.md) is the normative source for argument shapes and method names: column-type factories use their documented options objects, table runtime options are set with `.setOptions({...})`, and row deletion is authored with `.delete(args)` (wire tag `"delete"`). Postgres vendor helpers are documented from the JS-author side in [§3.15](#315-the-postgres-vendor-authoring-surface).
 
 ---
 

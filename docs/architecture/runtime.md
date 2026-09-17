@@ -100,13 +100,13 @@ code outside the bundle.
 | HTTP request shaping | [handler.rs](../../crates/zeroship-runtime/src/transport/handler.rs) |
 | Streams | [streams/mod.rs](../../crates/zeroship-runtime/src/web/streams/mod.rs) |
 | Native plugin wiring | [plugin.rs](../../crates/zeroship-runtime/src/core/plugin.rs) |
-| Bench tooling | `crates/zeroship-runtime/benches/`, `docs/reference/zerobench.md` |
+| Bench tooling | `crates/zeroship-runtime/benches/`, `docs/architecture/zerobench.md` |
 
 ## Related docs
 
 - [docs/architecture/overview.md](../architecture/overview.md) places the runtime in the full platform architecture.
 - [docs/architecture/distributed.md](../architecture/distributed.md) expands the cross-service request and deploy flows around the worker/runtime boundary.
 - The native plugin system turns `NativePlugin` surfaces into `env.*` namespaces inside an isolate.
-- [docs/reference/websocket-design.md](../reference/websocket-design.md) covers the runtime's WebSocket model and upgrade handling in more detail.
+- [docs/reference/websocket.md](../reference/websocket.md) covers the runtime's WebSocket model and upgrade handling in more detail.
 - [docs/reference/node-compat.md](../reference/node-compat.md) documents how npm packages and Node-style resolution are exposed inside V8.
 - [docs/reference/runtime-limits.md](../reference/runtime-limits.md) defines the operator-facing CPU, wall-clock, heap, and idle-GC controls referenced here.
