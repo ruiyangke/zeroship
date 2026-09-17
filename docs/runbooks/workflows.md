@@ -163,13 +163,22 @@ platform database. Neither is an operator SQL surface.
   any unexplained stalled run. A run reaches it when the app policy's
   `maxStuckDispatches` reclaimed dispatches of one frontier report nothing, so
   a rise here reads as bodies that hang or workers that die mid-dispatch, and
-  the run's recorded `StalledError` carries the count that tripped.
+  the run's recorded `StalledError` carries the count that tripped. A run whose
+  *rollback* stops reporting trips the same budget but rests `failed`, so it is
+  invisible here and shows up under abandoned rollback below.
 - Queue lag: track the oldest due job the manager has not delivered, and the
   oldest pending fanout page. To add: per-lane lag gauges emitted after each
   drain.
 - Journal and payload growth: per-app journal size and staged payload bytes.
   Alert on growth rate outside the measured launch envelope.
 - Ingress reject rate: count creator signal ingress 4xx/5xx outcomes by reason.
-- Partial compensation rate: count terminal runs with
-  `compensation_outcome = 'partial'`. Alert immediately; this means at least one
-  compensator failed and operator review is required.
+- Incomplete rollback rate: count terminal runs whose recorded error carries a
+  `compensation.outcome` other than `completed`. The outcome is a field of the
+  encoded `error` on the run's generation row, not a column, so this reads the
+  JSON rather than filtering on one. Alert immediately on either value.
+  `partial` means a compensator reported a failure, and `compensation.failures`
+  names it. `abandoned` means a compensator never reported at all, so the
+  platform stopped waiting and the undo may have half-applied;
+  `compensation.abandoned` names the steps nobody discharged and
+  `compensation.reason` carries the liveness verdict that stopped it. Both need
+  operator review, and `abandoned` needs it first.

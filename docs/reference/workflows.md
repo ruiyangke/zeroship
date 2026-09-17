@@ -1001,12 +1001,32 @@ interface CompensationSummary {
   total: number;      // compensators that ran to a final result
   completed: number;
   failed: number;
-  outcome: "completed" | "partial";
+  outcome: "completed" | "partial" | "abandoned";
+  failures?: { ordinal: number; error: unknown }[];
+  abandoned?: { ordinal: number; name: string }[];
+  reason?: unknown;   // the StalledError that stopped an abandoned rollback
 }
 ```
 
-A `partial` rollback always ends the run `failed`. Local development and deployed
-apps run compensators the same way.
+A `partial` rollback always ends the run `failed`, and `failures` names each
+compensator that reported one.
+
+A compensator that never returns is not a `partial` rollback: nothing reported,
+so nothing is known. The platform reclaims those dispatches against the same
+`maxStuckDispatches` budget a forward run gets, and when it is spent the
+rollback is abandoned. The run still rests `failed` with the creator's original
+error, because a rollback the platform gave up on does not overturn the verdict
+the workflow body produced. The summary reads `abandoned`, `abandoned` lists
+the steps whose compensators never reported, and `reason` carries the
+`StalledError` that stopped the wait. Those steps are outside `total`,
+`completed` and `failed`, which count only compensators that reached a final
+result.
+
+Treat an abandoned obligation as an undo of unknown state: the compensator may
+have applied part of its effect before it stopped reporting. The step name and
+ordinal are what let you go and check.
+
+Local development and deployed apps run compensators the same way.
 
 ## Errors
 
@@ -1017,7 +1037,7 @@ The SDK exports these workflow error classes:
 | `PermanentError` | Business failure that should not retry. If it escapes `run()`, the run fails and eligible compensators run. | Yes, if you intend to handle it and continue. |
 | `StepTimeoutError` | A step body is still running when `StepConfig.timeout` expires. Recorded as retryable. | Yes around `step.run`; if uncaught, normal failure handling applies. |
 | `NondeterministicError` | Bare workflow-body I/O/timers, journal name/kind/order mismatch, or unsupported step-promise control flow. | Treat as terminal misuse; do not swallow it. No rollback. |
-| `StalledError` | The platform reclaimed `maxStuckDispatches` dispatches of one frontier without the run reporting an outcome. | Not raised in your body: it is the platform's verdict, recorded on the run. Terminal. No rollback. |
+| `StalledError` | The platform reclaimed `maxStuckDispatches` dispatches of one frontier without the run reporting an outcome. | Not raised in your body: it is the platform's verdict. On a forward frontier it is recorded on the run, which rests `stalled`. On a rollback frontier it is recorded as `compensation.reason` and the run rests `failed` with the rollback abandoned. Terminal either way. No rollback. |
 | `ChildCancelledError` | A `step.call` child is cancelled before the parent join completes. | Yes around `step.call`; if uncaught, normal failure handling applies. |
 | `ChildTimeoutError` | A `step.call` child exceeds `ChildWorkflowOptions.timeout`. | Yes around `step.call`; if uncaught, normal failure handling applies. |
 | `LimitExceededError` | A platform cap is exceeded, such as `step.startMany` over the batch cap or output over the blob cap. | Once recorded, yes. The `step.startMany` cap cannot be caught in the dispatch that raises it: the catch resumes the body outside the replay boundary and the run fails `NondeterministicError` instead. |
