@@ -410,6 +410,10 @@ Chainable modifiers: `.required()` (the runtime-side counterpart of
 `.assigned({ by, on })`, `.references(table, opts?)`, `.mask(opts)`,
 `.auto_now()`, `.auto_now_on_update()`.
 
+A nullable field's write input is `T | undefined`, not `T | null`: passing
+`null` on insert or update is a compile error. `null` is a filter shape
+(`{ field: null }`), not a write value.
+
 `t.ref(table, opts?)` is the runtime-side foreign-key builder. It takes the
 target table first, then an options object with `column` (the target column,
 required for a manual schema), `relation`, `onDelete`, `onUpdate` and
@@ -596,6 +600,10 @@ The accessors are type-only; do not read them at runtime. `typeof collection.Id`
 and `InferId<typeof collection>` follow the schema's underlying ID type. Numeric
 IDs work with `get`, mutation shorthand, relation loading, and `bulkUnmask`.
 The map returned by `bulkUnmask` uses the caller's ID values as keys.
+
+A handler that takes a reference id as input must type it as the branded
+`Id<"table">` (or cast a plain `string` to it); a bare `string` is a compile
+error against the generated `env.db` types.
 
 For a runtime schema, `t.ref("users", { column: "account_key", relation: "user" })`
 declares the target column explicitly; an omitted target column uses `id`. The

@@ -115,9 +115,12 @@ Give a handler a required input parameter when the procedure takes an input
 object: an optional parameter (`input?: ...`) makes the wrapper infer a
 no-input procedure, and callers then cannot pass arguments. A `query` is
 read-only and cannot call `fetch()`; reach for `action` when a handler needs an
-outbound HTTP call. `subscription` metadata is recognized by discovery, but the
-public generated/manual client shape does not expose subscriptions yet — use
-`stream(...)` for shipped live feeds.
+outbound HTTP call. Both refusals are enforced at request time. A refused
+`env.db` write does not persist and resolves the call with `error` set (the
+typed `env.db` surface puts no `code` on that error); a refused `fetch()` throws
+with `code: "capability_violation"`. `subscription` metadata is recognized by
+discovery, but the public generated/manual client shape does not expose
+subscriptions yet — use `stream(...)` for shipped live feeds.
 
 ## Procedure auth (authenticated by default)
 
@@ -362,7 +365,7 @@ class RpcError extends Error {
 `isRpcError(err)` is the type guard, and `ErrorCode` is importable as a frozen
 enum-like object. Branch on `error.code`, not on the message.
 
-`code` is a closed set:
+`code` is a closed set for the platform's own faults:
 
 | `error.code` | Retried by default |
 | --- | --- |
@@ -380,6 +383,13 @@ enum-like object. Branch on `error.code`, not on the message.
 | `CANCELLED` | no |
 | `OUT_OF_RANGE` | no |
 | `UNIMPLEMENTED` | no |
+
+Database constraint faults sit outside that set. They keep the backend's
+classification instead of being mapped onto it: a duplicate key arrives as
+`UNIQUE_VIOLATION` and a broken reference as `FOREIGN_KEY_VIOLATION` (also
+`NOT_NULL_VIOLATION` and `CHECK_VIOLATION`), with the human message blanked to
+`internal error`. Branch on those codes directly — a duplicate key is not
+`ALREADY_EXISTS`.
 
 The client takes `retryable` from the server's envelope when present and falls
 back to those defaults. A `RpcError` also carries `details` when the server
@@ -426,6 +436,13 @@ INVALID_ARGUMENT` and `details.reason:
 Authenticated procedures accept any non-empty key, so a natural key such as an
 order id is fine there.
 
+**A request that carries no key is refused.** For a procedure declared
+`idempotent: true`, the deployed gateway rejects a request with no
+`Idempotency-Key` with `400 INVALID_ARGUMENT` and `details.reason:
+"missing_idempotency_key"`, before your handler runs. The generated client
+always mints a key, so this only affects a raw caller. `pnpm dev` runs no
+gateway, so the same call reaches your handler with no dedupe.
+
 **Only a response your handler produced is stored.** When the platform answers
 on its own behalf instead of running your call — it could not reach your app, or
 the request needs a sign-in round trip first — the key stays open and the retry
@@ -448,6 +465,11 @@ for await (const snapshot of subscribeTodos({ userId })) {
   render(snapshot);
 }
 ```
+
+On the wire the response is newline-delimited frames of the form
+`<type>:<json>`: `2:[<json>]` carries the next value, `0:<json>` a string,
+`e:<json>` a structured error, and `d:{}` ends the stream. The client decodes
+these for you; read them directly only from a raw consumer.
 
 For integrations that want a URL instead of an iterator, stream procedures expose
 `streamUrl(input)`. It returns the URL as a string when the procedure takes no

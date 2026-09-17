@@ -190,7 +190,8 @@ zeroship migrate [<path-to-migrations.ir.json>] [--app=<id>] [--app-name=<name>]
 
 The file posted is the build's recorded migration set (its intermediate
 representation, or IR); the CLI does not parse or rewrite it. `migrate` prints
-what it resolved and how many operations it applied and skipped, plus the
+what it resolved, how many operations it applied and skipped — the
+`applied`/`skipped` counts are operations, not migration files — and the
 migration id.
 
 ## `zeroship secret` and `zeroship var`

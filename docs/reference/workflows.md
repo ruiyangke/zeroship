@@ -1,5 +1,9 @@
 # `@zeroship/workflows`
 
+> **Availability.** Not published to the creator registry as of 2026-09-17, so
+> this SDK is not installable from a scaffolded app; the runtime's workflow host
+> runs regardless.
+
 `@zeroship/workflows` is the SDK for durable workflows. A workflow is a named
 TypeScript class whose `run(trigger, step)` body can pause, wait for a signal,
 call other workflows, and use timers, without writing the orchestration state
