@@ -9,8 +9,10 @@ from a working app instead of an empty server. It is built for creators —
 developers and the coding agents working beside them — who would rather build
 their product than run its infrastructure.
 
-zeroship is pre-launch. Nothing here is publicly available, and the wire
-formats, SDKs and schemas are still changing deliberately.
+> [!WARNING]
+> zeroship is under active development and has no release yet. Do not use it in
+> production. Nothing here is publicly available, and the APIs, wire formats and
+> schemas still change.
 
 ## What an AI-built app still needs
 
