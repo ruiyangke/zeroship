@@ -390,7 +390,6 @@ const MAX_HEADER_BYTES: usize = 16 * 1024;
 ///
 /// So `pnpm dev` refuses bodies that production accepts, which fails in the
 /// safe direction but makes a local 413 useless as evidence about the platform.
-/// See `docs/reference/runtime-limits.md`.
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 
 /// Max bytes buffered in `data` before we give up waiting for the request

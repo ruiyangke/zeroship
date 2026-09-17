@@ -1,7 +1,5 @@
 //! Miscellaneous node:crypto exports — `timingSafeEqual`, `getHashes`,
 //! `getCiphers`, `getCurves`, `getFips`, `setFips`, `secureHeapUsed`.
-//!
-//! Per `docs/archive/node-crypto-native.md` §X.2, §X.3, §II.13.
 
 use crate::crypto_ops::digest::HASH_NAMES;
 

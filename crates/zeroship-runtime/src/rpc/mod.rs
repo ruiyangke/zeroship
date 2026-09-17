@@ -1,4 +1,4 @@
-//! RPC v2 native foundation. See `docs/proposals/rpc.md`.
+//! RPC v2 native foundation.
 //!
 //! Current layout:
 //!

@@ -1,5 +1,4 @@
-//! AES-CTR / AES-CBC / AES-GCM / AES-KW. Per
-//! `docs/archive/webcrypto-native.md` §IV.2 / §IV.3 / §IV.4.
+//! AES-CTR / AES-CBC / AES-GCM / AES-KW.
 
 #![allow(dead_code)]
 
@@ -15,7 +14,7 @@ use crate::enforce_range::read_enforce_range_u32;
 use crate::state::OpError;
 
 // =============================================================================
-// AES-GCM with variable IV and tag lengths — §IV.2
+// AES-GCM with variable IV and tag lengths
 // =============================================================================
 
 pub fn encrypt_gcm<'s>(
@@ -580,9 +579,9 @@ fn aes_ctr(
         )
         .map_err(|_| OpError::dom("OperationError", "AES-CTR encrypt"))?;
     Ok(buf)
-    // Note (§IV.3): `length_bits` is informational — aws-lc-rs's CTR
+    // `length_bits` is informational — aws-lc-rs's CTR
     // increments the full 128-bit IV. WPT does not exercise the
-    // counter-overflow case; documented in the design.
+    // counter-overflow case.
 }
 
 // =============================================================================
