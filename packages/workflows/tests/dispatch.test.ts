@@ -15,7 +15,18 @@ import {
   installBodyGuards,
 } from "../../../crates/zeroship-workflow-v8/js/dispatch.js";
 
-import { Workflow } from "../src/index.ts";
+import {
+  ChildCancelledError,
+  ChildTimeoutError,
+  LimitExceededError,
+  NestedStepError,
+  NondeterministicError,
+  PermanentError,
+  StalledError,
+  StepTimeoutError,
+  Workflow,
+  WorkflowTimeoutError,
+} from "../src/index.ts";
 import type { StepContext, WorkflowStep, WorkflowTrigger } from "../src/index.ts";
 
 // Native startup calls this once per isolate, before any creator module
@@ -711,7 +722,7 @@ test("a step issued from inside a step body fails the run", { timeout: TEST_TIME
 
   const result = await replay(Checkout);
 
-  assertRunFailed(result, "Error", "cannot be called from inside a step body");
+  assertRunFailed(result, "NestedStepError", "cannot be called from inside a step body");
   assert.equal(result.name, "outer", show(result));
 });
 
@@ -727,7 +738,7 @@ test("a step issued after an await inside a step body fails the run", { timeout:
 
   const result = await replay(Checkout);
 
-  assertRunFailed(result, "Error", "cannot be called from inside a step body");
+  assertRunFailed(result, "NestedStepError", "cannot be called from inside a step body");
 });
 
 test("a step issued without a body fails the run", { timeout: TEST_TIMEOUT_MS }, async () => {
@@ -764,7 +775,7 @@ test("continueAsNew from inside a step body fails the run", { timeout: TEST_TIME
 
   const result = await replay(Checkout);
 
-  assertRunFailed(result, "Error", "cannot be called from inside a step body");
+  assertRunFailed(result, "NestedStepError", "cannot be called from inside a step body");
 });
 
 // ---------------------------------------------------------------------------
@@ -1313,4 +1324,192 @@ test("startMany past its batch bound fails as nondeterministic rather than by li
     "NondeterministicError",
     "awaited non-step work outside the microtask replay boundary",
   );
+});
+
+// ---------------------------------------------------------------------------
+// Error identity: what a creator's `catch` can branch on.
+//
+// A step failure reaches a body through `#resolveRecord`, which rebuilds the
+// error from the journal row rather than rethrowing the object that failed. The
+// constructor is therefore always lost, so the SDK's classes match on `name` --
+// the identity the journal carries as `type`. These cases are written the way a
+// creator writes them: `instanceof` at a catch site inside `run`.
+// ---------------------------------------------------------------------------
+
+function failedRow(
+  ordinal: number,
+  name: string,
+  error: StepError,
+  kind: JournalRow["kind"] = "run",
+): JournalRow {
+  return { ordinal, name, nameOccurrence: 0, kind, state: "failed", error };
+}
+
+test("a body catches a replayed step timeout with instanceof", { timeout: TEST_TIMEOUT_MS }, async () => {
+  class Checkout extends Workflow<unknown, unknown> {
+    async run(_trigger: WorkflowTrigger<unknown>, step: WorkflowStep) {
+      try {
+        await step.run("charge", () => "charged");
+        return "step did not fail";
+      } catch (e) {
+        if (e instanceof StepTimeoutError) return "handled a step timeout";
+        throw e;
+      }
+    }
+  }
+
+  const result = await replay(Checkout, [
+    failedRow(0, "charge", {
+      type: "StepTimeoutError",
+      message: "workflow step timed out",
+      retryable: true,
+    }),
+  ]);
+
+  assertRunCompleted(result, "handled a step timeout");
+});
+
+test("one catch site tells two workflow errors apart", { timeout: TEST_TIMEOUT_MS }, async () => {
+  // The discriminating half of the guard: the same `instanceof` chain must
+  // reject an error it does not name. Without this, a matcher that answered
+  // `true` for every Error would pass the case above.
+  class Checkout extends Workflow<unknown, unknown> {
+    async run(_trigger: WorkflowTrigger<unknown>, step: WorkflowStep) {
+      try {
+        await step.run("charge", () => "charged");
+        return "step did not fail";
+      } catch (e) {
+        if (e instanceof StepTimeoutError) return "matched the wrong class";
+        if (e instanceof ChildTimeoutError) return "matched a child timeout";
+        return "matched no class";
+      }
+    }
+  }
+
+  const matched = await replay(Checkout, [
+    failedRow(0, "charge", { type: "ChildTimeoutError", message: "child workflow timed out" }),
+  ]);
+  assertRunCompleted(matched, "matched a child timeout");
+
+  const unmatched = await replay(Checkout, [
+    failedRow(0, "charge", { type: "TypeError", message: "x is not a function" }),
+  ]);
+  assertRunCompleted(unmatched, "matched no class");
+});
+
+test("a creator's own error class survives the journal round trip", { timeout: TEST_TIMEOUT_MS }, async () => {
+  // The case no shared class identity could fix. The body throws a real
+  // `PermanentError`; the dispatch records it; the next dispatch rebuilds it
+  // from that recorded row. The second dispatch is fed the first one's own
+  // output, so the serialize/deserialize pair is exercised, not a hand-written
+  // journal row.
+  class Checkout extends Workflow<unknown, unknown> {
+    async run(_trigger: WorkflowTrigger<unknown>, step: WorkflowStep) {
+      try {
+        await step.run("review", () => {
+          throw new PermanentError("order did not pass review");
+        });
+        return "step did not fail";
+      } catch (e) {
+        if (e instanceof PermanentError) return "handled a permanent error";
+        throw e;
+      }
+    }
+  }
+
+  const recorded = await replay(Checkout);
+  const error = assertRunFailed(recorded, "PermanentError", "order did not pass review");
+
+  const replayed = await replay(Checkout, [failedRow(0, "review", error)]);
+  assertRunCompleted(replayed, "handled a permanent error");
+});
+
+test("a nested step call is catchable as NestedStepError", { timeout: TEST_TIMEOUT_MS }, async () => {
+  class Checkout extends Workflow<unknown, unknown> {
+    async run(_trigger: WorkflowTrigger<unknown>, step: WorkflowStep) {
+      try {
+        await step.run("outer", () => step.run("inner", () => "inner"));
+        return "step did not fail";
+      } catch (e) {
+        if (e instanceof NestedStepError) return "handled nested step misuse";
+        throw e;
+      }
+    }
+  }
+
+  const recorded = await replay(Checkout);
+  const error = assertRunFailed(recorded, "NestedStepError", "from inside a step body");
+
+  const replayed = await replay(Checkout, [failedRow(0, "outer", error)]);
+  assertRunCompleted(replayed, "handled nested step misuse");
+});
+
+test("a recorded limit failure is catchable as LimitExceededError", { timeout: TEST_TIMEOUT_MS }, async () => {
+  // The reachable limit path is the recorded one. A body cannot catch the
+  // `startMany` cap in the dispatch that raises it: the catch resumes the body
+  // outside the microtask replay boundary and the drain barrier fails the run
+  // first, which the `startMany` cap case at the end of this file pins.
+  class Checkout extends Workflow<unknown, unknown> {
+    async run(_trigger: WorkflowTrigger<unknown>, step: WorkflowStep) {
+      try {
+        await step.run("fanout", () => "fanned out");
+        return "step did not fail";
+      } catch (e) {
+        if (e instanceof LimitExceededError) return "handled a limit";
+        throw e;
+      }
+    }
+  }
+
+  const result = await replay(Checkout, [
+    failedRow(0, "fanout", {
+      type: "LimitExceededError",
+      message: "startMany batch exceeds maxStartManyBatch",
+    }),
+  ]);
+
+  assertRunCompleted(result, "handled a limit");
+});
+
+test("every exported workflow error matches its own name and nothing else", () => {
+  // Binds each class's `name` to the spelling its matcher tests, so the two
+  // cannot drift apart, and holds the matcher to real Error objects.
+  const classes = [
+    ChildCancelledError,
+    ChildTimeoutError,
+    LimitExceededError,
+    NestedStepError,
+    NondeterministicError,
+    PermanentError,
+    StalledError,
+    StepTimeoutError,
+    WorkflowTimeoutError,
+  ];
+
+  for (const ErrorClass of classes) {
+    const instance = new ErrorClass();
+    assert.equal(instance.name, ErrorClass.name, `${ErrorClass.name} names itself`);
+    assert.ok(instance instanceof ErrorClass, `${ErrorClass.name} matches its own instance`);
+    assert.ok(instance instanceof Error, `${ErrorClass.name} is still an Error`);
+
+    for (const Other of classes) {
+      if (Other === ErrorClass) continue;
+      assert.ok(
+        !(instance instanceof Other),
+        `${ErrorClass.name} must not match ${Other.name}`,
+      );
+    }
+
+    // A rebuilt failure is a plain Error carrying the recorded name.
+    const rebuilt = new Error("rebuilt");
+    rebuilt.name = ErrorClass.name;
+    assert.ok(rebuilt instanceof ErrorClass, `${ErrorClass.name} matches a rebuilt failure`);
+
+    for (const value of [null, undefined, "StepTimeoutError", 0, { name: ErrorClass.name }]) {
+      assert.ok(
+        !(value instanceof ErrorClass),
+        `${ErrorClass.name} must not match ${JSON.stringify(value) ?? "undefined"}`,
+      );
+    }
+  }
 });
