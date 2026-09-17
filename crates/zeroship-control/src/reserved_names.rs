@@ -69,23 +69,15 @@
 //! for the next config language, and do not add further couplings to
 //! Caddyfile syntax elsewhere in the tree.
 //!
-//! This module used to read `deploy/ops/Caddyfile` directly and pick site
-//! addresses out of the text. That is parsing a language we do not own, and it
-//! was silently wrong for every spelling it had not been taught. MEASURED
-//! 2026-08-20 against that parser — each of these routes a host away from
-//! creator apps, and each left the answer at the unchanged four labels:
+//! The Caddyfile TEXT is not parsed here. That is a language we do not own, and
+//! a text parser is silently wrong for every spelling it has not been taught: a
+//! `@status host status.{$D}` matcher, a `header Host` matcher, a `{ host ... }`
+//! block form or an `import` from another file each route a host away from
+//! creator apps while leaving the answer at the unchanged labels - and an
+//! `@x expression {host}.startsWith("...")` is CEL, so no text parser can decide
+//! it at any level of effort.
 //!
-//! | edge change | old parser said |
-//! | --- | --- |
-//! | `@status host status.{$D}` + `handle @status` | `Ok(["auth","control","console","api"])` |
-//! | `@h header Host h.{$D}` + `handle @h` | `Ok([])` |
-//! | `@b { host b.{$D} }` + `handle @b` | `Ok([])` |
-//! | `import sites/*.caddy` (a site block in another file) | `Ok([])` |
-//!
-//! and `@x expression {host}.startsWith("...")` is CEL, so no text parser can
-//! decide it at any level of effort.
-//!
-//! So the Caddyfile is no longer the input. `deploy/ops/caddy-claimed-hosts.sh`
+//! So the Caddyfile is not the input. `deploy/ops/caddy-claimed-hosts.sh`
 //! runs `caddy adapt`, which lowers the Caddyfile to Caddy's JSON config —
 //! resolving `{$ENV:default}`, resolving `import`, and emitting every host
 //! claim, however it was spelled, as a concrete `match` entry. The result is
@@ -112,13 +104,12 @@
 //!   `/opt/zeroship-deploy/ops/Caddyfile`, which `deploy/scripts/deploy-remote.sh`
 //!   overwrites from this repo on every roll (its `scp` of `deploy/ops/Caddyfile`)
 //!   — so the two can only diverge by a hand-edit ON the host, between rolls,
-//!   which the next roll silently reverts. Reported byte-identical on
-//!   2026-08-20; that was a check against the live host, not reproduced when
-//!   this was written, and nothing in this tree re-checks it.
-//! - **THE ROLL ITSELF used to be outside all of this.** Everything above is a
-//!   cargo test, and `deploy-remote.sh` runs from an operator's checkout
-//!   without being gated on one - so a tree CI had never seen could `scp` an
-//!   edge claiming a name the registry still hands out. That path now refuses
+//!   which the next roll silently reverts. That claim is not re-checked in this
+//!   tree.
+//! - **THE ROLL ITSELF is now gated.** Everything above is a cargo test, and
+//!   `deploy-remote.sh` runs from an operator's checkout without being gated on
+//!   one - so a tree CI had never seen could `scp` an edge claiming a name the
+//!   registry still hands out. That path refuses
 //!   before the build: it reads `RESERVED_APP_NAMES` out of this file with sed
 //!   (pinned by `the_deploy_scripts_sed_still_yields_reserved_app_names`
 //!   below), checks the artifact's `caddyfile_sha256` against the Caddyfile it
@@ -709,9 +700,9 @@ mod tests {
 
     /// THE REFUSAL. A `@status host status.{$D}` matcher inside the wildcard
     /// block routes `status.<domain>` away from creator apps without adding a
-    /// site block. The text parser this replaced answered the unchanged four
-    /// labels for exactly this file (MEASURED 2026-08-20); the gate must now
-    /// SEE the host and name it, so `reserved_set_matches_the_edge` goes red.
+    /// site block. The gate must SEE that host and name it - a text parser would
+    /// answer the unchanged four labels - so `reserved_set_matches_the_edge` goes
+    /// red.
     #[test]
     fn a_host_claimed_by_a_matcher_is_seen_and_named() {
         let claims = claimed_host_labels(FIXTURE_MATCHER, FIXTURE_MATCHER_CADDYFILE)
@@ -845,9 +836,9 @@ mod tests {
     }
 
     /// Caddy lowercases site addresses but leaves matcher hosts in source case
-    /// (MEASURED 2026-08-20: `header Host hdrhost.ZSDOMAIN.invalid` survives
-    /// adapt verbatim). Hostnames are case-insensitive, so the walk must be too
-    /// or a mixed-case matcher claims a host this never matches to a label.
+    /// (`header Host hdrhost.ZSDOMAIN.invalid` survives adapt verbatim).
+    /// Hostnames are case-insensitive, so the walk must be too or a mixed-case
+    /// matcher claims a host this never matches to a label.
     #[test]
     fn host_matching_is_case_insensitive() {
         assert_eq!(
@@ -857,8 +848,7 @@ mod tests {
     }
 
     /// A `header Host` matcher claims a host as surely as the `host` matcher,
-    /// under a different JSON key. The old text parser returned `Ok([])` for
-    /// this shape.
+    /// under a different JSON key.
     #[test]
     fn a_header_host_matcher_claims_its_label() {
         let mut labels = Vec::new();
@@ -1008,11 +998,9 @@ mod tests {
         );
 
         // The script must also put a FLOOR under the count, not merely refuse
-        // on empty. Its `[ -n "$X" ] || refuse` arm was unreachable under
+        // on empty. Its `[ -n "$X" ] || refuse` arm is unreachable under
         // `set -euo pipefail`: `grep -oE` exits 1 on no-match, so the
-        // assignment aborted the script one line before the refusal could run.
-        // Measured 2026-08-28: a roll died with a bare `sed: can't read ...`
-        // and none of that carefully written diagnosis.
+        // assignment aborts the script one line before the refusal can run.
         assert!(
             DEPLOY_REMOTE.contains("scrape_floor reserved_app_names"),
             "deploy/scripts/deploy-remote.sh no longer puts a floor under the \
