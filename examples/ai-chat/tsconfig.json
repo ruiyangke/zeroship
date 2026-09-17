@@ -14,5 +14,5 @@
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": false
   },
-  "include": ["src"]
+  "include": ["src", "e2e", "playwright.config.ts"]
 }
