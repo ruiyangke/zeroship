@@ -474,4 +474,3 @@ tests, then executes both owning reader suites.
 - [`vite-plugin.md`](vite-plugin.md) - the plugin options that did not move
 - [`env-vars.md`](env-vars.md) - `ZEROSHIP_CONFIG` and the rest of the environment surface
 - [`zship.md`](zship.md) - the artifact `build.output` names
-- [`../build-and-deploy-golden-path.md`](../build-and-deploy-golden-path.md) - build, deploy, migrate end to end

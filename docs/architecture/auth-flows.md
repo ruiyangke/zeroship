@@ -2884,8 +2884,7 @@ VERIFIED items, each paired with a positive live path or complete scoped search:
 VERIFIED drift:
 
 - `docs/reference/auth.md:301-319` describes a Gateway DPoP proof and
-  introspection path, while `docs/feature-map.md:527` says the DPoP arm was
-  removed. Scoped searches for `DPoP`, proof fields, and introspection in
+  introspection path. Scoped searches for `DPoP`, proof fields, and introspection in
   Gateway source and tests found no such request path; the live path is plain
   Bearer plus local JWKS verification
   (`crates/zeroship-gateway/src/router/auth.rs:654-825`).
