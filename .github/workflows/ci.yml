@@ -173,6 +173,14 @@ jobs:
       # status reported is the LAST command's - 0 whenever it could write - and
       # every failing test in the workspace sails through as a pass. The billing
       # gate hit that trap and solved it with PIPESTATUS.
+      # The workflow environment example is a fixture ARTIFACT that the workflow
+      # control tests read from ZEROSHIP_WORKFLOW_TEST_ENVIRONMENT_BIN. `cargo
+      # test` does not build `[[example]]` targets and `CARGO_BIN_EXE_` is not
+      # set for them, so the workspace test below needs it built and named here.
+      - name: Build the workflow environment fixture artifact
+        run: |
+          cargo build -p zeroship-control --example workflow-test-environment
+          echo "ZEROSHIP_WORKFLOW_TEST_ENVIRONMENT_BIN=$PWD/target/debug/examples/workflow-test-environment" >> "$GITHUB_ENV"
       - run: |
           set -o pipefail
           cargo test --workspace --no-fail-fast
