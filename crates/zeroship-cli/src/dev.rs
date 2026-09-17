@@ -296,9 +296,7 @@ fn validate_migrate_dsn(bytes: &[u8]) -> Result<(), String> {
 /// any one service key can present as any service to any service, and a worker
 /// can mint the identity envelope its own verifier accepts.
 ///
-/// The names match `zeroship_core::service_peers`, and
-/// `tests/lib/runtime_secrets.sh` writes the same set under the same names for
-/// the end-to-end harnesses.
+/// The names match `zeroship_core::service_peers`.
 const SERVICE_KEY_FILES: [(&str, &str); 3] = [
     ("svc-gateway.pem", "svc/gateway"),
     ("svc-control.pem", "svc/control"),

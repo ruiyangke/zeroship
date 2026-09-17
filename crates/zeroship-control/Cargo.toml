@@ -34,10 +34,10 @@ path = "tests/workflow_support/environment.rs"
 name = "zeroship-control"
 path = "src/main.rs"
 
-# Standalone mock-Stripe server for the billing & metering multi-node E2E
-# (tests/e2e_metering_billing.sh). Reuses the same Stripe-wire idiom as the
-# in-process mock in tests/billing_reconcile_test.rs, plus a /__mock/*
-# introspection surface for shell assertions.
+# Standalone mock-Stripe server for the billing & metering multi-node E2E.
+# Reuses the same Stripe-wire idiom as the in-process mock in
+# tests/billing_reconcile_test.rs, plus a /__mock/* introspection surface
+# for external assertions.
 [[bin]]
 name = "zeroship-mock-stripe"
 path = "src/bin/mock_stripe.rs"
@@ -133,7 +133,7 @@ zstd = { workspace = true }
 # inputs. The production helper is generic over `B: AsRef<[u8]>` so
 # `bytes` itself isn't a runtime dep.
 bytes = { workspace = true }
-# Webhook HTTP-boundary tests (#9/#2/#7) compute a REAL Stripe `v1=` HMAC so the
+# Webhook HTTP-boundary tests compute a REAL Stripe `v1=` HMAC so the
 # multi-v1 OR-fold and the signed-but-large-header paths exercise the production
 # `verify_stripe_signature`, not a hand-faked header. Same crates the lib uses.
 hmac = { workspace = true }

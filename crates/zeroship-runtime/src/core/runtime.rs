@@ -4636,8 +4636,8 @@ mod rpc_path_anchor_tests {
     }
 
     // What these do NOT cover: the gateway's own path canonicalisation (a
-    // different crate, driven by tests/e2e_gateway_path_backslash.sh), percent
-    // or backslash decoding — this function sees the raw request-target and
-    // deliberately does no unescaping — and whether the resolved id names a
-    // procedure at all, which is the dispatcher's job downstream.
+    // different crate), percent or backslash decoding — this function sees the
+    // raw request-target and deliberately does no unescaping — and whether the
+    // resolved id names a procedure at all, which is the dispatcher's job
+    // downstream.
 }

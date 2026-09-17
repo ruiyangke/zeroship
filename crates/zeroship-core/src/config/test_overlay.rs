@@ -115,8 +115,8 @@ fn load_opt() -> Option<FileConfig> {
 /// they read `PG_TEST_URL` and nothing else.
 ///
 /// `PG_TEST_URL` wins over the overlay. That is how a suite hands its per-run
-/// scratch database name down (`tests/lib/scratch_db.sh`) and how two concurrent
-/// runs stay disjoint - a per-run value cannot live in a file both of them read.
+/// scratch database name down and how two concurrent runs stay disjoint - a
+/// per-run value cannot live in a file both of them read.
 ///
 /// THE RESOLUTION ANNOUNCES ITSELF, and that is the whole of what the printing
 /// below is for. `env -u PG_TEST_URL cargo test ...` LOOKS like a no-database

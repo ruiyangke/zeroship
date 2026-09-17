@@ -497,9 +497,7 @@ pub async fn app_organization(pg: &compio_postgres::Client, app: &AppId) -> Stri
 /// NOTHING is a SUCCESSFUL statement affecting no rows: an app id that does not
 /// exist, or an app whose project row was never written, seats nobody and
 /// reports nothing. The test then fails much later as a 403 from whichever
-/// route wanted an owner, with no line pointing back at the fixture. The shell
-/// peer of this function (`seat_app_owner` in `tests/lib/organization_fixture.sh`)
-/// reads a token back out of the database for exactly the same reason.
+/// route wanted an owner, with no line pointing back at the fixture.
 #[allow(dead_code)]
 pub async fn seat_app_organization_member(
     pg: &compio_postgres::Client,

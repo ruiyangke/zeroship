@@ -1,9 +1,9 @@
 # The platform (author-owned) ceiling for the `db/migrations-ts` corpus.
 #
 # Passed to the general CLI as `zero-migrate apply --policy policies/platform.policy.toml`.
-# Every consumer names THIS path: tests/lib/runtime_secrets.sh (the harness helper),
-# deploy/ops/db-migrate.sh (the by-hand dev run), and deploy/compose/docker-compose.yml
-# (the `migrate` one-shot, which reads it from /policies inside the image).
+# Every consumer names THIS path: deploy/ops/db-migrate.sh (the by-hand dev run),
+# and deploy/compose/docker-compose.yml (the `migrate` one-shot, which reads it
+# from /policies inside the image).
 #
 # Author-owned: it injects NO mandatory system shape, so `resolve_create_table_policy`
 # is a pass-through over it (the platform's `db/migrations-ts` author their tables
