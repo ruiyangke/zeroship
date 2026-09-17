@@ -963,7 +963,7 @@ fn add_column_id_prefix_is_create_only_but_metric_and_mask_are_carried() {
     let metric_op: Op = serde_json::from_str(
         r#"{"op":"addColumn","table":"t","column":"x","type":{"vector":{"vector":8}},"vectorMetric":"cosine"}"#,
     )
-    .expect("addColumn now carries vectorMetric (#173)");
+    .expect("addColumn now carries vectorMetric");
     match &metric_op {
         Op::AddColumn { vector_metric, .. } => assert_eq!(
             *vector_metric,
@@ -977,7 +977,7 @@ fn add_column_id_prefix_is_create_only_but_metric_and_mask_are_carried() {
     let mask_op: Op = serde_json::from_str(
         r#"{"op":"addColumn","table":"t","column":"ssn","type":"text","mask":{"kind":"last4","classification":"spi"}}"#,
     )
-    .expect("addColumn now carries mask (#174)");
+    .expect("addColumn now carries mask");
     match &mask_op {
         Op::AddColumn { mask, .. } => {
             let m = mask.expect("the carried mask deserializes onto the op");

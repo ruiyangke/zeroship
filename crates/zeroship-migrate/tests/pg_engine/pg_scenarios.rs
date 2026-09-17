@@ -2607,7 +2607,7 @@ async fn interrupted_online_rename_is_guarded_until_explicitly_resolved() {
 /// Kept ignored rather than deleted because it states the contract a deploy-recovery
 /// driver has to meet. `apply/journal.rs` documents the durable primitives and
 /// the absence of that driver.
-#[ignore = "aspirational: a deploy-recovery driver would make this pass; today no driver exists so a retry cannot progress (#222)"]
+#[ignore = "aspirational: a deploy-recovery driver would make this pass; today no driver exists so a retry cannot progress"]
 #[compio::test]
 async fn interrupted_online_rename_is_automatically_recovered_on_same_deploy_retry() {
     let url = require_live_pg!();

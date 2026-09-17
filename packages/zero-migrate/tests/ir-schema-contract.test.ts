@@ -269,7 +269,7 @@ const TS_FLAGS_OVERRIDE = [
   "timeout_ms", "lock_timeout_ms", "phase",
 ].sort();
 
-test("IrFlagsOverride field set matches the schema (#180)", () => {
+test("IrFlagsOverride field set matches the schema", () => {
   assert.deepEqual(
     Object.keys(schema.$defs.IrFlagsOverride.properties).sort(),
     TS_FLAGS_OVERRIDE,

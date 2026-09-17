@@ -1603,7 +1603,7 @@ pub async fn record_baselines<D: SqlSession>(
         if let Err(e) = record_baseline_inner(conn, cfg, *rec).await {
             // Roll back the partial rows/edges; surface the original error.
             if let Err(rb) = conn.batch("ROLLBACK").await {
-                tracing::warn!(error = %rb, version = %rec.version, "zero-migrate: ROLLBACK failed after a record_baseline error (#3)");
+                tracing::warn!(error = %rb, version = %rec.version, "zero-migrate: ROLLBACK failed after a record_baseline error");
             }
             return Err(e);
         }
