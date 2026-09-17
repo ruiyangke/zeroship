@@ -50,6 +50,7 @@ interface Outcome {
   ordinal?: number;
   name?: string;
   nameOccurrence?: number;
+  maxAttempts?: number;
   stepKind?: string;
   output?: unknown;
   outputMode?: string;
@@ -1158,6 +1159,77 @@ test("a failed step's recorded error carries the creator's retryable flag", { ti
   assert.equal(error.retryable, false, show(result));
 });
 
+test("a permanent error declares that a retry cannot clear it", { timeout: TEST_TIMEOUT_MS }, async () => {
+  // `retries` is decided by the host off the recorded flag, so the SDK class
+  // named for a failure that cannot be retried has to say so on the wire. Its
+  // name alone reaches the host too, but nothing there matches on names.
+  class Checkout extends Workflow<unknown, unknown> {
+    async run(_trigger: WorkflowTrigger<unknown>, step: WorkflowStep) {
+      return await step.run("charge", { retries: { maxAttempts: 5 } }, () => {
+        throw new PermanentError("card declined");
+      });
+    }
+  }
+
+  const result = await replay(Checkout);
+
+  assert.equal(
+    assertRunFailed(result, "PermanentError", "card declined").retryable,
+    false,
+    show(result),
+  );
+  assert.equal(result.maxAttempts, 5, show(result));
+});
+
+test("a declared attempt ceiling reaches the host on the failure", { timeout: TEST_TIMEOUT_MS }, async () => {
+  // Paired with the control below, which differs only in declaring nothing.
+  class Checkout extends Workflow<unknown, unknown> {
+    async run(_trigger: WorkflowTrigger<unknown>, step: WorkflowStep) {
+      return await step.run("charge", { retries: { maxAttempts: 3 } }, () => {
+        throw new Error("kaboom");
+      });
+    }
+  }
+
+  const result = await replay(Checkout);
+  assertRunFailed(result, "Error", "kaboom");
+  assert.equal(result.maxAttempts, 3, show(result));
+
+  class Undeclared extends Workflow<unknown, unknown> {
+    async run(_trigger: WorkflowTrigger<unknown>, step: WorkflowStep) {
+      return await step.run("charge", () => {
+        throw new Error("kaboom");
+      });
+    }
+  }
+
+  const control = await replay(Undeclared);
+  assertRunFailed(control, "Error", "kaboom");
+  assert.equal(control.maxAttempts, 1, show(control));
+});
+
+test("an unusable attempt ceiling fails before the body runs", { timeout: TEST_TIMEOUT_MS }, async () => {
+  for (const declared of [0, -1, 2.5, "3"]) {
+    let ran = false;
+    class Checkout extends Workflow<unknown, unknown> {
+      async run(_trigger: WorkflowTrigger<unknown>, step: WorkflowStep) {
+        return await step.run(
+          "charge",
+          { retries: { maxAttempts: declared as number } },
+          () => {
+            ran = true;
+            return "ok";
+          },
+        );
+      }
+    }
+
+    const result = await replay(Checkout);
+    assertRunFailed(result, "Error", "retries.maxAttempts");
+    assert.equal(ran, false, show(result));
+  }
+});
+
 test("an error declaring no flag records none", { timeout: TEST_TIMEOUT_MS }, async () => {
   // Absent and `false` are different answers: one is the creator saying
   // nothing, the other is the creator ruling a retry out.
@@ -1251,28 +1323,24 @@ test("a replayed failure row rethrows the flag the journal holds", { timeout: TE
 // implied, and so closing one fails loudly at the case that documented it.
 // ---------------------------------------------------------------------------
 
-test("StepConfig.retries and StepConfig.backoff are read by nothing", { timeout: TEST_TIMEOUT_MS }, async () => {
-  // Both are declared in the SDK and inspected by neither the dispatcher nor
-  // the engine: a failing step under `maxAttempts` runs its body once and its
-  // failure is recorded as terminal. Closing this needs per-step attempt state
-  // in the journal, which does not exist.
+test("one dispatch runs a failing body once whatever its ceiling", { timeout: TEST_TIMEOUT_MS }, async () => {
+  // The dispatcher never spends an attempt of its own. A body that fails ends
+  // the dispatch and reports the declared ceiling; the host decides whether a
+  // later dispatch re-executes it, because nothing here survives the isolate.
   let bodies = 0;
   class Checkout extends Workflow<unknown, unknown> {
     async run(_trigger: WorkflowTrigger<unknown>, step: WorkflowStep) {
-      return await step.run(
-        "flaky",
-        { retries: { maxAttempts: 3 }, backoff: { base: "1ms", factor: 2 } },
-        () => {
-          bodies++;
-          throw new Error("kaboom");
-        },
-      );
+      return await step.run("flaky", { retries: { maxAttempts: 3 } }, () => {
+        bodies++;
+        throw new Error("kaboom");
+      });
     }
   }
 
   const result = await replay(Checkout);
 
   assert.equal(result.outcomes[0]!.kind, "RunFailed", show(result));
+  assert.equal(result.outcomes[0]!.maxAttempts, 3, show(result));
   assert.equal(bodies, 1, show(result));
 });
 

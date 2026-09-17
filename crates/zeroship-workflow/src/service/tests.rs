@@ -172,6 +172,7 @@ mod s3_fixture;
 mod schema_binding;
 mod schema_metadata;
 mod signal_models;
+mod step_retries;
 mod task_models;
 mod task_scope;
 mod topic_initialization;
@@ -1209,7 +1210,7 @@ async fn review_contract(store: Rc<OrmStore>) {
     let scope = service.fixture_app(app.clone());
     let policy = AppPolicy {
         max_running: 1,
-        compensation_retry_ms: 60_000,
+        retry_delay_ms: 60_000,
         ..Default::default()
     };
     service
