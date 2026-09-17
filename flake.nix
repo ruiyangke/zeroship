@@ -2,7 +2,7 @@
   description = "zeroship - AI-native app platform";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
@@ -10,112 +10,66 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
+        inherit (pkgs) lib stdenv;
+
+        # bindgen (libsqlite3-sys, pg_query, v8) drives libclang directly, so
+        # the cc wrapper's flags never reach it: name the system headers here.
+        # Darwin names them as a sysroot, since libSystem carries no headers.
+        bindgenClangArgs =
+          lib.optionals stdenv.hostPlatform.isLinux [ "-isystem ${stdenv.cc.libc.dev}/include" ]
+          ++ lib.optionals stdenv.hostPlatform.isDarwin [ "-isysroot ${pkgs.apple-sdk.sdkroot}" ];
       in
       {
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
-            nodejs_22
-            nodePackages.npm
-            bun
+            # Rust
             rustc
             cargo
-            # clippy from the same nixpkgs as rustc/cargo above, so its
-            # bundled clippy-driver matches the toolchain version (a
-            # mismatched clippy fails with E0514 against crates already
-            # built by this rustc).
             clippy
-            # rustfmt from the same nixpkgs as rustc/cargo, for the same reason
-            # clippy is pinned above. Without it `cargo fmt` is simply absent
-            # from the shell -- `cargo fmt --all -- --check` failed with "no
-            # such command" every time it was asked for, which reads like a
-            # passing check if the exit code is not inspected.
             rustfmt
+            cargo-nextest
+            cargo-flamegraph
+
+            # JavaScript. pnpm tracks the `package.json#packageManager` major;
+            # pnpm itself switches to that exact version when it differs.
+            nodejs_22
+            bun
+            esbuild
+            playwright-test
+            pnpm_11
+
+            # Native build dependencies
             cmake
             pkg-config
             openssl
             curl.dev
-            # SQLite CLI for ad-hoc inspection of dev/test databases.
-            # Note: rusqlite uses the `bundled` Cargo feature in
-            # crates/plugin-db, so it does NOT link against this sqlite —
-            # it compiles the SQLite 3.51.x amalgamation into our binary.
-            # Keep the CLI in the shell only for `sqlite3 <file>` debugging.
-            sqlite
-            # `pg_dump` and `pg_restore` for the data suite's snapshot tests.
-            # `xtask test data` refuses to run unless both are on PATH at the
-            # same major version as the fixture server in
-            # tests/fixtures/postgres/Dockerfile; without them the suite stops
-            # at its preflight instead of reporting on the code. Bump this
-            # attribute with that Dockerfile's tag.
-            postgresql_16
-            # libclang + clang are needed by rusqlite's `preupdate_hook`
-            # Cargo feature, which uses `bindgen` to generate Rust
-            # bindings against the bundled SQLite headers (see
-            # crates/plugin-db/Cargo.toml [sqlite] feature). LIBCLANG_PATH
-            # + BINDGEN_EXTRA_CLANG_ARGS below tell bindgen where to find
-            # the runtime + system headers.
-            llvmPackages.libclang
             llvmPackages.clang
-            wrk
-            numactl
-            hey
-            esbuild
-            # Profiling
-            linuxPackages.perf
-            cargo-flamegraph
-            # Playwright — `playwright` CLI for e2e tests without
-            # polluting node_modules. Browsers come from
-            # PLAYWRIGHT_BROWSERS_PATH below; the version of the CLI
-            # must match the bundled chromium build (currently 1208).
-            playwright-test
+            llvmPackages.libclang
 
-            # --- CI parity ------------------------------------------------
-            # CI runs inside this shell (`.github/workflows/ci.yml` sets
-            # `shell: nix develop --command bash -e {0}`). These are the tools
-            # the harnesses and CI steps invoke that the flake did not already
-            # supply. Without them the workflow needs a second, separately
-            # maintained apt list, and those two definitions drift.
-            #
-            # cargo-nextest replaces taiki-e/install-action. lsof and zstd are
-            # harness dependencies: ports are freed with `lsof -ti` and the
-            # artifact manifest is read with `tar --zstd`.
-            # git, procps, which, netcat, net-tools and jq are invoked by
-            # tests/provision_test_backends.sh and the e2e harnesses.
-            #
-            # pnpm is deliberately absent. package.json#packageManager pins the
-            # pnpm CI must use, and a devShell entry is PREPENDED to PATH, so a
-            # shell-provided pnpm would shadow that pin (this nixpkgs carries an
-            # older major than the pin). Move it here only with a nixpkgs bump.
-            cargo-nextest
+            # Databases. Keep postgresql at the fixture server's major
+            # (tests/fixtures/postgres/Dockerfile) or the data suite refuses.
+            postgresql_16
+            sqlite
+
+            # Test and CI tooling
             git
-            lsof
-            zstd
             jq
-            procps
-            which
+            lsof
             netcat
             net-tools
-          ];
+            procps
+            which
+            zstd
+
+            # Load generators
+            wrk
+            hey
+          ]
+          ++ lib.optionals stdenv.hostPlatform.isLinux [ pkgs.perf pkgs.numactl ];
 
           RUST_BACKTRACE = "1";
-          # bindgen (used by rusqlite preupdate_hook + other -sys crates)
-          # needs to locate libclang.so + clang's system headers at
-          # build time. Without these, `cargo build --features sqlite`
-          # fails with "Unable to find libclang".
           LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
-          # Two -isystem entries:
-          #   1. clang's own resource headers (stddef.h, stdarg.h, …) —
-          #      required by every bindgen consumer, incl. rusqlite.
-          #   2. glibc's dev headers (sys/types.h, …) — required by
-          #      `pg_query`/libpg_query (crates/zeroship-migrate), whose
-          #      generated `pg_query.h` pulls in `<sys/types.h>`. rusqlite's
-          #      bundled amalgamation never needed (2), so it was absent;
-          #      pg_query's bindgen fails with "'sys/types.h' file not found"
-          #      without it. `stdenv.cc.libc.dev` is the same glibc the
-          #      toolchain links against (no version skew).
-          BINDGEN_EXTRA_CLANG_ARGS =
-            "-isystem ${pkgs.llvmPackages.libclang.lib}/lib/clang/${pkgs.lib.getVersion pkgs.llvmPackages.clang}/include "
-            + "-isystem ${pkgs.stdenv.cc.libc.dev}/include";
-          # Playwright: use Nix-provided browsers, npm provides the test runner
+          BINDGEN_EXTRA_CLANG_ARGS = lib.concatStringsSep " " bindgenClangArgs;
           PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1";
         };
