@@ -1,6 +1,6 @@
 # ============================================================================
 # deploy/compose/openmeter.yml - a DEDICATED, opt-in OpenMeter stack for the
-# zeroship metering-export FAITHFUL e2e (tests/e2e_openmeter_export.sh).
+# zeroship metering-export FAITHFUL path.
 #
 # WARNING:  This is OPT-IN and ISOLATED on purpose. It is a SEPARATE compose project
 #     (`name: zeroship-openmeter`) with its OWN network + volumes and its OWN

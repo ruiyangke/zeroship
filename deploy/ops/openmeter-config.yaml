@@ -4,7 +4,7 @@
 # + `sink-worker` services. This is a DEV-ONLY local config (weak ClickHouse /
 # Postgres passwords, no TLS, an insecure portal token) - it exists purely so
 # the zeroship OpenMeterProvider's REAL cyper client can be exercised against a
-# LIVE OpenMeter, not the in-test mock. See tests/e2e_openmeter_export.sh and
+# LIVE OpenMeter, not the in-test mock. See
 # docs/runbooks/docker-compose.md (OpenMeter section).
 #
 # The shape mirrors OpenMeter's upstream quickstart config; the ONLY zeroship

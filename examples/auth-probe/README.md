@@ -1,7 +1,7 @@
 # auth-probe
 
 The fixture for the **auth leg of the dev-vs-deployed seam comparison**
-(`tests/e2e_dev_vs_deployed_auth.sh`, scenario 6 of `docs/pilot/e2e-scenarios.md`).
+(scenario 6 of `docs/pilot/e2e-scenarios.md`).
 Sibling of `examples/storage-probe` and `examples/workflow-probe`.
 
 It is not a demo. It exists so one identical sequence of auth operations can run
@@ -39,7 +39,6 @@ in the BUILT manifest so the deletion cannot happen silently.
 ```bash
 pnpm install --filter ./examples/auth-probe...
 pnpm --filter ./examples/auth-probe build     # -> dist/app.zship
-./tests/e2e_dev_vs_deployed_auth.sh           # both sides + the diff
 ```
 
 The dev users and the `AUTH_PROBE_API_PORT` default live in `vite.config.ts`.

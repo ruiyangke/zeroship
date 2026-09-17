@@ -48,7 +48,7 @@ export const getMessages = query(
 );
 
 // A procedure that always throws. It exists so the platform's error path can be
-// exercised on a REAL deployed app: golden_path step 13 drives it and then asks
+// exercised on a REAL deployed app: drive it, then ask
 // `GET /api/apps/<id>/logs` whether a creator can see anything about a request
 // their own code failed. The throw is inside the handler on purpose -- an input
 // rejection is refused before the handler runs, so it cannot tell "the error

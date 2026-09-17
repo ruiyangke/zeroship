@@ -5,12 +5,10 @@ import { zeroship } from "@zeroship/vite-plugin";
 // no client bundle - only `src/index.ts` exporting RPC procedures.
 //
 // The two dev users below are the DEV half of a dev-vs-deployed identity pair.
-// `tests/e2e_dev_vs_deployed_auth.sh` offline-mints a gateway session cookie
-// carrying the SAME id / email / name / avatar / email_verified / scopes for the
-// deployed half, so `env.auth.getUser()` can be diffed BYTE-FOR-BYTE instead of
-// through a normaliser that would hide exactly the field-level divergence the
-// comparison exists to find. Change a value here and you MUST change the
-// matching claim in that script (it re-asserts the pair on every run).
+// The deployed half must carry the SAME id / email / name / avatar /
+// email_verified / scopes, so `env.auth.getUser()` can be diffed BYTE-FOR-BYTE
+// instead of through a normaliser that would hide exactly the field-level
+// divergence the comparison exists to find.
 //
 // The dev sign-in password is NOT declared here - it is derived from each id by
 // `devPasswordFor` (packages/vite-plugin/src/dev-auth.ts): "dev-" + the first 8
