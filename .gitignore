@@ -54,6 +54,12 @@ nomad-driver-ch/bin/
 # Claude Code local state
 .claude/
 
+# ...except the scaffold's agent skills. These are product content that
+# `npm create zeroship-app` copies into a creator's project, not local state.
+# The rule above matches `.claude/` at any depth, so without this negation a
+# clean checkout ships the `.opencode` half of the skills and not this one.
+!packages/create-zeroship-app/template/.claude/
+
 # Pilot notes: local working artifacts, deliberately never committed.
 docs/pilot/
 
