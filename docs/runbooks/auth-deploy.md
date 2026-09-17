@@ -346,7 +346,6 @@ Record the operator action in the incident/audit trail.
 ## Reference
 
 - [Auth](../reference/auth.md)
-- [Auth dev tier](../reference/auth-dev-tier.md)
 - [Docker Compose runbook](docker-compose.md)
 - [Database migrations](db-migrations.md)
 - [Historical auth-server design](../archive/auth-server.md)
