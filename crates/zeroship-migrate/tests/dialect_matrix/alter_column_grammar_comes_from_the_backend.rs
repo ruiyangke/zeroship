@@ -1,23 +1,19 @@
 //! The `ALTER COLUMN` family is spelled by the BACKEND, not by the engine.
 //!
-//! # The defect this file was written against
+//! # What this file pins
 //!
 //! [`zeroship_migrate_backend::ddl::DdlEmitter`] covers the table-level and column
-//! add/drop verbs and used to stop exactly at the `ALTER COLUMN` family. Its only
-//! member there handed back the two IDENTIFIERS - a quoted table reference and a
-//! quoted column reference - and no statement. Everything after those identifiers was
-//! written in the engine:
+//! add/drop verbs, and the `ALTER COLUMN` family is the backend's too:
 //!
 //! * `ALTER TABLE … ALTER COLUMN … TYPE …` — the verb,
 //! * ` USING <col>::<type>` — the cast clause AND the `::` cast operator,
 //! * `SET NOT NULL` / `DROP NOT NULL`,
 //! * `SET DEFAULT <expr>` / `DROP DEFAULT`.
 //!
-//! Three of those are PostgreSQL decisions with no other spelling: MySQL retypes with
+//! These are PostgreSQL decisions with no other spelling: MySQL retypes with
 //! `MODIFY COLUMN` and restates the whole definition, and SQLite has no `ALTER COLUMN`
-//! at all. A backend that disagreed had nowhere to say so, because there was no method
-//! to override — the same shape as the `quote_ident` incident this tree already paid
-//! for once.
+//! at all. A backend that disagrees must have a method to override; when the engine
+//! wrote these itself, it gave a disagreeing backend nowhere to say so.
 //!
 //! # Why this needs a FOURTH backend and cannot be shown on the three that ship
 //!
@@ -94,7 +90,7 @@ const FOURTH_ID: DialectId = DialectId::new("fourthdb");
 /// `NativeAlterColumn` is the ONE capability this file needs and the whole reason the
 /// fixture exists. It is a claim about the DATABASE — "this server alters a column in
 /// place rather than rebuilding the table" — and it is true of far more servers than
-/// the one whose grammar the engine used to write.
+/// the three that ship.
 static FOURTH_DESCRIPTOR: BackendDescriptor = BackendDescriptor {
     id: FOURTH_ID,
     display_name: "FourthDB",

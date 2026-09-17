@@ -53,7 +53,7 @@
 //!   unit either, and nothing else does: the fold's `DuplicateIndex` check keys on
 //!   the target table's own index list (`render::fold`), so it never asks which
 //!   OTHER table owns a name, and the fold-level widening that would have closed
-//!   this was rejected on purpose (review-log F48). This probe is the only
+//!   this was rejected on purpose. This probe is the only
 //!   cross-table name-to-owner check that runs, and it reads ONE catalog snapshot
 //!   per unit.
 //! - **SQLite affinity compare (F1)** - the engine's declared snapshot data_type is
@@ -106,9 +106,8 @@ use zeroship_migrate_ir::probe::{ExpectColumn, GuardDir, GuardProbe};
 use crate::registry::BackendVendor;
 use crate::renderer::Capability;
 
-// `GuardProbe::schema()` now lives on the type itself in `zeroship_migrate_ir::probe`
-// (the type moved into the leaf wire-contract crate - an inherent `impl` here would
-// be an orphan impl on a foreign type).
+// `GuardProbe::schema()` is an inherent method in `zeroship_migrate_ir::probe`: an
+// `impl` here would be an orphan impl on a foreign type.
 
 /// A single same-name object whose shape DIVERGES from the declared one - the
 /// payload of [`GuardVerdict::FailDrift`]. Names + values only, never DDL.

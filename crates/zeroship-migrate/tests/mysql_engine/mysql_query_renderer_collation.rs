@@ -11,29 +11,23 @@
 //! PostgreSQL-spelled `data_type`, and it keeps the promise.
 //!
 //! `schema::query::renderer(&MYSQL).column_type` answers the SAME question
-//! from a raw SDK field def, and pinned NOTHING - not on `VARCHAR(n)`, not on
-//! `CHAR(n)`, not on `LONGTEXT`, not on the `VARCHAR(191)` a `ref` or an unknown token
-//! falls back to, not on the native `ENUM(...)`. Every one of those inherited the
+//! from a raw SDK field def: `VARCHAR(n)`, `CHAR(n)`, `LONGTEXT`, the
+//! `VARCHAR(191)` a `ref` or an unknown token falls back to, and the native
+//! `ENUM(...)` must each pin the collation explicitly rather than inherit the
 //! table default.
 //!
-//! # WHAT REACHES A SERVER, MEASURED BEFORE ANYTHING WAS CHANGED
+//! # What reaches a server
 //!
-//! **Nothing in production does.** That is not an inference from reading the call
-//! graph; it was measured. `MysqlSchemaRenderer::column_type` was given a tripwire
-//! that panics on entry, and the whole Rust suite was run against live PostgreSQL,
-//! live MySQL and live SQLite (37 sections, 3333 tests). Exactly EIGHT tests tripped
-//! it and all eight are `#[cfg(test)]` unit tests inside `schema/query.rs` itself; not
-//! one integration test and not one live-server leg reached it. The static reason
-//! agrees: the only production caller of the dialect-generic emitter is
-//! `render::declarative`'s SQLite 12-step rebuild, which passes a hardcoded
-//! `SQLITE`, and the three call sites of
+//! Nothing in production does. The only production caller of the
+//! dialect-generic emitter is `render::declarative`'s SQLite 12-step rebuild,
+//! which passes a hardcoded `SQLITE`, and the three call sites of
 //! `def_to_column_type_for_dialect` in `render::declarative` and `schema::diff` all
 //! pass a hardcoded `POSTGRES`. MySQL column DDL is produced by
 //! `MysqlSchemaRenderer::column_type`, which `render::declarative` reaches through the
 //! registered `SchemaRenderer`, instead.
 //!
 //! So this file does NOT claim to fix a defect a deployment can hit today. It claims
-//! that the two renderers now answer alike, and it is the only thing standing between
+//! that the two renderers answer alike, and it is the only thing standing between
 //! this arm and a regression - `schema::query` is a `pub mod` of the library crate,
 //! and `def_to_column_type_for_dialect` is `pub` and takes the dialect as a
 //! parameter, so the first caller that passes `Mysql` gets whatever this arm says.
@@ -259,8 +253,8 @@ async fn the_probe_server_is_case_insensitive_by_default() {
 /// THE BEHAVIOURAL CLAIM. For every character spelling this renderer can produce, the
 /// server must say `'Active'` and `'active'` are two different strings.
 ///
-/// Before the fix all seven compared EQUAL, because each inherited the `_ai_ci`
-/// database default.
+/// Absent the explicit pin each column inherits the `_ai_ci` database default and the
+/// two spellings compare EQUAL, so this assertion is what holds the pin in place.
 #[compio::test]
 async fn every_character_column_compares_two_cases_as_different_values() {
     let url = require_live_mysql!();

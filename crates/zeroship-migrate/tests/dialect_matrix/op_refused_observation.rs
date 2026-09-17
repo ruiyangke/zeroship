@@ -16,9 +16,8 @@
 //!
 //! # Why this is not `destructive-ops-dialect-parity.test.ts` again
 //!
-//! `packages/zero-migrate-cli/tests/host/destructive-ops-dialect-parity.test.ts` is
-//! the defect this observation is seeded from, and it is a good test. Two things here
-//! are different, and both are the point.
+//! `packages/zero-migrate-cli/tests/host/destructive-ops-dialect-parity.test.ts` is a
+//! good test, but two things here are different, and both are the point.
 //!
 //! 1. **Its three targets never meet.** Each target asserts its own CLI exit code
 //!    against a constant - `assert.equal(dropped.code, 1)`, `assert.equal(made.code,
@@ -37,14 +36,12 @@
 //!
 //! # The three arms, and why two of them exist only to stop a false pass
 //!
-//! Carried over from the host test, which records why each is there:
-//!
 //! - [`Subject::DropTable`] under [`Posture::Default`] - the policy never mentions the
 //!   knob, so the registry default applies. REFUSED, and the table is still there.
 //! - [`Subject::BoundedUpdate`] under [`Posture::Default`] - APPLIED. Without this the
-//!   file passes on a build that refuses far too much: the first version of the
-//!   original fix reused `Op::is_destructive`, the APPROVAL notion, which includes row
-//!   DML, and made two dialects refuse an `update` PostgreSQL allows.
+//!   file passes on a build that refuses far too much: `Op::is_destructive` is the
+//!   APPROVAL notion, which includes row DML, and reusing it as the security gate made
+//!   two dialects refuse an `update` PostgreSQL allows.
 //! - [`Subject::DropTable`] under [`Posture::Allow`] - APPLIED, and the table is gone.
 //!   Without this every default-posture arm passes on a build where drops never work
 //!   at all.
@@ -77,29 +74,25 @@
 //! There is no skip path anywhere here: a missing DSN panics in `require_live_pg!` /
 //! `require_live_mysql!`, for the reason `support::require_live_db_dsn` records.
 //!
-//! # The live red, and what building it found
+//! # The live red, and the residual gap it pins
 //!
 //! [`op_refused_still_disagrees_across_the_three_backends_on_an_unclassified_drop`] is
-//! the LIVE red, and it is a REAL residual gap rather than a constructed one. The
-//! defect this observation is seeded from was fixed by
-//! `zeroship_migrate_backend::guard::check_ir_data_security_policy`, a neutral walk over
-//! the structured ops that refuses `Op::is_destructive` minus row DML and raw. The
-//! parser-backed guard refuses on a different question: it refuses anything its
-//! classifier cannot POSITIVELY vouch for as non-destructive
-//! (`DataSecurityClass::Unknown`). Those two rules do not coincide, and `dropTrigger`
-//! is where they part:
+//! the LIVE red, and it is a REAL residual gap rather than a constructed one. The two
+//! guards answer different questions:
+//! `zeroship_migrate_backend::guard::check_ir_data_security_policy` is a neutral walk
+//! over the structured ops that refuses `Op::is_destructive` minus row DML and raw.
+//! The parser-backed guard refuses anything its classifier cannot POSITIVELY vouch for
+//! as non-destructive (`DataSecurityClass::Unknown`). Those two rules do not coincide,
+//! and `dropTrigger` is where they part:
 //!
 //! - `Op::DropTrigger` is not `Op::is_destructive`, so the neutral walk lets it past;
 //! - `DROP TRIGGER` parses to a `DropStmt` whose `remove_type` is neither in the
 //!   destructive drop table nor in the non-destructive allowlist (only an INDEX drop
 //!   is), so the parser-backed classifier answers `Unknown`.
 //!
-//! MEASURED offline before this file existed, by running the parser-backed
-//! classifier over the statements this fixture emits: `DROP TRIGGER` -> `Unknown`,
-//! `DROP TABLE` -> `Destructive("DROP TABLE")`, `DROP INDEX` -> `NonDestructive`,
-//! `CREATE TRIGGER ... EXECUTE FUNCTION` -> `NonDestructive`. So under the DEFAULT
-//! posture PostgreSQL refuses a `dropTrigger` that MySQL and SQLite apply - the same
-//! shape as the original defect, with the dialects on the other side of it.
+//! Under the DEFAULT posture PostgreSQL therefore refuses a `dropTrigger` that MySQL
+//! and SQLite apply - the same shape as the original defect, with the dialects on the
+//! other side of it.
 //!
 //! `dropTrigger` is believed to be the ONLY op with that property, and the belief is a
 //! READING rather than an executed census, so here is the method to re-run it. An op
@@ -115,31 +108,6 @@
 //! not a licence to delete the test: replace the fixture with whatever still splits
 //! the two rules, or record that nothing does. A red that silently becomes vacuous is
 //! the failure mode this whole layer exists to stop.
-//!
-//! # The red was MEASURED, by mutation, and every arm has its own
-//!
-//! `row_order_observation.rs` records that its FIRST mutation was a false green,
-//! because it flipped the one leg its fixture could not move. The check that avoids
-//! that shape here is per-ARM rather than per-leg: an arm whose failure could only
-//! come from a mutation another arm already catches is redundant coverage, so each was
-//! mutated separately and each went red on its own, with the split NAMED:
-//!
-//! - Inverting the neutral walk's gate in
-//!   `zeroship_migrate_backend::guard::check_ir_data_security_policy` restores the
-//!   original defect exactly - `["postgres"] -> RefusedByPolicy` against `["mysql",
-//!   "sqlite"] -> None`, which is the review entry's own sentence. Arm 1 red, the
-//!   other three green.
-//! - Widening `posture_denies` back to bare `Op::is_destructive` restores the
-//!   over-block regression - `["postgres"] -> None` against `["mysql", "sqlite"] ->
-//!   RefusedByPolicy`. Arm 1b red, the other three green.
-//! - Making the walk ignore the posture VALUE denies under `allow` too. Arm 2 red, the
-//!   other three green.
-//! - Adding `ObjectTrigger` to the parser's non-destructive allowlist closes the
-//!   residual gap, all three answer `None`, and the LIVE RED goes red with the "either
-//!   the gap closed or the harness is not asking three servers" message it promises.
-//!
-//! Two of the three backends move under each of the first three mutations and the
-//! third moves alone, so no arm here is passing on a leg that cannot move.
 //!
 //! # What this observation CANNOT see
 //!
@@ -158,12 +126,9 @@
 //!
 //! # One oracle written twice
 //!
-//! [`oracle`] is the same rule `row_order_observation::oracle` states, over a
-//! different value type. Extracting one generic oracle both observations share is the
-//! natural next step and it is deliberately NOT taken here: that file's module header
-//! explains its own oracle in place, including why the proposal's `[[case.differs]]`
-//! seam is absent, and a mechanical extraction would rewrite claims this change did
-//! not measure. Recorded as a finding rather than done quietly.
+//! [`oracle`] is the same rule `row_order_observation::oracle` states over a
+//! different value type. Extracting one shared generic oracle is deliberately not
+//! done here; that file explains its own oracle in place.
 
 use crate::support;
 
@@ -469,17 +434,17 @@ fn table_ops(subject: Subject, dialect: &DialectId) -> Vec<Value> {
     ops
 }
 
-/// The trigger the live red drops, and it is created AFTER the seed row.
+/// The trigger the live red drops, and it MUST be created AFTER the seed row.
 ///
-/// The order was measured, not chosen. MySQL refuses structured DML against a table
-/// that carries a trigger - "zero-migrate cannot prove transactional side effects, so
-/// structured data migrations fail closed" - so a fixture that created the trigger
-/// first could never seed its row there, and the leg died before observing anything.
+/// MySQL refuses structured DML against a table that carries a trigger - "zero-migrate
+/// cannot prove transactional side effects, so structured data migrations fail closed"
+/// - so a fixture that created the trigger first could never seed its row there, and
+/// the leg would die before observing anything.
 ///
 /// The grammar genuinely differs three ways: PostgreSQL EXECUTES A FUNCTION, SQLite
 /// and MySQL carry a BODY, and MySQL refuses a body that returns a result set, so its
 /// body deletes from an auxiliary table instead. Those three shapes are
-/// `dialect_conformance_live::prelude`'s, measured there against all three servers.
+/// `dialect_conformance_live::prelude`'s.
 ///
 /// The SUBJECT op is byte-identical on all three dialects in every case; only the
 /// setup splits. A subject that differed per dialect would be three observations
