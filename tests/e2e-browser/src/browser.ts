@@ -11,8 +11,8 @@
 //
 // Two things DO work:
 //
-//   1. The SYSTEM chromium (`/run/current-system/sw/bin/chromium`), which Nix
-//      built and patchelf'd against the store. Works unconditionally.
+//   1. A SYSTEM chromium — whatever `chromium` on PATH resolves to. Nix built
+//      and patchelf'd it against the store. Works unconditionally.
 //   2. The Nix `playwright-browsers` derivation, but ONLY when the shell has
 //      PLAYWRIGHT_BROWSERS_PATH pointing at it (i.e. inside `nix develop`).
 //
@@ -117,9 +117,10 @@ export async function launchBrowser(): Promise<{ browser: Browser; choice: Brows
       "no chromium available: none of " +
         SYSTEM_CANDIDATES.filter(Boolean).join(", ") +
         " is on PATH and PLAYWRIGHT_BROWSERS_PATH is unset.\n" +
-        "On NixOS install a system chromium (it is patchelf'd and works), or " +
-        "enter `nix develop` so PLAYWRIGHT_BROWSERS_PATH is set. " +
-        "Playwright's own `playwright install` browsers do NOT run on NixOS.",
+        "Install a system chromium, or run `pnpm exec playwright install chromium` " +
+        "so PLAYWRIGHT_BROWSERS_PATH points at a bundle. On NixOS prefer the " +
+        "system chromium or `nix develop`: browsers from `playwright install` are " +
+        "linked against a standard FHS layout and do not run there.",
     );
   }
 

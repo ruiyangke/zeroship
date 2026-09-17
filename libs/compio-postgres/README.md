@@ -175,7 +175,7 @@ question rather than gate a change:
 Bugs in a port hide in the places where it is NOT a transcription, so the suite
 leans on things that can disagree with it:
 
-- `tests/differential_tokio.rs` runs `tokio-postgres` beside this crate against
+- `tests/suite/differential_tokio.rs` runs `tokio-postgres` beside this crate against
   the same server and compares observable results. tokio is a
   `[dev-dependencies]` exemption to the workspace zero-tokio rule (AGENTS.md
   records the decision). Two divergences are DELIBERATE and pinned in that file
@@ -187,16 +187,16 @@ leans on things that can disagree with it:
   already carries - so the suite was comparing a fixed driver against an
   unfixed one, and a difference would have read as OUR defect. Move the pin
   when the port moves, never by resolution.
-- `tests/frame_fuzz.rs` and `tests/pgoutput_fuzz.rs` feed seeded corpora to the
+- `tests/suite/frame_fuzz.rs` and `tests/suite/pgoutput_fuzz.rs` feed seeded corpora to the
   backend-frame and replication decoders. Both assert termination, no panic,
   and a decoder that is still usable afterwards - plus FLOORS on what the
   corpus actually reached, because a fuzzer rejected before it enters the
   parser passes those assertions perfectly while testing nothing.
-- `tests/libpq_parameter_parity.rs` rules on every libpq connection parameter:
+- `tests/suite/libpq_parameter_parity.rs` rules on every libpq connection parameter:
   implemented, or refused with the key NAMED in the error's source chain. The
   state it exists to prevent is a parameter accepted and silently ignored,
   which is indistinguishable from support at the call site.
-- `tests/connection_churn.rs` opens ~90 connections including ones that end
+- `tests/suite/connection_churn.rs` opens ~90 connections including ones that end
   badly, and requires both `live_connections()` and the server's backend count
   back to baseline.
 
