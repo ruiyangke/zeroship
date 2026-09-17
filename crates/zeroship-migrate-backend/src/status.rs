@@ -60,7 +60,7 @@ pub struct MigrationStatus {
 /// One cross-deploy online-rename pending-contract obligation surfaced by
 /// `status_via_backend`. `orphaned` is computed against the supplied migration
 /// set:
-/// an obligation whose `pending_version` is NOT among the supplied set's versions
+/// an obligation whose `plan_version` is NOT among the supplied set's versions
 /// is orphaned (the rename was removed after its EXPAND applied) and emits the
 /// `zeroship_migrate::plan::pending::OrphanedPendingContract` payload.
 #[derive(Debug, Clone, PartialEq, Eq)]

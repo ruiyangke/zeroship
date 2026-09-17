@@ -1,19 +1,17 @@
 //! An operation targeting a table name a `renameTable` has already moved away is
 //! refused.
 //!
-//! Measured before the fix. This envelope was accepted and lowered:
+//! Otherwise the second statement names a table that no longer exists by the time
+//! it runs, and PostgreSQL fails it with `relation "prj_ir.a" does not exist`,
+//! mid-migration:
 //!
 //!     ALTER TABLE "prj_ir"."a" RENAME TO "b"
 //!     ALTER TABLE "prj_ir"."a" ADD COLUMN "n" text
 //!
-//! The second statement names a table that no longer exists by the time it runs.
-//! PostgreSQL fails it with `relation "prj_ir.a" does not exist`, mid-migration.
-//!
 //! THE ENGINE ALREADY REFUSES THE COLUMN-LEVEL EQUIVALENT. A `renameColumn`
 //! beside any other operation on the same table is rejected with "renameColumn
-//! must be the only operation targeting table \"a\" in a migration". The same
-//! class of mistake was caught for one rename operation and not the other, which
-//! is the asymmetry this closes.
+//! must be the only operation targeting table \"a\" in a migration". This closes
+//! the same class of mistake for the table rename.
 //!
 //! TWO SHAPES MUST KEEP WORKING, and they are what makes this narrow:
 //!
@@ -96,7 +94,7 @@ fn a_rename_on_its_own_is_still_allowed() {
 
 #[test]
 fn an_operation_on_a_dropped_table_is_refused() {
-    // Measured before the fix:
+    // The failure shape:
     //     DROP TABLE "prj_ir"."a"
     //     ALTER TABLE "prj_ir"."a" ADD COLUMN "n" text
     let refusal = verdict(
@@ -133,14 +131,7 @@ fn dropping_a_table_and_recreating_it_is_still_allowed() {
     .expect("drop-then-recreate, then use, is a real migration pattern");
 }
 
-// SINCE FIXED, in `op_references_a_dropped_column.rs`. Left here because the
-// reasoning below is what shaped that fix:
-//
-//     ALTER TABLE "prj_ir"."a" DROP COLUMN "v"
-//     CREATE INDEX IF NOT EXISTS "ix" ON "prj_ir"."a" ("v")
-//
-// lowered and failed at the server with `column "v" does not exist`. It needed
-// different machinery: this check compares one name per op via `touched_table`,
-// while the column case needs every column each op REFERENCES - index elements,
-// constraint column lists, backfill targets - a wider surface than the table
-// name, which is why it went in its own change with its own controls.
+// The table-name check here compares one name per op via `touched_table`. The
+// column-level case needs every column each op REFERENCES - index elements,
+// constraint column lists, backfill targets - a wider surface that is checked
+// separately, in `op_references_a_dropped_column.rs`.

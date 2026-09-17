@@ -1,25 +1,14 @@
 //! Live PostgreSQL oracle for the `Op::DropColumn` CHECK cascade.
 //!
 //! PostgreSQL drops a CHECK constraint whenever any column its expression
-//! references is dropped. `render/fold.rs` used to claim (at the `DropColumn`
-//! cascade and at `constraint_local_columns_contain`) that "CHECK is never
-//! folded". It is: both `fold_create_table_specs` and the `Op::AddConstraint` arm
-//! push a `ConstraintSnapshot { kind: "CHECK", definition: "CHECK (<rendered>)" }`.
-//! `constraint_local_columns_contain` parses the FIRST parenthesized group of that
-//! definition as a comma-separated column list, and for a CHECK that group is the
-//! EXPRESSION - so a single-column CHECK never matched its own column and the fold
-//! kept a constraint PostgreSQL had already cascaded away.
-//!
-//! Measured on PostgreSQL 18.4: `ALTER TABLE ... DROP COLUMN qty` removes
-//! `CHECK ((qty >= 0))` from `pg_constraint`.
-//!
-//! The fix records the referenced columns STRUCTURALLY on
-//! `ConstraintSnapshot::cascade_columns` - from `conkey` on the live side, from the
-//! closed AST on the fold side - so neither half has to read them back out of
-//! rendered SQL text. These tests pin both directions of that predicate against a
-//! real database: the constraint must go when PostgreSQL drops it, and must STAY
-//! when PostgreSQL keeps it (a literal that merely spells a column name, and a
-//! whole-row predicate that references nothing).
+//! references is dropped, and the fold must drop it too. The referenced columns
+//! are recorded STRUCTURALLY on `ConstraintSnapshot::cascade_columns` - from
+//! `conkey` on the live side, from the closed AST on the fold side - so neither
+//! half has to read them back out of rendered SQL text. These tests pin both
+//! directions of that predicate against a real database: the constraint must go
+//! when PostgreSQL drops it, and must STAY when PostgreSQL keeps it (a literal
+//! that merely spells a column name, and a whole-row predicate that references
+//! nothing).
 
 use crate::support;
 
@@ -253,9 +242,8 @@ async fn drop_column_cascades_a_standalone_check_the_way_postgresql_does() {
     );
 }
 
-/// Control: dropping an UNRELATED column must NOT cascade the CHECK. This one is
-/// expected to pass on current code and pins that the reproduction above is about
-/// the cascade, not about CHECK folding in general.
+/// Control: dropping an UNRELATED column must NOT cascade the CHECK, pinning that
+/// the cascade follows the referenced column rather than CHECK folding in general.
 #[compio::test]
 async fn drop_of_an_unrelated_column_keeps_the_check() {
     let source = r#"{
@@ -388,9 +376,9 @@ async fn drop_of_one_column_cascades_a_two_column_check() {
 /// closed AST instead of parsed out of the rendered SQL.
 ///
 /// `CHECK (status <> 'qty')` mentions the token `qty` only as a string LITERAL.
-/// Measured on PostgreSQL 18.4: the constraint SURVIVES `DROP COLUMN qty` (its
-/// `conkey` holds `status` alone). A text-matching cascade would drop a constraint
-/// PostgreSQL kept - a brand-new phantom in the opposite direction.
+/// The constraint SURVIVES `DROP COLUMN qty` (its `conkey` holds `status` alone).
+/// A text-matching cascade would drop a constraint PostgreSQL kept - a brand-new
+/// phantom in the opposite direction.
 #[compio::test]
 async fn a_literal_that_spells_a_column_name_does_not_cascade() {
     let source = r#"{

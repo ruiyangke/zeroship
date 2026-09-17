@@ -142,7 +142,7 @@ async fn apply_doc(
 ///      CHECK would panic in `assert_matches_live` at the fold, never reaching this
 ///      function. On the other side `snapshot_schema_sqlite` only ever pushes
 ///      `PRIMARY KEY`, `UNIQUE` and `FOREIGN KEY` into the constraint bucket.
-///      Measured: a table created with `CONSTRAINT "parts_qty_check" CHECK (("qty" >=
+///      A table created with `CONSTRAINT "parts_qty_check" CHECK (("qty" >=
 ///      0))` introspects to `pk_parts` and nothing else, with the CHECK text
 ///      surviving only on the excluded-from-equality `stored_create_sql`. The
 ///      current corpus authors no CHECK either, but that is the weaker fact.
@@ -329,18 +329,15 @@ async fn fold_equals_introspect_sqlite() {
     all_ops.extend(apply_doc(&be, desc_idx, &both, &live_tables, Approval::None).await);
     assert_matches_live(&be, &all_ops, "create descending index").await;
 
-    // (6) The ops PostgreSQL's fold sweep covers and this one did not.
-    //
-    // `fold_roundtrip_pg.rs` folds 35 op kinds; this file folded 7. Most of the
+    // (6) The ops PostgreSQL's fold sweep covers and this one did not. Most of the
     // difference is PostgreSQL-only surface (functions, triggers, partitions,
     // sequences) or ops SQLite refuses outright (alter-column, constraint add/drop),
     // and their absence is correct. These are the ones SQLite genuinely supports,
     // where a fold that disagreed with the live catalog would go unnoticed.
     //
-    // DOMAINS AND ENUMS USED TO BE ON THAT PostgreSQL-only list, and they do not
-    // belong there: `dialect-support.toml` rates `createEnum` and `createDomain`
-    // `portable` on all three dialects, and SQLite inlines them. Stage (8) below is
-    // what the entry was hiding.
+    // Domains and enums belong here too: `dialect-support.toml` rates `createEnum`
+    // and `createDomain` `portable` on all three dialects, and SQLite inlines them.
+    // Stage (8) below is where that is proved.
     let rename = r#"{"ir_version":1,"name":"rename_tbl","ops":[
         {"op":"renameTable","table":"folded","to":"folded_renamed"}
     ]}"#;
@@ -382,10 +379,6 @@ async fn fold_equals_introspect_sqlite() {
     // loss is SILENT for a same-schema type - which is why `fold_roundtrip_pg.rs`'s
     // `named_type_lifecycle` did not cover this and this file had to.
     //
-    // The file header used to list domains and enums under "PostgreSQL-only surface".
-    // Measured against `dialect-support.toml`, `createEnum` and `createDomain` are
-    // `portable` on all three dialects; the entry was wrong, and this stage is what
-    // found it.
     let named_types = r#"{"ir_version":1,"name":"named_types","ops":[
         {"op":"createEnum","name":"plan_tier","values":["free","pro"]},
         {"op":"createDomain","name":"seat_quota","as":"int"},
@@ -449,8 +442,6 @@ async fn fold_equals_introspect_sqlite() {
     //              pre-existing UNIQUE key"
     //
     // So a fixture needs a unique index on the target column first. Both refusals
-    // are the engine being correct rather than a defect; the stage is absent
-    // because that setup chain was not worth the cycles in the round that added
-    // the four stages above, and saying so beats leaving a reader to assume the
-    // rebuild path is fold-verified.
+    // are the engine being correct rather than a defect, and the rebuild path is
+    // not fold-verified here.
 }

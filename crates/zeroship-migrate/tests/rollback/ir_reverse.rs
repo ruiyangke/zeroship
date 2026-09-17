@@ -1,10 +1,9 @@
 //! The recorded reverse of a data migration, at the wire and the load gate.
 //!
 //! A `data()` migration declares exactly one of `inverse()` or `irreversible`.
-//! Before this, the recorder recorded the inverse and `buildEnvelope` then
-//! dropped it: the author wrote a reverse, every gate accepted it, and nothing
-//! downstream ever saw it. That is the accepted-and-discarded shape this project
-//! treats as a defect in its own right (F651, F652).
+//! The recorder records the inverse and the envelope carries it through; an
+//! accepted-and-discarded reverse — authored, accepted by every gate, and seen
+//! by nothing downstream — is a defect in its own right.
 //!
 //! Four properties are worth pinning, and three of them are about what must NOT
 //! change:
@@ -95,27 +94,10 @@ fn the_of_ir_digest_is_pinned_against_unintended_drift() {
     // a change nobody intended surfaces later as a drift abort on a migration
     // nobody touched.
     //
-    // IT HAS ALREADY CAUGHT ONE, which is why the name and message no longer talk
-    // only about the reverse. The original pin was captured before the reverse
-    // fields existed, and `ReverseDomain::None` provably folds nothing, so the
-    // reverse was never the thing that moved it. What moved it was `61298897b`
-    // ("remove full-text search") deleting `engine_goodie_ddl` from
-    // `MigrationFlags` - a field whose OWN doc comment said it was retained rather
-    // than deleted precisely "because it is covered by the canonical checksum
-    // image below, so removing it would invalidate every recorded migration's
-    // checksum". The removal deleted that warning along with the field, and this
-    // test was the only thing left saying so. Confirmed by restoring the field:
-    // the digest returns to the old value and this test passes.
-    //
-    // RE-PINNED 2026-08-28, deliberately. The removal stands: the field was dead
-    // (nothing in the engine ever set it), and pre-launch there are no deployed
-    // creator journals to invalidate - the platform corpus is applied to a fresh
-    // database. So the new fold is the intended one and the anchor moves with it.
-    //
     // IF THIS TEST GOES RED, DO NOT PASTE IN WHAT THE CODE NOW PRINTS. That turns
     // the only guard over the fold into a rubber stamp. Find WHICH folded field
     // changed, decide whether that change was intended, and re-pin only once it
-    // is - recording the reason here, as the line above does.
+    // is - recording the reason here.
     const EXPECTED: &str = "c57c0f9d309bff844e5d6bf5ab3a210523f4887fe3d7b9808cae5fb75aa6aeb1";
     let ir = envelope(vec![insert_op()]);
     assert_eq!(
