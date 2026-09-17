@@ -16,14 +16,15 @@
 // deltas. `result.toUIMessageStreamResponse()` produces the canonical
 // SSE wire `useChat` expects — no manual frame plumbing.
 
-import { mutation } from "@zeroship/rpc/server";
+import { action } from "@zeroship/rpc/server";
 import { openai } from "@ai-sdk/openai";
 import { streamText, convertToModelMessages, type UIMessage } from "ai";
 
-// Marked as `mutation()` — the procedure has side-effects (a model
-// call) and returns a single Response, even though that response
-// happens to stream.
-export const chat = mutation(
+// `action()`, not `mutation()`: mutations run inside a transaction and the
+// runtime refuses an outbound `fetch` there, so the OpenAI call fails with
+// `capability_violation` before a single token is produced. Actions may call
+// external APIs, and a returned `Response` still streams to `useChat`.
+export const chat = action(
   async (input: { messages: UIMessage[] }): Promise<Response> => {
     // `convertToModelMessages` turns the UI-shaped v6 messages
     // (`parts: [{ type: "text", text }]`) into the model-shaped form the
