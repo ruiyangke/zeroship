@@ -148,14 +148,13 @@ pub struct Holders {
     /// reason this scan exists -- a peer's suite sitting in cargo holds no
     /// backend and appears only in `PG_TEST_URL` -- and a kernel that refused
     /// every peer's `environ` would leave that half silently dead while the
-    /// argv half kept the scan looking healthy. Measured 2026-08-20 on this
-    /// machine: 77 readable, 14 refused. Zero is the gap.
+    /// argv half kept the scan looking healthy. A count of zero here is the gap.
     pub peer_env_read: usize,
     /// Entries that are alive and whose `cmdline` could not be read at all.
     ///
     /// A GAP. Exiting explains a short read and so does a refused environment;
     /// neither explains this, and every one of them could be the peer agent
-    /// whose database is about to be dropped. Measured 2026-08-20: 0 of 495.
+    /// whose database is about to be dropped.
     pub unexplained: Vec<i32>,
     /// `/proc` itself could not be listed. Total blindness, and indistinguish-
     /// able from "nothing holds any of these names" until it is carried out.
