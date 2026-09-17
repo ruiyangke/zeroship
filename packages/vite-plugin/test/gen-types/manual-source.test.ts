@@ -87,9 +87,9 @@ export const schema = {
   users: defineSchema({
     email: t.string().required().mask({ kind: "email", classification: "pii" }),
     secret: t.encrypted(),
-    secretAmount: t.encrypted({ of: t.number() }),
+    secretAmount: t.encrypted({ of: t.double() }),
     secretBytes: t.encrypted({ of: t.bytes() }),
-    age: t.number(),
+    age: t.double(),
     handle: t.string().required().unique(),
   })
     .softDelete()
@@ -309,7 +309,7 @@ describe("NormalizedSchema -> CollectionDescriptorDto mapping", () => {
     const { schema: defineSchema, t } = await import("@zeroship/db");
     const builder = defineSchema({
       name: t.string().required().unique(),
-      count: t.number(),
+      count: t.double(),
       handle: t.id("handle"),
       owner: t.ref("users", { column: "account_key" }),
     });

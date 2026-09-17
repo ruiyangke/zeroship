@@ -32,7 +32,7 @@ function makeMockNative() {
 
 
 test("encrypted metadata uses the logical field type", () => {
-  for (const [of, type] of [[t.string(), "string"], [t.number(), "number"], [t.bytes(), "bytes"]] as const) {
+  for (const [of, type] of [[t.string(), "string"], [t.double(), "number"], [t.bytes(), "bytes"]] as const) {
     assert.deepEqual(t.encrypted({ of }).toFieldDef(), {
       type, encrypted: true, mask: { kind: "full", classification: "pii" },
     });

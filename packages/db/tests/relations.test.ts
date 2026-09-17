@@ -187,7 +187,7 @@ test("reference builders retain scalar storage and named metadata through modifi
   const bigint = t.bigInt().references("people", { column: "id", relation: "author" }).required();
   assert.deepEqual(integer.toFieldDef(), { type: "integer", refTarget: "people", refColumn: "id", relation: "author", required: true });
   assert.deepEqual(bigint.toFieldDef(), { type: "bigInt", refTarget: "people", refColumn: "id", relation: "author", required: true });
-  assert.throws(() => t.number().references("people"), /reference storage/);
+  assert.throws(() => t.double().references("people"), /reference storage/);
 });
 
 test("redeclaring a reference replaces its previous target options", () => {

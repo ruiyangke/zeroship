@@ -5,7 +5,7 @@ import { installSchema, normalizeSchema } from "../../../crates/zeroship-data-v8
 
 const fields = {
   id: t.string().primaryKey().assigned({ by: "typedId", on: "insert" }).required(),
-  revision: t.number().assigned({ by: "increment(1)", on: "write" }).required(),
+  revision: t.double().assigned({ by: "increment(1)", on: "write" }).required(),
   removed: t.timestamp().assigned({ by: "now", on: "delete" }),
   title: t.string().required(),
 };

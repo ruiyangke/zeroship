@@ -36,7 +36,7 @@ describe("SchemaBuilder.index(name, fields) — definition-time validation", () 
 
   test("declares a multi-column index in declared field order", () => {
     const s = schema({
-      userId: t.number().required(),
+      userId: t.double().required(),
       done: t.boolean().default(false),
       created_at: t.timestamp(),
     }).index("by_user_done", ["userId", "done"]);
@@ -47,7 +47,7 @@ describe("SchemaBuilder.index(name, fields) — definition-time validation", () 
   test("chains multiple .index() calls in declaration order", () => {
     const s = schema({
       email: t.string().required(),
-      userId: t.number(),
+      userId: t.double(),
       done: t.boolean(),
     })
       .index("by_email", ["email"])
@@ -69,7 +69,7 @@ describe("SchemaBuilder.index(name, fields) — definition-time validation", () 
 
   test("uniqueIndex(name, fields) sets unique: true on the spec", () => {
     const s = schema({
-      orgId: t.number().required(),
+      orgId: t.double().required(),
       slug: t.string().required(),
     }).uniqueIndex("by_org_slug", ["orgId", "slug"]);
 
@@ -156,7 +156,7 @@ describe("Collection — unindexed-query warning honours declared indexes", () =
     return installSchemaForTest(
       {
         todos: schema({
-          userId: t.number(),
+          userId: t.double(),
           done: t.boolean().default(false),
           title: t.string().required(),
           email: t.string(),

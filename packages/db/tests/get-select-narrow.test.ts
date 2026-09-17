@@ -40,7 +40,7 @@ describe("get(...) select narrowing", () => {
       { ...generatedSchema,
         email: t.string().required().unique(),
         name: t.string().required(),
-        age: t.number(),
+        age: t.double(),
       },
       makeMockNative({ id: "usr_01", email: "a@b.com" }),
     );

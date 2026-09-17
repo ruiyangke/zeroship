@@ -12,7 +12,7 @@ const fields = {
   emailMasked: t.string().mask({ kind: "email" }),
   ssnRandom: t.encrypted({  }),
   secondSecret: t.encrypted({  }),
-  amountSecret: t.encrypted({ of: t.number() }),
+  amountSecret: t.encrypted({ of: t.double() }),
 };
 
 type UserFilter = Filter<typeof fields>;

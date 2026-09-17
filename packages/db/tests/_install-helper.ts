@@ -32,7 +32,7 @@ export const generatedSchema = {
   updated_at: t.timestamp().required().assigned({ by: "now", on: "write" }),
   created_by: t.string().nullable().required().assigned({ by: "actor", on: "insert" }),
   updated_by: t.string().nullable().required().assigned({ by: "actor", on: "write" }),
-  version: t.number().required().assigned({ by: "increment(1)", on: "write" }),
+  version: t.double().required().assigned({ by: "increment(1)", on: "write" }),
   deleted_at: t.timestamp().nullable().required().assigned({ by: "now", on: "delete" }),
 };
 

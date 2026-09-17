@@ -100,7 +100,7 @@ describe("B2 validateRefTargets — runtime ref check", () => {
   test("non-ref TypeBuilder fields are ignored", () => {
     assert.doesNotThrow(() => {
       validateRefTargets({
-        users: { name: t.string(), age: t.number(), tags: t.array(t.string()) },
+        users: { name: t.string(), age: t.double(), tags: t.array(t.string()) },
       });
     });
   });

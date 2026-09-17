@@ -131,9 +131,9 @@ describe("C2 — t.union() discriminator auto-detection", () => {
 describe("C2 — normalizeSchema flat expansion", () => {
   test("top-level t.union expands to flat columns + discriminator", () => {
     const events = t.union(
-      t.object({ kind: t.literal("login"), userId: t.number().required(), ip: t.string().required() }),
+      t.object({ kind: t.literal("login"), userId: t.double().required(), ip: t.string().required() }),
       t.object({ kind: t.literal("error"), message: t.string().required() }),
-      t.object({ kind: t.literal("metric"), name: t.string().required(), value: t.number().required() }),
+      t.object({ kind: t.literal("metric"), name: t.string().required(), value: t.double().required() }),
     );
     const flat = normalizeSchema(events);
 
@@ -172,7 +172,7 @@ describe("C2 — normalizeSchema flat expansion", () => {
         normalizeSchema(
           t.union(
             t.object({ kind: t.literal("a"), x: t.string() }),
-            t.object({ kind: t.literal("b"), x: t.number() }),
+            t.object({ kind: t.literal("b"), x: t.double() }),
           ),
         ),
       /incompatible types/,
@@ -199,7 +199,7 @@ describe("C2 — validation dispatch on discriminator", () => {
       t.union(
         t.object({
           kind: t.literal("login"),
-          userId: t.number().required(),
+          userId: t.double().required(),
           ip: t.string().required(),
         }),
         t.object({
@@ -210,7 +210,7 @@ describe("C2 — validation dispatch on discriminator", () => {
         t.object({
           kind: t.literal("metric"),
           name: t.string().required(),
-          value: t.number().required(),
+          value: t.double().required(),
         }),
       ),
     );
@@ -317,7 +317,7 @@ describe("C2 — partial update against a flat-expanded union", () => {
         ...normalizeSchema(t.union(
           t.object({
             kind: t.literal("login"),
-            userId: t.number().required(),
+            userId: t.double().required(),
             ip: t.string().required(),
           }),
           t.object({
@@ -345,7 +345,7 @@ describe("C2 — partial update against a flat-expanded union", () => {
       t.union(
         t.object({
           kind: t.literal("login"),
-          userId: t.number().required(),
+          userId: t.double().required(),
         }),
         t.object({
           kind: t.literal("signup"),
@@ -369,7 +369,7 @@ describe("C2 — partial update against a flat-expanded union", () => {
       t.union(
         t.object({
           kind: t.literal("login"),
-          userId: t.number().required(),
+          userId: t.double().required(),
         }),
         t.object({
           kind: t.literal("signup"),
@@ -389,7 +389,7 @@ describe("C2 — partial update against a flat-expanded union", () => {
       t.union(
         t.object({
           kind: t.literal("login"),
-          userId: t.number().required(),
+          userId: t.double().required(),
         }),
         t.object({
           kind: t.literal("signup"),
@@ -407,7 +407,7 @@ describe("C2 — partial update against a flat-expanded union", () => {
         t.object({
           kind: t.literal("b"),
           y: t.string().required(),
-          z: t.number().required(),
+          z: t.double().required(),
         }),
       ),
     );
@@ -432,7 +432,7 @@ describe("C2 — nested t.union() inside t.object()", () => {
     const s = normalizeSchema({
       payload: t.union(
         t.object({ kind: t.literal("a"), x: t.string().required() }),
-        t.object({ kind: t.literal("b"), y: t.number().required() }),
+        t.object({ kind: t.literal("b"), y: t.double().required() }),
       ),
     });
     assert.equal(s.payload.type, "union");
@@ -458,7 +458,7 @@ describe("C2 — expandUnionToFlatColumns", () => {
   test("produces the same shape as normalizeSchema(t.union(...))", () => {
     const u = t.union(
       t.object({ kind: t.literal("a"), x: t.string() }),
-      t.object({ kind: t.literal("b"), y: t.number() }),
+      t.object({ kind: t.literal("b"), y: t.double() }),
     );
     const def = u.toFieldDef();
     const flat = expandUnionToFlatColumns(def as Parameters<typeof expandUnionToFlatColumns>[0]);

@@ -21,7 +21,7 @@ import { table, t } from "@zeroship/migrate";
 //   2. `t.ref()` is DECLARED in @zeroship/migrate's public types but is not
 //      accepted by the vendored engine. It does not arise here: hr-system's
 //      schema contains ZERO `t.ref()` - its cross-table links are plain
-//      `t.number()` id columns (`managerId`, `departmentId`, ...), so this
+//      `t.double()` id columns (`managerId`, `departmentId`, ...), so this
 //      migration declares no foreign keys and none are lost in translation.
 //
 // THE TRANSLATION IS MECHANICAL, four column factories and nothing else. The
@@ -31,7 +31,7 @@ import { table, t } from "@zeroship/migrate";
 // blocks a non-default encrypted column.
 //
 //     t.string()  -> t.text()        t.boolean() -> t.boolean()
-//     t.number()  -> t.double()      t.array(..) -> t.json()
+//     t.double()  -> t.double()      t.array(..) -> t.json()
 //     .required() -> .notNull()
 //     .default(x) -> .notNull().default(x)   (a defaulted column is never null
 //                    in practice; same shape examples/db-todos uses for

@@ -283,7 +283,7 @@ function checkField(
     // The integral column tokens. The runtime descriptor emits `int`,
     // `integer`, `bigInt` and `float` — the generator keeps the column's real
     // type even though the TypeScript renderer collapses all five to
-    // `t.number()` — so they arrive here and are numbers, not a separate kind.
+    // `t.double()` — so they arrive here and are numbers, not a separate kind.
     //
     // Enforcing integrality is the point. Without it `create({ points: 1.5 })`
     // reaches an INTEGER column and Postgres assignment-casts it to 2, so the

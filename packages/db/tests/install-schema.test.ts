@@ -36,7 +36,7 @@ describe("normalizeSchema — P7 typed-id prefix (id: t.id(prefix))", () => {
   });
 
   test("familiar names retain their declared types", () => {
-    assert.deepEqual(normalizeSchema({ id: t.string(), version: t.number() }), {
+    assert.deepEqual(normalizeSchema({ id: t.string(), version: t.double() }), {
       id: {type:"string"}, version: {type:"number"},
     });
   });
