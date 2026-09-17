@@ -10,15 +10,12 @@
 # ordinary scratch path blows through without looking long.
 #
 # This is not hypothetical. The fixture this suite shipped before 2026-08-25
-# mounted its socket under an agent scratchpad:
-#
-#   /tmp/claude-1000/-home-ruiyang-Projects-appbase/<uuid>/scratchpad/pgsock
-#
-# which is 96 bytes, so the socket path came to 110 and NOTHING could connect
-# to it. The fixture existed, the container ran, and the one capability it was
-# there to prove - that this driver can actually talk over a Unix socket - had
-# no test at all. `libs/compio-postgres/tests/suite/unix_socket_path_limit.rs` covers the REFUSAL of an
-# overlong path; the successful path was never exercised.
+# mounted its socket under a per-session agent scratchpad, whose directory came
+# to 96 bytes, so the socket path came to 110 and NOTHING could connect to it.
+# The fixture existed, the container ran, and the one capability it was there to
+# prove - that this driver can actually talk over a Unix socket - had no test at
+# all. `libs/compio-postgres/tests/suite/unix_socket_path_limit.rs` covers the
+# REFUSAL of an overlong path; the successful path was never exercised.
 #
 # So keep the directory short and OUTSIDE any per-session scratch tree. The
 # script refuses to proceed if the resulting socket path would not fit, rather
