@@ -27,8 +27,8 @@ export const managerIdentityColumns = {
 // Queue records carry closed job metadata; customer history and payloads stay
 // in the worker's creator database and object storage.
 export function workflowManagerSchema(namespace) {
-  const text = () => t.text().notNull();
-  const integer = () => t.bigInt().notNull();
+  const text = () => t.text().required();
+  const integer = () => t.bigInt().required();
   const fk = (name, columns, target, targetColumns) => ({
     name, columns, references: { table: target, schema: namespace, columns: targetColumns }, onDelete: "restrict",
   });
@@ -86,7 +86,7 @@ export function workflowManagerSchema(namespace) {
     // A refused placement stays released for the life of that worker
     // instance, so the placement lane never offers the pair again.
     app_id: text(), worker_id: text(), revision: integer(), expires_at: integer(),
-    released: t.boolean().notNull(), refused: t.boolean().notNull(),
+    released: t.boolean().required(), refused: t.boolean().required(),
   }, ["app_id", "worker_id"], [
     fk("assignment_scope", ["app_id"], "queue_scopes", ["id"]),
     fk("assignment_worker", ["worker_id"], "workers", ["id"]),
@@ -145,7 +145,7 @@ export function workflowManagerSchema(namespace) {
   }, ["app_id", "run_id"], [fk("management_order_app", ["app_id"], "queue_scopes", ["id"])]);
   create("management", {
     app_id: text(), request_id: text(), run_id: text(), revision: integer(), actor: text(),
-    request: text(), request_digest: text(), blocks_execution: t.boolean().notNull(),
+    request: text(), request_digest: text(), blocks_execution: t.boolean().required(),
     created_at: integer(), outcome: t.text(),
   }, ["app_id", "request_id"], [
     fk("management_job", ["app_id", "id"], "jobs", ["app_id", "id"]),
@@ -170,7 +170,7 @@ export function workflowManagerSchema(namespace) {
     app_id: text(), revision: integer(), created_at: integer(),
   }, ["app_id", "revision"], [fk("schedule_disable_scope", ["app_id"], "queue_scopes", ["id"])]);
   create("schedule_scopes", {
-    revision: integer(), enabled: t.boolean().notNull(), activation_id: t.text(),
+    revision: integer(), enabled: t.boolean().required(), activation_id: t.text(),
   }, ["id"], [
     fk("schedule_scope_app", ["id"], "queue_scopes", ["id"]),
     fk("schedule_scope_activation", ["id", "activation_id"], "schedule_activations", ["app_id", "id"]),

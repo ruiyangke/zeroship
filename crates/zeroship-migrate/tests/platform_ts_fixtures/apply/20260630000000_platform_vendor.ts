@@ -23,8 +23,8 @@ export function schema() {
   table("ts_accounts", { schema: "zero_migrate" }).create({
     columns: {
       id: t.bigInt().identity({ always: true }).primaryKey(),
-      app_id: t.text().notNull(),
-      email: t.text().notNull(),
+      app_id: t.text().required(),
+      email: t.text().required(),
     },
   });
 

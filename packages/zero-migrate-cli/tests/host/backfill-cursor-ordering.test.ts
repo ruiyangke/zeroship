@@ -102,7 +102,7 @@ test("a backfill visits every row exactly once, whatever its cursor values sort 
         default: {
           schema() {
             table("nums").create({
-              columns: { id: t.int().notNull(), val: t.int().notNull() },
+              columns: { id: t.int().required(), val: t.int().required() },
               primaryKey: ["id"],
             });
           },
@@ -250,9 +250,9 @@ test("a composite cursor visits every row exactly once under the same inversions
           schema() {
             table("nums").create({
               columns: {
-                tenant: t.int().notNull(),
-                id: t.int().notNull(),
-                val: t.int().notNull(),
+                tenant: t.int().required(),
+                id: t.int().required(),
+                val: t.int().required(),
               },
               primaryKey: ["tenant", "id"],
             });

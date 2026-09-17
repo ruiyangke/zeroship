@@ -125,7 +125,7 @@ function mysqlIdent(value: string): string {
 function baseMigration(): NamedMigration {
   return authoredMigration("guard_fold_base", () => {
     table(BASE_TABLE).create({
-      columns: { id: t.int().notNull() },
+      columns: { id: t.int().required() },
       primaryKey: ["id"],
     });
   });
@@ -139,7 +139,7 @@ function createNotes(
 ): NamedMigration {
   return authoredMigration(name, () => {
     table(TABLE).create({
-      columns: { id: t.int().notNull(), body: options.body() },
+      columns: { id: t.int().required(), body: options.body() },
       primaryKey: ["id"],
       ...(options.guarded ? { ifNotExists: true as const } : {}),
     });

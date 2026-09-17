@@ -108,7 +108,7 @@ function project(namespace: string | null): { work: string; root: string; narrow
 export const name = "make_layered";
 export default {
   schema() {
-    table("${TABLE}").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+    table("${TABLE}").create({ columns: { id: t.int().required() }, primaryKey: ["id"] });
   },
 };
 `,

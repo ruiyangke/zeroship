@@ -90,8 +90,8 @@ export default {
   schema() {
     table("${TABLE}").create({
       columns: {
-        id: t.int().notNull(),
-        u: t.uuid().notNull().default(${helper}()),${extraColumn ? "\n        extra: t.int()," : ""}
+        id: t.int().required(),
+        u: t.uuid().required().default(${helper}()),${extraColumn ? "\n        extra: t.int()," : ""}
       },
       primaryKey: ["id"],
     });

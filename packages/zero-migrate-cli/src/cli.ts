@@ -958,7 +958,7 @@ export default {
     // Author your schema change with the fluent op DSL, e.g.:
     // table("widgets").create({
     //   columns: {
-    //     label: t.text().notNull(),
+    //     label: t.text().required(),
     //   },
     // });
   },

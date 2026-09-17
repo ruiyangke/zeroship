@@ -59,7 +59,7 @@ function createMasked(): NamedMigration {
   return authoredMigration("masked_drop_base", () => {
     table(TABLE).create({
       columns: {
-        id: t.int().notNull(),
+        id: t.int().required(),
         [MASKED_COLUMN]: t.string().mask({ kind: "last4" }),
       },
       primaryKey: ["id"],

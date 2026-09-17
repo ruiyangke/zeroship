@@ -73,7 +73,7 @@ test("a migration cannot reach outside its project schema unless the root charte
         default: {
           schema() {
             const handle = into ? table("items", { schema: into }) : table("items");
-            handle.create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+            handle.create({ columns: { id: t.int().required() }, primaryKey: ["id"] });
           },
         },
       } as MigrationModule,

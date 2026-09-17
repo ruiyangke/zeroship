@@ -36,15 +36,15 @@ export default {
   schema() {
     table("users").create({
       columns: {
-        handle: t.text().notNull().unique(),
-        name: t.text().notNull(),
+        handle: t.text().required().unique(),
+        name: t.text().required(),
       },
     });
 
     table("channels").create({
       columns: {
-        slug: t.text().notNull().unique(),
-        name: t.text().notNull(),
+        slug: t.text().required().unique(),
+        name: t.text().required(),
         // `topic` is the one optional column in this example: the schema
         // declares `t.string()` with no `.required()`.
         topic: t.text(),
@@ -53,10 +53,10 @@ export default {
 
     table("messages").create({
       columns: {
-        channelId: t.text().notNull().references("channels", "id"),
-        authorId: t.text().notNull().references("users", "id"),
-        body: t.text().notNull(),
-        flagged: t.boolean().notNull().default(false),
+        channelId: t.text().required().references("channels", "id"),
+        authorId: t.text().required().references("users", "id"),
+        body: t.text().required(),
+        flagged: t.boolean().required().default(false),
       },
       indexes: [{ name: "messages_channel_idx", on: ["channelId"] }],
     });

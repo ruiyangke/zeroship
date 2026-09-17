@@ -68,11 +68,11 @@ function pgIdent(value: string): string {
 function createAndAdoptUnvalidated(): NamedMigration {
   return authoredMigration("adoption_create", () => {
     table(PARENT).create({
-      columns: { id: t.int().notNull() },
+      columns: { id: t.int().required() },
       primaryKey: ["id"],
     });
     table(CHILD).create({
-      columns: { id: t.int().notNull(), parent_id: t.int() },
+      columns: { id: t.int().required(), parent_id: t.int() },
       primaryKey: ["id"],
     });
     table(CHILD)

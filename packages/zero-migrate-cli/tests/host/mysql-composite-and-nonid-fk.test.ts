@@ -48,10 +48,10 @@ export default {
   schema() {
     table("parent").create({
       columns: {
-        id: t.int().notNull(),
-        a: t.int().notNull(),
-        b: t.int().notNull(),
-        code: t.string({ length: 32 }).notNull(),
+        id: t.int().required(),
+        a: t.int().required(),
+        b: t.int().required(),
+        code: t.string({ length: 32 }).required(),
       },
       primaryKey: ["id"],
       uniques: [
@@ -61,10 +61,10 @@ export default {
     });
     table("child").create({
       columns: {
-        id: t.int().notNull(),
-        pa: t.int().notNull(),
-        pb: t.int().notNull(),
-        pcode: t.string({ length: 32 }).notNull(),
+        id: t.int().required(),
+        pa: t.int().required(),
+        pb: t.int().required(),
+        pcode: t.string({ length: 32 }).required(),
       },
       primaryKey: ["id"],
       foreignKeys: [

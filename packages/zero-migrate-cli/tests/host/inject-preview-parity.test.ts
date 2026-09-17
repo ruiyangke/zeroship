@@ -42,7 +42,7 @@ const MIGRATION = `import { table, t } from "@zeroship/migrate";
 export const name = "create_notes";
 export default {
   schema() {
-    table("notes").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+    table("notes").create({ columns: { id: t.int().required() }, primaryKey: ["id"] });
   },
 };
 `;

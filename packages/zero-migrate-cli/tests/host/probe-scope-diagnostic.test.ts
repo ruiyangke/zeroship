@@ -54,7 +54,7 @@ export const name = "make_rows";
 export default {
   schema() {
     table("${TABLE}").create({
-      columns: { id: t.int().notNull(), val: t.int().notNull() },
+      columns: { id: t.int().required(), val: t.int().required() },
       primaryKey: ["id"],
     });
     table("${TABLE}").index("${TABLE}_idx").add({ on: ["val"] });

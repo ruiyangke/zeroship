@@ -102,7 +102,7 @@ export const name = "a";
 export default {
   schema() {
     table("ix_t").create({
-      columns: { id: t.int().notNull(), e: t.text() },
+      columns: { id: t.int().required(), e: t.text() },
       primaryKey: ["id"],
     });
     table("ix_t").index("ix_a").add({ on: [${element}] });

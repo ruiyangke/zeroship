@@ -85,7 +85,7 @@ export const name = "indexed";
 export default {
   schema() {
     table("users").create({
-      columns: { id: t.int().notNull(), email: t.text(), rank: t.int() },
+      columns: { id: t.int().required(), email: t.text(), rank: t.int() },
       primaryKey: ["id"],
     });
     table("users").index("ix_users").add(${facetOptions});
@@ -228,7 +228,7 @@ test("vector and geoPoint lint clean on every dialect, matching what apply now d
   const COLUMNS: ReadonlyArray<readonly [string, string]> = [
     ["vector", `t.vector({ dimensions: 3, metric: "cosine" })`],
     ["geoPoint", `t.geoPoint()`],
-    ["geoPoint notNull", `t.geoPoint().notNull()`],
+    ["geoPoint notNull", `t.geoPoint().required()`],
   ];
   for (const [what, column] of COLUMNS) {
     const work = mkdtempSync(join(HERE, "lintann-"));
@@ -256,7 +256,7 @@ export const name = "typed";
 export default {
   schema() {
     table("things").create({
-      columns: { id: t.int().notNull(), payload: ${column} },
+      columns: { id: t.int().required(), payload: ${column} },
       primaryKey: ["id"],
     });
   },

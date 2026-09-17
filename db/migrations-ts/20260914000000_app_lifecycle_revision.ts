@@ -14,7 +14,7 @@ export default {
   schema() {
     table("apps", { schema: "zeroship" })
       .column("lifecycle_revision")
-      .add({ type: t.bigInt().notNull().default(0) });
+      .add({ type: t.bigInt().required().default(0) });
     table("apps", { schema: "zeroship" })
       .check("apps_lifecycle_revision_check")
       .add({ expr: (col) => col("lifecycle_revision").ge(0) });

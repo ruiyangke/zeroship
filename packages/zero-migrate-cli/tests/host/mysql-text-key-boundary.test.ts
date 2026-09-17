@@ -108,7 +108,7 @@ test("MySQL: a key over a t.text() column declared in the SAME migration is refu
         "standalone createIndex",
         () => {
           table("docs").create({
-            columns: { id: t.int().notNull(), body: t.text() },
+            columns: { id: t.int().required(), body: t.text() },
             primaryKey: ["id"],
           });
           table("docs").index("docs_body_idx").add({ on: [{ column: "body" }] });
@@ -118,7 +118,7 @@ test("MySQL: a key over a t.text() column declared in the SAME migration is refu
         "table-level unique",
         () => {
           table("docs2").create({
-            columns: { id: t.int().notNull(), body: t.text() },
+            columns: { id: t.int().required(), body: t.text() },
             primaryKey: ["id"],
             uniques: [{ name: "docs2_body_key", columns: ["body"] }],
           });
@@ -128,7 +128,7 @@ test("MySQL: a key over a t.text() column declared in the SAME migration is refu
         "createTable inline index",
         () => {
           table("docs3").create({
-            columns: { id: t.int().notNull(), body: t.text() },
+            columns: { id: t.int().required(), body: t.text() },
             primaryKey: ["id"],
             indexes: [{ name: "docs3_body_idx", on: [{ column: "body" }] }],
           });
@@ -166,7 +166,7 @@ test("MySQL: a key over a column an EARLIER migration created is refused at lowe
   // between them would be a rival explanation for the two verdicts.
   const created = authored("create_docs", () => {
     table("docs").create({
-      columns: { id: t.int().notNull(), body: t.text(), slug: t.string({ length: 120 }) },
+      columns: { id: t.int().required(), body: t.text(), slug: t.string({ length: 120 }) },
       primaryKey: ["id"],
     });
   });

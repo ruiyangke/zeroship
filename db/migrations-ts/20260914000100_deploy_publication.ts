@@ -26,17 +26,17 @@ export default {
   schema() {
     table("app_deploy_commands", { schema: "zeroship" }).create({
       columns: {
-        id: t.text().notNull(),
-        app_id: t.text().notNull(),
+        id: t.text().required(),
+        app_id: t.text().required(),
         actor_id: t.text(),
-        operation: t.text().notNull(),
-        content_type: t.text().notNull(),
-        archive_sha256: t.text().notNull(),
-        deploy_id: t.text().notNull(),
-        deploy_hash: t.text().notNull(),
+        operation: t.text().required(),
+        content_type: t.text().required(),
+        archive_sha256: t.text().required(),
+        deploy_id: t.text().required(),
+        deploy_hash: t.text().required(),
         lifecycle_revision: t.bigInt(),
-        result: t.text().notNull(),
-        created_at: t.timestamp().notNull().default(now()),
+        result: t.text().required(),
+        created_at: t.timestamp().required().default(now()),
       },
       primaryKey: ["id"],
     });
@@ -63,15 +63,15 @@ export default {
 
     table("app_lifecycle_intents", { schema: "zeroship" }).create({
       columns: {
-        id: t.text().notNull(),
-        app_id: t.text().notNull(),
-        revision: t.bigInt().notNull(),
-        action: t.text().notNull(),
+        id: t.text().required(),
+        app_id: t.text().required(),
+        revision: t.bigInt().required(),
+        action: t.text().required(),
         deploy_id: t.text(),
         registration: t.text(),
-        state: t.text().notNull(),
+        state: t.text().required(),
         receipt: t.text(),
-        created_at: t.timestamp().notNull().default(now()),
+        created_at: t.timestamp().required().default(now()),
         acknowledged_at: t.timestamp(),
       },
       primaryKey: ["id"],

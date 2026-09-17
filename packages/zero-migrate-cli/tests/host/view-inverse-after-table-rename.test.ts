@@ -103,7 +103,7 @@ const createTableAndView: NamedMigration = {
   default: {
     schema() {
       table(SOURCE).create({
-        columns: { id: t.int().notNull(), label: t.string().notNull() },
+        columns: { id: t.int().required(), label: t.string().required() },
         primaryKey: ["id"],
       });
       view(VIEW).create({

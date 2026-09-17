@@ -86,9 +86,9 @@ function authorWith({ begin, drain, ids, t, table }: Rec): any[] {
   table("documents").create({
     columns: {
       id: ids.typeId({ prefix: "doc" }).primaryKey(),
-      public_id: ids.typeId({ prefix: "document" }).notNull().unique(),
+      public_id: ids.typeId({ prefix: "document" }).required().unique(),
       opaque_id: ids.typeId({ prefix: "" }),
-      event_id: ids.ulid().notNull().unique(),
+      event_id: ids.ulid().required().unique(),
       owner_id: t.uuid().references("accounts", "id", {
         onDelete: "cascade",
         onUpdate: "restrict",

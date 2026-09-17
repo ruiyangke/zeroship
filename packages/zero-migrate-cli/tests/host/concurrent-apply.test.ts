@@ -56,7 +56,7 @@ export const name = "create_many";
 export default {
   schema() {
     for (const n of [1,2,3,4,5,6,7,8,9,10,11,12]) {
-      table("t" + n).create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+      table("t" + n).create({ columns: { id: t.int().required() }, primaryKey: ["id"] });
     }
   },
 };

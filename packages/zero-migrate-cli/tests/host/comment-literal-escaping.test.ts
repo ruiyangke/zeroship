@@ -90,8 +90,8 @@ scope = "all"
 export const name = "a";
 export default {
   schema() {
-    table("${BYSTANDER}").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
-    table("${TABLE}").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+    table("${BYSTANDER}").create({ columns: { id: t.int().required() }, primaryKey: ["id"] });
+    table("${TABLE}").create({ columns: { id: t.int().required() }, primaryKey: ["id"] });
     table("${TABLE}").comment(${JSON.stringify(PAYLOAD)});
     table("${TABLE}").column("id").comment(${JSON.stringify(PAYLOAD)});
   },

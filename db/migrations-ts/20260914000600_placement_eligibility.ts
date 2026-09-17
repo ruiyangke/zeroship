@@ -32,7 +32,7 @@ export default {
     // whatever value the row was created with, however it got there.
     table("apps", { schema: "zeroship" })
       .column("execution_zone_id")
-      .add({ type: t.text().notNull().default("ezn_default000000000000000000") });
+      .add({ type: t.text().required().default("ezn_default000000000000000000") });
     table("apps", { schema: "zeroship" })
       .foreignKey("apps_execution_zone_fk")
       .add({

@@ -10,20 +10,20 @@ export default {
   schema() {
     table("leave_requests").create({
       columns: {
-        id: t.uuid().notNull().default(uuidV4()),
+        id: t.uuid().required().default(uuidV4()),
         employee_id: ids
           .typeId({ prefix: "emp" })
-          .notNull()
+          .required()
           .references("employees", "id", { onDelete: "cascade" }),
-        leave_type: t.string({ length: 32 }).notNull(),
-        start_date: t.calendarDate().notNull(),
-        end_date: t.calendarDate().notNull(),
-        days: t.numeric({ precision: 4, scale: 1 }).notNull(),
+        leave_type: t.string({ length: 32 }).required(),
+        start_date: t.calendarDate().required(),
+        end_date: t.calendarDate().required(),
+        days: t.numeric({ precision: 4, scale: 1 }).required(),
         // `status` is an index member (composite employee/status index), so it is
         // a bounded `t.string`, not unbounded `t.text()`.
-        status: t.string({ length: 32 }).notNull().default("pending"),
-        metadata: t.json().notNull().default({}),
-        created_at: t.timestamp().notNull().default(now()),
+        status: t.string({ length: 32 }).required().default("pending"),
+        metadata: t.json().required().default({}),
+        created_at: t.timestamp().required().default(now()),
       },
       primaryKey: ["id"],
     });

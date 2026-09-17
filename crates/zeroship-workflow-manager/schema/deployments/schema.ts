@@ -5,14 +5,14 @@ export function deploymentSchema(namespace) {
   const deploys = table("app_deploys", { schema: namespace });
   deploys.create({
     columns: {
-      id: t.text().notNull(),
-      app_id: t.text().notNull(),
-      deploy_hash: t.text().notNull(),
-      manifest_json: t.text().notNull(),
-      created_at: t.timestamp().notNull().default(now()),
+      id: t.text().required(),
+      app_id: t.text().required(),
+      deploy_hash: t.text().required(),
+      manifest_json: t.text().required(),
+      created_at: t.timestamp().required().default(now()),
       activated_at: t.timestamp(),
-      retention_state: t.text().notNull().default("available"),
-      retention_lock: t.bigInt().notNull().default(0),
+      retention_state: t.text().required().default("available"),
+      retention_lock: t.bigInt().required().default(0),
     },
     primaryKey: ["id"],
   });
@@ -22,12 +22,12 @@ export function deploymentSchema(namespace) {
 
   table("app_deploy_holds", { schema: namespace }).create({
     columns: {
-      id: t.text().notNull(),
-      app_id: t.text().notNull(),
-      deploy_id: t.text().notNull(),
-      holder_id: t.text().notNull(),
-      generation: t.bigInt().notNull(),
-      state: t.text().notNull(),
+      id: t.text().required(),
+      app_id: t.text().required(),
+      deploy_id: t.text().required(),
+      holder_id: t.text().required(),
+      generation: t.bigInt().required(),
+      state: t.text().required(),
     },
     primaryKey: ["id"],
     foreignKeys: [{

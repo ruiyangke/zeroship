@@ -66,7 +66,7 @@ const migration = {
   name: "create_items",
   default: {
     schema() {
-      table("items").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+      table("items").create({ columns: { id: t.int().required() }, primaryKey: ["id"] });
     },
   },
 } as MigrationModule & { name: string };

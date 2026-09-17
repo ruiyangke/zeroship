@@ -79,7 +79,7 @@ export const name = "a";
 export default {
   schema() {
     table("${TABLE}").create({
-      columns: { id: t.int().notNull(), secret: t.encrypted({ of: t.text() }) },
+      columns: { id: t.int().required(), secret: t.encrypted({ of: t.text() }) },
       primaryKey: ["id"],
     });
   },

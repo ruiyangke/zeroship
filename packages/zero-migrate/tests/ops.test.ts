@@ -176,13 +176,13 @@ test("SA-6: sequence({ as }) rejects a type outside { int, bigInt }", () => {
   assert.equal(ops[0].as, "bigInt");
 });
 
-test("t.text() is nullable-by-default; .notNull() opts in", () => {
+test("t.text() is nullable-by-default; .required() opts in", () => {
   const ops = record(() => {
-    table("u").create({ columns: { a: t.text(), b: t.text().notNull() } });
+    table("u").create({ columns: { a: t.text(), b: t.text().required() } });
   });
   const cols = ops[0].columns;
   assert.equal(cols[0].nullable, undefined, "t.text() omits nullable (nullable-by-default)");
-  assert.equal(cols[1].nullable, false, "t.text().notNull() records nullable:false");
+  assert.equal(cols[1].nullable, false, "t.text().required() records nullable:false");
 });
 
 test("t.text({ caseSensitive:false }) records the caseSensitive facet", () => {
@@ -209,7 +209,7 @@ test(".collation('bytewise') records the collation facet on a create-table colum
       columns: {
         plain: t.text(),
         ordered: t.text().collation("bytewise"),
-        bounded: t.string({ length: 32 }).collation("bytewise").notNull(),
+        bounded: t.string({ length: 32 }).collation("bytewise").required(),
       },
     });
   });
@@ -223,7 +223,7 @@ test(".collation('bytewise') records the collation facet on a create-table colum
 
 test(".collation() returns a fresh def and leaves the receiver uncollated", () => {
   const ops = record(() => {
-    const base = t.text().notNull();
+    const base = t.text().required();
     table("u").create({ columns: { a: base, b: base.collation("bytewise") } });
   });
   const cols = ops[0].columns;
@@ -420,12 +420,12 @@ test("ids.typeId records exact text + valueFormat IR and remains constraint-neut
     table("public_examples").create({
       columns: {
         typed_id: ids.typeId({ prefix: "example" }),
-        bare_id: ids.typeId({ prefix: "" }).notNull(),
+        bare_id: ids.typeId({ prefix: "" }).required(),
         key_id: ids.typeId({ prefix: "key" }).primaryKey(),
       },
     });
     table("public_examples").column("candidate_id").add({
-      type: ids.typeId({ prefix: "candidate" }).notNull().unique(),
+      type: ids.typeId({ prefix: "candidate" }).required().unique(),
     });
   });
 
@@ -506,12 +506,12 @@ test("ids.ulid records exact text + valueFormat IR and remains constraint-neutra
     table("events").create({
       columns: {
         event_id: ids.ulid(),
-        candidate_id: ids.ulid().notNull().unique(),
+        candidate_id: ids.ulid().required().unique(),
         key_id: ids.ulid().primaryKey(),
       },
     });
     table("events").column("external_id").add({
-      type: ids.ulid().notNull().unique(),
+      type: ids.ulid().required().unique(),
     });
   });
 
@@ -585,7 +585,7 @@ test("public and engine recorders match for t.text({ caseSensitive:false })", ()
 
 test("t.textArray() records the textArray column type", () => {
   const ops = record(() => {
-    table("u").create({ columns: { scopes: t.textArray().notNull() } });
+    table("u").create({ columns: { scopes: t.textArray().required() } });
   });
   const col = ops[0].columns[0];
   assert.equal(col.type, "textArray");
@@ -637,7 +637,7 @@ test("default expression callbacks record IrDefault::Expr", () => {
   const ops = record(() => {
     table("u").create({
       columns: {
-        created_at: t.timestamp().notNull().default(now()),
+        created_at: t.timestamp().required().default(now()),
       },
     });
     table("u").column("updated_at").setDefault(now());
@@ -656,7 +656,7 @@ test("create() without primaryKey leaves the top-level field absent", () => {
 test("create() with a composite primaryKey records the top-level primaryKey", () => {
   const ops = record(() =>
     table("m").create({
-      columns: { a: t.uuid().notNull(), b: t.text().notNull() },
+      columns: { a: t.uuid().required(), b: t.text().required() },
       primaryKey: ["a", "b"],
     }),
   );
@@ -910,7 +910,7 @@ test("t.int().autoIncrement() records identity always:false and matches engine r
 
 test(".column().add() carries a fluent ColumnDef's modifiers", () => {
   const ops = record(() =>
-    table("u").column("status").add({ type: t.text().notNull().default("new") }),
+    table("u").column("status").add({ type: t.text().required().default("new") }),
   );
   assert.deepEqual(ops[0], {
     op: "addColumn",
@@ -926,7 +926,7 @@ test(".default(nextval(name,{schema})) emits IrDefault::Nextval", () => {
   const createOps = record(() => {
     table("audit_events").create({
       columns: {
-        id: t.bigInt().notNull().default(nextval("audit_events_id_seq", { schema: "zero_migrate" })),
+        id: t.bigInt().required().default(nextval("audit_events_id_seq", { schema: "zero_migrate" })),
       },
     });
   });
@@ -948,7 +948,7 @@ test("public and engine recorders match for nextval defaults", () => {
   const publicOps = record(() => {
     table("audit_events").create({
       columns: {
-        id: t.bigInt().notNull().default(nextval("audit_events_id_seq", { schema: "zero_migrate" })),
+        id: t.bigInt().required().default(nextval("audit_events_id_seq", { schema: "zero_migrate" })),
       },
     });
     table("audit_events").column("id").add({
@@ -958,7 +958,7 @@ test("public and engine recorders match for nextval defaults", () => {
   const engineOps = recordEngine(({ table, t, nextval }) => {
     table("audit_events").create({
       columns: {
-        id: t.bigInt().notNull().default(nextval("audit_events_id_seq", { schema: "zero_migrate" })),
+        id: t.bigInt().required().default(nextval("audit_events_id_seq", { schema: "zero_migrate" })),
       },
     });
     table("audit_events").column("id").add({
@@ -969,7 +969,7 @@ test("public and engine recorders match for nextval defaults", () => {
 });
 
 test("C2 — .column().add({ type: t.text().unique() }) emits the column + a follow-on unique", () => {
-  const ops = record(() => table("u").column("email").add({ type: t.text().notNull().unique() }));
+  const ops = record(() => table("u").column("email").add({ type: t.text().required().unique() }));
   assert.equal(ops.length, 2, "an addColumn + a follow-on addConstraint(unique)");
   assert.equal(ops[0].op, "addColumn");
   assert.equal(ops[0].column, "email");
@@ -1091,9 +1091,9 @@ test("create({ foreignKeys }) preserves composite tuple order and referential op
   const ops = record(() =>
     table("order_lines").create({
       columns: {
-        tenant_id: t.uuid().notNull(),
-        order_id: t.uuid().notNull(),
-        line_no: t.int().notNull(),
+        tenant_id: t.uuid().required(),
+        order_id: t.uuid().required(),
+        line_no: t.int().required(),
       },
       foreignKeys: [
         {
@@ -2342,9 +2342,9 @@ test("PG-first chain methods and root RLS scalar constructors record PG-only nod
   const ops = record(() => {
     table("t").create({
       columns: {
-        status: t.text().notNull(),
-        name: t.text().notNull(),
-        data: t.json().notNull(),
+        status: t.text().required(),
+        name: t.text().required(),
+        data: t.json().required(),
       },
       checks: [
         { name: "name_shape", expr: (col) => col("name").regex("^[a-z]+$") },
@@ -2704,18 +2704,18 @@ test("check helper and expression helpers build the frozen Expr IR nodes", () =>
   const ops = record(() => {
     table("expr_checks").create({
       columns: {
-        pkce_method: t.text().notNull(),
-        user_id: t.text().notNull(),
-        kind: t.text().notNull(),
-        data: t.json().notNull(),
-        subtotal_cents: t.int().notNull(),
-        credit_cents: t.int().notNull(),
-        total_cents: t.int().notNull(),
+        pkce_method: t.text().required(),
+        user_id: t.text().required(),
+        kind: t.text().required(),
+        data: t.json().required(),
+        subtotal_cents: t.int().required(),
+        credit_cents: t.int().required(),
+        total_cents: t.int().required(),
         floor_cents: t.int(),
-        created_at: t.timestamp().notNull(),
-        expires_at: t.timestamp().notNull(),
-        enabled: t.boolean().notNull(),
-        visible: t.boolean().notNull(),
+        created_at: t.timestamp().required(),
+        expires_at: t.timestamp().required(),
+        enabled: t.boolean().required(),
+        visible: t.boolean().required(),
       },
       checks: [
         check("pkce_method_check", (col) => col("pkce_method").eq("S256")),
@@ -3045,8 +3045,8 @@ test("chain extract and root interval build extract and interval nodes", () => {
     });
     table("oauth_device_codes").create({
       columns: {
-        issued_at: t.timestamp().notNull(),
-        expires_at: t.timestamp().notNull(),
+        issued_at: t.timestamp().required(),
+        expires_at: t.timestamp().required(),
       },
       checks: [
         {

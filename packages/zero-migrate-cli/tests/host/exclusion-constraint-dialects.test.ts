@@ -77,7 +77,7 @@ const MIGRATION: MigrationModule = {
   default: {
     schema() {
       table("bookings").create({
-        columns: { id: t.int().notNull(), room: t.text(), during: t.text() },
+        columns: { id: t.int().required(), room: t.text(), during: t.text() },
         primaryKey: ["id"],
         exclusions: [
           {

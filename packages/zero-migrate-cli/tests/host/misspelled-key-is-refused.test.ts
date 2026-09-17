@@ -54,11 +54,11 @@ export const name = "fk_by_${spelling}";
 export default {
   schema() {
     table("parent").create({
-      columns: { id: t.int().notNull() },
+      columns: { id: t.int().required() },
       primaryKey: ["id"],
     });
     table("child").create({
-      columns: { id: t.int().notNull(), pid: t.int().notNull() },
+      columns: { id: t.int().required(), pid: t.int().required() },
       primaryKey: ["id"],
       ${spelling}: [
         { name: "child_pid_fkey", columns: ["pid"], references: { table: "parent", columns: ["id"] } },
@@ -278,7 +278,7 @@ scope = "all"
 export const name = "guarded_create";
 export default {
   schema() {
-    table("alpha").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"], ${spelling}: true });
+    table("alpha").create({ columns: { id: t.int().required() }, primaryKey: ["id"], ${spelling}: true });
   },
 };
 `,

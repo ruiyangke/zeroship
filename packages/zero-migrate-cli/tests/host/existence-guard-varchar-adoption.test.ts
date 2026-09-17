@@ -89,7 +89,7 @@ function pgIdent(value: string): string {
 function guardedCreate(name: string, body: () => ColumnDef): NamedMigration {
   return authoredMigration(name, () => {
     table(TABLE).create({
-      columns: { id: t.int().notNull(), body: body() },
+      columns: { id: t.int().required(), body: body() },
       primaryKey: ["id"],
       ifNotExists: true,
     });

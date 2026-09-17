@@ -69,8 +69,8 @@ export default {
   schema() {
     table("hits").create({
       columns: {
-        path: t.text().notNull(),
-        counter: t.bigInt().notNull(),
+        path: t.text().required(),
+        counter: t.bigInt().required(),
       },
     });
   },

@@ -64,8 +64,8 @@ export default {
   schema() {
     table("notes").create({
       columns: {
-        id: t.int().notNull(),
-        body: t.string({ length: 64 }).notNull(),
+        id: t.int().required(),
+        body: t.string({ length: 64 }).required(),
       },
       primaryKey: ["id"],
     });

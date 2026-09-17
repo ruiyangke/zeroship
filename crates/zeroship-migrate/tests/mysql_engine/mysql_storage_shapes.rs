@@ -188,7 +188,7 @@ fn accepted(migration: &MigrationIr, dialect: &zeroship_migrate::DialectId, what
 }
 
 // (a) The shape the `create_widgets` host fixture used to carry until it was
-// bounded: `t.text().notNull().default("new")`.
+// bounded: `t.text().required().default("new")`.
 #[test]
 fn mysql_refuses_a_bare_literal_default_on_a_text_column() {
     let mut status = column("status", ColType::Text);

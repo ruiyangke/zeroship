@@ -86,9 +86,9 @@ function uniqueNamespace(prefix: string): string {
 const ALL_ROUTES = `import { table, t, check } from "@zeroship/migrate";
 export const name = "a";
 const cols = {
-  id: t.int().notNull(),
-  n: t.int().notNull(),
-  kind: t.text().notNull(),
+  id: t.int().required(),
+  n: t.int().required(),
+  kind: t.text().required(),
   floor: t.int(),
 };
 const P = [
@@ -127,7 +127,7 @@ export const name = "a";
 export default {
   schema() {
     table("c_helper").create({
-      columns: { id: t.int().notNull(), n: t.int().notNull() },
+      columns: { id: t.int().required(), n: t.int().required() },
       primaryKey: ["id"],
       checks: [check("ck_nonneg", (col) => col("n").ge(0))],
     });
@@ -141,7 +141,7 @@ export const name = "a";
 export default {
   schema() {
     table("c_addop").create({
-      columns: { id: t.int().notNull(), n: t.int().notNull() },
+      columns: { id: t.int().required(), n: t.int().required() },
       primaryKey: ["id"],
     });
     table("c_addop").check("ck_nonneg").add({ expr: (col) => col("n").ge(0) });

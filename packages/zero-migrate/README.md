@@ -24,9 +24,9 @@ export default {
     table("orders").create({
       columns: {
         id: ids.typeId({ prefix: "ord" }).primaryKey(),
-        total: t.numeric({ precision: 12, scale: 2 }).notNull(),
-        status: t.text().notNull().default("pending"),
-        created_at: t.timestamp().notNull().default(now()),
+        total: t.numeric({ precision: 12, scale: 2 }).required(),
+        status: t.text().required().default("pending"),
+        created_at: t.timestamp().required().default(now()),
       },
     });
 

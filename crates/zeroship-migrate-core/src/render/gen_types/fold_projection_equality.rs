@@ -1205,7 +1205,7 @@ fn the_catalog_and_the_authoring_artifact_agree_about_an_altered_primary_key() {
     // `single_primary_key` path), so the key is visible as `.primaryKey()` on a column
     // rather than as a table-level clause.
     // `.primaryKey()` implies NOT NULL in the authoring API, so the emitter renders
-    // the marker without a `.notNull()` beside it. Asserted as the emitter actually
+    // the marker without a `.required()` beside it. Asserted as the emitter actually
     // spells it rather than as a reader would guess.
     assert!(
         artifacts

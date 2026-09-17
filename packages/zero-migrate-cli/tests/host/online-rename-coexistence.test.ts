@@ -72,7 +72,7 @@ test("during an online rename both names stay aligned, and the destination wins 
 
   const created = authoredSchemaMigration("create_users", () => {
     table("users").create({
-      columns: { id: t.int().notNull(), display_name: t.string({ length: 255 }) },
+      columns: { id: t.int().required(), display_name: t.string({ length: 255 }) },
       primaryKey: ["id"],
     });
   });
@@ -223,8 +223,8 @@ test("during coexistence the source's constraints still bind writes made through
   const created = authoredSchemaMigration("create_users", () => {
     table("users").create({
       columns: {
-        id: t.int().notNull(),
-        display_name: t.string({ length: 255 }).notNull().default("anon"),
+        id: t.int().required(),
+        display_name: t.string({ length: 255 }).required().default("anon"),
       },
       primaryKey: ["id"],
       uniques: [{ name: "users_display_name_key", columns: ["display_name"] }],

@@ -189,7 +189,7 @@ export const name = "create_notes_and_add_tag";
 export function schema() {
   table("notes").create({
     columns: {
-      title: t.text().notNull(),
+      title: t.text().required(),
       body: t.text(),
     },
   });

@@ -53,7 +53,7 @@ const SEED_SCHEMA = `import { table, t } from "@zeroship/migrate";
 export const name = "create_seeded";
 export default {
   schema() {
-    table("seeded").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+    table("seeded").create({ columns: { id: t.int().required() }, primaryKey: ["id"] });
   },
 };
 `;
@@ -75,7 +75,7 @@ const FRESH_SCHEMA = `import { table, t } from "@zeroship/migrate";
 export const name = "create_fresh";
 export default {
   schema() {
-    table("fresh").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+    table("fresh").create({ columns: { id: t.int().required() }, primaryKey: ["id"] });
   },
 };
 `;

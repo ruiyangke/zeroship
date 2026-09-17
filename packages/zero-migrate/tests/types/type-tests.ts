@@ -132,8 +132,8 @@ const readonlyCompositeForeignKeys = [compositeForeignKey] as const satisfies re
 
 table("children").create({
   columns: {
-    tenant_id: t.uuid().notNull(),
-    parent_id: t.uuid().notNull(),
+    tenant_id: t.uuid().required(),
+    parent_id: t.uuid().required(),
   },
   primaryKey: ["tenant_id", "parent_id"] as const,
   foreignKeys: readonlyCompositeForeignKeys,
@@ -556,7 +556,7 @@ export function badColTypes(): void {
   // until the recorder twin removes the alias too.
   t.int();
 
-  // @ts-expect-error — `.notNull()` takes no argument.
+  // @ts-expect-error — `.required()` takes no argument.
   t.text().notNull("yes");
 
   // @ts-expect-error — the old untyped migration reference factory is removed.
@@ -589,8 +589,8 @@ export function badColTypes(): void {
   const idFormats: IdFormats = ids;
   const valueFormat: ValueFormat = { typeId: typeIdOptions };
   const ulidValueFormat: ValueFormat = "ulid";
-  const typedId: ColumnDef = idFormats.typeId(typeIdOptions).notNull().unique().primaryKey();
-  const ulid: ColumnDef = idFormats.ulid().notNull().unique().primaryKey();
+  const typedId: ColumnDef = idFormats.typeId(typeIdOptions).required().unique().primaryKey();
+  const ulid: ColumnDef = idFormats.ulid().required().unique().primaryKey();
   table("accounts").create({ columns: { id: typedId } });
   void valueFormat;
   void ulidValueFormat;
@@ -689,15 +689,15 @@ export function checkExpressionSurfaceTypechecks(): void {
   const pkceCheck: CheckDef = check("pkce_method_check", (col) => col("pkce_method").eq("S256"));
   table("oauth_authorization_codes").create({
     columns: {
-      pkce_method: t.text().notNull(),
-      user_id: t.text().notNull(),
-      kind: t.text().notNull(),
-      data: t.json().notNull(),
+      pkce_method: t.text().required(),
+      user_id: t.text().required(),
+      kind: t.text().required(),
+      data: t.json().required(),
       floor_cents: t.int(),
-      created_at: t.timestamp().notNull(),
-      expires_at: t.timestamp().notNull(),
-      active: t.boolean().notNull(),
-      visible: t.boolean().notNull(),
+      created_at: t.timestamp().required(),
+      expires_at: t.timestamp().required(),
+      active: t.boolean().required(),
+      visible: t.boolean().required(),
     },
     checks: [
       pkceCheck,
@@ -1022,7 +1022,7 @@ export function existenceGuardsTypecheck(): void {
 // ───────────────────────────────────────────────────────────────────────────
 
 export function immutableChainTypechecks(): void {
-  const base: ColumnDef = t.text().notNull();
+  const base: ColumnDef = t.text().required();
   const a: ColumnDef = base.unique();
   const b: ColumnDef = base.default("x");
   table("u").create({ columns: { a, b, base } });

@@ -515,7 +515,7 @@ fn emitted_env_db_ts_is_a_passive_current_authoring_schema() {
     );
     assert!(ts.contains("t."), "emits t.*() builder calls:\n{ts}");
     assert!(
-        ts.contains("email: t.text().notNull(),"),
+        ts.contains("email: t.text().required(),"),
         "the required email column renders its builder chain:\n{ts}"
     );
     assert!(

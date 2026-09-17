@@ -19,16 +19,16 @@ export function schema() {
 
   table("subscriptions").create({
     columns: {
-      tier: t.enum(planTier).notNull(),
+      tier: t.enum(planTier).required(),
       period: t.domain(billingPeriod),
     },
   });
 
   table("pg_expr_checks").create({
     columns: {
-      status: t.text().notNull(),
-      name: t.text().notNull(),
-      data: t.json().notNull(),
+      status: t.text().required(),
+      name: t.text().required(),
+      data: t.json().required(),
     },
     checks: [
       { name: "status_ne_all", expr: (col) => col("status").notIn(["x"]) },
