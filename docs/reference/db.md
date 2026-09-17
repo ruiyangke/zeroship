@@ -1,14 +1,14 @@
 # @zeroship/db — Database SDK
 
-`@zeroship/db` is the database SDK for zeroship apps. The schema source of
-truth is the committed op.* migration set. `@zeroship/vite-plugin` records
-`migrations/*.ts` in-process through its pure-JS recorder, folds the resulting
-IR envelopes through `zeroship-migrate-node`, and emits
-`generated/zeroship/env.db.ts`, which installs the TypeScript `Env.db`
-augmentation, plus `schema.runtime.json`, which the runtime consumes at boot.
-Handlers call CRUD methods on `env.db.<name>` directly.
-Behind the scenes the SDK calls into the native `env.db` v8_class surface
-(registered by the Rust runtime); no raw SQL is exposed to user code.
+`@zeroship/db` is the database SDK for zeroship apps. You define your tables in
+committed migration files under `migrations/`, and the build folds them into a
+typed `env.db` whose generated module declares the `Env.db` augmentation.
+Handlers call CRUD methods on `env.db.<name>` directly. There is no raw SQL
+surface.
+
+Every table a migration creates gets a fixed set of system columns, including
+the `id` primary key. **You do not declare them** — see
+[System columns](#system-columns).
 
 ```ts
 // migrations/20260628000000_initial_schema.ts
@@ -33,7 +33,7 @@ export default {
 import { env } from "zeroship";
 import { mutation, query } from "@zeroship/rpc/server";
 
-// Typed by generated/zeroship/env.db.ts.
+// Typed by the generated env.db module.
 const db = env.db;
 
 export const addUser = mutation(async ({ name, email }: { name: string; email: string }) => {
@@ -56,17 +56,25 @@ export const listAdmins = query(async () => {
 
 `zeroship deploy` ships code; it does not touch the database. `zeroship migrate`
 applies the migration set. **For an app with migrations, the migrate has to come
-first**, and the control plane enforces it: a deploy whose generated
-`schema.runtime.json` is not the one the app's newest applied migration produced
-is refused with `409 schema_not_applied`, and nothing goes live.
+first**, and the platform enforces it: a deploy whose generated schema descriptor
+is not the one the app's newest applied migration produced is refused with
+`409 schema_not_applied`, and nothing goes live.
 
 ```
-$ zeroship deploy ./dist/app.zship --app=<id>
+$ zeroship deploy ./dist/app.zship --app=<id> --control=<url>
 
 This app has committed migrations. Deploy does NOT apply them:
   zeroship migrate --app=<id> --control=<url>
 Until you do, this deploy is REFUSED with 409 schema_not_applied.
 ```
+
+`--app=<id>` names the app by its `app_...` identity and `--control=<url>` is
+the control-plane origin. Both `deploy` and `migrate` accept both flags. With a
+committed `zeroship.jsonc`, the first deploy writes the app id into `app` and
+the file already carries `control`, so the flags can be omitted and `zeroship
+migrate` alone is complete when run from the project directory. The 409 body
+below prints its remedy as `--app` only because the file supplies the control
+plane; pass `--control=<url>` when running from anywhere else.
 
 The response body names the fix:
 
@@ -79,9 +87,9 @@ The response body names the fix:
 }
 ```
 
-There is no override. The check exists because the generated descriptor is the
-only thing the runtime consults about your schema - including which columns are
-masked. If it could go live ahead of the DDL it describes, a column the
+There is no override. The check exists because the generated schema descriptor is
+the only thing the platform consults about your schema — including which columns
+are masked. If it could go live ahead of the schema it describes, a column the
 descriptor calls masked would be served as the plain value it still holds, and
 nothing downstream would notice.
 
@@ -96,10 +104,76 @@ Three consequences worth knowing before you meet them:
   it would boot the app with `env.db` uninstalled over a live database.
 - **You cannot deploy an older build across a migration boundary.** The
   comparison is against the NEWEST applied migration, not "any migration ever
-  applied". Schema migrations carry an engine-synthesized structural inverse,
+  applied". Schema migrations have their reverse synthesized by the platform,
   while data migrations carry either a recorded `inverse()` or an explicit
   `irreversible` reason; deployment still requires the descriptor for the newest
   applied state.
+
+### Schema and data migrations are separate
+
+A migration module declares exactly one forward phase: `schema()` for DDL or
+`data()` for DML — never both. There is no `up()` alias and no authored `down()`.
+
+A **schema** migration needs nothing else; the platform derives its reverse from
+the structure it applied:
+
+```ts
+import { table, t } from "@zeroship/migrate";
+
+export default {
+  name: "add_notes",
+  schema() {
+    table("notes").create({
+      columns: {
+        title: t.text().notNull(),
+        body: t.text(),
+      },
+    });
+  },
+};
+```
+
+A **data** migration must make its rollback posture explicit, with exactly one
+of:
+
+- `inverse()` — the reverse written in the same DSL, recorded alongside the
+  forward change and checked like it; or
+- `irreversible` — a non-empty string reason shown to whoever is deciding
+  whether to roll back.
+
+```ts
+import { table } from "@zeroship/migrate";
+
+export default {
+  name: "normalize_order_status",
+  data() {
+    table("orders").update({
+      set: { status: "pending" },
+      where: (col) => col("status").eq("new"),
+    });
+  },
+  inverse() {
+    table("orders").update({
+      set: { status: "new" },
+      where: (col) => col("status").eq("pending"),
+    });
+  },
+};
+```
+
+```ts
+export default {
+  name: "drop_legacy_notes",
+  data() {
+    table("legacy_notes").delete({ where: (col) => col("imported").eq(true) });
+  },
+  irreversible: "the original legacy rows are not recoverable",
+};
+```
+
+The forward phase is the only required member. A migration may also set `name`;
+if it omits one, the filename is used. `inverse()` and `irreversible` are
+mutually exclusive, and either is mandatory on a `data()` migration.
 
 ### TypeScript: typed `env.db`
 
@@ -116,6 +190,12 @@ project's `tsconfig.json`:
 }
 ```
 
+The build tooling writes `generated/zeroship/env.db.ts` from your `migrations/`
+files. `pnpm dev` regenerates it whenever a migration changes, and a
+development-mode build (`vite build --mode development`) regenerates it on
+demand. A production build does not rewrite it — it refuses to ship when the
+committed module has drifted from the migrations, so commit each regeneration.
+
 `@zeroship/types` declares the base `zeroship` runtime module. The
 generated `env.db.ts` imports `@zeroship/db`'s `t`/`Db` types, reconstructs
 the folded schema, and declares the single `Env.db` augmentation for the
@@ -127,17 +207,35 @@ module is the sole app-level `Env.db` augmentation.
 
 ### Collection names
 
-Collection names created by migrations become physical table names. Keep them
-ASCII alphanumeric plus underscores and within the backend identifier limit.
-Creator-authored migrations reserve backend catalog prefixes and `__zeroship`
-to avoid DDL collisions. The runtime ORM may address a prefixed table already
-declared by its trusted descriptor; the prefix does not change runtime access.
+A collection name becomes a table name. Names may contain only ASCII
+letters, digits and underscores, and must be at most **63 bytes** long. The cap
+is enforced rather than left to the database, which would silently truncate a
+longer name.
+
+Three prefixes are reserved and cannot be used, case-insensitively:
+
+| Reserved prefix | Owner |
+| --- | --- |
+| `pg_` | PostgreSQL system catalog |
+| `sqlite_` | SQLite system catalog |
+| `__zeroship` | zeroship platform |
+
+Column names follow the same 63-byte limit and portable-identifier rule, plus
+their own reservations:
+
+- No name may start with `_` (reserved for synthetic result columns such as
+  `_distance`).
+- No name may end with `_masked` (reserved for the column a `.mask()` or
+  `.encrypted()` field generates).
+- The classification names `public`, `pii`, `spi`, `phi`, `pci` and `internal`
+  are reserved exactly.
+- A system column name (`id`, `created_at`, `updated_at`, `created_by`,
+  `updated_by`, `version`, `deleted_at`) cannot be declared — the platform
+  manages those. See [System columns](#system-columns).
 
 **Type generation refuses invalid names too, so failures surface at build time.**
-Column names follow the portable identifier and reserved-prefix rules. Masked
-storage names come from the generated runtime descriptor. A masked field name
-must also leave room for its hidden raw storage name. Invalid declarations
-leave `generated/zeroship/` unchanged.
+A masked field name must also leave room for the column the platform generates
+for it. Invalid declarations leave the generated output unchanged.
 
 ## Two return contracts
 
@@ -162,40 +260,185 @@ const result = await db.transaction(async (tx) => {
 // `result` itself is a Result<R>: `{ data: u, error: null }` or `{ data: null, error }`.
 ```
 
-The `tx.<table>` wrapper is a JS-side throw-style adapter around the
-outer Collection. Routing the CRUD call to the transaction connection
-happens in Rust via the per-isolate `ThreadDbContext::tx_conn` slot
-(formerly a `TX_CONN` thread-local, folded into `ThreadDbContext` in
-Stage 8d-R4); the JS adapter only flips the surface from Result to
-throw.
+Inside a transaction, `tx` mirrors `db` but every collection method returns the
+bare value and throws on failure. Outside a transaction, each top-level
+`db.<table>.*` call autocommits on its own.
 
 ## Schema builders
 
-Use the `t.*` factories. Every builder is chainable.
+There are two `t.*` surfaces, and they are not interchangeable:
 
-### Field types
+- **`@zeroship/migrate`** — what you write in `migrations/*.ts` to define
+  tables. It is a DDL lexicon: `t.text()`, `t.string({ length })`,
+  `t.int()`, `t.timestamp()`, `.notNull()`, `t.text().references(...)`,
+  `ids.typeId(...)`.
+- **`@zeroship/db`** — the runtime schema the generated `env.db` typing is
+  built from, and the surface for shared packages and tests. It is a
+  validation/typing lexicon: `t.string()`, `t.number()`, `.required()`,
+  `t.ref("users")`, `t.array(...)`.
 
-| Builder                | TS type                       | Postgres        |
-|------------------------|-------------------------------|-----------------|
-| `t.string()`           | `string`                      | TEXT            |
-| `t.number()`           | `number`                      | DOUBLE PRECISION |
-| `t.integer()`          | `number`                      | INTEGER         |
-| `t.numeric({ precision, scale })` | `Decimal` string      | NUMERIC         |
-| `t.bigInt()`           | `number` or `bigint`           | BIGINT          |
-| `t.boolean()`          | `boolean`                     | BOOLEAN         |
-| `t.timestamp()`        | `number` (Unix ms)            | TIMESTAMPTZ     |
-| `t.calendarDate()`     | `string` (`YYYY-MM-DD`)       | DATE            |
-| `t.json()`             | `Record<string, unknown>`     | JSONB           |
-| `t.array(t.string())`  | `string[]`                    | JSONB           |
-| `t.ref("users")`       | `Id<"users">` (branded string) | TEXT + FK      |
-| `t.object({ ... })`    | nested inferred object        | JSONB           |
-| `t.literal("login")`   | `"login"`                     | underlying type |
-| `t.union(v1, v2, ...)` | discriminated union           | flat columns    |
-| `t.bytes()`            | `Uint8Array`                 | BYTEA           |
+The rest of this section documents the migration lexicon first — that is what
+you author — then the runtime lexicon.
 
-`t.date()` is **not** in the surface — use `t.timestamp()` for a TIMESTAMPTZ
-(Unix-ms numbers at the JS layer) or `t.calendarDate()` for a Postgres DATE
-(`YYYY-MM-DD` strings).
+### Migrations: the `t.*` DDL lexicon
+
+These builders define a column. Every modifier returns a **fresh**
+column definition, so a hoisted builder is safe to reuse.
+
+| Builder | Storage | Notes |
+| --- | --- | --- |
+| `t.text()` | `TEXT` | Unbounded; indexable but not bounded. |
+| `t.string({ length? })` | `VARCHAR(N)` | Bounded; `length` defaults to 255. |
+| `t.boolean()` | `BOOLEAN` | |
+| `t.int()` | `INTEGER` | 32-bit. |
+| `t.bigInt()` | `BIGINT` | 64-bit. |
+| `t.smallInt()` | `SMALLINT` | 16-bit. |
+| `t.real()` | `REAL` | Single-precision float. |
+| `t.double()` | `DOUBLE PRECISION` | Double-precision float. |
+| `t.numeric({ precision?, scale? })` | `NUMERIC` | Defaults to (38, 9). |
+| `t.timestamp()` | `TIMESTAMPTZ` | |
+| `t.date()` | `DATE` | Calendar date. |
+| `t.uuid()` | `UUID` | |
+| `t.json()` | `JSONB` | |
+| `t.bytes()` | `BYTEA` | |
+| `t.textArray()` | `TEXT[]` on PG | JSON text on other backends. |
+| `t.char({ length })` | `CHAR(N)` | Fixed-length. |
+| `t.vector({ dimensions, metric? })` | `vector` (pgvector) | See [Vector search](#vector-search). |
+| `t.geoPoint()` | `geography(POINT, 4326)` on PG | See [Geo](#geo-point--radius). |
+| `t.encrypted({ of })` | ciphertext | Wraps another column type. |
+
+Chainable modifiers: `.notNull()`, `.default(value)`, `.unique()`,
+`.primaryKey()`, `.references(table, column, opts?)`, `.mask({ kind, ... })`,
+`.generated(expr)`, `.identity()`, `.autoIncrement()`, `.collation(intent)`.
+
+`.references(table, column, opts?)` declares a foreign key. `column` is the
+target column and is required here; `opts` accepts `onDelete`, `onUpdate`,
+`name` and `relation`:
+
+```ts
+userId: t.text().references("users", "id", { relation: "author" }),
+```
+
+### System columns
+
+**Every table a migration creates receives seven system columns. Do not declare
+them, and do not declare a primary key** — the platform injects both, and a
+collision is refused at build time. The injected shape is:
+
+| Column | Type | Assignment |
+| --- | --- | --- |
+| `id` | text | Generated on insert as a typed id, e.g. `note_01h...`. Sole primary key; immutable. |
+| `created_at` | timestamp | Set on insert. |
+| `updated_at` | timestamp | Set on insert, rewritten on every write. |
+| `created_by` | text | Request actor on insert; null for anonymous writes. |
+| `updated_by` | text | Request actor, rewritten on every write. |
+| `version` | integer | Starts at 1; increments on every write. |
+| `deleted_at` | timestamp | The soft-delete marker (see [Delete](#delete)). |
+
+Two consequences:
+
+- **Assigned fields are read-only.** They are excluded from typed write inputs
+  and rejected if supplied. A created row's `id`, `created_at`, `created_by`
+  and `version` are already correct without you passing them.
+- **The typed-id prefix comes from the collection name.** A trailing `s` is
+  dropped, then the first four ASCII alphanumerics are lowercased: `notes` →
+  `note_`, `posts` → `post_`, `users` → `user_`. A name that yields nothing
+  uses `row_`.
+
+These behaviors are declared as descriptor metadata, not authored in the
+migration. The generator vocabulary is `typedId`, `actor`, `now`,
+`increment(N)` and `identity`, paired with an event (`insert`, `write` or
+`delete`). There is **no migration builder for `assign` or `idPrefix`** — they
+are managed by the platform, and a migration cannot override them. Every table
+a migration creates is injected with one of each system assignment, so the
+`now`-on-`delete` and increment-on-`write` generators the lifecycle options
+select are always present.
+
+If you build a manual runtime schema with `@zeroship/db` (for a shared package
+or a test), that surface does expose them: `.assigned({ by, on })` attaches an
+assignment and `t.id(prefix)` pins a typed-id prefix. See
+[Runtime schema builders](#runtime-schema-builders).
+
+### Migrations: refinements
+
+Chainable on any migration column:
+
+| Method | Effect |
+| --- | --- |
+| `.notNull()` | Column rejects null and becomes required in write inputs. |
+| `.default(value \| fn)` | Value applied by the database when the column is omitted. |
+| `.unique()` | Adds a `UNIQUE` index. |
+| `.primaryKey()` | Marks a primary key. On the platform this is refused — the platform pins `id`. |
+| `.references(table, column, opts?)` | Declares a foreign key. |
+| `.identity()` / `.autoIncrement()` | Database-generated integer. |
+| `.generated(expr)` | Generated/computed column. |
+| `.mask(opts)` | Standalone read-time mask. |
+| `.collation(intent)` | Pin byte-order comparison. |
+
+### Runtime schema builders
+
+`@zeroship/db`'s `schema()` and `t` describe the same fields at the runtime
+type layer. You rarely write one by hand — the generated `env.db` module builds
+it for you — but shared packages and tests use it directly. Its vocabulary and
+modifiers differ from the migration lexicon:
+
+| Builder | TS type | Notes |
+| --- | --- | --- |
+| `t.string()` | `string` | Text storage. |
+| `t.integer()` | `number` | Integer. |
+| `t.number()` | `number` | Floating point. |
+| `t.numeric({ precision?, scale? })` | `Decimal` | Exact decimal, defaults to (38, 9). |
+| `t.bigInt()` | `number \| bigint` | 64-bit. |
+| `t.boolean()` | `boolean` | |
+| `t.timestamp()` | `number` (Unix ms) | |
+| `t.calendarDate()` | `string` (`YYYY-MM-DD`) | |
+| `t.json()` | `JsonValue` | |
+| `t.array(t.string())` | `string[]` | Primitive item types only. |
+| `t.ref("users", opts?)` | `Id<"users">` (branded string) | Foreign key. |
+| `t.object({ ... })` | nested inferred object | |
+| `t.literal("login")` | `"login"` | Discriminator building block. |
+| `t.union(v1, v2, ...)` | discriminated union | |
+| `t.bytes()` | `Uint8Array` | |
+| `t.vector(dims, opts?)` | `number[]` | |
+| `t.geoPoint()` | `{ lat, lng }` | |
+| `t.encrypted({ of })` | ciphertext | |
+| `t.id(prefix?)` | `string` | Typed-id base, optionally pinning a prefix. |
+
+Chainable modifiers: `.required()` (the runtime-side counterpart of
+`.notNull()`), `.nullable()`, `.default(value)`, `.unique()`, `.index()`,
+`.min(n)`, `.max(n)`, `.enum(...values)`, `.pattern(/regex/)`, `.primaryKey()`,
+`.assigned({ by, on })`, `.references(table, opts?)`, `.mask(opts)`,
+`.auto_now()`, `.auto_now_on_update()`.
+
+`t.ref(table, opts?)` is the runtime-side foreign-key builder. It takes the
+target table first, then an options object with `column` (the target column,
+required for a manual schema), `relation`, `onDelete`, `onUpdate` and
+`deferrable`. Numeric references keep their storage type:
+`t.integer().references("users", { column: "id", relation: "user" })`.
+
+A manual runtime schema declares its own system columns, because it is not
+built from a migration:
+
+```ts
+import { t, schema } from "@zeroship/db";
+
+const users = schema({
+  id: t.id("user").required().primaryKey().assigned({ by: "typedId", on: "insert" }),
+  created_at: t.timestamp().required().assigned({ by: "now", on: "insert" }),
+  updated_at: t.timestamp().required().assigned({ by: "now", on: "write" }),
+  version: t.integer().required().default(1).assigned({ by: "increment(1)", on: "write" }),
+  deleted_at: t.timestamp().assigned({ by: "now", on: "delete" }),
+  email: t.string().required().unique(),
+});
+```
+
+`t.id(prefix)` pins the typed-id prefix; without it the prefix is derived from
+the collection name. A `data()` migration cannot declare any of this — see
+[System columns](#system-columns).
+
+`t.date()` is **not** in either surface. Use `t.timestamp()` for a
+`TIMESTAMPTZ` (Unix-ms numbers at the JS layer) or `t.calendarDate()` for a
+`DATE` (`YYYY-MM-DD` strings).
 
 Scalar timestamps accept integral Unix milliseconds, valid `Date` objects, or
 ISO timestamp strings and return Unix milliseconds. Strings must name a real
@@ -213,66 +456,19 @@ Wide integers accept safe integer numbers or bigint values within the database
 integer range. Reads return numbers within the safe integer range and bigint
 values beyond it. Convert bigint explicitly when returning a JSON response.
 
-Binary fields accept and return `Uint8Array`. The V8 adapter captures the bytes
-into an owned native value before asynchronous execution. Both database backends
-bind those bytes directly; Rust model fields use `Vec<u8>`.
+Binary fields accept and return `Uint8Array`. Text and ordinary arrays are
+refused for binary columns.
 
 ```ts
 const png = new Uint8Array(await file.arrayBuffer());
-await env.db.uploads.insert({ blob: png });
+await db.uploads.insert({ blob: png });
 
-const rows = await env.db.uploads.find({ id }, { limit: 1 });
-const back: Uint8Array = rows[0].blob;
+const { data: rows } = await db.uploads.find({ id }).limit(1);
+const back: Uint8Array | undefined = rows?.[0]?.blob;
 ```
 
-Text and ordinary arrays are refused for binary columns.
-
-### Refinements
-
-All chainable on any field:
-
-| Method                | Effect                                                       |
-|-----------------------|--------------------------------------------------------------|
-| `.required()`         | Marks the key non-optional in `RowInput<S>` and `Row<S>`.    |
-| `.unique()`           | Adds a `UNIQUE` index.                                       |
-| `.index()`            | Adds a non-unique index.                                     |
-| `.default(value\|fn)` | Default applied on insert when key is absent.                |
-| `.min(n)`             | Number minimum / string minimum length.                      |
-| `.max(n)`             | Number maximum / string maximum length.                      |
-| `.enum(...values)`    | Restricts the value to a fixed set.                          |
-| `.pattern(/regex/)`   | Regex constraint on string values.                           |
-
-### Generated columns
-
-Migration policy can supply columns with assignment generators. The resulting
-`schema.runtime.json` declares those fields, their types, primary keys and
-lifecycle roles. Rust and TypeScript use that same descriptor; `Row<S>` contains
-only fields declared by `S`.
-
-Every ORM collection must declare a required `id` field as its sole primary key.
-The descriptor must include it explicitly; collection setup never injects it.
-Generation remains optional and uses the field's assignment metadata. Composite
-business keys use unique constraints. Once inserted, `id` cannot change through
-updates, upsert conflicts, or lifecycle generators. ID generators run on insertion.
-Projections and aggregate results may omit `id`; protected reads retain it internally
-for decryption and unmasking.
-
-An assignment names a generator (`typedId`, `actor`, `now`, `increment(N)` or
-`identity`) and an event (`insert`, `write` or `delete`). The ORM supplies typed
-IDs and request actors. Database defaults initialize timestamps, counters and
-identity columns; write expressions update timestamps and counters. Anonymous
-writes assign a null actor. Assigned fields are excluded from typed write inputs.
-Encrypted inserts reserve a database-generated identity before encryption, within
-the write's transaction.
-
-Names such as `created_at`, `version` and `deleted_at` have no intrinsic behavior.
-Without assignment metadata, they are ordinary columns. See [Column assignments](#column-assignments).
-
-### Typed-id prefixes
-
-A field assigned by `typedId` receives a UUIDv7 encoded with a readable prefix.
-The ORM uses the field's `idPrefix` when declared, otherwise derives one from the
-collection name. The scalar `id` type alone does not request generation.
+`find` returns a chainable `Query`; awaiting it yields `{ data, error }`.
+`limit`, `sort` and `skip` are chained on the query, not passed as options.
 
 ### Per-collection options
 
@@ -294,16 +490,21 @@ export default {
 };
 ```
 
-- `softDelete: true` selects the declared `now` generator on `delete` as the
-  visibility marker. Deletes update the marker; reads hide marked rows.
-- `versioning: true` selects the declared write increment generator for
-  optimistic concurrency. A filter containing that field performs a revision check.
+- `softDelete: true` selects the injected `now` generator on `delete` as the
+  visibility marker. Deletes update the marker; reads hide marked rows. It
+  works with no declaration: the platform injects the marker column and its
+  `now` generator on every table.
+- `versioning: true` selects the injected write increment generator for
+  optimistic concurrency. A filter containing that field performs a revision
+  check. It too works with no declaration, on the injected `version` column.
+- `strictness: "strict" | "lenient" | "off"` is recorded on the collection.
+  The default is `"strict"`; today the setting does not change write validation,
+  which runs regardless.
 
-- `strictness: "strict" | "lenient" | "off"` records the deploy-time data-validation
-  policy. The descriptor preserves it; deployment enforcement is not wired yet.
-
-The migration renderer rejects enabled lifecycle options without an unambiguous
-matching generator. These options select roles; generators determine assignments.
+The migration renderer rejects an enabled lifecycle option only when no
+unambiguous matching generator exists. These options select roles; the injected
+system columns determine the assignments, so `softDelete: true` and
+`versioning: true` both work without any declaration.
 
 ### Named indexes
 
@@ -332,10 +533,9 @@ export default {
 };
 ```
 
-Each declaration becomes a CONCURRENTLY-built Postgres index named
-`"<collection>__<name>"` (e.g. `"todos__by_user_done"`). Field order
-matters — a multi-column index covers any **leftmost prefix** of its
-fields, matching Postgres B-tree semantics:
+An index name is namespaced to its collection. Field order matters — a
+multi-column index covers any **leftmost prefix** of its fields, matching
+B-tree semantics:
 
 | Filter                       | Matches `by_user_done`? |
 |------------------------------|-------------------------|
@@ -343,13 +543,12 @@ fields, matching Postgres B-tree semantics:
 | `{ userId }`                 | yes (prefix)            |
 | `{ done }`                   | no (skips `userId`)     |
 
-`schema(...).uniqueIndex(name, fields)` is the same builder but emits a
-`UNIQUE` index — useful for compound natural keys like `["orgId", "slug"]`.
-
-**Validation at definition time.** `.index(name, fields)` throws with
-`code = "SCHEMA_INVALID"` if `name` is empty or already declared on the
-schema, or if `fields` is empty or references a field absent from the
-schema, including any explicitly declared generated fields.
+The runtime `schema(...)` builder has the same two forms:
+`schema(...).index(name, fields)` and `schema(...).uniqueIndex(name, fields)`.
+Use `uniqueIndex` for compound natural keys like `["orgId", "slug"]`.
+`.index()` throws with `code = "SCHEMA_INVALID"` if `name` is empty or already
+declared on the schema, or if `fields` is empty or names a field absent from
+the schema.
 
 **Runtime warning.** Outside `NODE_ENV=production`, calling
 `find()` / `get()` / `deleteMany()` with a filter whose keys don't form
@@ -363,19 +562,14 @@ no declared index. Declared indexes: by_email, by_user_done. Add
 existing index.
 ```
 
-Per-field `.unique()` / `.index()` on `TypeBuilder` still works for
-single-column cases — those desugar to one-column indexes and the
-warning recognises them.
+Per-field `.unique()` / `.index()` still works for single-column cases — those
+become one-column indexes and the warning recognises them.
 
-**Future work.** Changing the field list of a previously declared index
-(e.g. `["userId"]` → `["userId", "done"]`) is currently a no-op: the
-orchestrator's `CREATE INDEX … IF NOT EXISTS` keeps the old definition.
-To swap an index in place today, drop it manually and redeploy.
-Multi-column `uniqueIndex` constraints are emitted but the deploy-time
-data-validation policy doesn't yet pre-check existing data for
-duplicates on a non-empty table — adding a `uniqueIndex` against a
-populated collection will succeed or fail at index-build time
-depending on the data.
+**Two index limits today.** Changing the field list of a previously declared
+index does not redefine it; drop the index and redeploy to change it. And a
+`uniqueIndex` over a populated collection is checked when the index is built,
+not at definition time — existing duplicates fail the migrate rather than the
+schema.
 
 ## Branded ids
 
@@ -403,15 +597,14 @@ and `InferId<typeof collection>` follow the schema's underlying ID type. Numeric
 IDs work with `get`, mutation shorthand, relation loading, and `bulkUnmask`.
 The map returned by `bulkUnmask` uses the caller's ID values as keys.
 
-For a manual schema, declare the foreign-key target column explicitly:
-`t.ref("users", { column: "account_key", relation: "user" })`. Migration-generated
-builders carry the target column and logical relation name from
-`schema.runtime.json`. The relation name exposes the edge to `.with()`; an
-unnamed foreign key remains a scalar reference. An omitted target column uses `id`.
-Numeric references retain their storage type: use
+For a runtime schema, `t.ref("users", { column: "account_key", relation: "user" })`
+declares the target column explicitly; an omitted target column uses `id`. The
+relation name exposes the edge to `.with()`; an unnamed foreign key remains a
+scalar reference. Numeric references retain their storage type: use
 `t.integer().references("users", { column: "id", relation: "user" })` or
-`t.bigInt().references(...)`. Wide integer values keep the SDK's `number | bigint`
-contract.
+`t.bigInt().references(...)`. In a migration, the equivalent is
+`t.text().references("users", "id", { relation: "user" })`. Wide integer values
+keep the SDK's `number | bigint` contract.
 
 By default, the builder emits a same-app FK without `ON DELETE`, `ON UPDATE`,
 or `DEFERRABLE` clauses,
@@ -423,38 +616,18 @@ end of the statement rather than firing per row.
 Add `onDelete: "cascade"` to the reference options for physical cascade,
 or `{ deferrable: true }` if you need cyclic refs insertable within one
 transaction — that is opt-in, not the default. Cross-app targets are refused;
-FKs stay inside the calling app. See `packages/db/src/types.ts` for the builder,
-and the next section for what does the refusing.
+FKs stay inside the calling app.
 
 ### Can an FK point at another app's table?
 
-No, and it is worth being exact about which code makes that true, because a
-plausible-looking answer is wrong.
+No. A foreign key can only target a table declared in the same app. A
+dot-qualified target (`t.ref("other.users")` or `.references("other.users", …)`)
+and a constraint that names a table absent from your own schema are both refused
+when the migration is applied. Model the relationship without a database-level
+foreign key, or declare the referenced table in the same app.
 
-**It is not `crates/zeroship-data-v8`.** A `refTarget` validator has no home
-there: the data plane emits no DDL, so it has nowhere to reject a foreign key.
-Nor is it `crates/zeroship-data-orm/src/sql`; migration validation belongs to
-the migration engine.
-
-**A migration is applied by the migration service at deploy**, and the schema it
-targets is not yours to choose: it is derived from your app. Three refusals follow.
-
-1. **A dot-qualified target on a column-level reference** — `t.ref("other.users")`
-   or `.references("other.users", ...)` — is refused when the migration is
-   applied, with `CrossAppFkForbidden`.
-2. **A table-level foreign-key constraint naming another app's table** is refused
-   with `CrossAppFkTargetMissing`: the target is resolved inside your own schema,
-   where no such table exists. The refusal reads as a missing table rather than as
-   a boundary violation, but it is still a refusal.
-3. **An op-level `schema:` qualifier naming another schema** is refused with
-   `CODE_CROSS_SCHEMA`.
-
-To fix any of these, declare the referenced table in the same app, or model the
-relationship without a database-level foreign key.
-
-What none of this covers: two apps that the control plane assigns the same
-`app_id`. Isolation there is a control-plane property, not one this contract can
-state.
+Isolation between apps is enforced by the platform, not by a constraint you
+declare.
 
 ## Collection CRUD
 
@@ -490,7 +663,7 @@ a generated identity; a conflict preserves the existing identity. Use
 
 ```ts
 // Single row by id (string is a shorthand for `{ id }`)
-const { data: user } = await db.users.get("usr_01hxyz...");
+const { data: user } = await db.users.get("user_01hxyz...");
 
 // Single row by filter
 const { data: user } = await db.users.get({ email: "alice@example.com" });
@@ -536,11 +709,25 @@ const { data: exists } = await db.users.exists({ email: "alice@example.com" });
 const { data: roles } = await db.users.distinct("role");
 ```
 
+`find(filter?, opts?)` takes an optional filter and an optional options object
+`{ with?, actor?, unmask?, unmaskReason? }`. `sort`, `limit`, `skip`, `select`,
+`with`, `after` and `paginate` are **chained** on the returned `Query`; `with`
+also works as an option. `get(idOrFilter, opts?)` returns one row or `null` and
+takes `{ select?, orderBy?, with?, actor?, unmask?, unmaskReason? }`. Both
+return a `Result` — a plain `{ data, error }` envelope — at the top level, so
+`rows` is never a bare array.
+
+That is the SDK `db.<name>` surface. The lower-level
+`env.db.collection(name).find(...)` shown under
+[Explicit joins](#explicit-joins) is different: it resolves to a bare row array
+and throws on failure.
+
 Sorting is portable for text, ID/reference, integer, floating-point, and
 temporal fields. Grouping and `distinct` also accept booleans and bytes.
-Decimal and JSON storage do not have the same native equality or ordering on
-PostgreSQL and SQLite, so the ORM refuses to sort, group, or deduplicate those
-fields. JSON filters still use structural equality on both backends.
+Decimal and JSON storage do not have the same equality or ordering on
+PostgreSQL and SQLite, so the database layer refuses to sort, group, or
+deduplicate those fields. JSON filters still use structural equality on both
+backends.
 
 ### Relations
 
@@ -567,11 +754,10 @@ const { data: page } = await db.todos
   .paginate({ numItems: 20 });
 ```
 
-The native ORM validates declared edges and fetches their targets in bounded
-batches. It preserves transaction routing and applies the target collection's
-read protection and soft-delete rules. The SDK forwards the selection and maps
-returned field names; it does not query target collections. Plain JavaScript can
-use the same native operation:
+Relations are loaded in bounded batches. A requested relation is resolved with
+the target collection's own read protection and soft-delete rules applied, on
+the same transaction connection as the query. The lower-level collection
+handle resolves to a bare row array:
 
 ```js
 const rows = await env.db.collection("todos").find({}, { with: { user: true } });
@@ -592,21 +778,21 @@ const rows = await env.db.collection("todos").find({}, { with: { user: true } })
 
 ```ts
 // By id, full row patch
-const { data: u } = await db.users.update("usr_01hxyz...", { name: "Alice Smith" });
+const { data: u } = await db.users.update("user_01hxyz...", { name: "Alice Smith" });
 if (!u) throw new Error("not found");
 
 // By filter (returns the lowest-id match, or null)
 const { data: u } = await db.users.update({ email: "alice@..." }, { role: "admin" });
 
 // Atomic operators — per-field
-await db.products.update("prd_01hxyz...", {
+await db.products.update("prod_01hxyz...", {
   stock: { $dec: 1 },
   views: { $inc: 1 },
   tags:  { $push: "sale" },
 });
 
 // MongoDB top-level shape (SDK translates)
-await db.products.update("prd_01hxyz...", { $inc: { views: 1 } });
+await db.products.update("prod_01hxyz...", { $inc: { views: 1 } });
 
 // Update many — returns counts
 const { data: counts } = await db.users.updateMany(
@@ -617,25 +803,25 @@ const { data: counts } = await db.users.updateMany(
 
 // CAS via the platform version field
 const { data, error } = await db.products.update(
-  { id: "prd_01hxyz...", version: 5 },
+  { id: "prod_01hxyz...", version: 5 },
   { stock: { $dec: 1 } },
 );
-// error instanceof OptimisticLockError when stored version != 5
+// error.code === "OPTIMISTIC_CONCURRENCY" when stored version != 5
 ```
 
 Filtered single-row updates, deletes, restores, and purges choose the matching
-row with the lowest `id`. This keeps the result stable across database plans.
+row with the lowest `id`.
 
 Bulk update, delete, restore, and purge operations affect all matching rows and
-report database affected-row counts without fetching the changed records.
-They remain atomic; large maintenance jobs should choose explicit bounded
-batches. Updates that encrypt values separately for each target row retain the
-ORM's encrypted-target cap and reject an oversized target set before writing.
+report affected-row counts without fetching the changed records. They remain
+atomic; large maintenance jobs should choose explicit bounded batches. An
+update that encrypts values per row rejects an oversized target set before
+writing.
 
 #### Retrying CAS updates with `withRetry`
 
 The OCC pattern (read → compute → update with `{ version }` → retry on
-`OptimisticLockError`) is wrapped by `withRetry`:
+`OPTIMISTIC_CONCURRENCY`) is wrapped by `withRetry`:
 
 ```ts
 import { withRetry, isOptimisticLockError } from "@zeroship/db";
@@ -652,8 +838,10 @@ const updated = await withRetry(async () => {
 });
 ```
 
-Defaults: `max: 3`, retries only `OptimisticLockError`, no backoff. Pass
-your own predicate to retry on additional coded errors:
+Defaults: `max: 3`, retries only the `OPTIMISTIC_CONCURRENCY` code, no backoff.
+`isOptimisticLockError(e)` matches on that code, so it is true for the
+`OptimisticLockError` class and for a plain `Error` carrying the same code.
+Pass your own predicate to retry on additional coded errors:
 
 ```ts
 await withRetry(fn, {
@@ -675,7 +863,7 @@ up to the caller.
 
 ```ts
 // By id — returns the deleted row (or null)
-const { data } = await db.users.delete("usr_01hxyz...");
+const { data } = await db.users.delete("user_01hxyz...");
 
 // By filter
 const { data } = await db.users.delete({ email: "spam@..." });
@@ -686,7 +874,7 @@ const { data } = await db.sessions.deleteMany({ expiresAt: { $lt: Date.now() } }
 
 // Soft delete: delete sets deleted_at instead of removing the row.
 // For an explicit hard-delete, use `purge` / `purgeMany`:
-await db.users.purge("usr_01hxyz...");
+await db.users.purge("user_01hxyz...");
 await db.users.purgeMany({ email: { $like: "spam-%" } });
 ```
 
@@ -730,8 +918,7 @@ the same database handle, and each join requires a connecting column equality.
 
 The query preserves matching row combinations, including repeated parents.
 Sorting and pagination apply to those combinations. `with` remains the separate
-relation-loading API. Column names and types come from the generated descriptor;
-the native adapter accepts structured expressions and bound values.
+relation-loading API. Column names and types come from your schema.
 
 Named scalar projections can select columns or `count`, `sum`, `avg`, `min`,
 and `max` expressions. Use `groupBy` for grouping keys and `having` for aggregate
@@ -747,31 +934,25 @@ collection, including those with no matching rows.
 
 ## Vector / Geo
 
-Two search modalities ride on top of the schema DSL. Each has the
-same shape: declare the column with a `t.*` builder;
-deploy registers the appropriate index; query via `Collection.search`
-or `Collection.near`. Cross-backend membership is identical, but PG and
-Rust floating-point distance values can differ in the low significand bits.
-Assert set membership rather than strict ordinal positions.
+Two search modalities ride on top of the schema DSL. Each has the same shape:
+declare the column with a `t.*` builder, apply a migration to build the index,
+and query via `Collection.search` or `Collection.near`. Cross-backend results
+have identical membership, but distances can differ in the low significand
+bits — assert set membership rather than strict ordinal positions.
 
 ### Backend extension dependency
 
-| Capability | PG dependency               | SQLite dependency         |
-|------------|-----------------------------|---------------------------|
-| Vector     | `pgvector` extension        | none — bundled            |
-| Geo (point + radius) | `postgis` extension | none — bundled            |
-| Polygon ops          | `postgis` extension | **not supported** (PG-only) |
+| Capability | PostgreSQL dependency | SQLite dependency |
+|------------|-----------------------|-------------------|
+| Vector     | `pgvector` extension  | none — bundled    |
+| Geo (point + radius) | `postgis` extension | none — bundled |
 
-The fastest path on PG is to swap the database image to
-`pgvector/pgvector:pg16`, which ships both `pgvector` AND `postgis`
-out of the box — see [`docs/runbooks/docker-compose.md`](../runbooks/docker-compose.md)
-for the operator-action runbook.
+On PostgreSQL both extensions must be installed. The fastest path is to run
+the database on the `pgvector/pgvector:pg16` image, which ships `pgvector` and
+`postgis` out of the box.
 
-On SQLite (dev/sandbox/test only), vector search routes through the
-`sqlite-vec` extension (statically compiled via the `sqlite-vec`
-Rust crate — no `.so` shipping, no amalgamation fork; the bundled
-SQLite invariant is preserved). Geo search uses a pure-Rust haversine
-flat scan — see "Backend coverage" below for the dev-scale ceiling.
+On SQLite (dev/sandbox/test only) both search paths work without an extension;
+they suit local development rather than production scale.
 
 ### Vector search
 
@@ -816,11 +997,9 @@ const { data, error } = await db.docs.search({
 // data: (Row<S> & { _distance: number })[]
 ```
 
-`_distance` is a synthetic column the row carries back from the scan.
-On PG this is `col <-> $query` (pgvector's distance operator
-specialised to the metric). SQLite uses sqlite-vec's scalar distance
-functions on the stored BLOB column. Filtering happens before ranking and
-limiting the result, so matching rows fill the requested result window.
+`_distance` is a synthetic column the row carries back from the scan. Filtering
+happens before ranking and limiting, so matching rows fill the requested result
+window.
 
 ### Geo (point + radius)
 
@@ -861,15 +1040,12 @@ const { data } = await db.stores.near({
 // data: (Row<S> & { _distance_m: number })[]
 ```
 
-`_distance_m` is the great-circle distance in metres. On PG this is
-`ST_Distance(loc, ST_MakePoint($lng, $lat)::geography)` (note:
-PostGIS takes lng-lat, but the SDK swaps for you — `point: {lat, lng}`
-is always the call site contract). On SQLite this is the Rust
-haversine computed during the full-scan post-filter.
+`_distance_m` is the great-circle distance in metres. `point: { lat, lng }` is
+always the call-site contract; the platform handles each database's own
+coordinate order.
 
-**Polygon ops are PG-only.** Passing a polygon to a SQLite backend
-rejects with `code: "POLYGON_OPS_PG_ONLY"`. Use PG for any
-production-scale geo workload.
+Use PostgreSQL for any production-scale geo workload; the SQLite path is a full
+scan intended for development.
 
 ### Search inside a transaction
 
@@ -907,19 +1083,15 @@ search. There is no runtime path that notices and repairs it.
 
 ### Backend coverage
 
-- **PG vector** — `pgvector` `ivfflat` index over the declared metric's
-  operator class (`vector_cosine_ops` / `vector_l2_ops` /
-  `vector_ip_ops`). Production-grade; scales to millions of rows.
-- **SQLite vector** — exact search over the migrated BLOB column using
-  statically linked sqlite-vec scalar distance functions. No virtual table,
-  trigger, or runtime DDL is required. Cosine and L2 are supported;
-  inner product returns `VECTOR_UNSUPPORTED_METRIC`. This path suits local
-  development; production vector workloads use PostgreSQL indexes.
-- **PG geo** — PostGIS `geography(POINT, 4326)` + GiST index; spheroid
-  distance via `ST_DWithin` / `ST_Distance`.
-- **SQLite geo** — packed `(lat, lng)` BLOB + full-scan haversine
-  (~30 LOC of trig). Dev-tier ceiling; for production geo workloads
-  use PG.
+- **PostgreSQL vector** — an approximate-nearest-neighbour index over the
+  declared metric. Production-grade; scales to millions of rows.
+- **SQLite vector** — exact search over the column, no index. Cosine and L2
+  are supported; inner product returns `VECTOR_UNSUPPORTED_METRIC`. This path
+  suits local development; production vector workloads use PostgreSQL.
+- **PostgreSQL geo** — a PostGIS geography column with a spatial index and
+  spheroid distance.
+- **SQLite geo** — a full scan. Dev-tier; for production geo workloads use
+  PostgreSQL.
 
 ### Error codes
 
@@ -928,14 +1100,13 @@ top of the global error rail (§ Errors):
 
 | `error.code`                       | When                                                                 |
 |------------------------------------|----------------------------------------------------------------------|
-| `INVALID_K`                        | `k` outside `1..=1000`. Client-side validation; the native side never sees the call. |
-| `VECTOR_EXTENSION_MISSING`         | PG without `pgvector`. Hint mentions `CREATE EXTENSION vector;` and the `pgvector/pgvector:pg16` image swap. |
-| `POSTGIS_EXTENSION_MISSING`        | PG without `postgis`. Hint mentions `CREATE EXTENSION postgis;` and the same image swap. |
+| `INVALID_K`                        | `k` outside `1..=1000`. Client-side validation; the call is never sent. |
+| `VECTOR_EXTENSION_MISSING`         | PostgreSQL without `pgvector`. Hint names `CREATE EXTENSION vector;` and the image swap. |
+| `POSTGIS_EXTENSION_MISSING`        | PostgreSQL without `postgis`. Hint names `CREATE EXTENSION postgis;` and the image swap. |
 | `VECTOR_DIMENSION_MISMATCH`        | `args.vector.length !== <declared dims>` at insert or query time.    |
-| `POLYGON_OPS_PG_ONLY`              | A polygon was passed to `.near` on a SQLite backend.                 |
+| `VECTOR_UNSUPPORTED_METRIC`        | Inner-product search on SQLite.                                      |
 
-All five carry a stable `.code` — branch on the code, never substring-match
-on `error.message`.
+Branch on `error.code`, never substring-match on `error.message`.
 
 ## Filter operators
 
@@ -962,16 +1133,15 @@ and `near`; ordinary comparisons on them are refused.
 ## Update operators
 
 Per-field (preferred): `$set`, `$inc`, `$dec`, `$mul`, `$push`, `$pull`,
-`$addToSet`. A bare value is treated as `$set`. MongoDB top-level shape
-(`{ $set: { ... } }`, `{ $inc: { ... } }`, etc.) is also accepted by the
-shared ORM. The SDK maps field names to columns while preserving this grammar.
+`$addToSet`. A bare value is treated as `$set`. The MongoDB top-level shape
+(`{ $set: { ... } }`, `{ $inc: { ... } }`, etc.) is also accepted.
 
 Each field may be assigned only once per update. Multiple operators on a field,
 mixed operator/data objects, and assignments that collide after column-name
-mapping are refused. Arithmetic operators require native numbers or Rust
-`Decimal` values; strings, booleans, and null are refused before SQL execution.
-Objects supplied through an explicit `$set` are literal data, even if their
-keys look like update operators.
+mapping are refused. Arithmetic operators require numbers or `Decimal` values;
+strings, booleans, and null are refused before SQL execution. Objects supplied
+through an explicit `$set` are literal data, even if their keys look like update
+operators.
 
 Array operators treat the operand as a complete element. `$push` appends it,
 `$pull` removes every structurally equal element, and `$addToSet` appends it
@@ -1005,8 +1175,8 @@ const { data, error } = await db.transaction(async (tx) => {
 - The callback receives a `tx` object that mirrors `db`. Methods on
   `tx.<table>` return the raw value (`Row<S>`, `number`, …) and throw on
   error — there is no Result envelope.
-- The transaction is rolled back automatically when the callback throws
-  or when the runtime drops the wrapper without commit/rollback.
+- The transaction is rolled back automatically when the callback throws;
+  resolving commits. There is no `tx.commit()`.
 - A transaction owns exactly **one** connection, so its operations cannot
   overlap: `await` each call inside the callback before starting the next.
   `Promise.all([tx.a.insert(...), tx.b.insert(...)])` runs them concurrently
@@ -1026,22 +1196,17 @@ const { data, error } = await db.transaction(async (tx) => {
   made, not by what happens to be open at the time. A plain `db.<table>.*`
   call is its own unit of work even while another request holds a transaction
   open for the same app, and a call made inside a callback still belongs to
-  that transaction on any branch of the callback's own async work.
-  The previous bullet now holds on **both** tiers: SQLite keeps a separate
-  connection for the one open transaction, so an ordinary write issued while a
-  transaction is open is its own unit of work there too. What still differs is
-  how many transactions can be open at once — on `pnpm dev` the answer is one
-  per process, shared across every app, and a second `db.transaction()` is
-  refused immediately with `TRANSACTION_CONNECTION_BUSY` rather than waiting
-  for a connection. Do not rely on `pnpm dev` to tell you whether concurrent
-  transactional work is correct — see
-  [sqlite-divergences.md](./sqlite-divergences.md#current-differences).
+  that transaction no matter where the callback's own async work resumes.
+- On `pnpm dev`, SQLite allows only one transaction per process, shared across
+  every app, so a second `db.transaction()` is refused immediately with
+  `TRANSACTION_CONNECTION_BUSY` rather than waiting. The deployed tier allows
+  concurrent transactions per app. Do not rely on `pnpm dev` to tell you whether
+  concurrent transactional work is correct.
 - PostgreSQL `isolationLevel` accepts `"read uncommitted"`, `"read committed"`,
   `"repeatable read"` or `"serializable"`. Omitting it uses the database default.
   SQLite accepts `"serializable"` or the default and rejects other levels with
   `unsupported_isolation_level`. A nested transaction inherits its parent's
   isolation; supplying a level for a savepoint returns `nested_isolation_level`.
-  See [sqlite-divergences.md](./sqlite-divergences.md#current-differences).
 - Outside the callback the result is again a `Result<R>` — the surrounding
   `transaction()` call doesn't throw.
 
@@ -1057,8 +1222,7 @@ commit or roll back as a unit.
 the lower-level `subscribe(collection)` primitive for framework adapters and
 advanced consumers. App code that wants refreshed query results should use
 `db.live(...)`; `subscribe(...)` reports invalidations and leaves the re-read to
-the caller. `openSubscription()` on the native collection remains an adapter
-detail.
+the caller.
 
 ```ts
 import { subscribe } from "@zeroship/db";
@@ -1074,7 +1238,7 @@ for await (const event of changes) {
 
 The returned `Subscription` is an async iterable with idempotent `ready()` and
 `close()` methods. It emits `change`, `resync`, and `closed` events. Breaking
-out of the loop closes the native subscription.
+out of the loop closes the subscription.
 
 `db.live(queryFn)` wraps the raw subscription stream into a
 query-shaped reactive primitive. It first runs `queryFn` only to discover
@@ -1096,12 +1260,11 @@ live.close();
 The `queryFn` may return either a `Query` builder (chainable, thenable —
 the `Result<T[]>` is unwrapped automatically) or a raw `Promise<T[]>`.
 
-**Coarse-grained.** v1 subscribes per-table, not per-row: every
+**Coarse-grained.** Subscriptions are per-table, not per-row: every
 insert/update/delete on a watched table fires a rerun, even when the
 row doesn't match the queryFn's filter. The auto-detected table set is
 the union of all collections the `queryFn` touched during its first
-execution. Read-set narrowing (Convex-style per-document tracking) is
-future work.
+execution. There is no per-document (read-set) tracking.
 
 **Explicit `tables` escape.** If `queryFn` returns a raw `Promise<T[]>`
 that never goes through a `Collection` method (e.g. it transforms data
@@ -1123,144 +1286,168 @@ break` or an early `throw`) also calls `close()` automatically.
 
 ### Distributed delivery and lifecycle
 
-PostgreSQL live queries receive committed invalidations from the separately
-deployed CDC relay. The relay owns a slot for each subscribed app and shares
-capture across worker connections. Each worker's ORM broker distributes those
-invalidations to its local Rust and V8 subscriptions. Row values stay out of the
-transport; live queries re-read through the usual ORM access controls.
+On PostgreSQL, live queries receive committed invalidations from a separately
+deployed change-data-capture service. Row values stay out of the transport;
+live queries re-read through the usual access controls.
 
-The first local subscriber connects lazily. `Subscription.ready()` resolves
-after the relay authenticates the worker and PostgreSQL accepts capture for the
-app's migration-owned publication. `db.live` waits before taking its initial
-snapshot. Missing relay configuration or failed startup rejects the live query.
-Connection loss, queue overflow and reconnect request a fresh snapshot.
+The first subscriber connects lazily. `Subscription.ready()` resolves once
+capture for the app is established; `db.live` waits before taking its initial
+snapshot. Missing configuration or a failed startup rejects the live query.
+Connection loss, queue overflow and reconnect all request a fresh snapshot.
 
-Closing the final local subscription disconnects that worker. The relay releases
-the app's slot after its final connected subscriber leaves. Apps without live
-queries retain no relay capture. File-backed SQLite captures commits locally and
-uses the same ORM broker without a relay service.
+Closing the final subscription releases the app's capture. Apps without live
+queries retain none. File-backed SQLite captures commits locally without the
+service.
 
-Archiving an app retains its worker version-feed entry and existing live
-subscriptions. Gateway routing and new workflow admission stop. Publication,
-schema and role deletion remain separate privileged lifecycle operations.
+Archiving an app keeps its existing live subscriptions; gateway routing and new
+workflow admission stop.
 
 ## Errors
 
-Errors carry a `.code` property where applicable:
+Every database error carries a `.code` string. **Branch on `error.code`** — it
+is the one stable field. Compare it case-insensitively: the spelling is not
+uniform (see [Two spellings of the same
+code](#two-spellings-of-the-same-code)). Do not branch on `error.name`, and
+do not substring-match `error.message`.
 
-| `error.code`                | When                                                |
-|-----------------------------|-----------------------------------------------------|
-| `VALIDATION`                | Input fails schema validation.                      |
-| `UNIQUE_VIOLATION`          | Duplicate unique-key violation.                     |
-| `ROW_DECODE_FAILED`         | A result column contains malformed binary data, an unsupported physical type, or a non-finite value that the native data contract cannot represent. The error identifies the column; SQL NULL remains a valid value. |
-| `OPTIMISTIC_CONCURRENCY`    | `update` with a CAS version that didn't match.     |
-| `SCHEMA_NOT_PROVISIONED`    | The app's database was never provisioned: its per-app Postgres role does not exist. Run `zeroship migrate` for the app. Reachable only for an app deployed WITHOUT a generated descriptor - one that carries a descriptor is refused at deploy with `409 schema_not_applied` instead (see [Migrate before you deploy](#migrate-before-you-deploy)). |
-| `GRANT_REVOKED`             | PostgreSQL refused the transaction's per-app role because the worker login no longer holds that grant. This is a terminal HTTP 403; restore the database grant before retrying. |
-| `MIGRATION_*` (see above)   | Migration lifecycle errors.                         |
-| `INVALID_K`, `VECTOR_EXTENSION_MISSING`, `POSTGIS_EXTENSION_MISSING`, `VECTOR_DIMENSION_MISMATCH`, `POLYGON_OPS_PG_ONLY` | Vector / geo paths - see [Vector / Geo: Error codes](#error-codes). |
+A few codes also have an exported class (`OptimisticLockError`,
+`ValidationError`, `NotFoundError`, `NotUniqueError`). The class is a
+convenience; the code is the contract, and `isOptimisticLockError(e)` matches on
+`OPTIMISTIC_CONCURRENCY` rather than on the class.
 
-Use the property directly — never substring-match on `error.message`.
+### Canonical codes
+
+| `error.code` | When |
+| --- | --- |
+| `VALIDATION` | Input fails schema validation. |
+| `UNIQUE_VIOLATION` | Duplicate unique key. |
+| `FOREIGN_KEY_VIOLATION` | Foreign-key constraint violated. |
+| `NOT_NULL_VIOLATION` | A required column was null. |
+| `CHECK_VIOLATION` | A check constraint failed. |
+| `SERIALIZATION_FAILURE` | The transaction was aborted; retry. |
+| `LOCK_NOT_AVAILABLE` | Lock contention; retry after a short backoff. |
+| `ROW_DECODE_FAILED` | A result column holds malformed binary data, an unsupported physical type, or a non-finite value. SQL NULL is still valid. |
+| `OPTIMISTIC_CONCURRENCY` | `update` with a CAS version that didn't match. |
+| `NOT_FOUND` | A unique-row lookup matched no row. |
+| `NOT_UNIQUE` | A unique-row lookup matched more than one row. |
+| `SCHEMA_NOT_PROVISIONED` | The app's database was never provisioned. Run `zeroship migrate`. An app that carries a descriptor is refused earlier at deploy with `409 schema_not_applied` (see [Migrate before you deploy](#migrate-before-you-deploy)). |
+| `GRANT_REVOKED` | The database refused the app's role; a terminal HTTP 403. Restore the grant before retrying. |
+| `LIVE_IN_TRANSACTION` | `db.live()` was called inside a transaction. |
+| `SCHEMA_INVALID` | A schema declaration is malformed (empty or duplicate index name, unknown field). |
+| `MASK_POLICY_IMMUTABLE` | `defineMaskPolicy()` was called after startup completed. |
+| `INVALID_MASK_CLASSIFICATION` | `defineMaskPolicy()` names a classification that is not one of the six. |
+| `INVALID_MASK_POLICY_SHAPE` | The `defineMaskPolicy()` declaration is malformed. |
+| `DATABASE_STARTUP_PENDING` | An unmask ran before startup finished (platform spelling `database_startup_pending`). |
+| `TRANSACTION_SCOPE_EXPIRED` | A database call outlived its transaction (see [Transactions](#transactions)). |
+| `TRANSACTION_CONNECTION_BUSY` | Two transaction operations overlapped on one connection, or a second transaction was started where only one is allowed. |
+| `INVALID_K`, `VECTOR_EXTENSION_MISSING`, `POSTGIS_EXTENSION_MISSING`, `VECTOR_DIMENSION_MISMATCH`, `VECTOR_UNSUPPORTED_METRIC` | Vector / geo paths — see [Vector / Geo: Error codes](#error-codes). |
+
+A platform release can add codes; branch on the code you expect, compared
+case-insensitively, rather than enumerating defensively. Schema-*definition*
+diagnostics (as opposed to
+operation failures) surface at build time rather than as a runtime `error.code`.
+
+### Two spellings of the same code
+
+The spelling depends on where the error was raised. This is a real trap:
+
+| Raised by | Spelling | Examples |
+| --- | --- | --- |
+| a collection operation — `insert`, `find`, `update`, and the same calls inside a transaction | SCREAMING_SNAKE | `UNIQUE_VIOLATION`, `FOREIGN_KEY_VIOLATION`, `TRANSACTION_CONNECTION_BUSY`, `SERIALIZATION_FAILURE` |
+| the transaction's own lifecycle — begin, isolation level, savepoint/nesting | raw lowercase | `unsupported_isolation_level`, `nested_isolation_level`, `transaction_lanes_exhausted`, `transaction_connection_busy`, `transaction_scope_expired` |
+
+When an error from the platform layer has a lowercase code, the SDK canonicalizes
+it to SCREAMING_SNAKE. Two codes are remapped by name rather than mechanically
+uppercased:
+
+| Platform spelling | `error.code` |
+| --- | --- |
+| `fk_violation` | `FOREIGN_KEY_VIOLATION` |
+| `concurrency_mismatch` | `OPTIMISTIC_CONCURRENCY` |
+
+Every other code uppercases as-is (`unique_violation` → `UNIQUE_VIOLATION`). A
+transaction-lifecycle error is passed through as the platform raised it, so it
+keeps the platform's lowercase spelling. That is why one rule has to cover both
+paths: compare `error.code` case-insensitively instead of matching a single
+spelling.
 
 ```ts
 const { data, error } = await db.users.update({ id, version: 5 }, { name });
-if (error?.name === "OptimisticLockError") {
+if (error?.code === "OPTIMISTIC_CONCURRENCY") {
   // refetch and retry
 }
 ```
 
-## Native surface (advanced)
+### What survives the network
 
-The SDK calls into a small native surface registered as `env.db` by the
-Rust DbPlugin. App code rarely needs it; SDK packages use it directly.
+An error carries `code`, plus `hint` where the platform has a remedy to suggest
+and `status` where the code has an HTTP status. A thrown error may be one of the
+SDK classes (`ValidationError`, `OptimisticLockError`, `NotFoundError`,
+`NotUniqueError`) or a plain `Error` with the same `code` — never depend on the
+class identity.
+
+**Nothing above reaches your end user by accident.** If a procedure lets one of
+these errors escape, the platform drops `hint` and `status` and replaces an
+unpublished code with `{"message":"internal error"}`. Catch it and return
+something you chose:
+
+```ts
+export const rename = mutation(async ({ id, name }) => {
+  const { data, error } = await db.users.update({ id }, { name });
+  if (error) return { ok: false, code: error.code };
+  return { ok: true, user: data };
+}, { id: "users.rename" });
+```
+
+## Advanced `env.db` surface
+
+App code rarely needs these; SDK packages use them directly.
 
 **Creator-reachable on `env.db`:**
 
-- `env.db.collection(name)` → `Collection` wrapper (per-collection CRUD)
-- `env.db.transaction(fn, opts?)` → native transaction orchestrator
-  (begin/commit/rollback/nested-savepoint owned in Rust; throw to abort,
-  resolve to commit — see [Transactions](#transactions))
+- `env.db.collection(name)` → the lower-level per-collection handle. Its methods
+  resolve to raw values and throw on failure, unlike `db.<name>`.
+- `env.db.transaction(fn, opts?)` → begins a transaction; the callback's
+  resolution commits and its throw rolls back (see
+  [Transactions](#transactions)).
+- `env.db.from(...)` → a structured join query (see
+  [Explicit joins](#explicit-joins)).
 
-**Startup policy and schema ownership:**
-
-The SDK's `defineMaskPolicy` submits a declaration through
-`env.db.declareMaskPolicy`. The native binding accepts it only while the host
-is evaluating the app's startup entry and captures an owned copy. The DB plugin
-installs and seals that declaration during native finalization. Creator code
-cannot reset or finalize the policy, or choose its deployment binding. Late
-calls fail with `MASK_POLICY_IMMUTABLE`; unmask operations issued before
-finalization fail with `database_startup_pending`.
-
-Runtime boot validates the generated descriptor and asks the data adapter to
-publish its complete collection field maps before creator modules run.
-`zeroship-data-v8` embeds and invokes its host-only `installSchema` adapter,
-which reads that descriptor to install JavaScript collection and transaction
-wrappers. Vite does not inject an installer import or call into the creator
-entry, and `@zeroship/db` exposes no framework subpath. Ordinary database
-operations may run during startup once the descriptor and SDK facade are
-prepared.
-
-Native policy installation has no JavaScript capability handle or readiness
-global. Replication operations belong to the relay service. Public type
-contracts live in `packages/types/db.d.ts`; the native DB binding lives in
-`crates/zeroship-data-v8/src/v8_classes/db.rs`.
-
+**Mask policy at startup.** `defineMaskPolicy()` submits its declaration while
+the app's entry module is being evaluated, and it is fixed for that deployment
+once startup completes. It cannot be reset or replaced afterwards: a late call
+fails with `MASK_POLICY_IMMUTABLE`, and an unmask issued before startup finishes
+fails with `database_startup_pending`. See
+[`defineMaskPolicy()`](#definemaskpolicy).
 
 ## Per-app isolation
 
-Every app gets its own Postgres schema (UUID-based):
+Every app has its own database schema, addressed by the platform on its behalf.
+The app's identity is fixed by the platform and cannot be read or overridden by
+user code. `env.db` is frozen.
 
-```sql
-SELECT * FROM "<app-uuid>"."users" WHERE ...
-```
+## Optimistic concurrency and soft delete
 
-The `app_id` is injected by the runtime from `env_vars`; user code can
-neither read nor override it. `env.db` is frozen.
-
-## Column assignments
-
-The migration renderer preserves effective policy assignments in
-`schema.runtime.json`. The ORM resolves them per collection, without a global
-field-name list or runtime policy copy. Lifecycle columns can be renamed with
-their assignments and roles; the primary key remains `id`.
-
-| Descriptor metadata | Runtime behavior |
-| --- | --- |
-| `assign: { by: "typedId", on: "insert" }` | Generate an identifier on insertion. |
-| `assign: { by: "actor", on: "write" }` | Stamp the request actor on insertion and writes. |
-| `assign: { by: "now", on: "write" }` | Use the database clock on insertion and writes. |
-| `assign: { by: "increment(N)", on: "write" }` | Initialize from the database default, then increment on writes. |
-| `primaryKey: true` | Required on `id`, the collection's sole primary key. |
-| `concurrency: true` | Interpret the field's equality predicate as a revision check. |
-| `softDelete: true` | Use the field as the deletion marker and read-visibility filter. |
-
-For a descriptor with revision `revision` and deletion marker `removed`,
-identity stays `id` while lifecycle operations follow the declared roles:
+The injected `version` column is the revision marker. Passing it in an update
+filter performs a compare-and-swap: if the stored value differs, the update
+fails with `OPTIMISTIC_CONCURRENCY`, and you should re-read and retry (see
+[Retrying CAS updates](#retrying-cas-updates-with-withretry)). Omitting the
+predicate permits a blind update.
 
 ```ts
 const { data: post } = await db.posts.insert({ title: "First post" });
 if (!post) throw new Error("insert failed");
 await db.posts.update(
-  { id: post.id, revision: post.revision },
+  { id: post.id, version: post.version },
   { title: "Edited" },
 );
-await db.posts.delete(post.id);
-await db.posts.restore(post.id);
-await db.posts.purge(post.id);
 ```
 
-A stale revision returns an optimistic-concurrency error. Omitting the revision
-predicate permits a blind update; declared write generators still run.
-`delete` physically removes rows when no soft-delete role is declared. With that
-role, it applies delete assignments and hides the row. `restore` clears delete
-assignments and runs write assignments. `purge` always removes the row.
-
-Rust uses these same semantics through `Database` and its typed collections.
-`schema!` reads the deployment descriptor; generated write capabilities exclude
-assigned fields. The V8 bridge forwards operations to this ORM.
-
-Implementation: `crates/zeroship-data-orm/src/assignments.rs`,
-`crates/zeroship-data-orm/src/crud/assignment_pass.rs`,
-`crates/zeroship-data-orm/src/sql/lifecycle.rs`.
+The injected `deleted_at` column is the soft-delete marker. `delete` physically
+removes a row unless the collection declares the soft-delete role, in which case
+it stamps `deleted_at` and reads hide the row. `restore` clears the marker;
+`purge` always removes the row. Assigned columns are read-only — they are
+excluded from write inputs, and `id` never changes.
 
 ## Masking
 
@@ -1277,11 +1464,9 @@ an explicit `.mask(...)` declaration is treated as `.mask({ kind:
 | Masking     | Returns a `MaskedValue<T>` wrapper on reads   | Find / get / live  |
 | Unmask      | Trades the wrapper for plaintext (audited)    | Explicit call only |
 
-A default read of a masked column **never** decrypts. The platform stores a
-pre-computed mask in the field's **own** column and the real value in a hidden
-sibling, so a plain `SELECT "ssn"` returns the mask. The column holding the real
-value never leaves the database on a default read, and the column-derivation key
-is never consulted.
+A default read of a masked column **never** decrypts: it returns the stored
+mask, and the real value does not leave the database. Revealing plaintext is
+always an explicit, audited operation (see [Unmasking](#unmasking)).
 
 #### Querying a masked column
 
@@ -1333,7 +1518,14 @@ export default {
 `.mask({ kind: "full", classification: "pii" })`. `t.text().mask({
 kind: "full", classification: "public" })` (mask without encryption)
 is also valid — masking is the read-side; encryption is the
-storage-side; they're independent.
+storage-side; they're independent. `.mask({ kind: "none" })` opts into
+plaintext reads.
+
+**What encryption changes.** Encryption is randomised: every write uses a fresh
+nonce. Encrypted fields cannot be filtered (equality and `IN` included), sorted,
+grouped, or declared unique. Masking is a separate read policy, so disabling the
+mask does not make an encrypted field queryable. To find a row, filter on an
+ordinary field and read the encrypted value from the returned row.
 
 ### The eight mask kinds
 
@@ -1408,6 +1600,10 @@ user.name;            // "Alice"  (non-masked, bare string)
 `user.ssn.length` so a leak path that "just works" at runtime
 doesn't compile.
 
+`MaskedValue` also exposes `masked` (the display string) and `classification`
+(one of `public`, `pii`, `spi`, `phi`, `pci`, `internal`), plus `_meta` with
+`{ collection, row_pk, column }`.
+
 ### Unmasking
 
 Single column on a row (writes one `__zeroship_audit_unmask` row):
@@ -1434,8 +1630,8 @@ Bulk unmask across rows (single RPC; atomic):
 ```ts
 const plains = await env.db.users.bulkUnmask(
   [
-    { id: "usr_01hxyz...", columns: ["ssn"] },
-    { id: "usr_01hxza...", columns: ["ssn", "email"] },
+    { id: "user_01hxyz...", columns: ["ssn"] },
+    { id: "user_01hxza...", columns: ["ssn", "email"] },
   ],
   { actor, reason },
 );
@@ -1457,9 +1653,8 @@ user.email;  // MaskedValue<string>  (not hinted)
 
 ### `defineMaskPolicy()`
 
-App-wide policy mapping `actor` → permitted classifications.
-Recommended pattern: declare at the app's entry module so every
-isolate sees the same policy on boot.
+App-wide policy mapping `actor` → permitted classifications. Declare it at the
+app's entry module so it is in force before any handler runs.
 
 ```ts
 import { defineMaskPolicy } from "@zeroship/db";
@@ -1472,9 +1667,13 @@ defineMaskPolicy({
 });
 ```
 
-Policies are keyed by app and deployment. Declarations replace the pending
-policy during startup; native finalization fixes it for that deployment. A new
-deployment can declare a different policy without changing an older isolate.
+The policy is per app and per deployment; a later deployment can declare a
+different one without affecting an older deployment. It is held in memory and is
+not persisted, so changing it requires a redeploy.
+
+**Fallback.** If an app never calls `defineMaskPolicy()`, only the system actor
+`auto` can unmask. If it does declare a policy, `auto` keeps full access unless
+the policy lists `auto` with a narrower set.
 
 ### Audit tables
 
@@ -1482,8 +1681,7 @@ deployment can declare a different policy without changing an older isolate.
 |------------------------------------|-------------------------------------|
 | `__zeroship_audit_unmask`          | Every `.unmask()` call (granted or denied). |
 
-This table lives in the per-app schema; standard isolation rules
-apply (`SELECT * FROM "<app>".__zeroship_audit_unmask`).
+This table lives in the per-app schema; standard isolation rules apply.
 
 **The unmask audit row is written OUTSIDE your transaction, on purpose.**
 An `unmask()` or `find({ unmask })` issued inside `db.transaction(fn)`
@@ -1505,74 +1703,5 @@ one records that plaintext left the database - which a rollback does
 not undo. The table has no transactional relationship to the rows it
 names; it stores their ids as text and holds no foreign key into them.
 Like every table in the creator schema, it is addressable through a
-declared ORM collection and has ordinary data privileges. Its name does
+declared collection and has ordinary data privileges. Its name does
 not make it hidden or append-only.
-
-## Encrypted and Masked Fields (Shipped Reference)
-
-This section is grounded in the shipped implementation: `packages/db/src/types.ts`, `crates/zeroship-data-orm/src/sql/mapping.rs`, `crates/zeroship-data-orm/src/protection/mask_pass.rs`, `crates/zeroship-data-v8/src/v8_classes/masked_value.rs`, `crates/zeroship-data-orm/src/protection/unmask.rs`, `packages/db/src/collection/masking.ts`, `packages/db/src/policy.ts`.
-
-The migration engine records physical placement in each field's runtime
-`storage` mapping. Default reads use `storage.valueColumn`; authorized unmasking
-and protected writes use `storage.rawColumn`. The raw column holds the real
-value and its constraints; the visible column holds the mask. The ORM validates
-that the raw column is inaccessible to ordinary creator queries.
-
-`t.encrypted(...)` applies a full mask with `pii` classification by default.
-`.mask({ kind: "none" })` opts into plaintext reads and suppresses masked
-storage. Both operations follow the runtime descriptor rather than naming a
-mask column from a suffix (`crates/zeroship-data-orm/src/sql/mapping.rs`,
-`crates/zeroship-data-orm/src/protection/mask_pass.rs`).
-
-On writes, `apply_mask_on_write` computes the mask from plaintext. After the
-encryption and byte passes, relocation follows the descriptor's `storage`
-mapping: the finished value moves to `storage.rawColumn` and the mask remains
-in `storage.valueColumn`. Null and absent values relocate nothing, and
-`kind: "none"` skips masking (`crates/zeroship-data-orm/src/protection/mask_pass.rs`).
-The mask kinds are defined together in `packages/db/src/types.ts` and
-`crates/zeroship-data-orm/src/protection/mask_pass.rs`.
-
-Default reads surface `MaskedValue<T>`, not plaintext. The Rust read path wraps a masked cell in the `__zsmask__` sentinel shape, then the runtime rehydrates that sentinel into a native `MaskedValue` v8 class before user code sees the row (`crates/zeroship-data-orm/src/protection/mask_pass.rs`, `crates/zeroship-data-v8/src/v8_classes/masked_value.rs`, `packages/db/src/types.ts`). The shipped surface is intentionally coercion-safe: `masked` and `classification` are readable, `_meta` carries `{ collection, row_pk, column }`, and `toString()` / `toJSON()` return the masked string (`crates/zeroship-data-v8/src/v8_classes/masked_value.rs`, `packages/db/src/types.ts`).
-
-Plaintext reveal is always explicit. `await row.ssn.unmask({ actor?, reason? })` reveals one field on one row, and `await row.ssn.unmask(["ssn", "dob"], { actor, reason })` fans out across multiple columns on the same row (`crates/zeroship-data-v8/src/v8_classes/masked_value.rs`, `packages/db/src/types.ts`). `Collection.bulkUnmask()` is the shipped multi-row path; it maps `(id, columns)` pairs to the native collection op and is atomic, so one unauthorized `(row, column)` pair rejects the whole call (`packages/db/src/collection/masking.ts`, `crates/zeroship-data-orm/src/protection/unmask.rs`). The per-query hint `find(..., { unmask: [...], actor, reason })` promotes only the listed columns to plaintext while leaving other masked columns wrapped, and it writes audit only after a successful query (`crates/zeroship-data-orm/src/protection/unmask.rs`, `packages/db/src/types.ts`).
-
-`defineMaskPolicy()` is the app-scoped authorization declaration for unmasking. It validates the classifications (`public`, `pii`, `spi`, `phi`, `pci`, `internal`) and asks the native DB binding to capture the pending role-to-classification map. Declarations may be replaced during startup; after native finalization, further calls fail with `MASK_POLICY_IMMUTABLE`. The policy is held in memory for the app and deployment. No database backend persists it, and changes require redeployment (`packages/db/src/policy.ts`). If an app never calls `defineMaskPolicy()`, the fallback is strict: only the `auto` actor can unmask. If the app does declare a policy, `auto` still keeps full access unless the policy explicitly lists `auto` with a narrower set (`packages/db/src/policy.ts`).
-
-`__zsmask__` is the read-side wire sentinel for a masked value payload (`packages/db/src/types.ts`, `crates/zeroship-data-orm/src/protection/mask_pass.rs`, `crates/zeroship-data-v8/src/v8_classes/masked_value.rs`). Catalog sentinels record stored protection. The mask marker carries its kind and classification; the encryption marker records only that protection is present from the ORM's perspective. Runtime type and storage behavior always come from the installed descriptor (`crates/zeroship-data-orm/src/sql/mask_codec.rs`).
-
-Column encryption is always randomised. Each write uses a fresh nonce and
-binds authentication to the app, collection, column and row identity.
-Encrypted fields cannot be filtered (including
-equality and `IN`), sorted, grouped, or declared unique. Masking remains a
-separate read policy; disabling the mask does not enable encrypted queries.
-Use an ordinary field to locate a row before reading or updating its encrypted
-values. These rules apply to Rust callers and worker TypeScript alike.
-
-Runtime descriptors carry the logical plaintext type and an encryption flag:
-
-```json
-{ "type": "number", "encrypted": true, "mask": { "kind": "full", "classification": "pii" } }
-```
-
-The SDK declaration is `t.encrypted({ of: t.number() })`; `t.encrypted()`
-selects string plaintext. Rust writes, reads and unmasking share a native
-plaintext codec selected by `type`. Binary values remain native buffers.
-The physical catalog marks the column as encrypted. It is not a second source
-of runtime type metadata.
-
-The host supplies a project encryption key and explicit app-to-project bindings
-through `DbServiceConfig.project_keys`. Every encrypted column in that project
-uses the same key. The ORM reads no column keys from environment variables or
-tenant tables.
-
-Control generates and persists the project key in `zeroship.project_data_keys`,
-wrapped with its secret-storage master key and authenticated against the project
-identity. Workers hydrate their shared key source through the authenticated
-`/internal/apps/{app_id}/data-key` endpoint before loading an app. Key material
-never enters the app environment, runtime descriptor or deployment bundle.
-Wrapping-key rotation preserves the data key and rewraps it when next read.
-
-The standalone development host keeps its own project key in
-`.zeroship/private/project-data-key.json`. It survives runtime restarts and is
-shared by apps served from that local project directory. Keep this private file
-with local database backups; it is separate from the deployed project's key.
