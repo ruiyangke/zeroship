@@ -2,12 +2,7 @@
 //! CompressionStream / DecompressionStream and internal fetch
 //! Content-Encoding handling.
 //!
-//! See docs/archive/compression-streams-native.md
-//! §B (Codec layer) for the trait contract these tests pin down. The
-//! tests target the Rust-side `Codec` trait directly; the JS-facing
-//! CompressionStream / DecompressionStream V8 classes wait on the
-//! native-streams sibling project (per the design's Dependencies
-//! section).
+//! The tests target the Rust-side `Codec` trait directly.
 //!
 //! Spec corner cases covered:
 //!
