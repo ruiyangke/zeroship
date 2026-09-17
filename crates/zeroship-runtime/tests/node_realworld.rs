@@ -1,21 +1,17 @@
 //! The real-world npm-package integration target for `zeroship-runtime`.
 //!
 //! These six modules drive unmodified npm clients (`pg`, `mysql2`, `ioredis`,
-//! `memjs`, node `http`, and the reconnect suite) against live servers. They
-//! were six separate executables; they are merged here rather than into
-//! `tests/main.rs` because of the helper they share.
+//! `memjs`, node `http`, and the reconnect suite) against live servers. They are
+//! merged here rather than into `tests/main.rs` because of the helper they share.
 //!
 //! `support/node_realworld.rs` owns `lock_env()`, a `static ENV_LOCK` that
 //! serialises the runtime's process-wide dev-mode and global-socket-cap cells
-//! and restores the previous values on `SettingsGuard::drop`. Each of the six
-//! used to reach it with its own
-//! `#[path = "support/node_realworld.rs"] mod node_realworld;`. In separate
-//! processes that was six copies of one file and it did not matter. In one
-//! process it would be six copies of the STATIC - six independent mutexes over
-//! a single set of process-wide cells, i.e. no mutual exclusion at all, with
-//! each module free to restore dev mode to off while another is mid-request
-//! under it. The entry below declares the helper exactly once and the six
-//! modules `use crate::node_realworld`, so there is one lock again.
+//! and restores the previous values on `SettingsGuard::drop`. The entry below
+//! declares the helper exactly once and the six modules `use
+//! crate::node_realworld`, so there is one lock over one set of cells. Six
+//! copies of the static would be six independent mutexes over the same
+//! process-wide cells, i.e. no mutual exclusion at all, with each module free to
+//! restore dev mode to off while another is mid-request under it.
 //!
 //! WHAT THIS DOES NOT PROTECT AGAINST
 //! ----------------------------------
@@ -28,11 +24,10 @@
 //! them in here would reintroduce exactly the two-mutexes-one-setting
 //! shape this file exists to remove.
 //!
-//! What the settings are NO LONGER is process ENVIRONMENT. They were
-//! `ZEROSHIP_DEV` and `ZEROSHIP_NET_GLOBAL_MAX_SOCKETS` set with
-//! `std::env::set_var`, which races concurrent libc `getenv` - undefined
-//! behaviour that no mutex here could have covered, since libc reads the
-//! environment from code that never takes this lock.
+//! The settings are process-wide cells in this process, not process
+//! ENVIRONMENT: setting them with `std::env::set_var` would race concurrent
+//! libc `getenv`, undefined behaviour that no mutex here could cover, since
+//! libc reads the environment from code that never takes this lock.
 //!
 //! These tests need live servers and they do NOT skip without them: the
 //! `ensure_*` helpers `docker start` the container and then panic if the port
@@ -40,19 +35,9 @@
 //! this machine" rather than "the runtime regressed" - read the panic message
 //! before believing either.
 //!
-//! That container dependence already showed itself across the merge.
-//! `node_pg_tls_e2e` FAILED on the pre-merge run of 2026-08-20 ("Connection
-//! terminated unexpectedly", 500 not 200) and passed on both post-merge runs.
-//! Nothing in the merge fixed it and nothing here should be read as having
-//! fixed it - the TLS Postgres container was up the second time. It is the
-//! clearest example in this crate of a test whose verdict is about the machine
-//! rather than about the code.
-//!
-//! Second isolation loss, specific to this target: each of the six files held
-//! exactly ONE test, so cargo used to run them as six sequential processes.
-//! They are now six threads in one process and run CONCURRENTLY. `lock_env()`
-//! serialises the environment between them; nothing serialises the `docker
-//! start` calls, and nothing stops two of them contending for the same
+//! The six modules run CONCURRENTLY as six threads in one process.
+//! `lock_env()` serialises the environment between them; nothing serialises the
+//! `docker start` calls, and nothing stops two of them contending for the same
 //! container if a future module reuses one.
 //!
 //! `Cargo.toml` sets `autotests = false`: a new file is compiled by nothing

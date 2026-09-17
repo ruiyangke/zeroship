@@ -1,5 +1,4 @@
-//! Compute-unit (CU) pricing — the cost-model / price decoupling (billing-v2
-//! Refactor B).
+//! Compute-unit (CU) pricing — the cost-model / price decoupling.
 //!
 //! The cost model (how much compute a metric op "costs" in CU) is a **global**
 //! fleet-wide table ([`MetricWeights`], persisted in `zeroship.metric_weights`);
@@ -7,10 +6,9 @@
 //! (`PlanPrice::fx`, defaulting from the global `zeroship.pricing_config`). This
 //! separates "engineering cost" from "business price" and — critically — lets us
 //! accumulate integer `compute_units` across every metric and convert to cents
-//! **exactly once**, killing the per-metric-line rounding-error class the old
-//! per-metric overage model carried.
+//! **exactly once**, so per-metric rounding cannot accumulate.
 //!
-//! Charge model (billing-v2, locked 2026-06-13):
+//! Charge model:
 //!
 //! ```text
 //! total_units    = Σ_m  floor( max(0, usage[m]) × units_per_op[m] / per_units[m] )   (integer CU)
@@ -26,15 +24,13 @@
 //!   10⁻¹² cent) so a sub-cent unit price is representable without floats; the
 //!   single `× fx ÷ 10¹²` conversion rounds half-up once at the boundary.
 //!
-//! ## Overflow envelope (documented per the blueprint)
+//! ## Overflow envelope
 //!
 //! Per-metric CU accumulation: `usage[m] (i64, ≤ ~9.2e18) × units_per_op (u64)`
 //! is done in `u128` (max ~3.4e38) then divided by `per_units` (≥ 1) — a single
 //! metric cannot overflow `u128`. The cents conversion `billable_units (u64, ≤
 //! ~1.8e19) × fx_pico (u64, ≤ ~1.8e19)` is a `u128` product (≤ ~3.4e38, within
-//! `u128::MAX ≈ 3.4e38`) divided by `10¹²`, rounded half-up. Realistic magnitudes
-//! (billable ≤ ~1e12 CU, fx ≤ ~1e9 pico-cents) sit ~17 orders of magnitude below
-//! the `u128` ceiling.
+//! `u128::MAX ≈ 3.4e38`) divided by `10¹²`, rounded half-up.
 //!
 //! ## Money never silently clamps (MAJOR-1 / MAJOR-2)
 //!
@@ -44,8 +40,8 @@
 //! - A per-metric CU total that does not fit `u64`, or a cross-metric sum that
 //!   overflows `u64`, is a hard [`PricingError::ComputeUnitOverflow`] (matching
 //!   `billing_reconcile`'s cents→i64 posture: skip-the-creator-with-a-warning,
-//!   never a clamped bill). [`total_units`] surfaces this via `Result` rather
-//!   than the old `unwrap_or(u64::MAX)` + `saturating_add` silent cap.
+//!   never a clamped bill). [`total_units`] surfaces this via `Result`, never a
+//!   silent `u64::MAX` cap.
 //! - An **unresolved FX** (`fx == None` reaching the pricer) is a hard
 //!   [`PricingError::UnresolvedFx`] — the platform cannot price, so the sweep
 //!   aborts (bills no one) rather than silently charging base-only $0. The
@@ -447,8 +443,7 @@ fn div_round_half_up(numer: u128, denom: u128) -> u64 {
 // They are DESCRIPTIVE ONLY — the authoritative `amount` is unchanged.
 // ===========================================================================
 
-/// Stripe caps an invoice LINE-ITEM description at 500 chars (the 2018-10-31
-/// changelog: "Descriptions for invoice line items now have a character limit").
+/// Stripe caps an invoice LINE-ITEM description at 500 chars.
 /// We cap our own enriched description well under that for human readability on
 /// the rendered PDF. ASCII-safe truncation (see [`truncate_on_char_boundary`]).
 pub const INVOICE_ITEM_DESC_MAX: usize = 350;
@@ -627,8 +622,8 @@ mod tests {
         assert_eq!(total_units(&weights(), &usage).unwrap(), 10);
     }
 
-    /// Metering coverage (#27): the two NEW metrics (changeset 0047) price
-    /// through the UNCHANGED CU pipeline once their weights exist —
+    /// Metering coverage (#27): the gateway-side egress and stream metrics price
+    /// through the same CU pipeline once their weights exist —
     /// `gateway_egress_bytes` mirrors `egress_bytes` (1 CU / 1000 B) and
     /// `stream_wall_us` mirrors `wall_us` (1 CU / 10 ms). This pins both the
     /// per-metric flooring and that the gateway/worker egress sums coherently.
@@ -703,18 +698,15 @@ mod tests {
 
     #[test]
     fn charge_rounds_units_to_cents_exactly_once() {
-        // REGRESSION (the whole point of Refactor B). Under the OLD per-metric
-        // overage model each metric's cents were rounded independently and
-        // summed, biasing the charge upward. Here we accumulate CU across many
-        // metrics into ONE total and round to cents ONCE.
+        // CU accumulate across every metric into ONE total and round to cents
+        // ONCE.
         //
         // FX = 0.5 cent per CU = FX_SCALE/2 pico-cents/CU. Three metrics each
         // contributing an ODD number of CU:
         //   requests 1 CU, cpu_us 1 CU (1000 us), egress_bytes 1 CU (1000 bytes)
         //   total_units = 3 CU.
-        //   Per-metric rounding (the OLD bug): each 1 CU × 0.5c = 0.5c → round-up
-        //     to 1c each ⇒ 3c total.
-        //   Round-ONCE (correct): 3 CU × 0.5c = 1.5c → round half-up once = 2c.
+        //   Round-ONCE: 3 CU × 0.5c = 1.5c → round half-up once = 2c.
+        //   Rounding each metric's cents instead: 0.5c → 1c each ⇒ 3c total.
         let half_cent_per_cu = (FX_SCALE / 2) as u64;
         let price = PlanPrice {
             base_fee_cents: 0,
