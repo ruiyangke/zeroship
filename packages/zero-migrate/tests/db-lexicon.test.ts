@@ -79,12 +79,32 @@ test("fromDb carries .unique() over from the db field", () => {
   assert.equal(ops[0].columns[0].unique, true);
 });
 
+test("t.actor() bridges as its string storage type", () => {
+  assert.equal(colTypeFromDbField(dbT.actor()), "text");
+});
+
+test("every storage-backed db token reduces to a neutral ColType", () => {
+  const asField = (type: string) =>
+    ({ type } as unknown as Parameters<typeof colTypeFromDbField>[0]);
+
+  assert.equal(colTypeFromDbField(dbT.timestamp()), "timestamp");
+  // Builder and descriptor both spell this token "timestamp" now; the raw field
+  // proves the bridge accepts the token without a TypeBuilder wrapper.
+  assert.equal(colTypeFromDbField(asField("timestamp")), "timestamp");
+  assert.equal(colTypeFromDbField(dbT.calendarDate()), "date");
+  assert.equal(colTypeFromDbField(dbT.integer()), "int");
+  assert.equal(colTypeFromDbField(dbT.bigInt()), "bigInt");
+  // Descriptor-only tokens: the runtime descriptor spells integer widths and
+  // float precision that no `t.*` factory authors, so they need a raw field.
+  assert.equal(colTypeFromDbField(asField("int")), "int");
+  assert.equal(colTypeFromDbField(asField("integer")), "int");
+  assert.equal(colTypeFromDbField(asField("float")), "double");
+});
+
 test("a non-storage db type (object/union/array/...) is a hard structured boundary, never silent", () => {
   for (const make of [
     () => dbT.object({ a: dbT.string() }),
     () => dbT.array(dbT.string()),
-    () => dbT.calendarDate(),
-    () => dbT.actor(),
     () => dbT.literal("x"),
   ]) {
     assert.throws(

@@ -4,15 +4,15 @@ use super::*;
 fn fields() -> Value {
     value!({
         "key":{"type":"string","unique":true},
-        "instants":{"type":"array","items":"date"},
+        "instants":{"type":"array","items":"timestamp"},
         "days":{"type":"array","items":"calendarDate"},
         "profile":{"type":"object","shape":{
             "instant":{"type":"timestamp"},
-            "schedule":{"type":"object","shape":{"instant":{"type":"date"}}},
+            "schedule":{"type":"object","shape":{"instant":{"type":"timestamp"}}},
             "payload":{"type":"json"}
         }},
         "event":{"type":"union","discriminator":"kind","variants":[
-            {"kind":{"type":"literal","literalValue":"dated"},"instant":{"type":"date"}},
+            {"kind":{"type":"literal","literalValue":"dated"},"instant":{"type":"timestamp"}},
             {"kind":{"type":"literal","literalValue":"text"},"instant":{"type":"string"}}
         ]},
         "payload":{"type":"json"}

@@ -1041,7 +1041,7 @@ fn nested_timestamps_follow_worker_descriptors() {
     let mut descriptor: serde_json::Value =
         serde_json::from_str(&notes_runtime_descriptor()).unwrap();
     descriptor["collections"]["notes"]["fields"]["instants"] =
-        serde_json::json!({"type":"array","items":"date"});
+        serde_json::json!({"type":"array","items":"timestamp"});
     descriptor["collections"]["notes"]["fields"]["profile"] =
         serde_json::json!({"type":"object","shape":{"instant":{"type":"timestamp"}}});
     descriptor["collections"]["notes"]["fields"]["payload"] = serde_json::json!({"type":"json"});

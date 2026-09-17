@@ -108,7 +108,7 @@ describe("R5 MINOR — t.array() rejects non-primitive item types", () => {
     assert.equal(t.array(t.string()).toFieldDef().items, "string");
     assert.equal(t.array(t.number()).toFieldDef().items, "number");
     assert.equal(t.array(t.boolean()).toFieldDef().items, "boolean");
-    assert.equal(t.array(t.timestamp()).toFieldDef().items, "date");
+    assert.equal(t.array(t.timestamp()).toFieldDef().items, "timestamp");
     assert.equal(t.array(t.json()).toFieldDef().items, "json");
     assert.equal(t.array(t.calendarDate()).toFieldDef().items, "calendarDate");
   });

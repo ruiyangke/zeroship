@@ -38,8 +38,8 @@ INSERT INTO "{LOCAL_DEV_APP_ID}".posts VALUES
                     "name":{"type":"string", "required":true},
                     "tally":{"type":"bigInt"},
                     "payload":{"type":"bytes"},
-                    "moment":{"type":"date"},
-                    "retired":{"type":"date", "softDelete":true, "writable":false,
+                    "moment":{"type":"timestamp"},
+                    "retired":{"type":"timestamp", "softDelete":true, "writable":false,
                         "assign":{"by":"now", "on":"delete"}},
                     "ssn":{"type":"string", "mask":{"kind":"last4", "classification":"spi"},
                         "storage":{"valueColumn":"ssn", "rawColumn":"__zs_raw__ssn"}}

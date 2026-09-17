@@ -617,7 +617,7 @@ mod tests {
         let mut data = Value::Json("null".into());
         prepare_value(
             "instants",
-            &column!({"type":"array","items":"date"}),
+            &column!({"type":"array","items":"timestamp"}),
             &mut data,
         )
         .unwrap();

@@ -22,10 +22,10 @@ describe("t type builder", () => {
     assert.equal(tb.toFieldDef().type, "boolean");
   });
 
-  test("t.timestamp() creates date-typed TypeBuilder (TIMESTAMPTZ)", () => {
+  test("t.timestamp() creates a timestamp-typed TypeBuilder (TIMESTAMPTZ)", () => {
     const tb = t.timestamp();
     assert.ok(tb instanceof TypeBuilder);
-    assert.equal(tb.toFieldDef().type, "date");
+    assert.equal(tb.toFieldDef().type, "timestamp");
   });
 
   test("t.json() creates json TypeBuilder", () => {
@@ -47,61 +47,72 @@ describe("t type builder", () => {
     assert.equal(tb.toFieldDef().items, "number");
   });
 
-  test(".required() sets required and returns this", () => {
+  // The receiver is untouched: these assert the corrected contract. Their earlier
+  // form (`result === tb`, receiver mutated) encoded the aliasing bug - see
+  // `typebuilder-aliasing.test.ts` for the cross-builder case.
+  test(".required() applies required to a derived builder", () => {
     const tb = t.string();
     const result = tb.required();
-    assert.equal(result, tb);
-    assert.equal(tb.toFieldDef().required, true);
+    assert.notEqual(result, tb);
+    assert.equal(result.toFieldDef().required, true);
+    assert.equal(tb.toFieldDef().required, undefined);
   });
 
-  test(".unique() sets unique and returns this", () => {
+  test(".unique() applies unique to a derived builder", () => {
     const tb = t.string();
     const result = tb.unique();
-    assert.equal(result, tb);
-    assert.equal(tb.toFieldDef().unique, true);
+    assert.notEqual(result, tb);
+    assert.equal(result.toFieldDef().unique, true);
+    assert.equal(tb.toFieldDef().unique, undefined);
   });
 
-  test(".index() sets index and returns this", () => {
+  test(".index() applies index to a derived builder", () => {
     const tb = t.string();
     const result = tb.index();
-    assert.equal(result, tb);
-    assert.equal(tb.toFieldDef().index, true);
+    assert.notEqual(result, tb);
+    assert.equal(result.toFieldDef().index, true);
+    assert.equal(tb.toFieldDef().index, undefined);
   });
 
-  test(".default() sets default and returns this", () => {
+  test(".default() applies default to a derived builder", () => {
     const tb = t.string();
     const result = tb.default("hello");
-    assert.equal(result, tb);
-    assert.equal(tb.toFieldDef().default, "hello");
+    assert.notEqual(result, tb);
+    assert.equal(result.toFieldDef().default, "hello");
+    assert.equal(tb.toFieldDef().default, undefined);
   });
 
-  test(".min() sets min and returns this", () => {
+  test(".min() applies min to a derived builder", () => {
     const tb = t.number();
     const result = tb.min(0);
-    assert.equal(result, tb);
-    assert.equal(tb.toFieldDef().min, 0);
+    assert.notEqual(result, tb);
+    assert.equal(result.toFieldDef().min, 0);
+    assert.equal(tb.toFieldDef().min, undefined);
   });
 
-  test(".max() sets max and returns this", () => {
+  test(".max() applies max to a derived builder", () => {
     const tb = t.number();
     const result = tb.max(100);
-    assert.equal(result, tb);
-    assert.equal(tb.toFieldDef().max, 100);
+    assert.notEqual(result, tb);
+    assert.equal(result.toFieldDef().max, 100);
+    assert.equal(tb.toFieldDef().max, undefined);
   });
 
-  test(".enum() sets enum values and returns this", () => {
+  test(".enum() applies enum values to a derived builder", () => {
     const tb = t.string();
     const result = tb.enum("a", "b", "c");
-    assert.equal(result, tb);
-    assert.deepEqual(tb.toFieldDef().enum, ["a", "b", "c"]);
+    assert.notEqual(result, tb);
+    assert.deepEqual(result.toFieldDef().enum, ["a", "b", "c"]);
+    assert.equal(tb.toFieldDef().enum, undefined);
   });
 
-  test(".pattern() sets pattern and returns this", () => {
+  test(".pattern() applies pattern to a derived builder", () => {
     const re = /^[a-z]+$/;
     const tb = t.string();
     const result = tb.pattern(re);
-    assert.equal(result, tb);
-    assert.equal(tb.toFieldDef().pattern, re);
+    assert.notEqual(result, tb);
+    assert.equal(result.toFieldDef().pattern, re);
+    assert.equal(tb.toFieldDef().pattern, undefined);
   });
 
   test("chaining multiple modifiers", () => {

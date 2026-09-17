@@ -628,7 +628,7 @@ fn create_index_render_is_byte_identical_pg() {
             },
             FieldDescriptor {
                 name: "at".into(),
-                ty: "date".into(),
+                ty: "timestamp".into(),
                 ..Default::default()
             },
         ],
@@ -1860,7 +1860,7 @@ fn create_index_render_is_byte_identical_sqlite() {
             },
             FieldDescriptor {
                 name: "at".into(),
-                ty: "date".into(),
+                ty: "timestamp".into(),
                 ..Default::default()
             },
         ],

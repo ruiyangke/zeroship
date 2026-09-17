@@ -2165,7 +2165,7 @@ mod tests {
         let fields = BTreeMap::from([(
             "entries".into(),
             serde_json::json!({
-                "key":{"type":"string"}, "removed":{"type":"date"}, "revision":{"type":"integer"},
+                "key":{"type":"string"}, "removed":{"type":"timestamp"}, "revision":{"type":"integer"},
                 "deleted_at":{"type":"string"}, "version":{"type":"string"}
             }),
         )]);

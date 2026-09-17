@@ -1019,7 +1019,7 @@ async fn ir_envelope_date_column_lowers_and_applies_on_sqlite() {
     let ir = resolved_envelope_json(
         r#"{"ir_version":1,"name":"create_events","ops":[
         {"op":"createTable","name":"events","columns":[
-            {"name":"happened_on","type":"date","nullable":false}
+            {"name":"happened_on","type":"timestamp","nullable":false}
         ]}
     ]}"#,
     );

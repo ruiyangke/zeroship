@@ -38,6 +38,7 @@
     "@zeroship/types": "workspace:*"
   },
   "devDependencies": {
+    "@zeroship/schema": "workspace:*",
     "@arethetypeswrong/cli": "^0.18.2",
     "@types/node": "catalog:",
     "fflate": "0.8.2",

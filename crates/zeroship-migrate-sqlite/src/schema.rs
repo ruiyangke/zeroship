@@ -430,6 +430,9 @@ fn column_type_for_def(def: &serde_json::Value) -> String {
         Some("number") => "REAL".to_string(),
         Some("real") => "REAL".to_string(),
         Some("boolean") => "INTEGER".to_string(),
+        Some("timestamp") => "TEXT".to_string(),
+        // Retired spelling, kept explicit so a stray legacy descriptor does not
+        // fall into the silent fallback at the end of this match.
         Some("date") => "TEXT".to_string(),
         Some("calendarDate") => "TEXT".to_string(),
         Some("json") | Some("object") | Some("array") | Some("union") => "TEXT".to_string(),

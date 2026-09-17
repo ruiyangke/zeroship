@@ -1,5 +1,5 @@
 // `@zeroship/migrate` — the SHARED column-type lexicon bridge from the db type-builder
-// surface (`./db-types.js`).
+// surface (`@zeroship/schema`).
 //
 // The migration DSL and the runtime schema share the same primitive type
 // lexicon. A `t.text()` written in a migration is the same dialect-neutral
@@ -30,7 +30,7 @@
 // the target table as a plain string. Migration `.references(table, column)` is
 // recorded separately on `IrColumn` and validated by the migration planner.
 
-import { TypeBuilder, type FieldDef } from "./db-types.js";
+import { TypeBuilder, type FieldDef } from "@zeroship/schema";
 
 import type { ColType } from "./types.js";
 
@@ -110,10 +110,26 @@ export function colTypeFromDbField(field: DbSchemaField): ColType {
       return "text";
     case "number":
       return "double";
+    // Descriptor-side tokens: integer widths and float precision that no `t.*`
+    // factory authors (`TypeName`'s `DescriptorOnlyTypeName`). They reach the
+    // bridge only from a descriptor-read `FieldDef`, and still reduce portably.
+    case "int":
+    case "integer":
+      return "int";
+    case "bigInt":
+      return "bigInt";
+    case "float":
+      return "double";
+    case "timestamp":
+      return "timestamp";
     case "boolean":
       return "boolean";
-    case "date":
-      return "timestamp";
+    // SQL DATE. This is a MAPPING, not a boundary: migrate's neutral `date`
+    // ColType is its exact counterpart, the same way it is the engine's
+    // `ColType::Date`. Refusing it would leave the one authored scalar with a
+    // direct neutral target as the only storage-backed type the bridge rejects.
+    case "calendarDate":
+      return "date";
     case "json":
       return "json";
     case "bytes":
@@ -152,8 +168,6 @@ export function colTypeFromDbField(field: DbSchemaField): ColType {
     case "union":
     case "literal":
     case "array":
-    case "actor":
-    case "calendarDate":
       throw new UnsupportedColTypeError(def.type);
     default: {
       // Exhaustiveness guard: every member of `DbFieldType` (= the db `TypeName`

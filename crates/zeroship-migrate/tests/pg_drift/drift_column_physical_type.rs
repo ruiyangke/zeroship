@@ -389,7 +389,7 @@ async fn an_untouched_mysql_table_reports_clean() {
                 {"name":"doc","type":"json","nullable":true},
                 {"name":"raw","type":"bytes","nullable":true},
                 {"name":"at","type":"timestamp","nullable":true},
-                {"name":"day","type":"date","nullable":true},
+                {"name":"day","type":"timestamp","nullable":true},
                 {"name":"flag","type":"boolean","nullable":true}
             ],
             "primaryKey":["id"]}
@@ -518,7 +518,7 @@ fn postgres_corpus_columns() -> serde_json::Value {
         { "name": "doc", "type": "json", "nullable": true },
         { "name": "raw", "type": "bytes", "nullable": true },
         { "name": "at", "type": "timestamp", "nullable": true },
-        { "name": "day", "type": "date", "nullable": true },
+        { "name": "day", "type": "timestamp", "nullable": true },
         { "name": "flag", "type": "boolean", "nullable": true }
     ])
 }

@@ -411,7 +411,7 @@ fixture:comments_indexes|Postgres|index|users|2|{ name: "users_created_by_idx", 
 fixture:comments_indexes|Postgres|index|users|3|{ name: "users_email_lower_idx", on: ["email", { expr: () => ({"node":"fnCall","fn":"lower","args":[{"node":"colRef","name":"email"}]} as Expr) }], where: () => ({"node":"unaryOp","op":"isTrue","operand":{"node":"colRef","name":"active"}} as Expr) },
 fixture:comments_indexes|Postgres|primary_key|users|single:id
 fixture:comments_indexes|Postgres|sha|env.db.ts|5b9d8455f50760ea9eb789e50557607bea9cabaa3ec4f4455c069b30a0b728a9
-fixture:comments_indexes|Postgres|sha|runtime.json|3781c23b6a9cd2b7299ccf3f372e443dec63dff48bd41fff311af973f6314fde
+fixture:comments_indexes|Postgres|sha|runtime.json|4da136428c37b11981c5d5ebaf77f8294e29143d2ef156833597a40bf82468fa
 fixture:comments_indexes|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: createTable table-level UNIQUE on SQLite (the SQLite CREATE renders from the descriptor; a table-level UNIQUE is not threaded into the emitter)
 fixture:constraint_not_valid|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: table `line_items` does not exist
 fixture:constraint_not_valid|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: table `line_items` does not exist
@@ -438,7 +438,7 @@ fixture:ddl_create|Mysql|index|orders|2|{ name: "orders_created_by_idx", on: ["c
 fixture:ddl_create|Mysql|index|orders|3|{ name: "orders_total_idx", on: ["total"] },
 fixture:ddl_create|Mysql|primary_key|orders|single:id
 fixture:ddl_create|Mysql|sha|env.db.ts|eac486d6cbd11a5785fe7e7ecc61c2669dd4d2763a70d7212023e3f8a43c19bf
-fixture:ddl_create|Mysql|sha|runtime.json|9b04562e6425d8ce3b7c4ace8bd8dc4ef9012a68c6140f335ab23bacfd38c35b
+fixture:ddl_create|Mysql|sha|runtime.json|69d17e4035ff0b556b17bd5a43b0016c2c011254e5e96bdf7b784cde744993ee
 fixture:ddl_create|Postgres|column|orders|0|id: t.string({ length: 255 }).primaryKey(),
 fixture:ddl_create|Postgres|column|orders|1|created_at: t.timestamp().notNull(),
 fixture:ddl_create|Postgres|column|orders|2|updated_at: t.timestamp().notNull(),
@@ -455,7 +455,7 @@ fixture:ddl_create|Postgres|index|orders|2|{ name: "orders_created_by_idx", on: 
 fixture:ddl_create|Postgres|index|orders|3|{ name: "orders_total_idx", on: ["total"] },
 fixture:ddl_create|Postgres|primary_key|orders|single:id
 fixture:ddl_create|Postgres|sha|env.db.ts|eac486d6cbd11a5785fe7e7ecc61c2669dd4d2763a70d7212023e3f8a43c19bf
-fixture:ddl_create|Postgres|sha|runtime.json|9b04562e6425d8ce3b7c4ace8bd8dc4ef9012a68c6140f335ab23bacfd38c35b
+fixture:ddl_create|Postgres|sha|runtime.json|69d17e4035ff0b556b17bd5a43b0016c2c011254e5e96bdf7b784cde744993ee
 fixture:ddl_create|Sqlite|column|orders|0|id: t.string({ length: 255 }).primaryKey(),
 fixture:ddl_create|Sqlite|column|orders|1|created_at: t.timestamp().notNull(),
 fixture:ddl_create|Sqlite|column|orders|2|updated_at: t.timestamp().notNull(),
@@ -472,7 +472,7 @@ fixture:ddl_create|Sqlite|index|orders|2|{ name: "orders_created_by_idx", on: ["
 fixture:ddl_create|Sqlite|index|orders|3|{ name: "orders_total_idx", on: ["total"] },
 fixture:ddl_create|Sqlite|primary_key|orders|single:id
 fixture:ddl_create|Sqlite|sha|env.db.ts|eac486d6cbd11a5785fe7e7ecc61c2669dd4d2763a70d7212023e3f8a43c19bf
-fixture:ddl_create|Sqlite|sha|runtime.json|9b04562e6425d8ce3b7c4ace8bd8dc4ef9012a68c6140f335ab23bacfd38c35b
+fixture:ddl_create|Sqlite|sha|runtime.json|69d17e4035ff0b556b17bd5a43b0016c2c011254e5e96bdf7b784cde744993ee
 fixture:ddl_drop|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
 fixture:ddl_drop|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
 fixture:ddl_drop|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
@@ -492,7 +492,7 @@ fixture:dialectal_ops|Mysql|index|docs|1|{ name: "docs_updated_at_idx", on: ["up
 fixture:dialectal_ops|Mysql|index|docs|2|{ name: "docs_created_by_idx", on: ["created_by"] },
 fixture:dialectal_ops|Mysql|primary_key|docs|single:id
 fixture:dialectal_ops|Mysql|sha|env.db.ts|4526e2b65c0dc5c74dcf19ffffc2114815b759b60873e32c01bc267f3b2a8159
-fixture:dialectal_ops|Mysql|sha|runtime.json|a269fc1bfce045e398a1ed1ffe026428858949996f337a0e87b5d202b2040d9f
+fixture:dialectal_ops|Mysql|sha|runtime.json|87a2f5adb66fa4b3c897b64e52d641960d2a77947f18f5b556bf7f3d5f4d114b
 fixture:dialectal_ops|Postgres|column|docs|0|id: t.string({ length: 255 }).primaryKey(),
 fixture:dialectal_ops|Postgres|column|docs|1|created_at: t.timestamp().notNull(),
 fixture:dialectal_ops|Postgres|column|docs|2|updated_at: t.timestamp().notNull(),
@@ -507,7 +507,7 @@ fixture:dialectal_ops|Postgres|index|docs|2|{ name: "docs_created_by_idx", on: [
 fixture:dialectal_ops|Postgres|index|docs|3|{ name: "docs_embedding_hnsw_idx", on: ["embedding"], using: "hnsw" },
 fixture:dialectal_ops|Postgres|primary_key|docs|single:id
 fixture:dialectal_ops|Postgres|sha|env.db.ts|0711151bff472f69657de5b9d020084c3ff96d84b9827f57610cb90f72437329
-fixture:dialectal_ops|Postgres|sha|runtime.json|a269fc1bfce045e398a1ed1ffe026428858949996f337a0e87b5d202b2040d9f
+fixture:dialectal_ops|Postgres|sha|runtime.json|87a2f5adb66fa4b3c897b64e52d641960d2a77947f18f5b556bf7f3d5f4d114b
 fixture:dialectal_ops|Sqlite|column|docs|0|id: t.string({ length: 255 }).primaryKey(),
 fixture:dialectal_ops|Sqlite|column|docs|1|created_at: t.timestamp().notNull(),
 fixture:dialectal_ops|Sqlite|column|docs|2|updated_at: t.timestamp().notNull(),
@@ -521,7 +521,7 @@ fixture:dialectal_ops|Sqlite|index|docs|1|{ name: "docs_updated_at_idx", on: ["u
 fixture:dialectal_ops|Sqlite|index|docs|2|{ name: "docs_created_by_idx", on: ["created_by"] },
 fixture:dialectal_ops|Sqlite|primary_key|docs|single:id
 fixture:dialectal_ops|Sqlite|sha|env.db.ts|4526e2b65c0dc5c74dcf19ffffc2114815b759b60873e32c01bc267f3b2a8159
-fixture:dialectal_ops|Sqlite|sha|runtime.json|a269fc1bfce045e398a1ed1ffe026428858949996f337a0e87b5d202b2040d9f
+fixture:dialectal_ops|Sqlite|sha|runtime.json|87a2f5adb66fa4b3c897b64e52d641960d2a77947f18f5b556bf7f3d5f4d114b
 fixture:dml|Mysql|sha|env.db.ts|02dd7a312a734e35d90f1e7616fdc029d84173f6c3c83e06d618a418c6350ed2
 fixture:dml|Mysql|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
 fixture:dml|Postgres|sha|env.db.ts|02dd7a312a734e35d90f1e7616fdc029d84173f6c3c83e06d618a418c6350ed2
@@ -572,7 +572,7 @@ fixture:enums_domains|Postgres|index|subscriptions|2|{ name: "subscriptions_crea
 fixture:enums_domains|Postgres|primary_key|pg_expr_checks|single:id
 fixture:enums_domains|Postgres|primary_key|subscriptions|single:id
 fixture:enums_domains|Postgres|sha|env.db.ts|ccfaf465ccb9ea24e10118b072e52d2f0c0c3016511ac6da537d719cf741ae61
-fixture:enums_domains|Postgres|sha|runtime.json|d5bb201b20d9f2086331f0ae614e22429fa05ebe107ad8a2cbe0e519cc8ba11b
+fixture:enums_domains|Postgres|sha|runtime.json|dc89a86dcca162b3049979adde5f830e47cb178ff1fca148782dbe84ca539890
 fixture:enums_domains|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: createTable table-level CHECK is PostgreSQL-only
 fixture:fluent_ddl|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: createTable table-level CHECK is PostgreSQL-only
 fixture:fluent_ddl|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: constraint `accounts_legacy_chk` does not exist on `accounts`
@@ -603,7 +603,7 @@ fixture:fluent_scalars|Mysql|index|ledger|1|{ name: "ledger_updated_at_idx", on:
 fixture:fluent_scalars|Mysql|index|ledger|2|{ name: "ledger_created_by_idx", on: ["created_by"] },
 fixture:fluent_scalars|Mysql|primary_key|ledger|single:id
 fixture:fluent_scalars|Mysql|sha|env.db.ts|e3bfed5718c974f25551883a3ca5492c879dd25ee244603d212f4c463fbe92c9
-fixture:fluent_scalars|Mysql|sha|runtime.json|5d2ce4aa6dfcd86d21877ef281ecb9f7704945d3e4c1c65eddfc406a33030286
+fixture:fluent_scalars|Mysql|sha|runtime.json|b9cd1281c38e59595ade9d7aebc73b3dd167344bf94a3fb8aabea91f1e8bfa34
 fixture:fluent_scalars|Postgres|column|ledger|0|id: t.string({ length: 255 }).primaryKey(),
 fixture:fluent_scalars|Postgres|column|ledger|1|created_at: t.timestamp().notNull(),
 fixture:fluent_scalars|Postgres|column|ledger|2|updated_at: t.timestamp().notNull(),
@@ -618,7 +618,7 @@ fixture:fluent_scalars|Postgres|index|ledger|1|{ name: "ledger_updated_at_idx", 
 fixture:fluent_scalars|Postgres|index|ledger|2|{ name: "ledger_created_by_idx", on: ["created_by"] },
 fixture:fluent_scalars|Postgres|primary_key|ledger|single:id
 fixture:fluent_scalars|Postgres|sha|env.db.ts|e3bfed5718c974f25551883a3ca5492c879dd25ee244603d212f4c463fbe92c9
-fixture:fluent_scalars|Postgres|sha|runtime.json|5d2ce4aa6dfcd86d21877ef281ecb9f7704945d3e4c1c65eddfc406a33030286
+fixture:fluent_scalars|Postgres|sha|runtime.json|b9cd1281c38e59595ade9d7aebc73b3dd167344bf94a3fb8aabea91f1e8bfa34
 fixture:fluent_scalars|Sqlite|column|ledger|0|id: t.string({ length: 255 }).primaryKey(),
 fixture:fluent_scalars|Sqlite|column|ledger|1|created_at: t.timestamp().notNull(),
 fixture:fluent_scalars|Sqlite|column|ledger|2|updated_at: t.timestamp().notNull(),
@@ -633,7 +633,7 @@ fixture:fluent_scalars|Sqlite|index|ledger|1|{ name: "ledger_updated_at_idx", on
 fixture:fluent_scalars|Sqlite|index|ledger|2|{ name: "ledger_created_by_idx", on: ["created_by"] },
 fixture:fluent_scalars|Sqlite|primary_key|ledger|single:id
 fixture:fluent_scalars|Sqlite|sha|env.db.ts|e3bfed5718c974f25551883a3ca5492c879dd25ee244603d212f4c463fbe92c9
-fixture:fluent_scalars|Sqlite|sha|runtime.json|5d2ce4aa6dfcd86d21877ef281ecb9f7704945d3e4c1c65eddfc406a33030286
+fixture:fluent_scalars|Sqlite|sha|runtime.json|b9cd1281c38e59595ade9d7aebc73b3dd167344bf94a3fb8aabea91f1e8bfa34
 fixture:grouped_views|Mysql|sha|env.db.ts|02dd7a312a734e35d90f1e7616fdc029d84173f6c3c83e06d618a418c6350ed2
 fixture:grouped_views|Mysql|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
 fixture:grouped_views|Postgres|sha|env.db.ts|02dd7a312a734e35d90f1e7616fdc029d84173f6c3c83e06d618a418c6350ed2
@@ -657,7 +657,7 @@ fixture:in_list_scalars|Postgres|index|scalar_membership|1|{ name: "scalar_membe
 fixture:in_list_scalars|Postgres|index|scalar_membership|2|{ name: "scalar_membership_created_by_idx", on: ["created_by"] },
 fixture:in_list_scalars|Postgres|primary_key|scalar_membership|single:id
 fixture:in_list_scalars|Postgres|sha|env.db.ts|310bf4cabc7116401c56d8ade0f809db336b4c4799785f0d2390f9e1b751eeaa
-fixture:in_list_scalars|Postgres|sha|runtime.json|cb0017715db852e0f00bd4782ba23c5026f392e156faf19f1916a2843bb77ee9
+fixture:in_list_scalars|Postgres|sha|runtime.json|4dd285f2aa1958835be984b3555ca2c2749cc963ac987ec1f61965996fa6e4ee
 fixture:in_list_scalars|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: createTable table-level CHECK is PostgreSQL-only
 fixture:p2a_facets|Mysql|column|posts|0|id: t.string({ length: 255 }).primaryKey(),
 fixture:p2a_facets|Mysql|column|posts|1|created_at: t.timestamp().notNull(),
@@ -674,7 +674,7 @@ fixture:p2a_facets|Mysql|index|posts|1|{ name: "posts_updated_at_idx", on: ["upd
 fixture:p2a_facets|Mysql|index|posts|2|{ name: "posts_created_by_idx", on: ["created_by"] },
 fixture:p2a_facets|Mysql|primary_key|posts|single:id
 fixture:p2a_facets|Mysql|sha|env.db.ts|c098482ee7a72e27f7226d9c4d219aff8954e2dd6791342d1f17b095507c403f
-fixture:p2a_facets|Mysql|sha|runtime.json|34e6d279018198baf7db770c2524336f81cf232f53bea6d2fee39dad84b06157
+fixture:p2a_facets|Mysql|sha|runtime.json|247eef972931f95c4c4c8ce99bee5cd77011d4c3a846bdf95aa88278a58e47af
 fixture:p2a_facets|Postgres|column|posts|0|id: t.string({ length: 255 }).primaryKey(),
 fixture:p2a_facets|Postgres|column|posts|1|created_at: t.timestamp().notNull(),
 fixture:p2a_facets|Postgres|column|posts|2|updated_at: t.timestamp().notNull(),
@@ -690,7 +690,7 @@ fixture:p2a_facets|Postgres|index|posts|1|{ name: "posts_updated_at_idx", on: ["
 fixture:p2a_facets|Postgres|index|posts|2|{ name: "posts_created_by_idx", on: ["created_by"] },
 fixture:p2a_facets|Postgres|primary_key|posts|single:id
 fixture:p2a_facets|Postgres|sha|env.db.ts|c098482ee7a72e27f7226d9c4d219aff8954e2dd6791342d1f17b095507c403f
-fixture:p2a_facets|Postgres|sha|runtime.json|34e6d279018198baf7db770c2524336f81cf232f53bea6d2fee39dad84b06157
+fixture:p2a_facets|Postgres|sha|runtime.json|247eef972931f95c4c4c8ce99bee5cd77011d4c3a846bdf95aa88278a58e47af
 fixture:p2a_facets|Sqlite|column|posts|0|id: t.string({ length: 255 }).primaryKey(),
 fixture:p2a_facets|Sqlite|column|posts|1|created_at: t.timestamp().notNull(),
 fixture:p2a_facets|Sqlite|column|posts|2|updated_at: t.timestamp().notNull(),
@@ -706,7 +706,7 @@ fixture:p2a_facets|Sqlite|index|posts|1|{ name: "posts_updated_at_idx", on: ["up
 fixture:p2a_facets|Sqlite|index|posts|2|{ name: "posts_created_by_idx", on: ["created_by"] },
 fixture:p2a_facets|Sqlite|primary_key|posts|single:id
 fixture:p2a_facets|Sqlite|sha|env.db.ts|c098482ee7a72e27f7226d9c4d219aff8954e2dd6791342d1f17b095507c403f
-fixture:p2a_facets|Sqlite|sha|runtime.json|34e6d279018198baf7db770c2524336f81cf232f53bea6d2fee39dad84b06157
+fixture:p2a_facets|Sqlite|sha|runtime.json|247eef972931f95c4c4c8ce99bee5cd77011d4c3a846bdf95aa88278a58e47af
 fixture:partition|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: table `events_2026_05` does not exist
 fixture:partition|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: table `events_2026_05` does not exist
 fixture:partition|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: table `events_2026_05` does not exist
@@ -736,7 +736,7 @@ fixture:runtime_options|Mysql|index|posts|3|{ name: "posts_author_status_idx", o
 fixture:runtime_options|Mysql|options|posts|options: { softDelete: true, strictness: "off" }
 fixture:runtime_options|Mysql|primary_key|posts|single:id
 fixture:runtime_options|Mysql|sha|env.db.ts|98c248d407bea7eedb7936f77e1613bffcfe864bca2077e8bc8906d1ff4ac207
-fixture:runtime_options|Mysql|sha|runtime.json|b2d6cabf02db242aeb6ee7d7a13588265c8666967c2b8e3b0bde4cf3ac65f5df
+fixture:runtime_options|Mysql|sha|runtime.json|99d4bd98741918d6632f8d105a3ad0f0bf515042ae3f44304cfec699643d3d5d
 fixture:runtime_options|Postgres|column|posts|0|id: t.string({ length: 255 }).primaryKey(),
 fixture:runtime_options|Postgres|column|posts|1|created_at: t.timestamp().notNull(),
 fixture:runtime_options|Postgres|column|posts|2|updated_at: t.timestamp().notNull(),
@@ -754,7 +754,7 @@ fixture:runtime_options|Postgres|index|posts|3|{ name: "posts_author_status_idx"
 fixture:runtime_options|Postgres|options|posts|options: { softDelete: true, strictness: "off" }
 fixture:runtime_options|Postgres|primary_key|posts|single:id
 fixture:runtime_options|Postgres|sha|env.db.ts|98c248d407bea7eedb7936f77e1613bffcfe864bca2077e8bc8906d1ff4ac207
-fixture:runtime_options|Postgres|sha|runtime.json|b2d6cabf02db242aeb6ee7d7a13588265c8666967c2b8e3b0bde4cf3ac65f5df
+fixture:runtime_options|Postgres|sha|runtime.json|99d4bd98741918d6632f8d105a3ad0f0bf515042ae3f44304cfec699643d3d5d
 fixture:runtime_options|Sqlite|column|posts|0|id: t.string({ length: 255 }).primaryKey(),
 fixture:runtime_options|Sqlite|column|posts|1|created_at: t.timestamp().notNull(),
 fixture:runtime_options|Sqlite|column|posts|2|updated_at: t.timestamp().notNull(),
@@ -772,7 +772,7 @@ fixture:runtime_options|Sqlite|index|posts|3|{ name: "posts_author_status_idx", 
 fixture:runtime_options|Sqlite|options|posts|options: { softDelete: true, strictness: "off" }
 fixture:runtime_options|Sqlite|primary_key|posts|single:id
 fixture:runtime_options|Sqlite|sha|env.db.ts|98c248d407bea7eedb7936f77e1613bffcfe864bca2077e8bc8906d1ff4ac207
-fixture:runtime_options|Sqlite|sha|runtime.json|b2d6cabf02db242aeb6ee7d7a13588265c8666967c2b8e3b0bde4cf3ac65f5df
+fixture:runtime_options|Sqlite|sha|runtime.json|99d4bd98741918d6632f8d105a3ad0f0bf515042ae3f44304cfec699643d3d5d
 fixture:sequences_exclusion|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: sequence `old_invoice_seq` does not exist
 fixture:sequences_exclusion|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: sequence `old_invoice_seq` does not exist
 fixture:sequences_exclusion|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: sequence `old_invoice_seq` does not exist

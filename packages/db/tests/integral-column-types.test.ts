@@ -81,6 +81,11 @@ describe("unknown field types fail closed", () => {
     assert.match((r as { message: string }).message, /unknown field type/);
   });
 
+  it("refuses the retired timestamptz spelling", () => {
+    const r = validate("date", "2026-08-08");
+    assert.equal(r.ok, false, "a descriptor carrying \"date\" must be refused, not silently accepted");
+  });
+
   it("accepts every token the descriptor generator can emit", () => {
     // The guard's blast radius. `renderGeneratedEnvDb` consumes the runtime
     // descriptor, so its switch cases are the authoritative list of tokens a
@@ -103,7 +108,6 @@ describe("unknown field types fail closed", () => {
       ["json", { a: 1 }],
       ["object", { a: 1 }],
       ["array", []],
-      ["date", "2026-08-08"],
       ["timestamp", "2026-08-08T00:00:00Z"],
       ["bytes", new Uint8Array([1, 2, 3])],
       ["geoPoint", { lat: 1, lon: 2 }],

@@ -11,6 +11,7 @@ fi
 
 publish_packages=(
   "packages/types"
+  "packages/schema"
   "packages/control"
   "packages/mcp"
   "packages/db"

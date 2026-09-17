@@ -33,7 +33,6 @@ const KNOWN_FIELD_TYPES: ReadonlySet<string> = new Set<TypeName>([
   "float",
   "timestamp",
   "boolean",
-  "date",
   "json",
   "calendarDate",
   "array",
@@ -146,7 +145,7 @@ const ARRAY_ITEM_VALIDATORS: Record<PrimitiveTypeName, (value: unknown) => boole
   string: value => typeof value === "string",
   number: value => typeof value === "number",
   boolean: value => typeof value === "boolean",
-  date: isTimestampValue,
+  timestamp: isTimestampValue,
   calendarDate: value => typeof value === "string" && isValidCalendarDate(value),
   json: isJsonSerializable,
 };
@@ -324,11 +323,7 @@ function checkField(
       errors[key] = { path: key, message: `${key} must be a boolean` };
       return;
     }
-    // `timestamp` alongside `date` for the same reason the integral tokens sit
-    // with `number`: the descriptor carries the column's own token, and the
-    // generator's renderer treats `date` and `timestamp` as one case. Leaving it
-    // out would send every timestamp column into the unknown-type guard below.
-  } else if (type === "date" || type === "timestamp") {
+  } else if (type === "timestamp") {
     if (!isTimestampValue(value)) {
       errors[key] = {
         path: key,

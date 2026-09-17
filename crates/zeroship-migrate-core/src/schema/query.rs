@@ -902,7 +902,7 @@ fn injected_column_type(
         ColType::String { length } => {
             serde_json::json!({ "type": "string", "maxLength": length })
         }
-        ColType::Timestamp => serde_json::json!({ "type": "date" }),
+        ColType::Timestamp => serde_json::json!({ "type": "timestamp" }),
         ColType::Int => serde_json::json!({ "type": "int" }),
         _ => {
             return Err(QueryError::InvalidFilter(format!(
@@ -3319,10 +3319,10 @@ columns = [
 
     #[test]
     fn d3_calendar_date_distinct_from_date() {
-        // Verify t.date() still emits TIMESTAMPTZ alongside DATE for the
+        // Verify t.timestamp() emits TIMESTAMPTZ alongside DATE for the
         // calendar variant - no overlap.
         let schema = json!({
-            "createdAt": { "type": "date" },
+            "createdAt": { "type": "timestamp" },
             "birthday": { "type": "calendarDate" },
         });
         let sql =

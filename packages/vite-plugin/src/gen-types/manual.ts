@@ -181,7 +181,7 @@ const TYPE_TOKEN: Readonly<Record<string, string>> = {
   int: "int",
   bigInt: "bigInt",
   boolean: "boolean",
-  date: "date",
+  timestamp: "timestamp",
   json: "json",
   object: "object",
   array: "array",

@@ -136,7 +136,7 @@
           }
         },
         "created_at": {
-          "type": "date",
+          "type": "timestamp",
           "required": true,
           "readable": true,
           "filterable": true,
@@ -147,7 +147,7 @@
           }
         },
         "activated_at": {
-          "type": "date",
+          "type": "timestamp",
           "readable": true,
           "filterable": true,
           "sortable": true,

@@ -29,7 +29,7 @@ fn artifact_and_native_declarations_have_the_same_contract() {
     ]);
     let artifact = CollectionSchema::from_fields(&value!({
         "happened": {
-            "type":"date", "required":true, "writable":false,
+            "type":"timestamp", "required":true, "writable":false,
             "storage":{"valueColumn":"happened"},
             "assign":{"by":"now", "on":"insert"}
         },

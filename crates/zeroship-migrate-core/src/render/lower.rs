@@ -9824,11 +9824,10 @@ pub(crate) fn col_type_to_token(ty: &ColType) -> (String, Option<String>) {
         ColType::Real => ("real".into(), None),
         ColType::Boolean => ("boolean".into(), None),
         ColType::Json => ("json".into(), None),
-        ColType::Timestamp => ("date".into(), None),
-        // The shared descriptor kernel reserves `date` for timestamp fields; its
-        // civil-date token is `calendarDate`, which renders PostgreSQL `date`,
-        // MySQL `DATE`, and SQLite `TEXT`. The migration-facing IR spelling stays
-        // `ColType::Date` / `t.date()`.
+        ColType::Timestamp => ("timestamp".into(), None),
+        // The descriptor's civil-date token is `calendarDate`, which renders
+        // PostgreSQL `date`, MySQL `DATE`, and SQLite `TEXT`. The
+        // migration-facing IR spelling stays `ColType::Date` / `t.date()`.
         ColType::Date => ("calendarDate".into(), None),
         ColType::Uuid => ("string".into(), None),
         ColType::Inet => ("inet".into(), None),

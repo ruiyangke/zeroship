@@ -105,12 +105,14 @@ export type {
 export { colTypeFromDbField, UnsupportedColTypeError } from "./db-lexicon.js";
 export type { DbSchemaField, DbFieldType } from "./db-lexicon.js";
 
-// The inlined db type-builder surface (`fromDb`/`colTypeFromDbField` input side).
-// `dbType` is the `t.*` lexicon a live db schema field is authored with; the
-// migrate bridge lifts it into a migration ColumnDef. Exposed here so a caller
-// (and the bridge tests) can construct db fields without a separate db package.
-export { t as dbType, TypeBuilder as DbTypeBuilder } from "./db-types.js";
-export type { FieldDef, TypeName, EncryptedOptions } from "./db-types.js";
+// The shared db type-builder surface (`fromDb`/`colTypeFromDbField` input side),
+// re-exported from `@zeroship/schema`. `dbType` is the `t.*` lexicon a live db
+// schema field is authored with; the migrate bridge lifts it into a migration
+// ColumnDef. Exposed here so a caller (and the bridge tests) can construct db
+// fields without depending on `@zeroship/db`.
+export { t as dbType, TypeBuilder as DbTypeBuilder } from "@zeroship/schema";
+export type { FieldDef, TypeName } from "@zeroship/schema";
+export type { EncryptedFieldOpts as EncryptedOptions } from "@zeroship/schema";
 
 // Public declaration-merging seams used by the separately installed vendor
 // attribute packages. These must be exported from the package root: their
