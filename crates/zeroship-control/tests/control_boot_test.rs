@@ -57,20 +57,23 @@ fn issuer_of(jwks_url: &str) -> String {
         .to_owned()
 }
 
-/// Ask `/readyz` over a raw socket, returning its status and everything read.
+/// Ask control for `path` over a raw socket, returning its status and body.
 /// A readiness question needs no HTTP client, and keeping the BODY is what makes
 /// a "not ready" answer diagnosable rather than a bare 503.
 ///
 /// A read timeout ends the read rather than failing it. ntex keeps the
 /// connection alive, so waiting for EOF stalls to the timeout; treating that as
 /// an error would discard the bytes that already carried the status line.
-fn readyz(port: u16) -> Option<(u16, String)> {
+fn get(port: u16, path: &str) -> Option<(u16, String)> {
     let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).ok()?;
     stream
         .set_read_timeout(Some(Duration::from_millis(500)))
         .ok()?;
     stream
-        .write_all(b"GET /readyz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .write_all(
+            format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
         .ok()?;
     let mut response = Vec::new();
     let mut buf = [0u8; 4096];
@@ -166,12 +169,19 @@ fn control_serves_readyz_on_an_owned_database() {
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut last = None;
     while Instant::now() < deadline {
-        last = readyz(port);
+        last = get(port, "/readyz");
         if last.as_ref().is_some_and(|(status, _)| *status == 200) {
             break;
         }
         std::thread::sleep(Duration::from_millis(200));
     }
+
+    // Control's routes are /api, /internal, /healthz and /readyz. The edge sends
+    // the whole /v1/* namespace to the migration service, so a route here would
+    // be shadowed and unreachable: an unknown path and a /v1 path must answer
+    // identically. Probed while the child is still serving.
+    let unknown = get(port, "/no-such-route").expect("control answers an unknown path");
+    let v1 = get(port, "/v1/apps").expect("control answers a /v1 path");
 
     let _ = child.kill();
     let _ = child.wait();
@@ -186,5 +196,11 @@ fn control_serves_readyz_on_an_owned_database() {
         200,
         "control never answered /readyz with 200: {described}\nLog:\n{}",
         std::fs::read_to_string(&log_path).unwrap_or_default()
+    );
+    assert_eq!(
+        v1.0, unknown.0,
+        "control must declare no /v1 route: the edge sends the whole /v1/* namespace to the \
+         migration service, so one here would be shadowed and unreachable.\n  \
+         /v1/apps -> {v1:?}\n  /no-such-route -> {unknown:?}"
     );
 }
