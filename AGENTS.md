@@ -415,8 +415,7 @@ Stable contracts, live in `docs/reference/`:
 
 ## Committing
 
-A `commit-msg` hook enforces this. Turn it on once per clone, or your commits
-are only checked in CI:
+A `commit-msg` hook enforces this. Turn it on once per clone:
 
 ```bash
 git config core.hooksPath .githooks
@@ -447,7 +446,7 @@ type(scope): imperative summary of what the change does
 - Every bug fix adds a regression test that would fail before the fix.
 
 Full rules, scope vocabulary and worked examples: `CONTRIBUTING.md`. Check a
-range yourself with `tests/commit_msg_gate.sh --range origin/main..HEAD`.
+range yourself with `.githooks/commit-msg --range origin/main..HEAD`.
 
 ---
 
