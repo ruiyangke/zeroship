@@ -252,5 +252,6 @@ fn limit_failure() -> StepOutcome {
             "message":"workflow result exceeds the configured payload limits",
             "retryable":false
         }),
+        max_attempts: 1,
     }
 }

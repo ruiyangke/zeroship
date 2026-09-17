@@ -243,7 +243,17 @@ pub(crate) async fn prepare(
     let progressed = journal::resolve(tx, app, run, now).await?;
     let steps = journal::load(tx, app, &run.text("id")?, run.integer("generation")?).await?;
     let pending = steps.iter().any(|step| step.state == "running");
-    if pending && !progressed {
+    // A step whose next attempt is due is forward work, so the run is dispatched
+    // even though an unresolved wait sits beside it. Without this the two
+    // together would hold each other: the wait is what makes the run look idle,
+    // and the attempt is the only thing that can move it.
+    let attempt_due = steps.iter().any(|step| {
+        step.state == "retrying"
+            && step
+                .wake_at
+                .is_none_or(|at| at.timestamp_millis() <= now)
+    });
+    if pending && !progressed && !attempt_due {
         suspend(tx, app, run, now, false).await?;
         return Ok(false);
     }
@@ -280,19 +290,26 @@ pub(crate) async fn apply(
     }) {
         return journal::invalid("forward task cannot submit compensation results");
     }
+    // Both ceilings bound executions of creator code at one ordinal, so both are
+    // checked against the one budget the app was granted. A declaration outside
+    // it is refused rather than clamped: a creator who asked for more attempts
+    // than the app allows has to learn that, not silently get fewer.
     for outcome in &execution.outcomes {
-        if let StepOutcome::StepCompleted {
-            compensation_max_attempts,
-            ..
-        } = outcome
-        {
-            if *compensation_max_attempts <= 0
-                || *compensation_max_attempts > policy.max_compensation_attempts
-            {
-                return journal::invalid(
-                    "workflow compensation retry policy exceeds the app limit",
-                );
-            }
+        let declared = match outcome {
+            StepOutcome::StepCompleted {
+                compensation_max_attempts,
+                ..
+            } => *compensation_max_attempts,
+            StepOutcome::StepFailed { max_attempts, .. }
+            | StepOutcome::RunFailed {
+                ordinal: Some(_),
+                max_attempts,
+                ..
+            } => *max_attempts,
+            _ => continue,
+        };
+        if declared <= 0 || declared > policy.max_step_attempts {
+            return journal::invalid("workflow step retry policy exceeds the app limit");
         }
     }
     let (checkpoints, update) =
@@ -335,7 +352,7 @@ pub(crate) async fn apply(
         if journal::load(tx, app, &run.text("id")?, run.integer("generation")?)
             .await?
             .iter()
-            .any(|step| step.state == "running")
+            .any(|step| matches!(step.state.as_str(), "running" | "retrying"))
         {
             return journal::invalid("workflow cannot complete with unresolved operations");
         }
@@ -351,7 +368,7 @@ pub(crate) async fn apply(
         }
         let steps = journal::load(tx, app, &run.text("id")?, run.integer("generation")?).await?;
         if steps.iter().any(|step| {
-            step.state == "running"
+            matches!(step.state.as_str(), "running" | "retrying")
                 || step
                     .compensation_state
                     .as_deref()
@@ -435,14 +452,25 @@ async fn suspend(
         .iter()
         .filter(|step| step.state == "running")
         .collect();
-    let state = if pending.is_empty() || progressed {
+    // A step with attempts left is forward work the run owes itself, not a wait
+    // on anything external, so the run queues rather than sleeping. Its deadline
+    // is the run's, because `due_at` is the only clock a reclaimed run keeps:
+    // the isolate that failed the attempt is gone long before the next one.
+    let retry = steps
+        .iter()
+        .filter(|step| step.state == "retrying")
+        .filter_map(|step| step.wake_at.map(|time| time.timestamp_millis()))
+        .min();
+    let state = if retry.is_some() || pending.is_empty() || progressed {
         RunState::Queued
     } else if pending.iter().all(|step| step.kind == "sleep") {
         RunState::Sleeping
     } else {
         RunState::Waiting
     };
-    let due = if state == RunState::Queued {
+    let due = if let Some(retry) = retry {
+        Some(retry.max(now))
+    } else if state == RunState::Queued {
         Some(now)
     } else {
         pending

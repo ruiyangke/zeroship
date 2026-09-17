@@ -84,8 +84,8 @@ fn shared_validation_rejects_invalid_resource_limits() {
         ("maxPayloadObjects", json!(0)),
         ("maxPayloadStorageBytes", json!(0)),
         ("payloadStagingRetentionMs", json!(0)),
-        ("maxCompensationAttempts", json!(0)),
-        ("compensationRetryMs", json!(0)),
+        ("maxStepAttempts", json!(0)),
+        ("retryDelayMs", json!(0)),
         ("maxDeliveryAttempts", json!(0)),
         ("maxStuckDispatches", json!(0)),
         ("maxScheduleBackfill", json!(0)),
@@ -166,7 +166,7 @@ fn unsigned_limits_reject_unrepresentable_values_without_clamping() {
 
 #[test]
 fn fixed_integer_fields_reject_wire_overflow_and_coercion() {
-    assert!(decode_with("maxCompensationAttempts", json!(i64::from(i32::MAX) + 1)).is_err());
+    assert!(decode_with("maxStepAttempts", json!(i64::from(i32::MAX) + 1)).is_err());
     assert!(decode_with("leaseMs", json!(u64::MAX)).is_err());
     for invalid in [json!(0), json!("false"), Value::Null] {
         assert!(decode_with("admission", invalid).is_err());
