@@ -179,7 +179,7 @@ function renderBuilderChain(def: RuntimeFieldDef): string {
         break;
       case "int":
       case "integer":
-        chain = "t.integer()";
+        chain = "t.int()";
         break;
       case "number":
         chain = renderNumberBase(def);
@@ -287,7 +287,7 @@ function renderRefBase(def: RuntimeFieldDef): string {
   if (typeof def.onUpdate === "string") opts.push(`onUpdate: ${jsStr(def.onUpdate)}`);
   if (typeof def.deferrable === "boolean") opts.push(`deferrable: ${def.deferrable}`);
   const args = jsStr(target) + (opts.length === 0 ? "" : `, { ${opts.join(", ")} }`);
-  if (def.type === "int" || def.type === "integer") return `t.integer().references(${args})`;
+  if (def.type === "int" || def.type === "integer") return `t.int().references(${args})`;
   if (def.type === "bigInt" || def.type === "bigint") return `t.bigInt().references(${args})`;
   if (def.type === "string" || def.type === "text" || def.type === "ref" || def.type === "id") return `t.ref(${args})`;
   throw new Error(`Unsupported reference storage: ${def.type}`);

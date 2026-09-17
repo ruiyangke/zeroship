@@ -980,7 +980,7 @@ export const t = {
     return new TypeBuilder<string, false, undefined, undefined, false, "text">({ type: "string" });
   },
   /** Creates an integer field definition. */
-  integer(): TypeBuilder<number, false, undefined, undefined, false, "ordered"> {
+  int(): TypeBuilder<number, false, undefined, undefined, false, "ordered"> {
     return new TypeBuilder<number, false, undefined, undefined, false, "ordered">({ type: "integer" });
   },
   /** Creates a number field definition. */
