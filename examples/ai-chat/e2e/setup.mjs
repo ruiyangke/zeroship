@@ -1,13 +1,13 @@
-// One-shot setup for the e2e driver: symlink the Nix-provided
-// `playwright` + `playwright-core` packages into local node_modules so
-// Node's ESM resolver can find them transitively. We avoid adding
-// playwright as a real dependency to keep the demo's installable
-// surface small.
+// One-shot setup for the e2e driver: make the `playwright` package
+// resolvable from this example. If it already resolves there is nothing
+// to do; otherwise the CLI on PATH is located and the package it owns is
+// symlinked into node_modules. We avoid adding playwright as a real
+// dependency to keep the demo's installable surface small.
 //
 // Run automatically by `pnpm e2e` (see package.json).
 
-import { existsSync, readdirSync, symlinkSync, mkdirSync } from "node:fs";
-import { execSync } from "node:child_process";
+import { existsSync, symlinkSync, mkdirSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -15,37 +15,43 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");
 const nm = resolve(root, "node_modules");
 
-function findPlaywrightStoreRoot() {
-  // 1. PATH probe — `nix develop` puts `playwright` in PATH. Walk
-  //    PATH ourselves; some shells' `which` shim resolves symlinks
-  //    inconsistently across nix-shell setups.
+function resolves(specifier) {
+  try {
+    createRequire(import.meta.url).resolve(specifier);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Walk PATH for the `playwright` CLI and return the prefix that holds it.
+// The CLI sits in `bin/` beside `lib/node_modules/`, so the prefix is
+// found without naming any install root. Done by hand rather than
+// shelling out because a shell's `which` shim resolves symlinks
+// inconsistently.
+function findPlaywrightPrefix() {
   for (const dir of (process.env.PATH ?? "").split(":")) {
     if (!dir) continue;
     const cli = `${dir}/playwright`;
-    if (existsSync(cli)) {
-      const storeRoot = dir.replace(/\/bin\/?$/, "");
-      if (existsSync(`${storeRoot}/lib/node_modules/playwright`)) return storeRoot;
-    }
+    if (!existsSync(cli)) continue;
+    const prefix = dir.replace(/\/bin\/?$/, "");
+    if (existsSync(`${prefix}/lib/node_modules/playwright`)) return prefix;
   }
-
-  // 2. Fallback: scan /nix/store for any playwright-test bundle.
-  try {
-    const candidates = readdirSync("/nix/store").filter((d) =>
-      d.startsWith("playwright-test-"),
-    );
-    for (const d of candidates) {
-      const p = `/nix/store/${d}/lib/node_modules/playwright`;
-      if (existsSync(p)) return `/nix/store/${d}`;
-    }
-  } catch (_) { /* fall through */ }
-
   return null;
 }
 
-const storeRoot = findPlaywrightStoreRoot();
-if (!storeRoot) {
+// Already resolvable means there is nothing to link: the ordinary state
+// when playwright is a real dependency.
+if (resolves("playwright")) {
+  process.exit(0);
+}
+
+const prefix = findPlaywrightPrefix();
+if (!prefix) {
   console.error(
-    "[setup] Could not locate playwright-test in /nix/store. Run inside `nix develop`.",
+    "[setup] Could not find the `playwright` package: it is not resolvable " +
+      "from here and no `playwright` CLI is on PATH. " +
+      "Install it (`pnpm add -D playwright`) or enter `nix develop`.",
   );
   process.exit(1);
 }
@@ -53,7 +59,7 @@ if (!storeRoot) {
 if (!existsSync(nm)) mkdirSync(nm);
 
 for (const pkg of ["playwright", "playwright-core"]) {
-  const target = `${storeRoot}/lib/node_modules/${pkg}`;
+  const target = `${prefix}/lib/node_modules/${pkg}`;
   const link = `${nm}/${pkg}`;
   if (existsSync(link)) continue;
   if (!existsSync(target)) {
