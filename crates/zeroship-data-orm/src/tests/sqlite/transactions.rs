@@ -1214,9 +1214,8 @@ fn two_replicas_reading_before_they_write_both_commit() {
 /// `main` is the one database every app on this backend shares.
 ///
 /// Read this as the price of the two arms above, not as a contract worth
-/// keeping. It fails if the price is ever paid down, which is the point: the
-/// divergence recorded in `docs/reference/sqlite-divergences.md` stops being
-/// true silently.
+/// keeping. It fails if the price is ever paid down: the divergence must not
+/// stop being true silently.
 #[test]
 fn two_apps_on_one_backend_serialize_their_transactions_through_main() {
     Host::test(|host| {

@@ -160,8 +160,7 @@ pub fn parse(typed_id: &str) -> Result<(&str, uuid::Uuid), String> {
 pub enum ParseError {
     /// The id parsed cleanly but its prefix did not match the expected
     /// entity-type prefix. Used by `parse_with_prefix` as the
-    /// path-traversal-hardening boundary check (Invariant 2 in
-    /// `docs/archive/sandbox-pg-state.md`).
+    /// path-traversal-hardening boundary check.
     WrongPrefix { expected: String, got: String },
     /// The id failed to parse — wrong shape, invalid base36, missing
     /// underscore, etc. Carries the same string the underlying [`parse`]

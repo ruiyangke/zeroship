@@ -35,7 +35,7 @@ const WORKFLOW_BASE_NAME = "Workflow";
 /** Wrapper-marker discriminator. `procedure` is generic; the others
  *  imply a kind the transform reads statically.
  *
- *  B3 capability mapping (see `docs/archive/zeroship-db.md` §B3):
+ *  B3 capability mapping:
  *    - `query`  → DB-read tx, no fetch
  *    - `mutation` → DB-write tx, no fetch
  *    - `action` / `stream` / `subscription` / `procedure` →
@@ -179,10 +179,9 @@ export function detectFileLevelUseServer(ast: { body?: unknown[] }): boolean {
 /**
  * Function-level `"use server"` directive detector.
  *
- * `docs/proposals/rpc.md` §1 says that a function whose first
- * statement is the string
- * literal `"use server"` is a server function regardless of whether
- * the enclosing file carries a file-level directive. The function may
+ * A function whose first statement is the string literal
+ * `"use server"` is a server function regardless of whether the
+ * enclosing file carries a file-level directive. The function may
  * be declared via:
  *
  *   - `function name() { "use server"; ... }` (FunctionDeclaration)
@@ -1509,8 +1508,7 @@ export function transformPlugin(state: TransformState): Plugin {
           }
         }
 
-        // Resolve wireId using the order from
-        // `docs/proposals/rpc.md` §2: explicit `id` wins (looked up
+        // Resolve wireId: explicit `id` wins (looked up
         // in both the wrapper's second-arg config and the legacy
         // `<fn>.config = { ... }` assignment); default is the bare
         // export name. The production-only "missing id" check happens
