@@ -984,9 +984,10 @@ async fn committed_savepoint_is_removed_from_the_server_stack() {
 /// `abandoned_failed_nested_commit_recovers_before_the_next_outer_operation`
 /// builds the same server state, but the status is still unsettled at that
 /// point, so its first poll parks on the settle barrier in `commit()` and the
-/// test abandons it there. That is a different claim, and it means nothing had
-/// ever run this arm: `start_batch_execute_with_error_cleanup` and
-/// `send_with_error_cleanup` both had zero executed coverage regions.
+/// test abandons it there. That is a different claim: the sibling test abandons
+/// the future before the cleanup arm runs, so
+/// `start_batch_execute_with_error_cleanup` and `send_with_error_cleanup` are
+/// exercised only here.
 #[compio::test]
 async fn failed_nested_commit_rolls_back_to_its_savepoint_and_spares_the_outer_writes() {
     compio::time::timeout(TEST_TIMEOUT, async {
