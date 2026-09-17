@@ -4,8 +4,8 @@ import { defineApp } from "@zeroship/server";
 //
 // The platform default is fail-closed (`auth: "user"`), and a gated procedure is
 // answered by the GATEWAY before dispatch - so its error body is the gateway's,
-// never the worker's. `tests/e2e_dev_vs_deployed_errors.sh` exists to measure
-// the WORKER's error envelope, which is only observable when the call actually
+// never the worker's. The measurement worth having is the WORKER's error
+// envelope, which is only observable when the call actually
 // reaches the worker. Declaring `auth: "anonymous"` here is what makes the
 // measurement possible; adding a gate would silently delete it.
 export default defineApp({

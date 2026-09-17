@@ -3,9 +3,9 @@
 // auth-probe - the AUTH leg of the dev-vs-deployed seam comparison.
 //
 // Sibling of `examples/storage-probe` and `examples/workflow-probe`: a
-// deliberately boring app whose only job is to let `tests/e2e_dev_vs_deployed_auth.sh`
-// run ONE identical sequence against `pnpm dev` and against the same `.zship`
-// deployed behind the gateway, and diff the RESULTS.
+// deliberately boring app whose only job is to let ONE identical sequence run
+// against `pnpm dev` and against the same `.zship` deployed behind the gateway,
+// so the RESULTS can be diffed.
 //
 // WHY A NEW EXAMPLE RATHER THAN `examples/auth-notes`. auth-notes stores notes
 // in `env.kv`, so half its procedures need a Redis on the deployed side, and the
