@@ -1,7 +1,6 @@
 //! Smoke tests for `#[v8_constructor(post_init = "fn_name")]`.
 //!
-//! See `docs/archive/macro-constructor-post-init.md` for the design
-//! and §7.2 for the test surface — this file ships the initial cases:
+//! Test cases:
 //!
 //!   #1   Basic post_init — private symbol set by hook is visible from
 //!        a method on the same class.
@@ -10,7 +9,7 @@
 //!   #3   Err path from post_init — constructor throws, no leak (drop
 //!        counter rises after a forced full GC).
 //!   #4   Subclass via #[v8_inherit] — derived's hook runs, base's does
-//!        NOT auto-chain (per §5.4 decision); explicit chaining works.
+//!        NOT auto-chain; explicit chaining works.
 //!   #5   must_new (default-on) + post_init: `Foo()` (no `new`) does
 //!        NOT trigger post_init. The pre-existing must-new TypeError
 //!        fires before the box install.
@@ -19,8 +18,8 @@
 //!        borrow at the post_init layer; the &mut self callback's own
 //!        guard treats post_init's transient call as a single occupier.
 //!   #6   callable_no_new + post_init — `Foo()` (no new) skips
-//!        post_init entirely (per §5.3 revised decision: the
-//!        is_construct_call() guard wraps the post_init dispatch).
+//!        post_init entirely (the is_construct_call() guard wraps the
+//!        post_init dispatch).
 //!   #7   with_state from post_init recovers the box and reads state
 //!        (the field-0 install ordering is correct).
 //!   #8   Plain-Self constructor (no Result wrapper) + post_init.
@@ -115,7 +114,7 @@ mod priv_sym_smoke {
             }
         }
 
-        /// Class-prefixed private symbol per §5.6 / §5.3a convention:
+        /// Class-prefixed private symbol convention:
         /// `__zs_<Class>_<purpose>` to avoid cross-class collision.
         pub(crate) fn after_install(
             scope: &mut v8::PinScope,
@@ -160,7 +159,7 @@ fn post_init_basic_runs_and_writes_priv_sym() {
     // the JS reflection surface by design — that's their purpose), so
     // we instead verify the hook ran by:
     //   (a) calling a method that requires the box to be installed
-    //       (post_init runs AFTER box install per §1.4 step 6);
+    //       (post_init runs AFTER box install);
     //   (b) the construction completes without throwing.
     let r = run_in_v8(
         |scope, global| {
@@ -382,8 +381,8 @@ fn post_init_err_throws_and_box_reclaimed() {
     );
     // Pre-GC: ctor body ran (Box materialised) but post_init failed
     // before Self::Drop could fire — the Box is in V8's hands now.
-    // Lazy-drop is the v1 contract per §4.4: the count may legitimately
-    // be 0 here. Don't assert mid-construction count.
+    // Lazy-drop: the count may legitimately be 0 here. Don't assert
+    // mid-construction count.
     let _ = count_after_construction;
     // Post-GC (or post-isolate-teardown): the Box must be reclaimed
     // exactly once.
@@ -441,7 +440,7 @@ mod inherit_smoke {
             this: v8::Local<v8::Object>,
         ) -> Result<(), OpError> {
             DERIVED_RAN.with(|c| c.set(true));
-            // §5.4 worked example: derived chains base explicitly.
+            // Derived chains base explicitly.
             PostBase::base_post(scope, this)?;
             Ok(())
         }
@@ -564,11 +563,11 @@ fn must_new_failure_skips_post_init() {
 // ---------------------------------------------------------------------------
 // Test #5b — &mut self method called from inside post_init body. The
 // per-method re-entry guard is per-instance, per-method — post_init
-// itself doesn't materialise a borrow at the macro layer (per §5.5
-// Option C selection), so the &mut self method's first call from
-// post_init succeeds, mutates state, and returns. A nested re-entry
-// from JS into the same &mut self while inside that body is what the
-// guard catches; calling once is fine.
+// itself doesn't materialise a borrow at the macro layer, so the
+// &mut self method's first call from post_init succeeds, mutates
+// state, and returns. A nested re-entry from JS into the same &mut
+// self while inside that body is what the guard catches; calling once
+// is fine.
 // ---------------------------------------------------------------------------
 
 mod mut_self_in_hook {
@@ -643,7 +642,7 @@ fn post_init_mutates_state_via_interior_mutability() {
 
 // ---------------------------------------------------------------------------
 // Test #6 — callable_no_new + post_init: bare `Foo()` (no new) skips
-// post_init per §5.3 revised decision.
+// post_init.
 // ---------------------------------------------------------------------------
 
 mod callable_path {
@@ -694,7 +693,7 @@ fn callable_no_new_skips_post_init_on_bare_call() {
     );
 
     // `Lax()` (no new) — post_init MUST NOT fire (is_construct_call()
-    // is false; the macro's guard skips the dispatch per §5.3).
+    // is false; the macro's guard skips the dispatch).
     callable_path::POST_INIT_RAN.with(|c| c.set(false));
     let _ = run_in_v8(
         |scope, global| {
@@ -717,7 +716,7 @@ fn callable_no_new_skips_post_init_on_bare_call() {
 
 // ---------------------------------------------------------------------------
 // Test #7 — `with_state` from post_init recovers the box. This locks
-// in the §3.5 ordering claim (set_internal_field is observable at the
+// in the ordering guarantee (set_internal_field is observable at the
 // next get_internal_field within the same isolate).
 // ---------------------------------------------------------------------------
 //
@@ -759,8 +758,8 @@ mod with_state_smoke {
             scope: &mut v8::PinScope,
             this: v8::Local<v8::Object>,
         ) -> Result<(), OpError> {
-            // If with_state can't recover the box, the §3.5 ordering
-            // claim is broken and this test fails loudly.
+            // If with_state can't recover the box, the ordering
+            // guarantee is broken and this test fails loudly.
             let seed = with_state(scope, this, |s| s.seed.get())
                 .ok_or_else(|| OpError::error("with_state could not recover box"))?;
             if seed != 0xDEADBEEF {
@@ -819,9 +818,8 @@ mod plain_self {
     impl Bare {
         #[v8_constructor(post_init = "after_install")]
         fn new() -> Bare {
-            // NB: returns Self, NOT Result<Self, _>. This is the §5.6
-            // case the design verifies but reasonably wants smoke
-            // coverage on.
+            // NB: returns Self, NOT Result<Self, _>. Plain-Self
+            // constructors are exercised here.
             Bare
         }
 
