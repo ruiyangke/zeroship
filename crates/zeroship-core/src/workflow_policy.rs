@@ -39,6 +39,10 @@ pub struct AppPolicy {
     pub payload_staging_retention_ms: i64,
     pub max_compensation_attempts: i32,
     pub compensation_retry_ms: i64,
+    /// How many delivery attempts of one job may reach creator execution before
+    /// the manager stops redelivering it. Attempts the worker never began, such
+    /// as a claim the creator journal deferred, are not counted against it.
+    pub max_delivery_attempts: i64,
     pub max_schedules: usize,
     pub max_schedule_backfill: usize,
     pub min_schedule_interval_ms: i64,
@@ -63,6 +67,7 @@ impl Default for AppPolicy {
             payload_staging_retention_ms: 86_400_000,
             max_compensation_attempts: 8,
             compensation_retry_ms: 1_000,
+            max_delivery_attempts: 8,
             max_schedules: 64,
             max_schedule_backfill: 32,
             min_schedule_interval_ms: 1_000,
@@ -89,6 +94,7 @@ impl AppPolicy {
             || self.payload_staging_retention_ms <= 0
             || self.max_compensation_attempts <= 0
             || self.compensation_retry_ms <= 0
+            || self.max_delivery_attempts <= 0
             || self.max_schedule_backfill == 0
             || self.min_schedule_interval_ms <= 0
             || self.max_signal_token_lifetime_seconds <= 0

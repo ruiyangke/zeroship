@@ -35,7 +35,7 @@ CREATE INDEX IF NOT EXISTS "receipt_scope_idx" ON "placement_receipts" ("app_id"
 
 CREATE UNIQUE INDEX IF NOT EXISTS "placement_receipts_scope_key" ON "placement_receipts" ("app_id", "request_id");
 
-CREATE TABLE "jobs" ("id" TEXT PRIMARY KEY NOT NULL, "app_id" TEXT NOT NULL, "deployment_id" TEXT, "operation" TEXT NOT NULL, "operation_kind" TEXT NOT NULL, "management_request_id" TEXT, "run_id" TEXT, "spec_digest" TEXT NOT NULL, "available_at" INTEGER NOT NULL, "dispatch_order" INTEGER NOT NULL, "state" TEXT NOT NULL, "attempt" INTEGER NOT NULL DEFAULT 0, "worker_id" TEXT, "assignment_revision" INTEGER, "lease_deadline" INTEGER, "outcome" TEXT, "settlement_digest" TEXT, "created_at" INTEGER NOT NULL, CONSTRAINT "jobs_app_id_fkey" FOREIGN KEY (app_id) REFERENCES queue_scopes(id) ON DELETE RESTRICT);
+CREATE TABLE "jobs" ("id" TEXT PRIMARY KEY NOT NULL, "app_id" TEXT NOT NULL, "deployment_id" TEXT, "operation" TEXT NOT NULL, "operation_kind" TEXT NOT NULL, "management_request_id" TEXT, "run_id" TEXT, "spec_digest" TEXT NOT NULL, "available_at" INTEGER NOT NULL, "dispatch_order" INTEGER NOT NULL, "state" TEXT NOT NULL, "attempt" INTEGER NOT NULL DEFAULT 0, "execution_attempts" INTEGER NOT NULL DEFAULT 0, "executed_attempt" INTEGER, "worker_id" TEXT, "assignment_revision" INTEGER, "lease_deadline" INTEGER, "outcome" TEXT, "settlement_digest" TEXT, "created_at" INTEGER NOT NULL, CONSTRAINT "jobs_app_id_fkey" FOREIGN KEY (app_id) REFERENCES queue_scopes(id) ON DELETE RESTRICT);
 
 CREATE INDEX IF NOT EXISTS "jobs_app_id_fkey_idx" ON "jobs" ("app_id");
 
@@ -148,4 +148,4 @@ CREATE INDEX IF NOT EXISTS "capacity_demands_zone_idx" ON "capacity_demands" ("e
 CREATE TABLE "capacity_targets" ("id" TEXT PRIMARY KEY NOT NULL, "revision" INTEGER NOT NULL DEFAULT 0, "desired" INTEGER NOT NULL DEFAULT 0, "state" TEXT NOT NULL DEFAULT 'steady', "refusal" TEXT, "observed" INTEGER, "attempt" INTEGER NOT NULL DEFAULT 0, "attempt_deadline" INTEGER, "retry_at" INTEGER, "below_since" INTEGER, "lock_version" INTEGER NOT NULL DEFAULT 0);
 
 SELECT 1;
-INSERT INTO main.schema_version (id, fingerprint) VALUES ('manager', 'ce953c04a8df02ce2792a2c5d6062beed648780e4bd29d3696fe0c1085a2e464');
+INSERT INTO main.schema_version (id, fingerprint) VALUES ('manager', '05468ea25777be6c1a636b6c4f841801aed1888d6918cf92e9349fd0318b3c95');

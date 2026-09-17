@@ -86,6 +86,7 @@ fn shared_validation_rejects_invalid_resource_limits() {
         ("payloadStagingRetentionMs", json!(0)),
         ("maxCompensationAttempts", json!(0)),
         ("compensationRetryMs", json!(0)),
+        ("maxDeliveryAttempts", json!(0)),
         ("maxScheduleBackfill", json!(0)),
         ("minScheduleIntervalMs", json!(0)),
         ("maxSignalTokenLifetimeSeconds", json!(0)),

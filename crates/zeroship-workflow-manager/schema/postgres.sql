@@ -35,7 +35,7 @@ CREATE INDEX IF NOT EXISTS "receipt_scope_idx" ON "workflow_manager"."placement_
 
 CREATE UNIQUE INDEX IF NOT EXISTS "placement_receipts_scope_key" ON "workflow_manager"."placement_receipts" ("app_id", "request_id");
 
-CREATE TABLE "workflow_manager"."jobs" ("id" text PRIMARY KEY NOT NULL, "app_id" text NOT NULL, "deployment_id" text, "operation" text NOT NULL, "operation_kind" text NOT NULL, "management_request_id" text, "run_id" text, "spec_digest" text NOT NULL, "available_at" bigint NOT NULL, "dispatch_order" bigint NOT NULL, "state" text NOT NULL, "attempt" bigint NOT NULL DEFAULT 0, "worker_id" text, "assignment_revision" bigint, "lease_deadline" bigint, "outcome" text, "settlement_digest" text, "created_at" bigint NOT NULL, CONSTRAINT "jobs_app_id_fkey" FOREIGN KEY ("app_id") REFERENCES "workflow_manager"."queue_scopes" (id) ON DELETE RESTRICT);
+CREATE TABLE "workflow_manager"."jobs" ("id" text PRIMARY KEY NOT NULL, "app_id" text NOT NULL, "deployment_id" text, "operation" text NOT NULL, "operation_kind" text NOT NULL, "management_request_id" text, "run_id" text, "spec_digest" text NOT NULL, "available_at" bigint NOT NULL, "dispatch_order" bigint NOT NULL, "state" text NOT NULL, "attempt" bigint NOT NULL DEFAULT 0, "execution_attempts" bigint NOT NULL DEFAULT 0, "executed_attempt" bigint, "worker_id" text, "assignment_revision" bigint, "lease_deadline" bigint, "outcome" text, "settlement_digest" text, "created_at" bigint NOT NULL, CONSTRAINT "jobs_app_id_fkey" FOREIGN KEY ("app_id") REFERENCES "workflow_manager"."queue_scopes" (id) ON DELETE RESTRICT);
 
 CREATE INDEX IF NOT EXISTS "jobs_app_id_fkey_idx" ON "workflow_manager"."jobs" ("app_id");
 
@@ -184,4 +184,4 @@ ALTER TABLE "workflow_manager"."schedule_scopes" ALTER COLUMN "id" TYPE text COL
 ALTER TABLE "workflow_manager"."schedules" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "name" TYPE text COLLATE "C", ALTER COLUMN "activation_id" TYPE text COLLATE "C";
 
 ALTER TABLE "workflow_manager"."schedule_occurrences" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "schedule_id" TYPE text COLLATE "C", ALTER COLUMN "run_id" TYPE text COLLATE "C", ALTER COLUMN "job_id" TYPE text COLLATE "C", ALTER COLUMN "activation_id" TYPE text COLLATE "C";
-INSERT INTO workflow_manager.schema_version (id, fingerprint) VALUES ('manager', 'ce953c04a8df02ce2792a2c5d6062beed648780e4bd29d3696fe0c1085a2e464');
+INSERT INTO workflow_manager.schema_version (id, fingerprint) VALUES ('manager', '05468ea25777be6c1a636b6c4f841801aed1888d6918cf92e9349fd0318b3c95');
