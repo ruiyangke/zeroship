@@ -69,42 +69,25 @@ pub struct AliasTarget {
 /// - row exists, `relay_email` set ⇒ reuse it, clear `revoked_at` (re-grant
 ///   stability, §6.1) — the address is unchanged.
 /// - row absent (consent ran before token or session issuance) returns
-///   `None`, and NOTHING mints it afterwards. This arm
-///   used to claim the gateway's "lazy-mint on read-through miss (main spec
-///   §7.1)" covered it, "so the app-facing email is never spuriously null".
-///   That mint does not exist. In `crates/zeroship-gateway/src/identities.rs`,
-///   `upsert` leaves `relay_email` untouched and `lookup_relay_email` only reads
-///   the persisted alias. So on a
-///   first login the order is: consent runs, finds no row, returns `None`;
-///   the gateway then INSERTs with `relay_email` NULL; consent never runs
-///   again for that grant.
+///   `None`, and NOTHING mints the alias afterwards: the gateway's `upsert`
+///   leaves `relay_email` untouched and its lookup only reads the persisted
+///   alias, so on a first login consent runs, finds no row, and returns
+///   `None`; the gateway then INSERTs with `relay_email` NULL; and consent
+///   never runs again for that grant.
 ///
-///   "Never runs again" is not an assumption — it is
-///   `oidc/authorization_code.rs`: the authorize path calls `consent_covers`,
-///   and when the stored grant already covers the requested scopes it calls
-///   `touch_consent_grant` and issues the code WITHOUT redirecting to consent.
+///   Consent does not run again because the authorize path calls
+///   `consent_covers`, and when the stored grant already covers the requested
+///   scopes it issues the code without redirecting to consent.
 ///   `post_consent_accept_native` is the only production caller of this
-///   function, so it is skipped on every subsequent login. The empty email is
-///   therefore PERMANENT for that `(user, client)` pair, not a first-login
-///   glitch that settles. The only paths back through consent are an explicit
-///   `prompt=consent` and deleting the grant row. Established by reading those
-///   call sites, not by running a second login — the login harness measured
-///   four logins and saw `""` throughout, but never exercised a re-grant.
+///   function, so it is skipped on every subsequent login. The app receives
+///   an EMPTY STRING rather than a null it could branch on: the projection
+///   collapses a missing alias to the default. The empty email is therefore
+///   PERMANENT for that `(user, client)` pair; the only paths back through
+///   consent are an explicit `prompt=consent` and deleting the grant row.
 ///
-///   The app then receives an EMPTY STRING, not a null it could branch on:
-///   `router/auth.rs` looks the alias up, leaves `relay_email = None` on a
-///   miss, and projects `owned.email = relay_email.unwrap_or_default()`.
-///   Measured end to end on a live deployed login by
-///   `tests/e2e_dev_vs_deployed_login.sh` (2026-08-10): dev handed the app
-///   `alpha@probe.zeroship.test`, deployed handed it `""`, through both the
-///   browser projection and `env.auth.getUser()`.
-///
-///   Which side should close it — auth minting without `pairwise_sub`, the
-///   gateway minting on miss, or the projection distinguishing "unknown" from
-///   "none" instead of collapsing both to `""` — is a contract decision on an
-///   identity path and is deliberately NOT taken here. What is fixed is the
-///   claim: it asserted a safety net that does not exist, which is why no test
-///   ever checked for the empty string.
+///   Closing this — auth minting without `pairwise_sub`, the gateway minting
+///   on miss, or the projection distinguishing "unknown" from "none" — is a
+///   contract decision on an identity path and is deliberately NOT taken here.
 ///
 /// Runs under the consent grant's advisory lock on a dedicated owned `Client`,
 /// so two concurrent first-consents mint exactly one alias.
@@ -130,8 +113,7 @@ pub async fn mint_alias_at_consent(
 
     let Some(row) = existing.first() else {
         // Row not written yet. NOTHING mints it afterwards — see the arm in
-        // this function's doc comment. The gateway's "lazy-mint on read-through
-        // miss" that this line used to name does not exist.
+        // this function's doc comment.
         return Ok(None);
     };
 
@@ -219,7 +201,7 @@ fn gen_token() -> String {
 /// forwarding, full stop. The two writers no longer need to share a lock; the
 /// inbound read derives liveness from the grant ledger (the single source of
 /// truth, spec §5.2/§5.4). Cross-schema read on one PG instance is fine
-/// (AGENTS.md: one database, separate schemas) — the existing
+/// (one database, separate schemas) — the existing
 /// `zeroship.oauth_grants`/`zeroship.app_scope_defs` reads in
 /// `ui/consent.rs` already do exactly this from the auth service.
 ///
@@ -308,8 +290,8 @@ fn seen_key(message_id: &str) -> String {
 /// only at a terminal outcome via [`commit_seen`], AFTER all the retryable (503)
 /// gates. That ordering is what keeps a Postmark retry of a transient-fault
 /// message (DB/mailer momentarily down, or a rate-limit spike) from being
-/// deduped away into a silent drop — the bug a commit-before-the-gates ordering
-/// caused (sub-spec §8 never-silent-drop / §7 retry-smoothing).
+/// deduped away into a silent drop (sub-spec §8 never-silent-drop / §7
+/// retry-smoothing).
 ///
 /// The TTL is 24h (longer than Postmark's ≤6h retry window); a row older than
 /// that is treated as expired and ignored (and reclaimed by [`commit_seen`]).

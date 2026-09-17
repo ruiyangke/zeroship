@@ -12,10 +12,9 @@
 //! command tag becomes a rows-affected count, and which SQLSTATE and message a
 //! failure carries. Those are the surfaces a port writes from scratch.
 //!
-//! `tokio-postgres` is a DEV-dependency only, permitted by the 2026-08-24
-//! decision recorded in AGENTS.md. It never enters a shipped binary, and
-//! `cargo xtask test repository` still refuses a normal or build dependency on
-//! tokio.
+//! `tokio-postgres` is a DEV-dependency only. It never enters a shipped
+//! binary, and `cargo xtask test repository` still refuses a normal or build
+//! dependency on tokio.
 //!
 //! WHERE THE REFERENCE IS WRONG. tokio-postgres is a reference, not an
 //! oracle: agreement is evidence, disagreement is a question, and sometimes
