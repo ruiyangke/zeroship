@@ -143,11 +143,16 @@ const ZS_MAX_START_MANY_BATCH = 1000;
 
 // Misuse of the step API. Deterministic by construction: the same body raises
 // it again, so re-executing the step cannot clear it.
-function wfErr(message, status, code) {
+//
+// `name` is the identity `@zeroship/workflows` matches on, so a condition the
+// SDK exports a class for passes its spelling here. The rest stay `Error`:
+// they are definition faults with no catchable class.
+function wfErr(message, status, code, name) {
     const e = new Error(message);
     e.status = status;
     e.code = code;
     e.retryable = false;
+    if (name) e.name = name;
     return e;
 }
 
@@ -929,7 +934,12 @@ class ZsJournalBackedStep {
             this.#activeStepCallbacks > 0 &&
             (this.#callbackSyncDepth > 0 || !this.#parallelIssueWindow)
         ) {
-            throw wfErr("workflow step methods cannot be called from inside a step body", 500, "WORKFLOW_DEFINITION_ERROR");
+            throw wfErr(
+                "workflow step methods cannot be called from inside a step body",
+                500,
+                "WORKFLOW_DEFINITION_ERROR",
+                "NestedStepError",
+            );
         }
     }
 }

@@ -1020,13 +1020,34 @@ The SDK exports these workflow error classes:
 | `StalledError` | The engine detects repeated dispatches with no durable progress. | Terminal engine error. No rollback. |
 | `ChildCancelledError` | A `step.call` child is cancelled before the parent join completes. | Yes around `step.call`; if uncaught, normal failure handling applies. |
 | `ChildTimeoutError` | A `step.call` child exceeds `ChildWorkflowOptions.timeout`. | Yes around `step.call`; if uncaught, normal failure handling applies. |
-| `LimitExceededError` | A platform cap is exceeded, such as `step.startMany` over 1,000 items or output over the blob cap. | Sometimes. Local `step.startMany` cap is catchable; committed cap failures are terminal. |
+| `LimitExceededError` | A platform cap is exceeded, such as `step.startMany` over the batch cap or output over the blob cap. | Once recorded, yes. The `step.startMany` cap cannot be caught in the dispatch that raises it: the catch resumes the body outside the replay boundary and the run fails `NondeterministicError` instead. |
+| `WorkflowTimeoutError` | A `step.waitForSignal` timeout that was recorded against the run rather than resolved to `null`. | Yes around `step.waitForSignal`; if uncaught, normal failure handling applies. |
+| `NestedStepError` | A `step.*` method is called from inside a step body or compensator. | Treat as terminal misuse. Fix the body rather than handling it. |
 | `CompensableCarryError` | `step.continueAsNew` is requested while the current generation still has pending compensators. | No. Finish or clear compensation first; no successor generation is created. |
 | `RestartError` | A run restart request is invalid or cannot be applied. | Outside `run()` only, around `run.restart(...)`. |
 
-The package also exports compatibility classes for stored wait timeouts and
-definition/runtime misuse. Prefer the specific classes above and branch on
-structured status/error fields for run monitoring.
+### Matching an error
+
+A workflow error is identified by its `name`, not by the constructor that built
+it. A step failure is recorded in the journal as `{ type, message, ... }`, and
+the dispatch that rethrows it into the body rebuilds it from that row, so the
+object caught is never the object thrown. Each exported class matches on the
+recorded name, which makes the ordinary form hold for a replayed failure and for
+one raised live:
+
+```ts
+try {
+  await step.run("charge", chargeCard);
+} catch (e) {
+  if (e instanceof StepTimeoutError) return retryLater();
+  throw e;
+}
+```
+
+The same holds for an error a body throws itself: `throw new PermanentError(...)`
+is caught as `e instanceof PermanentError` after the round trip. Because the
+match is on the recorded name, any error carrying that name matches, including
+one the runtime rebuilt as a plain `Error`.
 
 A recorded failure carries `type`, `message`, an optional `stack`, and
 `retryable` when the thrown error declared one. An error that declares nothing
