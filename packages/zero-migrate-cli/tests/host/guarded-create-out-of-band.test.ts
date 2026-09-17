@@ -1,16 +1,12 @@
 // A guard against an object created OUT OF BAND, which is where the two dialects part.
 //
-// `docs/writing-migrations.md` used to say MySQL is "not probed" and that a guarded
-// operation's statement "runs unconditionally, so a repeat run fails with the server's
-// own duplicate-object or missing-object error". Both halves are wrong, and this pins
-// what actually happens.
-//
 // MySQL DOES probe: `zeroship-migrate-mysql/src/backend/session.rs` calls
 // `existence_probe::decide` and honours all three verdicts (RunBare / SatisfiedNoop /
 // FailDrift), the same call PostgreSQL and SQLite make. What MySQL does not do is
 // resolve the guard while the PENDING SCHEMA is projected, and the projection runs
 // first — so a state the folded history disagrees with is refused by the guard-blind
-// fold before the probe is ever reached.
+// fold before the probe is ever reached, not by the server's own duplicate-object
+// error.
 //
 // The shape has to be one the fold cannot resolve on its own, so the table is created
 // OUT OF BAND: no migration in the history creates it, and the live catalog has it.
@@ -20,10 +16,9 @@
 // "a guarded create of an existing table is refused", which is dialect-independent and
 // false — PostgreSQL absorbs the identical migration.
 //
-// The MySQL assertion is on the MESSAGE, not the exit code. The old documented
-// behaviour ("runs unconditionally") ALSO fails, with MySQL's own duplicate-table
-// error, so an exit-code-only test would pass against the behaviour this file exists
-// to say we do not have.
+// The MySQL assertion is on the MESSAGE, not the exit code: an unconditional run
+// ALSO fails, with MySQL's own duplicate-table error, so an exit-code-only test
+// would pass against the wrong behaviour.
 //
 // GATES: `ZERO_MIGRATE_TEST_PG_URL`, `ZERO_MIGRATE_MYSQL_URL`.
 
@@ -137,7 +132,7 @@ test("MySQL refuses a guarded create of an out-of-band table during projection",
       /table `oob` already exists/,
       `and it must name the object: ${outcome.text}`,
     );
-    // The documented-but-false behaviour would surface MySQL's own error instead.
+    // An unconditional run would surface MySQL's own error instead.
     assert.doesNotMatch(
       outcome.text,
       /ER_TABLE_EXISTS_ERROR|Table 'oob' already exists/,

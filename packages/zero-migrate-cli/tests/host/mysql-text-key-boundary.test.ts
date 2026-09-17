@@ -1,4 +1,4 @@
-// Where the MySQL text-in-key refusal stops, measured against live MySQL 8.
+// Where the MySQL text-in-key refusal stops, against live MySQL 8.
 //
 // MySQL rejects a key over a `TEXT` column with no prefix length (`ERROR 1170`).
 // TWO gates refuse that shape before the deploy starts, and this file pins the
@@ -13,26 +13,17 @@
 //     no authored type; the live catalog the apply path has already introspected
 //     is the only witness. Second arm.
 //
-// Both halves are pinned here because both were being reported wrongly. `TODO.md`
-// listed the rule as unbuilt and `docs/dialects.md` said a text key "currently
-// surfaces this as MySQL's apply-time error rather than an earlier validation
-// error". Two documents describing a shipped gate as absent is the kind of thing
-// that gets the gate rebuilt, or removed as dead code.
+// Both halves are pinned because a text key without a prefix length must be
+// refused before anything is applied, not left to MySQL's apply-time error.
 //
-// The second arm USED to assert the mid-deploy server error, deliberately written
-// to fail when that improved. It has improved, and this is the record of what
-// shipped. Measured on this database before the fix, the second arm's migration
-// died mid-deploy with the server's own `BLOB/TEXT column 'body' used in key
-// specification without a key length`; it is now refused with nothing applied.
-//
-// That arm stays TWO-SIDED and must not be reduced to the refusal alone. It pins
-// the refusal (a regression that lets the shape through fails here) AND a bounded
-// control (a gate that starts refusing every keyed string column fails here too).
-// An over-refusing gate is worse than the bug it closes, and this one came close:
-// the catalog fact the check reads - MySQL's own physical-type leg on the column
-// snapshot - was chosen precisely
-// because the neighbouring `data_type` canonicalises `varchar(n)` to `"text"` and
-// would have refused every bounded key in the project.
+// The second arm stays TWO-SIDED and must not be reduced to the refusal alone. It
+// pins the refusal (a regression that lets the shape through fails here) AND a
+// bounded control (a gate that starts refusing every keyed string column fails
+// here too). An over-refusing gate is worse than the bug it closes: the catalog
+// fact the check reads - MySQL's own physical-type leg on the column snapshot -
+// was chosen precisely because the neighbouring `data_type` canonicalises
+// `varchar(n)` to `"text"` and would have refused every bounded key in the
+// project.
 //
 // GATE: `ZERO_MIGRATE_MYSQL_URL`.
 
@@ -249,13 +240,11 @@ test("MySQL: a key over a column an EARLIER migration created is refused at lowe
     // migration, same standalone createIndex, differing only in that the column is
     // a bounded t.string({ length }). This must still reach the server and apply.
     //
-    // NO PRIORS, deliberately, and this is the whole load-bearing detail: with
-    // priors the authored seed answers for `slug` and the catalog classifier is
-    // never consulted, so the assertion would pass no matter how wrong that
-    // classifier is. Measured - a deliberately broken build that classified from
-    // the canonical `data_type` (which folds `varchar(n)` into `"text"`, and so
-    // refuses every bounded key) passed the seeded form of this assertion and
-    // failed this one.
+    // NO PRIORS, deliberately: with priors the authored seed answers for `slug`
+    // and the catalog classifier is never consulted, so the assertion would pass
+    // no matter how wrong that classifier is. The canonical `data_type` folds
+    // `varchar(n)` into `"text"` and so refuses every bounded key, which is the
+    // failure this arm exists to catch.
     await deploy(indexedBounded, [], owned);
     const [afterBounded] = (await admin.query(
       `SELECT COUNT(*) AS n FROM information_schema.STATISTICS

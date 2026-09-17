@@ -1,15 +1,14 @@
 // The tutorial's first minute: `new` then `lint`.
 //
-// `docs/getting-started.md` opens with `zero-migrate new create_users` followed
-// immediately by `lint --dir ./migrations --explain`, before any database is
-// involved. That is the first thing a new user runs, and if the scaffold the
-// generator writes did not lint, the tutorial would fail at step one.
+// `zero-migrate new create_users` is followed immediately by
+// `lint --dir ./migrations --explain`, before any database is involved. If the
+// scaffold the generator writes did not lint, that first step would fail.
 //
-// Nothing covered it. `cli.test.ts` exercises `new` (that it writes a file, and
-// its naming rules) and `lint` separately; no test feeds one into the other. The
-// scaffold is a template string in the generator, so a DSL rename, a stray
-// syntax error, or a change to the default export shape would leave every
-// existing test green and every new user stuck.
+// `cli.test.ts` exercises `new` (that it writes a file, and its naming rules)
+// and `lint` separately; no test feeds one into the other. The scaffold is a
+// template string in the generator, so a DSL rename, a stray syntax error, or a
+// change to the default export shape would leave every existing test green and
+// every new user stuck.
 //
 // The assertions are deliberately about the CONTRACT rather than the wording:
 // the file must parse, export a `name` and a default object with a `schema`, and

@@ -1,7 +1,7 @@
 // `apply()` and `status()` do not leak database connections.
 //
-// `docs/node-api.md`: "Each call opens and closes its own database connection.
-// The caller does not need to close it manually."
+// Each call opens and closes its own database connection, and the caller does not
+// need to close it manually.
 //
 // That is a promise about a resource, and a broken one fails in the worst way
 // available: invisibly and slowly. A host that leaks one backend per deploy runs
@@ -15,18 +15,17 @@
 // WHAT THIS CAN AND CANNOT DISTINGUISH. `pg_stat_activity` is server-wide, and the
 // host suite runs its files concurrently, so a strict "delta must be zero" would
 // flake on an unrelated file's connection being momentarily open. The assertion is
-// therefore a BOUND: after twelve engine calls the backend count must not have
-// grown by twelve, or by anything close to it. That is deliberately weaker than
-// equality and still catches the failure mode the claim is about, because a leak
-// is per-call and monotonic while concurrency noise is a transient handful. A leak
-// of one connection per call would land at +12; the assertion trips well below it.
+// therefore a BOUND: after a full run of engine calls the backend count must not
+// have grown by the number of calls, or by anything close to it. That is
+// deliberately weaker than equality and still catches the failure mode the claim is
+// about, because a leak is per-call and monotonic while concurrency noise is a
+// transient handful. A leak of one connection per call would land there; the
+// assertion trips well below it.
 //
 // The "after" reading is the MINIMUM of several samples rather than a single one,
 // so a socket still closing - or a neighbouring file mid-deploy - is not mistaken
 // for a leak. A leaked backend is idle and persistent and survives every sample;
-// concurrency noise does not. A single reading measured this file's leak plus
-// whatever the suite had open at that instant, which are different quantities, and
-// it failed that way once the suite grew.
+// concurrency noise does not.
 //
 // GATE: `connectLivePg` (see `live-db.ts`).
 
@@ -128,15 +127,12 @@ test("repeated apply and status calls leave no database connections behind", asy
     //
     // A single reading measures this test's leak PLUS whatever the rest of the
     // suite happened to have open at that instant, and those are not comparable:
-    // `before` is one instant and `after` is another. Observed failing at
-    // before=5 after=17 delta=12 on a run where the engine provably did not leak
-    // (the identical twelve calls pass in isolation) - the baseline had simply
-    // moved under it.
+    // `before` is one instant and `after` is another.
     //
     // The minimum separates them on the property the file already names: a leaked
     // backend is idle and PERSISTENT, so it appears in every sample, while a
     // neighbouring file's connection is transient and drops out of at least one.
-    // Taking the floor keeps a real per-call leak at +12 and erodes the noise.
+    // Taking the floor keeps a real per-call leak and erodes the noise.
     let after = await backends();
     if (after > before) {
       for (let sample = 0; sample < 4; sample += 1) {
