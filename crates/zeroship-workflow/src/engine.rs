@@ -1075,6 +1075,18 @@ pub fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, R
     Ok((checkpoints, run_update))
 }
 
+/// The creator-visible reason a generation that asked to continue instead failed.
+///
+/// A compensator belongs to the generation whose step registered it, and a
+/// successor starts from an empty journal, so carrying the obligation across
+/// the transition would strand an undo nothing could ever run.
+pub fn compensable_carry_error() -> Value {
+    serde_json::json!({
+        "type": "CompensableCarryError",
+        "message": "cannot continue as new while compensable steps are pending",
+    })
+}
+
 /// The creator-visible reason a run rests in `stalled`: its dispatches kept
 /// being reclaimed with no outcome reported, against one unchanged frontier.
 pub fn stalled_error(dispatches: i64, limit: i64) -> Value {
