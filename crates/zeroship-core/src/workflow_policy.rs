@@ -44,10 +44,16 @@ pub struct AppPolicy {
     /// as a claim the creator journal deferred, are not counted against it.
     pub max_delivery_attempts: i64,
     /// How many consecutive dispatches of one run may be reclaimed without the
-    /// executor reporting an outcome before the creator engine gives up and
-    /// settles the run `stalled`. A dispatch that commits a frontier transition
-    /// supersedes the frontier the strikes were counted against, so the count
-    /// starts again from the transition rather than from the run.
+    /// executor reporting an outcome before the creator engine gives up on it.
+    /// A dispatch that commits a frontier transition supersedes the frontier the
+    /// strikes were counted against, so the count starts again from the
+    /// transition rather than from the run.
+    ///
+    /// One budget covers both phases, because both are the same question about
+    /// the same dispatch path. Where they differ is the resting state: a forward
+    /// run the host gave up on settles `stalled`, and a rollback it gave up on
+    /// rests at the failure it was rolling back with the undischarged
+    /// obligations named on the compensation summary.
     ///
     /// Strikes advance no faster than the counted executions bounding
     /// `max_delivery_attempts`, so keeping this below that ceiling is what
