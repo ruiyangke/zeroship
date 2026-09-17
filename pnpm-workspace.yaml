@@ -1,5 +1,10 @@
 packages:
   - "examples/*"
+  # meal-kit is NOT a workspace member. Its nested apps/ and packages/ are
+  # untracked work in progress, and `examples/*` would otherwise pull it in,
+  # along with the workspace deps that make it part of every install and of
+  # the lockfile.
+  - "!examples/meal-kit"
   # Browser integration suite spanning examples.
   - "tests/e2e-browser"
   # The migration engine's TypeScript half: the authoring DSL, the CLI and its

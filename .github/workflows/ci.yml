@@ -8,9 +8,9 @@ on: [push, pull_request]
 # `curl.dev`. Anything that builds the workspace needs those inputs, which is why
 # every job opts in instead of only the Rust steps.
 #
-# pnpm is deliberately NOT in the devShell: a devShell entry is PREPENDED to
-# PATH, and `package.json#packageManager` pins the pnpm CI must use. Declaring it
-# in the shell would shadow that pin. See the matching note in flake.nix.
+# pnpm comes from the devShell as well. It is a devShell entry, so it is first on
+# PATH, and pnpm then switches itself to the `package.json#packageManager`
+# version, which is what keeps that field the pin CI runs.
 defaults:
   run:
     shell: nix develop --command bash -e {0}
@@ -27,7 +27,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - uses: pnpm/action-setup@v4
       - run: pnpm install --frozen-lockfile
       # The vendored engine ships no dist/ and the vite-plugin imports it, so it
       # is built before the SDKs. Same ordering as the `sdk` job.
@@ -289,7 +288,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - uses: pnpm/action-setup@v4
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - name: Run billing tests with owned services
@@ -304,7 +302,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - uses: pnpm/action-setup@v4
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - name: Run native auth tests with owned services
@@ -320,7 +317,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - uses: pnpm/action-setup@v4
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @zeroship/migrate build
       - run: pnpm build
@@ -342,7 +338,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - uses: pnpm/action-setup@v4
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - name: Run native worker tests with owned services
@@ -365,7 +360,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - uses: pnpm/action-setup@v4
       - run: pnpm install --frozen-lockfile
       # The vendored engine ships no dist/ (it is gitignored there and built
       # from source), so it has to be built before anything that imports it.

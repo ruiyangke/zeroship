@@ -8,7 +8,8 @@
     "build": "vite build",
     "dev": "vite",
     "preview": "vite preview",
-    "e2e": "node e2e/setup.mjs && node e2e/run.mjs"
+    "test:e2e": "playwright test",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@ai-sdk/openai": "^3.0.55",
@@ -22,6 +23,8 @@
     "react-dom": "catalog:"
   },
   "devDependencies": {
+    "@playwright/test": "1.58.2",
+    "@types/node": "catalog:",
     "@types/react": "catalog:",
     "@types/react-dom": "catalog:",
     "typescript": "catalog:",

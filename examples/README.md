@@ -55,5 +55,5 @@ Platform SDK examples:
 | [`workflows-order/`](./workflows-order/) | `@zeroship/workflows` steps, sleeps, signals, child calls, and compensation |
 | [`auth-uploads-kv/`](./auth-uploads-kv/) | `env.auth` + `env.storage` + `env.kv` together: per-user object scoping where a by-key read refuses another user's key, a KV rate limit that blocks rather than counts, and counter compensation when an upload fails after its slot is reserved |
 | [`auth-notes-db/`](./auth-notes-db/) | `env.auth` + `env.db` + RPC. Committed deliberately BROKEN: it 500s under `pnpm dev` and is the reproduction case for the descriptor collision that stops any migration-first `env.db` app running in dev |
-| [`stream-probe/`](./stream-probe/) | an RPC `stream` procedure emitting paced chunks with no external provider, so `tests/e2e_dev_vs_deployed_stream.sh` can prove chunk boundaries survive the gateway |
+| [`stream-probe/`](./stream-probe/) | an RPC `stream` procedure emitting paced chunks with no external provider, so chunk boundaries can be shown to survive the gateway |
 | [`storage-probe/`](./storage-probe/) | `@zeroship/storage` with no login: put/get for text and bytes, overwrite, delete-then-read, content-type round trip, prefix listing and pagination, and streaming transfers. Its own Vitest and Playwright tests check local development (LocalFs) against deployment (S3) |
