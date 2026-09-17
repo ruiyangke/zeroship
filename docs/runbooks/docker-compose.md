@@ -351,7 +351,7 @@ suites; see [KV test commands](../../crates/zeroship-kv/README.md).
 ## OpenMeter metering-export test stack
 
 `deploy/compose/openmeter.yml` is a **separate, opt-in** stack used only by the
-faithful OpenMeter metering-export e2e (`tests/e2e_openmeter_export.sh`). It does
+faithful OpenMeter metering-export path. It does
 **not** boot the platform stack and shares **nothing** with `deploy/compose/docker-compose.yml`:
 it is a distinct compose project (`name: zeroship-openmeter`) with its own
 network, volumes, and a private `127.0.0.1`-only port band. In particular its
@@ -370,19 +370,14 @@ meter pre-provisioned in `deploy/ops/openmeter-config.yaml` to match exactly wha
 docker compose -f deploy/compose/openmeter.yml up -d
 curl -s http://127.0.0.1:48888/api/v1/meters | grep compute_units   # meter live?
 
-# Run the faithful e2e (owns its OWN ephemeral zeroship PG on :5481, NOT :5440):
-./tests/e2e_openmeter_export.sh
-
 # Tear it down (volumes too):
 docker compose -f deploy/compose/openmeter.yml down -v
 ```
 
-The e2e script brings the stack up/down for you; run the raw compose only when
-iterating manually. `KEEP_OPENMETER=1 ./tests/e2e_openmeter_export.sh` leaves the
-OpenMeter stack running between iterations. See
-[Billing & metering](../reference/billing-metering.md) (OpenMeter section "Real-API
-divergences from the mock") for what this e2e catches that the in-test mock cannot
-(eventual-consistency lag + the query-window/`time` interaction).
+See [Billing & metering](../reference/billing-metering.md) (OpenMeter section
+"Real-API divergences from the mock") for what a real OpenMeter deployment
+catches that the in-test mock cannot (eventual-consistency lag + the
+query-window/`time` interaction).
 
 ## Postgres connections a worker holds
 

@@ -97,89 +97,6 @@ declares no `/v1` routes.
   requires `--yes`. Idempotent: re-running with nothing new to apply reports
   `Applied 0 migration op(s)`.
 
-## What is validated today (`tests/golden_path.sh`)
-
-Run `nix develop --command bash tests/golden_path.sh` (needs the release binaries
-+ a Postgres on :5440). It proves the **load-bearing half** end-to-end with a
-REAL vite-built `.zship` (not a hand-packed fixture).
-
-It takes one argument, `--provision=deploy` (the default) or
-`--provision=dev-provision`, and it decides whether step 3 ships the artifact
-with the real `zeroship deploy` CLI or writes the registry row directly. The
-bypass arm announces itself where it happens and again in the run's summary
-line, which names whichever arm was taken; CI greps for the deploy arm's line,
-so a run that did not exercise the deploy command cannot read like one that did.
-(That announcement used to be spelled with a workspace-wide skip marker. The
-marker and the census that counted it are deleted, and asserting the COVERED
-arm's line is the stronger check anyway - it also fails on a truncated log and
-on no log at all.) It does **not** read
-`ZEROSHIP_TOKEN`: the deploy arm mints its own creator bearer against the
-harness's platform OP and passes it on `--token=`.
-
-1. ✅ `examples/starter` builds to `dist/app.zship` via the real vite-plugin pipeline.
-2. ✅ A fresh DB is migrated + the platform stack (control + worker + gateway)
-   comes up healthy on the current HEAD binaries.
-3. ✅ The app is created through `POST /api/apps` and deployed with
-   `zeroship deploy --app=... --token=...` against the running control plane -
-   the CLI a creator runs - and the **gateway serves it**: `GET /apps/<name>/`
-   returns the app's `index.html` + JS asset, and the **RPC server function
-   executes** in the worker (`/__zeroship/v1/getMessages`). The step checks that
-   the `deploy_hash` the CLI printed is the one control wrote to
-   `zeroship.apps` and `zeroship.app_deploys`, and that the same deploy with a
-   bad bearer is refused. Under `--provision=dev-provision` none of that runs:
-   the registry row and blob store are written directly and the step says so.
-
-   **The chain as a whole does NOT pass, deliberately, and the totals below are a
-   BASELINE, not a current result.** Measured 2026-08-21, before both the typed-id
-   collation fix and the app-archive change: **126 passed, 15 failed, exit 1** over
-   nineteen steps and 141 outcomes with `--provision=deploy`. The same tree with
-   `--provision=dev-provision` scored **122 passed, 15 failed**, the four-outcome
-   difference being step 3's deploy assertions; the reds were identical.
-
-   The fifteen were the by-design reds the harness named and classified:
-
-   | step | reds | issue | status |
-   | --- | --- | --- | --- |
-   | 10 | six scaffold comparisons | #260 | still red |
-   | 11 | two collation reds | #255 | RETIRED by the typed-id collation fix |
-   | 12 | four app-delete reds | #331 | REPLACED by archive/unarchive assertions |
-   | 13 | three log-visibility reds | #332/#333 | still red |
-
-   **No total is stated for the current tree, on purpose.** Two changes landed
-   between that measurement and this one, and they are not the same kind. The
-   collation fix flips two reds to green and leaves the outcome count at 141. The
-   archive change REPLACES step 12's four delete assertions with different
-   assertions, so it moves the denominator as well as the numerator. Adding two
-   deltas to one baseline would produce a number nobody measured. Nine by-design
-   reds are expected to remain (step 10's six and step 13's three); the passed and
-   failed counts wait on a fresh full four-service run.
-   The "9/9" this line carried was the count when only the first three steps
-   existed, and it survived every step added since - stating "passes" about a
-   script that exits non-zero. The 2026-08-11 figure that replaced it (67/8, twelve
-   steps) had rotted the same way by 2026-08-21.
-
-   WHAT STEP 3 DOES NOT SHOW. `getMessages` is `query(async () => messages)` over
-   a module-level array literal seeded in `examples/starter/src/server.ts`, and
-   `addMessage` pushes to that same array. The RPC returns a value the handler
-   closed over, not a value read from anywhere, so this leg proves dispatch and
-   serialization and says NOTHING about the data plane: THIS STEP's outcomes are
-   unchanged with `env.db` broken or absent. The starter's only `env.*` call is
-   `env.auth.getUser`. Scoped to the step on purpose - the claim used to cover the
-   whole chain, which stopped being true once steps 9, 9b and 11 started driving
-   `env.db` through `examples/db-todos` (22 of the 75 outcomes).
-   For a leg that does exercise `env.db`, the corpus has
-   eight examples that reach it (heaviest: `hr-system` 117 call sites,
-   `db-todos` 35, `db-e2e` 20). **`db-todos` IS wired into this chain** - steps 9,
-   9b and 11 - and the other seven are not. "None of them wired" was true when
-   written and was left standing after step 9 landed.
-
-   Two consequences worth knowing before copying the starter: the array is
-   per-isolate state, so with one isolate per (app, live deploy) plus LRU
-   eviction an `addMessage` result can vanish and reappear depending on which
-   isolate serves the next request; and it is a placeholder, not the house
-   persistence pattern, despite `examples/starter/CLAUDE.md` being what an AI
-   coding agent reads first.
-
 ## Both halves are now proven end-to-end
 
 ### External build (`tests/external_chain.sh`) — BROKEN since 2026-07-14
@@ -190,7 +107,7 @@ harness's platform OP and passes it on `--token=`.
 > `zeroship-migrate-node`, which were published
 > to no registry, so `npm install` in a scaffolded app now dies with `E404`
 > before the build step this section claims to have proven. Measured 2026-08-10;
-> see task #265 and `tests/golden_path.sh:2786`. Nothing in CI runs this
+> see task #265. Nothing in CI runs this
 > script, which is why the regression sat for weeks.
 
 The claim below, as originally written: an app **outside the monorepo** installs `@zeroship/*` **from a registry** and
@@ -229,8 +146,7 @@ For the **real agent flow** against a deployed platform, the path is
   A historical 2026-08-11 run measured **67 passed, 8 failed**. The typed-id
   collation fix retires that run's two step 11 failures; step 10's six scaffold
   comparisons (#260) remain. Later steps have added other independently tracked
-  reds, so the current classifier in `tests/golden_path.sh`, not this historical
-  total, is authoritative.
+  reds.
 - ❌ External build: registry-installed SDKs, scaffolded app builds outside the
   monorepo — **FAILS at `npm install`** (`tests/external_chain.sh`). The historical
   published `@zeroship/vite-plugin` requires the former `zero-migrate@0.1.0` name

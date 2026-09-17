@@ -122,11 +122,8 @@ cargo xtask test billing
 The remaining system suites use their configured development backends:
 
 ```bash
-tests/sweep_test_databases.sh   # reclaim the test databases no branch can ask
+cargo xtask platform-db sweep   # reclaim the test databases no branch can ask
                                 # for. Dry run unless --apply; never FORCE.
-./tests/golden_path.sh          # build a creator app locally and deploy it
-./tests/e2e_platform.sh         # multi-service platform smoke
-./tests/e2e_docker.sh           # the full stack under Docker Compose
 ```
 
 ## Key invariants

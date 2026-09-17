@@ -243,7 +243,6 @@ cargo xtask test billing
 cargo xtask test worker
 cargo test -p zeroship-runtime --lib
 cargo test -p compio-postgres -- --test-threads=1
-./tests/e2e_platform.sh
 ```
 
 ### Test database ownership
