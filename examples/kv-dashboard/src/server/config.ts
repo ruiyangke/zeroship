@@ -1,9 +1,7 @@
 import { defineApp } from "@zeroship/server";
 
 // App resource policy. Without this file every procedure below resolves to
-// `auth: "user"` when deployed, and the gateway refuses all sixteen with 401 --
-// which is what happened: this example ran green under `pnpm dev` and was
-// completely unreachable once deployed. See docs/pilot/e2e-scenarios.md.
+// `auth: "user"` when deployed, and the gateway refuses them with 401.
 //
 // The fail-closed default is deliberate (a procedure with no auth policy needs
 // an authenticated end-user, so forgetting auth is a loud 401 rather than a

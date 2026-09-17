@@ -12,14 +12,11 @@ import { zeroship } from "@zeroship/vite-plugin";
 //   deployed   5s         (FREE_TIER_RUNTIME_LIMITS, crates/zeroship-core/src/types.rs)
 //
 // A creator whose request takes longer than 5s therefore sees it WORK locally
-// and 504 in production, with no local signal. That divergence is recorded in
-// docs/pilot/e2e-scenarios.md under "Divergences that remain, pinned rather
-// than fixed", and until this app existed nothing executed it.
+// and 504 in production, with no local signal. That divergence is deliberately
+// pinned rather than fixed; this app exists to execute it.
 //
-// devServerPort is set explicitly (3098). Examples that leave the 3001 default
-// collide when two run at once -- see the note on that in the repo's example
-// port allocation. 3098 was checked to have zero hits tree-wide before it was
-// chosen here.
+// devServerPort is set explicitly (3098) so two examples running at once do
+// not collide on the shared 3001 default.
 export default defineConfig({
   plugins: [
     zeroship({
