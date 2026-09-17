@@ -1,6 +1,6 @@
 //! Idempotency dedupe for `idempotent: true` mutations.
 //!
-//! Per `docs/proposals/rpc.md` §8 (Idempotency). Implementation rules:
+//! Implementation rules:
 //!
 //! - Wire requires `Idempotency-Key` for any procedure whose
 //!   `EffectivePolicy.idempotent` is `true`.
@@ -27,7 +27,7 @@
 //! worker, not the gateway. Both backends share the same wire format
 //! (the JSON value below), so swapping is a configuration concern.
 //!
-//! KV value layout (matches §8 storage spec):
+//! KV value layout:
 //!
 //! ```jsonc
 //! {
@@ -186,8 +186,7 @@ pub fn lock_key(app_id: &AppId, wire_id: &str, principal: Principal<'_>, idem_ke
 /// Whether `key` carries enough entropy to be safe in the SHARED
 /// anonymous namespace ([`Principal::Anon`]).
 ///
-/// Spec §8 (`docs/proposals/rpc.md`, "Anonymous mutations + idempotency"):
-/// an anonymous mutation's key has no principal to partition on, so the
+/// An anonymous mutation's key has no principal to partition on, so the
 /// key itself must be unguessable — a `UUIDv4` (122 random bits) or `UUIDv7`
 /// (74 random bits per millisecond). Every other shape is refused,
 /// including UUID versions that are NOT random: v1 (timestamp + MAC) and

@@ -9,7 +9,7 @@ use crate::model::op_support::FEATURE_SUPPORT_REGISTRY;
 use crate::model::support::{Feature, SupportDecision};
 use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
 
-/// The one command that rewrites `docs/support-matrix.md`.
+/// The one command that rewrites the committed support matrix.
 ///
 /// An `#[ignore]`d test rather than an env var: a `std::env::var` read takes a `&str`,
 /// so the name it reads is one nothing has declared, which is what `clippy.toml`'s
@@ -161,7 +161,7 @@ fn committed_support_matrix_is_current() {
     );
 }
 
-/// Rewrites `docs/support-matrix.md` from the current support registry.
+/// Rewrites the committed support matrix from the current support registry.
 ///
 /// Not run by default - [`committed_support_matrix_is_current`] above is the gate; this
 /// is the developer affordance that keeps it green after an intentional capability

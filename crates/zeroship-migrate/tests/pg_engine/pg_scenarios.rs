@@ -1309,16 +1309,13 @@ async fn composite_guard_backfill_survives_crash_and_cleans_up_after_resume() {
 
 /// A resumed backfill stops at the cohort boundary its FIRST run captured.
 ///
-/// `docs/security-model.md`: "Before the first batch, a backfill captures a fixed
-/// terminal cursor. Each committed batch advances saved progress, and retries stop at
-/// that original boundary rather than chasing later rows."
-///
-/// That sentence is what makes a backfill terminate. If a resume re-derived its
-/// terminal cursor from the live table instead of reading the one `initialize_progress`
-/// persisted, a table taking ordinary writes would extend its own cohort every time a
-/// deploy retried, and the backfill would mutate rows the operator never approved —
-/// silently, since every one of them matches the filter and the run still reports
-/// success.
+/// Before the first batch, a backfill captures a fixed terminal cursor, and retries
+/// stop at that original boundary rather than chasing later rows. That is what makes
+/// a backfill terminate: if a resume re-derived its terminal cursor from the live
+/// table instead of reading the one `initialize_progress` persisted, a table taking
+/// ordinary writes would extend its own cohort every time a deploy retried, and the
+/// backfill would mutate rows the operator never approved — silently, since every one
+/// of them matches the filter and the run still reports success.
 ///
 /// The crash-and-resume coverage above never measured it: it seeds a fixed set of rows
 /// and the only row it inserts mid-flight is deliberately NON-matching, so a resume
@@ -2716,8 +2713,8 @@ async fn transactional_apply_creates_table_and_journals_completed() {
 
 /// Re-classifying an APPLIED once-only migration as repeatable is refused.
 ///
-/// `docs/security-model.md` lists it among the journal-integrity guarantees:
-/// "a versioned/repeatable kind mismatch fails". `drift.rs` names the attack it
+/// It is a journal-integrity guarantee: a versioned/repeatable kind mismatch is
+/// refused. `drift.rs` names the attack it
 /// stops - the flip-flag bypass: a once-only migration aborts when its checksum
 /// changes, so an attacker flips `repeatable = true` instead, and a naive engine
 /// reads a changed checksum on a "repeatable" as the ordinary re-run signal and
@@ -6002,7 +5999,7 @@ async fn a_guarded_partition_probe_fails_closed_on_a_divergent_child() {
 // CASCADE is not the answer and is not what this asserts: `DROP COLUMN qty
 // CASCADE` reports `drop cascades to column total` and removes a column nobody
 // named, inside a step whose destructive flag was granted for one specific
-// column. See docs/review-log.md F167.
+// column.
 //
 // The assertion that matters is the SECOND one. "An error came back" is also true
 // of today's mid-chain failure; only "the new column was never added" separates a
@@ -6306,7 +6303,7 @@ async fn rollback_unwinds_both_migrations_in_reverse_order_on_live_postgres() {
 // A CHECK reports BOTH a NORMAL and an AUTO edge on its column; a view's rewrite rule
 // and a generated column's default report NORMAL alone. Keyed on "any NORMAL
 // dependency", the guard would wrongly refuse this rename, so the predicate must ask
-// whether the same object also holds an AUTO edge (docs/review-log.md F300).
+// whether the same object also holds an AUTO edge.
 //
 // The second half is what this pins beyond "no error came back": the EXPAND half
 // actually ran, so `quantity` exists alongside `qty`. That is the shape the

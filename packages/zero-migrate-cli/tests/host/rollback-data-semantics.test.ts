@@ -5,10 +5,7 @@
 // None of it asks what happens to the ROWS, and that is the question an operator
 // planning a rollback actually has.
 //
-// It went undocumented long enough that `docs/operations.md` denied the verb existed
-// at all. When that was corrected I nearly replaced one guess with another - that
-// unwinding a `dropColumn` hands back an empty column, the way a naive inverse
-// would. Measuring it says otherwise, and the engine is safer than the guess:
+// The engine's rollback data semantics:
 //
 //   1. unwinding an ADDITIVE migration removes what it added and leaves surviving
 //      rows untouched;
@@ -247,11 +244,10 @@ test("a rollback refuses a dropped column rather than handing back an empty one,
 });
 
 test("only a migration that lowers to ONE journaled step can be rolled back", async (ctx) => {
-  // The limit that decides whether `rollback` is usable at all on a real project,
-  // and the one `docs/operations.md` did not state until it was measured. A single
-  // authored operation is not enough: `create({ indexes: [...] })` is one statement
-  // to the author and more than one journaled step to the engine, so it is
-  // irreversible. That is the shape the README's own example uses.
+  // The limit that decides whether `rollback` is usable at all on a real project.
+  // A single authored operation is not enough: `create({ indexes: [...] })` is one
+  // statement to the author and more than one journaled step to the engine, so it
+  // is irreversible. That is the shape the README's own example uses.
   //
   // The arms run against a live server because the refusal is raised while
   // reconciling the journal, not while lowering, so nothing offline reaches it.

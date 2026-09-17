@@ -1,8 +1,6 @@
 //! `Cipher` / `Decipher` classes + `createCipheriv` / `createDecipheriv`
 //! factories.
 //!
-//! See `docs/archive/node-crypto-native.md` §V.4 / §III.
-//!
 //! The current implementation ships AES-{CBC,CTR,GCM} and
 //! ChaCha20-Poly1305 — the four
 //! modes that cover ~95% of npm-package usage. CCM is in the design as
@@ -664,7 +662,7 @@ pub(crate) fn create_cipher_callback(
     _args: v8::FunctionCallbackArguments,
     _rv: v8::ReturnValue,
 ) {
-    // Deprecated path; see `docs/archive/node-crypto-native.md` §V.4.
+    // Deprecated path.
     let exc = crate::node_error::build_node_exception(
         scope,
         "ERR_CRYPTO_UNSUPPORTED_OPERATION",

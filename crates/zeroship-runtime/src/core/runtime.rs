@@ -239,7 +239,6 @@ pub struct RuntimeLimits {
 /// Idle GC threshold: after this much wall time without a request, the
 /// per-isolate idle ticker fires `Isolate::low_memory_notification` so V8
 /// reclaims the high-water-mark working set during quiet windows.
-/// See `docs/reference/runtime-limits.md` § "Idle GC".
 pub const DEFAULT_IDLE_GC_AFTER: Duration = Duration::from_millis(30_000);
 
 /// Wake interval for the idle-GC ticker. Each tick checks elapsed time
@@ -768,7 +767,7 @@ impl RuntimeBuilder {
     ///
     /// Recommended floor is 32 MB; lower caps thrash on burst load.
     /// The control plane / worker config surface this as a per-app
-    /// setting (see `docs/reference/runtime-limits.md`).
+    /// setting.
     pub fn heap_limit_mb(mut self, mb: u32) -> Self {
         self.limits.heap_limit_bytes = Some((mb as usize) * 1024 * 1024);
         self
@@ -838,8 +837,7 @@ impl RuntimeBuilder {
 
     /// Idle-GC threshold in milliseconds. After this much quiet time the
     /// per-isolate ticker fires a low-memory hint so V8 reclaims the
-    /// high-water-mark working set. Default `30000` (30s); see
-    /// `docs/reference/runtime-limits.md` § "Idle GC".
+    /// high-water-mark working set. Default `30000` (30s).
     pub fn idle_gc_after_ms(mut self, ms: u64) -> Self {
         self.idle_gc_after_ms = Some(ms);
         self
@@ -1445,7 +1443,7 @@ impl RuntimeInner {
     /// `now() - last_request_ts >= idle_gc_after`, enters V8 and fires
     /// `low_memory_notification` (a full-GC hint — the v8-147 binding
     /// doesn't expose `idle_notification_deadline`, so this is the
-    /// closest equivalent. See `docs/reference/runtime-limits.md`).
+    /// closest equivalent).
     ///
     /// Holds a `Weak`; once the runtime drops, `upgrade()` returns None
     /// and the loop exits naturally.
