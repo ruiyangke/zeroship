@@ -12,6 +12,7 @@ class ZsNondeterministicError extends Error {
     constructor(message = "workflow replay is nondeterministic") {
         super(message);
         this.name = "NondeterministicError";
+        this.retryable = false;
     }
 }
 
@@ -29,6 +30,12 @@ function zsAssertWorkflowBodyMayUseTimer() {
 
 let zsBodyGuardsInstalled = false;
 
+// The unguarded timers, kept so the dispatcher's own step-timeout clock is not
+// refused by the guard it installs: a frontier runs under the body store, where
+// the ambient `setTimeout` throws.
+let zsRealSetTimeout;
+let zsRealClearTimeout;
+
 // Wrap the ambient I/O globals before creator modules evaluate, so a creator
 // that captures `fetch` or `setTimeout` at module scope still holds a guarded
 // binding. Native startup calls this once per isolate.
@@ -44,6 +51,8 @@ export function installBodyGuards() {
     }
 
     const realSetTimeout = globalThis.setTimeout;
+    zsRealSetTimeout = realSetTimeout;
+    zsRealClearTimeout = globalThis.clearTimeout;
     if (typeof realSetTimeout === "function") {
         globalThis.setTimeout = function guardedWorkflowSetTimeout(...args) {
             zsAssertWorkflowBodyMayUseTimer();
@@ -85,6 +94,17 @@ class ZsWorkflowTimeoutError extends Error {
     constructor(message = "workflow signal wait timed out") {
         super(message);
         this.name = "WorkflowTimeoutError";
+        this.retryable = false;
+    }
+}
+
+// A step body that outlived `StepConfig.timeout`. Retryable: the bound says the
+// attempt was too slow, not that the work is impossible.
+class ZsStepTimeoutError extends Error {
+    constructor(message = "workflow step timed out") {
+        super(message);
+        this.name = "StepTimeoutError";
+        this.retryable = true;
     }
 }
 
@@ -92,6 +112,7 @@ class ZsChildCancelledError extends Error {
     constructor(message = "child workflow was cancelled") {
         super(message);
         this.name = "ChildCancelledError";
+        this.retryable = false;
     }
 }
 
@@ -99,6 +120,7 @@ class ZsChildTimeoutError extends Error {
     constructor(message = "child workflow timed out") {
         super(message);
         this.name = "ChildTimeoutError";
+        this.retryable = false;
     }
 }
 
@@ -106,6 +128,7 @@ class ZsLimitExceededError extends Error {
     constructor(message = "workflow limit exceeded") {
         super(message);
         this.name = "LimitExceededError";
+        this.retryable = false;
     }
 }
 
@@ -118,17 +141,24 @@ class ZsWorkflowCompensationReplayReady extends Error {
 
 const ZS_MAX_START_MANY_BATCH = 1000;
 
+// Misuse of the step API. Deterministic by construction: the same body raises
+// it again, so re-executing the step cannot clear it.
 function wfErr(message, status, code) {
     const e = new Error(message);
     e.status = status;
     e.code = code;
+    e.retryable = false;
     return e;
 }
 
+// `retryable` rides the journal so a later attempt policy has a signal to read.
+// An error that declares nothing leaves the field absent, which is distinct
+// from a declared `false`.
 function wfSerializeError(e) {
     if (e instanceof Error) {
         const out = { type: e.name || "Error", message: e.message };
         if (e.stack) out.stack = e.stack;
+        if (typeof e.retryable === "boolean") out.retryable = e.retryable;
         return out;
     }
     return { type: "Error", message: String(e) };
@@ -137,18 +167,119 @@ function wfSerializeError(e) {
 function wfDeserializeError(error) {
     const e = error && error.type === "WorkflowTimeoutError"
         ? new ZsWorkflowTimeoutError(error.message)
-        : error && error.type === "NondeterministicError"
-            ? new ZsNondeterministicError(error.message)
-            : error && error.type === "ChildCancelledError"
-                ? new ZsChildCancelledError(error.message)
-                : error && error.type === "ChildTimeoutError"
-                    ? new ZsChildTimeoutError(error.message)
-                    : error && error.type === "LimitExceededError"
-                        ? new ZsLimitExceededError(error.message)
-                        : new Error((error && error.message) || "workflow step failed");
+        : error && error.type === "StepTimeoutError"
+            ? new ZsStepTimeoutError(error.message)
+            : error && error.type === "NondeterministicError"
+                ? new ZsNondeterministicError(error.message)
+                : error && error.type === "ChildCancelledError"
+                    ? new ZsChildCancelledError(error.message)
+                    : error && error.type === "ChildTimeoutError"
+                        ? new ZsChildTimeoutError(error.message)
+                        : error && error.type === "LimitExceededError"
+                            ? new ZsLimitExceededError(error.message)
+                            : new Error((error && error.message) || "workflow step failed");
     e.name = (error && error.type) || e.name;
     if (error && error.stack) e.stack = error.stack;
+    // A body that catches a replayed failure sees the flag the journal holds,
+    // not the one its reconstructed class declares.
+    if (error && typeof error.retryable === "boolean") e.retryable = error.retryable;
     return e;
+}
+
+// The duration grammar `@zeroship/workflows` documents for sleeps and timeouts,
+// matching `parse_workflow_duration_ms` in `crates/zeroship-workflow/src/execution.rs`
+// so one spelling works everywhere. Returns milliseconds, or undefined when the
+// spelling is not a duration.
+function wfParseDurationMs(raw) {
+    if (typeof raw !== "string") return undefined;
+    const trimmed = raw.trim();
+    if (!trimmed) return undefined;
+    return wfParseIso8601DurationMs(trimmed) ?? wfParseSuffixDurationMs(trimmed);
+}
+
+function wfParseSuffixDurationMs(raw) {
+    for (const [suffix, multiplier] of [
+        ["ms", 1],
+        ["s", 1_000],
+        ["m", 60_000],
+        ["h", 3_600_000],
+        ["d", 86_400_000],
+    ]) {
+        if (!raw.endsWith(suffix)) continue;
+        const value = wfParseDurationNumber(raw.slice(0, -suffix.length));
+        if (value === undefined) return undefined;
+        const ms = value * multiplier;
+        return ms >= 0 && Number.isFinite(ms) ? Math.ceil(ms) : undefined;
+    }
+    return /^\d+$/.test(raw) ? Number(raw) : undefined;
+}
+
+function wfParseIso8601DurationMs(raw) {
+    if (!raw.startsWith("P")) return undefined;
+    const body = raw.slice(1);
+    const split = body.indexOf("T");
+    const parts = [
+        [split === -1 ? body : body.slice(0, split), { D: 86_400_000 }],
+        [split === -1 ? "" : body.slice(split + 1), { H: 3_600_000, M: 60_000, S: 1_000 }],
+    ];
+    let total = 0;
+    for (const [text, units] of parts) {
+        let number = "";
+        for (const ch of text) {
+            if ((ch >= "0" && ch <= "9") || ch === ".") {
+                number += ch;
+                continue;
+            }
+            const value = wfParseDurationNumber(number);
+            number = "";
+            if (value === undefined || units[ch] === undefined) return undefined;
+            total += Math.round(value * units[ch]);
+        }
+        if (number !== "") return undefined;
+    }
+    return total >= 0 ? total : undefined;
+}
+
+function wfParseDurationNumber(raw) {
+    if (!/^\d+(?:\.\d+)?$/.test(raw)) return undefined;
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : undefined;
+}
+
+// Bound one step body by `StepConfig.timeout`. The host's per-job execution
+// timeout is the outer bound and is not visible here: a step timeout past it
+// never fires, because the host disposes the isolate first. The body itself is
+// not cancellable, so an expired step abandons it rather than stopping it.
+function wfBoundStepBody(bodyPromise, timeoutMs, spelling) {
+    if (timeoutMs === undefined) return { promise: bodyPromise, cancel: () => {} };
+    const schedule = zsRealSetTimeout ?? globalThis.setTimeout;
+    if (typeof schedule !== "function") {
+        return {
+            promise: Promise.reject(wfErr(
+                "step.run timeout requires host timers",
+                500,
+                "WORKFLOW_DEFINITION_ERROR",
+            )),
+            cancel: () => {},
+        };
+    }
+    let handle;
+    const expiry = new Promise((_, reject) => {
+        handle = schedule.call(
+            globalThis,
+            () => reject(new ZsStepTimeoutError(`workflow step timed out after ${spelling}`)),
+            timeoutMs,
+        );
+    });
+    return {
+        promise: Promise.race([bodyPromise, expiry]),
+        cancel: () => {
+            const cancel = zsRealClearTimeout ?? globalThis.clearTimeout;
+            if (typeof cancel === "function" && handle !== undefined) {
+                cancel.call(globalThis, handle);
+            }
+        },
+    };
 }
 
 function wfTrigger(envelope) {
@@ -399,12 +530,24 @@ class ZsJournalBackedStep {
         if (typeof fn !== "function") {
             return Promise.reject(wfErr("step.run requires a function body", 500, "WORKFLOW_DEFINITION_ERROR"));
         }
+        const spelling = config && typeof config === "object" ? config.timeout : undefined;
+        let timeoutMs;
+        if (spelling !== undefined && spelling !== null) {
+            timeoutMs = wfParseDurationMs(spelling);
+            if (timeoutMs === undefined) {
+                return Promise.reject(wfErr(
+                    `step.run timeout must be a duration such as "30s": ${String(spelling)}`,
+                    500,
+                    "WORKFLOW_DEFINITION_ERROR",
+                ));
+            }
+        }
         const issued = this.#issue(name, "run");
         if (issued.record) {
             this.#registerCompensator(issued.record, config);
             return this.#recordPromise(issued.record);
         }
-        return this.#registerFrontier(this.#runFrontier(issued, name, config, fn));
+        return this.#registerFrontier(this.#runFrontier(issued, name, config, fn, timeoutMs));
     }
 
     sideEffect(name, fn) {
@@ -551,10 +694,11 @@ class ZsJournalBackedStep {
         throw new ZsWorkflowContinueAsNewSignal(input);
     }
 
-    async #runFrontier(issued, name, config, fn) {
+    async #runFrontier(issued, name, config, fn, timeoutMs) {
         const bodyPromise = this.#invokeStepBody(fn, this.#stepContext(issued, name));
+        const bounded = wfBoundStepBody(bodyPromise, timeoutMs, config?.timeout);
         try {
-            const output = await bodyPromise;
+            const output = await bounded.promise;
             const outputConfig = wfOutputConfig(config);
             const compensable = wfHasCompensator(config);
             return {
@@ -579,6 +723,7 @@ class ZsJournalBackedStep {
                 error: wfSerializeError(e),
             };
         } finally {
+            bounded.cancel();
             bodyPromise.catch(() => {});
             this.#activeStepCallbacks--;
             if (this.#activeStepCallbacks === 0) {
