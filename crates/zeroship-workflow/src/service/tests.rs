@@ -89,6 +89,16 @@ impl WorkflowService {
         binding.begin_refresh()?.install(snapshot)?;
         self.register_app(&binding).await.map(|_| ())
     }
+
+    /// Install over this service's existing binding without re-registering the
+    /// app, so a fixture can reissue policy after its setup already ran.
+    pub(super) fn fixture_install(
+        &self,
+        app: &AppId,
+        snapshot: PolicySnapshot,
+    ) -> Result<(), WorkflowServiceError> {
+        self.policies.fixture_install(app, snapshot)
+    }
 }
 
 /// Confirms every publication exactly as submitted, so the creator outbox drains
