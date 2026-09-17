@@ -3870,7 +3870,8 @@ fn validate_no_name_is_claimed_twice(
                 if_not_exists,
                 ..
             } if track_type_namespace => {
-                if !schemas.insert(name.as_str()) && !if_not_exists.unwrap_or(false) {
+                let fresh = schemas.insert(name.as_str());
+                if !fresh && !if_not_exists.unwrap_or(false) {
                     return Err(refuse(
                         op_index,
                         &format!(
@@ -3891,7 +3892,8 @@ fn validate_no_name_is_claimed_twice(
                 if_not_exists,
                 ..
             } if track_type_namespace => {
-                if !extensions.insert(name.as_str()) && !if_not_exists.unwrap_or(false) {
+                let fresh = extensions.insert(name.as_str());
+                if !fresh && !if_not_exists.unwrap_or(false) {
                     return Err(refuse(
                         op_index,
                         &format!(
@@ -3912,7 +3914,8 @@ fn validate_no_name_is_claimed_twice(
                 ..
             } if track_type_namespace => {
                 // A role is CLUSTER-wide, so this set carries no schema at all.
-                if !roles.insert(name.as_str()) && !if_not_exists.unwrap_or(false) {
+                let fresh = roles.insert(name.as_str());
+                if !fresh && !if_not_exists.unwrap_or(false) {
                     return Err(refuse(
                         op_index,
                         &format!(
@@ -7827,10 +7830,8 @@ fn validate_op_support(
         | Op::AttachPartition { .. }
         | Op::DetachPartition { .. }
         | Op::DropPartition { .. } => check(Feature::PartitionDdl)?,
-        Op::AddColumn { default, .. } => {
-            if default_is_nextval(default.as_ref()) {
-                check(Feature::SequenceDefault)?;
-            }
+        Op::AddColumn { default, .. } if default_is_nextval(default.as_ref()) => {
+            check(Feature::SequenceDefault)?;
         }
         Op::SetColumnType { using: Some(_), .. } => check(Feature::AlterColumnUsing)?,
         Op::SetColumnDefault {

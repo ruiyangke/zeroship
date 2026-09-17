@@ -100,10 +100,8 @@ pub fn parse_list_objects_v2(xml: &[u8]) -> Result<RawListPage, S3Error> {
                     "IsTruncated" if path_is_top_level(&path) => {
                         is_truncated = parse_bool(&text)?;
                     }
-                    "NextContinuationToken" if path_is_top_level(&path) => {
-                        if !text.is_empty() {
-                            next_token = Some(text);
-                        }
+                    "NextContinuationToken" if path_is_top_level(&path) && !text.is_empty() => {
+                        next_token = Some(text);
                     }
                     "Key" if in_contents => {
                         cur_key = Some(percent_decode_key(&text)?);
@@ -301,14 +299,12 @@ pub fn parse_list_multipart_uploads(xml: &[u8]) -> Result<Vec<(String, String)>,
                     }
                 }
             }
-            Ok(Event::Text(t)) => {
-                if in_upload {
-                    let text = t.decode().unwrap_or_default().into_owned();
-                    match path.last().map(String::as_str) {
-                        Some("Key") => cur_key = Some(text),
-                        Some("UploadId") => cur_id = Some(text),
-                        _ => {}
-                    }
+            Ok(Event::Text(t)) if in_upload => {
+                let text = t.decode().unwrap_or_default().into_owned();
+                match path.last().map(String::as_str) {
+                    Some("Key") => cur_key = Some(text),
+                    Some("UploadId") => cur_id = Some(text),
+                    _ => {}
                 }
             }
             Ok(Event::Eof) => break,
@@ -333,10 +329,8 @@ pub fn parse_upload_id(xml: &[u8]) -> Result<String, S3Error> {
             Ok(Event::End(_)) => {
                 path.pop();
             }
-            Ok(Event::Text(t)) => {
-                if path.last().map(String::as_str) == Some("UploadId") {
-                    upload_id = Some(t.decode().unwrap_or_default().into_owned());
-                }
+            Ok(Event::Text(t)) if path.last().map(String::as_str) == Some("UploadId") => {
+                upload_id = Some(t.decode().unwrap_or_default().into_owned());
             }
             Ok(Event::Eof) => break,
             Err(e) => return Err(err(format!("xml error: {e}"))),

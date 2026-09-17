@@ -855,15 +855,15 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
                 self.gate_raw_create(&target, raw, Some(c))?;
             }
             // -- CTAS / CREATE TABLE AS EXECUTE ----------------------------------
-            NodeEnum::CreateTableAsStmt(cta) => {
-                // A materialized view is not a table create; only OBJECT_TABLE /
-                // SELECT INTO bring a table into existence. Other objtypes fall
-                // through (matview creation is gated by its own vendor cap).
-                if cta.objtype == ObjectType::ObjectTable as i32 || cta.is_select_into {
-                    let rel = cta.into.as_ref().and_then(|i| i.rel.as_ref());
-                    let target = self.resolve_relation_target(rel, raw)?;
-                    self.gate_raw_create(&target, raw, None)?;
-                }
+            // A materialized view is not a table create; only OBJECT_TABLE /
+            // SELECT INTO bring a table into existence. Other objtypes fall
+            // through (matview creation is gated by its own vendor cap).
+            NodeEnum::CreateTableAsStmt(cta)
+                if cta.objtype == ObjectType::ObjectTable as i32 || cta.is_select_into =>
+            {
+                let rel = cta.into.as_ref().and_then(|i| i.rel.as_ref());
+                let target = self.resolve_relation_target(rel, raw)?;
+                self.gate_raw_create(&target, raw, None)?;
             }
             // -- SELECT ... INTO <table> -------------------------------------------
             // pg_query parses `SELECT ... INTO t` as a `SelectStmt` carrying an
