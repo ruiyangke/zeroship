@@ -1868,9 +1868,8 @@ async fn every_mysql_row_of_the_dialect_table_answers_to_a_live_server() {
     let url = require_live_mysql!();
     let session = MysqlDevSession::connect(&url);
 
-    // Name the server, in the ledger, before anything is measured. The proposal
-    // requires every ledger to name its scope: "F877's first pass was confidently
-    // wrong because it did not."
+    // Name the server, in the ledger, before anything is measured: a ledger that
+    // does not name its scope cannot be trusted for the run it describes.
     println!("LEDGER mysql SERVER version={}", session.server_version());
 
     // The same before/after census the PostgreSQL sweep runs, sequenced inside the

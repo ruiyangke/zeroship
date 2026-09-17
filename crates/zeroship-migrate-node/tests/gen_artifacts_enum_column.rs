@@ -11,9 +11,8 @@
 //! given `&IrColumn` alone can populate `enum_values`; the members have to be
 //! resolved from the op stream, which is what the fold behind the `FieldDef` map does
 //! through the same `NamedTypeRegistry` the DDL lower and the snapshot fold resolve them
-//! through. (That registry belonged to the standalone `FieldDef` walker until
-//! `docs/proposals/single-fold-and-effects.md` deleted it; the registry is
-//! carried on `FoldedSchema` now and `project_field_defs` reads it.)
+//! through. (The registry is carried on `FoldedSchema`, and `project_field_defs`
+//! reads it.)
 //!
 //! WHAT IS ASSERTED. Content, never `ok`: a silently dropped enum also returns
 //! `ok=true`. The members must be present, in DECLARATION order, on the right

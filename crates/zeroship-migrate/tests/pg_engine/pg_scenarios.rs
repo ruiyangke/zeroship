@@ -8271,8 +8271,8 @@ async fn two_pending_squashes_may_not_claim_the_same_superseded_version() {
 
 /// Re-supplying work that is already settled must be a no-op, not a refusal.
 ///
-/// F503-F511 all measured gates in their SAFETY direction: does the dangerous
-/// thing get through. Every one of those gates also has a liveness face, and it is
+/// The gates are stated in their SAFETY direction: does the dangerous thing
+/// get through. Every one of those gates also has a liveness face, and it is
 /// the one a production deploy meets on every run, because a migrations directory
 /// is append-only — yesterday's rename is still a file today, and `apply` is handed
 /// the whole set each time.

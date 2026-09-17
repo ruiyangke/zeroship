@@ -343,8 +343,8 @@ pub fn render_ir_envelope_sql_onto(
 /// the statement that raised it. The addon's `previewSql` verb, which backs the TS
 /// CLI's `lint` and `plan`, renders the HUMAN preview through
 /// [`render_ir_envelope_sql`] instead. This function is also re-exported from the
-/// crate root for out-of-tree embedders that take this crate as a path dependency
-/// (see `docs/embedding.md`), because it is the way to obtain the statement text
+/// crate root for out-of-tree embedders that take this crate as a path dependency,
+/// because it is the way to obtain the statement text
 /// without re-deriving the statement/label split that [`render_ir_envelope_sql`]
 /// folds into one formatted string.
 ///
