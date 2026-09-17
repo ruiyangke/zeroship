@@ -30,6 +30,7 @@ export default {
     });
 
     table("tasks").create({
+      options: { versioning: true },
       columns: {
         workspaceId: t.text().required().references("workspaces", "id", { relation: "workspace" }),
         ownerId: t.text().required().references("users", "id", { relation: "owner" }),
