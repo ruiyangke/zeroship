@@ -266,7 +266,7 @@ removed with no alias. The prefix stays declarable per field; when omitted,
 the current derivation from the collection name is preserved. `ids.ulid()`
 retires with the namespace: the `ids` object and `IdFormats` are removed
 outright, and the `ulid` value format goes with them. That is a deliberate
-reversal of the position this paragraph first took.|
+reversal of the position this paragraph first took.
 
 ### Numbers — the semantic family
 
