@@ -589,7 +589,7 @@ export function badColTypes(): void {
   const idFormats: IdFormats = ids;
   const valueFormat: ValueFormat = { typeId: typeIdOptions };
   const ulidValueFormat: ValueFormat = "ulid";
-  const typedId: ColumnDef = idFormats.typeId(typeIdOptions).required().unique().primaryKey();
+  const typedId: ColumnDef = t.typedId(typeIdOptions.prefix).required().unique().primaryKey();
   const ulid: ColumnDef = idFormats.ulid().required().unique().primaryKey();
   table("accounts").create({ columns: { id: typedId } });
   void valueFormat;
