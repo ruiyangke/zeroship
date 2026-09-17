@@ -238,7 +238,7 @@ export default {
         code: t.text().required(),
         email: t.text({ caseSensitive: false }).required(),
         login_challenge: t.text().required(),
-        attempts: t.smallInt().required().default(0),
+        attempts: t.int().required().default(0),
         expires_at: t.timestamp().required(),
         consumed_pending_at: t.timestamp(),
         consumed_at: t.timestamp(),
@@ -327,7 +327,7 @@ export default {
       columns: {
         id: t.bigInt().required().identity(),
         token_hash: t.bytes().required(),
-        hash_key_version: t.smallInt().required(),
+        hash_key_version: t.int().required(),
         refresh_family_id: t.text().required(),
         replaced_by_token_hash: t.bytes(),
         client_id: t.text().required(),
@@ -376,7 +376,7 @@ export default {
       columns: {
         id: t.bigInt().required().identity(),
         bucket_key: t.text().required(),
-        tokens: t.real().required(),
+        tokens: t.double().required(),
         updated_at: t.timestamp().required(),
       },
       primaryKey: ["id"],

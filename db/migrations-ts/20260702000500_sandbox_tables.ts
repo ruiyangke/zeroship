@@ -85,7 +85,7 @@ export default {
         snapshot_sha256: t.bytes(),
         snapshot_aead_dek_id: t.text(),
         snapshot_backing_versions: t.json(),
-        snapshot_vm_index: t.smallInt(),
+        snapshot_vm_index: t.int(),
         lessee_updated_at: t.timestamp(),
         last_running_worker_id: t.text(),
         idle_snapshot_opted_in: t.boolean().required().default(false),
