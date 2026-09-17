@@ -1,6 +1,5 @@
-// examples/starter — the scaffold every creator starts from (and what
-// tests/golden_path.sh builds and deploys). If this one is broken, the
-// documented first five minutes of the product are broken.
+// examples/starter — the scaffold every creator starts from. If this one is
+// broken, the documented first five minutes of the product are broken.
 //
 // What a user does here: type a message, press Add, see it in the list. The
 // messages live in an in-memory array inside the server module, so a reload

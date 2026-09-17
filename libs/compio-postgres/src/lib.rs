@@ -171,8 +171,8 @@
 
 // `MakeRustlsConnect` and `tls_rustls` above are code spans, not intra-doc links, and must stay that way. The
 // module carrying them is `#[cfg(feature = "tls")]`, so in a default-feature `cargo doc` there is no item for a
-// link to resolve against and rustdoc emits `unresolved link`. tests/run_doc_gate.sh builds both feature
-// configurations and allows zero unresolved links under `--all-features`.
+// link to resolve against and rustdoc emits `unresolved link`. The doc build must
+// resolve every link under `--all-features`.
 
 #![warn(rust_2018_idioms, clippy::all)]
 #![allow(clippy::needless_lifetimes)]

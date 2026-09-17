@@ -3652,10 +3652,9 @@ mod tests {
         // specified to return four columns, so a row with none is malformed
         // for this command whatever it might mean for some other one.
         //
-        // Nothing in the workspace depends on the other shape: the sole caller
-        // (`crates/zeroship-data-v8/src/wal_consumer.rs`) uses `identify_system` as a
-        // health check and discards the value, so refusing only makes that
-        // check harder to pass with a broken peer.
+        // Nothing in the workspace depends on the other shape: an
+        // `identify_system` health check discards the value, so refusing only
+        // makes that harder to pass with a broken peer.
         let row = identify_row(&[]);
         let error = parse_identify_system_row(&row)
             .expect_err("a row with no fields cannot be an IDENTIFY_SYSTEM identity");

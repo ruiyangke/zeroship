@@ -2,7 +2,7 @@
 # ============================================================================
 # tests/e2e_browser/scripts/down.sh — tear down the stack brought up by up.sh.
 #
-# Reads tests/e2e_browser/.stack.json for the pidfile / PG container / work
+# Reads the descriptor written by up.sh for the pidfile / PG container / work
 # dir, kills the binary PIDs, docker rm -f the container, and removes the work
 # dir + descriptor. Idempotent: a missing descriptor is not an error.
 # ============================================================================

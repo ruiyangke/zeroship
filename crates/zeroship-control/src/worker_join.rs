@@ -1590,9 +1590,8 @@ mod tests {
     fn two_minted_ring_keys_differ() {
         // The registrant contributes nothing to this value, so two mints under
         // IDENTICAL caller input must still differ. This arm rules on the mint;
-        // the end-to-end statement - two enrolments with byte-identical bodies
-        // from one peer land two different ring keys in the table - is bound by
-        // the live-database arm in tests/worker_enrolment_test.rs.
+        // two enrolments with byte-identical bodies from one peer must land two
+        // different ring keys in the table.
         let first = mint_ring_key();
         let second = mint_ring_key();
         assert_ne!(first, second);
