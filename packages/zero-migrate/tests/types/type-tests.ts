@@ -769,7 +769,7 @@ export function domainValueCheckSurfaceTypechecks(): void {
     check: (v) => v.in(["active", "past_due"]).and(v.isNotNull()),
   });
   domain("billing_period").create({
-    as: t.date(),
+    as: t.calendarDate(),
     check: (v) => v.extract("day").eq(1),
   });
   domain("email_domain").create({

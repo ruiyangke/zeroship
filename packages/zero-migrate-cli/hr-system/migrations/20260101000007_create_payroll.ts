@@ -11,7 +11,7 @@ export default {
       columns: {
         id: ids.ulid().primaryKey(),
         period_label: t.char({ length: 7 }).notNull(),
-        run_date: t.date().notNull(),
+        run_date: t.calendarDate().notNull(),
         status: t.string({ length: 32 }).notNull().default("draft"),
       },
     });

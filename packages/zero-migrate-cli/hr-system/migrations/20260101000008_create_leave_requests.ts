@@ -16,8 +16,8 @@ export default {
           .notNull()
           .references("employees", "id", { onDelete: "cascade" }),
         leave_type: t.string({ length: 32 }).notNull(),
-        start_date: t.date().notNull(),
-        end_date: t.date().notNull(),
+        start_date: t.calendarDate().notNull(),
+        end_date: t.calendarDate().notNull(),
         days: t.numeric({ precision: 4, scale: 1 }).notNull(),
         // `status` is an index member (composite employee/status index), so it is
         // a bounded `t.string`, not unbounded `t.text()`.
