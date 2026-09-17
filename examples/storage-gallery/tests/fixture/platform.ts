@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
+import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -14,6 +14,7 @@ import { stringify } from "smol-toml";
 import { Parser } from "tar";
 import { GenericContainer, Wait, type StartedTestContainer } from "testcontainers";
 import type { Target, WorkerFixture } from "../targets";
+import { isTypedId, typedIdFromStableSeed } from "@zeroship/server/typed-id";
 import { issuer } from "./issuer";
 import { Processes } from "./processes";
 
@@ -170,7 +171,7 @@ export class Platform {
     const identity = issuer();
     const jwks = await this.container(identity.container);
     const issuerUrl = `http://${jwks.getHost()}:${jwks.getMappedPort(80)}`;
-    const owner = randomUUID();
+    const owner = typedIdFromStableSeed("usr", "storage-gallery-fixture-owner");
     const seeded = await postgres.exec(["psql", "-U", "postgres", "-d", "storage_fixture", "-v", "ON_ERROR_STOP=1", "-c",
       `INSERT INTO zeroship.users (id, email, name, email_verified_at) VALUES ('${owner}', 'gallery-${owner}@zeroship.test', 'Storage fixture owner', NOW())`]);
     assert.equal(seeded.exitCode, 0, `Seed authenticated fixture owner: ${seeded.output}`);
@@ -190,7 +191,7 @@ export class Platform {
     // credential and the import document Control reads at startup, and hands
     // the worker the path Control mints the token into.
     const { publicKey: signerPublicKey, privateKey: signerPrivateKey } = generateKeyPairSync("ed25519");
-    const signerId = "wjs_storagegalleryfixturesign";
+    const signerId = typedIdFromStableSeed("wjs", "storage-gallery-fixture-signer");
     const signerPublicKeyX = (signerPublicKey.export({ format: "jwk" }).x) as string;
     const joinSigner = await this.secret("join-signer.json", JSON.stringify({
       signer_id: signerId,
@@ -265,7 +266,7 @@ export class Platform {
     assert(created.ok, `Create app: HTTP ${created.status}: ${created.ok ? "" : await created.text()}`);
     const { id } = await created.json();
     assert.equal(typeof id, "string", "Created app must have an id");
-    assert.match(id, /^[0-9a-f-]{36}$/);
+    assert(isTypedId(id, "app"), `Created app must have a typed app id: ${id}`);
     // The fixture is the operator. Creator requests cannot self-assign this tier.
     const plan = await postgres.exec(["psql", "-U", "postgres", "-d", "storage_fixture", "-v", "ON_ERROR_STOP=1", "-qtAc",
       "UPDATE zeroship.apps SET plan_id = (SELECT id FROM zeroship.plans WHERE name = 'unlimited' AND NOT archived) WHERE id = '" + id + "' RETURNING id"]);

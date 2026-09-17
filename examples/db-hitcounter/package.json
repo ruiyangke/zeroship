@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@zeroship/db": "workspace:*",
+    "@zeroship/server": "workspace:*",
     "@zeroship/vite-plugin": "workspace:*"
   },
   "devDependencies": {
