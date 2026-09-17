@@ -272,9 +272,9 @@ function renderNumberBase(def: RuntimeFieldDef): string {
   return `t.numeric({ precision: ${renderNumber(def.precision)}, scale: ${renderNumber(scale)} })`;
 }
 
-/** `t.id(prefix?)` - the typed-id base, threading the recovered `idPrefix`. */
+/** `t.typedId(prefix?)` - the typed-id base, threading the recovered `idPrefix`. */
 function renderIdBase(def: RuntimeFieldDef): string {
-  return typeof def.idPrefix === "string" ? `t.id(${jsStr(def.idPrefix)})` : "t.id()";
+  return typeof def.idPrefix === "string" ? `t.typedId(${jsStr(def.idPrefix)})` : "t.typedId()";
 }
 
 /** Preserve the reference target and its constraint options. */

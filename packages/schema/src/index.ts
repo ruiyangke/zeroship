@@ -1336,18 +1336,18 @@ export const t = {
    * ```
    */
   /** A textual identifier type; generation requires a typedId assignment. */
-  id(prefix?: string): TypeBuilder<string> {
+  typedId(prefix?: string): TypeBuilder<string> {
     if (prefix !== undefined) {
       if (typeof prefix !== "string" || prefix.length === 0) {
         throw Object.assign(
-          new Error("t.id(prefix): prefix must be a non-empty string"),
+          new Error("t.typedId(prefix): prefix must be a non-empty string"),
           { code: "ID_INVALID_PREFIX" as const },
         );
       }
       if (!/^[a-z][a-z0-9_]*$/.test(prefix)) {
         throw Object.assign(
           new Error(
-            `t.id(prefix): prefix must match /^[a-z][a-z0-9_]*$/ (got "${prefix}")`,
+            `t.typedId(prefix): prefix must match /^[a-z][a-z0-9_]*$/ (got "${prefix}")`,
           ),
           { code: "ID_INVALID_PREFIX" as const },
         );
@@ -1358,7 +1358,7 @@ export const t = {
       if (prefix === "usr") {
         throw Object.assign(
           new Error(
-            `t.id(prefix): "usr" is reserved for platform user ids; choose a different prefix`,
+            `t.typedId(prefix): "usr" is reserved for platform user ids; choose a different prefix`,
           ),
           { code: "ID_RESERVED_PREFIX" as const },
         );
