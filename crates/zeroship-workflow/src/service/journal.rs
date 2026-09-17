@@ -76,9 +76,17 @@ pub(crate) async fn load(
     }
     Ok(journal)
 }
+/// The journal as the replay bridge sees it.
+///
+/// A `retrying` step is deliberately absent: the bridge re-issues an ordinal it
+/// holds no row for, so leaving the hole is what makes the body run again. Every
+/// later ordinal keeps its own row, so a frontier that failed beside completed
+/// siblings replays those from the journal and re-executes only the one that has
+/// attempts left.
 pub(crate) fn replay(steps: &[StepCheckpoint]) -> Vec<JournalStep> {
     steps
         .iter()
+        .filter(|step| step.state != "retrying")
         .map(|step| JournalStep {
             ordinal: step.ordinal,
             name: step.name.clone(),
@@ -317,6 +325,62 @@ async fn save_checkpoint(
     Ok(())
 }
 
+/// Does a step that reported this failure get another execution?
+///
+/// The journal carries `retryable` exactly when the thrown error declared one,
+/// and a declared `false` is the body saying this failure cannot be cleared by
+/// running it again. An error that declares nothing is retried: absent is not a
+/// refusal, and the SDK's own permanent conditions all declare theirs.
+fn retryable(error: Option<&Value>) -> bool {
+    error
+        .and_then(|error| error.get("retryable"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
+
+/// Settle one execution of a step against the attempts it has left.
+///
+/// Every execution of a `run` body that reports an outcome is counted, so a
+/// completed row says what it cost rather than implying one execution. A failure
+/// with attempts remaining is then not a terminal journal fact: the row records
+/// what has been spent and when the next attempt is due, and the replay bridge
+/// is handed no row at all, so the body runs again. A failure with none left
+/// records the error the run then fails on.
+///
+/// `prior` is what earlier executions of this ordinal already spent: zero when
+/// the row is being created, and the held row's count when one is replacing it.
+fn settle_attempt(
+    step: &mut StepCheckpoint,
+    prior: i32,
+    policy: &AppPolicy,
+    now: i64,
+) -> Result<(), WorkflowServiceError> {
+    if step.kind != "run" {
+        return Ok(());
+    }
+    step.attempts = prior
+        .checked_add(1)
+        .ok_or_else(|| WorkflowServiceError::Internal("workflow step attempt overflow".into()))?;
+    if !matches!(step.state.as_str(), "failed" | "retrying") {
+        return Ok(());
+    }
+    step.state = "failed".into();
+    step.wake_at = None;
+    if step.attempts < step.max_attempts && retryable(step.error.as_ref()) {
+        step.state = "retrying".into();
+        step.wake_at = Some(
+            chrono::DateTime::from_timestamp_millis(super::app::deadline(
+                now,
+                policy.retry_delay_ms,
+            )?)
+            .ok_or_else(|| {
+                WorkflowServiceError::Internal("workflow retry deadline is out of range".into())
+            })?,
+        );
+    }
+    Ok(())
+}
+
 pub(crate) async fn append(
     tx: &mut Transaction,
     app: &AppId,
@@ -344,22 +408,40 @@ pub(crate) async fn append(
         {
             return invalid("invalid workflow checkpoint identity");
         }
+        // What an earlier execution of this ordinal already spent, when the row
+        // it left is one this outcome may replace. `None` means the checkpoint
+        // is new and everything below is creating it.
+        let mut held = None;
         if let Some(existing) = journal.iter().find(|entry| entry.ordinal == step.ordinal) {
-            // Pending effects can be re-reported by a replay suspended on a
-            // previously accepted frontier. Their original deadlines and child
-            // identities remain authoritative.
-            if existing.state != "running"
-                || existing.name != step.name
-                || existing.name_occurrence != step.name_occurrence
-                || existing.kind != step.kind
-                || existing.signal_type != step.signal_type
-                || existing.topic != step.topic
-            {
-                return invalid("workflow checkpoint rewrites committed history");
+            // A step with attempts left holds its ordinal without settling it,
+            // so the outcome of the next execution replaces the row rather than
+            // rewriting history. Identity still has to match: the replay bridge
+            // was handed no row here, so this is the one place a body that
+            // re-issued a different operation at this ordinal can be caught.
+            if existing.state == "retrying" {
+                if existing.name != step.name
+                    || existing.name_occurrence != step.name_occurrence
+                    || existing.kind != step.kind
+                {
+                    return invalid("workflow checkpoint rewrites committed history");
+                }
+                held = Some((existing.attempts, encode(existing)?.len()));
+            } else {
+                // Pending effects can be re-reported by a replay suspended on a
+                // previously accepted frontier. Their original deadlines and
+                // child identities remain authoritative.
+                if existing.state != "running"
+                    || existing.name != step.name
+                    || existing.name_occurrence != step.name_occurrence
+                    || existing.kind != step.kind
+                    || existing.signal_type != step.signal_type
+                    || existing.topic != step.topic
+                {
+                    return invalid("workflow checkpoint rewrites committed history");
+                }
+                continue;
             }
-            continue;
-        }
-        if step.ordinal as usize != journal.len()
+        } else if step.ordinal as usize != journal.len()
             || step.name_occurrence as usize
                 != journal
                     .iter()
@@ -368,6 +450,7 @@ pub(crate) async fn append(
         {
             return invalid("workflow checkpoint is not the next journal operation");
         }
+        settle_attempt(&mut step, held.map_or(0, |(spent, _)| spent), policy, now)?;
         if step.consumed_signal_id.is_some() {
             return invalid("signal consumption belongs to the workflow service");
         }
@@ -415,6 +498,7 @@ pub(crate) async fn append(
             None
         };
         journal_bytes = journal_bytes
+            .saturating_sub(held.map_or(0, |(_, spent)| spent))
             .checked_add(encode(&step)?.len())
             .ok_or_else(|| {
                 WorkflowServiceError::ResourceExhausted("workflow journal size overflow".into())
@@ -424,11 +508,23 @@ pub(crate) async fn append(
                 "workflow journal size limit reached".into(),
             ));
         }
+        if held.is_some() {
+            save_checkpoint(tx, app, &id, generation, &step, None).await?;
+            let ordinal = step.ordinal;
+            if let Some(entry) = journal.iter_mut().find(|entry| entry.ordinal == ordinal) {
+                *entry = step;
+            }
+            continue;
+        }
+        // A compensator runs arbitrarily later than the step it undoes, so the
+        // row pins the delay policy held when the step was journalled. A forward
+        // retry is scheduled in this same commit, and `settle_attempt` has
+        // already read the live value, so there is nothing to pin for it.
         steps.insert(value!({
             "id":super::types::storage_id(), "app_id":app.as_str(), "run_id":id.clone(), "generation":generation,
             "ordinal":i64::from(step.ordinal), "name":step.name.clone(), "occurrence":i64::from(step.name_occurrence),
             "origin_generation":generation, "kind":step.kind.clone(), "state":step.state.clone(),
-            "record":encode_checkpoint(&step, child_member.as_deref(), None)?, "compensation_retry_ms":policy.compensation_retry_ms,
+            "record":encode_checkpoint(&step, child_member.as_deref(), None)?, "compensation_retry_ms":policy.retry_delay_ms,
             "child_member_id":child_member, "child_result_member_id":null,
         })).await?;
         if step.state == "running" {

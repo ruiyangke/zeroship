@@ -16,13 +16,12 @@ export abstract class Workflow<Params = unknown, Output = unknown> {
 }
 
 export interface RetryConfig {
+  /**
+   * Executions of the step body, not re-executions: `1` is the default and
+   * means the body runs once. Must be a positive integer, and the app's own
+   * ceiling refuses anything above it rather than lowering it.
+   */
   maxAttempts?: number;
-}
-
-export interface BackoffConfig {
-  base?: string;
-  max?: string;
-  factor?: number;
 }
 
 export interface StepOutputRef {
@@ -50,8 +49,12 @@ export type Compensator<T> = (
 ) => unknown | Promise<unknown>;
 
 export interface StepConfig<T = unknown> {
+  /**
+   * How many times the body may run before its failure is final. Attempts share
+   * one `ctx.idempotencyKey`, so an effect that landed before the failure was
+   * reported is recognised by the external system on the next attempt.
+   */
   retries?: RetryConfig;
-  backoff?: BackoffConfig;
   timeout?: string;
   output?: "auto" | "inline" | "ref" | "blob" | "stream" | { as: "ref" | "blob" | "stream"; contentType?: string };
   compensate?: Compensator<T>;
@@ -204,6 +207,13 @@ function hasWorkflowErrorName(value: unknown, name: string): boolean {
 }
 
 export class PermanentError extends Error {
+  /**
+   * Declared, not merely implied by the name: `retries` reads this off the
+   * journal, and a business failure that cannot be cleared by running the body
+   * again must not consume attempts.
+   */
+  readonly retryable = false;
+
   static [Symbol.hasInstance](value: unknown): value is PermanentError {
     return hasWorkflowErrorName(value, "PermanentError");
   }

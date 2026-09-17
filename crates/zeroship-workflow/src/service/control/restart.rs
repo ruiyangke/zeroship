@@ -186,7 +186,10 @@ pub(in crate::service) async fn prepare_draft<'tx>(
             "workflow cancellation is still propagating to this run".into(),
         )));
     }
-    if retained.iter().any(|step| step.state == "running") {
+    if retained
+        .iter()
+        .any(|step| matches!(step.state.as_str(), "running" | "retrying"))
+    {
         return Ok(Preparation::Rejected(Rejection::Conflict(
             "restart prefix contains unresolved operations".into(),
         )));

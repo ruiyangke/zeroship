@@ -37,8 +37,18 @@ pub struct AppPolicy {
     pub max_payload_objects: i64,
     pub max_payload_storage_bytes: i64,
     pub payload_staging_retention_ms: i64,
-    pub max_compensation_attempts: i32,
-    pub compensation_retry_ms: i64,
+    /// How many times creator code may execute at one journal ordinal before
+    /// the platform stops re-running it.
+    ///
+    /// One budget covers both phases, because both are the same question about
+    /// the same ordinal: a `step.run` body re-executed under its declared
+    /// `retries`, and a compensator re-executed after it reported a failure.
+    /// A per-step declaration above this ceiling is refused rather than clamped,
+    /// so a creator learns their policy was rejected instead of silently
+    /// getting a smaller one.
+    pub max_step_attempts: i32,
+    /// How long a run waits before the next attempt at that ordinal.
+    pub retry_delay_ms: i64,
     /// How many delivery attempts of one job may reach creator execution before
     /// the manager stops redelivering it. Attempts the worker never began, such
     /// as a claim the creator journal deferred, are not counted against it.
@@ -82,8 +92,8 @@ impl Default for AppPolicy {
             max_payload_objects: 100_000,
             max_payload_storage_bytes: 1024 * 1024 * 1024,
             payload_staging_retention_ms: 86_400_000,
-            max_compensation_attempts: 8,
-            compensation_retry_ms: 1_000,
+            max_step_attempts: 8,
+            retry_delay_ms: 1_000,
             max_delivery_attempts: 8,
             max_stuck_dispatches: 4,
             max_schedules: 64,
@@ -110,8 +120,8 @@ impl AppPolicy {
             || self.max_payload_objects <= 0
             || self.max_payload_storage_bytes < self.max_payload_bytes
             || self.payload_staging_retention_ms <= 0
-            || self.max_compensation_attempts <= 0
-            || self.compensation_retry_ms <= 0
+            || self.max_step_attempts <= 0
+            || self.retry_delay_ms <= 0
             || self.max_delivery_attempts <= 0
             || self.max_stuck_dispatches <= 0
             || self.max_stuck_dispatches >= self.max_delivery_attempts

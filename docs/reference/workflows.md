@@ -385,17 +385,8 @@ interface RetryConfig {
   maxAttempts?: number;
 }
 
-interface BackoffConfig {
-  base?: string;
-  max?: string;
-  factor?: number;
-}
-
 interface StepConfig<T = unknown> {
-  /** Declared, and read by nothing. See the note under Semantics. */
   retries?: RetryConfig;
-  /** Declared, and read by nothing. See the note under Semantics. */
-  backoff?: BackoffConfig;
   timeout?: string;
   output?:
     | "auto"
@@ -460,11 +451,46 @@ Semantics:
 - `output` controls how the step output is represented. Explicit `"ref"`,
   `"blob"`, or `"stream"` returns a `StepOutputRef`.
 - `compensate` attaches a rollback function for terminal failure.
+- `retries.maxAttempts` is how many times the body may run. It counts
+  executions, not re-executions, so the default of one is the same step you get
+  by declaring nothing. A value that is not a positive integer fails the run
+  before the body is invoked, the way an unreadable `timeout` does.
 
-**`retries` and `backoff` are declared and read by nothing.** No component
-inspects either: a step whose body throws records that failure once and the run
-fails. Re-running a step needs per-step attempt state the journal does not
-carry. Do not write a workflow that depends on either field.
+#### Retries
+
+A failing step with attempts left does not fail its run. The platform records
+the attempt, requeues the run, and re-executes the body on the next dispatch;
+only the last failure is recorded as the step's outcome and rethrown into your
+`run()`.
+
+What matters when you use it:
+
+- **Attempts share one `ctx.idempotencyKey`.** A retry is at-least-once against
+  whatever the body touched, exactly as a re-execution after a lost lease is.
+  The key is the same one both discarded executions used, so pass it to the
+  external system and let it recognise the duplicate. Spacing does not make an
+  effect safe to repeat; the key does.
+- **An error that declares `retryable: false` spends no further attempt.**
+  `PermanentError` declares it, so a business failure ends the step however many
+  attempts remain. `StepTimeoutError` declares `true`. An error that declares
+  nothing is retried.
+- **The wait between attempts is the app's, not the step's.** It is durable on
+  the run rather than a timer in the worker, because the worker that failed the
+  attempt is gone before the next one starts. Your app's ceiling on attempts is
+  also enforced server-side: a `maxAttempts` above it fails the run rather than
+  quietly becoming a smaller number.
+
+```ts
+const charge = await step.run(
+  "charge-card",
+  { retries: { maxAttempts: 3 } },
+  (ctx) =>
+    stripe.paymentIntents.create(
+      { amount: order.totalCents, currency: "usd" },
+      { idempotencyKey: ctx.idempotencyKey },
+    ),
+);
+```
 
 Duration strings accepted by workflow sleeps and timeouts include suffixes such
 as `ms`, `s`, `m`, `h`, and `d`; plain positive numbers are milliseconds.
@@ -1034,8 +1060,8 @@ The SDK exports these workflow error classes:
 
 | Error | When it fires | Catchable? |
 | --- | --- | --- |
-| `PermanentError` | Business failure that should not retry. If it escapes `run()`, the run fails and eligible compensators run. | Yes, if you intend to handle it and continue. |
-| `StepTimeoutError` | A step body is still running when `StepConfig.timeout` expires. Recorded as retryable. | Yes around `step.run`; if uncaught, normal failure handling applies. |
+| `PermanentError` | Business failure that cannot be cleared by running the body again. Declares `retryable: false`, so it ends the step whatever `retries` allowed; if it escapes `run()`, the run fails and eligible compensators run. | Yes, if you intend to handle it and continue. |
+| `StepTimeoutError` | A step body is still running when `StepConfig.timeout` expires. Declares `retryable: true`, so it spends an attempt rather than ending the step. | Yes around `step.run`; if uncaught, normal failure handling applies. |
 | `NondeterministicError` | Bare workflow-body I/O/timers, journal name/kind/order mismatch, or unsupported step-promise control flow. | Treat as terminal misuse; do not swallow it. No rollback. |
 | `StalledError` | The platform reclaimed `maxStuckDispatches` dispatches of one frontier without the run reporting an outcome. | Not raised in your body: it is the platform's verdict. On a forward frontier it is recorded on the run, which rests `stalled`. On a rollback frontier it is recorded as `compensation.reason` and the run rests `failed` with the rollback abandoned. Terminal either way. No rollback. |
 | `ChildCancelledError` | A `step.call` child is cancelled before the parent join completes. | Yes around `step.call`; if uncaught, normal failure handling applies. |
