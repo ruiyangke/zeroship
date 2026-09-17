@@ -21,7 +21,7 @@
 //! ```
 //!
 //! The rule is a total function of the declared disposition
-//! (`docs/proposals/backend-conformance.md`, layer 1):
+//! (layer 1):
 //!
 //! | declared                | required outcome      |
 //! |-------------------------|-----------------------|
@@ -129,10 +129,10 @@
 //! pid discipline below is one rule, not two. What the MySQL leg needed, and what it
 //! turned out NOT to need, is written down at [`MYSQL_LEG`].
 //!
-//! COST. This is a live suite with one schema round-trip per row. Its wall clock is
-//! recorded in `docs/review-log.md`; it is gated on `ZERO_MIGRATE_TEST_PG_URL` and
-//! `ZERO_MIGRATE_MYSQL_URL` for the two server legs exactly like every other live
-//! suite here, so a database-free `cargo test` pays only the SQLite half.
+//! COST. This is a live suite with one schema round-trip per row. It is gated on
+//! `ZERO_MIGRATE_TEST_PG_URL` and `ZERO_MIGRATE_MYSQL_URL` for the two server legs
+//! exactly like every other live suite here, so a database-free `cargo test` pays only
+//! the SQLite half.
 
 use crate::dialect_corpus;
 use crate::support;
@@ -679,7 +679,7 @@ fn prelude(
     // server and died there with `[42000] BLOB/TEXT column 'a' used in key
     // specification without a key length` - a ServerError. Bounding the column is the
     // FIXTURE half of the answer; the ungated standalone lane is an engine finding,
-    // recorded in `docs/review-log.md`, not something this fixture can repair.
+    // not something this fixture can repair.
     let keyable = || {
         if dialect == &zeroship_migrate_mysql::DIALECT {
             json!({ "string": { "length": 24 } })
@@ -1438,12 +1438,9 @@ include!("../dialect_conformance/expectations.rs");
 /// the compiler: this block is const-evaluated, so an `ALLOWANCES` entry naming
 /// `ServerError` does not fail the suite, it fails the BUILD of the suite.
 ///
-/// The proposal's required-test matrix says the exception file "cannot suppress"
-/// (`docs/proposals/backend-conformance.md`), and the header of
-/// `tests/dialect_conformance/expectations.rs` says a `ServerError` "is never
-/// absorbed by an allowance". Until this block existed, both were PROSE. The judge
-/// below has a `verdict.outcome != Outcome::ServerError` conjunct, but read what it
-/// buys: `required_outcome` returns only `Applied` or `RefusedByCapability`, never
+/// A `ServerError` is never absorbed by an allowance. The judge below has a
+/// `verdict.outcome != Outcome::ServerError` conjunct, but read what it buys:
+/// `required_outcome` returns only `Applied` or `RefusedByCapability`, never
 /// `ServerError`, so that conjunct is already implied by `verdict.outcome ==
 /// required` and changes nothing. All it does is stop a `ServerError` counting as
 /// AGREEMENT - which it could not have done anyway. The row then FALLS THROUGH to
@@ -1452,9 +1449,6 @@ include!("../dialect_conformance/expectations.rs");
 /// the `words` assertion, land in `used`, and excuse the row. That is the exact
 /// failure this layer exists to catch: a migration that clears validate and preview
 /// and then dies partway through applying, waved through by the exception file.
-///
-/// It held only because no allowance happened to name one. Nobody-has-written-it-yet
-/// is not a guarantee; this block is.
 ///
 /// SCOPE, so this is not read as more than it is. This rejects the DECLARATION, not
 /// the observation. A row that actually produces a `ServerError` is still judged at
@@ -1874,9 +1868,8 @@ async fn every_mysql_row_of_the_dialect_table_answers_to_a_live_server() {
     let url = require_live_mysql!();
     let session = MysqlDevSession::connect(&url);
 
-    // Name the server, in the ledger, before anything is measured. The proposal
-    // requires every ledger to name its scope: "F877's first pass was confidently
-    // wrong because it did not."
+    // Name the server, in the ledger, before anything is measured: a ledger that
+    // does not name its scope cannot be trusted for the run it describes.
     println!("LEDGER mysql SERVER version={}", session.server_version());
 
     // The same before/after census the PostgreSQL sweep runs, sequenced inside the

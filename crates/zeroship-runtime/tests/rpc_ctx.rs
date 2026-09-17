@@ -1,12 +1,9 @@
 //! ALS-backed RPC ctx tests.
 //!
 //! Covers the per-request `ctx` object exposed by the native `zeroship`
-//! module: scalar fields, native
-//! Headers/URL wrapping (request-scoped, mutable per the 2026-05-07
-//! amendment), AbortSignal binding, and ALS-backed survival across
+//! module: scalar fields, native Headers/URL wrapping (request-scoped,
+//! and mutable), AbortSignal binding, and ALS-backed survival across
 //! `await` / `.then` boundaries.
-//!
-//! See `docs/proposals/rpc.md` §3 (Ambient context).
 
 use crate::common;
 use common::{dispatch, m};

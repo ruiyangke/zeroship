@@ -1,10 +1,9 @@
 //! The caller's authority at ONE resource, re-derived on every request.
 //!
-//! This module replaces `entities::load_memberships` and the entity cache that
-//! sat in front of it. There is one query per authorization, it is a JOIN
-//! rather than a lookup, and its result is never stored: a membership row
-//! removed by a committed transaction is invisible to the very next request in
-//! every process, with no invalidation signal to build, publish or miss.
+//! There is one query per authorization, it is a JOIN rather than a lookup, and
+//! its result is never stored: a membership row removed by a committed
+//! transaction is invisible to the very next request in every process, with no
+//! invalidation signal to build, publish or miss.
 //!
 //! # The two integers
 //!
@@ -50,11 +49,11 @@
 //! that unreachable.
 //!
 //! **This binds `zeroship.apps.id` as `text`, and that is a REQUIREMENT ON THE
-//! COLUMN, not a description of one.** The column carried `uuid` while an app id
-//! was a uuid. `AppId` exposes no route to those bits - there is no `uuid()` to
-//! call - so text against text is the only comparison this join can make, and a
-//! database whose `apps.id` is still `uuid` fails it outright with a type error
-//! rather than resolving anything. Loud, and on the first query.
+//! COLUMN, not a description of one.** `AppId` exposes no route to a uuid -
+//! there is no `uuid()` to call - so text against text is the only comparison
+//! this join can make, and a database whose `apps.id` is not `text` fails it
+//! outright with a type error rather than resolving anything. Loud, and on the
+//! first query.
 
 use compio_postgres::Client;
 use zeroship_id::{AppId, UserId};
@@ -425,23 +424,6 @@ mod tests {
             VIEWER
         );
     }
-
-    // WHAT USED TO BE HERE, AND WHY IT IS NOT.
-    //
-    // Two tests pinned `app_uuid_or_refuse`: that the canonical `app_<base36>`
-    // rendering resolved rather than falling through to the unranked read, and
-    // that an id in neither taught rendering was a REFUSAL rather than a silent
-    // rank zero. Both bound a function that existed only because
-    // `Resource::App` carried a `String` and two renderings of an app id were
-    // live at once.
-    //
-    // `Resource::App` carries an `AppId`, so neither test has an input left to
-    // build: there is one rendering, `AppId::parse` is the only way in, and the
-    // refusal happens at the crate boundary instead of inside the resolve. The
-    // boundary itself is bound in `resource.rs`
-    // (`a_non_canonical_app_id_does_not_deserialize`) and the parse is bound in
-    // `zeroship_id::app_id`. Re-asserting either here would be a second copy
-    // of a check this module no longer performs.
 }
 
 #[cfg(test)]

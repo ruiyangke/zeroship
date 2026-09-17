@@ -1,24 +1,21 @@
 //! The embedding guide's Rust examples must stay COMPILED, not just present.
 //!
-//! `crates/zeroship-migrate/src/lib.rs` includes `docs/embedding.md` under
-//! `#[cfg(doctest)]`, so rustdoc compiles every ```rust block in it against the real
-//! crate. That gate found six broken blocks the moment it was switched on, so it
-//! demonstrably has teeth.
+//! `crates/zeroship-migrate/src/lib.rs` includes the guide under `#[cfg(doctest)]`,
+//! so rustdoc compiles every ```rust block in it against the real crate.
 //!
 //! What it cannot defend on its own is its own coverage. A ```rust,ignore fence is
 //! invisible to rustdoc, and marking a block `ignore` is exactly what someone does
 //! when a doc example stops compiling and the deadline is close. Silence every block
 //! that way and `cargo test --doc` still reports success, having compiled nothing.
 //!
-//! So this asserts the floor: the guide keeps at least two COMPILED examples. Two is
-//! what it carries now - the PostgreSQL apply walkthrough and the SQLite backend
-//! open - and they are the two a reader is most likely to copy.
+//! So this asserts a floor on COMPILED examples, including the PostgreSQL apply
+//! walkthrough and the SQLite backend open - the two a reader is most likely to copy.
 //!
 //! The `ignore`d blocks are deliberate and are not defects: they are fragments that
 //! reference identifiers the surrounding prose introduces (`session`, `mysql`,
 //! `engine`), plus one trait-signature listing that names types it never defines.
-//! Making those compile means hidden setup lines, which is worth doing and is filed
-//! rather than done here.
+//! Making those compile means hidden setup lines, which is worth doing but not done
+//! here.
 
 use std::path::Path;
 

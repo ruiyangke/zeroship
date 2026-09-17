@@ -9,14 +9,14 @@
 // blocked by a coupling in the fixture, not by the platform. This app removes
 // the coupling: no login, no per-user data, every procedure anonymous.
 //
-// Shape rules, both learned the expensive way (docs/pilot/e2e-scenarios.md):
+// Shape rules, both learned the expensive way:
 //
 //   1. The file starts with "use server". Without it the build SUCCEEDS,
 //      reports `0 server functions`, still emits a manifest declaring every
-//      RPC resource, and every procedure 404s at runtime (#167).
+//      RPC resource, and every procedure 404s at runtime.
 //   2. `src/server/config.ts` opts every procedure into anonymous access.
 //      Without it each one resolves to `auth: "user"`, which is green under
-//      `pnpm dev` and 401 for every call once deployed (#163).
+//      `pnpm dev` and 401 for every call once deployed.
 //
 // Every procedure returns plain JSON that a shell script can diff verbatim
 // against the same procedure run on the other side. That constrains the

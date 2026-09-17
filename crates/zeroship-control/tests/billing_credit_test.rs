@@ -1,4 +1,4 @@
-//! PR-2 regression tests for billing-ops gap #26: the `0048 credit_ledger`
+//! PR-2 tests for the `0048 credit_ledger`
 //! append-only ledger, per-grant FIFO consume-at-finalize, and the operator
 //! `POST /api/billing/credit` grant endpoint.
 //!

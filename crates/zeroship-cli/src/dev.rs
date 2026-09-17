@@ -296,9 +296,7 @@ fn validate_migrate_dsn(bytes: &[u8]) -> Result<(), String> {
 /// any one service key can present as any service to any service, and a worker
 /// can mint the identity envelope its own verifier accepts.
 ///
-/// The names match `zeroship_core::service_peers`, and
-/// `tests/lib/runtime_secrets.sh` writes the same set under the same names for
-/// the end-to-end harnesses.
+/// The names match `zeroship_core::service_peers`.
 const SERVICE_KEY_FILES: [(&str, &str); 3] = [
     ("svc-gateway.pem", "svc/gateway"),
     ("svc-control.pem", "svc/control"),
@@ -317,7 +315,7 @@ const SERVICE_KEY_FILES: [(&str, &str); 3] = [
 ///
 /// Private, like every key file here. Generated once and never rotated in
 /// place: re-keying is provisioning a NEW signer, because Control refuses a
-/// changed key for a recorded id (`docs/runbooks/worker-join-signers.md`).
+/// changed key for a recorded id.
 const JOIN_SIGNER_FILE: &str = "join-signer.json";
 
 /// The trusted-signer import document Control reads at startup

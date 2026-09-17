@@ -62,14 +62,32 @@ pub fn run() -> Result<()> {
         cargo().args(["test", "-p", "zeroship-cli", "--test", "workflow_local"]),
         "CLI workflow binding and process recovery",
     )?;
+    // The workflow environment example is a fixture ARTIFACT, not a test.
+    // Build it here and hand its path over, rather than letting the fixture
+    // shell out to `cargo build` while tests are running.
     checked(
         cargo().args([
-            "test",
+            "build",
             "-p",
             "zeroship-control",
-            "--test",
-            "workflow_e2e",
+            "--example",
+            "workflow-test-environment",
         ]),
+        "workflow environment fixture artifact",
+    )?;
+    checked(
+        cargo()
+            .args([
+                "test",
+                "-p",
+                "zeroship-control",
+                "--test",
+                "workflow_e2e",
+            ])
+            .env(
+                "ZEROSHIP_WORKFLOW_TEST_ENVIRONMENT_BIN",
+                root().join("target/debug/examples/workflow-test-environment"),
+            ),
         "workflow API, persistence and deployed acceptance tests",
     )?;
     for package in ["packages/workflows", "packages/eslint-plugin-workflow"] {

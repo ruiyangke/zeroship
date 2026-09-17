@@ -1,6 +1,6 @@
-//! PR-8 regression tests for billing-ops gap #26: disputes / chargebacks.
+//! PR-8 regression tests for disputes / chargebacks.
 //!
-//! FAITHFUL by construction (gap #26 PR-8 review, CRITICAL-2): a REAL Stripe Dispute object
+//! FAITHFUL by construction (PR-8 review, CRITICAL-2): a REAL Stripe Dispute object
 //! carries NO `invoice` field — only `charge` (`ch_…`) and `payment_intent` (`pi_…`). No
 //! `in_…` ever appears on a dispute object here: one that did would resolve nothing at
 //! Stripe and let the suite pass while the production resolution path stayed dead. Every
@@ -930,7 +930,7 @@ async fn dispute_closed_won_before_created_is_order_independent() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// (i) ORDER-INDEPENDENCE vs. the LINKAGE (gap #26 dispute-vs-invoice.paid race, 0055):
+// (i) ORDER-INDEPENDENCE vs. the LINKAGE (dispute-vs-invoice.paid race, 0055):
 //     `charge.dispute.created` delivered BEFORE the `invoice.paid` that writes the
 //     pi_…→invoice linkage. The created PARKS the dispute (recorded, no debit yet);
 //     the later invoice.paid promotes it (billing_disputes row + dispute_debit + cap
@@ -1352,7 +1352,7 @@ async fn dispute_created_with_no_settling_object_is_acked_not_poisoned() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// GAP #14: a `lost → won` illegal reorder (the financially riskier direction — a bug would
+// A `lost → won` illegal reorder (the financially riskier direction — a bug would
 // spuriously RESTORE clawed-back cash via a stray `dispute_reversal`). Handler-level: dispute
 // closed `lost`, then a late/replayed `won` → status stays `lost`, NO `dispute_reversal`
 // appended, cash stays clawed-back at 0. The mirror of (g) but in the opposite direction.
@@ -1410,7 +1410,7 @@ async fn dispute_lost_then_late_won_is_rejected_cash_stays_clawed_back() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// GAP #18: close-before-create LOST. The `.closed lost` arrives with no `.created` yet → a
+// Close-before-create LOST. The `.closed lost` arrives with no `.created` yet → a
 // fresh terminal `lost` row is seeded DIRECTLY, the `dispute_debit` is applied (always), but
 // NO `dispute_reversal` (lost ≠ won). Cash ends clawed-back. The lost twin of (h).
 // ───────────────────────────────────────────────────────────────────────────
@@ -1454,7 +1454,7 @@ async fn dispute_closed_lost_before_created_seeds_terminal_debit_only() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// GAP #19: close-before-create with NO resolvable invoice (ctx=None). A `.closed` arrives for
+// Close-before-create with NO resolvable invoice (ctx=None). A `.closed` arrives for
 // a du_… whose pi_/ch_ resolves to no invoice (an unrecorded charge) AND no dispute row exists
 // → `record_dispute_closed` returns Ok(None) → handler acks `no_dispute_row`, writing NOTHING
 // (no row invented, no cash moved).
@@ -1486,7 +1486,7 @@ async fn dispute_closed_before_created_with_no_invoice_acks_no_dispute_row() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// GAP #16: directly EXERCISE the 0053 `billing_disputes_controlled_update` trigger RAISEs.
+// Directly EXERCISE the 0053 `billing_disputes_controlled_update` trigger RAISEs.
 // The app layer always gates the close UPDATE with `WHERE status='open'`, so the illegal
 // terminal→* transitions NEVER reach the DB through the app — a DROPPED or INVERTED trigger
 // would currently pass the whole handler-level suite. Only a RAW direct UPDATE/DELETE
@@ -1614,7 +1614,7 @@ async fn billing_disputes_controlled_update_trigger_raises_on_illegal_mutations(
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// GAP #22: `record_dispute_closed` (the close rail) takes the SAME per-organization advisory lock
+// `record_dispute_closed` (the close rail) takes the SAME per-organization advisory lock
 // the create rail does. C1 was proven only on the CREATED rail (the existing
 // `dispute_created_takes_per_organization_advisory_lock`); the close rail moves cash too — the won
 // reversal (RAISES the cap) and the close-before-create debit (LOWERS it) must serialize
@@ -1765,7 +1765,7 @@ async fn dispute_closed_takes_per_organization_advisory_lock() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// GAP #35: `resolve_invoice_for_dispute` deterministically PREFERS `payment_intent` over
+// `resolve_invoice_for_dispute` deterministically PREFERS `payment_intent` over
 // `charge` when both candidate ids map to a (different) invoice — the `ORDER BY (ref_kind =
 // 'payment_intent') DESC LIMIT 1`. We seed a pi_… linked to invoice A and a ch_… linked to a
 // DIFFERENT invoice B (pathological — they would normally point at the same invoice), pass

@@ -82,8 +82,7 @@ pub const EXPR_INVALID_NUMERIC: &str = "EXPR_INVALID_NUMERIC";
 ///
 /// The IR shape evolves by BUMPING this; the loader rejects an
 /// unknown FUTURE `ir_version` fail-closed (an IR envelope authored by a newer
-/// engine that this build cannot faithfully interpret), per the AGENTS.md
-/// "wire-format versioning is code-evolution discipline, not user-compat" stance.
+/// engine that this build cannot faithfully interpret).
 /// A bump MUST be checksum-neutral for already-applied artifacts.
 pub const CURRENT_IR_VERSION: u32 = 1;
 

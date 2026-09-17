@@ -2,8 +2,7 @@
 //!
 //! The vendors themselves are sibling crates - `zeroship-migrate-postgres`,
 //! `zeroship-migrate-sqlite` and `zeroship-migrate-mysql` - implementing the
-//! `zeroship-migrate-backend` contract (`docs/proposals/pluggable-backends.md`);
-//! what lives here is the composition.
+//! `zeroship-migrate-backend` contract; what lives here is the composition.
 //!
 //! # What belongs in a backend crate
 //!
@@ -58,8 +57,7 @@
 //!
 //! It sits BELOW the vendors rather than here because MySQL's drift path has to
 //! build that form itself, and it is `pub` across the crate boundary. That widening
-//! is what
-//! `crates/zeroship-migrate/tests/dialect_matrix/constraint_definition_is_comparison_text.rs` stands in for:
+//! is why the rule holds:
 //! a vendor may READ the codec to normalize what it introspected, but its `ddl.rs` /
 //! `dml.rs` may not spell an EMITTED identifier with it. On PostgreSQL and SQLite
 //! the wrong call emits correct bytes, so only a census can see it.

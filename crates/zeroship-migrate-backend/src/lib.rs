@@ -51,19 +51,15 @@
 //! policy engine legitimately reads. The renderer/parser traits are neither; they
 //! are backend-owned spelling and normalization.
 //!
-//! # What had to come with the traits, and the measurement that bounded it
+//! # What had to come with the traits
 //!
-//! A trait cannot move without the types in its signatures. The transitive closure of
-//! the DML vendor modules over the engine, measured by walking `crate::` references at
-//! module granularity with `#[cfg(test)]` stripped, was effectively the whole engine,
-//! because [`error::IrLowerError`] sat in `render::lower`, which reaches `engine`,
-//! `apply::*`, `model::validate` and `render::fold`.
-//!
-//! Moving three things collapses that closure to a small neighbourhood:
-//! [`error::IrLowerError`], [`error::DeclarativeError`] and [`step::BindValue`].
-//! Every other apparent edge dissolved on inspection: `crate::model::ir`,
-//! `crate::model::expr` and the former `crate::schema::query` dialect identity were
-//! `-ir` re-exports, and `BackfillSpec` / `PlanStep` appeared in doc links only.
+//! A trait cannot move without the types in its signatures. The DML vendor modules
+//! reach [`error::IrLowerError`] through `render::lower`, which itself reaches
+//! `engine`, `apply::*`, `model::validate` and `render::fold`, so the closure is
+//! effectively the whole engine until [`error::IrLowerError`],
+//! [`error::DeclarativeError`] and [`step::BindValue`] move with the traits; after
+//! that it is a small neighbourhood. Every other apparent edge was an `-ir`
+//! re-export or a doc link.
 //!
 //! # What is NOT here
 //!
@@ -72,40 +68,23 @@
 //! backend contract supplies every vendor-specific spelling and catalog-normalization
 //! fact those algorithms consume.
 //!
-//! # `MigrationBackend` is here, and what it took to get it here
+//! [`backend::MigrationBackend`] is here too. It is the apply/rollback seam: session
+//! I/O, the per-migration confined apply, journal row I/O, parse-time non-txn
+//! validation, drift introspection, preconditions, and the structured operations. It
+//! cannot be routed through [`registry::VendorSet`] like the renderer traits - it has
+//! an associated type, many `async fn`, and borrows its session, so it is not
+//! dyn-compatible - which is why it moves physically.
 //!
-//! [`backend::MigrationBackend`] is the apply/rollback seam: session I/O, the
-//! per-migration confined apply, journal row I/O, parse-time non-txn validation,
-//! drift introspection, preconditions, and the structured operations. It could not
-//! be routed through [`registry::VendorSet`] like the renderer traits - it has an
-//! associated type, many `async fn`, and borrows its session, so it is not
-//! dyn-compatible - which is why it had to physically move rather than be resolved
-//! dynamically.
+//! Shared plan vocabulary names no vendor: `TableRebuildSpec::sequence_policy` carries
+//! the neutral [`table_rebuild::SequenceHighWaterPolicy`] and the vendor converts at
+//! its own boundary. The shadow dry-run harness is a parameter to the engine's
+//! `dry_run`, not a capability a backend declares.
 //!
-//! Three obstacles held it, and only one of them was about size:
-//!
-//! * **A direction error.** `TableRebuildSpec::sequence_policy` was typed
-//!   `zeroship_migrate_sqlite::SqliteSequencePolicy` - a VENDOR type, in the shared
-//!   plan vocabulary, in a crate the vendors sit above. `PlanStep` reaches it
-//!   through `RenameStep::TableRebuild`, so one field stranded
-//!   `TableRebuildSpec`, `TableRebuild`, `RenameStep` and `PlanStep` together. The
-//!   field carries a neutral [`table_rebuild::SequenceHighWaterPolicy`] now and the
-//!   vendor converts at its own boundary.
-//! * **A capability nobody had.** `MigrationBackend::shadow()` returned
-//!   `Option<&dyn ShadowDryRun>` and all three backends answered `None`, so the
-//!   seam asked every vendor to declare a harness none of them had - while
-//!   `ShadowDryRun::dry_run_declarative` names the engine's `DeclarativeDeployPlan`
-//!   and `DesiredSchema`. The harness is a parameter to the engine's `dry_run` now.
-//! * **An error variant nobody built.** The dry-run refusal carried a
-//!   seed-failure arm whose own enum dragged the engine's whole `EngineError`
-//!   into the capability's signature, for arms nothing in the workspace ever
-//!   constructed. Deleted.
-//!
-//! What deliberately did NOT come down: `EngineError`, `DeclarativeDeployPlan` and
-//! `DesiredSchema`. Those are ORCHESTRATION RESULTS - what the engine DECIDED,
-//! built on its `MigrationPlan`, its `ResolvedInject`, and an error enum over
-//! `plan::pending` and `ManifestError`. Moving them would move the engine, so
-//! `ShadowDryRun` stays above and is handed in rather than declared.
+//! `EngineError`, `DeclarativeDeployPlan` and `DesiredSchema` deliberately stay
+//! above: they are ORCHESTRATION RESULTS - what the engine DECIDED, built on its
+//! `MigrationPlan`, its `ResolvedInject`, and an error enum over `plan::pending` and
+//! `ManifestError`. Moving them would move the engine, so `ShadowDryRun` stays above
+//! and is handed in rather than declared.
 
 pub mod advisory;
 // What each backend DECLARES about its own vendor attributes: the keys it owns, the IR

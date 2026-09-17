@@ -20,7 +20,7 @@
 //!
 //! # Capability surface
 //!
-//! This first MySQL backend implements the **core apply path**: the `GET_LOCK`
+//! This MySQL backend implements the **core apply path**: the `GET_LOCK`
 //! project lock, MySQL journal DDL + net-state reads + event writes, the two-phase
 //! apply, rollback, session setup, structured one-shot DML, resumable batched
 //! backfills, and the (dialect-agnostic) checksum-drift gate over the MySQL
@@ -1126,16 +1126,11 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
     fn online(&self) -> Option<&dyn OnlineSchemaChange> {
         // No online expand-contract harness on MySQL.
         //
-        // This used to justify itself with "the differ emits no renames for MySQL, so
-        // `renames` is empty - no online path is reached". That was FALSE, and
-        // measured false against a live server: the differ's rename author was
-        // dialect-blind, so a hinted MySQL rename planned an `ExpandContract` (then
-        // spelled `PgExpandContract`, a name the same investigation disproved), hit
-        // this `None` mid-apply, and left the deploy half-applied. The claim is true
-        // NOW because the differ refuses the rename at plan time
-        // (`DeclarativeError::ColumnRenameRefused`) rather than because
-        // anything about this `None` changed. Keep the two in step: re-enabling MySQL
-        // renames means giving this seam a real harness, not relaxing the refusal.
+        // The differ refuses a MySQL rename at plan time
+        // (`DeclarativeError::ColumnRenameRefused`), so the renames this seam
+        // would have to expand never reach it. Keep the two in step: re-enabling
+        // MySQL renames means giving this seam a real harness, not relaxing the
+        // refusal.
         None
     }
 

@@ -23,11 +23,9 @@ use zeroship_metering::Meter;
 // disk in fixed-size chunks. Holding 5 MB-plus assets in `BlobCache`
 // would either evict everything else (single-entry budget bypass) or
 // be silently dropped (single-entry budget exceeded), so streaming is
-// both a correctness and a footprint win for large blobs. 1 MiB
-// matches the value cited in `docs/architecture/blob-store.md` and is a
-// clean cut-off between "small enough to share
-// via Bytes refcounting" and "large enough to pay the cost of
-// chunked file I/O".
+// both a correctness and a footprint win for large blobs. 1 MiB is a
+// clean cut-off between "small enough to share via Bytes refcounting"
+// and "large enough to pay the cost of chunked file I/O".
 pub(super) const STREAM_THRESHOLD_BYTES: u64 = 1024 * 1024;
 
 // Chunk size for the streaming reader. 64 KiB is the historical

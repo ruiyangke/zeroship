@@ -1,4 +1,4 @@
-//! Organization-facing billing READ surface (billing-ops gap #26, PR-7).
+//! Organization-facing billing READ surface (billing-ops PR-7).
 //!
 //! The data layer behind the six `BillingRead` endpoints in [`crate::api`]:
 //! invoice history, frozen-snapshot line detail, the current-period projected

@@ -1,8 +1,8 @@
 // `validate()` reports failure through TWO channels, and `history()` returns a
 // value that plain `JSON.stringify` cannot serialize.
 //
-// Both are documented in `docs/node-api.md`, and both are the kind of contract a
-// caller gets wrong in a way that only shows up in production.
+// Both are the kind of contract a caller gets wrong in a way that only shows up
+// in production.
 //
 // THE TWO CHANNELS. "Invalid migration structure returns `{ ok: false, error }`.
 // A missing phase, an exception thrown by `schema()`, or a runtime setup failure
@@ -19,15 +19,14 @@
 // into one would break whichever callers guessed the other way, silently.
 //
 // THE BIGINT. `eventSeq` is a JavaScript `bigint` "so large values remain
-// exact", and `docs/node-api.md` warns that plain `JSON.stringify(audit)` throws
-// and supplies a replacer. If `eventSeq` ever became a `number`, the throw would
-// stop happening, the documented replacer would become pointless, and the loss of
+// exact", and plain `JSON.stringify(audit)` throws, so a replacer is supplied.
+// If `eventSeq` ever became a `number`, the throw would
+// stop happening, the replacer would become pointless, and the loss of
 // precision it exists to prevent would arrive silently - a passing test suite the
 // whole way. Pinning the THROW is what makes that change loud.
 //
 // The history arm needs real events, which is why it applies a migration first.
-// An empty journal serializes fine and would make the assertion vacuous - the
-// first draft of this file made exactly that mistake.
+// An empty journal serializes fine and would make the assertion vacuous.
 //
 // GATE: the history arm needs `ZERO_MIGRATE_TEST_PG_URL`; the validate arms are
 // offline.
@@ -82,7 +81,7 @@ test("an invalid migration RETURNS ok:false rather than throwing", () => {
   // An aggregate in a DML predicate is refused by the offline validator, so it
   // is a genuine structural failure rather than a dialect capability one - a
   // capability refusal happens later, at lower time, and would return ok:true
-  // here. The first draft of this file used one and measured nothing.
+  // here.
   const report = validate(
     validateOptions({
       name: "m",
@@ -189,7 +188,7 @@ test("history() returns bigint eventSeq, so plain JSON.stringify throws", async 
       "plain JSON.stringify must throw, which is what the documented replacer exists for",
     );
 
-    // The documented workaround has to actually work.
+    // The replacer workaround has to actually work.
     const json = JSON.stringify(
       audit,
       (_key, value) => (typeof value === "bigint" ? value.toString() : value),

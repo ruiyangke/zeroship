@@ -3,9 +3,9 @@
 // error-probe - the ERROR-ENVELOPE leg of the dev-vs-deployed seam comparison.
 //
 // Sibling of `examples/auth-probe` / `examples/storage-probe`: a deliberately
-// boring app whose only job is to let `tests/e2e_dev_vs_deployed_errors.sh` run
-// ONE identical sequence against `pnpm dev` and against the same `.zship`
-// deployed behind the gateway, and diff the RESULTS.
+// boring app whose only job is to let a dev-vs-deployed harness run ONE
+// identical sequence against `pnpm dev` and against the same `.zship` deployed
+// behind the gateway, and diff the RESULTS.
 //
 // WHY A NEW EXAMPLE RATHER THAN A ROW IN `examples/auth-probe`. auth-probe's
 // harness scrubs `"stack":"..."` down to `"stack":"<STACK>"` before diffing, on
@@ -150,8 +150,7 @@ export const okProbe = query(
  * dispatcher-originated, which is exactly what makes it the vehicle for the
  * dispatcher leg.
  *
- * It is driven three ways by `tests/e2e_dev_vs_deployed_errors.sh`, and the
- * three differ in ONE variable each:
+ * It is driven three ways, and the three differ in ONE variable each:
  *
  *   {"json":{"must":"..."}}   the control  -> 200, echoes the marker
  *   {"json":{"WRONGFIELD":1}} field name   -> the schema must REJECT

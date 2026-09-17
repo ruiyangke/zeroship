@@ -9,29 +9,29 @@
 //! `schema::query`'s PostgreSQL `column_type` reads it back out and answers
 //! `character varying(n)`.
 //!
-//! The INVERSE did not. `render::fold::token_to_col_type` matched `"string" =>
-//! ColType::Text`, flat, with no look at `max_length` — so the moment a descriptor was
-//! turned back into ops the width was gone and could not come back.
+//! The INVERSE must too: `render::fold::token_to_col_type` must consult `max_length`
+//! rather than matching `"string"` flat, or the width is gone the moment a descriptor
+//! is turned back into ops.
 //!
-//! # Which carrier decides, measured rather than assumed
+//! # Which carrier decides
 //!
-//! The same question the decimal defect answered three different ways
+//! The same question the decimal case answered three different ways
 //! (`sqlite_decimal_rebuild_live.rs`), asked again for the width. Here it has TWO
-//! answers, and only one of them was wrong:
+//! answers, and both must agree:
 //!
 //! * [`a_bounded_string_authored_as_ops_is_a_varchar_the_server_enforces`] is the ops
 //!   route: `createTable` with `{"string":{"length":64}}` → `ir_column_to_field` →
-//!   `maxLength: 64` → `character varying(64)`. THE FIELD-DEF CARRIER DECIDES AND IT
-//!   WAS ALREADY RIGHT. Green before and after; it is the tripwire, and it is also what
-//!   makes the next case a DISAGREEMENT between two carriers rather than a preference.
+//!   `maxLength: 64` → `character varying(64)`. THE FIELD-DEF CARRIER DECIDES; it is the
+//!   tripwire that makes the next case a DISAGREEMENT between two carriers rather than
+//!   a preference.
 //! * [`a_bounded_string_through_the_descriptor_producer_reaches_the_server_unbounded`]
 //!   is the producer route - the one `gen_artifacts_from_descriptors` and
 //!   `render_schema_export_from_descriptors` take, and the one a host takes when it
-//!   feeds an exported `SchemaExport` back in. THE PRODUCER DECIDES, and it answered
-//!   `text`.
+//!   feeds an exported `SchemaExport` back in. THE PRODUCER MUST DECIDE `character
+//!   varying(n)`, not `text`.
 //! * [`a_reimported_bounded_string_phantom_diffs_the_bound_off_a_live_column`] is the
 //!   consequence one layer out: `MigrationEngine::plan_declarative`, handed the
-//!   re-imported descriptors and a live `character varying(64)`, authors an
+//!   re-imported descriptors and a live `character varying(64)`, must NOT author an
 //!   `ALTER TABLE … TYPE text` against a schema nobody changed. That is not a cosmetic
 //!   diff — applying it REMOVES a constraint from a live server.
 //!
@@ -53,8 +53,7 @@
 //!   tell them apart. That is why this file is PostgreSQL-only.
 //! * Nothing about MySQL. `mysql_bounded_string_producer_live.rs` is the companion that
 //!   measures it, and the consequence there is the same shape with a 65535 ceiling on
-//!   it plus a change of storage family. It is a separate file because the prediction
-//!   about MySQL was wrong and the server said so.
+//!   it plus a change of storage family.
 //! * Not that the export WIRE carries the width. It does, and
 //!   `zeroship-migrate-node/tests/collection_export_round_trip.rs` is where that is pinned.
 //!   This file is about the leg after it.
@@ -315,14 +314,13 @@ async fn measure_column(session: &PgDevSession, schema: &str) -> Result<Measured
     })
 }
 
-/// **The tripwire. The ops route was already right, so the next case is a
-/// DISAGREEMENT.**
+/// **The tripwire: the ops route reaches the server as a bounded varchar, so the
+/// next case is a DISAGREEMENT.**
 ///
 /// A `createTable` carrying `ColType::String { length: 64 }` reaches PostgreSQL as
-/// `character varying(64)` and the server refuses a 200-character value. Green before
-/// the producer fix and after it: it is here so that the producer's `text` answer is
-/// measurably a second, contradictory opinion about the same column rather than the
-/// only opinion there is.
+/// `character varying(64)` and the server refuses a 200-character value. It is here so
+/// that the producer's answer is measurably a second, contradictory opinion about the
+/// same column rather than the only opinion there is.
 #[compio::test]
 async fn a_bounded_string_authored_as_ops_is_a_varchar_the_server_enforces() {
     let _url = require_live_pg!();
@@ -345,15 +343,14 @@ async fn a_bounded_string_authored_as_ops_is_a_varchar_the_server_enforces() {
     );
 }
 
-/// **The defect, adjudicated by the server: the producer unbounds the column.**
+/// **The same width, declared as a descriptor facet instead of inside a `ColType`.**
 ///
-/// The SAME width, declared as a descriptor facet instead of inside a `ColType`, and
-/// run through the shipped `descriptors_to_create_ops` — the producer behind
+/// Run through the shipped `descriptors_to_create_ops` — the producer behind
 /// `render_schema_export_from_descriptors` and the addon's
-/// `gen_artifacts_from_descriptors`. `token_to_col_type` mapped the `"string"` token to
-/// `ColType::Text` without consulting `max_length`, so the ops it produced declared an
-/// unbounded column and PostgreSQL stored 200 characters in a field the author bounded
-/// at 64.
+/// `gen_artifacts_from_descriptors`. `token_to_col_type` must carry `max_length` through
+/// rather than mapping the `"string"` token flat to `ColType::Text`, or the ops it
+/// produces declare an unbounded column and PostgreSQL stores 200 characters in a field
+/// the author bounded at 64.
 ///
 /// The insert is the point. A missing `character_maximum_length` is a lost facet; a
 /// stored over-long row is a lost CONSTRAINT.

@@ -35,8 +35,7 @@ use async_trait::async_trait;
 /// app's attached file, so two apps on one backend now serialize their explicit
 /// transactions through `main` instead of overlapping. They serialize rather
 /// than deadlock: `main` is database zero, so every lane takes the locks in the
-/// same order. `docs/reference/sqlite-divergences.md` records it as a
-/// divergence, and
+/// same order. This is an intentional divergence from PostgreSQL, and
 /// `two_apps_on_one_backend_serialize_their_transactions_through_main` measures
 /// it.
 const BEGIN_TRANSACTION: &str = "BEGIN IMMEDIATE";

@@ -7,7 +7,7 @@ import { zeroship } from "@zeroship/vite-plugin";
 //
 // No `devAuth` block on purpose. Every procedure is `auth: "anonymous"`, so identity
 // never enters the picture and the only thing the two tiers can disagree about
-// is the ENVIRONMENT SURFACE. See `tests/e2e_dev_vs_deployed_env.sh`.
+// is the ENVIRONMENT SURFACE.
 export default defineConfig({
   plugins: [
     zeroship({

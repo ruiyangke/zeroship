@@ -57,19 +57,16 @@ pub(crate) const TX_LANES_EXHAUSTED: &str = "transaction_lanes_exhausted";
 /// **Safety**: `sqlite3_auto_extension` is FFI-unsafe - the C signature is
 /// `int (*)(sqlite3*, char**, const sqlite3_api_routines*)` and we cast
 /// `sqlite3_vec_init` (whose signature matches the C contract per the upstream
-/// `sqlite-vec` crate) through `std::mem::transmute`. The cast is documented in
-/// the upstream `sqlite-vec` crate's own `examples/simple-rust/demo.rs` and is
-/// the canonical integration pattern. (That path is in the sqlite-vec
-/// repository, not this one.)
+/// `sqlite-vec` crate) through `std::mem::transmute`. The cast is the canonical
+/// integration pattern documented by that upstream crate.
 static VEC_INIT: Once = Once::new();
 
 #[allow(unsafe_code)]
 fn register_sqlite_vec_once() {
     VEC_INIT.call_once(|| {
         // SAFETY: `sqlite3_vec_init` matches the auto-extension callback
-        // signature expected by the linked SQLite amalgamation (see
-        // the upstream `sqlite-vec` crate's `examples/simple-rust/demo.rs`
-        // - that file is the canonical integration recipe). The
+        // signature expected by the linked SQLite amalgamation (see the
+        // upstream `sqlite-vec` crate's canonical integration recipe). The
         // registration is process-global and fires for every connection
         // opened thereafter; see the module-level rustdoc on `VEC_INIT`.
         unsafe {
@@ -624,8 +621,7 @@ impl SqliteSession {
     ///    app B's `db.transaction()` was refused while app A held one, which is
     ///    defect L22b.
     ///
-    /// Both are visible to creators, so they are also written down in
-    /// `docs/reference/sqlite-divergences.md`; keep the two in step.
+    /// Both are visible to creators.
     pub(crate) async fn reserve_transaction(
         self: &Rc<Self>,
         app_id: &str,

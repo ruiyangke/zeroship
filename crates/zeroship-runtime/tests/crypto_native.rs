@@ -1,8 +1,6 @@
 //! Native WebCrypto smoke tests. Drives `Crypto` / `SubtleCrypto` /
 //! `CryptoKey` directly in an isolated V8 context (no Runtime), so the
 //! tests run the native install path even before the polyfill flip.
-//!
-//! Per `docs/archive/webcrypto-native.md` §X.1.
 
 #![allow(unsafe_code, missing_debug_implementations)]
 
@@ -672,7 +670,7 @@ fn aes_kw_wrap_unwrap_round_trip() {
 }
 
 // =============================================================================
-// JWK private-key export for generated EC / Ed25519 keys (Blocker 2)
+// JWK private-key export for generated EC / Ed25519 keys
 // =============================================================================
 //
 // aws-lc-rs hides the private scalar after generateKey, so we walk the
@@ -817,7 +815,7 @@ fn ed25519_generate_jwk_round_trip() {
 }
 
 // =============================================================================
-// RSA-PSS variable salt length (Blocker 3)
+// RSA-PSS variable salt length
 // =============================================================================
 //
 // aws-lc-rs's high-level path fixes salt = digest length. We drop down

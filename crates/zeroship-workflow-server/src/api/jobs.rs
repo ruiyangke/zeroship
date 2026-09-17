@@ -81,10 +81,17 @@ async fn claim(
         async {
             let actor = authenticate(&request, &state, endpoints::WORKFLOW_JOB_CLAIM).await?;
             let command: AssignedScope = read_json(&request, body).await?;
+            // The delivery ceiling is operator policy, so it is read from the
+            // authoritative source rather than accepted from the worker.
+            let source = state.policy_source.as_ref().ok_or(Error::Unavailable)?;
+            let observed = source.observe(&command.app_id).await?;
+            let ceiling = observed.policy().max_delivery_attempts;
             state
                 .service
                 .manager
-                .claim_job(actor.id(), &command, || revalidate(&state, &actor))
+                .claim_job(actor.id(), &command, ceiling, || {
+                    revalidate(&state, &actor)
+                })
                 .await?
                 .map(|grant| grant.lease())
                 .transpose()

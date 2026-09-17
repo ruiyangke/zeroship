@@ -17,7 +17,7 @@ use crate::rule::{RequiredPrincipal, ResourceEntry};
 /// Reference to the worker-side JS for a deploy. Uniform shape: an
 /// `entry` specifier plus a `modules` map of specifier → blob hash.
 /// Single-bundled servers have one entry in `modules`; code-split
-/// servers have many. See `docs/reference/zship.md` Worker code section.
+/// servers have many.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkerCode {
     /// Specifier V8 evaluates first; must be a key in `modules`.
@@ -27,8 +27,7 @@ pub struct WorkerCode {
 }
 
 /// One per app. Carries everything the gateway needs to route a request
-/// without consulting the control plane on the hot path. Wire format:
-/// see `docs/reference/zship.md`.
+/// without consulting the control plane on the hot path.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
     /// Schema version. Reject unknown values.
@@ -56,10 +55,9 @@ pub struct Manifest {
     /// Unified resource map. Keys are `"rpc:<wireId>"` or `"/<path>"`
     /// or `"*"`.
     ///
-    /// See `docs/proposals/rpc.md` §7 for the full shape and merge
-    /// semantics. The gateway compiles this into per-resource
-    /// `EffectivePolicy` records at app-load time so per-request lookup
-    /// is a single `HashMap::get`.
+    /// The gateway compiles this into per-resource `EffectivePolicy`
+    /// records at app-load time so per-request lookup is a single
+    /// `HashMap::get`.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub resources: HashMap<String, ResourceEntry>,
 
@@ -140,14 +138,12 @@ pub struct Manifest {
 
     /// Build-time export discovery.
     ///
-    /// **Deprecated as of Stage 5c (ZS-standard refactor).** The runtime
-    /// no longer reads any field here; schema install now uses the generated
-    /// runtime descriptor carried by `runtime_descriptor`. The Vite plugin no
-    /// longer writes this field. Kept on the wire so older archives that carried
-    /// `exports` still deserialize cleanly during local upgrade; a future stage
-    /// removes the field entirely.
+    /// Retained on the wire so an archive that carries `exports` still
+    /// deserializes; schema install reads the generated runtime descriptor
+    /// carried by `runtime_descriptor` instead, and a fresh build omits this
+    /// field.
     ///
-    /// Additive on the wire: an old manifest without `exports`
+    /// Additive on the wire: a manifest without `exports`
     /// deserializes unchanged, and a fresh build omits the field
     /// entirely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -166,7 +162,7 @@ pub struct Manifest {
     /// `None` (the default; `skip_serializing_if`) is valid for schema-less apps.
     ///
     /// `validate()` enforces the blob-hash format only; the descriptor's JSON
-    /// shape is the producer's (`gen-types`) and consumer's (P4b runtime) contract,
+    /// shape is the producer's (`gen-types`) and consumer's (runtime) contract,
     /// not this struct's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_descriptor: Option<RuntimeDescriptorEntry>,
@@ -371,21 +367,18 @@ impl ScopeDef {
     }
 }
 
-/// Build-time export discovery — **deprecated as of Stage 5c.**
+/// Build-time export discovery.
 ///
-/// The runtime no longer reads any field here. Schema install now uses
-/// `Manifest::runtime_descriptor`, produced from the migration fold. The Vite
-/// plugin no longer writes this struct. The type is retained on the wire so
-/// older `.zship` archives that included it still deserialize cleanly during
-/// local upgrade; a future stage removes it.
+/// Retained on the wire so a `.zship` archive that includes it still
+/// deserializes; schema install reads `Manifest::runtime_descriptor`, produced
+/// from the migration fold, and a fresh build omits this struct.
 ///
 /// Wire shape stays permissive — both fields are optional and
 /// serialize to nothing when empty.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct ManifestExports {
-    /// **Deprecated as of Stage 5c.** Kept for older archives; future stage
-    /// removes. Historically: bundle-relative POSIX path of the module whose
-    /// default export held the DB schema.
+    /// Bundle-relative POSIX path of the module whose default export held the
+    /// DB schema. Retained on the wire for archives that carry it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
 
@@ -396,10 +389,9 @@ pub struct ManifestExports {
     pub handlers: Vec<HandlerEntry>,
 }
 
-/// One discovered handler module — Stage 2+ file-based discovery.
-/// Stage 1 only ships the type so manifests that opt in early (e.g.
-/// tests) can be parsed by older readers without an unknown-field
-/// error.
+/// One discovered handler module — reserved for file-based discovery. The type
+/// ships so manifests that opt in early (e.g. tests) can be parsed by readers
+/// without an unknown-field error.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HandlerEntry {
     /// Path relative to the bundle root, e.g. `"src/api/query/listTodos.ts"`.
@@ -424,8 +416,7 @@ pub struct ManifestMetadata {
 impl Manifest {
     /// Default schema version for `#[serde(default)]`.
     ///
-    /// v1 is the initial published shape — see `docs/proposals/rpc.md`
-    /// §7. Future breaking changes bump to v2.
+    /// v1 is the initial published shape. Future breaking changes bump to v2.
     fn default_version() -> u16 { 1 }
 
     /// Synthesize the minimal manifest for an app that has not shipped one.

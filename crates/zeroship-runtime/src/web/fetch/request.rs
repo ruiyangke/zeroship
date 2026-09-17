@@ -268,7 +268,7 @@ fn read_content_type(
 ///
 /// Stays private — only the `Body` trait impl above and the in-module
 /// constructor (which inspects an INPUT Request) need raw-pointer
-/// access. Per design `docs/archive/macro-v8-state.md` §7.2.1 the
+/// access. The
 /// macro doesn't auto-emit a `state_ptr` accessor: each consumer that
 /// needs raw access defines its own (avoids a public unsafe API
 /// surface). Outside this module the access is via the macro's brand-
@@ -985,7 +985,7 @@ impl RequestState {
 ///
 /// Populated lazily on the first `build_kernel_request` call — once
 /// the prototype is materialised, the slot lookup is one Rc-clone-shaped
-/// hop. Per design `docs/archive/macro-v8-state.md` §7.2.1.
+/// hop.
 pub struct RequestPrototypeSlot(pub v8::Global<v8::Object>);
 
 /// Install Request on `globalThis`. Wraps the macro-emitted
@@ -1069,8 +1069,7 @@ pub fn build_kernel_request<'s>(
     let this_obj = inst_tmpl.new_instance(scope)?;
 
     // 2. Resolve the prototype Object — cached lazily on first call.
-    //    Per design `docs/archive/macro-v8-state.md` §7.2.1: 3-V8-
-    //    call walk the first time, slot-read steady state.
+    //    A 3-V8-call walk the first time, slot-read steady state.
     let req_proto_g = match scope.get_slot::<RequestPrototypeSlot>() {
         Some(s) => s.0.clone(),
         None => {

@@ -171,8 +171,8 @@
 
 // `MakeRustlsConnect` and `tls_rustls` above are code spans, not intra-doc links, and must stay that way. The
 // module carrying them is `#[cfg(feature = "tls")]`, so in a default-feature `cargo doc` there is no item for a
-// link to resolve against and rustdoc emits `unresolved link`. tests/run_doc_gate.sh builds both feature
-// configurations and allows zero unresolved links under `--all-features`.
+// link to resolve against and rustdoc emits `unresolved link`. The doc build must
+// resolve every link under `--all-features`.
 
 #![warn(rust_2018_idioms, clippy::all)]
 #![allow(clippy::needless_lifetimes)]
@@ -264,17 +264,13 @@ pub mod types;
 // serialized-loop transport the suite needs to reach that loop over
 // plaintext.
 //
-// NOT behind a Cargo feature, deliberately. It was, and the flag split
-// "the suite" into two different test sets: `cargo test -p compio-postgres`
-// built 72 targets and 1628 tests, while the same command with
-// `--features test-utils` built 73 and 1652. The 24 it silently dropped were
-// all of `tests/serialized_loop.rs` - the fallback transport, i.e. exactly
-// the code least likely to be covered another way. A flag that decides
-// whether a whole transport is tested is worse than a doc-hidden module.
+// NOT behind a Cargo feature, deliberately: a feature that gates the fallback
+// transport splits "the suite" into two test sets and silently drops
+// `tests/serialized_loop.rs` from the default `cargo test` run - exactly the
+// code least likely to be covered another way.
 //
-// `#[doc(hidden)]` keeps it off the published surface. That is the same
-// trade `plugin-db` documents for its own bench-only items: still `pub`,
-// because an external test or bench target cannot reach `pub(crate)`.
+// `#[doc(hidden)]` keeps it off the published surface. Still `pub`, because an
+// external test or bench target cannot reach `pub(crate)`.
 #[doc(hidden)]
 pub mod test_utils;
 

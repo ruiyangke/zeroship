@@ -96,8 +96,7 @@
 //!
 //! Both paths are mandatory in [`ServiceKeyring::load`], and the empty string
 //! each setting defaults to is refused there rather than in the three `main`s
-//! that call it. Fence F4 of
-//! `docs/proposals/2026-09-05-auth-foundation-redesign.md` words the rule for
+//! that call it. Fence F4 words the rule for
 //! the worker - "absent a configured gateway public key the worker refuses to
 //! start" - and it holds for every binary that mints or verifies, because the
 //! failure it names has nothing to do with which service is holding the
@@ -417,9 +416,8 @@ impl ServiceKeyring {
     /// # An unconfigured path is a REFUSAL, not a mode
     ///
     /// Both paths are required, and the empty path each setting defaults to is
-    /// refused here rather than handled by the caller. That is fence F4 of
-    /// `docs/proposals/2026-09-05-auth-foundation-redesign.md`, and the reason
-    /// it lives in the loader is that the alternative shape is the defect the
+    /// refused here rather than handled by the caller. That is fence F4, and the
+    /// reason it lives in the loader is that the alternative shape is the defect the
     /// fence exists to remove: every `main` that reads two paths would need its
     /// own "neither was configured" branch, and the natural body of that branch
     /// is to carry on with no key material. A process that starts and then
@@ -470,8 +468,7 @@ impl ServiceKeyring {
     /// derive that `kid` from the public bytes. Without it, a document
     /// publishing this process's own public half under the GATEWAY's issuer
     /// would make this process's signer stamp exactly the `kid` its own
-    /// verifier resolves, and fence F4 of
-    /// `docs/proposals/2026-09-05-auth-foundation-redesign.md` - "a worker
+    /// verifier resolves, and fence F4 - "a worker
     /// must not be able to mint an envelope it would then accept" - would be
     /// a configuration choice rather than a property.
     ///

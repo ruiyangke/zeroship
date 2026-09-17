@@ -1,18 +1,16 @@
 //! An orphaned `zeroship serve` must actually die. Kernel behaviour, driven
 //! against the REAL binary.
 //!
-//! # Why this is a crate test and not a `tests/golden_path.sh` step
+//! # Why this is a crate test
 //!
 //! Everything else about the dev server is a seam - two processes, two ports,
 //! two backends - and a crate suite is blind to it by construction. This is
 //! not. The proposition here is a single-process property of one binary: given
 //! `ZEROSHIP_DIE_WITH_PARENT=<ppid>`, losing the parent kills it. Nothing about
-//! vite, the manifest, or the deployed tier participates. The SEAM half - that
-//! vite actually sets the variable, spelled the same way, on the child it
-//! spawns - is step 7d of `tests/golden_path.sh`, which kills a real dev server
-//! and requires the runtime it forked to be gone. Neither test subsumes the
-//! other: this one would pass with the plugin never setting the variable, and
-//! 7d would pass if the runtime happened to die for some unrelated reason.
+//! vite, the manifest, or the deployed tier participates. This test does NOT
+//! cover the SEAM half - that vite actually sets the variable, spelled the
+//! same way, on the child it spawns - and would pass with the plugin never
+//! setting the variable at all.
 //!
 //! # Shape
 //!

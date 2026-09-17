@@ -1,10 +1,9 @@
 // The cursor key proof, measured case by case against a live server.
 //
-// `docs/writing-migrations.md` states the rule that keeps a windowed backfill from
-// losing rows: "the planner proves that `cursorColumns` is the exact ordered,
-// non-null column tuple of a primary or full unique candidate key ... Prefix,
-// partial, expression, nullable, reordered, and wider keys do not prove the
-// cursor."
+// A windowed backfill only stays lossless when the planner proves that
+// `cursorColumns` is the exact ordered, non-null column tuple of a primary or
+// full unique candidate key. Prefix, partial, expression, nullable, reordered,
+// and wider keys do not prove the cursor.
 //
 // That sentence names SIX rejections, and every one of them is a data-safety
 // claim rather than a usability one. A windowed backfill checkpoints on the cursor

@@ -113,6 +113,8 @@ export function workflowManagerSchema(namespace) {
       dispatch_order: integer(),
       state: text(),
       attempt: integer().default(0),
+      execution_attempts: integer().default(0),
+      executed_attempt: t.bigInt(),
       worker_id: t.text(),
       assignment_revision: t.bigInt(),
       lease_deadline: t.bigInt(),

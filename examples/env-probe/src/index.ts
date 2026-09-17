@@ -4,7 +4,7 @@
 // comparison.
 //
 // Sibling of `examples/error-probe` / `examples/auth-probe`: a deliberately
-// boring app whose only job is to let `tests/e2e_dev_vs_deployed_env.sh` run ONE
+// boring app whose only job is to let a dev-vs-deployed harness run ONE
 // identical procedure against `pnpm dev` and against the same `.zship` deployed
 // behind the gateway, and diff the RESULTS.
 //

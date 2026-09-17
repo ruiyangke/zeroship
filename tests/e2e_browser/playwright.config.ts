@@ -1,13 +1,12 @@
 import { defineConfig, devices } from "@playwright/test";
 
 // Browser-level E2E against an EXTERNAL stack (control + worker + gateway +
-// ephemeral PG), brought up by global-setup → scripts/up.sh and torn down by
-// global-teardown → scripts/down.sh. There is intentionally NO `webServer`:
-// the stack is a multi-process Rust deployment, not a single dev server, and
-// the specs address it by `<slug>.localhost:<gatePort>` Host routing.
+// ephemeral PG). There is intentionally NO `webServer`: the stack is a
+// multi-process Rust deployment, not a single dev server, and the specs address
+// it by `<slug>.localhost:<gatePort>` Host routing.
 //
-// baseURL is NOT hardcoded — the gateway port is dynamic (chosen by up.sh and
-// recorded in .stack.json); helpers.ts builds per-app URLs from the descriptor.
+// baseURL is NOT hardcoded: the gateway port is dynamic and recorded in
+// .stack.json, and helpers.ts builds per-app URLs from that descriptor.
 export default defineConfig({
   testDir: "./specs",
   fullyParallel: false,
@@ -18,7 +17,6 @@ export default defineConfig({
   timeout: 60_000,
   expect: { timeout: 15_000 },
   globalSetup: "./global-setup.ts",
-  globalTeardown: "./global-teardown.ts",
   use: {
     trace: "on-first-retry",
     screenshot: "only-on-failure",

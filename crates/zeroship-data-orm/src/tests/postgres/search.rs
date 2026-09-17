@@ -20,8 +20,7 @@ use crate::value::value;
 ///
 /// Requires the `vector` extension, which a stock `postgres` image does not
 /// bundle. `require_pgvector` refuses the run and names the image that carries
-/// it (see docs/runbooks/docker-compose.md); there is no attribute that turns
-/// the absence into a pass.
+/// it; the absence cannot be turned into a pass by an attribute.
 #[test]
 fn vector_search_returns_k_nearest() {
     Host::test(|host| {

@@ -3697,11 +3697,10 @@ mod tests {
 
     /// What libpq does with `key=` - a keyword whose value is empty.
     ///
-    /// Probed from libpq with the `.invalid` host read-out
-    /// (`docs/runbooks/compio-postgres-libpq-parameter-probing.md` describes the
-    /// technique). The rule is per-option, not uniform: `port=` selects its
-    /// compiled default, other numeric options refuse an empty value, enum
-    /// options refuse it, and string options generally keep the empty string.
+    /// Probed from libpq with the `.invalid` host read-out. The rule is
+    /// per-option, not uniform: `port=` selects its compiled default, other
+    /// numeric options refuse an empty value, enum options refuse it, and
+    /// string options generally keep the empty string.
     /// GSSAPI is not implemented, but that is not a reason to refuse a request
     /// to TURN IT OFF.
     ///
@@ -5567,10 +5566,10 @@ mod dsn_parse_tests {
     /// when what remains does not start with a keyword, and the parse loop
     /// reads `None` as end-of-input either way. So everything after the first
     /// malformed token is silently dropped - including a later `sslmode`.
-    /// Here the caller asked for `require` and, before the fix, got the
-    /// `Prefer` default, which will fall back to an unencrypted connection
-    /// against a server that refuses TLS. A connection string that asked for
-    /// encryption must never quietly stop asking for it.
+    /// Here the caller asked for `require`; falling back to the `Prefer`
+    /// default would use an unencrypted connection against a server that
+    /// refuses TLS. A connection string that asked for encryption must never
+    /// quietly stop asking for it.
     ///
     /// libpq rejects the empty option name rather than treating it as the end
     /// of the string. tokio-postgres 0.7.18 has this same hole (its

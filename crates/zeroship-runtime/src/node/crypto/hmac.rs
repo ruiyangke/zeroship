@@ -1,13 +1,11 @@
 //! `Hmac` class — `crypto.createHmac(algorithm, key, options?)`.
 //!
-//! See `docs/archive/node-crypto-native.md` §V.3. Same
-//! surface as Hash: update + digest. **No `copy()`** — Hmac doesn't
-//! have one in Node.
+//! Same surface as Hash: update + digest. **No `copy()`** — Hmac
+//! doesn't have one in Node.
 //!
-//! Empty keys: per round-3 review (XVII.13b), Node silently accepts
-//! empty HMAC keys. We match (this is the Node-compat path; the
-//! defense-in-depth empty-key check on the WebCrypto surface lives
-//! over there for spec compliance).
+//! Empty keys: Node silently accepts empty HMAC keys. We match (this
+//! is the Node-compat path; the defense-in-depth empty-key check on
+//! the WebCrypto surface lives there for spec compliance).
 
 #![allow(unsafe_code)]
 

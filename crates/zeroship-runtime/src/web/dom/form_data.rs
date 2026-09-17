@@ -438,8 +438,8 @@ fn fd_from_this<'a>(
     }
     // SAFETY: Each FormData wrapper carries a unique boxed FormData
     // (the macro's gen_box_and_install_finalizer ensures finalizer
-    // ownership). V8 isolates are single-threaded per AGENTS.md
-    // invariant, and we don't yield across the borrow.
+    // ownership). V8 isolates are single-threaded by invariant, and we don't
+    // yield across the borrow.
     Some(unsafe { &mut *ptr })
 }
 

@@ -586,7 +586,7 @@ pub struct AppState {
     /// renders a per-kind template and sends it through this seam (over the relocated
     /// `zeroship-mailer` `Mailer`), passing a provider-side `Idempotency-Key =
     /// (organization_id, kind, transition_id)` so a re-driven send is idempotent at the
-    /// provider (billing-ops gap #26, PR-6, MAJOR-A). See [`notify::BillingNotifier`].
+    /// provider (PR-6, MAJOR-A). See [`notify::BillingNotifier`].
     pub notifier: Arc<dyn notify::BillingNotifier>,
     /// The outbound mailer, for the transactional mail the control plane sends
     /// on a REQUEST path rather than through the notify cron.
@@ -613,7 +613,7 @@ pub struct AppState {
     /// (Batch A fix 4). MUST stay byte-identical to the gateway's salt.
     pub pairwise_salt: [u8; 32],
     /// In-process TTL cache for the creator-facing OPEN-period projected charge
-    /// (billing-ops gap #26, PR-7, read API G / MAJOR-5). Memoises
+    /// (PR-7, read API G / MAJOR-5). Memoises
     /// `(app_id, period) → projected_cents` for
     /// [`billing_read::PROJECTED_CHARGE_TTL_SECS`] so polling cannot hammer a
     /// full pricing pass. The value is non-authoritative (only a finalized

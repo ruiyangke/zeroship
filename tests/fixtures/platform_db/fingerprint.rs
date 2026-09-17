@@ -1,24 +1,22 @@
 // The 12-hex fingerprint the branch-keyed suite database is named after.
 //
 // ONE CONSTRUCTION, TWO SOURCES, and they MUST agree byte for byte. [`of_dir`]
-// reads a working tree; [`of_ref`] reads a git tree. `tests/lib/suite_db.sh`
-// names a database with the first and `tests/sweep_test_databases.sh` decides
-// whether that database is still reachable with the second. If they ever
-// disagree, every database on the server matches no reachable branch, the
-// sweeper calls the lot dead, and one `--apply` deletes every agent's work at
-// once. That is the single most destructive bug this design admits, which is
-// why the pair is pinned against the REAL repository rather than a fixture --
-// see `tests/lib_sweep_db_selftest.sh`. A fixture would pin the two
-// implementations to each other and prove nothing about the files the sweeper
-// actually reasons over.
+// reads a working tree; [`of_ref`] reads a git tree. The suite-database
+// provisioner names a database with the first and the sweeper decides whether
+// that database is still reachable with the second. If they ever disagree,
+// every database on the server matches no reachable branch, the sweeper calls
+// the lot dead, and one `--apply` deletes every agent's work at once. That is
+// the single most destructive bug this design admits, which is why the pair is
+// pinned against the REAL repository rather than a fixture. A fixture would
+// pin the two implementations to each other and prove nothing about the files
+// the sweeper actually reasons over.
 //
 // THAT ARGUMENT IS ABOUT THE AGREEMENT, and the fixtures below are not trying
 // to take it over. They cover what the real repository cannot be asked to
 // demonstrate on command: that the hash MOVES when the migration set does and
-// HOLDS when anything else does. That pair used to be sampled from history --
-// "a commit 40 back must differ" -- which made the harness's verdict a
-// function of how recently somebody touched `db/migrations-ts`, and it read as
-// a broken fingerprint during every quiet spell.
+// HOLDS when anything else does. Sampling that pair from history instead would
+// make the harness's verdict a function of how recently somebody touched
+// `db/migrations-ts`, reading as a broken fingerprint during every quiet spell.
 //
 // WHY THE BASENAME GOES INTO THE HASH BESIDE THE BYTES. The platform runner
 // orders by filename and journals under it, so `20260101_a.ts` and
@@ -129,10 +127,10 @@ pub fn of_dir(root: &Path) -> Result<String, String> {
 /// nothing is a legitimate-looking hash no working tree can ever produce, so
 /// every database keyed to it would look reachable forever.
 ///
-/// WHY `repo` IS AN ARGUMENT. It used to be the process's working directory,
-/// which made this the one function here with an ambient input -- and the
+/// WHY `repo` IS AN ARGUMENT. Taking it from the process's working directory
+/// would make this the one function here with an ambient input -- and the
 /// sweeper's ref list comes from a `git for-each-ref` run somewhere else, so
-/// "which repository" was agreed by coincidence rather than stated. Naming it
+/// "which repository" would be agreed by coincidence rather than stated. Naming it
 /// also makes the discrimination control constructible: a test can build two
 /// trees that differ by exactly one migration and ask about THEM, instead of
 /// sampling this repository's history and hoping a migration changed recently.

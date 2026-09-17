@@ -1,5 +1,4 @@
-//! Standalone mock-Stripe server for the billing & metering multi-node E2E
-//! (`tests/e2e_metering_billing.sh`).
+//! Standalone mock-Stripe server for the billing & metering multi-node E2E.
 //!
 //! This is the SHELL-harness peer of the in-process mock-Stripe used by
 //! `crates/zeroship-control/tests/billing_reconcile_test.rs`. It reuses the SAME

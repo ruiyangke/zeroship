@@ -1,4 +1,4 @@
-//! Faithful PG integration tests for billing-ops gap #26 PR-6 — the notification
+//! Faithful PG integration tests for billing-ops PR-6 — the notification
 //! send-ledger (`0052 billing_notifications`), the surrogate-id'd history tables
 //! (`0041`/`0047`), the `BillingNotifier` seam, and the `cron::billing_notify` sweep.
 //!
@@ -770,7 +770,7 @@ async fn history_surrogate_ids_carry_disjoint_prefixes() {
 }
 
 // ===========================================================================
-// (#10) SPEND-BAND notifications — the spend_state_history → billing_notifications
+// SPEND-BAND notifications — the spend_state_history → billing_notifications
 // wiring. Drives a REAL spend transition (Allow→Warn→Degrade→Block AND a deadband
 // HOLD) through the REAL spend_reconcile cron on live PG, then runs the REAL notify
 // cron and asserts EXACTLY ONE notification of the right kind per transition,
@@ -1052,7 +1052,7 @@ async fn spend_band_walk_produces_one_notification_per_transition() {
 }
 
 // ===========================================================================
-// (HIGH, #10 follow-up) DOWNWARD / RECOVERY walk — escalation-only gate.
+// DOWNWARD / RECOVERY walk — escalation-only gate.
 //
 // `spend.rs::persist_transition` writes a `spend_state_history` row on EVERY edge,
 // INCLUDING de-escalations (`block→degrade`, `degrade→warn`, `warn→allow`) once the
@@ -1192,7 +1192,7 @@ async fn spend_band_recovery_walk_sends_no_notifications() {
 }
 
 // ===========================================================================
-// (#6 watermark) a organization_billing_status_history transition aged past the
+// a organization_billing_status_history transition aged past the
 // 30-day NOTIFY_SCAN_WINDOW is NOT picked up by the notify scan — the watermark
 // caps the sweep so long-dead transitions are abandoned, never belatedly emailed.
 // ===========================================================================
@@ -1269,7 +1269,7 @@ async fn aged_transition_past_scan_window_is_not_notified() {
 }
 
 // ===========================================================================
-// (#8) dunning tick's advisory-lock single-flight: a second concurrent tick that
+// dunning tick's advisory-lock single-flight: a second concurrent tick that
 // cannot acquire the dunning advisory lock no-ops (mirrors the spend-reconcile and
 // notify lock tests). The dunning key is distinct from spend/notify so the sweeps
 // never block each other.

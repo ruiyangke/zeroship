@@ -4,16 +4,6 @@
 //! This page is the human end of the OP's own device grant: the browser types
 //! the code the CLI printed, the signed-in user is bound to the pending row,
 //! and the CLI redeems it at `/oauth2/token`.
-//!
-//! It used to serve a second audience. Control ran a parallel device flow
-//! whose rows carried `provider = 'platform'`, and under
-//! `AuthProviderKind::Supabase` this page rendered a GoTrue sign-in that
-//! posted the resulting bearer to control's `/api/device/approve` instead of
-//! writing the row itself. Control's flow is gone - `zeroship login` drives
-//! the OP grant - so that page had nothing left to post to and was removed
-//! with it. Supabase survives as an upstream social login
-//! (`docs/decisions/2026-06-30-self-contained-auth-replace-hydra.md`, line 13);
-//! what retired is its DEPLOY path, which line 32 of the same ADR supersedes.
 
 use std::sync::Arc;
 
@@ -517,8 +507,7 @@ mod tests {
     ///
     /// What this does NOT catch: whether the page ever RECEIVES such a grant.
     /// That is `pending_user_code_details` dropping its `provider = 'op'` filter
-    /// and its inner join, which needs a database, and end to end it is
-    /// `tests/e2e_device_login.sh`. This pins only the rendering.
+    /// and its inner join, which needs a database. This pins only the rendering.
     #[test]
     fn a_platform_grant_names_the_cli_and_discloses_its_deploy_scopes() {
         let pending = device_token::PendingDeviceGrant {

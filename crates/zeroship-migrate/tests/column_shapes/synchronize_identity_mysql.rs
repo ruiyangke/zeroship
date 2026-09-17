@@ -31,11 +31,9 @@
 //!   counter to `MAX + 1` (77 -> 78);
 //! - and since 8.0 the counter is redo-logged, so a restart no longer loses it.
 //!
-//! An earlier draft of this file asserted a behind counter of 11 after that UPDATE
-//! and PASSED its probe. The probe was reading `information_schema` THROUGH the
-//! statistics cache; the true value was 51 the whole time. Which is the second reason
-//! this file has to be live, and the reason every read below goes through
-//! [`live_counter`].
+//! A read of `information_schema` goes THROUGH the statistics cache and can report a
+//! value arbitrarily behind the truth. That is the second reason this file has to be
+//! live, and the reason every read below goes through [`live_counter`].
 //!
 //! ## So what does the operation DO on MySQL?
 //!
@@ -57,10 +55,10 @@
 //!
 //! # What only a LIVE MySQL server can prove
 //!
-//! `zeroship-migrate-mysql/src/backend/identity_sql.rs` already has four unit tests over a
-//! `RecordingSession` fake, and they DO pin the emitted DDL text
+//! `zeroship-migrate-mysql/src/backend/identity_sql.rs` already pins the emitted DDL text
 //! (``ALTER TABLE `app`.`orders` AUTO_INCREMENT = 23``) and its ordering against the
-//! lock. Four things are out of a fake's reach, and each has a test here:
+//! lock over a `RecordingSession` fake. Four things are out of a fake's reach, and each
+//! has a test here:
 //!
 //! 1. **The stale-catalog trap.** `information_schema.TABLES.AUTO_INCREMENT` is
 //!    served from a server-wide statistics cache whose default lifetime is
@@ -87,7 +85,7 @@
 //! # The altitude the dialect corpus does NOT reach
 //!
 //! `synchronizeIdentity` is in the dialect corpus, so `dialect_conformance_live.rs`
-//! drives it on MySQL and records a `Verdict`. MEASURED: that row's prelude
+//! drives it on MySQL and records a `Verdict`. That row's prelude
 //! (`dialect_corpus/mod.rs`, the `("synchronizeIdentity", _)` arm) creates `t` and
 //! inserts NOTHING. `MAX(column)` over an empty table is NULL, and
 //! `resolve_counter_advance` returns `Ok(None)` on a NULL maximum - so the
@@ -242,8 +240,7 @@ async fn scalar(session: &MysqlDevSession, sql: &str) -> Option<i64> {
 ///
 /// Not defensive. Without the `information_schema_stats_expiry = 0` this sets, the
 /// read is served from a server-wide cache with a one-day default lifetime and can be
-/// arbitrarily far behind the truth - which is how an earlier draft of this file
-/// convinced itself of a behind counter that did not exist.
+/// arbitrarily far behind the truth.
 async fn live_counter(session: &MysqlDevSession, database: &str) -> Option<i64> {
     exec(session, "SET SESSION information_schema_stats_expiry = 0").await;
     counter_read(session, database, TABLE).await

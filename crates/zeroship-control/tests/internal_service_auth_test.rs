@@ -85,8 +85,7 @@ fn tmpdir(label: &str) -> PathBuf {
 }
 
 /// Write one ed25519 key per service and one peer document naming every public
-/// half - the same shape `tests/lib/runtime_secrets.sh` writes for the
-/// end-to-end harnesses, so this suite and those harnesses exercise one format.
+/// half, in the shape the runtime credential loader expects.
 ///
 /// It ALSO publishes keys this deployment must never trust, and returns what
 /// the arms need to present them:

@@ -5,17 +5,17 @@
 //! caller's other half either connects or does not; these functions produce a
 //! VERDICT, and a wrong verdict is a dropped database.
 //!
-//! THE SWEEPER MUST NEVER DROP `WITH (FORCE)`, and that asymmetry against
-//! `tests/lib/scratch_db.sh` -- which uses it, correctly -- is the whole safety
+//! THE SWEEPER MUST NEVER DROP `WITH (FORCE)`, and that asymmetry against a
+//! per-run scratch drop -- which uses it, correctly -- is the whole safety
 //! model. `WITH (FORCE)` terminates every other backend on the database before
-//! dropping, so the drop cannot fail on a live connection. scratch_db drops a
-//! database THIS RUN created, where the only connections left are its own
-//! stragglers, and a plain DROP would leak the database on them. The sweeper
-//! drops databases OTHER runs created; a live connection there is a peer agent
-//! mid-suite, and `WITH (FORCE)` would kill it. A plain `DROP DATABASE` failing
-//! with "is being accessed by other users" is not an inconvenience for the
-//! sweeper -- it is the answer, and the last line of defence behind the
-//! liveness scan below.
+//! dropping, so the drop cannot fail on a live connection. A per-run scratch
+//! drop targets a database THIS RUN created, where the only connections left
+//! are its own stragglers, and a plain DROP would leak the database on them.
+//! The sweeper drops databases OTHER runs created; a live connection there is
+//! a peer agent mid-suite, and `WITH (FORCE)` would kill it. A plain
+//! `DROP DATABASE` failing with "is being accessed by other users" is not an
+//! inconvenience for the sweeper -- it is the answer, and the last line of
+//! defence behind the liveness scan below.
 //!
 //! WHY A /proc SCAN AND NOT `pg_stat_activity`. A suite run exports
 //! `PG_TEST_URL=postgres://.../<db>`, so the name sits in `/proc/<pid>/environ`
@@ -98,8 +98,8 @@ fn parent_of(pid: i32) -> Option<i32> {
 /// How few `/proc` entries a pass may rule on before the pass itself is the
 /// thing in doubt.
 ///
-/// A FLOOR, NOT A TARGET, in the sense `tests/lib/gate_arms.sh` uses the word:
-/// it separates "this box is quiet" from "this scan did not look". Measured
+/// A FLOOR, NOT A TARGET: it separates "this box is quiet" from "this scan
+/// did not look". Measured
 /// 2026-08-20 on the machine the sweeper runs on: 495 entries, of which 109
 /// were ours. Any Linux kernel contributes more than sixteen threads before
 /// userspace starts, so a pass under this saw a process table that is not a
@@ -148,14 +148,13 @@ pub struct Holders {
     /// reason this scan exists -- a peer's suite sitting in cargo holds no
     /// backend and appears only in `PG_TEST_URL` -- and a kernel that refused
     /// every peer's `environ` would leave that half silently dead while the
-    /// argv half kept the scan looking healthy. Measured 2026-08-20 on this
-    /// machine: 77 readable, 14 refused. Zero is the gap.
+    /// argv half kept the scan looking healthy. A count of zero here is the gap.
     pub peer_env_read: usize,
     /// Entries that are alive and whose `cmdline` could not be read at all.
     ///
     /// A GAP. Exiting explains a short read and so does a refused environment;
     /// neither explains this, and every one of them could be the peer agent
-    /// whose database is about to be dropped. Measured 2026-08-20: 0 of 495.
+    /// whose database is about to be dropped.
     pub unexplained: Vec<i32>,
     /// `/proc` itself could not be listed. Total blindness, and indistinguish-
     /// able from "nothing holds any of these names" until it is carried out.

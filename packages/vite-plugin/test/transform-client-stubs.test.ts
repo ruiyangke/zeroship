@@ -1,9 +1,8 @@
 /**
  * Client-environment transform output.
  *
- * `docs/proposals/rpc.md` §5 says the client transform replaces
- * server-marked exports
- * with branded ProcedureRef stubs that:
+ * The client transform replaces server-marked exports with branded
+ * ProcedureRef stubs that:
  *
  *   - call the wire (`/__zeroship/v1/<wireId>`) when invoked,
  *   - carry the `__SERVER_REFERENCE` symbol (so `<form action={fn}>`

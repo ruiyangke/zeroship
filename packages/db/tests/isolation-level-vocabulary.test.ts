@@ -1,26 +1,20 @@
 /**
- * Task #245 - the `isolationLevel` vocabulary was recorded in multiple
- * places and no two agreed. The runtime (`normalize_isolation_level`,
+ * The `isolationLevel` vocabulary must have exactly one published source:
+ * `ZeroshipIsolationLevel` (`packages/types/shared.d.ts`), the SQL-spaced
+ * lowercase form. The runtime (`normalize_isolation_level`,
  * `crates/zeroship-data-v8/src/v8_classes/db.rs`) accepts three spellings per
- * level (camelCase, SQL-spaced, uppercase SQL) for all four levels, but
- * the only *published* TypeScript union is `ZeroshipIsolationLevel`
- * (`packages/types/shared.d.ts`) - the SQL-spaced lowercase form. That is the
- * type `@zeroship/db`'s `Db<Schema>.transaction()` is checked against
- * (`packages/db/src/db-types.ts` `TransactionOptions.isolationLevel:
+ * level (camelCase, SQL-spaced, uppercase SQL) for all four levels, but the
+ * only *published* TypeScript union exposes just the SQL-spaced lowercase form.
+ * That is the type `@zeroship/db`'s `Db<Schema>.transaction()` is checked
+ * against (`packages/db/src/db-types.ts` `TransactionOptions.isolationLevel:
  * IsolationLevel`, `IsolationLevel = ZeroshipIsolationLevel` in
  * `packages/db/src/types.ts`).
  *
  * `packages/types/db.d.ts`'s raw native `ZeroshipDb.transaction()` - the type
  * a creator gets from `import { env } from "zeroship"; env.db.transaction`
- * without going through `@zeroship/db` - used to declare its OWN
- * three-value camelCase-only literal (`"readCommitted" | "repeatableRead"
- * | "serializable"`), independently of `ZeroshipIsolationLevel`. It
- * disagreed on both spelling AND count: it dropped `readUncommitted`
- * entirely, camelCase or otherwise, even though the runtime accepts it
- * (measured 2026-08-10 by driving `db.transaction({isolationLevel:
- * "readUncommitted"})` against a live `pnpm dev` server - accepted, no
- * error). That is now fixed to reference `ZeroshipIsolationLevel`
- * directly, so the two surfaces cannot drift apart again silently.
+ * without going through `@zeroship/db` - references `ZeroshipIsolationLevel`
+ * directly, so the two surfaces cannot drift apart silently. The runtime
+ * accepts `readUncommitted`, so the published union must admit it.
  *
  * This file is a type-only regression test in the `@ts-expect-error`
  * idiom already used elsewhere in this package (see
@@ -35,22 +29,11 @@
  *     -p <a tsconfig including this file, packages/db/src, and
  *         packages/types/*.d.ts>
  *
- * MUTATION PROOF (performed by hand against `packages/types/db.d.ts`, not
- * left in the tree): reverting the fix back to the old three-value
- * camelCase literal made the `rawTransaction(..., { isolationLevel:
- * "read uncommitted" })` line below (the canonical spelling, no
- * @ts-expect-error) fail with:
- *
- *   TS2820: Type '"read uncommitted"' is not assignable to type
- *   '"serializable" | "repeatableRead" | "readCommitted" | undefined'.
- *   Did you mean '"readCommitted"'?
- *
- * Restoring the fix made it compile clean again. WHAT THIS DOES NOT
- * CATCH: a fifth level or spelling added to `ZeroshipIsolationLevel`
- * without a matching change to the runtime's `normalize_isolation_level`
- * match arms (or vice versa) - nothing here cross-checks the TypeScript
- * union against the Rust match arms at runtime; that pairing has to be
- * kept by hand on both sides.
+ * WHAT THIS DOES NOT CATCH: a fifth level or spelling added to
+ * `ZeroshipIsolationLevel` without a matching change to the runtime's
+ * `normalize_isolation_level` match arms (or vice versa) - nothing here
+ * cross-checks the TypeScript union against the Rust match arms at runtime;
+ * that pairing has to be kept by hand on both sides.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -69,8 +52,7 @@ function typeOnly_neverCalledAtRuntime(db: Db<typeof s>, rawTransaction: Zeroshi
   const okSdkSpaced: TransactionOptions = { isolationLevel: "read uncommitted" };
   const okSdkSerializable: TransactionOptions = { isolationLevel: "serializable" };
   // @ts-expect-error "repeatableRead" (camelCase) is not in the published
-  // ZeroshipIsolationLevel union - this is the exact TS2820
-  // docs/reference/db.md now documents ("Did you mean '"repeatable read"'?").
+  // ZeroshipIsolationLevel union (TS2820).
   const badSdkCamel: TransactionOptions = { isolationLevel: "repeatableRead" };
 
   void okSdkSpaced;
@@ -88,13 +70,11 @@ function typeOnly_neverCalledAtRuntime(db: Db<typeof s>, rawTransaction: Zeroshi
   // gets it through; taken as a parameter type here only so this function
   // signature pins the same ambient name without an explicit import.
 
-  // Canonical spelling - MUST compile. This is the line that was broken: the
-  // old `ZeroshipDb` literal rejected every form of "read uncommitted",
-  // camelCase or SQL-spaced, because the arm was missing outright.
+  // Canonical spelling - MUST compile. Every form of "read uncommitted",
+  // camelCase or SQL-spaced, is accepted by the runtime.
   rawTransaction(async () => {}, { isolationLevel: "read uncommitted" });
-  // @ts-expect-error camelCase was never published on ZeroshipIsolationLevel;
-  // ZeroshipDb now matches that decision instead of carrying its own
-  // independent (and, before the fix, incomplete) list.
+  // @ts-expect-error camelCase is not published on ZeroshipIsolationLevel;
+  // ZeroshipDb matches that union rather than carrying its own list.
   rawTransaction(async () => {}, { isolationLevel: "readUncommitted" });
   // @ts-expect-error not a real isolation level under any spelling.
   rawTransaction(async () => {}, { isolationLevel: "totallyBogus" });

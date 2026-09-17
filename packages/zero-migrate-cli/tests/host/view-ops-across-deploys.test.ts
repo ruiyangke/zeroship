@@ -720,9 +720,8 @@ test("PostgreSQL: an applied prior moves the refusal from the database into the 
   }
 });
 
-/** The dialect split for the GUARDED drop of a never-created view, which is the pair
- *  `docs/writing-migrations.md` gets to state and therefore the pair that must be
- *  measured rather than reasoned about.
+/** The dialect split for the GUARDED drop of a never-created view: the pair that
+ *  must be measured rather than reasoned about.
  *
  *  The MySQL half is above: with a prior applied, the fold refuses. This is the other
  *  half, and it lands the opposite way — PostgreSQL ACCEPTS the same authored migration
@@ -738,8 +737,8 @@ test("PostgreSQL: an applied prior moves the refusal from the database into the 
  *  The split is at lowering, NOT at apply. Every dialect probes at apply
  *  (`mysql/session.rs` calls `existence_probe::decide` exactly as PostgreSQL does), but
  *  projection runs first, so on MySQL the probe is never consulted here at all — which
- *  is also why the native `DROP VIEW IF EXISTS` the docs once credited MySQL with is
- *  unreachable for an absent view.
+ *  is also why the native `DROP VIEW IF EXISTS` is unreachable for an absent
+ *  view.
  *
  *  Both arms drop a view NO migration in the history ever created, so a pass cannot come
  *  from the snapshot resolving a known view without consulting the guard. */

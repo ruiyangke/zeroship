@@ -2,7 +2,7 @@
 
 A platform where anyone can create, launch, and run software without writing code. Creators describe what they want in natural language. AI builds it. The platform handles the infrastructure: hosting, database, auth, payments, and scaling. It meters the infrastructure each app consumes, and integrates Stripe (including Stripe Connect) so apps can accept payments from their end users.
 
-**Primary creator flow (2026-06-29 direction): build locally → deploy.** Creators (or an AI coding agent — Claude Code / Codex — on the creator's machine) build a zeroship app locally and `zeroship deploy` the built `.zship` to the platform. We don't rebuild a hosted in-browser AI builder (the agents do that better); the platform's value is the *infrastructure* (runtime, `env.*` primitives, deploy contract, gateway, billing). The hosted-build environment / **sandbox is deferred** (extracted to the standalone `zeroship-sandbox` project). Golden path + scaffold: `docs/build-and-deploy-golden-path.md` · `examples/starter/` (+ its `CLAUDE.md`) · `tests/golden_path.sh`.
+**Primary creator flow (2026-06-29 direction): build locally → deploy.** Creators (or an AI coding agent — Claude Code / Codex — on the creator's machine) build a zeroship app locally and `zeroship deploy` the built `.zship` to the platform. We don't rebuild a hosted in-browser AI builder (the agents do that better); the platform's value is the *infrastructure* (runtime, `env.*` primitives, deploy contract, gateway, billing). The hosted-build environment / **sandbox is deferred** (extracted to the standalone `zeroship-sandbox` project). Golden path + scaffold: `docs/build-and-deploy-golden-path.md` · `examples/starter/` (+ its `CLAUDE.md`).
 
 This file is the AI-agent landing page. Read the **task router** below first.
 
@@ -61,7 +61,7 @@ None of this is licence to measure less - measure more, and put the result in a 
 | **KV storage and SDK** (`@zeroship/kv`) | `docs/reference/kv.md` · `crates/zeroship-kv/` (storage) · `crates/zeroship-kv-v8/` (V8 binding) · `packages/kv/` |
 | **The RPC SDK / server functions** (`@zeroship/rpc`) | `docs/reference/rpc.md` · `packages/rpc/` · `packages/vite-plugin/src/{transform,rpc-registry,manifest}.ts` · `crates/zeroship-runtime/src/rpc/` |
 | **Durable workflows** (`@zeroship/workflows`, `env.workflows`) | `docs/reference/workflows.md` · `packages/workflows/` · `crates/zeroship-workflow/` (Rust engine/client) · `crates/zeroship-workflow-schema/` (the journal's authored schema, its generated artifacts and their one schema-name substitution; a LEAF crate, so a platform service may install the journal without depending on the engine) · `crates/zeroship-workflow-v8/` (binding/executor) · `crates/zeroship-workflow-manager/` + `crates/zeroship-workflow-server/` (the manager that owns delivery) · `crates/zeroship-worker/src/workflow_host.rs` (the host that owns the creator journal) |
-| **Build a creator app + deploy** (the primary creator flow) | `docs/build-and-deploy-golden-path.md` · `examples/starter/` (scaffold + `CLAUDE.md`) · `tests/golden_path.sh` · `crates/zeroship-cli/` (`zeroship deploy`) |
+| **Build a creator app + deploy** (the primary creator flow) | `docs/build-and-deploy-golden-path.md` · `examples/starter/` (scaffold + `CLAUDE.md`) · `crates/zeroship-cli/` (`zeroship deploy`) |
 | **Creator project config** (`zeroship.jsonc`: app, control, build shape, migration paths, environments) | `docs/reference/project-config.md`, `schema/project-v1.json`, `crates/zeroship-cli/src/project_config/`, `packages/vite-plugin/src/project-config/` |
 | **zeroship deploy contract** (`default = { fetch?, rpc? }`, dispatcher, raw-JS deploys) | `docs/reference/zeroship-standard.md` · `crates/zeroship-runtime/src/core/runtime_startup.rs` · `crates/zeroship-runtime/src/rpc/dispatch.rs` |
 | **Framework-internal coordination** (startup, DB facade, dev entry loading) | `crates/zeroship-runtime/src/core/{runtime_startup,plugin_modules,dev_entry}.rs` · `crates/zeroship-data-v8/js/` · `packages/vite-plugin/src/dev-bootstrap/` |
@@ -199,8 +199,7 @@ PostgreSQL containers; Docker is required and no external database URL is used.
 controls beside each check. Do not add or port source-text checks: tests must
 exercise behavior, compiler contracts, parsed artifacts or structured metadata,
 rather than search implementation text for expected spellings. Retire existing
-source scanners as their suites are migrated. Surviving shell gates use
-`tests/lib/gate_arms.sh` for per-arm floors and failure propagation. There is no central script-count
+source scanners as their suites are migrated. There is no central script-count
 census or requirement to recreate retired bookkeeping checks in Rust.
 
 Data architecture checks are Rust tests in `xtask/tests/data_architecture.rs`,
@@ -211,8 +210,7 @@ checked by the data architecture suite. The ORM and V8 adapter deny
 `private_interfaces` and `private_bounds` during ordinary compilation.
 Keep nonempty-input assertions and rejection controls beside the checks. Example acceptance
 tests live inside each example and use Vitest, TypeScript fixtures and browser
-assertions. Other repository gates remain shell scripts under `tests/` and
-participate in `tests/lib/gate_arms.sh`.
+assertions. Other repository gates remain shell scripts under `tests/`.
 
 Standalone, zeroship-independent driver libraries (own top-level `libs/`, publishable):
 
@@ -415,8 +413,7 @@ Stable contracts, live in `docs/reference/`:
 
 ## Committing
 
-A `commit-msg` hook enforces this. Turn it on once per clone, or your commits
-are only checked in CI:
+A `commit-msg` hook enforces this. Turn it on once per clone:
 
 ```bash
 git config core.hooksPath .githooks
@@ -447,7 +444,7 @@ type(scope): imperative summary of what the change does
 - Every bug fix adds a regression test that would fail before the fix.
 
 Full rules, scope vocabulary and worked examples: `CONTRIBUTING.md`. Check a
-range yourself with `tests/commit_msg_gate.sh --range origin/main..HEAD`.
+range yourself with `.githooks/commit-msg --range origin/main..HEAD`.
 
 ---
 
@@ -574,10 +571,6 @@ cargo clippy --workspace --all-targets --all-features
 ./crates/zeroship-runtime/tests/setup-wpt.sh                 # ~930 MB working tree at depth=1
 # Bump the pin via WPT_COMMIT env var; default is the last-known-good
 # commit baked into setup-wpt.sh. Re-run after pulling if the pin moves.
-
-# E2E + benchmarks
-./tests/e2e_platform.sh
-./tests/bench_platform.sh
 ```
 
 Detailed setup: `docs/runbooks/local-dev.md`. Multi-node: `docs/runbooks/docker-compose.md`.

@@ -54,15 +54,6 @@
 //! fold is over the per-migration `checksum` (NOT the raw `up`/`down` text) so
 //! it is cheap and reuses the already-tamper-evident content hash.
 //!
-//! The result is DETERMINISTIC and folded over the CANONICAL EXECUTED order:
-//! the manifest is invariant to a cosmetic SLICE reorder (the same set
-//! executes the same way => the same hash, so the control plane stamping one slice
-//! order and the bundle arriving in another does NOT false-mismatch), and a
-//! `depends_on` change that reorders EXECUTION changes the hash (also caught by
-//! the per-migration checksum, which folds `depends_on`). The set-level
-//! mutations it still catches: an INSERTION, a REMOVAL, and a CONTENT edit (via
-//! the per-migration checksum).
-//!
 //! # Trust model - the expected hash MUST come from a trusted source
 //!
 //! The manifest detects tampering BETWEEN authoring/review and apply: a creator,

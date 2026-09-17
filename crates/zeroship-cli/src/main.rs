@@ -220,7 +220,7 @@ fn cmd_serve(args: &[String]) {
     // no endpoint. "local accumulation only" is true but reads like "your usage
     // is tracked here", and a creator who wants to see it locally goes looking
     // for a surface that does not exist. Deployed is where usage becomes
-    // visible; see docs/pilot/e2e-scenarios.md row 14.
+    // visible.
     eprintln!(
         "[zeroship] metering on (dev: counters accumulate but are NOT READABLE - \
          no flush, no snapshot API; usage is only observable on a deployed app)"

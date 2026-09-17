@@ -1,30 +1,18 @@
 /**
  * The build must REFUSE `auth: "admin"`.
  *
- * `admin` was a level for a principal that does not exist.
- * `docs/architecture/control-plane.md` states "There is no platform admin
- * surface", and the gateway enforced `Admin` byte-for-byte as `User` at all
- * three of its match sites - two arms in
- * `crates/zeroship-gateway/src/router/auth.rs` and one in
- * `crates/zeroship-gateway/src/router/dispatch.rs`, each spelled
- * `User | Admin`. No site anywhere tested for platform-admin identity. A
- * `rank()` function made `Admin` win a MERGE against `User`, which is why the
- * level read as implemented: the merge question was answered and the access
- * question never was.
+ * `admin` named a principal that does not exist. There is no platform admin
+ * surface: the gateway enforces `Admin` byte-for-byte as `User` at all of its
+ * match sites - two arms in `crates/zeroship-gateway/src/router/auth.rs` and
+ * one in `crates/zeroship-gateway/src/router/dispatch.rs`, each spelled
+ * `User | Admin` - and no site tests for platform-admin identity. A `rank()`
+ * function makes `Admin` win a MERGE against `User`, so the level reads as
+ * implemented while the access question is never asked.
  *
- * That would have been an internal wart if the creator surface had not
- * RECOMMENDED the value. It did, twice, in this file's production sibling
- * (`src/manifest.ts`): the secure-by-default remedy said `or set auth:
- * "user" or "admin"`, and the fail-closed banner said `auth: "user"` /
- * `auth: "admin"` "to keep it gated". A creator who followed that advice to
- * lock a route down got user-level protection - every signed-in end user
- * reached it.
- *
- * The decision was to DELETE the variant, not implement it
- * (`crates/zeroship-bundle/src/rule.rs`, now `RequiredPrincipal` with two
- * variants). The build is the right place to say so: it is the first thing a
- * creator runs, and it can name the file and the key. These tests pin the
- * refusal and the message.
+ * The variant is DELETED, not implemented (`crates/zeroship-bundle/src/rule.rs`,
+ * `RequiredPrincipal` with two variants). The build is the right place to
+ * enforce that: it is the first thing a creator runs, and it can name the file
+ * and the key. These tests pin the refusal and the message.
  *
  * `computeManifestExtras` is the same entry point `src/build.ts` calls, so a
  * refusal here is a refusal of `zeroship build`.

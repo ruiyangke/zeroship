@@ -797,14 +797,6 @@ and then continues with the whole `CancelToken` type. A production edit there
 lands AFTER the marker and the heuristic calls it inert - a false "no need to
 re-run" on a real behaviour change.
 
-Use `tests/lib/production_lines_changed.py <base> <head>` instead. It brace-
-matches EVERY `#[cfg(test)]` item to build the full set of test spans, and
-counts changed lines outside all of them, excluding comments and blanks. Run its
-two controls before trusting a zero:
-
-    production_lines_changed.py a228a10aa~1 a228a10aa   -> 35   (a known prod fix)
-    production_lines_changed.py 8df74effc~1 8df74effc   ->  0   (a docs commit)
-
 A tool that reports zero is only useful if you have watched it report non-zero.
 
 **THE TOOL DETECTS TEXT CHANGE, NOT BEHAVIOUR CHANGE, and the difference bit

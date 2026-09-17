@@ -27,6 +27,7 @@ use zeroship_core::{
     workflow_jobs::{
         Delivery, DeliveryLease, DeploymentId, JobLease, JobSpec, Settlement, SettlementReceipt,
     },
+    workflow_policy::AppPolicy,
 };
 use zeroship_data_orm::{
     binding::DbBinding,
@@ -309,29 +310,46 @@ impl Queue {
         }
     }
 
-    /// Claim under a current assignment authenticated by the native host.
+    /// Claim under a current assignment authenticated by the native host, on the
+    /// default app policy's delivery budget. This form substitutes defaults the
+    /// authorized form demands: a host that observes its app's policy, or
+    /// revalidates placement inside the transaction, calls `claim_authorized`.
     ///
     /// # Errors
     /// Refuses expired authority and failed transactions.
     pub async fn claim(&self, assignment: &Assignment) -> Result<Option<DeliveryGrant>, Error> {
-        self.claim_authorized(&assignment.into(), |_| ready(Ok(assignment.clone())))
-            .await
+        self.claim_authorized(
+            &assignment.into(),
+            AppPolicy::default().max_delivery_attempts,
+            |_| ready(Ok(assignment.clone())),
+        )
+        .await
     }
 
     /// Revalidate placement after acquiring the app lock and before commit.
     /// Each authorization callback receives the active transaction for scoped reads.
     ///
+    /// A job whose counted executions have reached `max_delivery_attempts` is no
+    /// longer a candidate, so a body that never completes stops being redelivered.
+    /// The exhausted row keeps its attempt history; nothing settles it, because
+    /// no executor produced an outcome for it.
+    ///
     /// # Errors
-    /// Refuses revoked assignments, exhausted attempts and failed transactions.
+    /// Refuses revoked assignments, invalid ceilings, exhausted attempt numbering
+    /// and failed transactions.
     pub async fn claim_authorized<F, Fut>(
         &self,
         assignment: &VerifyAssignment,
+        max_delivery_attempts: i64,
         mut authorize: F,
     ) -> Result<Option<DeliveryGrant>, Error>
     where
         F: FnMut(Database) -> Fut,
         Fut: Future<Output = Result<Assignment, Error>>,
     {
+        if max_delivery_attempts <= 0 {
+            return Err(Error::Invalid);
+        }
         let budget = Budget::new(self.options.transaction_timeout);
         self.transact_for(budget.clone(), |tx| async move {
             lock_scope(&tx, &assignment.app_id).await?;
@@ -342,7 +360,14 @@ impl Queue {
             let now = sample.millis;
             let assignment_expires = local_deadline(sample, authority.expires_at.get())?;
             crate::management::validate_pending(&tx, &assignment.app_id).await?;
-            let Some(id) = Box::pin(crate::scheduling::candidate(&tx, &assignment.app_id, now)).await? else {
+            let Some(id) = Box::pin(crate::scheduling::candidate(
+                &tx,
+                &assignment.app_id,
+                now,
+                Some(max_delivery_attempts),
+            ))
+            .await?
+            else {
                 let observed = authorize(tx.clone()).await?;
                 let sample = self.clock.sample().await?;
                 let authority = current(assignment, observed, sample.millis)?;
@@ -454,7 +479,7 @@ impl Queue {
                 sample,
                 assignment_expires,
             )?;
-            update(&tx, fence(delivery), value!({"lease_deadline":deadline})).await?;
+            update(&tx, fence(delivery), renewal(&job, delivery, deadline)?).await?;
             let observed = authorize(tx.clone()).await?;
             let sample = self.clock.sample().await?;
             let authority = current(assignment, observed, sample.millis)?;
@@ -704,6 +729,7 @@ impl Queue {
             "management_request_id":models::management_request(&spec.operation),
             "operation_kind":models::operation_kind(&spec.operation),"run_id":models::operation_run(&spec.operation),
             "spec_digest":digest,"available_at":spec.available_at.get(),"state":"ready", "attempt":0,
+            "execution_attempts":0,
             "dispatch_order":dispatch_order,"created_at":now
         })).await?;
         Ok(())
@@ -931,6 +957,23 @@ fn live(job: &Job, now: i64) -> Result<(), Error> {
         return Err(Error::Conflict);
     }
     Ok(())
+}
+
+/// Renewal is the manager's only evidence that a delivery began executing: a
+/// claim the creator journal defers never reaches this path, so its attempt
+/// stays uncounted and capacity pressure cannot exhaust a job's budget. The
+/// first renewal of an attempt counts it; later renewals of the same attempt
+/// extend only the lease.
+fn renewal(job: &Job, delivery: &Delivery, deadline: i64) -> Result<Value, Error> {
+    if job.executed_attempt == Some(delivery.attempt.get()) {
+        return Ok(value!({ "lease_deadline": deadline }));
+    }
+    let counted = job
+        .execution_attempts
+        .checked_add(1)
+        .ok_or(Error::Capacity)?;
+    Ok(value!({"lease_deadline":deadline,"execution_attempts":counted,
+        "executed_attempt":delivery.attempt.get()}))
 }
 
 fn fence(delivery: &Delivery) -> Value {

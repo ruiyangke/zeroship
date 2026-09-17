@@ -1,5 +1,5 @@
 //! Reservation, cancellation and terminal-classification protocol for the
-//! SQLite actor (SC-2, `docs/proposals/2026-08-26-sc2-sqlite-actor-protocol.md`).
+//! SQLite actor (SC-2).
 //!
 //! ## What this module owns
 //!

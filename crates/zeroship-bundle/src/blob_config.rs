@@ -75,14 +75,12 @@ impl StoreUrl {
 /// a STRUCTURAL reason rather than a stylistic one:
 /// `zeroship-core` depends on `zeroship-bundle`, so bundle cannot use the typed
 /// environment keys that make a read enumerable, and a raw read here would be
-/// exactly the invisible read Step 4 of
-/// `docs/proposals/2026-08-11-config-name-alignment.md` removes.
+/// an invisible read that typed keys exist to prevent.
 ///
-/// The rule that resolves it is the one Section 4.5 states for publishable
-/// libraries: production library APIs accept resolved options, and platform
-/// processes declare and read any external credentials before injecting them.
-/// Bundle is not in `libs/`, but the dependency direction puts it in the same
-/// position, so it gets the same shape.
+/// The rule that resolves it: production library APIs accept resolved options,
+/// and platform processes declare and read any external credentials before
+/// injecting them. Bundle is not in `libs/`, but the dependency direction puts
+/// it in the same position, so it gets the same shape.
 #[derive(Debug, Clone)]
 pub struct S3Runtime {
     /// Static credentials. There is no provider chain and no metadata-service

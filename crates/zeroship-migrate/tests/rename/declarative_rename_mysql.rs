@@ -14,11 +14,11 @@
 //!
 //! # Why refusal, not a product change
 //!
-//! MySQL cannot rename a column: `docs/dialects.md`'s "Rename column" row reads
-//! `MySQL 8 | No`, the validation policy records `renameColumn | base` as
-//! `Unsupported`, and the IR lane onto the SAME `ExpandContractAuthor` answers
-//! `&MYSQL => Err(UnsupportedInV1)` at plan time. Refusing the declarative path
-//! makes it honor the same promise rather than change what the product offers.
+//! MySQL cannot rename a column: the validation policy records
+//! `renameColumn | base` as `Unsupported`, and the IR lane onto the SAME
+//! `ExpandContractAuthor` answers `&MYSQL => Err(UnsupportedInV1)` at plan time.
+//! Refusing the declarative path makes it honor the same promise rather than
+//! change what the product offers.
 //!
 //! # What this file asserts, and why it is not an error-type check
 //!

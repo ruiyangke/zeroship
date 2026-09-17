@@ -1,8 +1,8 @@
 //! Integration tests for the spend-reconcile cron.
 //!
 //! Runs the REAL `cron::spend_reconcile::tick` against a live Postgres: it takes
-//! the advisory lock (#2), runs `SpendEngine::evaluate_all`, and on a transition
-//! writes the enriched `SpendStateChange` audit row (#8). No shims.
+//! the advisory lock, runs `SpendEngine::evaluate_all`, and on a transition
+//! writes the enriched `SpendStateChange` audit row. No shims.
 //!
 //! Gated on a configured test database
 //! (`common::require_control_db`); an absent or unmigrated one REFUSES
@@ -164,10 +164,10 @@ async fn make_over_limit_app(state: &AppState, limit: i64) -> AppId {
     common::seed_app(&state.control_pg, &name, &plan_id).await
 }
 
-/// #8: a transition through the REAL cron `tick` writes a `SpendStateChange`
+/// A transition through the REAL cron `tick` writes a `SpendStateChange`
 /// audit row whose detail carries the money context `{from,to,spend_cents,
 /// limit_cents}` — matching the doc on `audit::Action::SpendStateChange`.
-/// (This also exercises #2: `tick` takes + releases the advisory lock around
+/// (This also exercises the advisory lock: `tick` takes + releases it around
 /// the sweep; a single instance acquires it and proceeds.)
 // SWEEP_LOCK guards `Mutex<()>` - a pure test-serialization token, not
 // shared mutable data accessed across the await. compio::test runs each
@@ -215,11 +215,11 @@ async fn reconcile_tick_writes_enriched_spend_audit() {
     assert_eq!(v["to"], "block", "records the to-state");
     assert_eq!(
         v["spend_cents"], 100,
-        "audit detail carries spend_cents (#8)"
+        "audit detail carries spend_cents"
     );
     assert_eq!(
         v["limit_cents"], 100,
-        "audit detail carries limit_cents (#8)"
+        "audit detail carries limit_cents"
     );
 
     // Teardown: the fixture holds the only handle to this test's Postgres
@@ -230,7 +230,7 @@ async fn reconcile_tick_writes_enriched_spend_audit() {
     common::drain_pg().await;
 }
 
-/// #2: the advisory lock is single-flight. While one connection holds
+/// The advisory lock is single-flight. While one connection holds
 /// `pg_try_advisory_lock(<spend key>)`, a concurrent `tick` cannot acquire it
 /// and SKIPS (returns 0) rather than racing a duplicate sweep. We hold the lock
 /// on a side connection using the SAME key the cron uses, then assert the tick
@@ -313,9 +313,9 @@ async fn reconcile_tick_skips_when_advisory_lock_held() {
     common::drain_pg().await;
 }
 
-/// #12 (spend band walk): drive a single app through Allow→Warn→Degrade→Block AND a
-/// deadband HOLD through the REAL `evaluate_all`/spend cron `tick` on live PG. Only
-/// Allow→Block was cron-tested before; this pins every intermediate band edge AND the
+/// Spend band walk: drive a single app through Allow→Warn→Degrade→Block AND a
+/// deadband HOLD through the REAL `evaluate_all`/spend cron `tick` on live PG. This
+/// pins every intermediate band edge AND the
 /// anti-flap deadband (a relaxation inside the deadband HOLDS, writing no transition).
 ///
 /// Thresholds (SpendThresholds::default): warn 80%, degrade 95%, block 100%, deadband 5%.

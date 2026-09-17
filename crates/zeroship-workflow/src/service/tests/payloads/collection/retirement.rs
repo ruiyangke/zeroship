@@ -88,7 +88,7 @@ impl Manager {
     async fn claim(&self, expected: &JobSpec) -> DeliveryGrant {
         let grant = self
             .coordinator
-            .claim_job(&self.worker, &self.scope, || ready(Ok(self.worker.clone())))
+            .claim_job(&self.worker, &self.scope, AppPolicy::default().max_delivery_attempts, || ready(Ok(self.worker.clone())))
             .await
             .unwrap()
             .expect("the manager delivers its maintenance job");

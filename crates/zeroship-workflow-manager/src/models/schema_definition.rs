@@ -71,6 +71,9 @@ zeroship_data_orm::orm::schema! {
             state: Text,
             #[orm(default = 0)]
             attempt: BigInt,
+            #[orm(default = 0)]
+            execution_attempts: BigInt,
+            executed_attempt: Nullable<BigInt>,
             worker_id: Nullable<Text>,
             assignment_revision: Nullable<BigInt>,
             lease_deadline: Nullable<BigInt>,

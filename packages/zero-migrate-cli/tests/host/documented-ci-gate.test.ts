@@ -1,31 +1,25 @@
-// The one pipeline recipe the documentation actually prints, run as written.
-//
-// docs/cli.md:
-//
-//   zero-migrate status --env production --strict --json > status.json || exit 1
-//   jq -e '.busy | not' status.json    # fail this build if a deploy was running
+// The CI gate: `status --strict --json` plus a `busy` check, run as written.
 //
 // It only works because two separate behaviours agree, and neither is obvious:
 //
 //   1. `status --strict` exits 0 when a peer holds the project lock. Contention
 //      is not a dirty migration set - a strict gate that failed there would fail
-//      on every pipeline overlapping a deploy - so line 1 does NOT stop.
-//   2. `busy` is present in the JSON whether or not anything is busy, so line 2
-//      has something to test.
+//      on every pipeline overlapping a deploy - so the `status` step does NOT stop.
+//   2. `busy` is present in the JSON whether or not anything is busy, so the `jq`
+//      step has something to test.
 //
-// If (1) changed, the recipe would exit at line 1 and never reach the busy check.
-// If (2) changed, `jq -e '.busy | not'` on a missing field yields `true` and the
-// gate would pass forever - silently stopping protecting, which is the direction
-// that matters. Neither would fail any existing test.
+// If (1) changed, the recipe would exit at the `status` step and never reach the
+// busy check. If (2) changed, `jq -e '.busy | not'` on a missing field yields
+// `true` and the gate would pass forever - silently stopping protecting, which is
+// the direction that matters. Neither would fail any existing test.
 //
 // So this asserts the gate in BOTH directions: it must pass when idle and FAIL
 // when a deploy is running. A gate only verified in the passing direction is not
 // verified at all.
 //
-// The real `jq` runs when it is on PATH, so the documented command itself is
-// exercised rather than a re-implementation of it. When it is absent the same
-// predicate is evaluated in JavaScript, because the property belongs to the JSON
-// rather than to jq.
+// The real `jq` runs when it is on PATH, so the command itself is exercised rather
+// than a re-implementation of it. When it is absent the same predicate is evaluated
+// in JavaScript, because the property belongs to the JSON rather than to jq.
 //
 // GATE: `ZERO_MIGRATE_TEST_PG_URL`.
 

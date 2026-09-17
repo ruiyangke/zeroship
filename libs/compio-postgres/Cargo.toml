@@ -185,7 +185,7 @@ optional = true
 # so running both against the same server and comparing answers is the
 # strongest check available for a port. Permitted here and ONLY here: the
 # zero-tokio invariant bans a normal or build dependency, and dev is exempt by
-# the 2026-08-24 decision recorded in AGENTS.md.
+# policy.
 #
 # PINNED to the exact version this crate is a port OF, because an oracle is
 # only an oracle for the version it is. `version = "0.7"` resolved to 0.7.17,

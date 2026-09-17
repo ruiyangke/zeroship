@@ -1,11 +1,9 @@
 //! The sealed test-key enum for this crate's gated tests.
 //!
 //! `compio-postgres` is a standalone, publishable driver with NO zeroship
-//! dependency (`AGENTS.md`, the `libs/` boundary), so it cannot use the typed
-//! keys in `zeroship_core::config` that the rest of the workspace reads the
-//! environment through. Section 4.5 of
-//! `docs/proposals/2026-08-11-config-name-alignment.md` allows exactly one
-//! substitute: a dependency-free sealed key enum, in exactly
+//! dependency, so it cannot use the typed keys in `zeroship_core::config` that
+//! the rest of the workspace reads the environment through. Exactly one
+//! substitute is permitted: a dependency-free sealed key enum, in exactly
 //! `libs/<crate>/tests/common/env.rs`, whose variants map to literal names and
 //! whose raw access lives in one accessor.
 //!

@@ -7,13 +7,10 @@ import { devSqliteDir } from "../src/gen-types/dev-apply.js";
 /**
  * `resolveDatabaseUrl` is the ONE resolution shared by `migrate-dev.ts` and
  * `dev-server.ts` (both consumers import it rather than re-deriving the
- * precedence). Today it returns whatever it finds with no branch on the
- * scheme, so a Postgres `DATABASE_URL` is silently routed to the SQLite dev
- * apply path and the runtime child at the same time — see
- * `docs/proposals/2026-08-26-sc4-dev-and-hmr-mechanism.md`, Decision 1.
+ * precedence). A non-SQLite dev URL is refused AT RESOLUTION, before any
+ * caller can derive a path or apply a migration from it.
  *
- * These tests pin the fix: a non-SQLite dev URL is refused AT RESOLUTION,
- * before any caller can derive a path or apply a migration from it.
+ * These tests pin the refusal.
  */
 
 const SQLITE_DEFAULT = "sqlite:.zeroship/dev.sqlite";

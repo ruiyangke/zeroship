@@ -469,7 +469,7 @@ are internally accessed; end-users hit it indirectly via HTTP.
 | --- | --- | --- | --- | --- | --- | --- |
 | Manifest-based resource-tree dispatch | 🟢 | internal | `crates/zeroship-bundle/src/compiled.rs`, `router/dispatch.rs` | `docs/architecture/gateway-routing.md` | `crates/zeroship-bundle/src/compiled.rs` | Rule-walker removed; resources is the only path. |
 | Subdomain routing (Host-header) | 🟢 | internal | `crates/zeroship-gateway/src/router/dispatch.rs` | `docs/architecture/gateway-routing.md` | `crates/zeroship-gateway/src/router/dispatch.rs` | Path-based takes priority over subdomain. |
-| Path canonicalization + traversal rejection (SEC-2) | 🟢 | internal | `crates/zeroship-bundle/src/compiled.rs`, `router/dispatch.rs` | `docs/architecture/gateway-routing.md` | `tests/e2e_gateway_path_backslash.sh` | Canonical form used for auth match + forward. Rejects `\` (WHATWG folds it to `/`) as well as dot-segments; the 2026-06-09 review's "RPC is not affected" was wrong — the worker's RPC tag match was a substring, now anchored to the path root. |
+| Path canonicalization + traversal rejection (SEC-2) | 🟢 | internal | `crates/zeroship-bundle/src/compiled.rs`, `router/dispatch.rs` | `docs/architecture/gateway-routing.md` | — | Canonical form used for auth match + forward. Rejects `\` (WHATWG folds it to `/`) as well as dot-segments; the 2026-06-09 review's "RPC is not affected" was wrong — the worker's RPC tag match was a substring, now anchored to the path root. |
 | Compiled policy inheritance | 🟢 | internal | `crates/zeroship-bundle/src/compiled.rs` | `docs/architecture/gateway-routing.md` | `crates/zeroship-bundle/src/compiled.rs` | timeout_ms declared but None. |
 | RPC fail-closed default (SEC-5) | 🟢 | internal | `crates/zeroship-bundle/src/compiled.rs` | `docs/architecture/gateway-routing.md` | `crates/zeroship-bundle/src/compiled.rs` | rpc: defaults to User. |
 | Worker-side declared-policy enforcement | 🟢 | internal | `crates/zeroship-worker/src/policy.rs`, `crates/zeroship-bundle/src/compiled.rs` | `docs/architecture/gateway-routing.md` | `crates/zeroship-worker/src/policy.rs` | The SECOND fence, in Rust, before creator code. Same `CompiledManifest` as the gateway. Refuses `user` with no verified identity and an uncovered `required_scopes`; admits an undeclared path (routing stays the gateway's). Dev (`serve.rs`) has no manifest and still does not gate. |
@@ -839,13 +839,13 @@ snapshots are shared across threads via a process-wide RwLock.
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| HTTP dispatch endpoint | 🟢 | POST /dispatch/{app_id} | `crates/zeroship-worker/src/handler.rs` | `docs/architecture/distributed.md` | `tests/e2e_platform.sh` | 4 MiB body cap; ed25519 service assertion. |
+| HTTP dispatch endpoint | 🟢 | POST /dispatch/{app_id} | `crates/zeroship-worker/src/handler.rs` | `docs/architecture/distributed.md` | — | 4 MiB body cap; ed25519 service assertion. |
 | Streaming (SSE/ReadableStream) forwarding | 🟢 | internal | `crates/zeroship-worker/src/handler.rs` | — | — | Waker-based mpsc; no busy-poll. |
 | WebSocket upgrade via dispatch endpoint | ⚫ | HTTP endpoint (unreachable) | `crates/zeroship-worker/src/handler.rs` | — | — | Returns 500; gateway uses separate WS path. |
-| Per-thread V8 isolate LRU cache | 🟢 | internal | `crates/zeroship-worker/src/cache.rs` | `AGENTS.md` | `tests/e2e_platform.sh` | Thread-local; default 200; abort fan-out on evict. |
-| On-demand app loading (cold start) | 🟢 | internal (cache miss) | `crates/zeroship-worker/src/handler.rs` | `docs/architecture/distributed.md` | `tests/e2e_platform.sh` | env committed before isolate. |
+| Per-thread V8 isolate LRU cache | 🟢 | internal | `crates/zeroship-worker/src/cache.rs` | `AGENTS.md` | — | Thread-local; default 200; abort fan-out on evict. |
+| On-demand app loading (cold start) | 🟢 | internal (cache miss) | `crates/zeroship-worker/src/handler.rs` | `docs/architecture/distributed.md` | — | env committed before isolate. |
 | Process-wide version poller | 🟢 | internal | `crates/zeroship-worker/src/sync.rs` | `docs/architecture/distributed.md` | — | Single task; GCs SharedEnvs. |
-| Per-thread reconcile loop | 🟢 | internal | `crates/zeroship-worker/src/sync.rs` | `docs/architecture/distributed.md` | `tests/e2e_platform.sh` | env refresh + isolate swap; startup jitter. |
+| Per-thread reconcile loop | 🟢 | internal | `crates/zeroship-worker/src/sync.rs` | `docs/architecture/distributed.md` | — | env refresh + isolate swap; startup jitter. |
 | Env-only isolate rotation (SEC-7) | 🟢 | internal | `crates/zeroship-worker/src/sync.rs` | — | `crates/zeroship-worker/src/sync.rs` | env_version bump → isolate swap. |
 | Process-wide env snapshot cache | 🟢 | internal | `crates/zeroship-worker/src/sync.rs` | — | — | Fail-closed 503 (ENV_UNAVAILABLE). |
 | App kernel namespace wiring | 🟢 | env.db/kv/storage/auth | `crates/zeroship-worker/src/cache.rs` | `AGENTS.md` | `crates/zeroship-worker/src/handler.rs` | KV=Redis multi-node; namespaces degrade independently. |
@@ -856,7 +856,7 @@ snapshots are shared across threads via a process-wide RwLock.
 | In-flight request abort on LRU eviction | 🟢 | internal | `crates/zeroship-worker/src/cache.rs` | — | — | Synchronous abort before drop. |
 | App console log capture + /logs endpoint | 🟢 | GET /logs/{app_id} | `crates/zeroship-worker/src/logs.rs` | — | `crates/zeroship-worker/src/handler.rs` | Ring buffer 1000 lines; no persistence. |
 | Prometheus metrics endpoint | 🟢 | GET /metrics | `crates/zeroship-worker/src/metrics.rs` | — | — | 13 counters; no auth. |
-| Health + readiness endpoints | 🟢 | GET /healthz, GET /readyz | `crates/zeroship-worker/src/health.rs` | — | `tests/e2e_platform.sh` | /healthz is a constant 200 (liveness); /readyz needs a current control poll AND a reachable blob store. |
+| Health + readiness endpoints | 🟢 | GET /healthz, GET /readyz | `crates/zeroship-worker/src/health.rs` | — | — | /healthz is a constant 200 (liveness); /readyz needs a current control poll AND a reachable blob store. |
 | Config validation dry-run | 🟢 | --check-config [--format] | `crates/zeroship-worker/src/main.rs` | — | `crates/zeroship-worker/tests/check_config.rs` | Non-secret summary. Each service owns its process test. |
 | Secret reference resolution | 🟢 | ZEROSHIP_CONTROL_KEY / ZEROSHIP_PAIRWISE_SALT / ... | `crates/zeroship-core/src/config/secrets.rs` | — | `crates/zeroship-core/src/config/names.rs` | Literal or urn:zeroship:file only; secrets sit at their canonical overlay path. |
 | Unix domain socket listener | 🟢 | --socket / ZEROSHIP_WORKER_SOCKET | `crates/zeroship-worker/src/main.rs` | — | — | Stale socket removed at startup. |

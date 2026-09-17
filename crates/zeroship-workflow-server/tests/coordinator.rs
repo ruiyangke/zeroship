@@ -20,6 +20,7 @@ use zeroship_core::{
     typed_id,
     workflow_coordination::*,
     workflow_jobs::{JobOperation, JobOutcome, ManagementCommand, Settlement},
+    workflow_policy::AppPolicy,
 };
 use zeroship_workflow_manager::{coordinator::Placed, Error};
 use zeroship_workflow_server::coordinator::{Coordinator, Error as HostError, Options, SCHEMA_SQL};
@@ -339,7 +340,7 @@ async fn release_needs_neither_a_wake_hint_nor_a_responsible_peer() {
     let outsider = register_worker(&a, 1).await;
     assert_eq!(
         a.manager
-            .claim_job(&outsider, &assigned(&foreign), || async {
+            .claim_job(&outsider, &assigned(&foreign), AppPolicy::default().max_delivery_attempts, || async {
                 Ok(outsider.clone())
             })
             .await
@@ -472,7 +473,7 @@ async fn management_is_durable_bounded_typed_and_assignment_scoped() {
     let scope = assigned(&assignment);
     let grant = b
         .manager
-        .claim_job(&worker, &scope, || async { Ok(worker.clone()) })
+        .claim_job(&worker, &scope, AppPolicy::default().max_delivery_attempts, || async { Ok(worker.clone()) })
         .await
         .unwrap()
         .unwrap();
@@ -569,7 +570,7 @@ async fn management_is_durable_bounded_typed_and_assignment_scoped() {
     let reopened = fixture.options(options).await;
     let grant = reopened
         .manager
-        .claim_job(&worker, &assigned(&renewed), || async {
+        .claim_job(&worker, &assigned(&renewed), AppPolicy::default().max_delivery_attempts, || async {
             Ok(worker.clone())
         })
         .await

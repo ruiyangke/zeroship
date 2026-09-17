@@ -97,9 +97,27 @@ pub enum RunState {
 }
 
 impl RunState {
+    /// Every state a run can rest in for good, as the journal stores them.
+    ///
+    /// Queries that select live runs by state string read this rather than
+    /// spelling the set again, so a new terminal state reaches them too.
+    pub const TERMINAL: [&'static str; 4] = [
+        Self::Completed.as_str(),
+        Self::Failed.as_str(),
+        Self::Cancelled.as_str(),
+        Self::Stalled.as_str(),
+    ];
+
+    /// `Stalled` rests here with the other three: the platform has given up on
+    /// the run, so nothing further will dispatch it, its parents are owed their
+    /// notification, and its delivery job can settle instead of being kept
+    /// alive by a manager that reads this to decide.
     #[must_use]
     pub const fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::Stalled
+        )
     }
 
     #[must_use]

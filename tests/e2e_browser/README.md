@@ -31,12 +31,10 @@ playwright test                 # nix playwright on PATH
 pnpm exec playwright test
 ```
 
-`global-setup.ts` spawns `scripts/up.sh` (full stack bring-up + deploys the
-three render examples), and `global-teardown.ts` spawns `scripts/down.sh`
-(kills the binaries, removes the ephemeral PG container, cleans the work dir).
-There is **no Playwright `webServer`** — the stack is an external multi-process
-deployment. The gateway port is dynamic; specs read it from `.stack.json`
-(written by `up.sh`, gitignored) via `helpers.ts`.
+The stack is an external multi-process Rust deployment, so there is **no
+Playwright `webServer`** and the suite does not bring one up. The gateway port
+is dynamic; specs read it from `.stack.json` (gitignored) via `helpers.ts`, and
+that descriptor is written by whichever bring-up provisioned the stack.
 
 ### Prerequisites
 
@@ -46,13 +44,6 @@ deployment. The gateway port is dynamic; specs read it from `.stack.json`
 - Built example artifacts: `examples/{csr-todo,ssr-blog,ssg-docs}/dist/app.zship`
   (`pnpm --filter <example> build`). A missing dist makes that example's specs
   `skip` rather than fail.
-
-### Bring the stack up by hand (debugging)
-
-```bash
-bash tests/e2e_browser/scripts/up.sh     # leaves the stack running, writes .stack.json
-bash tests/e2e_browser/scripts/down.sh   # tears it down
-```
 
 ## `*.localhost` addressing
 
@@ -66,7 +57,7 @@ descriptor.
 
 ## Division of labour: curl harness vs. browser harness
 
-- **`tests/e2e_app_primitives_render.sh`** (curl) asserts the **server/wire**
+- **A curl-level harness** asserts the **server/wire**
   contract through the gateway: HTTP status, content-type, cache headers, the
   presence of SSR markup / hydration `<script>` tags / SPA shell bytes, and the
   raw SSE data-stream framing over the worker `/dispatch`. It never runs JS.
@@ -75,7 +66,6 @@ descriptor.
   into the live DOM, SSG stays static with JS off, and a stream renders frame by
   frame. It complements, and does not duplicate, the curl harness.
 
-Both harnesses share one bring-up implementation: `tests/lib/e2e_stack.sh`
-(`stack_up` / `mint_creator_bearer` / `deploy_zship` / `stack_down`). The browser
-harness uses a private port band (`ZEROSHIP_GATEWAY_PORT=8022`, etc.) and `*-bx` app slugs
-so it can coexist with the `*-e2e` curl-harness apps on the same host.
+The browser harness uses a private port band (`ZEROSHIP_GATEWAY_PORT=8022`,
+etc.) and `*-bx` app slugs so it can coexist with the curl-harness apps on the
+same host.

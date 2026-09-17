@@ -60,8 +60,8 @@ http://auth.{$ZEROSHIP_DOMAIN:zeroship.localhost} {
 
 # control.<domain> - shared creator API edge. The migration service owns the
 # complete /v1 namespace, including today's /v1/apps routes and a future
-# database-id re-key. Control declares no /v1 routes; deploy_scripts_gate.sh
-# enforces that collision boundary. The catch-all is the control plane.
+# database-id re-key. Control declares no /v1 routes. The catch-all is the
+# control plane.
 http://control.{$ZEROSHIP_DOMAIN:zeroship.localhost} {
 	handle /v1/* {
 		reverse_proxy migrate-server:9091
@@ -88,8 +88,7 @@ http://control.{$ZEROSHIP_DOMAIN:zeroship.localhost} {
 	#
 	# Refusing here restores the derivation as a side effect: internal callers
 	# reach control directly on the compose network, so the observed peer is the
-	# real worker again. `tests/deploy_scripts_gate.sh` asserts this block is
-	# present, because nothing in Rust would notice it being deleted.
+	# real worker again.
 	handle /internal/* {
 		respond 404
 	}

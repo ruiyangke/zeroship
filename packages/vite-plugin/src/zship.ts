@@ -9,8 +9,7 @@
 //                                                 dist/index.html
 //
 // We then walk `dist/`, content-hash every file, emit a manifest, and pack
-// it into a tar.zst archive at `dist/app.zship`. The wire format is
-// defined in `docs/reference/zship.md` (schema v2).
+// it into a tar.zst archive at `dist/app.zship`. The wire format is schema v2.
 //
 // The control plane ingests this via `POST /api/apps/{id}/deploy`.
 
@@ -92,7 +91,7 @@ interface Manifest {
   asset_version: 0;
   sourcemaps: Record<Sha256Hex, Sha256Hex>;
   metadata: ManifestMetadata;
-  /** Unified resource tree — see `docs/proposals/rpc.md` §7. */
+  /** Unified resource tree. */
   resources?: Record<string, Record<string, unknown>>;
   /** Wire transformer: `"json"` (default) or `"superjson"`. */
   transformer?: "superjson" | "json";

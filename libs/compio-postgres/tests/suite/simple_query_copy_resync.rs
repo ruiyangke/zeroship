@@ -131,9 +131,7 @@ async fn batch_execute_of_copy_from_stdin_leaves_the_session_usable() {
 /// that is normally a DIRECT server, so a plain run does not exercise a pooler
 /// at all - the name of the hazard is not the same as measuring it. Restoring
 /// the redundant `Sync` fails this test on a direct server, which is what makes
-/// it a regression guard; the pooler claim needs
-/// `PG_TEST_URL` pointed at one, per
-/// `docs/runbooks/compio-postgres-transaction-pooler-check.md`.
+/// it a regression guard; the pooler claim needs `PG_TEST_URL` pointed at one.
 #[compio::test]
 async fn batch_copy_abort_settles_before_the_follow_up_query() {
     let url = test_url();

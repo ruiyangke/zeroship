@@ -1839,7 +1839,7 @@ Expected: clean.
 
 - [ ] **Step 2: Full test suite (pg excluded — needs live DB)**
 
-Run: `cargo test --workspace --exclude compio-postgres --exclude zeroship-plugin-db 2>&1 | grep -E "^test result|FAILED"`
+Run: `cargo test --workspace --exclude compio-postgres --exclude zeroship-data-v8 2>&1 | grep -E "^test result|FAILED"`
 
 Expected: every line says `ok. N passed; 0 failed`. If any fail, fix before committing.
 
@@ -1847,7 +1847,7 @@ Expected: every line says `ok. N passed; 0 failed`. If any fail, fix before comm
 
 Run: `cargo test -p compio-postgres -- --test-threads=1 2>&1 | tail -5`
 
-Run: `cargo test -p zeroship-plugin-db -- --test-threads=1 2>&1 | tail -5`
+Run: `cargo test -p zeroship-data-v8 -- --test-threads=1 2>&1 | tail -5`
 
 Expected: both green. Skip if local DB isn't up — note it in the PR description.
 
@@ -1905,9 +1905,9 @@ gh pr create --title "PR 1: kernel cut — one fetch primitive, no RPC sugar" --
 - noop:      <before>K → <after>K req/s (<delta>%)
 
 ## Test plan
-- [x] cargo test --workspace (ex. compio-postgres, zeroship-plugin-db) passes
+- [x] cargo test --workspace (ex. compio-postgres, zeroship-data-v8) passes
 - [x] cargo test -p compio-postgres -- --test-threads=1 passes
-- [x] cargo test -p zeroship-plugin-db -- --test-threads=1 passes
+- [x] cargo test -p zeroship-data-v8 -- --test-threads=1 passes
 - [x] Bench within 15% of main
 - [ ] Merge PR 2 right after — end-to-end remains broken until then
 EOF

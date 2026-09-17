@@ -176,7 +176,7 @@ pub struct SpendEngine {
 ///
 /// Carries the priced `spend_cents` and effective `eval_limit_cents` at the
 /// derive so the reconcile cron's `SpendStateChange` audit row records the
-/// money context (#8) — matching the `{from,to,spend_cents,limit_cents}` shape
+/// money context — matching the `{from,to,spend_cents,limit_cents}` shape
 /// documented on `audit::Action::SpendStateChange`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpendTransition {
@@ -241,7 +241,7 @@ impl SpendEngine {
             .await?;
         let period_start = current_period_start_unix();
 
-        // #5 — avoid the per-app N+1 connection storm. `catalog.get` and
+        // Avoid the per-app N+1 connection storm. `catalog.get` and
         // `metering.period_totals` each open a FRESH PG connection per call, so
         // a naive per-app loop opened ~2N connections per sweep. Instead:
         //   * hoist EVERY plan once into a map (plans are few — the built-in
@@ -410,7 +410,7 @@ impl SpendEngine {
                 // the next tick's `limit_changed` comparison is accurate and
                 // the dashboard sees current spend. Upsert without history.
                 //
-                // #10 (write-amplification): we deliberately DO write every
+                // Write-amplification: we deliberately DO write every
                 // tick. Skipping the write when nothing changed would require
                 // reading the stored `spend_cents` back to compare — but for any
                 // ACTIVE app `spend_cents` almost always changes tick-to-tick
@@ -427,7 +427,7 @@ impl SpendEngine {
     /// UPSERT the spend row to the new state AND append a history row. Called
     /// only on an actual transition.
     ///
-    /// Both writes run in ONE transaction (#1): a crash or error between the
+    /// Both writes run in ONE transaction: a crash or error between the
     /// `app_spend_state` UPSERT and the `spend_state_history` INSERT must never
     /// leave a state change with no audit row (or an audit row with no state
     /// change). The transaction either commits both or — via the RAII

@@ -1,4 +1,4 @@
-//! PR-3 regression tests for billing-ops gap #26: the `0049 refunds` table +
+//! PR-3 tests for the `0049 refunds` table +
 //! over-refund trigger, the `RefundProvider` seam (Stripe `Refund` for cash / native
 //! `refund_to_credit` grant for credit), the operator `POST /invoices/{id}/refunds`
 //! endpoint, and the void+reissue + `void_reversal` + negative-invoice true-up bridge.

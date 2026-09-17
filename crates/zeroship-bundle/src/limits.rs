@@ -1,5 +1,4 @@
 //! Size and count limits enforced during `.zship` ingestion.
-//! See `docs/reference/zship.md` "Limits" section.
 
 /// Compressed-body cap. Wire-level limit before any decompression.
 pub const MAX_COMPRESSED_BYTES: usize = 256 * 1024 * 1024;
@@ -24,30 +23,26 @@ pub const MAX_BLOBS_PER_DEPLOY: usize = 10_000;
 /// throughput lever (the official `@aws-sdk/lib-storage` runs ~4 parallel
 /// parts, ~2× a sequential `upload_part().await` loop) while keeping memory
 /// bounded at `N × PART_SIZE`.
-// 4 matches lib-storage's default queueSize. Verified on a CLEAN (uncontended)
-// box: 5 GiB conc=8 e2e completed in 244s (vs 268s sequential), memory bounded,
-// object finalized + checksum-matched. Override via
+// 4 matches lib-storage's default queueSize. Override via
 // ZEROSHIP_BLOB_UPLOAD_CONCURRENCY (clamped 1..=64).
 pub const DEFAULT_UPLOAD_CONCURRENCY: usize = 4;
 
 /// Environment variable overriding [`DEFAULT_UPLOAD_CONCURRENCY`]. Clamped to
-/// `1..=64` (1 reproduces the old strictly-sequential behaviour).
+/// `1..=64` (1 means one part at a time).
 ///
 /// The name is stated here and READ by the platform process that builds the
-/// store; see [`crate::blob_config::S3Runtime`] for why this crate no longer
-/// reads its own configuration.
+/// store; see [`crate::blob_config::S3Runtime`] for why this crate does not
+/// read its own configuration.
 pub const UPLOAD_CONCURRENCY_ENV: &str = "ZEROSHIP_BLOB_UPLOAD_CONCURRENCY";
 
 /// Clamp an already-read override into the in-flight part-upload concurrency.
 ///
 /// PURE: it takes the value rather than the name. That is what lets the read
 /// itself live in a process that can register it as a typed key, while the
-/// clamping rule - the part with the measurement behind it - stays here beside
-/// the default it falls back to.
+/// clamping rule stays here beside the default it falls back to.
 ///
 /// A value that is absent, unparsable, or zero yields
-/// [`DEFAULT_UPLOAD_CONCURRENCY`], exactly as the environment read it replaced
-/// did.
+/// [`DEFAULT_UPLOAD_CONCURRENCY`].
 #[must_use]
 pub fn resolve_upload_concurrency(raw: Option<&str>) -> usize {
     raw.and_then(|v| v.trim().parse::<usize>().ok())

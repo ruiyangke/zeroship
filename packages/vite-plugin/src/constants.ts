@@ -26,10 +26,9 @@ export const ENV_DEV_AUTH_SECRET = "ZEROSHIP_DEV_AUTH_SECRET";
  * `killChild` below is not enough and never can be. It runs in vite; a vite
  * killed by pid - a harness, a crash, the OOM killer - runs no code at all, and
  * the `zeroship serve` child it forked survives holding its listening socket
- * AND an exclusive redb lock on the project's `.zeroship/kv.redb`. Task #221
- * measured four such survivors, aged 10 to 34 minutes, after which no dev
- * server for that example could boot on ANY port, because the contended
- * resource is the state dir and not the port.
+ * AND an exclusive redb lock on the project's `.zeroship/kv.redb`. A survivor
+ * blocks every later boot on ANY port, because the contended resource is the
+ * state dir and not the port.
  *
  * So the reaping is delegated to the kernel, which is the only party still able
  * to act once we are gone (`PR_SET_PDEATHSIG`, armed by the child - see

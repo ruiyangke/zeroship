@@ -21,7 +21,6 @@ pub const APP_JOURNAL_LIMIT_FIELD: &str = "workflow_app_journal_max_bytes";
 pub const MAX_CHILD_DEPTH_FIELD: &str = "workflow_max_child_depth";
 pub const MAX_LIVE_DESCENDANTS_FIELD: &str = "workflow_max_live_descendants";
 pub const MAX_START_MANY_BATCH_FIELD: &str = "workflow_max_start_many_batch";
-pub const STUCK_STRIKE_LIMIT_FIELD: &str = "workflow_stuck_strike_limit";
 
 static OWNER_ID: OnceLock<String> = OnceLock::new();
 
@@ -29,10 +28,6 @@ fn default_owner_id() -> String {
     OWNER_ID
         .get_or_init(|| format!("control-wf-{}", std::process::id()))
         .clone()
-}
-
-fn default_stuck_strike_limit() -> i16 {
-    WorkflowEngineConfig::default().stuck_strike_limit
 }
 
 fn default_max_child_depth() -> i16 {
@@ -107,12 +102,6 @@ pub fn workflow_engine_limits_from_plan(
     {
         config.max_start_many_batch = limit;
     }
-    if let Some(limit) = runtime_limits
-        .and_then(|json| positive_i64_field(json, STUCK_STRIKE_LIMIT_FIELD))
-        .and_then(|limit| i16::try_from(limit).ok())
-    {
-        config.stuck_strike_limit = limit;
-    }
     config
 }
 
@@ -177,11 +166,6 @@ pub struct WorkflowEngineConfig {
     pub claim_ttl_ms: i64,
     /// Heartbeat cadence while a detached dispatch is in flight.
     pub heartbeat_ms: u64,
-    /// Consecutive zero-progress dispatches before fail-closed `stalled`.
-    ///
-    /// G3 placeholder: DW-23 will measure wide-frontier rollover behavior and
-    /// replace this conservative seed with operator-plan defaults.
-    pub stuck_strike_limit: i16,
     /// Maximum parent/child depth for step.call trees.
     pub max_child_depth: i16,
     /// Maximum live descendants under a workflow tree root.
@@ -203,7 +187,6 @@ impl Default for WorkflowEngineConfig {
             max_inflight_dispatch: 64,
             claim_ttl_ms: 120_000,
             heartbeat_ms: 5_000,
-            stuck_strike_limit: 3,
             max_child_depth: DEFAULT_MAX_CHILD_DEPTH,
             max_live_descendants: DEFAULT_MAX_LIVE_DESCENDANTS,
             max_start_many_batch: DEFAULT_MAX_START_MANY_BATCH,
@@ -270,8 +253,6 @@ pub struct StepRequest {
     pub journal: Vec<JournalStep>,
     #[serde(default = "default_owner_id")]
     pub owner_id: String,
-    #[serde(default = "default_stuck_strike_limit")]
-    pub stuck_strike_limit: i16,
     #[serde(default = "default_max_child_depth")]
     pub max_child_depth: i16,
     #[serde(default = "default_max_live_descendants")]
@@ -1057,12 +1038,14 @@ pub fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, R
     Ok((checkpoints, run_update))
 }
 
-pub fn stalled_error(strikes: i16, limit: i16) -> Value {
+/// The creator-visible reason a run rests in `stalled`: its dispatches kept
+/// being reclaimed with no outcome reported, against one unchanged frontier.
+pub fn stalled_error(dispatches: i64, limit: i64) -> Value {
     serde_json::json!({
         "type": "StalledError",
-        "message": "workflow made no durable progress before the liveness strike limit",
-        "stuck_strikes": strikes,
-        "stuck_strike_limit": limit,
+        "message": "workflow made no durable progress before the liveness dispatch limit",
+        "stuckDispatches": dispatches,
+        "maxStuckDispatches": limit,
     })
 }
 
@@ -1156,12 +1139,11 @@ pub fn outcomes_from_apply_parts(
                 error: error.clone(),
             });
         }
-        RunUpdate::Stalled { error } => outcomes.push(StepOutcome::RunFailed {
-            ordinal: None,
-            name: None,
-            name_occurrence: 0,
-            error: error.clone(),
-        }),
+        // The executor cannot report a stall: it is the host's verdict on
+        // dispatches the executor never returned from, so there is no outcome
+        // to encode. Encoding one as `RunFailed` would hand a run the host
+        // stalled back as an ordinary creator failure.
+        RunUpdate::Stalled { .. } => {}
         _ => {}
     }
 

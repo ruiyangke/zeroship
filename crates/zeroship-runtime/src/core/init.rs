@@ -401,9 +401,7 @@ pub(crate) fn prepare_application(
     // Native Headers per WHATWG Fetch §2.2.
     install_headers(scope);
 
-    // Native WHATWG Streams. See
-    // `docs/decisions/2026-05-02-streams-native.md`. ReadableStream,
-    // WritableStream,
+    // Native WHATWG Streams. ReadableStream, WritableStream,
     // TransformStream, *Controller, *Reader, *Writer, BYOBReader,
     // BYOBRequest, and the async-iter prototype patches are all
     // native-backed.
@@ -1659,8 +1657,7 @@ fn validate_runtime_descriptor_value(value: &serde_json::Value) -> Result<(), St
 /// chain explicit: native primitives load before user modules.
 ///
 /// The implementation lives in `crate::headers` (Headers struct,
-/// HeadersIterator, install_global). See
-/// `docs/decisions/2026-05-01-headers-native.md` for the design.
+/// HeadersIterator, install_global).
 pub fn install_headers(scope: &mut v8::PinScope) {
     let global = scope.get_current_context().global(scope);
     crate::headers::install_global(scope, global);
@@ -1696,8 +1693,7 @@ pub fn install_dom(scope: &mut v8::PinScope) {
 /// Native covers ReadableStream, WritableStream, TransformStream,
 /// *DefaultController, *DefaultWriter, *DefaultReader, BYOBReader,
 /// BYOBRequest, the async-iter prototype patches,
-/// ByteLengthQueuingStrategy, and CountQueuingStrategy. See
-/// `docs/decisions/2026-05-02-streams-native.md` for the design.
+/// ByteLengthQueuingStrategy, and CountQueuingStrategy.
 pub fn install_native_streams(scope: &mut v8::PinScope) {
     let global = scope.get_current_context().global(scope);
     crate::streams::install_native_streams(scope, global);

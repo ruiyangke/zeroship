@@ -1,4 +1,4 @@
-//! Render the zeroship-owned half of `docs/reference/env-vars.md`.
+//! Render the zeroship-owned half of the environment-variables reference.
 //!
 //! THE SOURCE IS THE COMPILED CONTRACT. Every row below comes from a
 //! [`ConfigSpec`] that the `zeroship_config` proc macro emitted and rustc

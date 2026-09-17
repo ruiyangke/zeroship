@@ -17,7 +17,10 @@ use super::{
     AppWorkflows, DeployRegistration, ScheduleOverlap, ScheduleRegistration,
 };
 use crate::service::policy::admit;
-use crate::{operations::StartOptions, validation, WorkflowServiceError};
+use crate::{
+    operations::{RunState, StartOptions},
+    validation, WorkflowServiceError,
+};
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{RequestId, Revision, RunId, UnixMillis},
@@ -283,11 +286,7 @@ impl AppWorkflows {
                             runs::app_id
                                 .eq(self.app_id().as_str())?
                                 .and(runs::schedule_id.eq(Some(cron.schedule_id.as_str()))?)
-                                .and(runs::state.not_in_values([
-                                    "completed",
-                                    "failed",
-                                    "cancelled",
-                                ])?),
+                                .and(runs::state.not_in_values(RunState::TERMINAL)?),
                         )
                         .await?;
                 if !skip && live_runs(&tx, self.app_id()).await? >= policy.max_live_runs {

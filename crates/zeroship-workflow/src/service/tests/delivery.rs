@@ -107,6 +107,455 @@ case!(
     competing
 );
 
+case!(
+    sqlite_delivery_stalls_a_run_whose_dispatches_never_report,
+    postgres_delivery_stalls_a_run_whose_dispatches_never_report,
+    stalling
+);
+
+case!(
+    sqlite_delivery_keeps_a_run_that_supersedes_its_frontier,
+    postgres_delivery_keeps_a_run_that_supersedes_its_frontier,
+    progress_clears_strikes
+);
+
+/// A dispatch that never reports leaves the frontier exactly where it was, so
+/// the next delivery hands out the same work again. Counting those reclaimed
+/// dispatches is what lets such a run reach a resting state at all, and only a
+/// resting run settles its delivery job and gives the deployment back.
+///
+/// The two halves are asserted against each other: the same `release_deployment`
+/// call that the hold refuses while the run is live must succeed once the stall
+/// has settled the job, so an assertion cannot pass by never pinning anything.
+async fn stalling(store: Rc<OrmStore>) {
+    let (service, app, _, _deployments) = registered_service(store).await;
+    let scope = service.fixture_app(app.clone());
+    let run = scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    service
+        .policies
+        .fixture_install(
+            &app,
+            leased_policy(
+                2,
+                AppPolicy {
+                    max_stuck_dispatches: 2,
+                    ..Default::default()
+                },
+            ),
+        )
+        .unwrap();
+    let manager = Manager::with_options(
+        &app,
+        Options {
+            lease: Duration::from_millis(300),
+            ..Default::default()
+        },
+    )
+    .await;
+    let owner = assignment(&app);
+    let job = publish(&scope, &manager).await;
+    let deployment = job
+        .deployment_id()
+        .expect("an advance job names its deployment")
+        .clone();
+
+    let mut grant = manager.queue.claim(&owner).await.unwrap().unwrap();
+    for _ in 0..2 {
+        let claimed = task(scope.accept_job(&grant).await.unwrap());
+        assert_eq!(run_state(&service, &app, &run.id).await, "running");
+        assert_eq!(
+            manager.queue.release_deployment(&app, &deployment).await,
+            Err(zeroship_workflow_manager::Error::Conflict),
+            "an unsettled delivery job must keep its deployment"
+        );
+        scope.release_job(&claimed, &grant).await.unwrap();
+        expire(&grant).await;
+        grant = manager.queue.claim(&owner).await.unwrap().unwrap();
+    }
+
+    let JobAcceptance::Settled(receipt) = scope.accept_job(&grant).await.unwrap() else {
+        panic!("a spent strike budget must settle the delivery instead of dispatching again");
+    };
+    assert_eq!(
+        receipt.outcome,
+        JobOutcome::Completed {},
+        "a stalled run is at rest, so its job is done rather than waiting"
+    );
+    assert_eq!(run_state(&service, &app, &run.id).await, "stalled");
+
+    let tx = service.begin().await.unwrap();
+    let runs = journal_rows(&tx, "runs", json!({"app_id":app.as_str(), "id":run.id.clone()})).await;
+    assert!(
+        runs[0].optional_integer("terminal_at").unwrap().is_some(),
+        "a stalled run must record when it came to rest"
+    );
+    let generations = journal_rows(
+        &tx,
+        "generations",
+        json!({"app_id":app.as_str(), "run_id":run.id.clone()}),
+    )
+    .await;
+    let error: serde_json::Value =
+        serde_json::from_str(&generations[0].text("error").unwrap()).unwrap();
+    assert_eq!(error["type"], "StalledError");
+    assert_eq!(error["stuckDispatches"], 2);
+    assert_eq!(error["maxStuckDispatches"], 2);
+    tx.commit().await.unwrap();
+
+    manager
+        .queue
+        .settle(&owner, &receipt.settlement(&grant).unwrap())
+        .await
+        .unwrap();
+    manager
+        .queue
+        .release_deployment(&app, &deployment)
+        .await
+        .unwrap();
+}
+
+/// Strikes belong to the frontier they were counted against, not to the run.
+///
+/// The run here accumulates as many reclaimed dispatches as the stalling case
+/// does, but commits a frontier transition between them, so it must keep being
+/// dispatched. Without this the strike count could ignore the frontier entirely
+/// and the stalling case above would still pass, because nothing there ever
+/// makes progress for a revision to supersede.
+async fn progress_clears_strikes(store: Rc<OrmStore>) {
+    let (service, app, _, _deployments) = registered_service(store).await;
+    let scope = service.fixture_app(app.clone());
+    let run = scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    service
+        .policies
+        .fixture_install(
+            &app,
+            leased_policy(
+                2,
+                AppPolicy {
+                    max_stuck_dispatches: 2,
+                    ..Default::default()
+                },
+            ),
+        )
+        .unwrap();
+    let manager = Manager::with_options(
+        &app,
+        Options {
+            lease: Duration::from_millis(300),
+            ..Default::default()
+        },
+    )
+    .await;
+    let owner = assignment(&app);
+    publish(&scope, &manager).await;
+    let mut grant = manager.queue.claim(&owner).await.unwrap().unwrap();
+    let mut claimed = task(scope.accept_job(&grant).await.unwrap());
+
+    // One reclaimed dispatch, then a reported one that supersedes the frontier.
+    scope.release_job(&claimed, &grant).await.unwrap();
+    expire(&grant).await;
+    grant = manager.queue.claim(&owner).await.unwrap().unwrap();
+    claimed = task(scope.accept_job(&grant).await.unwrap());
+    let receipt = scope
+        .complete_job(
+            &claimed,
+            &grant,
+            execution(json!([{"kind":"RunFailed", "ordinal":0, "name":"charge",
+                "nameOccurrence":0, "error":{"type":"Error", "message":"retry"}}])),
+        )
+        .await
+        .unwrap();
+    assert_eq!(receipt.outcome, JobOutcome::Waiting {});
+    manager
+        .queue
+        .settle(&owner, &receipt.settlement(&grant).unwrap())
+        .await
+        .unwrap();
+
+    // One more reclaimed dispatch, against the superseding frontier.
+    publish(&scope, &manager).await;
+    grant = manager.queue.claim(&owner).await.unwrap().unwrap();
+    claimed = task(scope.accept_job(&grant).await.unwrap());
+    scope.release_job(&claimed, &grant).await.unwrap();
+    expire(&grant).await;
+    grant = manager.queue.claim(&owner).await.unwrap().unwrap();
+
+    task(scope.accept_job(&grant).await.unwrap());
+    assert_eq!(
+        run_state(&service, &app, &run.id).await,
+        "running",
+        "strikes carried across a committed frontier transition would stall a live run"
+    );
+}
+
+async fn run_state(service: &WorkflowService, app: &AppId, run: &str) -> String {
+    let tx = service.begin().await.unwrap();
+    let rows = journal_rows(&tx, "runs", json!({"app_id":app.as_str(), "id":run})).await;
+    let state = rows[0].text("state").unwrap();
+    tx.commit().await.unwrap();
+    state
+}
+
+case!(
+    sqlite_delivery_abandons_a_rollback_that_never_reports,
+    postgres_delivery_abandons_a_rollback_that_never_reports,
+    abandoning
+);
+
+case!(
+    sqlite_delivery_keeps_a_rollback_that_supersedes_its_frontier,
+    postgres_delivery_keeps_a_rollback_that_supersedes_its_frontier,
+    rollback_progress_clears_strikes
+);
+
+/// A compensator that never returns is the forward stall one phase later, and
+/// the same strikes bound it. The run rests at the failure it was rolling back
+/// rather than at a stall, because that verdict is the creator's and a rollback
+/// the host gave up on does not overturn it. The obligation it abandoned is
+/// named on the summary, which is the only place a creator can learn that an
+/// undo may have half-applied.
+///
+/// The deployment assertions refute each other: the hold that `release_deployment`
+/// refuses while the rollback is live must be released once the abandonment has
+/// settled the job, so this cannot pass by never pinning a deployment at all.
+async fn abandoning(store: Rc<OrmStore>) {
+    let (service, app, _, _deployments) = registered_service(store).await;
+    let scope = service.fixture_app(app.clone());
+    let run = scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    service
+        .policies
+        .fixture_install(
+            &app,
+            leased_policy(
+                2,
+                AppPolicy {
+                    max_stuck_dispatches: 2,
+                    ..Default::default()
+                },
+            ),
+        )
+        .unwrap();
+    let manager = Manager::with_options(
+        &app,
+        Options {
+            lease: Duration::from_millis(300),
+            ..Default::default()
+        },
+    )
+    .await;
+    let owner = assignment(&app);
+    let job = publish(&scope, &manager).await;
+    let deployment = job
+        .deployment_id()
+        .expect("an advance job names its deployment")
+        .clone();
+    let mut grant = manager.queue.claim(&owner).await.unwrap().unwrap();
+    let claimed = task(scope.accept_job(&grant).await.unwrap());
+    let receipt = scope
+        .complete_job(&claimed, &grant, compensable_failure())
+        .await
+        .unwrap();
+    manager
+        .queue
+        .settle(&owner, &receipt.settlement(&grant).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(run_state(&service, &app, &run.id).await, "compensating");
+
+    publish(&scope, &manager).await;
+    grant = manager.queue.claim(&owner).await.unwrap().unwrap();
+    for _ in 0..2 {
+        let claimed = task(scope.accept_job(&grant).await.unwrap());
+        assert_eq!(
+            claimed.assignment().invocation.phase,
+            "compensating",
+            "a run in rollback must be dispatched its compensators"
+        );
+        assert_eq!(
+            manager.queue.release_deployment(&app, &deployment).await,
+            Err(zeroship_workflow_manager::Error::Conflict),
+            "an unsettled rollback delivery must keep its deployment"
+        );
+        scope.release_job(&claimed, &grant).await.unwrap();
+        expire(&grant).await;
+        grant = manager.queue.claim(&owner).await.unwrap().unwrap();
+    }
+
+    let JobAcceptance::Settled(receipt) = scope.accept_job(&grant).await.unwrap() else {
+        panic!("a spent strike budget must settle the delivery instead of dispatching again");
+    };
+    assert_eq!(
+        receipt.outcome,
+        JobOutcome::Completed {},
+        "an abandoned rollback leaves the run at rest, so its job is done"
+    );
+    assert_eq!(
+        run_state(&service, &app, &run.id).await,
+        "failed",
+        "the run keeps the verdict its own code produced"
+    );
+    let error = scope.status(&run.id).await.unwrap().error.unwrap();
+    assert_eq!(error["type"], json!("Error"));
+    assert_eq!(error["message"], json!("intentional failure"));
+    assert_eq!(
+        error["compensation"],
+        json!({
+            "total":0, "completed":0, "failed":0, "outcome":"abandoned",
+            "abandoned":[{"ordinal":0, "name":"reserve"}],
+            "reason":{"type":"StalledError",
+                "message":"workflow made no durable progress before the liveness dispatch limit",
+                "stuckDispatches":2, "maxStuckDispatches":2},
+        }),
+        "an obligation nobody reported on is named, not counted as a compensator that ran"
+    );
+
+    let tx = service.begin().await.unwrap();
+    let steps = journal_rows(&tx, "steps", json!({"app_id":app.as_str()})).await;
+    let record: serde_json::Value =
+        serde_json::from_str(&steps[0].text("record").unwrap()).unwrap();
+    assert_eq!(
+        record["step"]["compensationState"],
+        json!("abandoned"),
+        "a run at rest must not leave its journal claiming a pending compensator"
+    );
+    tx.commit().await.unwrap();
+
+    manager
+        .queue
+        .settle(&owner, &receipt.settlement(&grant).unwrap())
+        .await
+        .unwrap();
+    manager
+        .queue
+        .release_deployment(&app, &deployment)
+        .await
+        .unwrap();
+}
+
+/// Rollback strikes belong to the frontier they were counted against, exactly
+/// as forward strikes do.
+///
+/// This run accumulates as many reclaimed dispatches as the abandoning case
+/// does, but discharges one obligation between them, so it must keep being
+/// dispatched for the obligation that is left. Without this the strike count
+/// could ignore the frontier and the abandoning case above would still pass,
+/// because nothing there ever discharges anything.
+async fn rollback_progress_clears_strikes(store: Rc<OrmStore>) {
+    let (service, app, _, _deployments) = registered_service(store).await;
+    let scope = service.fixture_app(app.clone());
+    let run = scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    service
+        .policies
+        .fixture_install(
+            &app,
+            leased_policy(
+                2,
+                AppPolicy {
+                    max_stuck_dispatches: 2,
+                    ..Default::default()
+                },
+            ),
+        )
+        .unwrap();
+    let manager = Manager::with_options(
+        &app,
+        Options {
+            lease: Duration::from_millis(300),
+            ..Default::default()
+        },
+    )
+    .await;
+    let owner = assignment(&app);
+    publish(&scope, &manager).await;
+    let mut grant = manager.queue.claim(&owner).await.unwrap().unwrap();
+    let mut claimed = task(scope.accept_job(&grant).await.unwrap());
+    let mut receipt = scope
+        .complete_job(&claimed, &grant, two_compensable_failure())
+        .await
+        .unwrap();
+    manager
+        .queue
+        .settle(&owner, &receipt.settlement(&grant).unwrap())
+        .await
+        .unwrap();
+
+    // One reclaimed rollback dispatch, then a reported one that discharges the
+    // newest obligation and supersedes the frontier.
+    publish(&scope, &manager).await;
+    grant = manager.queue.claim(&owner).await.unwrap().unwrap();
+    claimed = task(scope.accept_job(&grant).await.unwrap());
+    scope.release_job(&claimed, &grant).await.unwrap();
+    expire(&grant).await;
+    grant = manager.queue.claim(&owner).await.unwrap().unwrap();
+    claimed = task(scope.accept_job(&grant).await.unwrap());
+    receipt = scope
+        .complete_job(
+            &claimed,
+            &grant,
+            execution(
+                json!([{"kind":"CompensationCompleted", "ordinal":1, "name":"charge",
+                    "nameOccurrence":0}]),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(receipt.outcome, JobOutcome::Waiting {});
+    manager
+        .queue
+        .settle(&owner, &receipt.settlement(&grant).unwrap())
+        .await
+        .unwrap();
+
+    // One more reclaimed dispatch, against the superseding frontier.
+    publish(&scope, &manager).await;
+    grant = manager.queue.claim(&owner).await.unwrap().unwrap();
+    claimed = task(scope.accept_job(&grant).await.unwrap());
+    scope.release_job(&claimed, &grant).await.unwrap();
+    expire(&grant).await;
+    grant = manager.queue.claim(&owner).await.unwrap().unwrap();
+
+    task(scope.accept_job(&grant).await.unwrap());
+    assert_eq!(
+        run_state(&service, &app, &run.id).await,
+        "compensating",
+        "strikes carried across a discharged obligation would abandon a live rollback"
+    );
+}
+
+/// A run that completes one compensable step and then fails, so the engine owes
+/// exactly one compensator.
+fn compensable_failure() -> crate::WorkflowExecution {
+    execution(json!([
+        {"kind":"StepCompleted", "ordinal":0, "name":"reserve", "nameOccurrence":0,
+            "compensable":true, "output":0},
+        {"kind":"RunFailed", "error":{"type":"Error", "message":"intentional failure"}},
+    ]))
+}
+
+/// The same, owing two compensators, so discharging one leaves the run in
+/// rollback rather than settling it.
+fn two_compensable_failure() -> crate::WorkflowExecution {
+    execution(json!([
+        {"kind":"StepCompleted", "ordinal":0, "name":"reserve", "nameOccurrence":0,
+            "compensable":true, "output":0},
+        {"kind":"StepCompleted", "ordinal":1, "name":"charge", "nameOccurrence":0,
+            "compensable":true, "output":0},
+        {"kind":"RunFailed", "error":{"type":"Error", "message":"intentional failure"}},
+    ]))
+}
+
 async fn competing(store: Rc<OrmStore>) {
     let (service, app, _, _deployments) = registered_service(store).await;
     let scope = service.fixture_app(app.clone());

@@ -2,8 +2,6 @@
 //! impl. Source: https://github.com/web-platform-tests/wpt/tree/master/WebCryptoAPI.
 //! Files are vendored under `crates/runtime/tests/wpt/WebCryptoAPI/`.
 //!
-//! Per `docs/archive/webcrypto-native.md` §X.2 / §X.3.
-//!
 //! Each WPT file is run in a fresh V8 isolate with:
 //!   1. Native Crypto / SubtleCrypto / CryptoKey installed.
 //!   2. TextEncoder / TextDecoder / btoa / atob shimmed.
@@ -13,7 +11,7 @@
 //!   5. The test file itself.
 //!
 //! The Rust `#[test]` functions classify subtests as pass/fail/skip
-//! and assert ≥90% pass per the must-pass-v1 set in the design.
+//! and assert a pass-rate floor across the must-pass set.
 
 #![allow(unsafe_code)]
 
@@ -736,7 +734,7 @@ struct WptFile {
     sources: &'static [&'static str],
 }
 
-/// must-pass-v1 set per design §X.2. Each entry is a file label
+/// The must-pass set. Each entry is a file label
 /// + the ordered script chain (helpers/vectors/run + entry).
 const MUST_PASS: &[WptFile] = &[
     WptFile { name: "getRandomValues", sources: &[GET_RANDOM_VALUES] },

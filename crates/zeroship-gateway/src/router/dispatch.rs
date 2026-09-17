@@ -765,10 +765,9 @@ async fn execute_resource_tree(
             // the upgraded connection (that needs hijacking the TCP stream
             // from ntex), so `handle_subscription_dispatch` below returns 501.
             // Deployed subscriptions are a stub; only single-tenant
-            // `zeroship serve` speaks WebSocket. Bounded:
-            // `docs/reference/rpc.md` states subscriptions are not part of the
-            // public client surface, so no creator can reach this today.
-            // Latent, not live.
+            // `zeroship serve` speaks WebSocket. Subscriptions are not
+            // part of the public client surface, so no creator can reach
+            // this today. Latent, not live.
             if matches!(policy.kind, Some(ProcedureKind::Subscription)) {
                 // The 501 stub is the gateway's own answer, not the app's.
                 (
@@ -5557,11 +5556,10 @@ mod tests {
     }
 
     /// The anonymous namespace has no principal to partition on, so the
-    /// spec's compensating control is that the key must be unguessable:
-    /// `docs/proposals/rpc.md` §8 requires a UUIDv4/v7 for `auth: "anonymous"`
-    /// mutations. A guessable key ("checkout-1") is exactly how two
-    /// unrelated anonymous clients collide, so it must be rejected BEFORE
-    /// the worker runs.
+    /// key must be unguessable: a UUIDv4/v7 is required for
+    /// `auth: "anonymous"` mutations. A guessable key ("checkout-1") is
+    /// exactly how two unrelated anonymous clients collide, so it must be
+    /// rejected BEFORE the worker runs.
     #[compio::test]
     async fn anonymous_idempotency_key_must_be_a_uuid() {
         use std::sync::atomic::Ordering;

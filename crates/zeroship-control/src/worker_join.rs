@@ -19,8 +19,7 @@
 //! provisioning a new signer. Revocation is the other direction and is not
 //! configuration at all: `zeroship.rotate_worker_join_signer` stops future
 //! tokens, `zeroship.purge_worker_join_signer` additionally retires everything
-//! the signer admitted, and neither has a runtime EXECUTE grant. See
-//! `docs/runbooks/worker-join-signers.md`.
+//! the signer admitted, and neither has a runtime EXECUTE grant.
 //!
 //! # The order of the checks, and why each is separate
 //!
@@ -1591,9 +1590,8 @@ mod tests {
     fn two_minted_ring_keys_differ() {
         // The registrant contributes nothing to this value, so two mints under
         // IDENTICAL caller input must still differ. This arm rules on the mint;
-        // the end-to-end statement - two enrolments with byte-identical bodies
-        // from one peer land two different ring keys in the table - is bound by
-        // the live-database arm in tests/worker_enrolment_test.rs.
+        // two enrolments with byte-identical bodies from one peer must land two
+        // different ring keys in the table.
         let first = mint_ring_key();
         let second = mint_ring_key();
         assert_ne!(first, second);

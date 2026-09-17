@@ -11,7 +11,7 @@ import type { NamedIndexSpec, PlainObject } from "../types";
  * guaranteed by the JS spec. On overflow we evict the oldest entry — an
  * AI-generated app that synthesises new filter shapes (metric names,
  * dynamic identifiers) over a long-lived dev server would otherwise leak
- * one entry per shape forever (Gap P). 1024 is generous for any real
+ * one entry per shape forever. 1024 is generous for any real
  * app and bounds the memory hard.
  */
 const MAX_WARNED_SHAPES = 1024;
@@ -104,13 +104,12 @@ export function _maybeWarnUnindexedFilter(
  *     some declared multi-column index, OR every key carries its own
  *     single-field marker.
  *
- * Round-1 critique #3: the prior rule was "single-key OR (compound +
- * any one key marked)" — which silently hid scans like
- * `find({ userId, done })` when only `done` was `.index()`-marked,
- * even though no compound index covered `(userId, done)`. The warning
- * exists to nudge users toward declaring the right index; the rule
- * above keeps the single-field shortcut for `t.string().unique()` but
- * stops accepting "any one marked key" as compound coverage.
+ * The warning exists to nudge users toward declaring the right index;
+ * the rule above keeps the single-field shortcut for
+ * `t.string().unique()` but stops accepting "any one marked key" as
+ * compound coverage, so `find({ userId, done })` is not treated as
+ * covered when only `done` is `.index()`-marked and no declared
+ * compound index covers `(userId, done)`.
  */
 function _filterCoveredByIndex(
   keys: string[],

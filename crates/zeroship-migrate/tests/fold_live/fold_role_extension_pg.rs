@@ -469,11 +469,10 @@ async fn role_attributes_round_trip_and_drift_is_named() {
 ///
 /// What this does NOT claim: that the engine confines the blast radius to the
 /// project schema. It cannot and does not — `DROP OWNED BY` is role-scoped by
-/// PostgreSQL's design, and `docs/security-model.md` delegates that bound to the
-/// database itself ("use a dedicated, non-login migrator role with only the
-/// project-schema permissions required"). The engine's part is to render the
-/// statement faithfully and refuse the two footguns; the operator's part is the
-/// migrator role. This pins the engine's half.
+/// PostgreSQL's design, and the platform delegates that bound to the operator,
+/// who runs a dedicated, non-login migrator role scoped to the project schema.
+/// The engine's part is to render the statement faithfully and refuse the two
+/// footguns. This pins the engine's half.
 #[compio::test]
 async fn drop_owned_by_removes_the_role_s_objects_and_spares_everyone_else_s() {
     let url = require_live_pg!();

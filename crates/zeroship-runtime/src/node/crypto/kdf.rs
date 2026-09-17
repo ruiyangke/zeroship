@@ -1,15 +1,11 @@
 //! KDF ops — `pbkdf2Sync`, `pbkdf2`, `hkdfSync`, `hkdf`.
 //!
-//! See `docs/archive/node-crypto-native.md` §VI.2.
-//!
 //! Sync variants run on the V8 thread (user opted in by picking the
 //! `*Sync` API). Async variants (`pbkdf2(...callback)` and the
 //! Promise-shaped form) currently run synchronously on the V8 thread
 //! and resolve a Promise / fire the callback synchronously via the
-//! microtask queue. A future commit can wire the spawn_blocking
-//! threadpool variant; npm packages that block the event
-//! loop with PBKDF2 1M iterations from request handlers are doing
-//! something wrong (XVII.6).
+//! microtask queue; npm packages that block the event loop with PBKDF2
+//! from request handlers are doing something wrong.
 //!
 //! scrypt is in the design (Stage B FFI inventory) but requires
 //! aws-lc-sys raw FFI; not yet wired here.
