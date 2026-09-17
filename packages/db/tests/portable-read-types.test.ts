@@ -3,7 +3,7 @@ import type { Collection, SortableField, SortInput } from "../src/index.js";
 
 const fields = {
   title: t.string(),
-  score: t.number(),
+  score: t.double(),
   enabled: t.boolean(),
   payload: t.bytes(),
   document: t.json(),

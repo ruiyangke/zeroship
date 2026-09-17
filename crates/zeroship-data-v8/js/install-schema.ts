@@ -195,7 +195,7 @@ function decodeRuntimeFields(fields: Record<string, FieldDef>): Record<string, F
 }
 
 /** Input form: a record of TypeBuilder instances. Field values must be
- *  produced by the `t.*` API (`t.string()`, `t.number()`, etc.).
+ *  produced by the `t.*` API (`t.string()`, `t.double()`, etc.).
  *
  *  `TypeBuilder`'s 5th param (`D`, the has-default brand set by
  *  `.default(...)`) must be `any` here, not omitted - omitting it pins the
@@ -254,7 +254,7 @@ export function normalizeSchema(input: SchemaInputOrUnion): NormalizedSchema {
       throw Object.assign(
         new Error(
           `unrecognized schema field "${key}": every field must be a t.* builder ` +
-            `(e.g. t.string(), t.number(), t.ref("users")). Bare constructors and ` +
+            `(e.g. t.string(), t.double(), t.ref("users")). Bare constructors and ` +
             `Mongoose-style { type: Constructor } objects are no longer supported.`,
         ),
         { code: "SCHEMA_FIELD_NOT_TYPEBUILDER" as const },
@@ -539,7 +539,7 @@ export type ValidateSchemaShape<T> = {
               [F in keyof T[K]]:
                 IsValidSchemaField<T[K][F]> extends true
                   ? T[K][F]
-                  : `Field "${F & string}" on "${K & string}" must be a t.* builder (e.g. t.string(), t.number(), t.ref("users")) — got a bare value.`;
+                  : `Field "${F & string}" on "${K & string}" must be a t.* builder (e.g. t.string(), t.double(), t.ref("users")) — got a bare value.`;
             }
           : `Schema "${K & string}" must be a field map of t.* builders, a schema(...) builder, or a top-level t.union(...).`;
 };

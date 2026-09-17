@@ -90,8 +90,8 @@ describe("P5.5 PR 1 — t.string().mask(...) DSL modifier", () => {
     assert.equal(def.mask!.classification, "internal");
   });
 
-  test("t.number().mask({ kind: 'full' }) is permitted (number wrap)", () => {
-    const b = t.number().mask({ kind: "full" });
+  test("t.double().mask({ kind: 'full' }) is permitted (number wrap)", () => {
+    const b = t.double().mask({ kind: "full" });
     const def = b.toFieldDef();
     assert.equal(def.type, "number");
     assert.equal(def.mask!.kind, "full");

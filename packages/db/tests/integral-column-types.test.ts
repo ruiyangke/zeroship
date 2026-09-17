@@ -134,7 +134,7 @@ describe("unknown field types fail closed", () => {
 });
 
 it("types bigint arithmetic without widening ordinary numeric fields", () => {
-  const schema = { counter: t.bigInt().required(), score: t.number().required() };
+  const schema = { counter: t.bigInt().required(), score: t.double().required() };
   const patch: UpdateExpression<typeof schema> = {
     counter: { $inc: 1n },
     $mul: { counter: 2n, score: 2 },

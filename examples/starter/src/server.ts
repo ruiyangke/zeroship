@@ -19,9 +19,9 @@ export type Message = {
 };
 
 const MessageSchema = z.object({
-  id: z.number(),
+  id: z.double(),
   text: z.string(),
-  createdAt: z.number(),
+  createdAt: z.double(),
 });
 
 let nextId = 3;

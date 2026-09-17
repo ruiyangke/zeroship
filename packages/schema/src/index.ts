@@ -839,7 +839,7 @@ export class TypeBuilder<
    * `find({ ssn: { $gt: v } })` compares masks. Looking a row up by its
    * real value is `unmask`-shaped work, not filter-shaped work.
    *
-   * Valid on `t.string()`, `t.number()`, `t.bytes()`, and
+   * Valid on `t.string()`, `t.double()`, `t.bytes()`, and
    * `t.encrypted()` (the encrypted column wraps one of those
    * primitive types). Refused on `t.ref()` with
    * `ENCRYPTED_ON_REF_UNSUPPORTED` — FK columns must remain
@@ -969,7 +969,7 @@ export class TypeBuilder<
  * ```ts
  * const fields = {
  *   name: t.string().required(),
- *   age:  t.number().min(0),
+ *   age:  t.double().min(0),
  *   tags: t.array(t.string()),
  * };
  * ```
@@ -984,7 +984,7 @@ export const t = {
     return new TypeBuilder<number, false, undefined, undefined, false, "ordered">({ type: "integer" });
   },
   /** Creates a number field definition. */
-  number(): TypeBuilder<number, false, undefined, undefined, false, "ordered"> {
+  double(): TypeBuilder<number, false, undefined, undefined, false, "ordered"> {
     return new TypeBuilder<number, false, undefined, undefined, false, "ordered">({ type: "number" });
   },
   /** Creates a fixed precision decimal represented as exact text. */
@@ -1040,7 +1040,7 @@ export const t = {
   array<U>(items: TypeBuilder<U, any, any, any, any>): TypeBuilder<U[], false, undefined, undefined, false, "json"> {
     if (!(items instanceof TypeBuilder)) {
       throw Object.assign(
-        new Error("t.array(items) requires a TypeBuilder (use t.string(), t.number(), ...)"),
+        new Error("t.array(items) requires a TypeBuilder (use t.string(), t.double(), ...)"),
         { code: "INVALID_ARRAY_ITEM" as const },
       );
     }
@@ -1097,7 +1097,7 @@ export const t = {
     for (const [key, val] of Object.entries(shape)) {
       if (!(val instanceof TypeBuilder)) {
         throw Object.assign(
-          new Error(`t.object: nested field "${key}" must be a TypeBuilder (use t.string(), t.number(), ...)`),
+          new Error(`t.object: nested field "${key}" must be a TypeBuilder (use t.string(), t.double(), ...)`),
           { code: "OBJECT_FIELD_NOT_TYPEBUILDER" as const },
         );
       }
@@ -1201,7 +1201,7 @@ export const t = {
    * const fields = {
    *   ssn: t.encrypted().required(),
    *   payload: t.encrypted({ of: t.bytes() }),
-   *   amount: t.encrypted({ of: t.number() }),
+   *   amount: t.encrypted({ of: t.double() }),
    * };
    * ```
    */
@@ -1222,7 +1222,7 @@ export const t = {
     if (innerBuilder !== undefined) {
       if (!(innerBuilder instanceof TypeBuilder)) {
         throw Object.assign(
-          new Error("t.encrypted({ of }): of must be a TypeBuilder (t.string() / t.number() / t.bytes())"),
+          new Error("t.encrypted({ of }): of must be a TypeBuilder (t.string() / t.double() / t.bytes())"),
           { code: "ENCRYPTED_TYPE_UNSUPPORTED" as const },
         );
       }
@@ -1307,7 +1307,7 @@ export const t = {
    * events: t.union(
    *   t.object({ kind: t.literal("login"), userId: t.ref("users"), ip: t.string() }),
    *   t.object({ kind: t.literal("error"), message: t.string() }),
-   *   t.object({ kind: t.literal("metric"), name: t.string(), value: t.number() }),
+   *   t.object({ kind: t.literal("metric"), name: t.string(), value: t.double() }),
    * )
    * ```
    *

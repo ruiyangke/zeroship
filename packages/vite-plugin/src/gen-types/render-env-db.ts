@@ -185,7 +185,7 @@ function renderBuilderChain(def: RuntimeFieldDef): string {
         chain = renderNumberBase(def);
         break;
       case "float":
-        chain = "t.number()";
+        chain = "t.double()";
         break;
       case "boolean":
         chain = "t.boolean()";
@@ -267,7 +267,7 @@ function renderEncryptedBase(def: RuntimeFieldDef): string {
 }
 
 function renderNumberBase(def: RuntimeFieldDef): string {
-  if (typeof def.precision !== "number") return "t.number()";
+  if (typeof def.precision !== "number") return "t.double()";
   const scale = typeof def.scale === "number" ? def.scale : 0;
   return `t.numeric({ precision: ${renderNumber(def.precision)}, scale: ${renderNumber(scale)} })`;
 }

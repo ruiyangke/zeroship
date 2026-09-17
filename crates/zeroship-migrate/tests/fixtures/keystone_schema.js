@@ -10,7 +10,7 @@ const users = {
   // not a public TypeID; this local compatibility builder does not retain prefixes.
   id: internalDbType.id(),
   email: internalDbType.string().required().unique(),
-  age: internalDbType.number(),
+  age: internalDbType.double(),
   role: internalDbType.string(),
   active: internalDbType.boolean(),
   // An encrypted column using the default key. `internalDbType.encrypted()`

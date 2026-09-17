@@ -10,8 +10,8 @@ describe("t type builder", () => {
     assert.equal(tb.toFieldDef().type, "string");
   });
 
-  test("t.number() creates number TypeBuilder", () => {
-    const tb = t.number();
+  test("t.double() creates number TypeBuilder", () => {
+    const tb = t.double();
     assert.ok(tb instanceof TypeBuilder);
     assert.equal(tb.toFieldDef().type, "number");
   });
@@ -41,8 +41,8 @@ describe("t type builder", () => {
     assert.equal(tb.toFieldDef().items, "string");
   });
 
-  test("t.array(t.number()) creates array TypeBuilder with items=number", () => {
-    const tb = t.array(t.number());
+  test("t.array(t.double()) creates array TypeBuilder with items=number", () => {
+    const tb = t.array(t.double());
     assert.equal(tb.toFieldDef().type, "array");
     assert.equal(tb.toFieldDef().items, "number");
   });
@@ -83,7 +83,7 @@ describe("t type builder", () => {
   });
 
   test(".min() applies min to a derived builder", () => {
-    const tb = t.number();
+    const tb = t.double();
     const result = tb.min(0);
     assert.notEqual(result, tb);
     assert.equal(result.toFieldDef().min, 0);
@@ -91,7 +91,7 @@ describe("t type builder", () => {
   });
 
   test(".max() applies max to a derived builder", () => {
-    const tb = t.number();
+    const tb = t.double();
     const result = tb.max(100);
     assert.notEqual(result, tb);
     assert.equal(result.toFieldDef().max, 100);
