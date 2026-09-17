@@ -181,9 +181,9 @@ export default {
         // would put an unpresentable entry in the unique index below and would
         // say a credential exists where none does.
         secret_hash: t.bytes(),
-        secret_key_version: t.smallInt(),
+        secret_key_version: t.int(),
         prev_secret_hash: t.bytes(),
-        prev_secret_key_version: t.smallInt(),
+        prev_secret_key_version: t.int(),
         rotated_at: t.timestamp(),
         idem_response_enc: t.bytes(),
         idem_expires_at: t.timestamp(),

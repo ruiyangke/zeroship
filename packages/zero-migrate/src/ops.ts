@@ -1847,10 +1847,8 @@ export const t: TypeLexicon = {
     return col;
   },
   geoPoint: () => new ColumnDefImpl("geoPoint"),
-  smallInt: () => new ColumnDefImpl("smallInt"),
   int: () => new ColumnDefImpl("int"),
   bigInt: () => new ColumnDefImpl("bigInt"),
-  real: () => new ColumnDefImpl("real"),
   double: () => new ColumnDefImpl("double"),
   inet: () => new ColumnDefImpl("inet"),
   enum: (name) => {

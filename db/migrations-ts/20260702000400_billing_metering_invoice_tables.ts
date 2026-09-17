@@ -80,7 +80,7 @@ export default {
         ref_kind: t.text().required(),
         external_id: t.text().required(),
         created_at: t.timestamp().required().default(now()),
-        segment_no: t.smallInt().required().default(0),
+        segment_no: t.int().required().default(0),
       },
       primaryKey: ["id"],
     });
@@ -263,7 +263,7 @@ export default {
         usage_snapshot: t.json().required(),
         weights_snapshot: t.json().required(),
         created_at: t.timestamp().required().default(now()),
-        segment_no: t.smallInt().required().default(0),
+        segment_no: t.int().required().default(0),
         plan_id: t.text().required(),
       },
       primaryKey: ["id"],

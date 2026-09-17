@@ -94,10 +94,10 @@ function authorWith({ begin, drain, ids, t, table }: Rec): any[] {
         onUpdate: "restrict",
       }),
       seq: t.bigInt().identity({ always: true }),
-      shard: t.smallInt(),
+      shard: t.int(),
       qty: t.int(),
       unit_cents: t.int(),
-      ratio: t.real(),
+      ratio: t.double(),
       source_ip: t.inet(),
       total_cents: t.int().generated((col: any) => col("qty").mul(col("unit_cents"))),
       virtual_total: t.int().generated((col: any) => col("qty").mul(col("unit_cents")), { virtual: true }),
@@ -142,8 +142,8 @@ test("the recorded facets carry the exact camelCase wire form", () => {
 
   // t.vector({ dimensions, metric }) → vectorMetric (closed token)
   assert.equal(byName("embedding").vectorMetric, "cosine");
-  assert.equal(byName("shard").type, "smallInt");
-  assert.equal(byName("ratio").type, "real");
+  assert.equal(byName("shard").type, "int");
+  assert.equal(byName("ratio").type, "double");
   assert.equal(byName("source_ip").type, "inet");
   assert.deepEqual(byName("public_id").valueFormat, { typeId: { prefix: "document" } });
   assert.deepEqual(byName("opaque_id").valueFormat, { typeId: { prefix: "" } });

@@ -333,12 +333,10 @@ export interface TypeLexicon {
   vector(opts: VectorOptions): ColumnDef;
   geoPoint(): ColumnDef;
   /** 16-bit signed integer. */
-  smallInt(): ColumnDef;
   /** 32-bit signed integer (canonical; `t.integer` is deleted). */
   int(): ColumnDef;
   bigInt(): ColumnDef;
   /** Single-precision float (float4). */
-  real(): ColumnDef;
   /** Double-precision float (float8). */
   double(): ColumnDef;
   /** IP network/address (`inet` on Postgres). */
