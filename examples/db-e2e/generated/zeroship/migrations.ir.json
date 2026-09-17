@@ -1,6 +1,6 @@
 {
   "kind": "ir",
-  "descriptor_sha256": "c7a797a3976c79de49d8e444a4aa35b3cbee58de4b57ca9b93273981e09df7c4",
+  "descriptor_sha256": "aec444816ccc9fc79ed2c496a7d95b42bfbad2e5999413af9e8c73e88c8fe09b",
   "documents": [
     {
       "filename": "20260101000000_create_db_e2e.ir.json",
@@ -217,7 +217,7 @@
               }
             ],
             "runtimeOptions": {
-              "softDelete": false,
+              "softDelete": true,
               "versioning": true,
               "strictness": "strict"
             }

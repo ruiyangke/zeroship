@@ -348,7 +348,8 @@
             "by": "now",
             "on": "delete"
           },
-          "writable": false
+          "writable": false,
+          "softDelete": true
         },
         "workspaceId": {
           "type": "string",
@@ -457,7 +458,7 @@
         }
       },
       "options": {
-        "softDelete": false,
+        "softDelete": true,
         "versioning": true,
         "strictness": "strict"
       },
