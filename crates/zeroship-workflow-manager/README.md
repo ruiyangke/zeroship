@@ -23,6 +23,13 @@ Timeout during an in-flight commit leaves an uncertain outcome; retries recover
 its durable receipt without adding successor jobs again.
 Claim and heartbeat return `DeliveryGrant`; converting it to a wire lease after
 commit charges elapsed time against the originally observed assignment authority.
+Redelivery is bounded by the app policy's `max_delivery_attempts`, which the
+caller supplies from its own policy authority: a job that reached it in counted
+executions is no longer a candidate. Lease renewal is the manager's only evidence
+that an attempt began, so it is what counts, and a claim the creator journal
+deferred spends nothing. Nothing settles an exhausted job; no executor produced
+an outcome for it, and the row keeps its attempt history. Placement carries no
+policy authority and so applies no ceiling.
 Worker publication cannot mint manager-owned activation, cron or management commands.
 Job outcomes use closed tagged objects. Management results cannot settle ordinary
 jobs, and generic completion cannot stand in for a management lifecycle result.

@@ -1314,10 +1314,16 @@ struct Candidate {
 
 /// Filter readiness before limiting candidates, so blocked cron work cannot
 /// hide a deliverable activation or recovery job later in the app's queue.
+///
+/// `ceiling` is the app's delivery budget, from the caller's policy authority.
+/// A job that has reached it in counted executions is not a candidate, and
+/// becomes one again only if policy raises the budget. Callers without policy
+/// authority pass `None` and see every claimable row.
 pub(crate) async fn candidate(
     tx: &Database,
     app: &AppId,
     now: i64,
+    ceiling: Option<i64>,
 ) -> Result<Option<String>, Error> {
     use crate::models::jobs;
     use zeroship_core::workflow_jobs::JobOutcome;
@@ -1345,19 +1351,23 @@ pub(crate) async fn candidate(
                         .column(schedule_occurrences::activation_id)
                         .eq(activation.column(jobs::id))?,
                 ),
-        )?
+        )?;
+    let mut claimable = job
+        .column(jobs::state)
+        .eq("ready")?
+        .and(job.column(jobs::available_at).lte(now)?)
+        .or(job
+            .column(jobs::state)
+            .eq("leased")?
+            .and(job.column(jobs::lease_deadline).lte(Some(now))?));
+    if let Some(ceiling) = ceiling {
+        claimable = claimable.and(job.column(jobs::execution_attempts).lt(ceiling)?);
+    }
+    let query = query
         .filter(
             job.column(jobs::app_id)
                 .eq(app.as_str())?
-                .and(
-                    job.column(jobs::state)
-                        .eq("ready")?
-                        .and(job.column(jobs::available_at).lte(now)?)
-                        .or(job
-                            .column(jobs::state)
-                            .eq("leased")?
-                            .and(job.column(jobs::lease_deadline).lte(Some(now))?)),
-                )
+                .and(claimable)
                 .and(
                     occurrence
                         .column(schedule_occurrences::id)
