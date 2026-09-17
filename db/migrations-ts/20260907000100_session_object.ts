@@ -70,7 +70,7 @@ export default {
         // sector identifier. Storing it is what removes the reverse-lookup
         // table.
         subject: t.text().required(),
-        scopes: t.textArray().required().default([]),
+        scopes: t.array(t.text(), { storage: "native" }).required().default([]),
         relay_email: t.text(),
         subject_status: t.text().required().default("active"),
         suspended_at: t.timestamp(),
@@ -187,10 +187,10 @@ export default {
         rotated_at: t.timestamp(),
         idem_response_enc: t.bytes(),
         idem_expires_at: t.timestamp(),
-        amr: t.textArray().required().default([]),
+        amr: t.array(t.text(), { storage: "native" }).required().default([]),
         acr: t.text(),
         auth_time: t.timestamp().required().default(now()),
-        scopes: t.textArray().required().default([]),
+        scopes: t.array(t.text(), { storage: "native" }).required().default([]),
         label: t.text(),
         created_at: t.timestamp().required().default(now()),
         idle_expires_at: t.timestamp().required(),
