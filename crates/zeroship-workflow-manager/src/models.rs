@@ -38,6 +38,11 @@ pub struct Job {
     pub dispatch_order: i64,
     pub state: String,
     pub attempt: i64,
+    /// Attempts a worker confirmed had begun executing, by renewing their lease.
+    pub execution_attempts: i64,
+    /// The latest attempt counted into `execution_attempts`, so repeated
+    /// renewals of one delivery contribute once.
+    pub executed_attempt: Option<i64>,
     pub worker_id: Option<String>,
     pub assignment_revision: Option<i64>,
     pub lease_deadline: Option<i64>,

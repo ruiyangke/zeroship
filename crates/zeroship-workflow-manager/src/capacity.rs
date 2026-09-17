@@ -416,7 +416,10 @@ impl Capacity {
         let due = queue
             .transact(|tx| async move {
                 let now = queue.clock.now().await?;
-                Ok(Box::pin(scheduling::candidate(&tx, app, now))
+                // Placement carries no policy authority, so it applies no
+                // delivery ceiling: an app is due while any row remains
+                // claimable, and the claim transaction decides deliverability.
+                Ok(Box::pin(scheduling::candidate(&tx, app, now, None))
                     .await?
                     .is_some())
             })

@@ -164,6 +164,7 @@ pub async fn open<C: Composition>(
     } else {
         manager.selected(&app).await?
     };
+    let delivery_ceiling = host_policy.max_delivery_attempts;
     let ingress = Rc::new(LocalIngress {
         manager: manager.clone(),
         app: app.clone(),
@@ -203,7 +204,7 @@ pub async fn open<C: Composition>(
         config.payloads,
     )?));
     let consumer = JobConsumer::new(
-        Rc::new(composition.transport(manager.transport(wake_sender.clone()))),
+        Rc::new(composition.transport(manager.transport(wake_sender.clone(), delivery_ceiling))),
         manager.worker().clone(),
         config.consumer_options(),
     )?;

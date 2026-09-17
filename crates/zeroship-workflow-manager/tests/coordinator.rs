@@ -360,12 +360,12 @@ async fn management_receipts(fixture: &Fixture) {
         None
     );
     assert!(coordinator
-        .claim_job(&worker, &scope(&other), || ready(Ok(worker.clone())))
+        .claim_job(&worker, &scope(&other), support::delivery_ceiling(), || ready(Ok(worker.clone())))
         .await
         .unwrap()
         .is_none());
     let delivery = coordinator
-        .claim_job(&worker, &scope(&assignment), || ready(Ok(worker.clone())))
+        .claim_job(&worker, &scope(&assignment), support::delivery_ceiling(), || ready(Ok(worker.clone())))
         .await
         .unwrap()
         .unwrap()
@@ -552,7 +552,7 @@ async fn claim_authority(fixture: &Fixture) {
     };
     assert!(matches!(
         coordinator
-            .claim_job(&forged.worker_id, &scope(&forged), || std::future::ready(
+            .claim_job(&forged.worker_id, &scope(&forged), support::delivery_ceiling(), || std::future::ready(
                 Ok(forged.worker_id.clone())
             ))
             .await,
@@ -566,7 +566,7 @@ async fn claim_authority(fixture: &Fixture) {
     assert!(replacement.revision > original.revision);
     assert!(matches!(
         coordinator
-            .claim_job(&original.worker_id, &scope(&original), || {
+            .claim_job(&original.worker_id, &scope(&original), support::delivery_ceiling(), || {
                 std::future::ready(Ok(original.worker_id.clone()))
             })
             .await,
@@ -579,7 +579,7 @@ async fn claim_authority(fixture: &Fixture) {
     };
     assert!(matches!(
         coordinator
-            .claim_job(&foreign_worker.worker_id, &scope(&foreign_worker), || {
+            .claim_job(&foreign_worker.worker_id, &scope(&foreign_worker), support::delivery_ceiling(), || {
                 std::future::ready(Ok(foreign_worker.worker_id.clone()))
             })
             .await,
@@ -594,7 +594,7 @@ async fn claim_authority(fixture: &Fixture) {
     };
     assert!(matches!(
         coordinator
-            .claim_job(&foreign_scope.worker_id, &scope(&foreign_scope), || {
+            .claim_job(&foreign_scope.worker_id, &scope(&foreign_scope), support::delivery_ceiling(), || {
                 std::future::ready(Ok(foreign_scope.worker_id.clone()))
             })
             .await,
@@ -612,7 +612,7 @@ async fn claim_authority(fixture: &Fixture) {
     .await;
     assert!(matches!(
         coordinator
-            .claim_job(&replacement.worker_id, &scope(&replacement), || {
+            .claim_job(&replacement.worker_id, &scope(&replacement), support::delivery_ceiling(), || {
                 std::future::ready(Ok(replacement.worker_id.clone()))
             })
             .await,
@@ -630,7 +630,7 @@ async fn claim_authority(fixture: &Fixture) {
     .await;
     assert!(matches!(
         coordinator
-            .claim_job(&current.worker_id, &scope(&current), || std::future::ready(
+            .claim_job(&current.worker_id, &scope(&current), support::delivery_ceiling(), || std::future::ready(
                 Ok(current.worker_id.clone())
             ))
             .await,
@@ -647,7 +647,7 @@ async fn claim_authority(fixture: &Fixture) {
     )
     .await;
     let delivery = coordinator
-        .claim_job(&current.worker_id, &scope(&current), || {
+        .claim_job(&current.worker_id, &scope(&current), support::delivery_ceiling(), || {
             std::future::ready(Ok(current.worker_id.clone()))
         })
         .await
@@ -661,7 +661,7 @@ async fn claim_authority(fixture: &Fixture) {
     assert_eq!(delivery.attempt.get(), 1);
     assert!(delivery.deadline.get() <= stored_expiry);
     assert!(coordinator
-        .claim_job(&current.worker_id, &scope(&current), || std::future::ready(
+        .claim_job(&current.worker_id, &scope(&current), support::delivery_ceiling(), || std::future::ready(
             Ok(current.worker_id.clone())
         ))
         .await
@@ -823,7 +823,7 @@ async fn worker_publication(fixture: &Fixture) {
         1
     );
     let grant = coordinator
-        .claim_job(&worker, &scope(&assigned), || ready(Ok(worker.clone())))
+        .claim_job(&worker, &scope(&assigned), support::delivery_ceiling(), || ready(Ok(worker.clone())))
         .await
         .unwrap()
         .unwrap();
@@ -890,7 +890,7 @@ async fn delivery_enrollment(fixture: &Fixture) {
     checks.set(0);
     assert!(matches!(
         coordinator
-            .claim_job(&worker, &scope(&assigned), enrollment)
+            .claim_job(&worker, &scope(&assigned), support::delivery_ceiling(), enrollment)
             .await,
         Err(Error::Denied)
     ));
@@ -904,7 +904,7 @@ async fn delivery_enrollment(fixture: &Fixture) {
         ..assigned.clone()
     };
     let grant = coordinator
-        .claim_job(&worker, &scope(&stale), || ready(Ok(worker.clone())))
+        .claim_job(&worker, &scope(&stale), support::delivery_ceiling(), || ready(Ok(worker.clone())))
         .await
         .unwrap()
         .unwrap();
@@ -1170,7 +1170,7 @@ async fn journal_pages(
     };
     assert_publication_identity(&coordinator, &worker, &assigned, &spec, substitutes).await;
     let granted = coordinator
-        .claim_job(&worker, &scope(&assigned), || ready(Ok(worker.clone())))
+        .claim_job(&worker, &scope(&assigned), support::delivery_ceiling(), || ready(Ok(worker.clone())))
         .await
         .unwrap()
         .unwrap();

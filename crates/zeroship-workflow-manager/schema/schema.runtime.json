@@ -584,6 +584,28 @@
             "valueColumn": "attempt"
           }
         },
+        "execution_attempts": {
+          "type": "bigInt",
+          "required": true,
+          "default": 0,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "execution_attempts"
+          }
+        },
+        "executed_attempt": {
+          "type": "bigInt",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "executed_attempt"
+          }
+        },
         "worker_id": {
           "type": "string",
           "readable": true,

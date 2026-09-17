@@ -1132,7 +1132,7 @@ async fn revocation_rolls_back_mutations(fixture: &Fixture) {
     let checks = Cell::new(0);
     assert!(matches!(
         queue
-            .claim_authorized(&identity(&authority), |tx| {
+            .claim_authorized(&identity(&authority), support::delivery_ceiling(), |tx| {
                 checks.set(checks.get() + 1);
                 revoke_in_transaction(tx, &authority, &spec, ["ready", "leased"], checks.get())
             })
@@ -1334,7 +1334,7 @@ async fn claim_timeout_rolls_back(fixture: &Fixture) {
     let checks = Cell::new(0);
     let timed = compio::time::timeout(
         Duration::from_secs(1),
-        expiring.claim_authorized(&identity(&expiring_authority), |_| {
+        expiring.claim_authorized(&identity(&expiring_authority), support::delivery_ceiling(), |_| {
             checks.set(checks.get() + 1);
             let first = checks.get() == 1;
             let authority = expiring_authority.clone();
@@ -1495,6 +1495,103 @@ async fn assert_database_privileges(fixture: &Fixture) {
 }
 
 case!(
+    sqlite_delivery_budget_bounds_redelivery_of_executed_attempts,
+    postgres_delivery_budget_bounds_redelivery_of_executed_attempts,
+    delivery_budget_bounds_redelivery
+);
+
+/// A body that never completes stops being redelivered once the job's counted
+/// executions reach the app's budget. Renewal is the only evidence an attempt
+/// began: a claim the creator journal defers never renews, so capacity pressure
+/// and a paused dispatch cannot spend the budget. Nothing settles an exhausted
+/// job, because no executor produced an outcome for it.
+async fn delivery_budget_bounds_redelivery(fixture: &Fixture) {
+    const CEILING: i64 = 2;
+    let queue = queue(
+        fixture,
+        Options {
+            lease: Duration::from_millis(300),
+            ..Options::default()
+        },
+    )
+    .await;
+    let app = AppId::mint();
+    queue.register_scope(&app).await.unwrap();
+    let authority = assignment(fixture, &app).await;
+    let selector = identity(&authority);
+    let spec = job(&app);
+    queue.submit(&spec).await.unwrap();
+    let claim = |ceiling: i64| {
+        let authority = authority.clone();
+        let selector = selector.clone();
+        let queue = queue.clone();
+        async move {
+            queue
+                .claim_authorized(&selector, ceiling, move |_| ready(Ok(authority.clone())))
+                .await
+                .unwrap()
+        }
+    };
+    let renew = |delivery: Delivery| {
+        let authority = authority.clone();
+        let selector = selector.clone();
+        let queue = queue.clone();
+        async move {
+            queue
+                .heartbeat_authorized(&selector, &delivery, move |_| ready(Ok(authority.clone())))
+                .await
+                .unwrap()
+        }
+    };
+    // More deferred attempts than the budget allows. Each is claimed, never
+    // renewed, and left to expire; none of them may count.
+    for _ in 0..=CEILING {
+        let grant = claim(CEILING)
+            .await
+            .expect("an attempt that never began keeps the job claimable");
+        assert_eq!(
+            stored(fixture, &spec.id).await.unwrap()["execution_attempts"],
+            value!(0)
+        );
+        until(fixture, grant.delivery().deadline.get()).await;
+    }
+    // Attempts that began. Renewing twice within one attempt must spend the
+    // budget once.
+    for spent in 1..=CEILING {
+        let grant = claim(CEILING).await.expect("the budget admits this attempt");
+        let renewed = renew(grant.delivery().clone()).await;
+        let renewed = renew(renewed.delivery().clone()).await;
+        assert_eq!(renewed.delivery().attempt, grant.delivery().attempt);
+        assert_eq!(
+            stored(fixture, &spec.id).await.unwrap()["execution_attempts"],
+            value!(spent)
+        );
+        until(fixture, renewed.delivery().deadline.get()).await;
+    }
+    assert!(
+        claim(CEILING).await.is_none(),
+        "an exhausted job is no longer a delivery candidate"
+    );
+    let row = stored(fixture, &spec.id).await.unwrap();
+    assert_eq!(row["state"], value!("leased"));
+    assert_eq!(row["execution_attempts"], value!(CEILING));
+    assert_eq!(row["outcome"], Value::Null);
+    assert_eq!(row["settlement_digest"], Value::Null);
+    // The budget is policy, not a property of the row: raising it re-admits the
+    // same job, and no other app's queue was consulted to decide either way.
+    let readmitted = claim(CEILING + 1)
+        .await
+        .expect("a raised budget re-admits the job");
+    assert_eq!(readmitted.delivery().job, spec);
+    assert!(matches!(
+        queue
+            .claim_authorized(&selector, 0, |_| ready(Ok(authority.clone())))
+            .await,
+        Err(Error::Invalid)
+    ));
+}
+
+case!(
     sqlite_delivery_grants_keep_their_original_monotonic_budget,
     postgres_delivery_grants_keep_their_original_monotonic_budget,
     delivery_grant_budget
@@ -1524,7 +1621,7 @@ async fn delivery_grant_budget(fixture: &Fixture) {
         .unwrap();
     assert!(matches!(queue.claim(&stale).await, Err(Error::Denied)));
     let grant = queue
-        .claim_authorized(&selector, |_| ready(Ok(authority.clone())))
+        .claim_authorized(&selector, support::delivery_ceiling(), |_| ready(Ok(authority.clone())))
         .await
         .unwrap()
         .unwrap();
