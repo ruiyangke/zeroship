@@ -1278,7 +1278,7 @@ SQL
       before/after below cannot attribute anything to \`zeroship deploy\`"
 
   # THE COMMAND UNDER TEST. Auth arrives on `--token=`, one of the three inputs
-  # AGENTS.md documents for deploy (`zeroship login`, `--token=`, ZEROSHIP_TOKEN)
+  # for deploy (`zeroship login`, `--token=`, ZEROSHIP_TOKEN)
   # and the only one that is a credential the caller states rather than a
   # credential the environment happens to hold.
   DEPLOY=$("$BIN/zeroship" deploy "$ZSHIP" --app="$APP_ID" \
