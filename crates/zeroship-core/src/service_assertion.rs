@@ -372,10 +372,9 @@ impl ServiceIssuer {
 
 /// An ed25519 keypair a service uses to sign its own assertions.
 ///
-/// Provisioning is an operator responsibility; see the module-level notes in
-/// `docs/proposals/2026-08-16-service-identity.md` section 7. This type only
-/// gives the operator the two ends of it: generate a key, and publish the JWK
-/// half that peers put in their trust bundle.
+/// Provisioning is an operator responsibility. This type only gives the operator
+/// the two ends of it: generate a key, and publish the JWK half that peers put
+/// in their trust bundle.
 pub struct ServiceSigningKey {
     inner: ed25519_dalek::SigningKey,
 }
