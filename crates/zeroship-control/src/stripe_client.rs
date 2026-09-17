@@ -104,7 +104,7 @@ pub struct ConnectPaymentIntent {
 }
 
 /// A retrieved Stripe **Invoice**'s reconciliation-relevant fields (`GET
-/// /v1/invoices/{in_}`, #28). All amounts are cents. `status` is the raw Stripe
+/// /v1/invoices/{in_}`). All amounts are cents. `status` is the raw Stripe
 /// enum (`draft`/`open`/`paid`/`uncollectible`/`void`); the reconciler compares
 /// it against OUR `invoices.status` + the cash we recorded.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,7 +117,7 @@ pub struct StripeInvoice {
 }
 
 /// A retrieved Stripe **Refund**'s reconciliation-relevant fields (`GET
-/// /v1/refunds/{re_}`, #28). `status` is the raw Stripe enum
+/// /v1/refunds/{re_}`). `status` is the raw Stripe enum
 /// (`pending`/`requires_action`/`succeeded`/`failed`/`canceled`). The reconciler
 /// flags a refund Stripe says `failed`/`canceled` that we still hold
 /// `pending`/`issued` (a missed `charge.refund.updated`).
@@ -129,7 +129,7 @@ pub struct StripeRefund {
 }
 
 /// A retrieved Stripe **Dispute**'s reconciliation-relevant fields (`GET
-/// /v1/disputes/{du_}` or a row from `GET /v1/disputes?created>=…`, #28). A
+/// /v1/disputes/{du_}` or a row from `GET /v1/disputes?created>=…`). A
 /// Dispute object carries NO `invoice` field — only the settling `charge`
 /// (`ch_…`) / `payment_intent` (`pi_…`) (verified at docs.stripe.com/api/disputes/
 /// object), which the reconciler resolves back to our invoice via the
@@ -344,7 +344,7 @@ pub trait StripeApi {
     ) -> Result<(Option<String>, Option<String>), StripeError>;
 
     /// Create a **Refund** (`re_…`) returning the cash that was collected on a paid
-    /// invoice back to the original card (billing-ops gap #26, PR-3).
+    /// invoice back to the original card (billing-ops PR-3).
     /// `provider_invoice_id` is the refund TARGET the caller recorded: the settling
     /// `pi_…`/`ch_…` (preferred — captured at `invoice.paid` from the expanded fetch) or
     /// the Stripe invoice `in_…`. A `pi_…`/`ch_…` is refunded DIRECTLY; an `in_…` is first
@@ -387,7 +387,7 @@ pub trait StripeApi {
         idempotency_key: &str,
     ) -> Result<ConnectPaymentIntent, StripeError>;
 
-    // ── #28: READ-ONLY state-reconciliation GETs (the missed-webhook backstop) ──
+    // ── READ-ONLY state-reconciliation GETs (the missed-webhook backstop) ──
 
     /// Retrieve a Stripe Invoice's reconciliation fields (`GET /v1/invoices/{in_}`).
     /// READ-ONLY: the reconciler compares Stripe's `status`/`amount_due`/`amount_paid`

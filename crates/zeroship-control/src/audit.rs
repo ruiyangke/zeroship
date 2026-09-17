@@ -75,24 +75,24 @@ pub enum Action {
     /// actor + the old→new value in the detail JSON.
     SetGlobalFx,
     /// An operator granted an organization credit via `POST /api/billing/credit`
-    /// (billing-ops gap #26, PR-2). Credit is a money lever (it reduces a future
+    /// (PR-2). Credit is a money lever (it reduces a future
     /// bill), operator-only, so every grant is audited with the actor + the
     /// organization / amount / kind in the detail JSON.
     CreditGranted,
     /// An operator refunded a finalized invoice via `POST
-    /// /api/invoices/{id}/refunds` (billing-ops gap #26, PR-3). A refund moves
+    /// /api/invoices/{id}/refunds` (PR-3). A refund moves
     /// real money (a Stripe `Refund` for `destination='cash'`) or grants
     /// platform credit (`destination='credit'`), operator-only, so every refund is
     /// audited with the actor + the invoice / amount / destination in the detail JSON.
     InvoiceRefunded,
     /// An operator voided a finalized invoice via `POST /api/invoices/{id}/void`
-    /// (billing-ops gap #26, PR-3). A void is the only legal finalized→void
+    /// (PR-3). A void is the only legal finalized→void
     /// correction transition; it restores consumed credit (`void_reversal`) and
     /// reissues a corrected invoice, so it is audited with the actor + the
     /// voided/reissued ids + any true-up refund in the detail JSON.
     InvoiceVoided,
     /// A chargeback/dispute lifecycle event was recorded from a `charge.dispute.*`
-    /// webhook (billing-ops gap #26, PR-8). A dispute claws back cash the cardholder
+    /// webhook (PR-8). A dispute claws back cash the cardholder
     /// paid — a forced reversal recorded as a `billing_disputes` row + a signed
     /// `invoice_payments` row — so every dispute create/resolve is audited with the
     /// dispute / invoice / amount / status in the detail JSON.

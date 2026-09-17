@@ -1,4 +1,4 @@
-//! Tax seam — compute tax at finalize, frozen onto the invoice (billing-ops gap #26,
+//! Tax seam — compute tax at finalize, frozen onto the invoice (billing-ops
 //! PR-5; design §"PR-5 tax (seam only)" + flow E "Tax at finalize").
 //!
 //! **Code-only, no changeset.** `invoices.tax_cents` already exists (the redesign froze

@@ -622,7 +622,7 @@ mod tests {
         assert_eq!(total_units(&weights(), &usage).unwrap(), 10);
     }
 
-    /// Metering coverage (#27): the gateway-side egress and stream metrics price
+    /// Metering coverage: the gateway-side egress and stream metrics price
     /// through the same CU pipeline once their weights exist —
     /// `gateway_egress_bytes` mirrors `egress_bytes` (1 CU / 1000 B) and
     /// `stream_wall_us` mirrors `wall_us` (1 CU / 10 ms). This pins both the
