@@ -489,10 +489,8 @@ async fn get_versions_projects_app_egress_rules_with_plan_caps() {
 
 #[compio::test]
 async fn upsert_with_none_archived_preserves_existing_archived() {
-    // REGRESSION (#11): an archived plan, re-upserted with `archived = None`
-    // (the PUT-without-archived case), MUST STAY archived. The old code set
-    // `archived = EXCLUDED.archived` from a `#[serde(default)] -> false`, so a
-    // name edit silently UN-archived the plan. Now `None` ⇒ COALESCE-preserve.
+    // An archived plan, re-upserted with `archived = None` (the PUT-without-archived
+    // case), MUST STAY archived: `None` ⇒ COALESCE-preserve.
     let url = db_url();
     let _client = pg(&url).await;
     let registry = Registry::new(&url).await.expect("registry");

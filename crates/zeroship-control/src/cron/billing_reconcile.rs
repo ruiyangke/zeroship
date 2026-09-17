@@ -1420,7 +1420,7 @@ pub(crate) async fn bill_organization_with_parts<S: StripeApi>(
             // (WHERE status <> 'void') the 0042 reshape introduced. The `WHERE status <> 'void'` on the
             // conflict clause names the partial index's predicate so a voided prior
             // invoice does NOT collide: a corrected invoice can reissue into the released
-            // period slot (billing-ops PR-1, gap #26 C).
+            // period slot (billing-ops PR-1).
             conn.execute(
                 "INSERT INTO zeroship.invoices (id, organization_id, period, status) \
                  VALUES ($1, $2, $3::date, 'draft') \

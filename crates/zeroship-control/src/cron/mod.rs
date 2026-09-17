@@ -80,7 +80,7 @@ pub fn spawn_all(
     })
     .detach();
 
-    // Billing-notify sweep (billing-ops gap #26, PR-6) — turns the already-written
+    // Billing-notify sweep (PR-6) — turns the already-written
     // billing transition rows (dunning history, newly-finalized invoices, newly-issued
     // refunds) into an organization's billing address via the `BillingNotifier` seam: claim-before-send
     // under a dedicated advisory lock (multi-node safe), then flip to `sent`.
@@ -288,7 +288,7 @@ mod tests {
         );
     }
 
-    /// The Stripe state-reconciliation backstop (#28) rides the Native invoice rail (which
+    /// The Stripe state-reconciliation backstop rides the Native invoice rail (which
     /// MINTS the Stripe objects it re-reads), so it is spawned under `native` and NOT under
     /// the export backends (which never run the invoice rail → nothing platform-minted to
     /// reconcile).

@@ -65,8 +65,8 @@ pub async fn invoice_id_for_provider_invoice<C: GenericClient + Sync>(
     Ok(rows.first().map(|r| r.get::<_, String>("invoice_id")))
 }
 
-/// Persist the dispute-resolution linkage for a paid Stripe invoice (billing-ops gap #26,
-/// PR-8 CRITICAL-1). A Stripe Dispute object carries NO `invoice` field — only `charge`
+/// Persist the dispute-resolution linkage for a paid Stripe invoice (PR-8
+/// CRITICAL-1). A Stripe Dispute object carries NO `invoice` field — only `charge`
 /// (`ch_…`) and `payment_intent` (`pi_…`). So to map a future `charge.dispute.*` back to
 /// THIS internal invoice we must record, at `invoice.paid` time, the `pi_…`/`ch_…` that
 /// settled the invoice as `billing_provider_refs` rows keyed by their own `ref_kind`
@@ -143,7 +143,7 @@ pub async fn record_payment_object_refs<C: GenericClient + Sync>(
         }
     }
 
-    // ORDER-INDEPENDENCE (gap #26 dispute-vs-linkage race, 0055). A `charge.dispute.created`
+    // ORDER-INDEPENDENCE (dispute-vs-linkage race, 0055). A `charge.dispute.created`
     // may have arrived BEFORE this `invoice.paid` and parked itself in `pending_disputes`
     // (no linkage to resolve against yet). Now that the settling pi_…/ch_…→invoice linkage is
     // written, promote any parked dispute matching these candidates: a `billing_disputes` row
@@ -249,7 +249,7 @@ pub async fn append_charge<C: GenericClient + Sync>(
         })
 }
 
-/// Append a signed dispute `invoice_payments` row (billing-ops gap #26, PR-8).
+/// Append a signed dispute `invoice_payments` row (PR-8).
 ///
 /// A `dispute_debit` (`amount_cents < 0`) records cash CLAWED BACK by a
 /// `charge.dispute.created` — it LOWERS `Σ(invoice_payments)`, automatically tightening

@@ -1,4 +1,4 @@
-//! Billing-notification cron (billing-ops gap #26, PR-6; design flow F).
+//! Billing-notification cron (billing-ops PR-6; design flow F).
 //!
 //! Every ~5min it sweeps the already-written billing transition rows for events that
 //! have NOT yet produced a `sent` notification, claims each BEFORE sending (two-phase
