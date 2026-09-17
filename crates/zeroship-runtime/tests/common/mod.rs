@@ -85,7 +85,7 @@ async fn drive_fetch_outcome(outcome: FetchOutcome) -> (u16, String, Vec<String>
 /// Dispatch a single RPC-style call and block on its result.
 ///
 /// Handles both sync handlers (no compio runtime needed) and async ones
-/// (spins up a compio runtime just for the await). Mirrors the old
+/// (spins up a compio runtime just for the await). Mirrors the
 /// `dispatch_rpc` contract: JSON string body on 2xx, Err(message) on 4xx/5xx.
 fn run_dispatch_on_runtime(runtime: &Runtime, method: &str, args_json: &str) -> Result<RequestResult, String> {
     let env = EnvSnapshot::empty();
@@ -377,12 +377,9 @@ pub fn dispatch_with_env(
     })
 }
 
-/// Helper: feed an HTTP request straight through `call_fetch_handler`.
-///
-/// Previously this called the obsolete `dispatch_http`; now it just lifts
-/// headers into the `call_fetch_handler` contract. Returns `None` for the
-/// "no handler" case to mirror the old "no onRequest" behavior (for tests
-/// that negate the presence of a handler).
+/// Helper: feed an HTTP request straight through `call_fetch_handler`,
+/// lifting headers into its contract. Returns `None` for the "no handler"
+/// case (for tests that negate the presence of a handler).
 /// Status, response headers, and body of a synchronous dispatch — `None`
 /// when the module has no `default.fetch` handler.
 type HttpSyncResponse = Option<(u16, Vec<(String, String)>, String)>;

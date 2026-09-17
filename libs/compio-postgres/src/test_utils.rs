@@ -26,9 +26,6 @@
 //! that cannot see the defining module cannot answer whether a function is
 //! dead.
 //!
-//! The benches cannot fetch a real row before the timed loop: that would put
-//! a network round trip inside a decode benchmark.
-//!
 //! `Row::new` is `pub(crate)`, so an external bench cannot build one. Both
 //! places in this crate that could have used them deliberately do not, and
 //! their reasons are worth knowing before reaching for one:

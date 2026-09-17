@@ -43,16 +43,16 @@
 //! from the handshake in `Established::leftover` and seeded into the
 //! reader's buffer BEFORE the first network read.
 //!
-//! For the plain-TCP driver we use a `ChainReader` adapter that yields
-//! the leftover slice first, then the underlying stream. For the TLS
-//! driver we just prepend to `read_buffer`.
+//! For both drivers the leftover slice initializes the reader's
+//! `read_buffer` ahead of the first network read.
 //!
 //! ## Event flow JS-ward
 //!
 //! Every queued `WsEvent` triggers a one-shot
-//! `OpResult::WebSocketEvent` future; the runtime arm in `runtime.rs`
-//! calls `dispatch_ws_event`, which drains the per-WS queue (so
-//! multiple events queued in one batch dispatch in one V8 turn).
+//! `OpResult::WebSocketEvent` future; the pump arm in `runtime.rs`
+//! calls `dispatch_pending_ws_events` (in `dispatch.rs`), which drains the
+//! per-WS queue so multiple events queued in one batch dispatch in one V8
+//! turn.
 //!
 //! ## Backpressure
 //!
