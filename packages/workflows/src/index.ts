@@ -181,7 +181,33 @@ export interface WorkflowRun<Output = unknown> {
   createSignalToken(opts: { types: string[]; ttl: string }): Promise<string>;
 }
 
+/**
+ * A workflow error is identified by its `name`, never by its constructor.
+ *
+ * A step failure is recorded in the journal as `{ type, message, ... }`, and the
+ * host replay bridge rebuilds it on the later dispatch that rethrows it into the
+ * body. The object a creator catches is therefore never the object that was
+ * thrown, and no shared class could survive that round trip. `name` is the one
+ * identity that does cross it, and it is the same key the journal stores as
+ * `type`, so every class below matches on it.
+ *
+ * The brand check deliberately avoids `value instanceof Error`: the error a
+ * creator catches is built by the host bridge, which is a different module from
+ * this package, so the check must not depend on which `Error` constructor made
+ * it.
+ */
+function hasWorkflowErrorName(value: unknown, name: string): boolean {
+  return (
+    Object.prototype.toString.call(value) === "[object Error]" &&
+    (value as Error).name === name
+  );
+}
+
 export class PermanentError extends Error {
+  static [Symbol.hasInstance](value: unknown): value is PermanentError {
+    return hasWorkflowErrorName(value, "PermanentError");
+  }
+
   constructor(message = "permanent workflow error") {
     super(message);
     this.name = "PermanentError";
@@ -191,23 +217,22 @@ export class PermanentError extends Error {
 export class StepTimeoutError extends Error {
   readonly retryable = true;
 
+  static [Symbol.hasInstance](value: unknown): value is StepTimeoutError {
+    return hasWorkflowErrorName(value, "StepTimeoutError");
+  }
+
   constructor(message = "workflow step timed out") {
     super(message);
     this.name = "StepTimeoutError";
   }
 }
 
-export class WorkflowStepTimeoutError extends Error {
-  readonly retryable = true;
-
-  constructor(message = "workflow step timed out") {
-    super(message);
-    this.name = "WorkflowStepTimeoutError";
-  }
-}
-
 export class WorkflowTimeoutError extends Error {
   readonly retryable = false;
+
+  static [Symbol.hasInstance](value: unknown): value is WorkflowTimeoutError {
+    return hasWorkflowErrorName(value, "WorkflowTimeoutError");
+  }
 
   constructor(message = "workflow signal wait timed out") {
     super(message);
@@ -218,6 +243,10 @@ export class WorkflowTimeoutError extends Error {
 export class ChildCancelledError extends Error {
   readonly retryable = false;
 
+  static [Symbol.hasInstance](value: unknown): value is ChildCancelledError {
+    return hasWorkflowErrorName(value, "ChildCancelledError");
+  }
+
   constructor(message = "child workflow was cancelled") {
     super(message);
     this.name = "ChildCancelledError";
@@ -226,6 +255,10 @@ export class ChildCancelledError extends Error {
 
 export class ChildTimeoutError extends Error {
   readonly retryable = false;
+
+  static [Symbol.hasInstance](value: unknown): value is ChildTimeoutError {
+    return hasWorkflowErrorName(value, "ChildTimeoutError");
+  }
 
   constructor(message = "child workflow timed out") {
     super(message);
@@ -236,6 +269,10 @@ export class ChildTimeoutError extends Error {
 export class LimitExceededError extends Error {
   readonly retryable = false;
 
+  static [Symbol.hasInstance](value: unknown): value is LimitExceededError {
+    return hasWorkflowErrorName(value, "LimitExceededError");
+  }
+
   constructor(message = "workflow limit exceeded") {
     super(message);
     this.name = "LimitExceededError";
@@ -245,6 +282,10 @@ export class LimitExceededError extends Error {
 export class CompensableCarryError extends Error {
   readonly retryable = false;
 
+  static [Symbol.hasInstance](value: unknown): value is CompensableCarryError {
+    return hasWorkflowErrorName(value, "CompensableCarryError");
+  }
+
   constructor(message = "cannot continue as new while compensable steps are pending") {
     super(message);
     this.name = "CompensableCarryError";
@@ -252,6 +293,10 @@ export class CompensableCarryError extends Error {
 }
 
 export class RestartError extends Error {
+  static [Symbol.hasInstance](value: unknown): value is RestartError {
+    return hasWorkflowErrorName(value, "RestartError");
+  }
+
   constructor(message = "workflow restart failed") {
     super(message);
     this.name = "RestartError";
@@ -260,6 +305,10 @@ export class RestartError extends Error {
 
 export class NondeterministicError extends Error {
   readonly retryable = false;
+
+  static [Symbol.hasInstance](value: unknown): value is NondeterministicError {
+    return hasWorkflowErrorName(value, "NondeterministicError");
+  }
 
   constructor(message = "workflow replay is nondeterministic") {
     super(message);
@@ -270,6 +319,10 @@ export class NondeterministicError extends Error {
 export class StalledError extends Error {
   readonly retryable = false;
 
+  static [Symbol.hasInstance](value: unknown): value is StalledError {
+    return hasWorkflowErrorName(value, "StalledError");
+  }
+
   constructor(message = "workflow run stalled") {
     super(message);
     this.name = "StalledError";
@@ -279,36 +332,13 @@ export class StalledError extends Error {
 export class NestedStepError extends Error {
   readonly retryable = false;
 
+  static [Symbol.hasInstance](value: unknown): value is NestedStepError {
+    return hasWorkflowErrorName(value, "NestedStepError");
+  }
+
   constructor(message = "workflow step methods cannot be called from inside a step body") {
     super(message);
     this.name = "NestedStepError";
-  }
-}
-
-export class WorkflowNestedStepError extends Error {
-  readonly retryable = false;
-
-  constructor(message = "workflow step methods cannot be called from inside a step body") {
-    super(message);
-    this.name = "WorkflowNestedStepError";
-  }
-}
-
-export class UnsupportedError extends Error {
-  readonly retryable = false;
-
-  constructor(message = "workflow operation is not supported by this runtime") {
-    super(message);
-    this.name = "UnsupportedError";
-  }
-}
-
-export class WorkflowUnsupportedError extends Error {
-  readonly retryable = false;
-
-  constructor(message = "workflow operation is not supported by this runtime") {
-    super(message);
-    this.name = "WorkflowUnsupportedError";
   }
 }
 
