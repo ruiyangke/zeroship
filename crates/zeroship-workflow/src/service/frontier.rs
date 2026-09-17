@@ -98,12 +98,64 @@ pub(crate) async fn invocation(
     })
 }
 
+/// Dispatches of this run's current frontier that were reclaimed without the
+/// executor reporting an outcome. Committing a frontier transition advances the
+/// run's revision, so a dispatch that reported anything durable leaves the
+/// strikes behind with the frontier they were counted against.
+async fn stuck_dispatches(
+    tx: &mut Transaction,
+    app: &AppId,
+    run: &Row,
+) -> Result<i64, WorkflowServiceError> {
+    let counted = tx
+        .database()
+        .collection(models::tasks::Entity::COLLECTION)?
+        .execute(Operation::Count {
+            filter: value!({"app_id":app.as_str(), "run_id":run.text("id")?,
+                "generation":run.integer("generation")?,
+                "frontier_revision":run.integer("frontier_revision")?, "state":"expired"}),
+            options: value!({}),
+        })
+        .await?;
+    match counted {
+        zeroship_data_orm::orm::Output::Count(count) => Ok(count),
+        _ => Err(WorkflowServiceError::Internal(
+            "workflow task count returned rows".into(),
+        )),
+    }
+}
+
+/// Bring a run to rest at `stalled` without rolling anything back.
+///
+/// The verdict is the host's, not the body's: the platform gave up on work it
+/// could not get an outcome for, so there is no creator failure to compensate
+/// and no reason to hand a compensator to the same dispatch path that already
+/// failed to report. Compensation stays reserved for outcomes a run reported.
+async fn stall(
+    tx: &mut Transaction,
+    app: &AppId,
+    run: &Row,
+    error: Value,
+    now: i64,
+) -> Result<RunState, WorkflowServiceError> {
+    let update = RunUpdate::Stalled { error };
+    let state = parse_state(update.state())?;
+    finish(tx, app, run, state, None, update.error(), now).await
+}
+
 /// Reconcile control intent and durable waits before assigning an executor.
 /// A parent's still-propagating cascade counts as recorded cancellation.
+///
+/// A run whose frontier keeps being dispatched and reclaimed with nothing
+/// reported settles `stalled` here rather than being handed another executor.
+/// This is the creator-facing half of the manager's delivery ceiling: the
+/// manager stops redelivering a job that never finishes, and a job whose run is
+/// terminal settles, so the verdict has to land before that ceiling is spent.
 pub(crate) async fn prepare(
     tx: &mut Transaction,
     app: &AppId,
     run: &Row,
+    policy: &AppPolicy,
     now: i64,
 ) -> Result<bool, WorkflowServiceError> {
     let intent = super::propagation::effective_control(tx, app, run).await?;
@@ -121,6 +173,18 @@ pub(crate) async fn prepare(
     }
     if run.text("state")? == "compensating" {
         return compensation_ready(tx, app, run, now).await;
+    }
+    let stuck = stuck_dispatches(tx, app, run).await?;
+    if stuck >= policy.max_stuck_dispatches {
+        stall(
+            tx,
+            app,
+            run,
+            crate::engine::stalled_error(stuck, policy.max_stuck_dispatches),
+            now,
+        )
+        .await?;
+        return Ok(false);
     }
     let progressed = journal::resolve(tx, app, run, now).await?;
     let steps = journal::load(tx, app, &run.text("id")?, run.integer("generation")?).await?;
@@ -184,6 +248,9 @@ pub(crate) async fn apply(
     let intent = super::propagation::effective_control(tx, app, run).await?;
     if intent == ControlIntent::Cancel {
         return settle(tx, app, run, RunUpdate::Cancelled, now).await;
+    }
+    if let RunUpdate::Stalled { error } = update {
+        return stall(tx, app, run, error, now).await;
     }
     if matches!(update, RunUpdate::Failed { .. } | RunUpdate::Cancelled) {
         return settle(tx, app, run, update, now).await;

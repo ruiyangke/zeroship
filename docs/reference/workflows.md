@@ -1017,7 +1017,7 @@ The SDK exports these workflow error classes:
 | `PermanentError` | Business failure that should not retry. If it escapes `run()`, the run fails and eligible compensators run. | Yes, if you intend to handle it and continue. |
 | `StepTimeoutError` | A step body is still running when `StepConfig.timeout` expires. Recorded as retryable. | Yes around `step.run`; if uncaught, normal failure handling applies. |
 | `NondeterministicError` | Bare workflow-body I/O/timers, journal name/kind/order mismatch, or unsupported step-promise control flow. | Treat as terminal misuse; do not swallow it. No rollback. |
-| `StalledError` | The engine detects repeated dispatches with no durable progress. | Terminal engine error. No rollback. |
+| `StalledError` | The platform reclaimed `maxStuckDispatches` dispatches of one frontier without the run reporting an outcome. | Not raised in your body: it is the platform's verdict, recorded on the run. Terminal. No rollback. |
 | `ChildCancelledError` | A `step.call` child is cancelled before the parent join completes. | Yes around `step.call`; if uncaught, normal failure handling applies. |
 | `ChildTimeoutError` | A `step.call` child exceeds `ChildWorkflowOptions.timeout`. | Yes around `step.call`; if uncaught, normal failure handling applies. |
 | `LimitExceededError` | A platform cap is exceeded, such as `step.startMany` over the batch cap or output over the blob cap. | Once recorded, yes. The `step.startMany` cap cannot be caught in the dispatch that raises it: the catch resumes the body outside the replay boundary and the run fails `NondeterministicError` instead. |

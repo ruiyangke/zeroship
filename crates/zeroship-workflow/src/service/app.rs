@@ -480,7 +480,7 @@ pub(crate) async fn live_runs(tx: &Transaction, app: &AppId) -> Result<i64, Work
         .database()
         .collection(models::runs::Entity::COLLECTION)?
         .count(
-            value!({"app_id":app.as_str(), "state":{"$nin":["completed","failed","cancelled"]}}),
+            value!({"app_id":app.as_str(), "state":{"$nin":RunState::TERMINAL}}),
             value!({}),
         )
         .await?;

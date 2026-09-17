@@ -367,7 +367,7 @@ impl AppWorkflows {
             tx.commit().await?;
             return Ok(JobAcceptance::Deferred);
         }
-        if !frontier::prepare(&mut tx, &self.app, &run, now).await? {
+        if !frontier::prepare(&mut tx, &self.app, &run, policy, now).await? {
             publication::advance(&tx, &self.app, run_id.as_str(), now).await?;
             let current = lock_run(&mut tx, &self.app, run_id.as_str()).await?;
             let outcome = if parse_state(&current.text("state")?)?.is_terminal() {
