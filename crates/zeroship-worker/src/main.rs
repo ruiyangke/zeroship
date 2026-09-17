@@ -134,8 +134,7 @@ fn workflow_host_prerequisites(database: bool, storage: bool) -> Result<(), &'st
 /// which is the property the tiering buys and the reason it is stated here
 /// rather than left implicit in a missing argument.
 ///
-/// EVERY OUTCOME BUT ONE IS AN EXIT, and that is fence F4 of
-/// `docs/proposals/2026-09-05-auth-foundation-redesign.md` in full: "absent a
+/// EVERY OUTCOME BUT ONE IS AN EXIT, and that is fence F4 in full: "absent a
 /// configured gateway public key the worker refuses to start". An unconfigured,
 /// unreadable, insecurely permissioned or unparseable join token or peer
 /// document, and a peer document missing the gateway key, are one fate,

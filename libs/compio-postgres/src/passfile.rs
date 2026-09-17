@@ -5,9 +5,7 @@
 //! keep credentials out of connection strings, so a driver that ignores the
 //! file rejects a setup its users reasonably expect to work.
 //!
-//! The rules below were DERIVED BY PROBING the review container's libpq -
-//! version 18.4, though `psql` there reports 16.14; see
-//! `docs/runbooks/compio-postgres-libpq-parameter-probing.md`. Not read off the
+//! The rules below were DERIVED BY PROBING libpq, not read off the
 //! documentation, because the interesting one is not what the format
 //! description implies - see `match_field`.
 //!
@@ -35,10 +33,10 @@ pub(crate) struct PassfileKey<'a> {
 // THE PATH COMES FROM THE CALLER, and this module does not go looking.
 //
 // libpq resolves an unset `passfile` from `$PGPASSFILE` and then
-// `$HOME/.pgpass`. This crate is a standalone, publishable driver
-// (`AGENTS.md`, the `libs/` boundary) and a published library takes resolved
-// options from its caller rather than reading process configuration. The
-// workspace Clippy policy rejects direct environment reads in library code.
+// `$HOME/.pgpass`. This crate is a standalone, publishable driver and a
+// published library takes resolved options from its caller rather than
+// reading process configuration. The workspace Clippy policy rejects direct
+// environment reads in library code.
 //
 // So an application that wants libpq's default locations resolves them itself
 // and passes the result to `Config::passfile`. That keeps the decision to read
@@ -213,9 +211,9 @@ mod file_tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
-    /// `lookup` had NO test of its own until 2026-08-27 - every existing case
-    /// drove the pure `lookup_in_contents`. So the permission mask that decides
-    /// whether a password file may be read at all was unexercised.
+    /// Every other case drives the pure `lookup_in_contents`, so without this
+    /// test the permission mask that decides whether a password file may be
+    /// read at all would be unexercised.
     ///
     /// WHAT THESE DO NOT CATCH: the check and the read are now made against one
     /// descriptor rather than two path resolutions, and that race has no
@@ -261,10 +259,10 @@ mod file_tests {
 
     /// libpq refuses anything that is not a plain file (`S_ISREG`).
     ///
-    /// THIS DOES NOT PROVE THAT GUARD: measured 2026-08-27, the case still
-    /// passes with `permissions_allow_use` disabled, because `read_to_end` on
-    /// a directory fails with EISDIR regardless. It pins the OUTCOME - a
-    /// directory never yields a password - not the mechanism.
+    /// THIS DOES NOT PROVE THAT GUARD: the case still passes with
+    /// `permissions_allow_use` disabled, because `read_to_end` on a directory
+    /// fails with EISDIR regardless. It pins the OUTCOME - a directory never
+    /// yields a password - not the mechanism.
     #[test]
     fn a_directory_is_refused() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -400,8 +398,8 @@ mod tests {
     /// The same line is AMBIGUOUS, and libpq resolves it both ways: it also
     /// serves the shorter user `od`, with the password `d`.
     ///
-    /// This is not a quirk of the implementation - it was measured. With a
-    /// role `od` whose real password is `d`, that line connects; change the
+    /// This is not a quirk of the implementation. With a role `od` whose real
+    /// password is `d`, that line connects; change the
     /// role's password and libpq reports authenticating from the file and
     /// failing. A reader who expects one line to name one account will find
     /// this surprising, which is exactly why it is pinned.

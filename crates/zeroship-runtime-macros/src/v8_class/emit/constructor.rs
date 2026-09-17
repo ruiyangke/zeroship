@@ -1,6 +1,6 @@
 //! Constructor callback codegen + Box install/finalize helpers.
 //!
-//! Split out from the old `v8_class/method.rs` mega-file. Hosts:
+//! Hosts:
 //!
 //! - `gen_constructor_callback` — user-defined `#[v8_constructor]`
 //! - `gen_default_constructor_callback` — `<State as Default>::default()`
@@ -27,7 +27,7 @@ use crate::gen_throw_op_error_arms;
 /// The thrown TypeError uses Chromium's verbatim phrasing
 /// (`"Failed to construct 'X': Please use the 'new' operator, this
 /// DOM object constructor cannot be called as a function."`) for two
-/// reasons (closes design §13.4):
+/// reasons:
 ///
 ///   1. **WPT compatibility.** A handful of tests in
 ///      `wpt/dom/`, `wpt/url/`, and `wpt/fetch/` assert against the
@@ -125,24 +125,22 @@ pub(crate) fn gen_constructor_callback(cfg: &ClassConfig, c: &ClassMethod) -> To
     // callback returns to V8. Hook signature is
     // `fn(&mut PinScope, Local<Object>) -> Result<(), OpError>`.
     //
-    // Behaviour matrix (design §5.2 / §5.3):
+    // Behaviour matrix:
     //   - must_new + post_init: must-new throws early, post_init never
     //     runs. No special case in this code — must-new returns first.
     //   - callable_no_new + post_init: hook only fires for `new Foo()`
     //     (is_construct_call() == true). Bare `Foo()` skips the hook
-    //     to avoid writing private symbols on globalThis (the design
-    //     reverses the v1 "always run" decision; see §5.3).
+    //     to avoid writing private symbols on globalThis.
     //   - #[v8_inherit]: derived's hook runs; base's does NOT auto-chain
     //     (V8's existing constructor semantics — derived is responsible
-    //     for invoking base setup explicitly; see §5.4 worked example).
+    //     for invoking base setup explicitly).
     //
-    // Box reclamation under failure (§5.9 / §4.4): when the hook returns
-    // Err, the macro throws a JS exception and returns. The box stays
-    // installed in field 0 until the V8 weak finalizer reclaims the
-    // wrapper on the next GC sweep. v1 ships with lazy drop; eager drop
-    // is deferred per the design's cost-benefit analysis. The
-    // user-visible contract: `Self::Drop` side-effects from a failed
-    // post_init may be delayed by up to one GC cycle.
+    // Box reclamation under failure: when the hook returns Err, the macro
+    // throws a JS exception and returns. The box stays installed in field
+    // 0 until the V8 weak finalizer reclaims the wrapper on the next GC
+    // sweep. Drop is lazy; the user-visible contract: `Self::Drop`
+    // side-effects from a failed post_init may be delayed by up to one
+    // GC cycle.
     let post_init = match c.post_init.as_ref() {
         None => quote! {},
         Some(hook_ident) => {
@@ -280,8 +278,7 @@ fn gen_box_and_install_finalizer(state_ty: &syn::Ident, has_any_fastcall: bool) 
         // variant fires on GC or isolate teardown anyway, so we leak
         // the per-instance WeakData (~32 bytes) to keep the registration.
         //
-        // Accepted leak — measurement protocol (closes design §13.5,
-        // §13.7):
+        // Accepted leak — measurement protocol:
         //   - Each instance allocation costs `Box<dyn FnOnce()>` + a
         //     `v8::WeakData` shell ≈ 32 bytes (8B closure pointer +
         //     8B raw_addr + 16B v8::Weak header).
@@ -295,8 +292,7 @@ fn gen_box_and_install_finalizer(state_ty: &syn::Ident, has_any_fastcall: bool) 
         //     control-plane's per-app heap metrics; per-instance
         //     allocations should track 1:1 with `state.spawned_ops`
         //     drains. The bound on a 1M-instance app is ≈ 30 MB
-        //     resident — comfortably below the 64-MB worker budget
-        //     (see `docs/runbooks/local-dev.md`).
+        //     resident — comfortably below the worker budget.
         //
         // Instrumentation deferred: emitting `tracing::trace!` from
         // every constructor would force a snapshot regeneration for

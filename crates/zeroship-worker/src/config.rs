@@ -69,8 +69,7 @@ pub struct WorkerSettings {
     /// is signed by that key. Every assertion after the join is minted under
     /// that instance key. No worker holds a `svc/worker` role key.
     /// `crates/zeroship-core/src/worker_join.rs` carries the token and proof
-    /// formats, and `docs/runbooks/worker-join-signers.md` the operator
-    /// procedure.
+    /// formats.
     ///
     /// The token is read FRESH AT EVERY BOOT, so a single-host deployment can
     /// have its control plane rotate the file and a container restarted days

@@ -7,26 +7,9 @@
 //! quoted beside it.
 //!
 //! THAT LIBPQ IS 18.4, not the 16.14 the container's `psql` reports - the two
-//! carry separate versions and this file used to name the wrong one. See
-//! `docs/runbooks/compio-postgres-libpq-parameter-probing.md`.
+//! carry separate versions.
 //!
 //! These are parse-level assertions: no database is contacted.
-//!
-//! NOTHING HERE IS `#[ignore]`d ANY MORE. This file arrived with six tests
-//! asserting libpq's behaviour for cases where we diverged, red on purpose so
-//! each was a ready-made regression test. All six now pass:
-//!
-//!   * three were already fixed on `main` when the file merged -- it was
-//!     written against an older base -- namely the userinfo `@` bound and the
-//!     query-string `host=`/`port=` rules;
-//!   * three were fixed afterwards: malformed percent escapes, port zero, and
-//!     empty credentials meaning unset.
-//!
-//! The habit that produced that is worth keeping: after any parser change, run
-//! `cargo test --test url_parity -- --ignored` if ignores are ever added again.
-//! A divergence test that has started PASSING is a fix to record, not a fluke,
-//! and one that has started FAILING is a regression with its evidence already
-//! written down.
 
 use std::fmt::Write as _;
 
@@ -108,9 +91,8 @@ fn malformed_brackets_are_rejected_like_libpq() {
 //   postgres://postgres@[::1]:/postgres?...&application_name=v6emptyport
 //     -> [app=v6emptyport]...
 //
-// THE 5432 ABOVE IS THE EFFECTIVE PORT, NOT AN EXPLICIT ONE, and this test
-// asserted the wrong half of that until 2026-08-26. An empty value means
-// "unset" to libpq, which then supplies `DEF_PGPORT_STR` (`fe-connect.c`
+// THE 5432 ABOVE IS THE EFFECTIVE PORT, NOT AN EXPLICIT ONE. An empty value
+// means "unset" to libpq, which then supplies `DEF_PGPORT_STR` (`fe-connect.c`
 // stores the compiled default for an empty port rather than a parsed 5432).
 // `get_ports` reports what the CALLER set, so the empty spelling must leave it
 // empty - exactly as the keyword form does in
