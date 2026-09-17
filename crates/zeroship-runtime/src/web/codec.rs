@@ -38,11 +38,6 @@
 //! already returns the consumed-offset directly via its `CustomWrite`
 //! contract, so we adopt the same `(produced, consumed)` shape
 //! uniformly.
-//!
-//! ## Design references
-//!
-//! `docs/decisions/2026-05-01-compression-streams-native.md` records
-//! the design tradeoffs that shaped this implementation.
 
 use std::io::Write;
 

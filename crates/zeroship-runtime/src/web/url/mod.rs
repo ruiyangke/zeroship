@@ -29,7 +29,7 @@
 //! - The wire format for params storage is `Vec<(String, String)>`
 //!   (insertion-ordered list, like Headers).
 //!
-//! See also `docs/architecture/runtime.md` and the WHATWG spec.
+//! See also the WHATWG URL Living Standard.
 
 pub mod helpers;
 pub mod search_params;

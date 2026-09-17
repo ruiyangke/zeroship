@@ -4,17 +4,17 @@
 //! path end-to-end: `extract_zs_v1_id` → `parse_envelope_body` →
 //! `RpcContext::build_js_object` (frozen Headers/URL + AbortController)
 //! → `with_rpc_context_in_als` (ContinuationPreservedEmbedderData
-//! save/install/restore) → `rpc_fn.call` (the V8 function call this
-//! wave is here to measure) → `classify_rpc_return` →
+//! save/install/restore) → `rpc_fn.call` (the V8 function call under
+//! measurement) → `classify_rpc_return` →
 //! `JSON.stringify` envelope wrap.
 //!
 //! Workloads (input → echoed back as the response body):
 //!
-//!   tiny      `{ "n": 1 }`                                       ~16 B
-//!   small     single nested object                              ~230 B
-//!   medium    array of 50 small objects                         ~3.6 KB
-//!   large     array of 1000 records                              ~50 KB
-//!   multipart same body as `medium`, multipart Content-Type     ~3.6 KB
+//!   tiny      `{ "n": 1 }`
+//!   small     single nested object
+//!   medium    array of 50 small objects
+//!   large     array of 1000 records
+//!   multipart same body as `medium`, multipart Content-Type
 //!
 //! The "multipart" workload exists to exercise the dispatch path with
 //! a multipart-shaped Content-Type. Real FormData parsing is not part
@@ -22,12 +22,11 @@
 //! The point is to confirm dispatch overhead is roughly constant
 //! across header shapes, not to measure FormData decoding.
 //!
-//! Per `docs/proposals/rpc.md` §5, this baseline decides whether
-//! the current implementation stays on the single-call ABI or moves to a two-step
-//! `#[v8_method(fastcall)] enqueue` shape. If single-call dispatch is
-//! a small fraction of typical procedure latency, single-call wins;
-//! the two-step ABI's fastcall savings (proposal estimates 30-100 ns)
-//! aren't worth the extra slow-path round trip on `awaitDispatch`.
+//! This baseline decides whether the current implementation stays on the
+//! single-call ABI or moves to a two-step `#[v8_method(fastcall)] enqueue`
+//! shape. If single-call dispatch is a small fraction of typical procedure
+//! latency, single-call wins; the two-step ABI's fastcall savings aren't
+//! worth the extra slow-path round trip on `awaitDispatch`.
 
 use std::time::Duration;
 

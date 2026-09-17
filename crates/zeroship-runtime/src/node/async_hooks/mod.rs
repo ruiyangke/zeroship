@@ -7,8 +7,7 @@
 //!
 //! ## Why native
 //!
-//! The closure-based polyfill in `docs/reference/node-compat.md`'s
-//! original §"node:async_hooks" reverted state synchronously in
+//! The closure-based polyfill reverted state synchronously in
 //! `try { fn(...) } finally { ... }` and therefore tore down the
 //! store before any awaited continuation resumed. That broke
 //! `interrupt()` after `await model.invoke(...)` in a LangGraph

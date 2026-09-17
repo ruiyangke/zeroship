@@ -1,6 +1,6 @@
 //! Native `node:crypto`.
 //!
-//! See `docs/archive/node-crypto-native.md`. The current module ships
+//! The module ships
 //! Hash / Hmac / random / KDFs / timingSafeEqual / the WebCrypto bridge,
 //! plus KeyObject, Sign / Verify, and Cipher / Decipher.
 //!
