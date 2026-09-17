@@ -4,8 +4,8 @@ export default defineConfig(({ mode }) => ({
   test: {
     fileParallelism: false,
     projects: [
-      { test: { name: "unit", environment: "node", include: ["tests/*.unit.test.ts"] } },
-      { test: {
+      { extends: true, test: { name: "unit", environment: "node", include: ["tests/*.unit.test.ts"] } },
+      { extends: true, test: {
         name: "dashboard",
         environment: "node",
         include: ["tests/rpc.test.ts", "tests/browser.test.ts"],
