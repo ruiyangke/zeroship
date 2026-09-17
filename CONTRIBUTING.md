@@ -146,7 +146,6 @@ This repo uses Conventional Commits. Keep `git log` a readable, greppable change
 A `commit-msg` hook enforces the mechanical rules below. Enable it once per
 clone with `git config core.hooksPath .githooks`. The hook is the only
 enforcement, so an unconfigured clone or a `--no-verify` goes unchecked.
-Check a range yourself with `.githooks/commit-msg --range origin/main..HEAD`.
 
 ### Format
 
@@ -217,12 +216,9 @@ named after it.
   defaults in CREATE TABLE DDL"), not "update code". Aim for 50-72 characters; the
   enforced ceiling is 100.
 
-  That ceiling is measured rather than picked. Over a week of 699 commits the
-  subject length ran p50 75, p90 91, p99 116: a 72-char limit would have
-  rejected 413 of them, and was in fact ignored. 100 accepts 676 and refuses
-  only the multi-clause outliers. A ceiling that is kept beats one that is
-  rewritten every few days - if you find yourself over it, the subject is
-  carrying two changes or a sentence that belongs in the body.
+  A ceiling that is kept beats one that is rewritten every few days. If you find
+  yourself over it, the subject is carrying two changes or a sentence that
+  belongs in the body.
 - Lowercase first word after the colon; no trailing period.
 - No internal-process markers. Strip orchestration artifacts before committing:
   `phase N`, `stage N`, `part N`, `wave N`, `milestone`, job/task IDs (`J2`, `M0`,
@@ -272,10 +268,9 @@ trade-off, or migration impact is not obvious. Separate it with one blank line, 
 it at 80 columns, and write prose paragraphs (one idea each, blank line between),
 not a bullet dump.
 
-**The whole message is capped at 500 characters,** which with a typical subject is
-about six wrapped lines. This is deliberately tighter than what the repo was doing:
-the week before it landed ran p50 623 and p90 829, so it refuses the prevailing
-style rather than ratifying it. Say what changed and why it is not obvious; a
+**The whole message is capped at 200 characters.** With a subject at the limit that
+leaves about two wrapped lines of body, so it refuses narration rather than
+ratifying it. Say what changed and why it is not obvious; a
 measurement log, a transcript, or a narrative of how the work was scheduled belongs
 in the PR description or a doc under `docs/`, where it can be edited later. A commit
 message cannot be, and `git log` is read far more often than it is written.
