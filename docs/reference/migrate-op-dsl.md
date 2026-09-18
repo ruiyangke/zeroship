@@ -21,7 +21,7 @@ explicit dialect leg.
 There is one import root: `@zeroship/migrate`. Core value exports include
 `table`, `view`, `enumType`, `domain`, `schema`, `extension`, `role`,
 `sequence`, `grant`, `revoke`, `createFunction`, `dropFunction`, `dropOwnedBy`,
-`raw`, `comment`, `t`, `ids`, `fromDb`, and `lintDeterminism`. `index`/`foreignKey`/
+`raw`, `comment`, `t`, `fromDb`, and `lintDeterminism`. `index`/`foreignKey`/
 `check`/`unique` stay fluent methods on the table handle; they are not
 top-level exports. Postgres-vendor ops are first-class root exports, and the
 security gate remains the engine's per-op `VendorCapability` validation:
@@ -48,14 +48,14 @@ contract.
 
 ```ts
 // migrations/0007_create_orders.ts
-import { ids, now, table, t } from "@zeroship/migrate";
+import { now, table, t } from "@zeroship/migrate";
 
 export default {
   name: "create_orders", // optional; defaults to the filename label
   schema() {
     table("orders").create({
       columns: {
-        id: ids.typeId({ prefix: "ord" }).primaryKey(),
+        id: t.typedId("ord").primaryKey(),
         status: t.text().notNull().default("pending"),
         created_at: t.timestamp().notNull().default(now()),
       },
@@ -120,7 +120,6 @@ The principal exports used throughout this guide
 | `enumType` | portable enum entry — returns an inert `EnumHandle`; `.create({ values })` records |
 | `comment` | standalone structured object comments |
 | `t` | the immutable column-type lexicon |
-| `ids` | validated TypeID and ULID text-column formats |
 | `dialect` | per-dialect value or whole-op escape hatch |
 | `fromDb` | the `@zeroship/db` field → migration `ColumnDef` bridge |
 | `lintDeterminism` | the best-effort determinism source scan |
@@ -256,7 +255,7 @@ The shipped factories (`packages/zero-migrate/src/ops.ts`):
 
 | Factory | Column type |
 | --- | --- |
-| `ids.typeId({ prefix })` / `ids.ulid()` | validated text storage formats; nullable and constraint-neutral until modifiers opt in |
+| `t.typedId(prefix)` | a typed-id column: bounded string storage carrying the prefix; nullable and constraint-neutral until modifiers opt in |
 | `t.text({ caseSensitive? })` | unbounded text |
 | `t.string({ length?, caseSensitive? })` | bounded string; length defaults to 255 |
 | `t.textArray()` | text array (JSON text on non-PG targets) |
@@ -275,7 +274,6 @@ The shipped factories (`packages/zero-migrate/src/ops.ts`):
 | `t.vector({ dimensions, metric? })` | a pgvector column; `metric` pins the distance metric — see [Sensitive-data facets](#sensitive-data-facets) |
 | `t.geoPoint()` | a geo point |
 | `t.enum(name)` / `t.domain(name)` | a reference to a declared enum or domain type |
-| `t.encrypted({ of })` | an application-level encrypted column wrapping an inner type |
 
 > The `string`/`integer`/`float` aliases and the `t.X({ notNull, default })`
 > options-bag overload are **removed**. Use the canonical `t.text()`/`t.int()`
@@ -292,18 +290,19 @@ Chainable modifiers (`packages/zero-migrate/src/ops.ts`), each returning a fresh
 | `.references(table, column, options?)` | a typed single-column foreign key — keeps this column's storage type and adds the target `{ table, column }` (+ optional `onDelete`/`onUpdate`/`name`/`relation`) |
 | `.collation(intent)` | pin how the column compares, as a closed intent token — see [Column collation](#column-collation) |
 | `.mask({ kind, classification? })` | declare a standalone column mask (the field reads back as `MaskedValue<T>`) — see [Sensitive-data facets](#sensitive-data-facets) |
+| `.encrypted()` | store this column's plaintext encrypted (AEAD, fresh nonce per write); the type stays the plaintext — see [Sensitive-data facets](#sensitive-data-facets) |
 
 ```ts
-import { ids, table, t } from "@zeroship/migrate";
+import { table, t } from "@zeroship/migrate";
 
 export default {
   schema() {
     table("orders").create({
       columns: {
-        id: ids.typeId({ prefix: "ord" }).primaryKey(),
+        id: t.typedId("ord").primaryKey(),
         total: t.numeric({ precision: 12, scale: 2 }).notNull().default(0),
         status: t.text().notNull().default("pending"),
-        customer_id: ids.typeId({ prefix: "cus" })
+        customer_id: t.typedId("cus")
           .notNull()
           .references("customers", "id", { relation: "customer" }),
         owner_id: t.uuid().notNull().references("users", "id", { onDelete: "cascade" }),
@@ -314,8 +313,8 @@ export default {
 ```
 
 There is no untyped `t.ref()` shortcut. `.references(table, column)` is a column
-**facet**: the column keeps the explicit storage type or validated ID format you
-chose (`t.uuid()` or `ids.typeId(...)` above) and the facet records the full target identity
+**facet**: the column keeps the explicit storage type or typed id you
+chose (`t.uuid()` or `t.typedId(...)` above) and the facet records the full target identity
 (`references: { table, column }`) plus the optional referential actions and an
 explicit constraint name (absent ⇒ `<table>_<column>_fkey`). Both halves of the
 target are required — a missing target column is an `OP_INVALID` at authoring
@@ -328,25 +327,27 @@ and cannot collide with a column. It is carried in runtime metadata; `name`
 independently names the SQL constraint.
 
 The facet is **create-table only**: `.column().add()`, `.setType()`, and nested
-type positions (`t.encrypted({ of })`, a domain's `as`) reject a `.references()`
+type positions (a domain's `as`) reject a `.references()`
 `ColumnDef` rather than dropping the reference. Add a foreign key to an existing
 table with `.foreignKey(name).add({ columns, references })`, which is also the
 only shape for a **composite** key.
 
 ### Sensitive-data facets
 
-Three column facets carry intent the live catalog cannot fully recover. Each
-lands on the wire `IrColumn` (`valueFormat` /
-`vectorMetric` / `mask`), is **closed** (the engine rejects an out-of-set token
+Column facets carry intent that must survive the offline author→generate→fold
+round-trip. Each lands on the wire `IrColumn` (`idPrefix` /
+`vectorMetric` / `mask` / `encrypted`), is **closed** (the engine rejects an
+out-of-set token
 at deserialize, and the SDK gives a friendly `OP_INVALID` at authoring time), and
 is **checksum-neutral when absent** (a facet-less column is byte-identical to the
 pre-facet image).
 
-**`ids.typeId({ prefix })` and `ids.ulid()` — validated text formats.** These
-builders select storage and validation only. They do not imply `NOT NULL`, a
+**`t.typedId(prefix)` — typed id.** It selects storage only: a bounded string
+carrying the declared prefix in `idPrefix`. It does not imply `NOT NULL`, a
 primary key, a default, or a generator; opt into those ordinary column facets
-explicitly. A TypeID prefix is validated at author time and carried as
-`valueFormat` because the catalog cannot recover it.
+explicitly. The prefix is validated at author time and carried as `idPrefix`
+because the catalog cannot recover it; the DDL has no database-level format
+check.
 
 **`t.vector({ dimensions, metric })` — pgvector distance metric.** Pins the ivfflat/hnsw
 operator class. Closed set: `cosine | l2 | innerProduct`. Declared-only (pgvector
@@ -354,9 +355,14 @@ stores dimensions, not the search metric).
 
 **`.mask({ kind, classification? })` — standalone column mask.** The field reads
 back as `MaskedValue<T>`; the op lower emits the `zero-migrate:mask` sentinel + `_masked`
-sibling (the same shape `t.encrypted()`'s auto-mask uses; an explicit `.mask()`
+sibling (the same shape `.encrypted()`'s auto-mask uses; an explicit `.mask()`
 on an encrypted column **overrides** the auto-mask). `kind` is **required**;
 `classification` is **optional and defaults to `"pii"`**.
+
+**`.encrypted()` — encrypted storage.** The physical type remains the declared
+plaintext; this verb sets the `encrypted` facet, and the op lower emits the
+`zero-migrate:enc` sentinel + `_masked` sibling. The engine refuses it on a
+column that is already `.unique()`, `.references()` or `.collation()`.
 
 | Facet | Closed token set | Default |
 | --- | --- | --- |
@@ -365,13 +371,13 @@ on an encrypted column **overrides** the auto-mask). `kind` is **required**;
 | vector `metric` | `cosine \| l2 \| innerProduct` | engine default |
 
 ```ts
-import { ids, table, t } from "@zeroship/migrate";
+import { table, t } from "@zeroship/migrate";
 
 export default {
   schema() {
     table("documents").create({
       columns: {
-        id: ids.typeId({ prefix: "doc" }).primaryKey(),
+        id: t.typedId("doc").primaryKey(),
         embedding: t.vector({ dimensions: 1536, metric: "cosine" }),
         ssn: t.text().mask({ kind: "last4", classification: "pci" }),
         email: t.text().mask({ kind: "email" }), // classification defaults to "pii"
@@ -381,8 +387,8 @@ export default {
 };
 ```
 
-> `valueFormat`, `vectorMetric`, and `mask` also ride on
-> `.column().add({ type })`; none silently disappears from an added column.
+> `vectorMetric` and `mask` also ride on `.column().add({ type })`; neither
+> silently disappears from an added column.
 
 These facets are also what the migration set carries into the generated types:
 the typed-id `prefix`, the vector `metric`, and the `mask` brand survive the op
@@ -413,8 +419,8 @@ table("job_receipts").create({
 
 It is **refused**, not dropped, in four situations: on a type that cannot carry
 a collation (anything but `t.text()` / `t.string()`); alongside
-`caseSensitive: false`, which asks for the opposite ordering; alongside a value
-format (`ids.typeId()` / `ids.ulid()`), which pins bytewise comparison as part
+`caseSensitive: false`, which asks for the opposite ordering; alongside a typed
+id (`t.typedId()`), which pins bytewise comparison as part
 of its storage contract; and outside `table(...).create({ columns })` —
 `.column().add()`, `.column().setType()`, `.column().rename()` and nested type
 positions have no slot for the facet, and refuse it rather than leave the
@@ -448,8 +454,8 @@ the handle** so calls chain.
 ```ts
 table("audit_log").create({
   columns: {
-    id: ids.typeId({ prefix: "evt" }).primaryKey(),
-    org_id: ids.typeId({ prefix: "org" }).notNull(),
+    id: t.typedId("evt").primaryKey(),
+    org_id: t.typedId("org").notNull(),
     email: t.text().notNull(),
     role: t.text().notNull().default("member"),
   },

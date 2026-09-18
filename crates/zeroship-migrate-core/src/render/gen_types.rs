@@ -21,7 +21,7 @@ use crate::model::expr::{Expr, SynthFn};
 use crate::model::ir::{
     ColType, ColumnOrExpr, ColumnReference, EmptyContainerKind, ExclusionMethod, IndexElement,
     IndexSortOrder, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, IrJsonValue,
-    IrScalar, MigrationIr, Op, PartitionSpec, ValueFormat,
+    IrScalar, MigrationIr, Op, PartitionSpec,
 };
 use zeroship_migrate_ir::dialect::DialectId;
 
@@ -1250,16 +1250,16 @@ fn render_column(
 }
 
 fn render_column_base(column: &IrColumn) -> String {
-    if let Some(ValueFormat::TypeId { prefix }) = &column.value_format {
-        return format!("t.typedId({})", js_str(prefix));
+    let base = if let Some(prefix) = &column.id_prefix {
+        format!("t.typedId({})", js_str(prefix))
+    } else {
+        render_col_type(&column.ty, column.case_sensitive, column.vector_metric)
+    };
+    if column.encrypted == Some(true) {
+        format!("{base}.encrypted()")
+    } else {
+        base
     }
-    if matches!(column.value_format, Some(ValueFormat::Ulid)) {
-        return "ids.ulid()".to_string();
-    }
-    if let Some(prefix) = &column.id_prefix {
-        return format!("t.typedId({})", js_str(prefix));
-    }
-    render_col_type(&column.ty, column.case_sensitive, column.vector_metric)
 }
 
 fn render_col_type(
@@ -1304,9 +1304,6 @@ fn render_col_type(
         }
         ColType::Enum { name, .. } => format!("t.enum({})", js_str(name)),
         ColType::Domain { name, .. } => format!("t.domain({})", js_str(name)),
-        ColType::Encrypted { of } => {
-            format!("t.encrypted({{ of: {} }})", render_col_type(of, None, None))
-        }
     }
 }
 
@@ -1803,13 +1800,13 @@ mod tests {
             nullable: None,
             default: None,
             unique: None,
-            value_format: None,
             references: None,
             id_prefix: None,
             collation: None,
             vector_metric: None,
             case_sensitive: None,
             mask: None,
+            encrypted: None,
             generated: None,
             identity: None,
         }
@@ -1835,7 +1832,7 @@ mod tests {
         );
         assert_eq!(
             render_column_base(&column("day", ColType::Date)),
-            "t.date()"
+            "t.calendarDate()"
         );
     }
 
@@ -1855,24 +1852,11 @@ mod tests {
             "t.bigInt().primaryKey().autoIncrement()"
         );
 
-        let mut type_id = column("id", ColType::Text);
-        type_id.value_format = Some(ValueFormat::TypeId {
-            prefix: "usr".to_string(),
-        });
+        let mut type_id = column("id", ColType::String { length: 36 });
+        type_id.id_prefix = Some("usr".to_string());
         assert_eq!(
             render_column(&type_id, true, None),
             "t.typedId(\"usr\").primaryKey()"
-        );
-
-        let mut ulid = column("trace_id", ColType::Text);
-        ulid.value_format = Some(ValueFormat::Ulid);
-        assert_eq!(render_column_base(&ulid), "ids.ulid()");
-
-        let mut prefixed = column("id", ColType::Text);
-        prefixed.id_prefix = Some("post".to_string());
-        assert_eq!(
-            render_column(&prefixed, true, None),
-            "t.typedId(\"post\").primaryKey()"
         );
 
         let mut counter = column("counter", ColType::BigInt);
@@ -2032,15 +2016,9 @@ mod tests {
             render_column_base(&vector),
             "t.vector({ dimensions: 1536, metric: \"innerProduct\" })"
         );
-        assert_eq!(
-            render_column_base(&column(
-                "secret",
-                ColType::Encrypted {
-                    of: Box::new(ColType::Text),
-                },
-            )),
-            "t.encrypted({ of: t.text() })"
-        );
+        let mut secret = column("secret", ColType::Text);
+        secret.encrypted = Some(true);
+        assert_eq!(render_column_base(&secret), "t.text().encrypted()");
     }
 
     #[test]

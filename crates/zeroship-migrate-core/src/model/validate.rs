@@ -657,7 +657,11 @@ pub struct LogicalColumnKey {
 #[derive(Debug, Clone)]
 pub struct LogicalColumnContract {
     pub ty: crate::model::ir::ColType,
-    pub value_format: Option<crate::model::ir::ValueFormat>,
+    /// Whether this authored column's plaintext is stored encrypted. Carried
+    /// because backend key-storage policy and reference compatibility key on the
+    /// RENDERED storage: an encrypted column renders as ciphertext
+    /// (`bytea`/`BLOB`) even though `ty` is the plaintext.
+    pub encrypted: Option<bool>,
     /// Authored collation intent. `None` and `Some(true)` both mean the
     /// bytewise/default comparison behavior; `Some(false)` requests the
     /// portable case-insensitive text shape.
@@ -791,9 +795,6 @@ fn catalog_proves_reference_format(
     let Some(target) = catalog.column(table, column) else {
         return false;
     };
-    if let Some(expected) = &local.value_format {
-        return target.value_format.as_ref() == Some(expected);
-    }
     if !matches!(local.ty, crate::model::ir::ColType::Uuid) {
         return false;
     }
@@ -868,9 +869,9 @@ fn declare_logical_column(
     table: &str,
     column: &str,
     ty: crate::model::ir::ColType,
-    value_format: Option<crate::model::ir::ValueFormat>,
     case_sensitive: Option<bool>,
     id_prefix: Option<String>,
+    encrypted: Option<bool>,
     candidate_key_sources: CandidateKeySources,
 ) {
     // Supersede any prior declaration of this same logical column. Only entries
@@ -903,7 +904,7 @@ fn declare_logical_column(
         },
         LogicalColumnContract {
             ty,
-            value_format,
+            encrypted,
             case_sensitive,
             id_prefix,
             single_column_reference_key: candidate_keys.contains(&vec![column.to_string()]),
@@ -1406,7 +1407,7 @@ fn validate_per_row_destination(
     target_dialect: &DialectId,
     op_index: usize,
 ) -> Result<(), AuthoringError> {
-    use crate::model::ir::{ColType, PerRowGenerator, ValueFormat};
+    use crate::model::ir::{ColType, PerRowGenerator};
 
     if let PerRowGenerator::TypeId { prefix } = generator {
         if let Err(error) = crate::model::ir::validate_type_id_prefix(prefix) {
@@ -1416,10 +1417,10 @@ fn validate_per_row_destination(
                 op_index,
                 dialect: target_dialect.clone(),
                 reason: format!(
-                    "backfill perRow.typeId({{ prefix: {prefix:?} }}) carries an invalid TypeID prefix: {error}"
+                    "backfill perRow.typeId({{ prefix: {prefix:?} }}) carries an invalid typed-id prefix: {error}"
                 ),
                 suggested_fix: Some(
-                    "use an empty prefix, or at most 63 lowercase ASCII letters and underscores, starting and ending with a letter"
+                    "use an empty prefix, or at most 6 lowercase ASCII letters and underscores, starting and ending with a letter"
                         .to_string(),
                 ),
             });
@@ -1480,15 +1481,10 @@ fn validate_per_row_destination(
         PerRowGenerator::UuidV4 | PerRowGenerator::UuidV7 => {
             matches!(destination.ty, ColType::Uuid)
         }
-        PerRowGenerator::TypeId { prefix } => matches!(
-            (&destination.ty, &destination.value_format),
-            (ColType::Text, Some(ValueFormat::TypeId { prefix: declared_prefix }))
-                if declared_prefix == prefix
-        ),
-        PerRowGenerator::Ulid => matches!(
-            (&destination.ty, &destination.value_format),
-            (ColType::Text, Some(ValueFormat::Ulid))
-        ),
+        PerRowGenerator::TypeId { prefix } => {
+            matches!(destination.ty, ColType::String { length: 36 })
+                && destination.id_prefix.as_deref() == Some(prefix.as_str())
+        }
     };
     if valid {
         return Ok(());
@@ -1498,18 +1494,12 @@ fn validate_per_row_destination(
         PerRowGenerator::UuidV4 => "a logical UUID column for perRow.uuidV4()".to_string(),
         PerRowGenerator::UuidV7 => "a logical UUID column for perRow.uuidV7()".to_string(),
         PerRowGenerator::TypeId { prefix } => format!(
-            "a TypeID column whose declared stored prefix is exactly {prefix:?} for perRow.typeId(...)"
+            "a typed-id column whose declared prefix is exactly {prefix:?} for perRow.typeId(...)"
         ),
-        PerRowGenerator::Ulid => "a declared ULID column for perRow.ulid()".to_string(),
     };
-    let actual = match (&destination.ty, &destination.value_format) {
-        (ColType::Text, Some(ValueFormat::TypeId { prefix })) => {
-            format!("a TypeID column with stored prefix {prefix:?}")
-        }
-        (ColType::Text, Some(ValueFormat::Ulid)) => "a ULID column".to_string(),
-        (ColType::Text, None) => "generic text with no value-format contract".to_string(),
-        (ty, Some(format)) => format!("logical type {ty:?} with value format {format:?}"),
-        (ty, None) => format!("logical type {ty:?}"),
+    let actual = match &destination.id_prefix {
+        Some(prefix) => format!("a typed-id column with prefix {prefix:?}"),
+        None => format!("logical type {:?} with no typed-id prefix", destination.ty),
     };
     Err(per_row_validation_error(
         target_dialect,
@@ -1517,7 +1507,7 @@ fn validate_per_row_destination(
         format!(
             "backfill per-row destination {qualified_table}.{column} is {actual}; this generator requires {expected}"
         ),
-        "use the generator matching the destination's declared logical value format; generic text is not inferred as TypeID or ULID"
+        "use the generator matching the destination's declared typed-id prefix; a plain bounded string is not inferred as a typed id"
             .to_string(),
     ))
 }
@@ -1574,9 +1564,9 @@ fn validate_per_row_op(
                     name,
                     &column.name,
                     column.ty.clone(),
-                    column.value_format.clone(),
                     column.case_sensitive,
                     column.id_prefix.clone(),
+                    column.encrypted,
                     reference_keys.clone(),
                 );
             }
@@ -1585,8 +1575,8 @@ fn validate_per_row_op(
             table,
             column,
             ty,
-            value_format,
             case_sensitive,
+            encrypted,
             schema,
             ..
         } => {
@@ -1598,11 +1588,11 @@ fn validate_per_row_op(
                 table,
                 column,
                 ty.clone(),
-                value_format.clone(),
                 *case_sensitive,
                 // An added column is never the system PK, so it carries no
                 // legacy platform-ID prefix (`Op::AddColumn` has no slot).
                 None,
+                *encrypted,
                 CandidateKeySources::default(),
             );
         }
@@ -1986,9 +1976,9 @@ fn collect_logical_declarations_op(
                     name,
                     &column.name,
                     column.ty.clone(),
-                    column.value_format.clone(),
                     column.case_sensitive,
                     column.id_prefix.clone(),
+                    column.encrypted,
                     reference_keys.clone(),
                 );
             }
@@ -1997,8 +1987,8 @@ fn collect_logical_declarations_op(
             table,
             column,
             ty,
-            value_format,
             case_sensitive,
+            encrypted,
             schema,
             ..
         } => {
@@ -2010,11 +2000,11 @@ fn collect_logical_declarations_op(
                 table,
                 column,
                 ty.clone(),
-                value_format.clone(),
                 *case_sensitive,
                 // An added column is never the system PK, so it carries no
                 // legacy platform-ID prefix (`Op::AddColumn` has no slot).
                 None,
+                *encrypted,
                 CandidateKeySources::default(),
             );
         }
@@ -2167,19 +2157,16 @@ fn lowered_reference_storage(
 }
 
 fn reference_is_format_bearing(contract: &LogicalColumnContract) -> bool {
-    contract.value_format.is_some() || matches!(contract.ty, crate::model::ir::ColType::Uuid)
+    matches!(contract.ty, crate::model::ir::ColType::Uuid) || contract.id_prefix.is_some()
 }
 
 fn reference_format_description(contract: &LogicalColumnContract) -> String {
-    match &contract.value_format {
-        Some(crate::model::ir::ValueFormat::TypeId { prefix }) => {
-            format!("TypeID(prefix={prefix:?})")
-        }
-        Some(crate::model::ir::ValueFormat::Ulid) => "ULID".to_string(),
-        None if matches!(contract.ty, crate::model::ir::ColType::Uuid) => {
-            "canonical UUID".to_string()
-        }
-        None => "no value format".to_string(),
+    if let Some(prefix) = &contract.id_prefix {
+        format!("typed-id(prefix={prefix:?})")
+    } else if matches!(contract.ty, crate::model::ir::ColType::Uuid) {
+        "canonical UUID".to_string()
+    } else {
+        "no value format".to_string()
     }
 }
 
@@ -2357,18 +2344,17 @@ fn validate_one_column_reference(
         ));
     }
 
-    if local_contract.value_format != target.value_format {
+    if local_contract.id_prefix != target.id_prefix {
         return Err(reference_validation_error(
             local,
             reference,
             target_dialect,
             op_index,
             format!(
-                "value formats differ ({} local vs {} target)",
-                reference_format_description(local_contract),
-                reference_format_description(target)
+                "typed-id prefixes differ ({:?} local vs {:?} target)",
+                local_contract.id_prefix, target.id_prefix
             ),
-            "use the exact same value-format helper and TypeID prefix on both sides".to_string(),
+            "use the exact same t.typedId(prefix) on both sides".to_string(),
         ));
     }
 
@@ -2437,7 +2423,7 @@ fn validate_column_references_op(
                 };
                 let local_contract = LogicalColumnContract {
                     ty: column.ty.clone(),
-                    value_format: column.value_format.clone(),
+                    encrypted: column.encrypted,
                     case_sensitive: column.case_sensitive,
                     id_prefix: column.id_prefix.clone(),
                     single_column_reference_key: false,
@@ -2619,7 +2605,7 @@ fn validate_vendor_key_storage_op(
                         vendors,
                         target_dialect,
                         &contract.ty,
-                        contract.value_format.as_ref(),
+                        contract.encrypted,
                         contract.id_prefix.as_deref(),
                         contract.case_sensitive,
                     )
@@ -5214,15 +5200,15 @@ fn validate_table_foreign_key_constraint(
                     "declare positionally corresponding columns with the same logical storage type",
                 ));
             }
-            if local.value_format != target.value_format {
+            if local.id_prefix != target.id_prefix {
                 return Err(error(
                     format!(
-                        "position {} value format differs ({} local vs {} referenced)",
+                        "position {} typed-id prefix differs ({:?} local vs {:?} referenced)",
                         position + 1,
-                        reference_format_description(local),
-                        reference_format_description(target)
+                        local.id_prefix,
+                        target.id_prefix
                     ),
-                    "use the exact same ValueFormat, TypeID prefix, or ULID declaration at each tuple position",
+                    "use the exact same t.typedId(prefix) at each tuple position",
                 ));
             }
             let local_case_sensitive = local.case_sensitive.unwrap_or(true);
@@ -6810,44 +6796,8 @@ pub fn validate_op_authorized(
             // exactly their active injection before checksum; no-inject paths do not.
             let cols: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
             let scope = TargetScope::new(name, &cols);
-            let value_format_columns = columns
-                .iter()
-                .filter_map(|column| {
-                    let format = match column.value_format.as_ref()? {
-                        crate::model::ir::ValueFormat::TypeId { .. } => "TypeID",
-                        crate::model::ir::ValueFormat::Ulid => "ULID",
-                    };
-                    Some((column.name.as_str(), format))
-                })
-                .collect::<std::collections::BTreeMap<_, _>>();
             for ix in indexes {
                 for element in &ix.columns {
-                    let weakening = match element {
-                        IndexElement::Column {
-                            name,
-                            collation: Some(collation),
-                            ..
-                        } if collation != "C" => value_format_columns
-                            .get(name.as_str())
-                            .map(|format| (name, collation, format)),
-                        _ => None,
-                    };
-                    if let Some((name, collation, format)) = weakening {
-                        return Err(AuthoringError {
-                            code: CODE_COLUMN_FACET_CONFLICT.to_string(),
-                            kind: None,
-                            op_index,
-                            dialect: target_dialect.clone(),
-                            reason: format!(
-                                "column {name:?} declares a {format} value format but index {:?} selects collation {collation:?}; {format} requires the bytewise C collation",
-                                ix.name
-                            ),
-                            suggested_fix: Some(
-                                "remove the index collation override or use collation \"C\""
-                                    .to_string(),
-                            ),
-                        });
-                    }
                     check_index_element(element, &scope)?;
                 }
                 if let Some(pred) = &ix.r#where {
@@ -7122,10 +7072,10 @@ pub fn validate_op_authorized(
             ty,
             nullable,
             default,
-            value_format,
             vector_metric,
             case_sensitive,
             mask,
+            encrypted,
             generated,
             identity,
             ..
@@ -7146,12 +7096,12 @@ pub fn validate_op_authorized(
                 )?;
             }
             let view = crate::model::ir::IrColumn {
+                encrypted: *encrypted,
                 name: column.clone(),
                 ty: ty.clone(),
                 nullable: *nullable,
                 default: default.clone(),
                 unique: None,
-                value_format: value_format.clone(),
                 references: None,
                 id_prefix: None,
                 collation: None,
@@ -9050,12 +9000,86 @@ fn validate_column_facets(
         suggested_fix: Some(fix),
     };
 
-    if matches!(col.ty, crate::model::ir::ColType::Encrypted { .. }) && col.unique == Some(true) {
+    if col.encrypted == Some(true) && col.unique == Some(true) {
         return Err(mk(
             CODE_OP_INVALID,
             format!("encrypted column {:?} cannot be unique", col.name),
             "remove the unique constraint or use an unencrypted lookup field".into(),
         ));
+    }
+
+    if col.encrypted == Some(true) {
+        // `ty` is the PLAINTEXT, so every type-keyed facet check below would pass
+        // for a ciphertext column. Encryption changes the STORED bytes, so each
+        // of these facets describes the plaintext and cannot co-exist with it.
+        // Refused in the ENGINE: a recorded or hand-authored envelope never
+        // passes through the JS DSL, and the SDK is not the authority.
+        if col.collation.is_some() {
+            return Err(mk(
+                CODE_COLUMN_FACET_CONFLICT,
+                format!(
+                    "encrypted column {:?} also pins a collation; a collation orders the \
+                     stored bytes, which are ciphertext, not the plaintext",
+                    col.name
+                ),
+                "drop the collation, or remove `.encrypted()`".to_string(),
+            ));
+        }
+        if col.case_sensitive == Some(false) {
+            return Err(mk(
+                CODE_COLUMN_FACET_CONFLICT,
+                format!(
+                    "encrypted column {:?} also declares caseSensitive:false; a \
+                     case-insensitive comparison cannot see the ciphertext's plaintext",
+                    col.name
+                ),
+                "drop caseSensitive:false, or remove `.encrypted()`".to_string(),
+            ));
+        }
+        if col.id_prefix.is_some() {
+            return Err(mk(
+                CODE_COLUMN_FACET_CONFLICT,
+                format!(
+                    "encrypted column {:?} also declares a typed-id prefix; a value format \
+                     describes the plaintext representation, which encryption replaces",
+                    col.name
+                ),
+                "drop the typed-id prefix, or remove `.encrypted()`".to_string(),
+            ));
+        }
+        if col.vector_metric.is_some() {
+            return Err(mk(
+                CODE_COLUMN_FACET_CONFLICT,
+                format!(
+                    "encrypted column {:?} also carries a vector_metric; a distance metric \
+                     orders the stored vector, which encryption replaces",
+                    col.name
+                ),
+                "drop the metric, or remove `.encrypted()`".to_string(),
+            ));
+        }
+        if col.identity.is_some() {
+            return Err(mk(
+                CODE_COLUMN_FACET_CONFLICT,
+                format!(
+                    "encrypted column {:?} also declares identity; an identity value is \
+                     generated by the database as plaintext",
+                    col.name
+                ),
+                "drop the identity facet, or remove `.encrypted()`".to_string(),
+            ));
+        }
+        if col.references.is_some() {
+            return Err(mk(
+                CODE_COLUMN_FACET_CONFLICT,
+                format!(
+                    "encrypted column {:?} also declares a foreign-key reference; a \
+                     reference compares the stored bytes, which are ciphertext",
+                    col.name
+                ),
+                "drop the reference, or remove `.encrypted()`".to_string(),
+            ));
+        }
     }
 
     if let Some(name) = col
@@ -9107,21 +9131,6 @@ fn validate_column_facets(
                 "keep the collation for byte order, or `caseSensitive: false` for a \
                  case-insensitive comparison - not both"
                     .to_string(),
-            ));
-        }
-        if col.value_format.is_some() {
-            // A value format already pins bytewise storage as part of its contract,
-            // and it is the one that also carries the length and the CHECK. Two
-            // writers of the same snapshot field is how the two halves of a column's
-            // identity drift apart, so keep it at one.
-            return Err(mk(
-                CODE_COLUMN_FACET_CONFLICT,
-                format!(
-                    "column {:?} declares both a value format and a collation; the value \
-                     format already pins the column's comparison order",
-                    col.name
-                ),
-                "drop the collation - the value format carries it".to_string(),
             ));
         }
     }
@@ -9211,78 +9220,55 @@ fn validate_column_facets(
     }
 
     if let Some(prefix) = &col.id_prefix {
-        // Charset + reserved deny-list - the runtime's single source of truth.
-        if let Err(e) = crate::schema::query::validate_id_prefix(prefix) {
+        if let Err(e) = crate::model::ir::validate_type_id_prefix(prefix) {
             return Err(mk(
                 CODE_INVALID_ID_PREFIX,
                 format!(
-                    "column {:?} declares an invalid internal platform-ID prefix {prefix:?}: {e}",
+                    "column {:?} declares an invalid typed-id prefix {prefix:?}: {e}",
                     col.name
                 ),
-                "use a prefix matching ^[a-z][a-z0-9_]*$ that is not platform-reserved \
-                 (e.g. \"post\", \"org\")"
+                "use an empty prefix, or at most 6 lowercase ASCII letters and underscores, \
+                 starting and ending with a letter"
                     .to_string(),
             ));
         }
-        // Keep the complete typed id within the platform's identifier bound.
-        if prefix.len() > MAX_ID_PREFIX_LEN {
+        // `usr` is the platform user-id prefix; a creator typed id must never
+        // collide with a platform user id.
+        if prefix == "usr" {
             return Err(mk(
                 CODE_INVALID_ID_PREFIX,
                 format!(
-                    "column {:?} declares an internal platform-ID prefix {prefix:?} of {} bytes; the \
-                     maximum is {MAX_ID_PREFIX_LEN}",
-                    col.name,
-                    prefix.len()
+                    "column {:?} declares the reserved platform prefix {prefix:?}",
+                    col.name
                 ),
-                format!("shorten the prefix to at most {MAX_ID_PREFIX_LEN} characters"),
+                "choose a prefix other than \"usr\"".to_string(),
             ));
         }
     }
 
-    if let Some(value_format) = &col.value_format {
-        let format_name = match value_format {
-            crate::model::ir::ValueFormat::TypeId { prefix } => {
-                if let Err(error) = crate::model::ir::validate_type_id_prefix(prefix) {
-                    return Err(mk(
-                        CODE_INVALID_TYPE_ID_PREFIX,
-                        format!(
-                            "column {:?} declares an invalid TypeID prefix {prefix:?}: {error}",
-                            col.name
-                        ),
-                        "use an empty prefix, or at most 63 lowercase ASCII letters and underscores, starting and ending with a letter"
-                            .to_string(),
-                    ));
-                }
-                "TypeID"
-            }
-            crate::model::ir::ValueFormat::Ulid => "ULID",
-        };
+    if col.id_prefix.is_some()
+        && !matches!(col.ty, crate::model::ir::ColType::String { length: 36 })
+    {
+        return Err(mk(
+            CODE_COLUMN_FACET_CONFLICT,
+            format!(
+                "column {:?} declares a typed-id prefix on a non-typed-id storage type; a typed id requires string(36) storage",
+                col.name,
+            ),
+            "declare the column with t.typedId(prefix), or remove the id prefix".to_string(),
+        ));
+    }
 
-        if !matches!(col.ty, crate::model::ir::ColType::Text) {
-            return Err(mk(
-                CODE_COLUMN_FACET_CONFLICT,
-                format!(
-                    "column {:?} declares a {format_name} value format on a non-text storage type; {format_name} requires exact text storage",
-                    col.name,
-                ),
-                format!(
-                    "declare the column with text storage, or remove the {format_name} value format"
-                ),
-            ));
-        }
-
-        if matches!(col.case_sensitive, Some(false)) {
-            return Err(mk(
-                CODE_COLUMN_FACET_CONFLICT,
-                format!(
-                    "column {:?} declares both a {format_name} value format and caseSensitive:false; {format_name} requires bytewise, case-sensitive comparison",
-                    col.name,
-                ),
-                format!(
-                    "remove caseSensitive:false so {format_name} storage keeps bytewise comparison semantics"
-                ),
-            ));
-        }
+    if col.id_prefix.is_some() && matches!(col.case_sensitive, Some(false)) {
+        return Err(mk(
+            CODE_COLUMN_FACET_CONFLICT,
+            format!(
+                "column {:?} declares both a typed-id prefix and caseSensitive:false; a typed id requires bytewise, case-sensitive comparison",
+                col.name,
+            ),
+            "remove caseSensitive:false so typed-id storage keeps bytewise comparison semantics"
+                .to_string(),
+        ));
     }
 
     if col.vector_metric.is_some() && !matches!(col.ty, crate::model::ir::ColType::Vector { .. }) {
@@ -9345,7 +9331,7 @@ fn validate_vendor_literal_default_storage(
         vendors,
         target_dialect,
         &col.ty,
-        col.value_format.as_ref(),
+        col.encrypted,
         col.id_prefix.as_deref(),
         col.case_sensitive,
     ) else {
@@ -10946,13 +10932,13 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
-                value_format: None,
                 references: None,
                 id_prefix: None,
                 collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             }],
@@ -11108,13 +11094,13 @@ mod tests {
             nullable: not_null.then_some(false),
             default: None,
             unique: None,
-            value_format: None,
             references: None,
             id_prefix: None,
             collation: None,
             vector_metric: None,
             case_sensitive: None,
             mask: None,
+            encrypted: None,
             generated: None,
             identity: None,
         }
@@ -12420,13 +12406,13 @@ mod tests {
                         nullable: None,
                         default: None,
                         unique: None,
-                        value_format: None,
                         references: None,
                         id_prefix: None,
                         collation: None,
                         case_sensitive: None,
                         vector_metric: None,
                         mask: None,
+                        encrypted: None,
                         generated: None,
                         identity: None,
                     },
@@ -12436,13 +12422,13 @@ mod tests {
                         nullable: None,
                         default: None,
                         unique: None,
-                        value_format: None,
                         references: None,
                         id_prefix: None,
                         collation: None,
                         case_sensitive: None,
                         vector_metric: None,
                         mask: None,
+                        encrypted: None,
                         generated: None,
                         identity: None,
                     },
@@ -12745,13 +12731,13 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
-                value_format: None,
                 references: None,
                 id_prefix: None,
                 collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             }],
@@ -12813,13 +12799,13 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
-                value_format: None,
                 references: None,
                 id_prefix: None,
                 collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             }],
@@ -12861,13 +12847,13 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
-                value_format: None,
                 references: None,
                 id_prefix: None,
                 collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             }],
@@ -13336,7 +13322,7 @@ mod tests {
     // misplaced metric must be caught here rather than passing validate and deferring
     // the blow-up to render / mint colliding ids.
 
-    use crate::model::ir::{EmptyContainerKind, IrJsonValue, ValueFormat, VectorMetric};
+    use crate::model::ir::{EmptyContainerKind, IrJsonValue, VectorMetric};
 
     /// Build a createTable Op with a single `id` column carrying `id_prefix`.
     fn create_with_id_prefix(prefix: &str) -> Op {
@@ -13345,17 +13331,17 @@ mod tests {
             name: "things".into(),
             columns: vec![IrColumn {
                 name: "id".into(),
-                ty: ColType::Uuid,
+                ty: ColType::String { length: 36 },
                 nullable: None,
                 default: None,
                 unique: None,
-                value_format: None,
                 references: None,
                 id_prefix: Some(prefix.to_string()),
                 collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             }],
@@ -13381,7 +13367,6 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
-                value_format: None,
                 references: Some(ColumnReference {
                     relation: None,
                     table: "accounts".into(),
@@ -13395,6 +13380,7 @@ mod tests {
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             }],
@@ -13408,7 +13394,12 @@ mod tests {
         }
     }
 
-    fn create_with_type_id(prefix: &str, ty: ColType, case_sensitive: Option<bool>) -> Op {
+    fn create_with_typed_id(
+        prefix: &str,
+        ty: ColType,
+        case_sensitive: Option<bool>,
+        encrypted: bool,
+    ) -> Op {
         Op::CreateTable {
             attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "things".into(),
@@ -13418,45 +13409,13 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
-                value_format: Some(ValueFormat::TypeId {
-                    prefix: prefix.to_string(),
-                }),
                 references: None,
-                id_prefix: None,
+                id_prefix: Some(prefix.to_string()),
                 collation: None,
                 case_sensitive,
                 vector_metric: None,
                 mask: None,
-                generated: None,
-                identity: None,
-            }],
-            primary_key: None,
-            constraints: vec![],
-            indexes: vec![],
-            partition_by: None,
-            runtime_options: None,
-            schema: None,
-            existence_guard: None,
-        }
-    }
-
-    fn create_with_ulid(ty: ColType, case_sensitive: Option<bool>) -> Op {
-        Op::CreateTable {
-            attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
-            name: "things".into(),
-            columns: vec![IrColumn {
-                name: "id".into(),
-                ty,
-                nullable: None,
-                default: None,
-                unique: None,
-                value_format: Some(ValueFormat::Ulid),
-                references: None,
-                id_prefix: None,
-                collation: None,
-                case_sensitive,
-                vector_metric: None,
-                mask: None,
+                encrypted: encrypted.then_some(true),
                 generated: None,
                 identity: None,
             }],
@@ -13480,13 +13439,13 @@ mod tests {
                 nullable: None,
                 default: Some(default),
                 unique: None,
-                value_format: None,
                 references: None,
                 id_prefix: None,
                 collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             }],
@@ -13567,202 +13526,201 @@ mod tests {
     }
 
     #[test]
-    fn type_id_value_format_accepts_canonical_prefixes_on_exact_text() {
+    fn typed_id_prefix_accepts_canonical_prefixes_on_string_36() {
         let max_prefix = "a".repeat(crate::model::ir::TYPE_ID_MAX_PREFIX_LEN);
-        for prefix in ["", "a", "my__type", max_prefix.as_str()] {
+        for prefix in ["", "a", "my_t", max_prefix.as_str()] {
             for dialect in [&POSTGRES, &MYSQL, &SQLITE] {
-                let ir = ir_with(vec![create_with_type_id(prefix, ColType::Text, None)]);
+                let ir = ir_with(vec![create_with_typed_id(
+                    prefix,
+                    ColType::String { length: 36 },
+                    None,
+                    false,
+                )]);
                 assert!(
                     validate_ir_platform(&ir, dialect).is_ok(),
-                    "canonical TypeID prefix {prefix:?} must validate for {dialect:?}"
+                    "canonical typed-id prefix {prefix:?} must validate for {dialect:?}"
                 );
             }
         }
     }
 
     #[test]
-    fn type_id_value_format_rejects_noncanonical_prefixes() {
+    fn typed_id_prefix_rejects_noncanonical_prefixes() {
         let overlong = "a".repeat(crate::model::ir::TYPE_ID_MAX_PREFIX_LEN + 1);
-        for prefix in [
-            "_user",
-            "user_",
-            "User",
-            "user1",
-            "us-er",
-            "týpe",
-            overlong.as_str(),
-        ] {
-            let ir = ir_with(vec![create_with_type_id(prefix, ColType::Text, None)]);
+        for prefix in ["_user", "User", "us-er", "týpe", overlong.as_str()] {
+            let ir = ir_with(vec![create_with_typed_id(
+                prefix,
+                ColType::String { length: 36 },
+                None,
+                false,
+            )]);
             let error = validate_ir_platform(&ir, &POSTGRES)
-                .expect_err("a noncanonical TypeID prefix must fail closed");
-            assert_eq!(error.code, CODE_INVALID_TYPE_ID_PREFIX, "got: {error}");
+                .expect_err("a noncanonical typed-id prefix must fail closed");
+            assert_eq!(error.code, CODE_INVALID_ID_PREFIX, "got: {error}");
         }
     }
 
     #[test]
-    fn type_id_value_format_requires_exact_text_storage() {
-        for ty in [
-            ColType::Uuid,
-            ColType::String { length: 255 },
-            ColType::Encrypted {
-                of: Box::new(ColType::String { length: 255 }),
-            },
+    fn typed_id_prefix_requires_string_36_storage() {
+        for (ty, encrypted) in [
+            (ColType::Uuid, false),
+            (ColType::Text, false),
+            (ColType::String { length: 255 }, false),
+            (ColType::String { length: 255 }, true),
         ] {
-            let ir = ir_with(vec![create_with_type_id("user", ty, None)]);
+            let ir = ir_with(vec![create_with_typed_id("user", ty, None, encrypted)]);
             let error = validate_ir_platform(&ir, &POSTGRES)
-                .expect_err("TypeID metadata on non-text storage must fail closed");
+                .expect_err("a typed-id prefix on non-string(36) storage must fail closed");
             assert_eq!(error.code, CODE_COLUMN_FACET_CONFLICT, "got: {error}");
-            assert!(error.reason.contains("exact text storage"), "got: {error}");
         }
     }
 
     #[test]
-    fn type_id_value_format_rejects_case_insensitive_text() {
-        let ir = ir_with(vec![create_with_type_id(
+    fn typed_id_prefix_rejects_case_insensitive_string() {
+        let ir = ir_with(vec![create_with_typed_id(
             "user",
-            ColType::Text,
+            ColType::String { length: 36 },
             Some(false),
+            false,
         )]);
         let error = validate_ir_platform(&ir, &POSTGRES)
-            .expect_err("TypeID plus caseSensitive:false must fail closed");
+            .expect_err("a typed-id prefix plus caseSensitive:false must fail closed");
         assert_eq!(error.code, CODE_COLUMN_FACET_CONFLICT, "got: {error}");
         assert!(error.reason.contains("bytewise"), "got: {error}");
-    }
-
-    #[test]
-    fn type_id_value_format_rejects_a_weakening_index_collation() {
-        let mut op = create_with_type_id("user", ColType::Text, None);
-        let Op::CreateTable { indexes, .. } = &mut op else {
-            unreachable!("helper always returns createTable");
-        };
-        indexes.push(IrIndex {
-            name: Some("things_id_ci".into()),
-            columns: vec![crate::model::ir::IndexElement::Column {
-                name: "id".into(),
-                order: None,
-                opclass: None,
-                collation: Some("und-x-icu".into()),
-            }],
-            unique: Some(true),
-            using: None,
-            r#where: None,
-            include: vec![],
-            attributes: Default::default(),
-            only: None,
-            nulls_not_distinct: None,
-        });
-
-        let error = validate_ir_platform(&ir_with(vec![op]), &POSTGRES)
-            .expect_err("a non-bytewise TypeID index collation must fail closed");
-        assert_eq!(error.code, CODE_COLUMN_FACET_CONFLICT, "got: {error}");
-        assert!(error.reason.contains("collation"), "got: {error}");
-        assert!(error.reason.contains("bytewise"), "got: {error}");
-    }
-
-    #[test]
-    fn add_column_type_id_value_format_uses_the_same_policy_gate() {
-        let valid = ir_with(vec![op_json(
-            r#"{"op":"addColumn","table":"things","column":"id","type":"text","valueFormat":{"typeId":{"prefix":"thing"}}}"#,
-        )]);
-        assert!(validate_ir_platform(&valid, &POSTGRES).is_ok());
-
-        let wrong_storage = ir_with(vec![op_json(
-            r#"{"op":"addColumn","table":"things","column":"id","type":"uuid","valueFormat":{"typeId":{"prefix":"thing"}}}"#,
-        )]);
-        let error = validate_ir_platform(&wrong_storage, &POSTGRES)
-            .expect_err("addColumn TypeID metadata on UUID storage must fail closed");
-        assert_eq!(error.code, CODE_COLUMN_FACET_CONFLICT, "got: {error}");
-    }
-
-    #[test]
-    fn ulid_value_format_accepts_exact_text_on_every_dialect() {
-        for dialect in [&POSTGRES, &MYSQL, &SQLITE] {
-            let ir = ir_with(vec![create_with_ulid(ColType::Text, None)]);
-            assert!(
-                validate_ir_platform(&ir, dialect).is_ok(),
-                "ULID text storage must validate for {dialect:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn ulid_value_format_requires_exact_text_storage() {
-        for ty in [
-            ColType::Uuid,
-            ColType::String { length: 255 },
-            ColType::Encrypted {
-                of: Box::new(ColType::String { length: 255 }),
-            },
-        ] {
-            let ir = ir_with(vec![create_with_ulid(ty, None)]);
-            let error = validate_ir_platform(&ir, &POSTGRES)
-                .expect_err("ULID metadata on non-text storage must fail closed");
-            assert_eq!(error.code, CODE_COLUMN_FACET_CONFLICT, "got: {error}");
-            assert!(error.reason.contains("exact text storage"), "got: {error}");
-            assert!(error.reason.contains("ULID"), "got: {error}");
-        }
-    }
-
-    #[test]
-    fn ulid_value_format_rejects_case_insensitive_text() {
-        let ir = ir_with(vec![create_with_ulid(ColType::Text, Some(false))]);
-        let error = validate_ir_platform(&ir, &POSTGRES)
-            .expect_err("ULID plus caseSensitive:false must fail closed");
-        assert_eq!(error.code, CODE_COLUMN_FACET_CONFLICT, "got: {error}");
-        assert!(error.reason.contains("ULID"), "got: {error}");
-        assert!(error.reason.contains("bytewise"), "got: {error}");
-    }
-
-    #[test]
-    fn ulid_value_format_rejects_a_weakening_index_collation() {
-        let mut op = create_with_ulid(ColType::Text, None);
-        let Op::CreateTable { indexes, .. } = &mut op else {
-            unreachable!("helper always returns createTable");
-        };
-        indexes.push(IrIndex {
-            name: Some("things_id_ci".into()),
-            columns: vec![crate::model::ir::IndexElement::Column {
-                name: "id".into(),
-                order: None,
-                opclass: None,
-                collation: Some("und-x-icu".into()),
-            }],
-            unique: Some(true),
-            using: None,
-            r#where: None,
-            include: vec![],
-            attributes: Default::default(),
-            only: None,
-            nulls_not_distinct: None,
-        });
-
-        let error = validate_ir_platform(&ir_with(vec![op]), &POSTGRES)
-            .expect_err("a non-bytewise ULID index collation must fail closed");
-        assert_eq!(error.code, CODE_COLUMN_FACET_CONFLICT, "got: {error}");
-        assert!(error.reason.contains("ULID"), "got: {error}");
-        assert!(error.reason.contains("collation"), "got: {error}");
-        assert!(error.reason.contains("bytewise"), "got: {error}");
-    }
-
-    #[test]
-    fn add_column_ulid_value_format_uses_the_same_policy_gate() {
-        let valid = ir_with(vec![op_json(
-            r#"{"op":"addColumn","table":"things","column":"id","type":"text","valueFormat":"ulid"}"#,
-        )]);
-        assert!(validate_ir_platform(&valid, &POSTGRES).is_ok());
-
-        let wrong_storage = ir_with(vec![op_json(
-            r#"{"op":"addColumn","table":"things","column":"id","type":"uuid","valueFormat":"ulid"}"#,
-        )]);
-        let error = validate_ir_platform(&wrong_storage, &POSTGRES)
-            .expect_err("addColumn ULID metadata on UUID storage must fail closed");
-        assert_eq!(error.code, CODE_COLUMN_FACET_CONFLICT, "got: {error}");
     }
 
     #[test]
     fn internal_uuid_id_prefix_is_valid() {
         let ir = ir_with(vec![create_with_id_prefix("post")]);
         assert!(validate_ir_platform(&ir, &POSTGRES).is_ok());
+    }
+
+    fn create_with_encrypted_column(mutate: impl FnOnce(&mut IrColumn)) -> Op {
+        let mut column = IrColumn {
+            name: "payload".into(),
+            ty: ColType::Text,
+            nullable: None,
+            default: None,
+            unique: None,
+            references: None,
+            id_prefix: None,
+            collation: None,
+            case_sensitive: None,
+            vector_metric: None,
+            mask: None,
+            encrypted: Some(true),
+            generated: None,
+            identity: None,
+        };
+        mutate(&mut column);
+        Op::CreateTable {
+            attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
+            name: "secrets".into(),
+            columns: vec![column],
+            primary_key: None,
+            constraints: vec![],
+            indexes: vec![],
+            partition_by: None,
+            runtime_options: None,
+            schema: None,
+            existence_guard: None,
+        }
+    }
+
+    fn expect_encrypted_facet_conflict(ir: &crate::model::ir::MigrationIr, facet: &str) {
+        for dialect in [&POSTGRES, &MYSQL, &SQLITE] {
+            let error = validate_ir_platform(ir, dialect)
+                .expect_err("an encrypted column's plaintext facet must be refused");
+            assert_eq!(error.code, CODE_COLUMN_FACET_CONFLICT, "got: {error}");
+            assert!(
+                error.reason.contains("encrypted") && error.reason.contains(facet),
+                "the refusal must name the encrypted facet {facet:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn encrypted_column_rejects_a_collation() {
+        let ir = ir_with(vec![create_with_encrypted_column(|column| {
+            column.collation = Some(crate::model::ir::ColumnCollation::Bytewise);
+        })]);
+        expect_encrypted_facet_conflict(&ir, "collation");
+    }
+
+    #[test]
+    fn encrypted_column_rejects_case_insensitive_comparison() {
+        let ir = ir_with(vec![create_with_encrypted_column(|column| {
+            column.case_sensitive = Some(false);
+        })]);
+        expect_encrypted_facet_conflict(&ir, "caseSensitive:false");
+    }
+
+    #[test]
+    fn encrypted_column_rejects_a_typed_id_prefix() {
+        let ir = ir_with(vec![create_with_encrypted_column(|column| {
+            column.ty = ColType::String { length: 36 };
+            column.id_prefix = Some("user".to_string());
+        })]);
+        expect_encrypted_facet_conflict(&ir, "typed-id prefix");
+    }
+
+    #[test]
+    fn encrypted_column_rejects_a_vector_metric() {
+        let ir = ir_with(vec![create_with_encrypted_column(|column| {
+            column.ty = ColType::Vector { vector: 3 };
+            column.vector_metric = Some(VectorMetric::L2);
+        })]);
+        expect_encrypted_facet_conflict(&ir, "vector_metric");
+    }
+
+    #[test]
+    fn encrypted_column_rejects_identity() {
+        let mut op = create_with_encrypted_column(|column| {
+            column.ty = ColType::Int;
+            column.identity = Some(crate::model::ir::IdentityCol { always: false });
+        });
+        if let Op::CreateTable { primary_key, .. } = &mut op {
+            *primary_key = Some(vec!["payload".to_string()]);
+        }
+        expect_encrypted_facet_conflict(&ir_with(vec![op]), "identity");
+    }
+
+    #[test]
+    fn encrypted_column_rejects_a_foreign_key_reference() {
+        let ir = ir_with(vec![create_with_encrypted_column(|column| {
+            column.references = Some(ColumnReference {
+                relation: None,
+                table: "accounts".into(),
+                column: "id".into(),
+                on_delete: None,
+                on_update: None,
+                name: None,
+            });
+        })]);
+        expect_encrypted_facet_conflict(&ir, "reference");
+    }
+
+    #[test]
+    fn mysql_key_storage_refuses_an_encrypted_non_text_key() {
+        let mut op = create_with_encrypted_column(|column| {
+            column.ty = ColType::Int;
+        });
+        if let Op::CreateTable { primary_key, .. } = &mut op {
+            *primary_key = Some(vec!["payload".to_string()]);
+        }
+        let ir = ir_with(vec![op]);
+        let error = validate_ir_platform(&ir, &MYSQL).expect_err(
+            "an encrypted non-text key renders MySQL LONGBLOB, which needs a prefix length",
+        );
+        assert_eq!(error.code, CODE_DIALECT_UNSUPPORTED, "got: {error}");
+        assert!(
+            error.reason.contains("BLOB"),
+            "the refusal must name the BLOB storage: {error}"
+        );
+        assert!(
+            validate_ir_platform(&ir, &POSTGRES).is_ok(),
+            "PostgreSQL renders bytea, which is keyable, so the refusal is MySQL-specific"
+        );
     }
 
     #[test]
@@ -13812,13 +13770,13 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
-                value_format: None,
                 references: None,
                 id_prefix: None,
                 collation: None,
                 case_sensitive: None,
                 vector_metric: Some(VectorMetric::Cosine),
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             }],
@@ -13849,13 +13807,13 @@ mod tests {
                     nullable: None,
                     default: None,
                     unique: None,
-                    value_format: None,
                     references: None,
                     id_prefix: None,
                     collation: None,
                     case_sensitive: Some(false),
                     vector_metric: None,
                     mask: None,
+                    encrypted: None,
                     generated: None,
                     identity: None,
                 }],
@@ -13956,13 +13914,13 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
-                value_format: None,
                 references: None,
                 id_prefix: None,
                 collation: None,
                 case_sensitive: None,
                 vector_metric: Some(VectorMetric::Cosine),
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             }],
@@ -13982,7 +13940,7 @@ mod tests {
         );
     }
 
-    fn per_row_create_op(ty: ColType, value_format: Option<ValueFormat>) -> Op {
+    fn per_row_create_op(ty: ColType, id_prefix: Option<String>) -> Op {
         let columns = vec![
             part_col("cursor", ColType::Int, true),
             IrColumn {
@@ -13991,13 +13949,13 @@ mod tests {
                 nullable: Some(true),
                 default: None,
                 unique: None,
-                value_format,
                 references: None,
-                id_prefix: None,
+                id_prefix,
                 collation: None,
                 vector_metric: None,
                 case_sensitive: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             },
@@ -14033,36 +13991,29 @@ mod tests {
 
     fn per_row_validation_ir(
         ty: ColType,
-        value_format: Option<ValueFormat>,
+        id_prefix: Option<String>,
         generator: PerRowGenerator,
     ) -> MigrationIr {
         ir_with(vec![
-            per_row_create_op(ty, value_format),
+            per_row_create_op(ty, id_prefix),
             per_row_backfill_op(generator),
         ])
     }
 
     #[test]
     fn per_row_destination_validation_accepts_exact_logical_families() {
-        for (ty, format, generator) in [
+        for (ty, id_prefix, generator) in [
             (ColType::Uuid, None, PerRowGenerator::UuidV4),
             (ColType::Uuid, None, PerRowGenerator::UuidV7),
             (
-                ColType::Text,
-                Some(ValueFormat::TypeId {
-                    prefix: "order".into(),
-                }),
+                ColType::String { length: 36 },
+                Some("order".to_string()),
                 PerRowGenerator::TypeId {
                     prefix: "order".into(),
                 },
             ),
-            (
-                ColType::Text,
-                Some(ValueFormat::Ulid),
-                PerRowGenerator::Ulid,
-            ),
         ] {
-            let ir = per_row_validation_ir(ty, format, generator);
+            let ir = per_row_validation_ir(ty, id_prefix, generator);
             validate_ir_platform(&ir, &SQLITE)
                 .expect("an exact declared per-row destination family must validate");
         }
@@ -14071,56 +14022,50 @@ mod tests {
     #[test]
     fn per_row_type_id_requires_the_exact_declared_prefix() {
         let ir = per_row_validation_ir(
-            ColType::Text,
-            Some(ValueFormat::TypeId {
-                prefix: "invoice".into(),
-            }),
+            ColType::String { length: 36 },
+            Some("inv".to_string()),
             PerRowGenerator::TypeId {
                 prefix: "order".into(),
             },
         );
         let error = validate_ir_platform(&ir, &SQLITE)
-            .expect_err("a mismatched TypeID prefix must fail before lowering");
+            .expect_err("a mismatched typed-id prefix must fail before lowering");
         assert_eq!(error.code, CODE_OP_INVALID);
         assert!(
-            error.reason.contains("stored prefix \"invoice\"")
+            error.reason.contains("prefix \"inv\"")
                 && error.reason.contains("exactly \"order\""),
             "got: {error}"
         );
     }
 
     #[test]
-    fn per_row_type_id_and_ulid_never_infer_generic_text() {
-        for generator in [
-            PerRowGenerator::TypeId {
-                prefix: "order".into(),
-            },
-            PerRowGenerator::Ulid,
-        ] {
-            let ir = per_row_validation_ir(ColType::Text, None, generator);
-            let error = validate_ir_platform(&ir, &POSTGRES)
-                .expect_err("generic text must not infer a TypeID or ULID contract");
-            assert_eq!(error.code, CODE_OP_INVALID);
-            assert!(
-                error
-                    .reason
-                    .contains("generic text with no value-format contract"),
-                "got: {error}"
-            );
-        }
+    fn per_row_type_id_never_infers_a_plain_bounded_string() {
+        let generator = PerRowGenerator::TypeId {
+            prefix: "order".into(),
+        };
+        let ir = per_row_validation_ir(ColType::String { length: 36 }, None, generator);
+        let error = validate_ir_platform(&ir, &POSTGRES)
+            .expect_err("a plain bounded string must not infer a typed-id contract");
+        assert_eq!(error.code, CODE_OP_INVALID);
+        assert!(
+            error.reason.contains("with no typed-id prefix"),
+            "got: {error}"
+        );
     }
 
     #[test]
-    fn per_row_uuid_rejects_text_even_without_a_value_format() {
-        let ir = per_row_validation_ir(ColType::Text, None, PerRowGenerator::UuidV7);
+    fn per_row_uuid_rejects_a_plain_bounded_string() {
+        let ir = per_row_validation_ir(
+            ColType::String { length: 36 },
+            None,
+            PerRowGenerator::UuidV7,
+        );
         let error = validate_ir_platform(&ir, &SQLITE)
-            .expect_err("a UUID generator requires logical UUID, not text storage");
+            .expect_err("a UUID generator requires logical UUID, not a plain bounded string");
         assert_eq!(error.code, CODE_OP_INVALID);
         assert!(
             error.reason.contains("logical UUID column")
-                && error
-                    .reason
-                    .contains("generic text with no value-format contract"),
+                && error.reason.contains("with no typed-id prefix"),
             "got: {error}"
         );
     }
@@ -14157,7 +14102,7 @@ mod tests {
             .expect_err("missing destination metadata must not defer generator validation");
         assert_eq!(error.code, CODE_INVALID_TYPE_ID_PREFIX);
         assert!(
-            error.reason.contains("invalid TypeID prefix"),
+            error.reason.contains("invalid typed-id prefix"),
             "got: {error}"
         );
     }
@@ -14194,7 +14139,7 @@ mod tests {
                 ),
                 (
                     crate::test_fixtures::SQLITE,
-                    vec![per_row_create_op(ColType::Text, None)],
+                    vec![per_row_create_op(ColType::String { length: 36 }, None)],
                 ),
             ]
             .into_iter()
@@ -14207,11 +14152,11 @@ mod tests {
 
         validate_ir_platform(&ir, &POSTGRES).expect("the selected PG declaration is logical UUID");
         let error = validate_ir_platform(&ir, &SQLITE)
-            .expect_err("SQLite must use its generic-text leg, not the PostgreSQL leg");
+            .expect_err("SQLite must use its bounded-string leg, not the PostgreSQL leg");
         assert!(
             error
                 .reason
-                .contains("generic text with no value-format contract"),
+                .contains("with no typed-id prefix"),
             "got: {error}"
         );
     }
@@ -14219,7 +14164,7 @@ mod tests {
     fn typed_reference_column(
         name: &str,
         ty: ColType,
-        value_format: Option<ValueFormat>,
+        id_prefix: Option<String>,
         case_sensitive: Option<bool>,
         target: Option<(&str, &str)>,
     ) -> IrColumn {
@@ -14229,7 +14174,7 @@ mod tests {
             nullable: Some(true),
             default: None,
             unique: None,
-            value_format,
+            id_prefix,
             references: target.map(|(table, column)| ColumnReference {
                 relation: None,
                 table: table.into(),
@@ -14238,11 +14183,11 @@ mod tests {
                 on_update: None,
                 name: None,
             }),
-            id_prefix: None,
             collation: None,
             vector_metric: None,
             case_sensitive,
             mask: None,
+            encrypted: None,
             generated: None,
             identity: None,
         }
@@ -14323,61 +14268,34 @@ mod tests {
     }
 
     #[test]
-    fn typed_reference_rejects_type_id_prefix_and_ulid_format_mismatches() {
-        let type_id_child = typed_reference_table(
+    fn typed_reference_rejects_a_typed_id_prefix_mismatch() {
+        let child = typed_reference_table(
             "memberships",
             typed_reference_column(
                 "account_id",
-                ColType::Text,
-                Some(ValueFormat::TypeId {
-                    prefix: "account".into(),
-                }),
+                ColType::String { length: 36 },
+                Some("acct".to_string()),
                 None,
                 Some(("accounts", "id")),
             ),
         );
-        let type_id_target = typed_reference_key_table(
+        let target = typed_reference_key_table(
             "accounts",
             typed_reference_column(
                 "id",
-                ColType::Text,
-                Some(ValueFormat::TypeId {
-                    prefix: "acct".into(),
-                }),
+                ColType::String { length: 36 },
+                Some("ord".to_string()),
                 None,
                 None,
             ),
         );
-        let type_id_error =
-            validate_ir_platform(&ir_with(vec![type_id_child, type_id_target]), &POSTGRES)
-                .expect_err("different stored TypeID prefixes must fail closed");
+        let error = validate_ir_platform(&ir_with(vec![child, target]), &POSTGRES)
+            .expect_err("different typed-id prefixes must fail closed");
         assert!(
-            type_id_error.reason.contains("value formats differ")
-                && type_id_error.reason.contains("account")
-                && type_id_error.reason.contains("acct"),
-            "got: {type_id_error}"
-        );
-
-        let ulid_child = typed_reference_table(
-            "memberships",
-            typed_reference_column(
-                "account_id",
-                ColType::Text,
-                Some(ValueFormat::Ulid),
-                None,
-                Some(("accounts", "id")),
-            ),
-        );
-        let plain_target = typed_reference_key_table(
-            "accounts",
-            typed_reference_column("id", ColType::String { length: 255 }, None, None, None),
-        );
-        let ulid_error = validate_ir_platform(&ir_with(vec![ulid_child, plain_target]), &MYSQL)
-            .expect_err("ULID references must target the same exact value format");
-        assert!(
-            ulid_error.reason.contains("value formats differ")
-                && ulid_error.reason.contains("ULID"),
-            "got: {ulid_error}"
+            error.reason.contains("typed-id prefixes differ")
+                && error.reason.contains("acct")
+                && error.reason.contains("ord"),
+            "got: {error}"
         );
     }
 
@@ -14411,10 +14329,8 @@ mod tests {
             "memberships",
             typed_reference_column(
                 "account_id",
-                ColType::Text,
-                Some(ValueFormat::TypeId {
-                    prefix: "account".into(),
-                }),
+                ColType::String { length: 36 },
+                Some("acct".to_string()),
                 None,
                 Some(("accounts", "id")),
             ),
@@ -14430,7 +14346,7 @@ mod tests {
             None,
             CatalogColumnEvidence::none(),
         )
-        .expect_err("a catalog cannot invent missing TypeID metadata");
+        .expect_err("a catalog cannot invent a missing typed-id target");
         assert!(
             error.reason.contains("no authored value-format metadata"),
             "got: {error}"

@@ -7,7 +7,6 @@ use zeroship_migrate_backend::value_format::{
 };
 use zeroship_migrate_ir::dialect::DialectId;
 use zeroship_migrate_ir::expr::Expr;
-use zeroship_migrate_ir::ir::ValueFormat;
 
 use crate::DIALECT;
 
@@ -188,15 +187,6 @@ impl ValueFormatRenderer for MysqlValueFormatRenderer {
         vec![rendered.to_string()]
     }
 
-    fn recovery_candidates(
-        &self,
-        _literals: &[String],
-        _type_id_alphabet: &str,
-        _ulid_alphabet: &str,
-    ) -> Vec<ValueFormat> {
-        Vec::new()
-    }
-
     fn uuid_column_metadata(&self, quoted: &str) -> Option<ValueFormatColumnMetadata> {
         let regex = grammar_string_literal(
             "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
@@ -209,44 +199,6 @@ impl ValueFormatRenderer for MysqlValueFormatRenderer {
                  REGEXP_LIKE({quoted}, {regex}, 'c')))"
             ),
         })
-    }
-
-    fn ulid_column_metadata(
-        &self,
-        quoted: &str,
-        regex: &str,
-        len: usize,
-    ) -> ValueFormatColumnMetadata {
-        let regex = grammar_string_literal(regex);
-        ValueFormatColumnMetadata {
-            ddl_type: "VARCHAR(191) CHARACTER SET ascii COLLATE ascii_bin".to_string(),
-            collation: None,
-            inline_check: format!(
-                "CHECK ({quoted} IS NULL OR (CHAR_LENGTH({quoted}) = {len} AND \
-                 REGEXP_LIKE({quoted}, {regex}, 'c')))"
-            ),
-        }
-    }
-
-    fn type_id_column_metadata(
-        &self,
-        quoted: &str,
-        _stored_prefix: &str,
-        _suffix_start: usize,
-        total_len: usize,
-        _suffix_len: usize,
-        _alphabet: &str,
-        regex: &str,
-    ) -> ValueFormatColumnMetadata {
-        let regex = grammar_string_literal(regex);
-        ValueFormatColumnMetadata {
-            ddl_type: "VARCHAR(191) CHARACTER SET ascii COLLATE ascii_bin".to_string(),
-            collation: None,
-            inline_check: format!(
-                "CHECK ({quoted} IS NULL OR (CHAR_LENGTH({quoted}) = {total_len} AND \
-                 REGEXP_LIKE({quoted}, {regex}, 'c')))"
-            ),
-        }
     }
 
     fn bytewise_column_metadata(

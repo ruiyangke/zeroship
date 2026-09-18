@@ -84,27 +84,21 @@
               },
               {
                 "name": "contactEmail",
-                "type": {
-                  "encrypted": {
-                    "of": "text"
-                  }
-                },
+                "type": "text",
                 "mask": {
                   "kind": "email",
                   "classification": "pii"
-                }
+                },
+                "encrypted": true
               },
               {
                 "name": "ssn",
-                "type": {
-                  "encrypted": {
-                    "of": "text"
-                  }
-                },
+                "type": "text",
                 "mask": {
                   "kind": "last4",
                   "classification": "spi"
-                }
+                },
+                "encrypted": true
               },
               {
                 "name": "city",

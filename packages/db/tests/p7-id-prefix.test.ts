@@ -2,11 +2,12 @@
  * **P7** — `t.typedId(prefix)` typed-id prefix declaration.
  *
  * Covers the SDK-builder fence on the declared prefix:
- * - `t.typedId("blog")` returns a builder carrying `{ type: "id", idPrefix: "blog" }`.
+ * - `t.typedId("blog")` returns a builder carrying
+ *   `{ type: "string", maxLength: 36, idPrefix: "blog" }`.
  * - `t.typedId("usr")` throws (ID_RESERVED_PREFIX) — `usr` is the platform
  *   user-id prefix and must never be a creator prefix.
  * - `t.typedId("")` and `t.typedId("1bad")` throw (ID_INVALID_PREFIX).
- * - `t.typedId()` (no arg) returns `{ type: "id" }` with no idPrefix (auto-derive).
+ * - `t.typedId()` (no arg) returns the bounded string with no idPrefix.
  *
  * Mirrors the ORM SQL mapping's `validate_id_prefix` fence.
  */
@@ -17,13 +18,15 @@ import { t } from "../src/index.js";
 describe("P7 — t.typedId(prefix) fence", () => {
   test("t_id_blog_carries_idPrefix", () => {
     const def = t.typedId("blog").toFieldDef();
-    assert.equal(def.type, "id");
+    assert.equal(def.type, "string");
+    assert.equal(def.maxLength, 36);
     assert.equal(def.idPrefix, "blog");
   });
 
   test("t_id_no_arg_omits_idPrefix", () => {
     const def = t.typedId().toFieldDef();
-    assert.equal(def.type, "id");
+    assert.equal(def.type, "string");
+    assert.equal(def.maxLength, 36);
     assert.equal(def.idPrefix, undefined);
   });
 

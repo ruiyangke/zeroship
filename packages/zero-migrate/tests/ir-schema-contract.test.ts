@@ -72,8 +72,8 @@ const TS = {
     "inList", "regexMatch", "storageSize", "extract", "interval",
     "dialect",
   ].sort(),
-  // ColType string tokens (the object-variant arms — char/ref/vector/decimal/encrypted
-  // — are not `const` and are checked structurally by the round-trip, not here).
+  // ColType string tokens (the object-variant arms — char/ref/vector/decimal/enum/
+  // domain — are not `const` and are checked structurally by the round-trip, not here).
   // `string` is now a struct variant (`{ string: { length } }`), not a bare token.
   ColTypeStrings: [
     "text", "int", "smallInt", "bigInt", "double", "real", "boolean",
@@ -148,7 +148,7 @@ const TS_OP_FIELDS: Record<string, string[]> = {
   renameTable: ["existenceGuard", "schema", "table", "to"].sort(),
   // column facets + generated/identity — addColumn carries the column facets that are
   // sound on an added column (NOT `idPrefix`: an added column is never the system PK).
-  addColumn: ["attributes", "caseSensitive", "column", "default", "existenceGuard", "generated", "identity", "mask", "nullable", "schema", "table", "type", "valueFormat", "vectorMetric"].sort(),
+  addColumn: ["attributes", "caseSensitive", "column", "default", "encrypted", "existenceGuard", "generated", "identity", "mask", "nullable", "schema", "table", "type", "vectorMetric"].sort(),
   dropColumn: ["column", "existenceGuard", "schema", "table"].sort(),
   createIndex: ["columns", "concurrently", "existenceGuard", "include", "name", "nullsNotDistinct", "only", "schema", "table", "unique", "using", "where", "attributes"].sort(),
   dropIndex: ["concurrently", "existenceGuard", "name", "schema", "table", "unique"].sort(),
@@ -399,34 +399,29 @@ test("createTable requires its primary key field", () => {
   assert.ok(schemaFields.createTable.includes("primaryKey"));
 });
 
-test("TypeID and ULID ValueFormat shapes reach both column forms", () => {
-  const valueFormat = schema.$defs.ValueFormat;
-  assert.ok(valueFormat, "schema must define ValueFormat");
-  assert.equal(valueFormat.oneOf.length, 2, "ValueFormat must contain exactly TypeID and ULID");
-  const typeId = valueFormat.oneOf.find((branch: any) => branch.required?.includes("typeId"));
-  assert.ok(typeId, "ValueFormat must include the externally tagged typeId variant");
-  assert.equal(typeId.additionalProperties, false);
-  assert.deepEqual(typeId.required, ["typeId"]);
-  assert.deepEqual(typeId.properties.typeId.required, ["prefix"]);
-  assert.deepEqual(Object.keys(typeId.properties.typeId.properties), ["prefix"]);
-  assert.equal(typeId.properties.typeId.properties.prefix.type, "string");
-  const ulid = valueFormat.oneOf.find((branch: any) => branch.const === "ulid");
-  assert.ok(ulid, "ValueFormat must include the externally tagged ULID unit variant");
-  assert.equal(ulid.type, "string");
+test("a typed-id column carries idPrefix on createTable and not on addColumn", () => {
+  const irColumnPrefix = schema.$defs.IrColumn.properties.idPrefix;
+  assert.ok(irColumnPrefix, "schema must define IrColumn.idPrefix");
+  assert.ok(
+    Array.isArray(irColumnPrefix.type)
+      ? irColumnPrefix.type.includes("string")
+      : irColumnPrefix.type === "string",
+    "idPrefix is a nullable string",
+  );
+  assert.equal(schema.$defs.IrColumn.properties.valueFormat, undefined, "valueFormat is retired");
 
-  const irColumnFormat = schema.$defs.IrColumn.properties.valueFormat;
-  assert.match(JSON.stringify(irColumnFormat), /#\/\$defs\/ValueFormat/);
   const addColumn = schema.$defs.Op.oneOf.find(
     (branch: any) => branch.properties?.op?.const === "addColumn",
   );
   assert.ok(addColumn, "schema must define addColumn");
-  assert.match(JSON.stringify(addColumn.properties.valueFormat), /#\/\$defs\/ValueFormat/);
+  assert.equal(addColumn.properties.idPrefix, undefined, "addColumn has no idPrefix slot");
+  assert.equal(addColumn.properties.valueFormat, undefined, "addColumn has no valueFormat facet");
 });
 
 test("per-row generators are represented only in backfill set values", () => {
   const generator = schema.$defs.PerRowGenerator;
   assert.ok(generator, "schema must define PerRowGenerator");
-  assert.deepEqual(enumTokens(generator), ["ulid", "uuidV4", "uuidV7"]);
+  assert.deepEqual(enumTokens(generator), ["uuidV4", "uuidV7"]);
   const typeId = generator.oneOf.find((branch: any) => branch.required?.includes("typeId"));
   assert.ok(typeId, "PerRowGenerator must include a TypeID prefix arm");
   assert.deepEqual(typeId.required, ["typeId"]);

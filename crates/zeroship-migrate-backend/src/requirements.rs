@@ -41,9 +41,6 @@ pub enum DatabaseFeature {
     /// Enforced canonical TypeID format checks on MySQL. MySQL parsed but
     /// ignored `CHECK` constraints before 8.0.16.
     TypeIdValidation,
-    /// Enforced canonical ULID format checks on MySQL. MySQL parsed but ignored
-    /// `CHECK` constraints before 8.0.16.
-    UlidValidation,
 }
 
 impl DatabaseFeature {
@@ -55,7 +52,6 @@ impl DatabaseFeature {
             Self::UuidV7Generation => "exact RFC 9562 UUIDv7 database generation",
             Self::UuidValidation => "canonical UUID format validation",
             Self::TypeIdValidation => "canonical TypeID format validation",
-            Self::UlidValidation => "canonical ULID format validation",
         }
     }
 }

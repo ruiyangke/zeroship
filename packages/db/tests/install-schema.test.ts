@@ -30,7 +30,8 @@ describe("normalizeSchema — P7 typed-id prefix (id: t.typedId(prefix))", () =>
     });
     // The id prefix declaration survives normalization so the runtime
     // descriptor can carry the declared prefix.
-    assert.equal(out.id.type, "id");
+    assert.equal(out.id.type, "string");
+    assert.equal(out.id.maxLength, 36);
     assert.equal(out.id.idPrefix, "blog");
     assert.equal(out.title.type, "string");
   });

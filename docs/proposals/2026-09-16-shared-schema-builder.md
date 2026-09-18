@@ -78,7 +78,7 @@ This is a merge, not a victory for either side:
   facets as disjoint fields with "absent means omitted on the wire" — and the
   DDL lexicon: `char`, `double`, `inet`, `uuid`, `enum`, `domain`, native
   array storage, plus the `collation`, `generated`, `identity`,
-  `caseSensitive`, and `valueFormat` facets. (`smallInt`/`real` are *not*
+  `caseSensitive`, and `idPrefix` facets. (`smallInt`/`real` are *not*
   contributed — the runtime lexicon never carried them; the engine keeps the
   tokens for introspection only. See
   [Numbers: the semantic family](#numbers--the-semantic-family).)
@@ -139,7 +139,7 @@ change; no aliases, no deprecation shims (pre-launch rule).
 | Array column | `t.array(item, { storage? })` — one factory, storage as a facet | `t.textArray()` | `textArray` bakes a vendor spelling (`text[]`) into the contract name; the storage choice is a physical facet, not a type. Default storage is `"json"`; `{ storage: "native" }` renders `text[]` on PG and is emulated faithfully elsewhere. Full rationale in [Arrays: contract vs storage](#arrays--contract-vs-storage). |
 | Foreign key | `.references(table, column, opts)` on any scalar builder — `column` is **required** — plus `t.ref(table, { relation? })` as the narrowed constructor for the platform's dominant pattern | today's `t.ref(table, opts)` with its optional `{ column }` | `t.ref` is NOT sugar: it targets the target's typed-id `id` primary key, always. The `{ column }` option is removed from it, so anything nonstandard — a non-`id` target, non-text storage — is forced into the explicit method form where a reviewer can see it. The two forms never overlap; the target shape forces the choice. (Convex's `v.id("users")` is the same move: the identity reference is the constructor, not an abbreviation.) Both lower to the same facet. |
 | Primary key | `.primaryKey()` implies required | db's non-implying form | Aligns with migrate's current behavior. Decided in review: the fold **stops emitting** the redundant `.required()` on `id` columns — generated code should be minimal. |
-| Typed identity | `t.typedId(prefix)` | `t.id(prefix?)` (db), `ids.typeId({ prefix })` (migrate) | One factory spelling the platform's own term (typed_id: UUIDv7 + base36 + entity prefix). Lowers to the `valueFormat` facet; assignment metadata derived at descriptor emission. See [Value formats and identity](#value-formats-and-identity--one-ttypedidprefix-spelling). |
+| Typed identity | `t.typedId(prefix)` | `t.id(prefix?)` (db), `ids.typeId({ prefix })` (migrate) | One factory spelling the platform's own term (typed_id: UUIDv7 + base36 + entity prefix). Lowers to the `idPrefix` facet; assignment metadata derived at descriptor emission. See [Value formats and identity](#value-formats-and-identity--one-ttypedidprefix-spelling). |
 | Mask | db's closed-set validation (`MaskKind`, `Classification`) | migrate's `{ kind: string; classification: string }` carrier | The closed sets are the runtime's contract; authoring should not accept what the runtime refuses. |
 | Vector dims | db's authoring-time range check against pgvector's dimension ceiling | migrate accepting any positive integer | Same reasoning: fail at authoring, not at index build. |
 | Encryption | `.encrypted()` chain method on the plaintext builder | `t.encrypted({ of })` wrapper | Protection is a verb, not a wrapper. Kills the hidden string default, the inner-facet shredding, and the `{ of }` bag; the plaintext type is always explicit. See [Protection facets](#protection-facets--encrypted-and-mask). |
@@ -240,9 +240,9 @@ Rules:
   [Arrays](#arrays--contract-vs-storage). The set widens when the runtime
   grows a codec — builder and codec land in the same change.
 - **migrate's form converges.** `t.encrypted({ of: ColumnDef | ColType })` —
-  including the loose-token escape hatch — is replaced by the facet. The IR's
-  `{ encrypted: { of } }` node is unchanged: wire format, not authoring
-  surface.
+  including the loose-token escape hatch — is replaced by the facet. The IR
+  carries it as `IrColumn.encrypted: Option<bool>` beside the plaintext `type`,
+  not as an `{ encrypted: { of } }` wrapper.
 
 Companion work (not the merge): a **blind index** facet
 (`.encrypted().blindIndex()` — a platform-derived HMAC sibling column so
@@ -253,13 +253,13 @@ with the remedy; mask-only on such names warns that snapshots stay readable).
 
 ### Value formats and identity — one `t.typedId(prefix)` spelling
 
-migrate carries a `valueFormat` facet (`ids.typeId`, `ids.ulid`); db carries
+migrate's ID helpers (`ids.typeId`, `ids.ulid`) carry a validated-text facet; db carries
 `t.id(prefix?)`, and the fold converts between them and the
 `.assigned({ by: "typedId", on: "insert" })` assignment metadata seen in
 generated code. Resolution (decided in review): **one factory,
 `t.typedId(prefix)`** — spelling the platform's own term for the concept
 (typed_id: UUIDv7 + base36 + entity prefix, the stack-wide identity
-invariant). It lowers to the `valueFormat` facet, and the descriptor emitter
+invariant). It lowers to the `idPrefix` facet, and the descriptor emitter
 derives the assignment metadata from it — the same derivation the fold
 performs today, relocated, not redesigned. `t.id()` and `ids.typeId()` are
 removed with no alias. The prefix stays declarable per field; when omitted,
@@ -706,7 +706,7 @@ Sequenced as separate PRs, each self-contained, no aliases at any step:
 5. **`ColumnDefImpl` replacement.** migrate's recorder consumes the shared
    class; the widen-`FieldDef` facets (`char`, `double`, `inet`, `uuid`,
    `enum`, `domain`, `collation`, `generated`, `identity`, `caseSensitive`,
-   `valueFormat`) land with the refusal matrix enforced at descriptor
+   `idPrefix`) land with the refusal matrix enforced at descriptor
    emission. This step also carries the engine half of structured types in
    migrations (`t.object`/`t.union`/`t.literal` rendering and differ support)
    — the one part of the merge that is new engine behavior rather than a

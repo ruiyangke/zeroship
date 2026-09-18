@@ -158,11 +158,15 @@ fn validate_column(name: &str, column: &ColumnSchema, depth: usize) -> Result<()
     if column.encrypted {
         if !matches!(
             column.logical_type,
-            LogicalType::Text | LogicalType::Number | LogicalType::Bytes
+            LogicalType::Text
+                | LogicalType::Number
+                | LogicalType::Integer
+                | LogicalType::BigInt
+                | LogicalType::Bytes
         ) {
             return Err(DbError::validation(
                 "encrypted_type_unsupported",
-                "encrypted field type must be string, number, or bytes",
+                "encrypted field type must be string, number, integer, or bytes",
             ));
         }
         if column.unique {

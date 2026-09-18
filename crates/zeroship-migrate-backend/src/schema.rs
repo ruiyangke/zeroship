@@ -506,7 +506,7 @@ pub fn string_enum_values(def: &serde_json::Value) -> Option<Vec<String>> {
 }
 
 /// Render the `COMMENT ON COLUMN ... 'zero-migrate:enc:<wraps>'`
-/// statements for every `t.encrypted(...)` column in `schema` (PG only). The
+/// statements for every `.encrypted()` column in `schema` (PG only). The
 /// comment BODY is built by the shared codec
 /// ([`crate::mask_codec::build_encryption_sentinel`]) so it is byte-identical to
 /// what the migration engine emits and what the runtime parser
@@ -704,7 +704,7 @@ pub fn build_mask_sentinel_comments(
 }
 
 /// The bare `zero-migrate:enc:<wraps>` sentinel BODY for a field's
-/// `t.encrypted({...})` declaration (no `/* */` wrapper, no comment statement),
+/// `.encrypted()` declaration (no `/* */` wrapper, no comment statement),
 /// or `None` for a plain column. The SINGLE source of truth for the `zero-migrate:enc` wire
 /// grammar: `encryption_sentinel_for_field` wraps it in `/* */` for the inline
 /// DDL form, and [`build_encryption_sentinel_comments`] wraps it in a
@@ -717,7 +717,7 @@ pub fn encryption_sentinel_body_for_field(def: &serde_json::Value) -> Option<Str
     }
     let wraps = match def.get("type").and_then(serde_json::Value::as_str)? {
         "string" => crate::mask_meta::WrappedType::String,
-        "number" => crate::mask_meta::WrappedType::Number,
+        "number" | "int" | "bigInt" => crate::mask_meta::WrappedType::Number,
         "bytes" => crate::mask_meta::WrappedType::Bytes,
         _ => return None,
     };

@@ -1,8 +1,8 @@
 //! **Standalone `.mask()` ROUND-TRIPS through the op.* fold.**
 //!
 //! The `FieldDef` map has always carried the ENCRYPTED auto-mask (the fail-safe
-//! `{ full, pii }` every `t.encrypted()` column carries), because
-//! that mask is the kernel default a `ColType::Encrypted` column unambiguously implies.
+//! `{ full, pii }` every `.encrypted()` column carries), because
+//! that mask is the kernel default the `encrypted` facet unambiguously implies.
 //!
 //! A STANDALONE `.mask()` on a PLAINTEXT column (`t.string().mask({ kind: "last4" })`)
 //! used to be DROPPED: the IR `IrColumn` had no `mask` field, and the offline op fold

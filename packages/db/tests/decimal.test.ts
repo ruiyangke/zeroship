@@ -33,7 +33,7 @@ describe("exact decimals", () => {
 
   test("encrypted numeric builders retain exact decimal facets", () => {
     assert.deepEqual(
-      t.encrypted({ of: t.numeric({ precision: 30, scale: 2 }) }).toFieldDef(),
+      t.numeric({ precision: 30, scale: 2 }).encrypted().toFieldDef(),
       {
         type: "number",
         precision: 30,

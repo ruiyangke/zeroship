@@ -1214,7 +1214,7 @@ async fn golden_sqlite_add_column() {
 
     // Encrypted, no explicit `.mask()` — the schema-normaliser's fail-safe still
     // auto-populates the default `{ kind: full, classification: pii }` mask (mirrors
-    // the SDK's `t.encrypted()` auto-fill), so `secret` splits into a RAW column
+    // the SDK's `.encrypted()` auto-fill), so `secret` splits into a RAW column
     // (declared type BLOB + the inline encryption sentinel, no COMMENT tail on
     // SQLite) named by `raw_column_name`, and the field's own `secret` column
     // holding the mask.

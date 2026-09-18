@@ -1,12 +1,9 @@
-//! The engine's DOOR into the value-format seam - and the ONE place a dialect
-//! becomes a vendor for a catalog comparison.
+//! The engine's DOOR into the vendor catalog-normalization seam - and the ONE
+//! place a dialect becomes a vendor for a catalog comparison.
 //!
-//! A [`ValueFormat`] is logical schema metadata carried separately from the physical
-//! [`ColType`](crate::model::ir::ColType). Turning that metadata into an exact column
-//! collation and inline `CHECK`, and comparing what a catalog gives back against what
-//! was authored, is single-sourced in
-//! [`zeroship_migrate_backend::value_format`] so no backend can hold a private opinion
-//! about whether two defaults are the same default.
+//! Comparing what a catalog gives back against what was authored is
+//! single-sourced in [`zeroship_migrate_backend::value_format`] so no backend
+//! can hold a private opinion about whether two defaults are the same default.
 //!
 //! # What lives HERE
 //!
@@ -30,7 +27,7 @@
 //! expression, so it needs the engine's IR-facing surface, and no backend calls it.
 
 use crate::model::expr::Expr;
-use crate::model::ir::{IrDefault, IrScalar, SequenceRef, ValueFormat};
+use crate::model::ir::{IrDefault, IrScalar, SequenceRef};
 use crate::model::snapshot::{ColumnCollationSnapshot, IdDefaultSnapshot};
 use crate::render::backends::{renderer, value_format_renderer, value_format_renderers};
 use zeroship_migrate_backend::registry::VendorSet;
@@ -40,12 +37,6 @@ use zeroship_migrate_backend::value_format::{
     ValueFormatColumnMetadata, VendorRules,
 };
 use zeroship_migrate_ir::dialect::DialectId;
-
-// The recovered-format verdict. `#[cfg(test)]` for the same reason the door below
-// is: its last production consumer left with the PostgreSQL execution half, and the
-// comparison tests here still name it.
-#[cfg(test)]
-pub(crate) use zeroship_migrate_backend::value_format::RecoveredFormatCheck;
 
 /// Every registered vendor's declared catalog rules, composed.
 ///
@@ -412,30 +403,6 @@ fn catalog_expression_fingerprint_for(
     )
 }
 
-/// Recover an engine-owned UUID/TypeID/ULID CHECK from catalog SQL.
-///
-/// `#[cfg(test)]` because its last PRODUCTION caller left with the PostgreSQL
-/// execution half: all three vendors now enter
-/// [`zeroship_migrate_backend::value_format::recover_format_check`] with their OWN
-/// renderers, which is what the contract crate's copy takes, so nothing in the
-/// engine holds a `DialectId` and needs it turned into a pair of renderers here. The
-/// comparison tests below still drive it, and they are the reason it is gated rather
-/// than deleted: they are the engine's own proof that the dialect-resolving spelling
-/// and the renderer-taking one answer identically.
-#[cfg(test)]
-pub(crate) fn recover_format_check(
-    column: &str,
-    check_sql: &str,
-    dialect: &DialectId,
-) -> Option<RecoveredFormatCheck> {
-    seam::recover_format_check(
-        column,
-        check_sql,
-        value_format_renderer(crate::test_fixtures::VENDORS, dialect),
-        renderer(crate::test_fixtures::VENDORS, dialect),
-    )
-}
-
 /// Lower a logical UUID column to the portable textual contract used on MySQL
 /// and SQLite. PostgreSQL's native `uuid` type enforces the representation, so
 /// it needs neither an override nor a duplicate `CHECK`.
@@ -446,21 +413,6 @@ pub(crate) fn uuid_column_metadata(
 ) -> Result<Option<ValueFormatColumnMetadata>, String> {
     seam::uuid_column_metadata(
         column,
-        value_format_renderer(vendors, dialect),
-        renderer(vendors, dialect),
-    )
-}
-
-/// Lower one logical value format to its dialect-specific text representation.
-pub(crate) fn column_metadata(
-    vendors: VendorSet,
-    column: &str,
-    format: &ValueFormat,
-    dialect: &DialectId,
-) -> Result<ValueFormatColumnMetadata, String> {
-    seam::column_metadata(
-        column,
-        format,
         value_format_renderer(vendors, dialect),
         renderer(vendors, dialect),
     )
@@ -505,15 +457,12 @@ mod tests {
         authored_id_default, authored_text_id_default, authored_uuid_id_default,
         catalog_expression_fingerprint, catalog_expression_fingerprint_in_dialect,
         catalog_id_default, catalog_id_default_for_expected, catalog_text_id_default,
-        catalog_uuid_id_default, column_metadata, recover_format_check, RecoveredFormatCheck,
+        catalog_uuid_id_default,
     };
     use crate::model::expr::{CastTarget, Expr, ScalarFn};
-    use crate::model::ir::{IrDefault, IrScalar, SequenceRef, ValueFormat};
+    use crate::model::ir::{IrDefault, IrScalar, SequenceRef};
     use crate::model::snapshot::IdDefaultSnapshot;
     use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
-
-    const LOWER: &str = "0123456789abcdefghjkmnpqrstvwxyz";
-    const UPPER: &str = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
     /// The measurement behind `apply::drift::index_expression_bodies_are_comparable`'s
     /// verdict that the reduce-both-sides technique does not rescue an index body:
@@ -558,111 +507,6 @@ mod tests {
             "identifier QUOTING is the one thing left between the two sides, so a body \
              comparison would need a rule for it before the rename problem even comes up"
         );
-    }
-
-    #[test]
-    fn postgres_catalog_parentheses_and_text_cast_recover_exact_format() {
-        let check = format!(
-            "CHECK (((public_id IS NULL) OR ((pg_catalog.octet_length(public_id) = 34) AND \
-             ((public_id COLLATE \"C\") ~ '^account_[0-7][{LOWER}]{{25}}$'::text))))"
-        );
-        assert_eq!(
-            recover_format_check("public_id", &check, &POSTGRES),
-            Some(RecoveredFormatCheck::Value(ValueFormat::TypeId {
-                prefix: "account".to_string(),
-            }))
-        );
-        let qualified_operator = check.replacen(" ~ ", " OPERATOR(pg_catalog.~) ", 1);
-        assert_eq!(
-            recover_format_check("public_id", &qualified_operator, &POSTGRES),
-            Some(RecoveredFormatCheck::Value(ValueFormat::TypeId {
-                prefix: "account".to_string(),
-            })),
-            "a search-path-qualified built-in regex operator is catalog decoration"
-        );
-    }
-
-    #[test]
-    fn mysql_catalog_charset_introducers_recover_ulid() {
-        let check = format!(
-            "((`event_id` is null) or ((char_length(`event_id`) = 26) and \
-             regexp_like(`event_id`,_latin1'^[0-7][{UPPER}]{{25}}$',_ascii'c')))"
-        );
-        assert_eq!(
-            recover_format_check("event_id", &check, &MYSQL),
-            Some(RecoveredFormatCheck::Value(ValueFormat::Ulid))
-        );
-    }
-
-    #[test]
-    fn any_contract_edit_is_not_recovered_as_the_original_format() {
-        let check = format!(
-            "CHECK (\"id\" IS NULL OR (octet_length(\"id\") = 99 AND \
-             (\"id\" COLLATE \"C\") ~ '^account_[0-7][{LOWER}]{{25}}$'))"
-        );
-        assert_eq!(recover_format_check("id", &check, &POSTGRES), None);
-    }
-
-    #[test]
-    fn sqlite_glob_contract_recovers_type_id_prefix() {
-        let check = format!(
-            "CHECK (\"id\" IS NULL OR (typeof(\"id\") = 'text' AND length(\"id\") = 34 \
-             AND length(CAST(\"id\" AS BLOB)) = 34 AND substr(\"id\", 1, 8) = \
-             'account_' COLLATE BINARY AND substr(\"id\", 9, 1) GLOB '[0-7]' AND \
-             substr(\"id\", 9, 26) NOT GLOB '*[^{LOWER}]*'))"
-        );
-        assert_eq!(
-            recover_format_check("id", &check, &SQLITE),
-            Some(RecoveredFormatCheck::Value(ValueFormat::TypeId {
-                prefix: "account".to_string(),
-            }))
-        );
-    }
-
-    /// A CHECK recovery is normalised by ONE dialect's rules - the dialect it was
-    /// read from - and not by every registered vendor's at once.
-    ///
-    /// `canonical_check_sql` used to take no dialect, so it ran all three vendors'
-    /// `normalize_catalog_tokens` over the same token stream in sequence. Only
-    /// PostgreSQL implements that hook, so a SQLite or MySQL contract was silently
-    /// normalised by POSTGRESQL's catalog rules: `pg_catalog.` qualifiers and
-    /// `::text` annotations were erased from a stream that can never contain them
-    /// legitimately. An edit that injected either therefore normalised back onto the
-    /// pristine contract and was recovered as valid - the exact failure
-    /// `any_contract_edit_is_not_recovered_as_the_original_format` forbids, reached
-    /// through a foreign vendor's normaliser instead of through a weakened comparison.
-    #[test]
-    fn a_foreign_vendors_catalog_decoration_does_not_normalise_away() {
-        let pristine = column_metadata(
-            crate::test_fixtures::VENDORS,
-            "id",
-            &ValueFormat::TypeId {
-                prefix: "account".to_string(),
-            },
-            &SQLITE,
-        )
-        .expect("TypeID metadata")
-        .inline_check;
-        assert_eq!(
-            recover_format_check("id", &pristine, &SQLITE),
-            Some(RecoveredFormatCheck::Value(ValueFormat::TypeId {
-                prefix: "account".to_string(),
-            })),
-            "the pristine SQLite contract must still recover"
-        );
-
-        for decorated in [
-            pristine.replacen("typeof(", "pg_catalog.typeof(", 1),
-            pristine.replacen("'text'", "'text'::text", 1),
-        ] {
-            assert_ne!(decorated, pristine, "fixture must actually decorate");
-            assert_eq!(
-                recover_format_check("id", &decorated, &SQLITE),
-                None,
-                "SQLite declares no catalog-token normalisation, so PostgreSQL's must \
-                 not run on a SQLite CHECK: {decorated}"
-            );
-        }
     }
 
     #[test]
@@ -905,15 +749,6 @@ mod tests {
             );
         }
 
-        column_metadata(
-            crate::test_fixtures::VENDORS,
-            "type_key",
-            &ValueFormat::TypeId {
-                prefix: String::new(),
-            },
-            &MYSQL,
-        )
-        .expect("an empty-prefix TypeID contract is valid");
         let expression_decimal = IrDefault::Expr {
             expr: Expr::Literal {
                 value: IrScalar::Decimal("12345678901234567890123456".to_string()),
@@ -1651,28 +1486,5 @@ mod tests {
                  same way"
             );
         }
-    }
-
-    #[test]
-    fn moving_sqlite_format_parentheses_changes_the_contract() {
-        let expected = column_metadata(
-            crate::test_fixtures::VENDORS,
-            "id",
-            &ValueFormat::TypeId {
-                prefix: "account".to_string(),
-            },
-            &SQLITE,
-        )
-        .expect("TypeID metadata")
-        .inline_check;
-        let altered = expected.replace(
-            "substr(\"id\", 9, 26) NOT GLOB '*[^0123456789abcdefghjkmnpqrstvwxyz]*'",
-            "substr(\"id\", 9, 26 NOT GLOB '*[^0123456789abcdefghjkmnpqrstvwxyz]*')",
-        );
-        assert_ne!(
-            altered, expected,
-            "fixture must move a semantic parenthesis"
-        );
-        assert_eq!(recover_format_check("id", &altered, &SQLITE), None);
     }
 }

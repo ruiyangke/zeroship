@@ -38,6 +38,10 @@ export type Decimal = string & { readonly [decimalBrand]: "Decimal" };
 const DECIMAL_PATTERN = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/;
 const MAX_DECIMAL_INPUT_DIGITS = 4096;
 const MAX_DECIMAL_EXPONENT = 4096;
+/** Maximum typed-id prefix length: `<prefix>_<26 base32>` fits `string(36)`. */
+export const TYPE_ID_MAX_PREFIX_LEN = 6;
+/** The bounded storage width of a typed-id column. */
+export const TYPE_ID_LENGTH = 36;
 
 export function decimal(value: string): Decimal {
   if (value.length > MAX_DECIMAL_INPUT_DIGITS) {
@@ -62,14 +66,18 @@ export function decimal(value: string): Decimal {
 }
 
 export type InferFieldDef<T> =
-  T extends TypeBuilder<infer U, any, infer M, any, any, any>
+  T extends TypeBuilder<infer U, any, infer M, infer E, any, any>
     ? M extends MaskKind
       ? M extends "none"
         ? U
         : U extends string | number | bigint | Uint8Array
           ? MaskedValue<U>
           : U
-      : U
+      : E extends true
+        ? U extends string | number | bigint | Uint8Array
+          ? MaskedValue<U>
+          : U
+        : U
     : unknown;
 
 /** Keys whose field builder was marked `.required()` (the `R` brand of
@@ -379,19 +387,6 @@ export declare class MaskedValue<T extends string | number | bigint | Uint8Array
   toJSON(): string;
 }
 
-/**
- * options accepted by `t.encrypted(opts?)`.
- *
- * The host supplies the project encryption key; schemas contain no key selector.
- */
-export interface EncryptedFieldOpts {
-  /**
-   * Inner type the encrypted value wraps. Only string / number / bytes
-   * are supported. Passing any other `TypeBuilder` throws with code
-   * `ENCRYPTED_TYPE_UNSUPPORTED` at schema-definition time.
-   */
-  of?: TypeBuilder<any, any, any, any, any>;
-}
 /** Definition for an array field with a declared item type. */
 export type ArrayTypeDef = { type: "array"; items: PrimitiveTypeName };
 /**
@@ -535,6 +530,8 @@ export interface FieldDef {
   writable?: boolean;
   min?: number;
   max?: number;
+  /** Bounded string/varchar width. Absent means unbounded text. */
+  maxLength?: number;
   precision?: number;
   scale?: number;
   enum?: (string | number)[];
@@ -616,7 +613,7 @@ export interface FieldDef {
   /**
    * column-mask metadata. Present iff the SDK declared
    * the column with `.mask({ kind, classification? })`, OR the column
-   * is `t.encrypted(...)` without explicit `.mask(...)` and the
+   * is `.encrypted()` without explicit `.mask(...)` and the
    * schema-normaliser auto-populates the default mask
    * (`{ kind: "full", classification: "pii" }`).
    *
@@ -670,7 +667,7 @@ const TYPE_BUILDER_BRAND = Symbol.for("@zeroship/db/TypeBuilder");
  * - `T` — the inferred TS value type (bare primitive or branded id).
  * - `R` — `true` when the field was marked `.required()`; otherwise `false`.
  * - `M` — the mask kind declared via `.mask({...})`,
- *   or the default `"full"` for `t.encrypted()` columns, or
+ *   or the default `"full"` for `.encrypted()` fields, or
  *   `undefined` for unmasked columns. Surfaces through
  *   `InferFieldDef` so `Row<S>` wraps masked fields in
  *   `MaskedValue<T>` at the type level.
@@ -678,7 +675,7 @@ const TYPE_BUILDER_BRAND = Symbol.for("@zeroship/db/TypeBuilder");
  *   `Filter<S>` excludes encrypted values.
  *
  * `t.string().required().min(3).max(50)` → `TypeBuilder<string, true>`
- * `t.encrypted()` → `TypeBuilder<string, false, "full", true, false>`
+ * `t.string().encrypted()` → `TypeBuilder<string, false, "full", true, false>`
  * `t.string().mask({ kind: "email" })` → `TypeBuilder<string, false, "email", undefined, false>`
  * `t.string().required().default("x")` → `TypeBuilder<string, true, undefined, undefined, true>`
  */
@@ -745,9 +742,21 @@ export class TypeBuilder<
     return this.clone({ primaryKey: true });
   }
 
-  /** Returns a frozen copy of the field definition. */
+  /**
+   * Returns a frozen copy of the field definition.
+   *
+   * Seal-time defaults resolve here, once, from the final facet set: chain
+   * calls write disjoint facets and declaration order carries no semantics. An
+   * encrypted field without an explicit `.mask(...)` gets the fail-safe default
+   * `{ kind: "full", classification: "pii" }`; an explicit mask wins from
+   * either chain position.
+   */
   toFieldDef(): Readonly<FieldDef> {
-    return Object.freeze({ ...this._def });
+    const def: FieldDef = { ...this._def };
+    if (def.encrypted === true && def.mask === undefined) {
+      def.mask = { kind: "full", classification: "pii" };
+    }
+    return Object.freeze(def);
   }
 
   /** Attach a reference without changing its scalar storage. */
@@ -761,6 +770,14 @@ export class TypeBuilder<
     }
     if (!["string", "text", "ref", "id", "int", "integer", "bigInt", "bigint"].includes(this._def.type)) {
       throw new TypeError("reference storage must be text or integer");
+    }
+    if (this._def.encrypted === true) {
+      throw Object.assign(
+        new Error(
+          ".references(): an encrypted field cannot be a foreign key; a reference compares stored bytes, which are ciphertext",
+        ),
+        { code: "ENCRYPTED_ON_REF_UNSUPPORTED" as const },
+      );
     }
     // Build the next definition on a COPY: this is the one chain call that
     // REMOVES facets (re-referencing must not keep the previous target's column,
@@ -786,7 +803,7 @@ export class TypeBuilder<
     if (this._def.encrypted === true) {
       throw Object.assign(
         new Error(
-          "t.encrypted().unique(): encrypted fields cannot enforce uniqueness.",
+          "encrypted fields cannot enforce uniqueness; remove .unique() or drop .encrypted()",
         ),
         { code: "UNIQUE_ENCRYPTED_UNSUPPORTED" as const },
       );
@@ -839,9 +856,9 @@ export class TypeBuilder<
    * `find({ ssn: { $gt: v } })` compares masks. Looking a row up by its
    * real value is `unmask`-shaped work, not filter-shaped work.
    *
-   * Valid on `t.string()`, `t.double()`, `t.bytes()`, and
-   * `t.encrypted()` (the encrypted column wraps one of those
-   * primitive types). Refused on `t.ref()` with
+   * Valid on `t.string()`, `t.double()`, `t.bytes()`, and any
+   * `.encrypted()` field (encryption is a facet on those primitive
+   * types). Refused on `t.ref()` with
    * `ENCRYPTED_ON_REF_UNSUPPORTED` — FK columns must remain
    * unencrypted/unmasked so the JOIN integrity check works (the
    * mask sibling would itself participate in the FK semantics,
@@ -849,19 +866,19 @@ export class TypeBuilder<
    *
    * ```ts
    * const fields = {
-   *   ssn:      t.encrypted(),           // → default mask = "full" + "pii"
-   *   card_pan: t.encrypted().mask({ kind: "last4" }),         // → MaskedValue<string>
-   *   email:    t.string().mask({ kind: "email" }),            // → MaskedValue<string>
+   *   ssn:      t.string().encrypted(),           // → default mask = "full" + "pii"
+   *   card_pan: t.string().encrypted().mask({ kind: "last4" }),  // → MaskedValue<string>
+   *   email:    t.string().mask({ kind: "email" }),              // → MaskedValue<string>
    *   notes:    t.string().mask({ kind: "full", classification: "internal" }),
-   *   opted:    t.encrypted().mask({ kind: "none" }),          // explicit no-mask
+   *   opted:    t.string().encrypted().mask({ kind: "none" }),   // explicit no-mask
    * };
    * ```
    *
    * Defaults:
    * - `classification` defaults to `"pii"` when omitted.
-   * - When `t.encrypted()` is declared without `.mask(...)`, the
-   *   schema-normaliser auto-populates `{ kind: "full",
-   *   classification: "pii" }` — fail-safe per §3 of the proposal.
+   * - When `.encrypted()` is declared without `.mask(...)`, sealing
+   *   auto-populates `{ kind: "full", classification: "pii" }` — fail-safe
+   *   per §3 of the proposal.
    */
   mask<K extends MaskKind>(opts: { kind: K; classification?: Classification }): TypeBuilder<T, R, K, E, D, F extends "text" ? "text" : "equality"> & BuilderMetadata<this> {
     if (opts === null || typeof opts !== "object") {
@@ -930,6 +947,56 @@ export class TypeBuilder<
       );
     }
     return this.clone({ mask: { kind, classification } }) as unknown as TypeBuilder<T, R, K, E, D, F extends "text" ? "text" : "equality"> & BuilderMetadata<this>;
+  }
+
+  /**
+   * Store this field's plaintext encrypted (AEAD, a fresh nonce per write,
+   * bound to the collection, column and row). Encryption is an ATTRIBUTE of
+   * the field, not a wrapper around its type: `type` stays the plaintext and
+   * `.encrypted()` is not terminal — it chains exactly like any other facet.
+   *
+   * ```ts
+   * ssn:    t.string().encrypted(),
+   * amount: t.double().encrypted(),
+   * payload: t.bytes().encrypted(),
+   * ```
+   *
+   * Only string / number / bigint / bytes plaintext is encryptable; the
+   * restriction is refused at authoring time (a runtime gate for
+   * descriptor-only tokens, since the type parameter alone cannot name every
+   * non-encryptable builder). When no `.mask(...)` is chained,
+   * sealing applies the fail-safe default `{ kind: "full", classification:
+   * "pii" }`; an explicit `.mask()` wins from either chain position and
+   * `.mask({ kind: "none" })` opts out. Encrypted fields cannot be filtered,
+   * sorted, or made unique.
+   */
+  encrypted(
+    this: [NonNullable<T>] extends [string | number | bigint | Uint8Array] ? TypeBuilder<T, R, M, E, D, F> : never,
+  ): TypeBuilder<T, R, M, true, D, F> & BuilderMetadata<this> {
+    if (!["string", "number", "integer", "int", "bigInt", "bigint", "bytes"].includes(this._def.type)) {
+      throw Object.assign(
+        new Error(
+          `.encrypted(): only string / number / bigint / bytes fields can be encrypted, got "${this._def.type}"`,
+        ),
+        { code: "ENCRYPTED_TYPE_UNSUPPORTED" as const },
+      );
+    }
+    if (this._def.refTarget !== undefined) {
+      throw Object.assign(
+        new Error(
+          ".encrypted(): an encrypted field cannot be a foreign key; a reference compares stored bytes, which are ciphertext",
+        ),
+        { code: "ENCRYPTED_ON_REF_UNSUPPORTED" as const },
+      );
+    }
+    return this.clone({ encrypted: true }) as unknown as TypeBuilder<
+      T,
+      R,
+      M,
+      true,
+      D,
+      F
+    > & BuilderMetadata<this>;
   }
 
   /** Allow null in the field's value type. */
@@ -1187,76 +1254,9 @@ export const t = {
   calendarDate(): TypeBuilder<string, false, undefined, undefined, false, "ordered"> {
     return new TypeBuilder<string, false, undefined, undefined, false, "ordered">({ type: "calendarDate" });
   },
-  /** Native binary column, also usable as an encrypted field's wrap. */
+  /** Native binary column. Encryptable as binary plaintext via `.encrypted()`. */
   bytes(): TypeBuilder<Uint8Array, false, undefined, undefined, false, "equality"> {
     return new TypeBuilder<Uint8Array, false, undefined, undefined, false, "equality">({ type: "bytes" });
-  },
-  /**
-   * Encrypt string, number or byte values with a fresh random nonce per write.
-   * The ciphertext is bound to its collection, column and row identity.
-   * Encrypted fields cannot be filtered, sorted, or unique.
-   * A full mask is applied by default; `.mask({ kind: "none" })` opts out.
-   *
-   * ```ts
-   * const fields = {
-   *   ssn: t.encrypted().required(),
-   *   payload: t.encrypted({ of: t.bytes() }),
-   *   amount: t.encrypted({ of: t.double() }),
-   * };
-   * ```
-   */
-  encrypted<
-    // Infer the plaintext type from the wrapped builder.
-    W extends TypeBuilder<string | number | bigint | Uint8Array, any, any, any, any> | undefined = undefined,
-    T extends string | number | bigint | Uint8Array =
-      W extends TypeBuilder<infer WT extends string | number | bigint | Uint8Array, any, any, any, any>
-        ? WT
-        : string,
-  >(
-    opts?: Omit<EncryptedFieldOpts, "of"> & { of?: W },
-  ): TypeBuilder<T, false, "full", true, false> {
-    const innerBuilder = opts?.of;
-    let plaintextType: "string" | "number" | "bytes" = "string";
-    let precision: number | undefined;
-    let scale: number | undefined;
-    if (innerBuilder !== undefined) {
-      if (!(innerBuilder instanceof TypeBuilder)) {
-        throw Object.assign(
-          new Error("t.encrypted({ of }): of must be a TypeBuilder (t.string() / t.double() / t.bytes())"),
-          { code: "ENCRYPTED_TYPE_UNSUPPORTED" as const },
-        );
-      }
-      const def = innerBuilder.toFieldDef();
-      if (def.type === "string") plaintextType = "string";
-      else if (def.type === "number") {
-        plaintextType = "number";
-        precision = def.precision;
-        scale = def.scale;
-      } else if (def.type === "bytes") plaintextType = "bytes";
-      else {
-        throw Object.assign(
-          new Error(
-            `t.encrypted({ of }): only string / number / bytes are supported, got "${def.type}"`,
-          ),
-          { code: "ENCRYPTED_TYPE_UNSUPPORTED" as const },
-        );
-      }
-    }
-    // `type` describes the plaintext; `encrypted` selects binary storage.
-    // fail-safe default-mask rule (§3 of the
-    // sensitive-field-masking proposal): every `t.encrypted()` column
-    // gets `mask: { kind: "full", classification: "pii" }` at
-    // builder time when no `.mask(...)` is chained. The
-    // intentional path to plaintext-on-read is the explicit
-    // `.mask({ kind: "none" })` opt-out. Chaining `.mask({...})`
-    // after `t.encrypted()` overwrites this default via the
-    // builder's `.mask` method (assigns `_def.mask` unconditionally).
-    return new TypeBuilder<T, false, "full", true>({
-      type: plaintextType,
-      ...(precision === undefined ? {} : { precision, scale }),
-      encrypted: true,
-      mask: { kind: "full", classification: "pii" },
-    });
   },
   /**
    * C2 — literal-value field. Validation accepts only the exact value
@@ -1335,7 +1335,7 @@ export const t = {
    * }
    * ```
    */
-  /** A textual identifier type; generation requires a typedId assignment. */
+  /** A typed identifier: a bounded `string(36)` carrying the declared prefix. */
   typedId(prefix?: string): TypeBuilder<string> {
     if (prefix !== undefined) {
       if (typeof prefix !== "string" || prefix.length === 0) {
@@ -1352,6 +1352,14 @@ export const t = {
           { code: "ID_INVALID_PREFIX" as const },
         );
       }
+      if (prefix.length > TYPE_ID_MAX_PREFIX_LEN) {
+        throw Object.assign(
+          new Error(
+            `t.typedId(prefix): prefix must be at most ${TYPE_ID_MAX_PREFIX_LEN} characters (got "${prefix}")`,
+          ),
+          { code: "ID_INVALID_PREFIX" as const },
+        );
+      }
       // `usr` is the platform user-id prefix (`crates/zeroship-core/src/typed_id.rs`);
       // reserve it so a creator id can never collide with a platform user id.
       // The generated migration surface mirrors this fence.
@@ -1364,7 +1372,7 @@ export const t = {
         );
       }
     }
-    const def: FieldDef = { type: "id" };
+    const def: FieldDef = { type: "string", maxLength: TYPE_ID_LENGTH };
     if (prefix !== undefined) def.idPrefix = prefix;
     return new TypeBuilder<string>(def);
   },

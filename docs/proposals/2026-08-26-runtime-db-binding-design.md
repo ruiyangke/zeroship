@@ -902,7 +902,7 @@ These constraints bind any future change to this design.
     synthetic nonce as `HMAC-SHA256(k_siv, aad || plaintext)`, with tests pinning
     byte-identical output) and the mode selects the AAD shape, dropping
     `row_pk`. But it is **unreachable from the authoring surface**:
-    `ColType::Encrypted { of }` carries the inner type and nothing else, and
+    `IrColumn.encrypted` is a boolean facet and carries no mode, and
     lowering hardcodes `"mode": "randomised"`. Since the committed migration set
     is the schema source of truth, this is a code path no creator input can
     reach. The query-by-plaintext design argues a keyed lookup column serves

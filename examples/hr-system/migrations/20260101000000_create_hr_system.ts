@@ -26,7 +26,7 @@ import { table, t } from "@zeroship/migrate";
 //
 // THE TRANSLATION IS MECHANICAL, four column factories and nothing else. The
 // source uses only `t.string` (81), `t.number` (101), `t.boolean` (6) and one
-// `t.array`; it contains no `t.encrypted`, `t.vector`, `t.geoPoint` or
+// `t.array`; it contains no `.encrypted()`, `t.vector`, `t.geoPoint` or
 // `.mask`, so unlike examples/db-e2e nothing here touches the IR gap that
 // blocks a non-default encrypted column.
 //

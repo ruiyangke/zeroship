@@ -49,7 +49,7 @@ use crate::model::ir::{
     IndexElement, IndexMethod, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex,
     IrMask, Join, MigrationIr, Op, OrderDir, OrderItem, PartitionBoundValue, PartitionBounds,
     PartitionSpec, RefAction, SelectAst, SelectItem, TableRef, TableRuntimeOptions, TriggerAction,
-    TriggerStmt, ValueFormat, VectorMetric, ViewQuery,
+    TriggerStmt, VectorMetric, ViewQuery,
 };
 use crate::model::load::ir_created_tables;
 use crate::model::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
@@ -71,8 +71,7 @@ use crate::render::step::{
     SynchronizeIdentityStep,
 };
 use crate::render::value_format::{
-    authored_id_default, authored_text_id_default, authored_uuid_id_default,
-    column_metadata as value_format_column_metadata, uuid_column_metadata,
+    authored_id_default, authored_uuid_id_default, uuid_column_metadata,
 };
 use zeroship_migrate_backend::advisory::Advisory;
 use zeroship_migrate_backend::ddl::{ExclusionConstraintRequest, ExclusionElementParts};
@@ -1929,7 +1928,6 @@ fn require_database_feature(requirements: &mut DatabaseRequirements, feature: Fo
         FoldDatabaseFeature::UuidV7Generation => DatabaseFeature::UuidV7Generation,
         FoldDatabaseFeature::UuidValidation => DatabaseFeature::UuidValidation,
         FoldDatabaseFeature::TypeIdValidation => DatabaseFeature::TypeIdValidation,
-        FoldDatabaseFeature::UlidValidation => DatabaseFeature::UlidValidation,
     });
 }
 
@@ -1964,19 +1962,10 @@ fn collect_op_database_requirements(
         Op::AddColumn {
             ty,
             default,
-            value_format,
             generated,
             ..
         } => {
             collect_uuid_database_requirement(vendors, ty, false, dialect, requirements);
-            if let Some(value_format) = value_format {
-                collect_value_format_database_requirement(
-                    vendors,
-                    value_format,
-                    dialect,
-                    requirements,
-                );
-            }
             if let Some(default) = default {
                 collect_default_database_requirements(vendors, default, dialect, requirements);
             }
@@ -2153,11 +2142,6 @@ fn collect_column_database_requirements(
         dialect,
         requirements,
     );
-    if column.references.is_none() {
-        if let Some(value_format) = &column.value_format {
-            collect_value_format_database_requirement(vendors, value_format, dialect, requirements);
-        }
-    }
     if let Some(default) = &column.default {
         collect_default_database_requirements(vendors, default, dialect, requirements);
     }
@@ -2176,20 +2160,6 @@ fn collect_uuid_database_requirement(
     if let Some(feature) = crate::render::backends::vendor(vendors, dialect)
         .catalog_fold
         .database_requirement_for_column(ty, is_reference)
-    {
-        require_database_feature(requirements, feature);
-    }
-}
-
-fn collect_value_format_database_requirement(
-    vendors: VendorSet,
-    value_format: &ValueFormat,
-    dialect: &DialectId,
-    requirements: &mut DatabaseRequirements,
-) {
-    if let Some(feature) = crate::render::backends::vendor(vendors, dialect)
-        .catalog_fold
-        .database_requirement_for_value_format(value_format)
     {
         require_database_feature(requirements, feature);
     }
@@ -3250,7 +3220,6 @@ impl IrAuthor {
             &self.dialect,
         )?;
         self.apply_uuid_column_metadata(column, &mut snapshot)?;
-        self.apply_value_format_column_metadata(column, &mut snapshot)?;
         // This transient validation carrier retains authored integer width even
         // on engines whose physical catalog spelling collapses every width. The
         // backend policy decides whether the neutral token matters.
@@ -3279,12 +3248,12 @@ impl IrAuthor {
         self.authored_reference_column_snapshot(
             table,
             &IrColumn {
+                encrypted: None,
                 name: column.to_string(),
                 ty: contract.ty.clone(),
                 nullable: None,
                 default: None,
                 unique: None,
-                value_format: contract.value_format.clone(),
                 references: None,
                 id_prefix: None,
                 collation: None,
@@ -4233,7 +4202,6 @@ impl IrAuthor {
                 self.apply_named_type_metadata(&eff_schema, name, columns, &mut snap, named_types)?;
                 self.apply_uuid_metadata(columns, &mut snap)?;
                 self.apply_collation_metadata(columns, &mut snap)?;
-                self.apply_value_format_metadata(columns, &mut snap)?;
                 self.apply_id_default_metadata(columns, &mut snap)?;
                 // keep the CREATE path on the same
                 // masked-sibling source as ADD COLUMN. `build_table_snapshot` normally
@@ -4362,10 +4330,10 @@ impl IrAuthor {
                 ty,
                 nullable,
                 default,
-                value_format,
                 vector_metric,
                 case_sensitive,
                 mask,
+                encrypted,
                 generated,
                 identity,
                 ..
@@ -4379,28 +4347,13 @@ impl IrAuthor {
                 // Same resolution as `createTable`: an ADD COLUMN carrying an encrypted
                 // domain column stamps the same sentinel and must describe the same
                 // plaintext.
-                let resolved_ty = resolve_encrypted_inner_domain(ty, named_types);
-                let ty = resolved_ty.as_ref().unwrap_or(ty);
-                let (mut col, masked_sibling) = self.add_column_snapshot_with_sibling(
-                    &eff_schema,
-                    table,
-                    column,
-                    ty,
-                    *nullable,
-                    default.as_ref(),
-                    *vector_metric,
-                    *case_sensitive,
-                    *mask,
-                    generated.as_ref(),
-                    *identity,
-                )?;
-                let source_col = IrColumn {
+                let mut source_col = IrColumn {
+                    encrypted: *encrypted,
                     name: column.clone(),
                     ty: ty.clone(),
                     nullable: *nullable,
                     default: default.clone(),
                     unique: None,
-                    value_format: value_format.clone(),
                     references: None,
                     id_prefix: None,
                     collation: None,
@@ -4410,6 +4363,21 @@ impl IrAuthor {
                     generated: generated.clone(),
                     identity: *identity,
                 };
+                source_col = resolve_encrypted_inner_domain_in_column(&source_col, named_types);
+                let (mut col, masked_sibling) = self.add_column_snapshot_with_sibling(
+                    &eff_schema,
+                    table,
+                    column,
+                    &source_col.ty,
+                    source_col.encrypted,
+                    *nullable,
+                    default.as_ref(),
+                    *vector_metric,
+                    *case_sensitive,
+                    *mask,
+                    generated.as_ref(),
+                    *identity,
+                )?;
                 self.apply_named_type_column_metadata(
                     &eff_schema,
                     table,
@@ -4418,7 +4386,6 @@ impl IrAuthor {
                     named_types,
                 )?;
                 self.apply_uuid_column_metadata(&source_col, &mut col)?;
-                self.apply_value_format_column_metadata(&source_col, &mut col)?;
                 self.apply_id_default_column_metadata(&source_col, &mut col);
                 // Lower the main column, then the masked sibling (if any) as a second
                 // ADD COLUMN - both ride the same migration unit list.
@@ -4929,6 +4896,7 @@ impl IrAuthor {
                     None,
                     None,
                     None,
+                    None,
                 )?;
                 if matches!(to_type, ColType::Enum { .. } | ColType::Domain { .. }) {
                     match to_type {
@@ -4952,12 +4920,12 @@ impl IrAuthor {
                         }
                         _ => {
                             let source_col = IrColumn {
+                                encrypted: None,
                                 name: column.clone(),
                                 ty: to_type.clone(),
                                 nullable: None,
                                 default: None,
                                 unique: None,
-                                value_format: None,
                                 references: None,
                                 id_prefix: None,
                                 collation: None,
@@ -6836,7 +6804,7 @@ impl IrAuthor {
     ) -> Result<(), IrLowerError> {
         let mut changed = false;
         for c in columns {
-            if c.mask.is_none() && !matches!(c.ty, ColType::Encrypted { .. }) {
+            if c.mask.is_none() && !c.encrypted.unwrap_or(false) {
                 continue;
             }
             if c.identity.is_some() {
@@ -6847,6 +6815,7 @@ impl IrAuthor {
                 table,
                 &c.name,
                 &c.ty,
+                c.encrypted,
                 c.nullable,
                 c.default.as_ref(),
                 c.vector_metric,
@@ -7092,6 +7061,7 @@ impl IrAuthor {
         table: &str,
         column: &str,
         ty: &ColType,
+        encrypted: Option<bool>,
         nullable: Option<bool>,
         default: Option<&IrDefault>,
         vector_metric: Option<VectorMetric>,
@@ -7106,6 +7076,7 @@ impl IrAuthor {
                 table,
                 column,
                 ty,
+                encrypted,
                 nullable,
                 default,
                 vector_metric,
@@ -7132,6 +7103,7 @@ impl IrAuthor {
         table: &str,
         column: &str,
         ty: &ColType,
+        encrypted: Option<bool>,
         nullable: Option<bool>,
         default: Option<&IrDefault>,
         vector_metric: Option<VectorMetric>,
@@ -7150,15 +7122,16 @@ impl IrAuthor {
             });
         }
         let field = ir_column_to_field(&IrColumn {
+            encrypted,
             name: column.to_string(),
             ty: ty.clone(),
             nullable,
             default: default.cloned(),
             // `id_prefix` stays `None` (an added column is never the
-            // policy-injected primary key); the vector metric + standalone mask ARE carried so the snapshot
-            // renders the metric opclass / `zero-migrate:mask` sentinel.
+            // policy-injected primary key); the vector metric, standalone mask and
+            // encrypted facet ARE carried so the snapshot
+            // renders the metric opclass / `zero-migrate:mask` / `zero-migrate:enc` sentinel.
             unique: None,
-            value_format: None,
             references: None,
             id_prefix: None,
             collation: None,
@@ -7250,29 +7223,17 @@ impl IrAuthor {
             if !matches!(source.ty, ColType::Enum { .. } | ColType::Domain { .. }) {
                 continue;
             }
+            // `resolve_encrypted_inner_domain_in_column` leaves an encrypted column
+            // whose domain never resolved unchanged (still `Domain`). Mirror that
+            // pass-through here: inventing a base type or failing would make this
+            // stage disagree with the resolver.
+            if source.encrypted == Some(true) && matches!(source.ty, ColType::Domain { .. }) {
+                continue;
+            }
             let Some(col) = snap.columns.iter_mut().find(|c| c.name == source.name) else {
                 return Err(IrLowerError::UnsupportedOp("named type column folded away"));
             };
             self.apply_named_type_column_metadata(default_schema, table, source, col, named_types)?;
-        }
-        Ok(())
-    }
-
-    fn apply_value_format_metadata(
-        &self,
-        columns: &[IrColumn],
-        snap: &mut TableSnapshot,
-    ) -> Result<(), IrLowerError> {
-        for source in columns {
-            let Some(_) = &source.value_format else {
-                continue;
-            };
-            let Some(col) = snap.columns.iter_mut().find(|col| col.name == source.name) else {
-                return Err(IrLowerError::UnsupportedOp(
-                    "value-format column folded away",
-                ));
-            };
-            self.apply_value_format_column_metadata(source, col)?;
         }
         Ok(())
     }
@@ -7381,33 +7342,6 @@ impl IrAuthor {
         }
     }
 
-    fn apply_value_format_column_metadata(
-        &self,
-        source: &IrColumn,
-        col: &mut ColumnSnapshot,
-    ) -> Result<(), IrLowerError> {
-        let Some(value_format) = &source.value_format else {
-            return Ok(());
-        };
-        let metadata =
-            value_format_column_metadata(self.vendors, &source.name, value_format, &self.dialect)
-                .map_err(DeclarativeError::Invalid)?;
-        col.collation = metadata.collation;
-        col.ddl_type_override = Some(metadata.ddl_type);
-        col.id_default = Some(authored_text_id_default(
-            self.vendors,
-            source.default.as_ref(),
-            col.default.as_deref(),
-            &self.dialect,
-            Some(&self.project_schema),
-        ));
-        if source.references.is_none() {
-            col.value_format = Some(value_format.clone());
-            col.inline_checks.push(metadata.inline_check);
-        }
-        Ok(())
-    }
-
     fn apply_named_type_column_metadata(
         &self,
         default_schema: &str,
@@ -7470,6 +7404,7 @@ impl IrAuthor {
                     table,
                     &source.name,
                     &def.as_type,
+                    source.encrypted,
                     source.nullable,
                     source.default.as_ref(),
                     source.vector_metric,
@@ -7546,6 +7481,7 @@ impl IrAuthor {
                     "__domain",
                     "VALUE",
                     as_type,
+                    None,
                     None,
                     None,
                     None,
@@ -7636,6 +7572,7 @@ impl IrAuthor {
             None,
             None,
             None,
+            None,
         )?;
         let policy = crate::render::backends::vendor(self.vendors, &self.dialect).catalog_fold;
         if let Some((data_type, ddl_type)) =
@@ -7680,6 +7617,22 @@ impl IrAuthor {
             .ddl_type_override
             .as_deref()
             .unwrap_or(&live_from_type);
+        // A rename cannot carry the `encrypted` facet (`Op::RenameColumn` has no
+        // slot for it, and the recorder refuses an encrypted ColumnDef in the
+        // type position), so the IR `ty` is always the PLAINTEXT while the live
+        // column stores ciphertext. Refuse with that reason rather than reporting
+        // a type mismatch the author cannot act on.
+        if live_from_column
+            .encryption_sentinel
+            .as_deref()
+            .or(live_from_column.comment_sentinel.as_deref())
+            .is_some_and(|sentinel| sentinel.contains("zero-migrate:enc:"))
+        {
+            return Err(IrLowerError::RenameLower(format!(
+                "renameColumn {table:?}.{from:?} → {to:?}: renaming an encrypted column is \
+                 unsupported; the live column stores ciphertext, not the declared plaintext type"
+            )));
+        }
         let rename_strategy = crate::render::backends::schema_renderer(self.vendors, &self.dialect)
             .column_rename_strategy();
         let modifier_mismatch = matches!(
@@ -9484,7 +9437,7 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
     // id-prefix facet) renders as MySQL `TEXT`. Typed-ids carry a facet and bounded
     // injected columns are `String`, so neither is flagged here.
     let unbounded_text =
-        matches!(c.ty, ColType::Text) && c.value_format.is_none() && c.id_prefix.is_none();
+        matches!(c.ty, ColType::Text) && c.id_prefix.is_none();
     let references = c
         .references
         .as_ref()
@@ -9498,19 +9451,17 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
         .references
         .as_ref()
         .and_then(|reference| reference.name.clone());
-    // An ENCRYPTED column carries the inner token as `ty` PLUS the `encrypted`
+    // An ENCRYPTED column carries the plaintext `ty` PLUS the `encrypted`
     // facet - the shared builder reads the facet to pick BYTEA + the `zero-migrate:enc`
     // sentinel (built by the shared kernel, never re-spelled here).
     //
-    // Encryption is a flag; `ty` already describes the plaintext. Apply the
-    // same default mask as the SDK builder.
-    let (encrypted, encrypted_mask) = match &c.ty {
-        ColType::Encrypted { .. } => (
-            Some(true),
-            Some(serde_json::json!({ "kind": "full", "classification": "pii" })),
-        ),
-        _ => (None, None),
-    };
+    // Encryption is a flag; `ty` already describes the plaintext. An encrypted
+    // column with no explicit mask gets the SDK builder's fail-safe default mask.
+    let encrypted = c.encrypted;
+    let encrypted_mask = c
+        .encrypted
+        .filter(|encrypted| *encrypted)
+        .map(|_| serde_json::json!({ "kind": "full", "classification": "pii" }));
     // A `vector(N)` column carries its dimensionality N (the `vector` facet on the
     // neutral `ColType`). The shared snapshot builder spells `vector(N)` ONLY when
     // the descriptor's `vector_dims` is set, so the dimension MUST be threaded here
@@ -9606,13 +9557,16 @@ pub(crate) fn ir_column_to_field_resolved_create(c: &IrColumn) -> FieldDescripto
 ///
 /// The type token is not the whole type: `String { length }`, `Char { length }`,
 /// `Vector { vector }` and `Decimal { precision, scale }` carry their parameters in
-/// SIBLING descriptor fields, and `Encrypted { of }` splits into an inner token plus
-/// the `encrypted` facet. So anything that decides "this column is really shaped like
+/// SIBLING descriptor fields. So anything that decides "this column is really shaped like
 /// `T`" has to move all of them together or it emits a token whose parameters
 /// describe the old type. `Decimal`'s two are the sharpest case, because it SHARES
 /// its token with `Double`: a retype from `numeric(20, 4)` to `t.number()` leaves the
 /// token `"number"` unchanged, so a stale `precision` left behind here is the whole
 /// difference between a float column and a decimal one.
+///
+/// The `encrypted` facet is deliberately NOT touched: encryption is orthogonal to
+/// the type and is not part of [`ColType`] any more, so a domain lift that rewrites
+/// the type must leave the column's encryption declaration exactly as it was.
 ///
 /// Extracted so the sites that re-derive a column's shape from a new type cannot
 /// drift. Its one caller is the fold's named-domain lift
@@ -9625,12 +9579,12 @@ pub(crate) fn apply_col_type_to_field_descriptor(field: &mut FieldDescriptor, ty
     // type-to-facet mapping here is exactly how this replay drifted from the other
     // two.
     let derived = ir_column_to_field(&IrColumn {
+        encrypted: None,
         name: field.name.clone(),
         ty: ty.clone(),
         nullable: None,
         default: None,
         unique: None,
-        value_format: None,
         references: None,
         id_prefix: None,
         collation: None,
@@ -9648,7 +9602,6 @@ pub(crate) fn apply_col_type_to_field_descriptor(field: &mut FieldDescriptor, ty
     field.precision = derived.precision;
     field.scale = derived.scale;
     field.unbounded_text = derived.unbounded_text;
-    field.encrypted = derived.encrypted;
 }
 
 /// The physical type the selected backend renders for an authored column's
@@ -9659,23 +9612,24 @@ pub(crate) fn apply_col_type_to_field_descriptor(field: &mut FieldDescriptor, ty
 /// spelling the renderer actually emits. `None` means the type-position
 /// validation already refused a token with no data type.
 ///
-/// Only the four facets that move the storage are taken; nullability, defaults,
-/// keys, and generation do not change the rendered type.
+/// Only the facets that move the storage are taken; nullability, defaults,
+/// keys, and generation do not change the rendered type. `encrypted` DOES move
+/// the storage (ciphertext `BYTEA`/`BLOB`), so it is a parameter here.
 pub(crate) fn rendered_storage_for_column_facets(
     vendors: VendorSet,
     dialect: &DialectId,
     ty: &ColType,
-    value_format: Option<&crate::model::ir::ValueFormat>,
+    encrypted: Option<bool>,
     id_prefix: Option<&str>,
     case_sensitive: Option<bool>,
 ) -> Option<String> {
     let column = IrColumn {
+        encrypted,
         name: String::new(),
         ty: ty.clone(),
         nullable: None,
         default: None,
         unique: None,
-        value_format: value_format.cloned(),
         references: None,
         id_prefix: id_prefix.map(str::to_string),
         collation: None,
@@ -9758,56 +9712,41 @@ pub(crate) fn resolve_domain_base_type<'a>(
     }
 }
 
-/// Rewrite `Encrypted { of: Domain }` to `Encrypted { of: <the domain's base type> }`,
-/// and leave every other [`ColType`] alone (`None` = nothing to rewrite).
+/// Rewrite an ENCRYPTED column whose plaintext type NAMES a domain to carry the
+/// domain's base type, and leave every other column alone.
 ///
-/// # Why the ENCRYPTED inner, and nothing else
+/// # Why the ENCRYPTED domain, and nothing else
 ///
 /// A PLAIN domain column must keep NAMING its domain: on PostgreSQL the column's
 /// rendered type IS `"schema"."domain_name"`, so resolving it here would change the
 /// DDL. An ENCRYPTED column's physical type is `BYTEA`/`BLOB`/`LONGBLOB` regardless of
-/// what it wraps, so the inner type reaches the catalog through exactly one channel -
+/// what it wraps, so the plaintext type reaches the catalog through exactly one channel -
 /// the `zero-migrate:enc:<wraps>` sentinel - and through the runtime
 /// descriptor's type token. Both are DESCRIPTIONS of the plaintext, and both were
 /// describing a domain over `int` as `string`.
 ///
-/// Resolve the inner type before building the descriptor. The runtime codec
-/// and catalog sentinel then derive from the same logical type.
+/// Only `ty` is rewritten; the `encrypted` facet is preserved on the returned column.
 ///
 /// An unresolvable name, a cycle, or a base that is itself an ENUM all return the
 /// column unchanged: the sentinel is not optional, so "absent beats wrong" is
 /// "unchanged beats invented" here too. An enum base's token is `"string"`, which is
 /// the answer the column already had.
-pub(crate) fn resolve_encrypted_inner_domain(
-    ty: &ColType,
-    named_types: &NamedTypeRegistry,
-) -> Option<ColType> {
-    let ColType::Encrypted { of } = ty else {
-        return None;
-    };
-    let ColType::Domain { name, .. } = of.as_ref() else {
-        return None;
-    };
-    let base = resolve_domain_base_type(name, named_types)?;
-    Some(ColType::Encrypted {
-        of: Box::new(base.clone()),
-    })
-}
-
-/// [`resolve_encrypted_inner_domain`] over a column: returns an owned column whose
-/// encrypted inner domain is resolved, or the column untouched.
 pub(crate) fn resolve_encrypted_inner_domain_in_column(
     c: &IrColumn,
     named_types: &NamedTypeRegistry,
 ) -> IrColumn {
-    match resolve_encrypted_inner_domain(&c.ty, named_types) {
-        Some(ty) => {
-            let mut resolved = c.clone();
-            resolved.ty = ty;
-            resolved
-        }
-        None => c.clone(),
+    if c.encrypted != Some(true) {
+        return c.clone();
     }
+    let ColType::Domain { name, .. } = &c.ty else {
+        return c.clone();
+    };
+    let Some(base) = resolve_domain_base_type(name, named_types) else {
+        return c.clone();
+    };
+    let mut resolved = c.clone();
+    resolved.ty = base.clone();
+    resolved
 }
 
 /// Map a closed [`ColType`] to the descriptor's `(type_token, references?)`. The
@@ -9839,18 +9778,6 @@ pub(crate) fn col_type_to_token(ty: &ColType) -> (String, Option<String>) {
         ColType::GeoPoint => ("geoPoint".into(), None),
         ColType::Decimal { .. } => ("number".into(), None),
         ColType::Enum { .. } | ColType::Domain { .. } => ("string".into(), None),
-        // An encrypted column wraps an inner type; the descriptor carries it as the
-        // inner token with the `encrypted` facet set (the shared builder reads the
-        // facet to pick BYTEA + the sentinel). The inner token drives the masked
-        // sibling's plaintext shape.
-        ColType::Encrypted { of } => {
-            let inner = match of.as_ref() {
-                ColType::SmallInt | ColType::Int | ColType::BigInt | ColType::Double
-                | ColType::Real | ColType::Decimal { .. } => "number".into(),
-                _ => col_type_to_token(of).0,
-            };
-            (inner, None)
-        }
     }
 }
 
@@ -10873,13 +10800,13 @@ mod tests {
             nullable: Some(false),
             default: Some(IrDefault::Expr { expr }),
             unique: None,
-            value_format: None,
             references: None,
             id_prefix: None,
             collation: None,
             vector_metric: None,
             case_sensitive: None,
             mask: None,
+            encrypted: None,
             generated: None,
             identity: None,
         }
@@ -10888,19 +10815,17 @@ mod tests {
     fn type_id_column(name: &str, prefix: &str) -> TIrColumn {
         TIrColumn {
             name: name.into(),
-            ty: ColType::Text,
+            ty: ColType::String { length: 36 },
             nullable: None,
             default: None,
             unique: None,
-            value_format: Some(crate::model::ir::ValueFormat::TypeId {
-                prefix: prefix.into(),
-            }),
             references: None,
-            id_prefix: None,
+            id_prefix: Some(prefix.into()),
             collation: None,
             vector_metric: None,
             case_sensitive: None,
             mask: None,
+            encrypted: None,
             generated: None,
             identity: None,
         }
@@ -10971,8 +10896,7 @@ mod tests {
                     { "name": "cursor", "type": "int", "nullable": false },
                     {
                         "name": "public_id",
-                        "type": "text",
-                        "valueFormat": { "typeId": { "prefix": "order" } }
+                        "type":{"string":{"length":36}},"idPrefix":"order"
                     }
                 ],
                 "primaryKey": ["cursor"],
@@ -11035,8 +10959,7 @@ mod tests {
                 { "name": "cursor", "type": "int", "nullable": false },
                 {
                     "name": "public_id",
-                    "type": "text",
-                    "valueFormat": { "typeId": { "prefix": "order" } }
+                    "type":{"string":{"length":36}},"idPrefix":"order"
                 }
             ],
             "primaryKey": ["cursor"],
@@ -11158,25 +11081,6 @@ mod tests {
         assert_eq!(spec.schema, "foreign");
     }
 
-    fn ulid_column(name: &str) -> TIrColumn {
-        TIrColumn {
-            name: name.into(),
-            ty: ColType::Text,
-            nullable: None,
-            default: None,
-            unique: None,
-            value_format: Some(crate::model::ir::ValueFormat::Ulid),
-            references: None,
-            id_prefix: None,
-            collation: None,
-            vector_metric: None,
-            case_sensitive: None,
-            mask: None,
-            generated: None,
-            identity: None,
-        }
-    }
-
     fn insert_uuid_expr(expr: Expr) -> Op {
         Op::Insert {
             table: "events".into(),
@@ -11269,64 +11173,15 @@ mod tests {
     }
 
     #[test]
-    fn mysql_plan_records_type_id_check_requirement_only_on_mysql() {
+    fn typed_id_storage_needs_no_live_capability_gate() {
         let ir = create_table_ir("events", vec![type_id_column("id", "event")]);
 
-        let mysql_plan = test_ir_author("app", "app_a", MYSQL)
-            .lower_plan(&ir, &LiveSchema::default())
-            .expect("MySQL TypeID storage lowers");
-        assert_eq!(
-            mysql_plan.database_requirements.iter().collect::<Vec<_>>(),
-            vec![DatabaseFeature::TypeIdValidation]
-        );
-
-        for dialect in [POSTGRES, SQLITE] {
+        for dialect in [MYSQL, POSTGRES, SQLITE] {
             let plan = test_ir_author("app", "app_a", dialect.clone())
                 .lower_plan(&ir, &LiveSchema::default())
-                .expect("TypeID storage lowers without a server gate");
+                .expect("typed-id storage lowers without a server gate");
             assert!(plan.database_requirements.is_empty(), "got {dialect:?}");
         }
-    }
-
-    #[test]
-    fn mysql_plan_records_ulid_check_requirement_only_on_mysql() {
-        let ir = create_table_ir("events", vec![ulid_column("id")]);
-
-        let mysql_plan = test_ir_author("app", "app_a", MYSQL)
-            .lower_plan(&ir, &LiveSchema::default())
-            .expect("MySQL ULID storage lowers");
-        assert_eq!(
-            mysql_plan.database_requirements.iter().collect::<Vec<_>>(),
-            vec![DatabaseFeature::UlidValidation]
-        );
-
-        for dialect in [POSTGRES, SQLITE] {
-            let plan = test_ir_author("app", "app_a", dialect.clone())
-                .lower_plan(&ir, &LiveSchema::default())
-                .expect("ULID storage lowers without a server gate");
-            assert!(plan.database_requirements.is_empty(), "got {dialect:?}");
-        }
-
-        let add_ir: MigrationIr = serde_json::from_value(serde_json::json!({
-            "ir_version": 1,
-            "name": "add_event_id",
-            "owner_app": "app_a",
-            "ops": [{
-                "op": "addColumn",
-                "table": "events",
-                "column": "public_id",
-                "type": "text",
-                "valueFormat": "ulid"
-            }]
-        }))
-        .expect("ULID add-column IR deserializes");
-        let add_plan = test_ir_author("app", "app_a", MYSQL)
-            .lower_plan(&add_ir, &LiveSchema::default())
-            .expect("MySQL ULID add column lowers");
-        assert_eq!(
-            add_plan.database_requirements.iter().collect::<Vec<_>>(),
-            vec![DatabaseFeature::UlidValidation]
-        );
     }
 
     #[test]
@@ -11568,13 +11423,13 @@ mod tests {
                 nullable: Some(false),
                 default: None,
                 unique: None,
-                value_format: None,
                 references: None,
                 id_prefix: None,
                 collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             }],
@@ -11612,13 +11467,13 @@ mod tests {
                     value: crate::model::ir::IrScalar::Bytes(vec![0x00, 0x01, 0x7f, 0x80, 0xff]),
                 }),
                 unique: None,
-                value_format: None,
                 references: None,
                 id_prefix: None,
                 collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             }],
@@ -11659,13 +11514,13 @@ mod tests {
                     value: crate::model::ir::IrScalar::Int64(9_007_199_254_740_993),
                 }),
                 unique: None,
-                value_format: None,
                 references: None,
                 id_prefix: None,
                 collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             }],
@@ -11709,13 +11564,13 @@ mod tests {
                     ),
                 }),
                 unique: None,
-                value_format: None,
                 references: None,
                 id_prefix: None,
                 collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             }],
@@ -11781,10 +11636,10 @@ mod tests {
                 ty: ColType::BigInt,
                 nullable: Some(false),
                 default: None,
-                value_format: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: Some(crate::model::ir::IdentityCol { always: false }),
                 schema: None,
@@ -11827,13 +11682,13 @@ mod tests {
                 nullable: Some(false),
                 default: None,
                 unique: None,
-                value_format: None,
                 references: None,
                 id_prefix: None,
                 collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             }],
@@ -11878,13 +11733,13 @@ mod tests {
                     nullable: None,
                     default: None,
                     unique: None,
-                    value_format: None,
                     references: None,
                     id_prefix: None,
                     collation: None,
                     case_sensitive: None,
                     vector_metric: None,
                     mask: None,
+                    encrypted: None,
                     generated: None,
                     identity: None,
                 },
@@ -11896,13 +11751,13 @@ mod tests {
                     nullable: None,
                     default: None,
                     unique: None,
-                    value_format: None,
                     references: None,
                     id_prefix: None,
                     collation: None,
                     case_sensitive: None,
                     vector_metric: None,
                     mask: None,
+                    encrypted: None,
                     generated: None,
                     identity: None,
                 },
@@ -11976,13 +11831,13 @@ mod tests {
                     nullable,
                     default: None,
                     unique: None,
-                    value_format: None,
                     references: None,
                     id_prefix: None,
                     collation: None,
                     case_sensitive: None,
                     vector_metric: None,
                     mask: None,
+                    encrypted: None,
                     generated: None,
                     identity: None,
                 }],
@@ -12037,13 +11892,13 @@ mod tests {
                     nullable: Some(false),
                     default: None,
                     unique: None,
-                    value_format: None,
                     references: None,
                     id_prefix: None,
                     collation: None,
                     case_sensitive: None,
                     vector_metric: None,
                     mask: None,
+                    encrypted: None,
                     generated: None,
                     identity: None,
                 },
@@ -12053,13 +11908,13 @@ mod tests {
                     nullable: Some(false),
                     default: None,
                     unique: None,
-                    value_format: None,
                     references: None,
                     id_prefix: None,
                     collation: None,
                     case_sensitive: None,
                     vector_metric: None,
                     mask: None,
+                    encrypted: None,
                     generated: None,
                     identity: None,
                 },
@@ -12097,13 +11952,13 @@ mod tests {
                     nullable: Some(false),
                     default: None,
                     unique: None,
-                    value_format: None,
                     references: None,
                     id_prefix: None,
                     collation: None,
                     case_sensitive: None,
                     vector_metric: None,
                     mask: None,
+                    encrypted: None,
                     generated: None,
                     identity: None,
                 }],
@@ -12170,13 +12025,13 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
-                value_format: None,
                 references: None,
                 id_prefix: None,
                 collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             }],
@@ -12224,13 +12079,13 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
-                value_format: None,
                 references: None,
                 id_prefix: None,
                 collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             }],
@@ -12278,13 +12133,13 @@ mod tests {
                         value: IrScalar::Int(5),
                     }),
                     unique: None,
-                    value_format: None,
                     references: None,
                     id_prefix: None,
                     collation: None,
                     case_sensitive: None,
                     vector_metric: None,
                     mask: None,
+                    encrypted: None,
                     generated: None,
                     identity: None,
                 },
@@ -12296,13 +12151,13 @@ mod tests {
                         value: IrScalar::Int(0),
                     }),
                     unique: None,
-                    value_format: None,
                     references: None,
                     id_prefix: None,
                     collation: None,
                     case_sensitive: None,
                     vector_metric: None,
                     mask: None,
+                    encrypted: None,
                     generated: None,
                     identity: None,
                 },
@@ -12316,13 +12171,13 @@ mod tests {
                         value: IrScalar::Int64(9_007_199_254_740_993),
                     }),
                     unique: None,
-                    value_format: None,
                     references: None,
                     id_prefix: None,
                     collation: None,
                     case_sensitive: None,
                     vector_metric: None,
                     mask: None,
+                    encrypted: None,
                     generated: None,
                     identity: None,
                 },
@@ -12334,13 +12189,13 @@ mod tests {
                         value: IrScalar::Decimal("0.5".into()),
                     }),
                     unique: None,
-                    value_format: None,
                     references: None,
                     id_prefix: None,
                     collation: None,
                     case_sensitive: None,
                     vector_metric: None,
                     mask: None,
+                    encrypted: None,
                     generated: None,
                     identity: None,
                 },
@@ -12352,13 +12207,13 @@ mod tests {
                         value: IrScalar::Decimal("0.25".into()),
                     }),
                     unique: None,
-                    value_format: None,
                     references: None,
                     id_prefix: None,
                     collation: None,
                     case_sensitive: None,
                     vector_metric: None,
                     mask: None,
+                    encrypted: None,
                     generated: None,
                     identity: None,
                 },
@@ -12370,13 +12225,13 @@ mod tests {
                         value: IrScalar::Str("192.0.2.1".into()),
                     }),
                     unique: None,
-                    value_format: None,
                     references: None,
                     id_prefix: None,
                     collation: None,
                     case_sensitive: None,
                     vector_metric: None,
                     mask: None,
+                    encrypted: None,
                     generated: None,
                     identity: None,
                 },
@@ -12434,13 +12289,13 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
-                value_format: None,
                 references: None,
                 id_prefix: None,
                 collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             }],
@@ -12481,13 +12336,13 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
-                value_format: None,
                 references: None,
                 id_prefix: None,
                 collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             }],
@@ -12525,13 +12380,13 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
-                value_format: None,
                 references: None,
                 id_prefix: None,
                 collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             }],
@@ -12571,13 +12426,13 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
-                value_format: None,
                 references: None,
                 id_prefix: None,
                 collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             }],
@@ -12616,13 +12471,13 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
-                value_format: None,
                 references: None,
                 id_prefix: None,
                 collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             }],
@@ -12665,13 +12520,13 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
-                value_format: None,
                 references: None,
                 id_prefix: None,
                 collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             }],
@@ -12874,13 +12729,13 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
-                value_format: None,
                 references: None,
                 id_prefix: None,
                 collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             }],
@@ -13251,19 +13106,17 @@ mod tests {
             "vault",
             vec![TIrColumn {
                 name: "secret".into(),
-                ty: ColType::Encrypted {
-                    of: Box::new(ColType::Text),
-                },
+                ty: ColType::Text,
                 nullable: None,
                 default: None,
                 unique: None,
-                value_format: None,
                 references: None,
                 id_prefix: None,
                 collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: Some(true),
                 generated: None,
                 identity: None,
             }],
@@ -13321,13 +13174,13 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None,
-                value_format: None,
                 references: None,
                 id_prefix: None,
                 collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             }],
@@ -13362,13 +13215,13 @@ mod tests {
                 nullable: Some(false),
                 default: None,
                 unique: None,
-                value_format: None,
                 references: None,
                 id_prefix: None,
                 collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             }],
@@ -13416,13 +13269,13 @@ mod tests {
                     value: crate::model::ir::IrScalar::Str(nasty.into()),
                 }),
                 unique: None,
-                value_format: None,
                 references: None,
                 id_prefix: None,
                 collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             }],
@@ -13602,9 +13455,8 @@ mod tests {
                     "app",
                     "vault",
                     "secret",
-                    &ColType::Encrypted {
-                        of: Box::new(ColType::Text),
-                    },
+                    &ColType::Text,
+                    Some(true),
                     None,
                     None,
                     None,
@@ -13616,7 +13468,7 @@ mod tests {
                 .expect("ir add_column_snapshot");
 
             // The differ's snapshot for the SAME field, via the SAME shared builder
-            // fed from a `t.encrypted(...)`-shaped descriptor (`encrypted: true` selects
+            // fed from an `.encrypted()`-shaped descriptor (`encrypted: true` selects
             // the kernel defaults - the shape `ir_column_to_field` emits).
             let desc = CollectionDescriptor {
                 name: "vault".into(),
@@ -13702,6 +13554,7 @@ columns = [
                 None,
                 None,
                 None,
+                None,
             )
             .expect_err("the explicit schema must select its malformed inject probe");
         assert!(
@@ -13715,6 +13568,7 @@ columns = [
                 "events",
                 "payload",
                 &ColType::Text,
+                None,
                 None,
                 None,
                 None,
@@ -13746,13 +13600,13 @@ columns = [
                 nullable: Some(false),
                 default: None,
                 unique: None,
-                value_format: None,
                 references: None,
                 id_prefix: None,
                 collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             }];
@@ -13842,13 +13696,13 @@ columns = [
                             kind: EmptyContainerKind::Object,
                         }),
                         unique: None,
-                        value_format: None,
                         references: None,
                         id_prefix: None,
                         collation: None,
                         case_sensitive: None,
                         vector_metric: None,
                         mask: None,
+                        encrypted: None,
                         generated: None,
                         identity: None,
                     },
@@ -13860,13 +13714,13 @@ columns = [
                             kind: EmptyContainerKind::Array,
                         }),
                         unique: None,
-                        value_format: None,
                         references: None,
                         id_prefix: None,
                         collation: None,
                         case_sensitive: None,
                         vector_metric: None,
                         mask: None,
+                        encrypted: None,
                         generated: None,
                         identity: None,
                     },
@@ -13878,13 +13732,13 @@ columns = [
                             kind: EmptyContainerKind::Array,
                         }),
                         unique: None,
-                        value_format: None,
                         references: None,
                         id_prefix: None,
                         collation: None,
                         case_sensitive: None,
                         vector_metric: None,
                         mask: None,
+                        encrypted: None,
                         generated: None,
                         identity: None,
                     },
@@ -13986,13 +13840,13 @@ columns = [
                     nullable: None,
                     default: Some(IrDefault::Json { value }),
                     unique: None,
-                    value_format: None,
                     references: None,
                     id_prefix: None,
                     collation: None,
                     case_sensitive: None,
                     vector_metric: None,
                     mask: None,
+                    encrypted: None,
                     generated: None,
                     identity: None,
                 }],
@@ -14060,13 +13914,13 @@ columns = [
                     nullable: None,
                     default: Some(IrDefault::Json { value }),
                     unique: None,
-                    value_format: None,
                     references: None,
                     id_prefix: None,
                     collation: None,
                     case_sensitive: None,
                     vector_metric: None,
                     mask: None,
+                    encrypted: None,
                     generated: None,
                     identity: None,
                 }],
@@ -14130,13 +13984,13 @@ columns = [
                     nullable: None,
                     default: Some(synth_default(crate::model::expr::SynthFn::Now)),
                     unique: None,
-                    value_format: None,
                     references: None,
                     id_prefix: None,
                     collation: None,
                     case_sensitive: None,
                     vector_metric: None,
                     mask: None,
+                    encrypted: None,
                     generated: None,
                     identity: None,
                 }],
@@ -14181,10 +14035,10 @@ columns = [
                 ty: ColType::Uuid,
                 nullable: Some(false),
                 default: Some(uuid_v4_default()),
-                value_format: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
                 schema: None,
@@ -14224,10 +14078,10 @@ columns = [
                 default: Some(IrDefault::Literal {
                     value: crate::model::ir::IrScalar::Str("x".into()),
                 }),
-                value_format: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
                 schema: None,
@@ -14794,13 +14648,13 @@ columns = [
                 nullable: Some(false),
                 default: None,
                 unique: None,
-                value_format: None,
                 references: None,
                 id_prefix: None,
                 collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             }],
@@ -14871,13 +14725,13 @@ columns = [
                 nullable: Some(false),
                 default: None,
                 unique: None,
-                value_format: None,
                 references: None,
                 id_prefix: None,
                 collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             }],
@@ -14922,13 +14776,13 @@ columns = [
                 nullable: None,
                 default: None,
                 unique: None,
-                value_format: None,
                 references: None,
                 id_prefix: None,
                 collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             }],
@@ -14941,13 +14795,13 @@ columns = [
                 nullable: None,
                 default: None,
                 unique: None,
-                value_format: None,
                 references: None,
                 id_prefix: None,
                 collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             }],
@@ -15427,13 +15281,13 @@ columns = [
                 nullable: Some(false),
                 default: None,
                 unique: None,
-                value_format: None,
                 references: None,
                 id_prefix: None,
                 collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             }],

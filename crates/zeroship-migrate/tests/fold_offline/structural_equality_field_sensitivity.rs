@@ -41,7 +41,7 @@ use crate::support::field_probes::{
 use zeroship_migrate::model::schema_model;
 use zeroship_migrate::{
     ColumnCollationSnapshot, ColumnSnapshot, GeneratedColumnSnapshot, GeneratedKindSnapshot,
-    IdDefaultSnapshot, IdentityCol, IndexSortOrder, TableStrictness, ValueFormat,
+    IdDefaultSnapshot, IdentityCol, IndexSortOrder, TableStrictness,
 };
 
 /// Run the property: every declared field must change `==`.
@@ -81,7 +81,7 @@ fn fields_invisible_to_equality<T: Clone + PartialEq + std::fmt::Debug>(
 
 /// Every `ColumnSnapshot` field that can differ while `==` reports EQUAL.
 ///
-/// MEASURED, not asserted from the impl body. Fourteen of twenty-four. Each one is
+/// MEASURED, not asserted from the impl body. Fourteen of twenty-three. Each one is
 /// individually defensible - every entry has a reason in its own field doc - and the
 /// point of section D is that being individually defensible is not the same as being
 /// manageable, because the list is consulted implicitly by every consumer of column
@@ -125,7 +125,6 @@ fn model_column_probes() -> ProbeSet<schema_model::Column> {
         generated,
         generated_kind,
         identity,
-        value_format,
         id_default,
         case_sensitive,
         unbounded_text,
@@ -163,9 +162,6 @@ fn model_column_probes() -> ProbeSet<schema_model::Column> {
     });
     set.probe("Column::identity", identity, |c| {
         c.identity = Some(IdentityCol { always: true });
-    });
-    set.probe("Column::value_format", value_format, |c| {
-        c.value_format = Some(ValueFormat::Ulid);
     });
     set.probe("Column::id_default", id_default, |c| {
         c.id_default = Some(IdDefaultSnapshot::Absent);
@@ -366,11 +362,11 @@ fn base_constraint() -> schema_model::Constraint {
 /// the reason section D exists. It is pinned in BOTH directions so it cannot drift: a
 /// field added to `ColumnSnapshot::eq` fails here, and so does a field removed from it.
 #[test]
-fn fourteen_of_twenty_four_column_snapshot_fields_are_invisible_to_equality_today() {
+fn fourteen_of_twenty_three_column_snapshot_fields_are_invisible_to_equality_today() {
     let set = field_probes::column_snapshot_probes();
     assert_eq!(
         set.probes.len(),
-        24,
+        23,
         "the `ColumnSnapshot` probe list drifted from the type's field count"
     );
 
@@ -394,7 +390,7 @@ fn every_field_of_the_neutral_column_is_compared_by_default() {
     let set = model_column_probes();
     assert_eq!(
         set.probes.len(),
-        19,
+        18,
         "the `Column` probe list drifted from the type's field count"
     );
 

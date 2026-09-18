@@ -163,7 +163,11 @@ function renderBuilderChain(def: RuntimeFieldDef): string {
 
   let chain: string;
   if (hasEncrypted) {
-    chain = renderEncryptedBase(def);
+    chain = `${renderEncryptedPlaintextBase(def)}.encrypted()`;
+  } else if (typeof def.idPrefix === "string") {
+    // A typed-id column round-trips as `t.typedId(prefix)`; its bounded
+    // `string(36)` storage is implied by the factory.
+    chain = renderIdBase(def);
   } else if (typeof def.refTarget === "string" && def.refTarget.length > 0) {
     // Reference metadata is independent of the storage type.
     chain = renderRefBase(def);
@@ -241,7 +245,7 @@ function renderBuilderChain(def: RuntimeFieldDef): string {
     const kind = typeof def.mask.kind === "string" ? def.mask.kind : "full";
     const classification =
       typeof def.mask.classification === "string" ? def.mask.classification : "pii";
-    // `t.encrypted()` stamps the fail-safe `{ full, pii }` auto-mask at builder
+    // `.encrypted()` applies the fail-safe `{ full, pii }` auto-mask at seal
     // time, so re-emitting exactly that on an encrypted column is redundant
     // noise. An OVERRIDING mask on an encrypted column is still rendered.
     const isEncryptedAutoMask = hasEncrypted && kind === "full" && classification === "pii";
@@ -256,13 +260,26 @@ function renderBuilderChain(def: RuntimeFieldDef): string {
   return chain;
 }
 
-/** Render the logical plaintext type; the host owns project-key selection. */
-function renderEncryptedBase(def: RuntimeFieldDef): string {
+/** The plaintext builder an `.encrypted()` column chains off; the caller appends
+ *  the `.encrypted()` suffix. Refuses a token the builder cannot encrypt. */
+function renderEncryptedPlaintextBase(def: RuntimeFieldDef): string {
   switch (def.type) {
-    case "string": return "t.encrypted()";
-    case "number": return `t.encrypted({ of: ${renderNumberBase(def)} })`;
-    case "bytes": return "t.encrypted({ of: t.bytes() })";
-    default: throw new Error(`Unsupported encrypted field type: ${def.type}`);
+    case "string":
+    case "text":
+      return "t.string()";
+    case "int":
+    case "integer":
+      return "t.int()";
+    case "bigInt":
+    case "bigint":
+      return "t.bigInt()";
+    case "number":
+    case "float":
+      return renderNumberBase(def);
+    case "bytes":
+      return "t.bytes()";
+    default:
+      throw new Error(`Unsupported encrypted field type: ${def.type}`);
   }
 }
 

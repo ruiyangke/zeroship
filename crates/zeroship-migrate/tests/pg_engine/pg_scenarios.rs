@@ -586,8 +586,8 @@ async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
             {"name":"id","type":"bigInt","nullable":false},
             {"name":"uuid4","type":"uuid"},
             {"name":"uuid7","type":"uuid"},
-            {"name":"type_id","type":"text","valueFormat":{"typeId":{"prefix":"order"}}},
-            {"name":"ulid","type":"text","valueFormat":"ulid"},
+            {"name":"type_id","type":{"string":{"length":36}},"idPrefix":"order"},
+            {"name":"ulid","type":"text","type":"text"},
             {"name":"plain_text","type":"text"}
           ],"primaryKey":["id"]}
         ]}"#,

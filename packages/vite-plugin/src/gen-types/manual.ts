@@ -268,6 +268,10 @@ export function fieldDefToDto(
   // `id` prefix.
   if (def.idPrefix !== undefined) dto.idPrefix = def.idPrefix;
 
+  // Bounded string width: `string` is a two-type token, and without this the
+  // descriptor loses the bound and degrades a typed id to unbounded text.
+  if (def.maxLength !== undefined) dto.maxLength = def.maxLength;
+
   // `vector` facets.
   if (def.vectorDims !== undefined) dto.vectorDims = def.vectorDims;
   if (def.vectorMetric !== undefined) dto.vectorMetric = def.vectorMetric;

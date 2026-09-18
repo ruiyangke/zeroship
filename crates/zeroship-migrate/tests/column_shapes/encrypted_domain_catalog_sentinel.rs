@@ -1,16 +1,17 @@
 //! **An encrypted DOMAIN column's catalog sentinel must name the domain's BASE type.**
 //!
-//! A `t.encrypted({ of: t.domain("positive_number") })` column stores ciphertext in
+//! A `t.domain("positive_number").encrypted()` column stores ciphertext in
 //! `BYTEA`/`BLOB`, and the ONLY record of what the plaintext is shaped like is the
 //! `zero-migrate:enc:<wraps>` sentinel the lower stamps into the catalog:
 //!
 //! ```text
-//!   postgres  "amount" bytea /* zero-migrate:enc:string */ NOT NULL
-//!             COMMENT ON COLUMN "app"."amounts"."amount" IS 'zero-migrate:enc:…:string'
-//!   sqlite    "amount" BLOB  /* zero-migrate:enc:string */ NOT NULL
+//!   postgres  "amount" bytea /* zero-migrate:enc:number */ NOT NULL
+//!             COMMENT ON COLUMN "app"."amounts"."amount" IS 'zero-migrate:enc:…:number'
+//!   sqlite    "amount" BLOB  /* zero-migrate:enc:number */ NOT NULL
 //! ```
 //!
-//! `string` — for a domain over `int`. `wraps` is not decoration: it selects which
+//! The sentinel must name the domain's BASE type. The defect was `string` for a domain
+//! over `int`. `wraps` is not decoration: it selects which
 //! type-checker validates the plaintext before the encrypt pass swaps bytes in
 //! (`schema::diff::EncryptionMeta::wraps`), so every write to that column ran the text
 //! validator over an integer, and every read decoded it back as text.
@@ -65,7 +66,7 @@ fn create_ops(base: serde_json::Value, inner: serde_json::Value) -> Vec<Op> {
             "op": "createTable",
             "name": "amounts",
             "columns": [
-                { "name": "amount", "type": { "encrypted": { "of": inner } }, "nullable": false },
+                { "name": "amount", "type": inner, "encrypted": true, "nullable": false },
             ],
             "primaryKey": null,
         },
@@ -88,7 +89,8 @@ fn add_column_ops(base: serde_json::Value, inner: serde_json::Value) -> Vec<Op> 
             "op": "addColumn",
             "table": "amounts",
             "column": "amount",
-            "type": { "encrypted": { "of": inner } },
+            "type": inner,
+            "encrypted": true,
             "nullable": true,
         },
     ]))
@@ -250,7 +252,8 @@ fn an_undeclared_domain_leaves_the_sentinel_unchanged() {
             "name": "amounts",
             "columns": [{
                 "name": "amount",
-                "type": { "encrypted": { "of": { "domain": { "name": "never_declared" } } } },
+                "type": { "domain": { "name": "never_declared" } },
+                "encrypted": true,
                 "nullable": false,
             }],
             "primaryKey": null,
@@ -316,7 +319,8 @@ fn an_unrelated_rename_carries_the_encrypted_domain_columns_sentinel_unchanged()
                 "columns": [
                     {
                         "name": "amount",
-                        "type": { "encrypted": { "of": { "domain": { "name": "positive_number" } } } },
+                        "type": { "domain": { "name": "positive_number" } },
+                        "encrypted": true,
                         "nullable": false,
                     },
                     { "name": "note", "type": "text", "nullable": false },
@@ -450,7 +454,7 @@ fn the_lower_the_snapshot_fold_and_the_field_defs_agree_on_plaintext_type() {
         .expect("field-def fold succeeds");
         let amounts = defs.get("amounts").expect("amounts in the field defs");
         assert_eq!(
-            amounts["amount"]["type"], "number",
+            amounts["amount"]["type"], "int",
             "{label}: field-def replay disagrees: {amounts}"
         );
         assert_eq!(

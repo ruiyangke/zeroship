@@ -74,7 +74,6 @@ fn col(name: &str, dtype: &str, nullable: bool) -> ColumnSnapshot {
         generated_kind: None,
         identity: None,
         rowid_alias: false,
-        value_format: None,
         catalog_uuid_format_check: false,
         id_default: None,
         expression_default: None,

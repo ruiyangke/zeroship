@@ -12,7 +12,7 @@
 //   t.json(), t.text().references(target, column), t.vector({ dimensions }), t.geoPoint(), t.text() (was t.string —
 //   alias removed), t.int() (t.integer deleted), t.bigInt(),
 //   t.double() (was t.float),
-//   t.encrypted({of}), and .unique().
+//   t.text().encrypted(), and .unique().
 import { table, t, decimal, now } from "@zeroship/migrate";
 
 export default {
@@ -35,7 +35,7 @@ export default {
         hits: t.int().required().default(0),
         big_hits: t.bigInt(),
         ratio: t.double(),
-        secret: t.encrypted({ of: t.text() }),
+        secret: t.text().encrypted(),
       },
     });
 

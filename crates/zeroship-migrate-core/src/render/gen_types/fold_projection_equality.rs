@@ -506,7 +506,7 @@ fn the_gate_has_the_shape_it_claims() {
 /// `crates/zeroship-migrate/tests/gen_types/gen_types_authoring_tables_from_the_fold.rs` and
 /// `crates/zeroship-migrate/tests/gen_types/gen_types_field_defs_from_the_fold.rs`, whose goldens were captured from the
 /// walkers.
-const EQUAL_COMPARISONS: usize = 683;
+const EQUAL_COMPARISONS: usize = 680;
 /// Comparisons whose two texts differ. Every one is attributed in [`DIVERGENCES`].
 ///
 /// Was 12, then 6, and now ZERO - and zero here is NOT "the divergences were fixed".
@@ -523,7 +523,7 @@ const DIFFERING_COMPARISONS: usize = 0;
 /// postgres-only `dialectal_ops` fixture are the prefixes that trade.
 /// [`FOLD_REFUSAL_PREFIXES`] measures the same set without reference to a projection
 /// leg, so the two must agree.
-const BOTH_REFUSED: usize = 196;
+const BOTH_REFUSED: usize = 199;
 /// Prefixes the fold refuses and a walker answers about.
 ///
 /// ZERO. The authoring-table walker was the last one in this gate with no coherence
@@ -561,7 +561,6 @@ fn column_field_differences(mine: &ColumnSnapshot, theirs: &ColumnSnapshot) -> V
         generated_kind,
         identity,
         rowid_alias,
-        value_format,
         catalog_uuid_format_check,
         id_default,
         expression_default,
@@ -595,7 +594,6 @@ fn column_field_differences(mine: &ColumnSnapshot, theirs: &ColumnSnapshot) -> V
     check("generated_kind", *generated_kind == theirs.generated_kind);
     check("identity", *identity == theirs.identity);
     check("rowid_alias", *rowid_alias == theirs.rowid_alias);
-    check("value_format", *value_format == theirs.value_format);
     check(
         "catalog_uuid_format_check",
         *catalog_uuid_format_check == theirs.catalog_uuid_format_check,
@@ -964,7 +962,7 @@ fn the_folds_refusal_set_is_the_catalog_replays_refusal_set() {
 /// Moves against [`EQUAL_COMPARISONS`] when the dialectal coverage rule changes: the
 /// SQLite and MySQL target attempts over the postgres-only `dialectal_ops` fixture are
 /// the prefixes that trade between the two. Check their SUM before re-pinning either.
-const FOLD_REFUSAL_PREFIXES: usize = 196;
+const FOLD_REFUSAL_PREFIXES: usize = 199;
 
 // ---------------------------------------------------------------------------
 // The evidence behind the two recorded divergences

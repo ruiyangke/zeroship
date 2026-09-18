@@ -29,7 +29,7 @@ import { table, t } from "@zeroship/migrate";
 //
 // UNLIKE examples/db-e2e, this example's schema uses no encrypted columns, no
 // vector and no geoPoint, so all of it IS representable in
-// a migration. db-e2e stops short at `t.encrypted`, which cannot carry a mode
+// a migration. db-e2e stops short at `.encrypted()`, which cannot carry a mode
 // or a keyId -- see the comment in its migration.
 export default {
   name: "create_db_chat",

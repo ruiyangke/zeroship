@@ -61,8 +61,8 @@ const CORPUS_IR: &str = r#"{
       {"name":"amount","type":{"decimal":{"precision":12,"scale":2}},"nullable":true},
       {"name":"score","type":"double","nullable":true},
       {"name":"done","type":"boolean","nullable":false},
-      {"name":"sku_code","type":"text","nullable":true,
-       "valueFormat":{"typeId":{"prefix":"sku"}}}
+      {"name":"sku_code","type":{"string":{"length":36}},"nullable":true,
+       "idPrefix":"sku"}
     ],"primaryKey":["id"],"indexes":[
       {"name":"sm_mysql_main_title_idx","columns":[{"kind":"column","name":"title"}]}
     ]}

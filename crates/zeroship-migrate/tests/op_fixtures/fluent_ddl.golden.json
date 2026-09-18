@@ -155,11 +155,8 @@
         },
         {
           "name": "secret",
-          "type": {
-            "encrypted": {
-              "of": "text"
-            }
-          }
+          "type": "text",
+          "encrypted": true
         }
       ],
       "primaryKey": [

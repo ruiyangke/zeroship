@@ -46,7 +46,6 @@ export {
   minValue,
   maxValue,
   t,
-  ids,
   perRow,
   // value-position case helper
   cCase,

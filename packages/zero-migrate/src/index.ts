@@ -78,8 +78,6 @@ export {
   raw,
   // the immutable fluent column-type lexicon
   t,
-  // validated textual ID formats (storage + validation only)
-  ids,
   // apply-engine ID generators evaluated once for every backfilled row
   perRow,
   // the shared `db` lexicon bridge: lift a live-schema
@@ -112,7 +110,6 @@ export type { DbSchemaField, DbFieldType } from "./db-lexicon.js";
 // fields without depending on `@zeroship/db`.
 export { t as dbType, TypeBuilder as DbTypeBuilder } from "@zeroship/schema";
 export type { FieldDef, TypeName } from "@zeroship/schema";
-export type { EncryptedFieldOpts as EncryptedOptions } from "@zeroship/schema";
 
 // Public declaration-merging seams used by the separately installed vendor
 // attribute packages. These must be exported from the package root: their
@@ -126,7 +123,6 @@ export type {
   // authoring types
   ColumnDef,
   TypeLexicon,
-  IdFormats,
   PerRowGeneratorValue,
   PerRowGenerators,
   ExprBuilder,
@@ -248,7 +244,6 @@ export type {
   Classification,
   ColumnCollation,
   VectorMetric,
-  ValueFormat,
   PerRowGenerator,
   TypeIdOptions,
   TextOptions,

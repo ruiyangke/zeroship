@@ -84,9 +84,9 @@ export default {
   name: "create_secrets",
   schema() {
     table("secrets").create({ columns: {
-      message: t.encrypted({ of: t.text() }),
-      amount: t.encrypted({ of: t.int() }),
-      payload: t.encrypted({ of: t.bytes() }),
+      message: t.text().encrypted(),
+      amount: t.int().encrypted(),
+      payload: t.bytes().encrypted(),
     }});
   },
 };`;
@@ -95,7 +95,7 @@ export default {
   try {
     await genTypesFromMigrations(join(fx.root, "migrations"), outDir, {});
     const descriptor = JSON.parse(await fs.readFile(join(outDir, RUNTIME_DESCRIPTOR_FILE), "utf8"));
-    for (const [field, type] of [["message", "string"], ["amount", "number"], ["payload", "bytes"]]) {
+    for (const [field, type] of [["message", "string"], ["amount", "int"], ["payload", "bytes"]]) {
       const def = descriptor.collections.secrets.fields[field];
       assert.equal(def.type, type);
       assert.equal(def.encrypted, true);
@@ -103,9 +103,9 @@ export default {
       assert.equal(def.sortable, false);
     }
     const source = await fs.readFile(join(outDir, ENV_DB_FILE), "utf8");
-    assert.match(source, /message: t\.encrypted\(\)/);
-    assert.match(source, /amount: t\.encrypted\(\{ of: t\.number\(\) \}\)/);
-    assert.match(source, /payload: t\.encrypted\(\{ of: t\.bytes\(\) \}\)/);
+    assert.match(source, /message: t\.string\(\)\.encrypted\(\)/);
+    assert.match(source, /amount: t\.int\(\)\.encrypted\(\)/);
+    assert.match(source, /payload: t\.bytes\(\)\.encrypted\(\)/);
   } finally {
     await fx.cleanup();
   }

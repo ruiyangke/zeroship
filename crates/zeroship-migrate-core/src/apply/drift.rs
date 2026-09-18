@@ -866,16 +866,6 @@ fn format_identity(column: &ColumnSnapshot) -> &'static str {
     }
 }
 
-fn format_value_format(value_format: Option<&crate::model::ir::ValueFormat>) -> String {
-    match value_format {
-        None => String::new(),
-        Some(crate::model::ir::ValueFormat::TypeId { prefix }) => {
-            format!("typeId({prefix})")
-        }
-        Some(crate::model::ir::ValueFormat::Ulid) => "ulid".to_string(),
-    }
-}
-
 fn format_id_default(default: Option<&crate::model::snapshot::IdDefaultSnapshot>) -> String {
     use crate::model::snapshot::IdDefaultSnapshot;
     match default {
@@ -1076,12 +1066,6 @@ fn diff_attrs(
                     format_generated_kind(actual_generated),
                 );
             }
-            push(
-                &obj,
-                "format",
-                &format_value_format(ec.value_format.as_ref()),
-                &format_value_format(ac.value_format.as_ref()),
-            );
             push(
                 &obj,
                 "case_sensitive",
