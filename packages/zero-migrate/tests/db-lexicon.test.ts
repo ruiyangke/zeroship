@@ -105,19 +105,15 @@ test("every storage-backed db token reduces to a neutral ColType", () => {
   assert.equal(colTypeFromDbField(asField("float")), "double");
 });
 
-test("a non-storage db type (object/union/array/...) is a hard structured boundary, never silent", () => {
-  for (const make of [
-    () => dbT.object({ a: dbT.string() }),
-    () => dbT.array(dbT.string()),
-    () => dbT.literal("x"),
-  ]) {
-    assert.throws(
-      () => colTypeFromDbField(make()),
-      (e: unknown) => {
-        assert.ok(e instanceof UnsupportedColTypeError, "is the structured boundary error");
-        assert.equal((e as UnsupportedColTypeError).code, "COLTYPE_UNSUPPORTED");
-        return true;
-      },
-    );
-  }
+test("a portable JSON array stays a hard structured boundary, never silent", () => {
+  // `t.object`/`t.literal`/`t.union` now lower (structured-types.test.ts). A
+  // JSON-stored array has no neutral single-column ColType, so it still refuses.
+  assert.throws(
+    () => colTypeFromDbField(dbT.array(dbT.string())),
+    (e: unknown) => {
+      assert.ok(e instanceof UnsupportedColTypeError, "is the structured boundary error");
+      assert.equal((e as UnsupportedColTypeError).code, "COLTYPE_UNSUPPORTED");
+      return true;
+    },
+  );
 });

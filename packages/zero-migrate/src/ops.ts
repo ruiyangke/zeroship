@@ -1201,8 +1201,10 @@ function isColumnDef(x: unknown): x is ColumnDefBuilder {
  *  `sequence(...).create({ as })`, `.column().setType()`) reduces its argument to
  *  that `ColType` too. So
  *  the choice at these positions is refuse or silently drop, and a dropped facet
- *  is a column that reads as referencing or collated in the migration source and
- *  is neither in the database. */
+ *  is a column that reads as referencing, collated, or literal-constrained in the
+ *  migration source and is neither in the database. A `t.union`/`t.literal`
+ *  ColumnDef is the same: its flat columns and CHECK constraints live on the
+ *  create-table op. */
 function rejectCreateTableOnlyFacets(def: ColumnDefBuilder, where: string): void {
   if (def._reference !== undefined) {
     throw structuredError(
@@ -1214,6 +1216,19 @@ function rejectCreateTableOnlyFacets(def: ColumnDefBuilder, where: string): void
     throw structuredError(
       "OP_INVALID",
       `${where} cannot use a .collation() ColumnDef; column collations are supported only in table(...).create({ columns })`,
+    );
+  }
+  const type = def.toFieldDef().type;
+  if (type === "union") {
+    throw structuredError(
+      "OP_INVALID",
+      `${where} cannot use a t.union(...) ColumnDef; its flat columns and CHECK constraints are supported only in table(...).create({ columns })`,
+    );
+  }
+  if (type === "literal") {
+    throw structuredError(
+      "OP_INVALID",
+      `${where} cannot use a t.literal(...) ColumnDef; its equality CHECK is supported only in table(...).create({ columns })`,
     );
   }
 }
@@ -1833,6 +1848,12 @@ export const t: TypeLexicon = {
         "t.array(item): an encrypted element is not supported; encrypt the array column or store plaintext elements",
       );
     }
+    if (isColumnDef(item) && ["object", "union", "literal"].includes(item.toFieldDef().type)) {
+      throw structuredError(
+        "OP_INVALID",
+        `t.array(item): a ${item.toFieldDef().type} element has no native array storage; model the collection as its own table or store the payload as JSON`,
+      );
+    }
     return new ColumnDefBuilder({ type: "array", items: "string", arrayStorage: "native" });
   },
   numeric: (opts = {}) => {
@@ -2191,6 +2212,13 @@ export function fromDb(field: DbSchemaField): ColumnDefType {
   if (fd.enumSchema !== undefined) def.enumSchema = fd.enumSchema;
   if (fd.domainName !== undefined) def.domainName = fd.domainName;
   if (fd.domainSchema !== undefined) def.domainSchema = fd.domainSchema;
+  // Structured shapes: the recorder needs the nested shape, the literal value
+  // and the union's variants/discriminator to render JSON columns and the
+  // CHECK constraints the structured types imply.
+  if (fd.shape !== undefined) def.shape = fd.shape;
+  if (fd.literalValue !== undefined) def.literalValue = fd.literalValue;
+  if (fd.variants !== undefined) def.variants = fd.variants;
+  if (fd.discriminator !== undefined) def.discriminator = fd.discriminator;
   return new ColumnDefBuilder(def);
 }
 
@@ -3568,6 +3596,170 @@ const CREATE_TABLE_KEYS = [
   "schema",
 ] as const;
 
+/** The primitive `FieldDef.type` a union discriminator literal lowers to. */
+function discriminatorFieldType(value: unknown): FieldDef["type"] {
+  switch (typeof value) {
+    case "string":
+      return "string";
+    case "number":
+      return "number";
+    case "boolean":
+      return "boolean";
+    default:
+      throw structuredError(
+        "OP_INVALID",
+        "a union discriminator literal must be a string, number, or boolean",
+      );
+  }
+}
+
+/** NAMEDATALEN-safe constraint-name fragment: alphanumerics and underscore only. */
+function constraintNameFragment(value: unknown): string {
+  const fragment = String(value).replace(/[^A-Za-z0-9_]/g, "_");
+  return fragment.length === 0 ? "x" : fragment;
+}
+
+function literalColumnCheck(table: string, column: string, value: unknown): Node {
+  return compact({
+    name: `${table}_${column}_lit_chk`,
+    kind: {
+      kind: "check",
+      expr: {
+        node: "binOp",
+        op: "eq",
+        lhs: { node: "colRef", name: column },
+        rhs: { node: "literal", value: toIrScalar(value) },
+      },
+    },
+  });
+}
+
+/** Flat-expand a `t.union(...)` row shape into the sibling columns the db SDK
+ *  documents: one nullable column per variant-wide field, the discriminator's
+ *  `IN (...)` CHECK, and one per-variant NOT NULL CHECK. */
+function unionFieldColumns(
+  table: string,
+  unionName: string,
+  fd: FieldDef,
+): { columns: Node[]; constraints: Node[]; names: string[] } {
+  if (fd.type !== "union" || fd.variants === undefined || fd.discriminator === undefined) {
+    throw structuredError("OP_INVALID", `create column "${unionName}" is not a well-formed t.union(...)`);
+  }
+  const discriminator = fd.discriminator;
+  const variants = fd.variants;
+  if (variants.length < 2) {
+    throw structuredError("OP_INVALID", `union "${unionName}" requires at least 2 variants`);
+  }
+  const discriminatorValues: unknown[] = [];
+  let discriminatorType: FieldDef["type"] = "string";
+  for (let i = 0; i < variants.length; i++) {
+    const literal = variants[i][discriminator];
+    if (literal === undefined || literal.type !== "literal") {
+      throw structuredError(
+        "OP_INVALID",
+        `union "${unionName}" variant #${i} is missing discriminator literal "${discriminator}"`,
+      );
+    }
+    const type = discriminatorFieldType(literal.literalValue);
+    if (i === 0) {
+      discriminatorType = type;
+    } else if (discriminatorType !== type) {
+      throw structuredError(
+        "OP_INVALID",
+        `union "${unionName}" discriminator literals must share one primitive type`,
+      );
+    }
+    discriminatorValues.push(literal.literalValue);
+  }
+  const seen = new Set<string>();
+  for (const value of discriminatorValues) {
+    const tag = typeof value + ":" + String(value);
+    if (seen.has(tag)) {
+      throw structuredError("OP_INVALID", `union "${unionName}" discriminator literals must be distinct`);
+    }
+    seen.add(tag);
+  }
+
+  const columns: Node[] = [
+    new ColumnDefBuilder({ type: discriminatorType, required: true }).__toIrColumn(discriminator),
+  ];
+  const constraints: Node[] = [
+    compact({
+      name: `${table}_${discriminator}_enum_chk`,
+      kind: {
+        kind: "check",
+        expr: {
+          node: "inList",
+          expr: { node: "colRef", name: discriminator },
+          elems: discriminatorValues.map(toIrScalar),
+          negated: false,
+        },
+      },
+    }),
+  ];
+  const names: string[] = [discriminator];
+
+  const fieldTypes = new Map<string, FieldDef["type"]>();
+  for (const variant of variants) {
+    for (const [field, fieldDef] of Object.entries(variant)) {
+      if (field === discriminator) continue;
+      const prior = fieldTypes.get(field);
+      if (prior !== undefined) {
+        if (prior !== fieldDef.type) {
+          throw structuredError(
+            "OP_INVALID",
+            `union "${unionName}" field "${field}" has incompatible types across variants`,
+          );
+        }
+        continue;
+      }
+      fieldTypes.set(field, fieldDef.type);
+      names.push(field);
+      columns.push(new ColumnDefBuilder({ ...fieldDef, required: false }).__toIrColumn(field));
+      if (fieldDef.type === "literal") {
+        constraints.push(literalColumnCheck(table, field, fieldDef.literalValue));
+      }
+    }
+  }
+
+  for (let i = 0; i < variants.length; i++) {
+    const required = Object.entries(variants[i])
+      .filter(([field, fieldDef]) => field !== discriminator && fieldDef.required === true)
+      .map(([field]) => field);
+    if (required.length === 0) continue;
+    let notNull: Node = { node: "unaryOp", op: "isNotNull", operand: { node: "colRef", name: required[0] } };
+    for (let j = 1; j < required.length; j++) {
+      notNull = {
+        node: "binOp",
+        op: "and",
+        lhs: notNull,
+        rhs: { node: "unaryOp", op: "isNotNull", operand: { node: "colRef", name: required[j] } },
+      };
+    }
+    constraints.push(
+      compact({
+        name: `${table}_${discriminator}_${constraintNameFragment(discriminatorValues[i])}_chk`,
+        kind: {
+          kind: "check",
+          expr: {
+            node: "binOp",
+            op: "or",
+            lhs: {
+              node: "binOp",
+              op: "ne",
+              lhs: { node: "colRef", name: discriminator },
+              rhs: { node: "literal", value: toIrScalar(discriminatorValues[i]) },
+            },
+            rhs: notNull,
+          },
+        },
+      }),
+    );
+  }
+
+  return { columns, constraints, names };
+}
+
 function recordCreateTable(
   name: string,
   args: CreateTableArgs,
@@ -3582,11 +3774,34 @@ function recordCreateTable(
   const pkCols: string[] = [];
   const columnNames = Object.keys(args.columns);
   const relations = new Set<string>();
+  const emittedColumns = new Set<string>();
 
   for (const colName of columnNames) {
     const def = args.columns[colName];
     if (!isColumnDef(def)) {
       throw structuredError("OP_INVALID", `create column "${colName}" must be a t.* ColumnDef`);
+    }
+    const fd = def.toFieldDef();
+    if (fd.type === "union") {
+      if (def._primaryKey || def._unique || def._reference !== undefined) {
+        throw structuredError(
+          "OP_INVALID",
+          `create column "${colName}" is a t.union(...); a union is a row shape and cannot be a primary key, unique, or reference column`,
+        );
+      }
+      const expanded = unionFieldColumns(name, colName, fd);
+      for (const emitted of expanded.names) {
+        if (emittedColumns.has(emitted)) {
+          throw structuredError(
+            "OP_INVALID",
+            `create table "${name}" union "${colName}" expands to column "${emitted}", which is already declared`,
+          );
+        }
+        emittedColumns.add(emitted);
+      }
+      cols.push(...expanded.columns);
+      constraints.push(...expanded.constraints);
+      continue;
     }
     const relation = def._reference?.relation;
     if (relation !== undefined) {
@@ -3595,8 +3810,18 @@ function recordCreateTable(
       }
       relations.add(relation);
     }
+    if (emittedColumns.has(colName)) {
+      throw structuredError(
+        "OP_INVALID",
+        `create table "${name}" column "${colName}" collides with a column a union expansion already declared`,
+      );
+    }
+    emittedColumns.add(colName);
     cols.push(def.__toIrColumn(colName));
     if (def._primaryKey) pkCols.push(colName);
+    if (fd.type === "literal") {
+      constraints.push(literalColumnCheck(name, colName, fd.literalValue));
+    }
   }
 
   const tablePrimaryKey = args.primaryKey;
@@ -3683,7 +3908,7 @@ function recordCreateTable(
   if (args.foreignKeys !== undefined && !Array.isArray(args.foreignKeys)) {
     throw structuredError("OP_INVALID", `create table "${name}" foreignKeys must be an array`);
   }
-  const knownColumns = new Set(columnNames);
+  const knownColumns = new Set(emittedColumns);
   const foreignKeyNames = new Set<string>();
   for (const [position, fkSpec] of (args.foreignKeys ?? []).entries()) {
     requirePlainObject(fkSpec, `create table "${name}" foreignKeys[${position}]`);
