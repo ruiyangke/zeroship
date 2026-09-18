@@ -190,9 +190,9 @@ async fn validate_child_checkpoint(
                 && step
                     .error
                     .as_ref()
-                    .and_then(|error| error.get("name"))
+                    .and_then(|error| error.get("type"))
                     .and_then(Value::as_str)
-                    == Some("WorkflowTimeoutError"))
+                    == Some("ChildTimeoutError"))
         {
             return Err(invalid());
         }
@@ -204,7 +204,7 @@ async fn validate_child_checkpoint(
     Ok(())
 }
 
-fn validate_child_result(
+pub(super) fn validate_child_result(
     step: &StepCheckpoint,
     result: &continuations::HistoricalMember,
 ) -> Result<(), WorkflowServiceError> {
@@ -243,7 +243,7 @@ fn validate_child_result(
             }
         }
         "failed" | "cancelled" => {
-            let error = result.outcome.error.as_deref().map(decode::<Value>).transpose()?.unwrap_or_else(|| json!({"name":"ChildWorkflowError","message":"child workflow was cancelled"}));
+            let error = result.outcome.error.as_deref().map(decode::<Value>).transpose()?.unwrap_or_else(|| json!({"type":"ChildCancelledError","message":"child workflow was cancelled"}));
             if step.state != "failed"
                 || step.error.as_ref() != Some(&error)
                 || step.output.is_some()
@@ -892,10 +892,10 @@ pub(crate) async fn resolve(
                     );
                 }
             } else if state.is_terminal() {
-                error=Some(outcome.error.map(|value|decode(&value)).transpose()?.unwrap_or(json!({"name":"ChildWorkflowError","message":"child workflow was cancelled"})));
+                error=Some(outcome.error.map(|value|decode(&value)).transpose()?.unwrap_or(json!({"type":"ChildCancelledError","message":"child workflow was cancelled"})));
             } else if expired {
                 error = Some(
-                    json!({"name":"WorkflowTimeoutError","message":"child workflow wait expired"}),
+                    json!({"type":"ChildTimeoutError","message":"child workflow wait expired"}),
                 );
             }
         }
