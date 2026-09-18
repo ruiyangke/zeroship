@@ -237,19 +237,6 @@ export class StepTimeoutError extends Error {
   }
 }
 
-export class WorkflowTimeoutError extends Error {
-  readonly retryable = false;
-
-  static [Symbol.hasInstance](value: unknown): value is WorkflowTimeoutError {
-    return hasWorkflowErrorName(value, "WorkflowTimeoutError");
-  }
-
-  constructor(message = "workflow signal wait timed out") {
-    super(message);
-    this.name = "WorkflowTimeoutError";
-  }
-}
-
 export class ChildCancelledError extends Error {
   readonly retryable = false;
 
