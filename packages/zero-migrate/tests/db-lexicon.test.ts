@@ -18,9 +18,10 @@ import {
 import { __begin, __drain } from "../src/ops.js";
 
 /** The dialect-neutral `ColType` the migration `t.*` records for a column — read
- *  off the impl's `_type` brand (the exact field `.create()`/`.column().add()` lower). */
+ *  off the impl's derived `_colType` accessor (the exact field `.create()`/
+ *  `.column().add()` lower). */
 function migrateColType(def: unknown): unknown {
-  return (def as { _type: unknown })._type;
+  return (def as { _colType: unknown })._colType;
 }
 
 test("ONE lexicon: a db field reduces to the same ColType the migration t.* produces", () => {

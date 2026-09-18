@@ -796,7 +796,7 @@ export class TypeBuilder<
 
   readonly [TYPE_BUILDER_BRAND] = true;
 
-  private _def: FieldDef;
+  protected _def: FieldDef;
 
   static [Symbol.hasInstance](value: unknown): boolean {
     return Boolean(
@@ -817,9 +817,19 @@ export class TypeBuilder<
    * makes one call's facet appear on a sibling's builder, so a builder's
    * declared type can disagree with its runtime shape. Pinned by
    * `packages/db/tests/typebuilder-aliasing.test.ts`.
+   *
+   * Constructs through `this.constructor`, so a subclass (the migration
+   * recorder's column builder) survives every chain call.
    */
-  private clone(overrides: Partial<FieldDef>): this {
-    return new TypeBuilder<T, R, M, E, D, F>({ ...this._def, ...overrides }) as unknown as this;
+  protected clone(overrides: Partial<FieldDef>): this {
+    const Ctor = this.constructor as new (def: FieldDef) => this;
+    return new Ctor({ ...this._def, ...overrides });
+  }
+
+  /** A copy of this builder with a whole replacement definition. */
+  protected replaceDef(def: FieldDef): this {
+    const Ctor = this.constructor as new (def: FieldDef) => this;
+    return new Ctor({ ...def });
   }
 
   /** Attach generated-column metadata after the value-type builder chain. */
