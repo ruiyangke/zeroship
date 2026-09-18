@@ -44,10 +44,9 @@ export type DbFieldType = FieldDef["type"];
  *  the same `ColType` through {@link colTypeFromDbField}. */
 export type DbSchemaField = TypeBuilder<any, any, any, any, any> | FieldDef;
 
-/** A column type that has no portable dialect-neutral `ColType` (e.g. a JSON
- *  `array`, a nested `object`, a discriminated `union`, a `literal`). Mirrors the
- *  engine's hard structured boundary: a non-expressible type is a hard error, not
- *  a silent fallback (property A). */
+/** A column type that has no portable dialect-neutral `ColType` (the
+ *  JSON-stored `array`). Mirrors the engine's hard structured boundary: a
+ *  non-expressible type is a hard error, not a silent fallback (property A). */
 export class UnsupportedColTypeError extends Error {
   readonly code = "COLTYPE_UNSUPPORTED" as const;
   readonly dbType: string;
@@ -85,10 +84,12 @@ function toFieldDef(field: DbSchemaField): FieldDef {
  * `"int"`/`"number"` outputs are engine-internal descriptors — see the module
  * header.)
  *
- * Type-only / non-storage db field shapes (`object`/`union`/`literal`/`array`/
- * `actor`/`calendarDate`) that have no single portable column type throw
+ * Type-only db field shapes that have no single portable column type throw
  * {@link UnsupportedColTypeError} — a hard structured boundary, never a silent
- * fallback.
+ * fallback. The portable JSON `array` is the remaining member of that set;
+ * `object`/`literal`/`union` lower to their storage type (JSON, the literal's
+ * primitive, and a JSON image respectively) and the recorder renders the
+ * structured facets.
  */
 export function colTypeFromDbField(field: DbSchemaField): ColType {
   const def = toFieldDef(field);
@@ -200,15 +201,39 @@ export function colTypeFromDbField(field: DbSchemaField): ColType {
       }
       throw new UnsupportedColTypeError(def.type);
     }
-    // Non-storage / type-only db field shapes that have no single portable
-    // column type are a hard structured boundary (property A): they reduce to
-    // `UnsupportedColTypeError`, never a silent fallback. These ARE part of the
-    // db `FieldDef.type` space, so they must be enumerated explicitly
-    // — the `default` arm below is the exhaustiveness guard, not a catch-all.
+    // Structured db types lower to a storage `ColType`; their structure is not
+    // a dialect-neutral column type.
+    //
+    // A nested object is one JSON document: JSONB on PG, JSON text on
+    // SQLite/MySQL. The nested shape stays on the db `FieldDef` for runtime
+    // validation; the migration IR records the storage type only.
     case "object":
+      return "json";
+    // A literal is its underlying primitive, paired by the recorder with a
+    // `CHECK (col = <value>)` table constraint. The value's JS type selects the
+    // primitive, the same way the db DDL emitter reads `literalValue`.
+    case "literal": {
+      const value = def.literalValue;
+      switch (typeof value) {
+        case "string":
+          return "text";
+        case "number":
+          return "double";
+        case "boolean":
+          return "boolean";
+        default:
+          throw new TypeError(
+            "colTypeFromDbField: a literal field must carry a string, number, or boolean literalValue",
+          );
+      }
+    }
+    // A discriminated union is a ROW SHAPE, not a single column: the recorder
+    // flat-expands it into one nullable column per variant-wide field plus the
+    // discriminator (see `recordCreateTable`). A single-column image — a union
+    // nested inside a `t.object`, whose whole shape is stored as JSON — is a
+    // JSON document.
     case "union":
-    case "literal":
-      throw new UnsupportedColTypeError(def.type);
+      return "json";
     default: {
       // Exhaustiveness guard: every member of `DbFieldType` (= the db `TypeName`
       // single source) must be handled by an arm above. If the db type builder
