@@ -578,7 +578,8 @@ with a structured error, never silently drop:
 | `enum(name)` / `domain(name)` | references the named type object | refuse: standalone type objects are migration-authored |
 | `caseSensitive` | recorded facet | accept and ignore, same reasoning as collation |
 | `min`/`max`/`enum(values)`/`pattern` | runtime validation today; `CHECK` lowering per the follow-up above | runtime validation (unchanged) |
-| `mask`, `encrypted`, `unique`, `index`, `references`, `default`, `clientDefault`, `primaryKey`, `required` | supported | supported |
+| `mask`, `encrypted`, `unique`, `index`, `references`, `default`, `primaryKey`, `required` | supported | supported |
+| `clientDefault` | supported | **refuse** (decided in review): the descriptor crosses a JSON boundary into the engine, where a live factory cannot survive, so the runtime would silently lose the default. A declared schema carries only a database default via `.default(value)`. |
 
 The matrix is enforced at one point — descriptor emission — with one error
 code family (`SCHEMA_FACET_NOT_DECLARABLE` or similar), and the table above is
@@ -704,9 +705,11 @@ Sequenced as separate PRs, each self-contained, no aliases at any step:
 4. **`.default` / `.clientDefault` split.** Factory-function call sites move
    to `.clientDefault`; scalar and expression defaults stay.
 5. **`ColumnDefImpl` replacement.** migrate's recorder consumes the shared
-   class; the widen-`FieldDef` facets (`char`, `double`, `inet`, `uuid`,
-   `enum`, `domain`, `collation`, `generated`, `identity`, `caseSensitive`,
-   `idPrefix`) land with the refusal matrix enforced at descriptor
+   class; the widen-`FieldDef` facets (`char`, `double`, `inet`, `uuid`, `enum`,
+   `domain`, `collation`, `generated`, `identity`, `caseSensitive`, `idPrefix`,
+   `encrypted`, `vectorMetric`, plus the carriers `charLength`, `enumName`/
+   `enumSchema`, `domainName`/`domainSchema`, `refName` and `arrayStorage`) land
+   with the refusal matrix enforced at descriptor
    emission. This step also carries the engine half of structured types in
    migrations (`t.object`/`t.union`/`t.literal` rendering and differ support)
    — the one part of the merge that is new engine behavior rather than a

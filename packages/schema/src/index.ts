@@ -413,7 +413,31 @@ export type ArrayTypeDef = { type: "array"; items: PrimitiveTypeName };
  */
 export type DescriptorOnlyTypeName = "int" | "integer" | "bigInt" | "float";
 
-export type TypeName = PrimitiveTypeName | DescriptorOnlyTypeName | "array" | "ref" | "object" | "literal" | "union" | "vector" | "geoPoint" | "bytes" | "id";
+/**
+ * The DDL-only type tokens the migration lexicon contributes to the shared
+ * vocabulary. They name a physical column shape the runtime descriptor never
+ * authors (`char`, `double`, `inet`, `uuid`) or a standalone named type object
+ * the migration path declares (`enum`, `domain`). A `FieldDef` carrying one is
+ * expressible by the shared builder, and the migrate bridge lowers it to its
+ * neutral `ColType`; the runtime's own `t.*` factories keep their existing
+ * spellings where the two vocabularies overlap (`t.double()` still authors
+ * `"number"`).
+ */
+export type DdlTypeName = "char" | "double" | "inet" | "uuid" | "enum" | "domain";
+
+export type TypeName =
+  | PrimitiveTypeName
+  | DescriptorOnlyTypeName
+  | DdlTypeName
+  | "array"
+  | "ref"
+  | "object"
+  | "literal"
+  | "union"
+  | "vector"
+  | "geoPoint"
+  | "bytes"
+  | "id";
 
 /**
  * distance metric for `t.vector(...)` fields. The three
@@ -427,6 +451,25 @@ export type TypeName = PrimitiveTypeName | DescriptorOnlyTypeName | "array" | "r
  *   holds across all three metrics).
  */
 export type VectorMetric = "cosine" | "l2" | "innerProduct";
+
+/** The CLOSED per-column collation-INTENT lexicon. Mirrors the migrate IR's
+ *  `ColumnCollation` (`crate::model::ir`): the member is an INTENT, never a
+ *  dialect collation name, so only the engine knows whether `"bytewise"` is
+ *  PostgreSQL `COLLATE "C"`, SQLite `COLLATE BINARY` or MySQL `utf8mb4_0900_bin`. */
+export type ColumnCollation = "bytewise";
+
+/** A generated/computed column DDL facet. `expr` is the migration path's
+ *  immutable expression AST; the shared builder stores it opaquely and the
+ *  descriptor emitter refuses it on the declared-schema path. */
+export interface GeneratedColumnFacet {
+  readonly expr: unknown;
+  readonly stored: boolean;
+}
+
+/** A SQL identity column DDL facet. */
+export interface IdentityColumnFacet {
+  readonly always: boolean;
+}
 
 /** Union of all values that can serve as a field default. */
 export type FieldDefaultValue = string | number | boolean | Date | Uint8Array | null | PlainObject | string[] | number[] | boolean[];
@@ -648,6 +691,41 @@ export interface FieldDef {
   };
   /** Prefix used when this field declares a typedId assignment. */
   idPrefix?: string;
+  /**
+   * Fixed width of a `CHAR(N)` column. Present iff `type === "char"`; the
+   * bounded-width sibling of `maxLength` for the fixed-width token.
+   */
+  charLength?: number;
+  /** Name of a standalone ENUM type object. Present iff `type === "enum"`. */
+  enumName?: string;
+  /** Schema qualifying {@link enumName}. */
+  enumSchema?: string;
+  /** Name of a standalone DOMAIN type object. Present iff `type === "domain"`. */
+  domainName?: string;
+  /** Schema qualifying {@link domainName}. */
+  domainSchema?: string;
+  /**
+   * Native/JSON storage for a `type === "array"` field. Absent means the
+   * portable JSON storage; `"native"` is the opt-in vendor `text[]` path.
+   */
+  arrayStorage?: "json" | "native";
+  /** Optional FK constraint name; otherwise derived from table and field. */
+  refName?: string;
+  /**
+   * Purely physical comparison intent. The database enforces it on every query,
+   * so the runtime has no behaviour to drive; the descriptor emitter accepts and
+   * ignores it rather than dropping a runtime fact.
+   */
+  collation?: ColumnCollation;
+  /** Computed/generated column DDL facet. */
+  generated?: GeneratedColumnFacet;
+  /** SQL identity column DDL facet. */
+  identity?: IdentityColumnFacet;
+  /**
+   * Portable case-insensitive-text facet; only `false` is meaningful. Physical
+   * like {@link collation}, so the descriptor emitter accepts and ignores it.
+   */
+  caseSensitive?: boolean;
 
   /**
    * **Where this field physically lives** (runtime descriptor v2). See
@@ -882,6 +960,43 @@ export class TypeBuilder<
   /** For strings: a RegExp the value must match. */
   pattern(re: RegExp): this {
     return this.clone({ pattern: re });
+  }
+
+  /**
+   * Pin the column's comparison order to a closed intent token. Purely physical:
+   * the database applies it to every query, so the runtime merely inherits it.
+   */
+  collation(intent: ColumnCollation): this {
+    return this.clone({ collation: intent });
+  }
+
+  /** Record the portable case-insensitive-text facet (`false` only). */
+  caseSensitive(caseSensitive: boolean): this {
+    return this.clone({ caseSensitive });
+  }
+
+  /** Select native vendor array storage instead of the portable JSON default. */
+  arrayStorage(storage: "json" | "native"): this {
+    return this.clone({ arrayStorage: storage });
+  }
+
+  /**
+   * Declare a computed/generated column from an immutable expression AST. The
+   * expression is stored opaquely; only the migration path can render it, and
+   * the declared-schema descriptor emitter refuses the facet.
+   */
+  generated(expr: unknown, opts?: { virtual?: boolean }): this {
+    return this.clone({ generated: { expr, stored: opts?.virtual !== true } });
+  }
+
+  /** Declare a SQL identity column (`GENERATED ... AS IDENTITY`). */
+  identity(opts?: { always?: boolean }): this {
+    return this.clone({ identity: { always: opts?.always === true } });
+  }
+
+  /** Portable auto-increment intent; sugar for `.identity({ always: false })`. */
+  autoIncrement(): this {
+    return this.clone({ identity: { always: false } });
   }
 
   /**
@@ -1298,6 +1413,36 @@ export const t = {
   /** Native binary column. Encryptable as binary plaintext via `.encrypted()`. */
   bytes(): TypeBuilder<Uint8Array, false, undefined, undefined, false, "equality"> {
     return new TypeBuilder<Uint8Array, false, undefined, undefined, false, "equality">({ type: "bytes" });
+  },
+  /** Fixed-length character column (`CHAR(N)`). */
+  char(opts: { length: number }): TypeBuilder<string, false, undefined, undefined, false, "text"> {
+    const length = opts?.length;
+    if (!Number.isSafeInteger(length) || length < 1) {
+      throw new TypeError("t.char({ length }) requires a positive integer length");
+    }
+    return new TypeBuilder<string, false, undefined, undefined, false, "text">({ type: "char", charLength: length });
+  },
+  /** Native UUID column. */
+  uuid(): TypeBuilder<string, false, undefined, undefined, false, "text"> {
+    return new TypeBuilder<string, false, undefined, undefined, false, "text">({ type: "uuid" });
+  },
+  /** IP network/address column (`inet` on PostgreSQL). */
+  inet(): TypeBuilder<string, false, undefined, undefined, false, "text"> {
+    return new TypeBuilder<string, false, undefined, undefined, false, "text">({ type: "inet" });
+  },
+  /** Reference a standalone ENUM type object declared by a migration. */
+  enum(name: string): TypeBuilder<string, false, undefined, undefined, false, "equality"> {
+    if (typeof name !== "string" || name.length === 0) {
+      throw new TypeError("t.enum(name) requires a non-empty type name");
+    }
+    return new TypeBuilder<string, false, undefined, undefined, false, "equality">({ type: "enum", enumName: name });
+  },
+  /** Reference a standalone DOMAIN type object declared by a migration. */
+  domain(name: string): TypeBuilder<string, false, undefined, undefined, false, "equality"> {
+    if (typeof name !== "string" || name.length === 0) {
+      throw new TypeError("t.domain(name) requires a non-empty type name");
+    }
+    return new TypeBuilder<string, false, undefined, undefined, false, "equality">({ type: "domain", domainName: name });
   },
   /**
    * C2 — literal-value field. Validation accepts only the exact value

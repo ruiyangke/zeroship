@@ -1023,6 +1023,12 @@ export function dbFieldTypeExhaustiveness(token: DbFieldType): void {
     case "bigInt":
     case "float":
     case "timestamp":
+    case "char":
+    case "double":
+    case "uuid":
+    case "inet":
+    case "enum":
+    case "domain":
       return;
     default: {
       const _exhaustive: never = token;
