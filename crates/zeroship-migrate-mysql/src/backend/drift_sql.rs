@@ -12,7 +12,6 @@ use zeroship_migrate_backend::snapshot::{
 };
 use zeroship_migrate_backend::value_format::{
     catalog_id_default, catalog_text_id_default, catalog_uuid_id_default, recover_format_check,
-    RecoveredFormatCheck,
 };
 use zeroship_migrate_ir::ir::{IdentityCol, IndexSortOrder};
 
@@ -248,7 +247,6 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
             generated: None,
             identity,
             rowid_alias: false,
-            value_format: None,
             // Set below from the CHECK pass, which is the only place the
             // engine's own UUID contract is recoverable on MySQL.
             catalog_uuid_format_check: false,
@@ -304,21 +302,21 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
                 .columns
                 .iter()
                 .enumerate()
-                .filter_map(|(index, column)| {
+                .filter(|(_, column)| {
                     recover_format_check(&column.name, &check_clause, VALUE_FORMAT, DML)
-                        .map(|format| (index, format))
                 })
+                .map(|(index, _)| index)
                 .collect::<Vec<_>>();
             if recovered.len() > 1 {
                 return Err(DriftError::Snapshot(format!(
                     "MySQL catalog CHECK {table_name}.{constraint_name} ambiguously matches multiple ID-format columns"
                 )));
             }
-            let Some((column_index, recovered)) = recovered.into_iter().next() else {
+            let Some(column_index) = recovered.into_iter().next() else {
                 continue;
             };
             let column = &mut table.columns[column_index];
-            if column.value_format.is_some() || column.id_default.is_some() {
+            if column.catalog_uuid_format_check || column.id_default.is_some() {
                 return Err(DriftError::Snapshot(format!(
                     "MySQL catalog returned multiple ID-format CHECKs for {table_name}.{}",
                     column.name
@@ -328,25 +326,15 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
                 .get(&(table_name.clone(), column.name.clone()))
                 .copied()
                 .unwrap_or(false);
-            column.id_default = Some(match &recovered {
-                RecoveredFormatCheck::Uuid => {
-                    recover_mysql_id_default(column.default.as_deref(), expression_default, true)
-                }
-                RecoveredFormatCheck::Value(_) => catalog_text_id_default(
-                    column.default.as_deref(),
-                    VALUE_FORMAT,
-                    DML,
-                    Some(expression_default),
-                ),
-            });
-            match recovered {
-                // Retain the engine's own UUID contract as catalog evidence.
-                // `value_format` cannot carry it (UUID is not a `ValueFormat`),
-                // and the id-default classification above consumes it without
-                // recording that the column enforces the UUID spelling locally.
-                RecoveredFormatCheck::Uuid => column.catalog_uuid_format_check = true,
-                RecoveredFormatCheck::Value(format) => column.value_format = Some(format),
-            }
+            column.id_default = Some(recover_mysql_id_default(
+                column.default.as_deref(),
+                expression_default,
+                true,
+            ));
+            // Retain the engine's own UUID contract as catalog evidence. The
+            // id-default classification above consumes it without recording that
+            // the column enforces the UUID spelling locally.
+            column.catalog_uuid_format_check = true;
         }
     }
 

@@ -183,7 +183,7 @@ provides the native V8 surface; the TS SDK (`@zeroship/db`) wraps it. Both Postg
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| Schema DSL — t.* type builders | 🟢 | `import { t } from '@zeroship/db'` | `packages/db/src/types.ts` | `docs/reference/db.md` | `packages/db/tests/types.test.ts` | t.encrypted/vector/geoPoint/id; no t.date(). |
+| Schema DSL — t.* type builders | 🟢 | `import { t } from '@zeroship/db'` | `packages/db/src/types.ts` | `docs/reference/db.md` | `packages/db/tests/types.test.ts` | .encrypted()/vector/geoPoint/id; no t.date(). |
 | Schema refinements (.required/.unique/.index/...) | &#x1F7E2; | chained on t.*() | `packages/db/src/types.ts` | `docs/reference/db.md` | `packages/db/tests/types.test.ts` | |
 | Per-collection options (schema() builder) | 🟢 | `import { schema } from '@zeroship/db'` | `packages/db/src/types.ts` | `docs/reference/db.md` | `packages/db/tests/named-indexes.test.ts` | softDelete/withVersioning are hints; cols always created. |
 | Native runtime-descriptor binding | &#x1F7E2; | internal (runtime plugin boot hook) | `crates/zeroship-runtime/src/core/plugin.rs`, `crates/zeroship-data-v8/src/lib.rs` | `docs/reference/db.md` | `crates/zeroship-data-v8/src/lib.rs` | Runtime validates the descriptor, then data-v8 installs the app-at-deploy collection set before creator modules evaluate. |
@@ -210,7 +210,7 @@ provides the native V8 surface; the TS SDK (`@zeroship/db`) wraps it. Both Postg
 | Native transactions + nested savepoints | 🟢 | `env.db.transaction(async tx => {...})` | `crates/zeroship-data-orm/src/transaction/mod.rs`, `v8_classes/db.rs` | `docs/reference/db.md` | `packages/db/tests/p9-pr3-native-transaction.test.ts` | PG isolation; SQLite ignores level. |
 | Vector search (t.vector + search({vector})) | 🟢 | `Collection.search({ vector, k, ... })` | `crates/zeroship-data-orm/src/crud/search.rs`, `crates/zeroship-data-orm/src/backend/sqlite/search.rs`, `crates/zeroship-data-orm/src/backend/postgres/search.rs` | `docs/reference/db.md` | — | pgvector / sqlite-vec; innerProduct PG-only. |
 | Geo / spatial search (t.geoPoint + near()) | 🟢 | `Collection.near({ field, point, radius, ... })` | `crates/zeroship-data-orm/src/crud/search.rs`, `crates/zeroship-data-orm/src/backend/sqlite/search.rs`, `crates/zeroship-data-orm/src/backend/postgres/search.rs` | `docs/reference/db.md` | — | PostGIS; SQLite haversine flat scan. |
-| Column-level encryption (t.encrypted) | 🟢 | `t.encrypted({ of })` | `crates/zeroship-data-orm/src/encryption/`, `crates/zeroship-data-orm/src/protection/encryption_pass.rs` | `docs/reference/db.md` | `packages/db/tests/p5-encrypted-builder-and-filter-fence.test.ts` | Randomised AES-GCM; fenced from filters. |
+| Column-level encryption (.encrypted()) | 🟢 | `t.text().encrypted()` | `crates/zeroship-data-orm/src/encryption/`, `crates/zeroship-data-orm/src/protection/encryption_pass.rs` | `docs/reference/db.md` | `packages/db/tests/p5-encrypted-builder-and-filter-fence.test.ts` | Randomised AES-GCM; fenced from filters. |
 | Field masking (.mask() + MaskedValue) | 🟢 | `.mask({ kind, classification })` | `crates/zeroship-data-orm/src/protection/mask_pass.rs`, `v8_classes/masked_value.rs` | `docs/reference/db.md` | `packages/db/tests/p55-pr1-mask-builder-and-masked-value.test.ts` | 8 kinds × 6 classifications; __zsmask__ sentinel. |
 | MaskedValue.unmask() / bulkUnmask() | 🟢 | `MaskedValue.unmask(opts)` / `Collection.bulkUnmask(...)` | `crates/zeroship-data-orm/src/protection/unmask.rs`, `packages/db/src/collection/masking.ts` | `docs/reference/db.md` | `packages/db/tests/p55-pr7-per-query-unmask.test.ts` | Atomic; every call audited. |
 | defineMaskPolicy() | 🟢 | `import { defineMaskPolicy } from '@zeroship/db'` | `packages/db/src/policy.ts`, `crates/zeroship-data-orm/src/protection/mask_policy.rs` | `docs/reference/db.md` | `packages/db/tests/p55-pr5-define-mask-policy.test.ts` | Keyed by app_id; replace not merge. |
@@ -233,7 +233,7 @@ provides the native V8 surface; the TS SDK (`@zeroship/db`) wraps it. Both Postg
 | Per-query unmask hint (find opts.unmask) | 🟢 | `Collection.find(filter, { unmask, actor, ... })` | `crates/zeroship-data-orm/src/crud/mod.rs` | `docs/reference/db.md` | `packages/db/tests/p55-pr7-per-query-unmask.test.ts` | id must be in select if projecting. |
 | Collection.unmaskField / bulkUnmask | 🟢 | `collection.unmaskField(rowPk, column, opts?)` | `crates/zeroship-data-v8/src/v8_classes/collection.rs`, `crud/unmask.rs` | `docs/reference/db.md` | — | Collection name un-spoofable; audited. |
 | Unindexed query runtime warnings | 🟢 | automatic (dev) | `packages/db/src/collection/index-warnings.ts` | `docs/reference/db.md` | `packages/db/tests/named-indexes.test.ts` | Suppressed in production. |
-| Encrypted field filter fence | 🟢 | automatic when schema has t.encrypted | `packages/db/src/collection/encryption-fence.ts` | — | `packages/db/tests/filter-encryption-types.test.ts` | Deterministic mode allows equality. |
+| Encrypted field filter fence | 🟢 | automatic when schema has .encrypted() | `packages/db/src/collection/encryption-fence.ts` | — | `packages/db/tests/filter-encryption-types.test.ts` | Deterministic mode allows equality. |
 
 ---
 

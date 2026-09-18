@@ -8,7 +8,7 @@ Server-only `@zeroship/db` demo for the full SQLite-backed surface area.
 - Query: filters, sort, `limit`, `skip`, `after`, `count`, `distinct`, `aggregate`
 - Relations: `with({ owner: true, workspace: true })`
 - Generated lifecycle fields: `created_at`, `updated_at`, `created_by`, `updated_by`, `version`, `deleted_at`
-- Security: `t.encrypted`, masking, `MaskedValue.canUnmask`, row unmask, bulk unmask, per-query unmask hints
+- Security: `.encrypted()`, masking, `MaskedValue.canUnmask`, row unmask, bulk unmask, per-query unmask hints
 - Transactions: `db.transaction(...)`, rollback, nested savepoints, `TxCollection` / `TxQuery`
 - Search: vector search, geo `near`
 - Realtime: `db.live(...)` streamed over `/__zeroship/v1/liveTasks`

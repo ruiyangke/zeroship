@@ -146,7 +146,7 @@ impl ValidationPolicy for MysqlValidationPolicy {
             ColType::Timestamp => "datetime".to_string(),
             ColType::Date => "date".to_string(),
             ColType::Uuid | ColType::Inet | ColType::TextArray => "text".to_string(),
-            ColType::Bytes | ColType::Encrypted { .. } => "blob".to_string(),
+            ColType::Bytes => "blob".to_string(),
             ColType::Char { length } => format!("char({length})"),
             ColType::Vector { vector } => format!("vector({vector})"),
             ColType::GeoPoint => "text".to_string(),

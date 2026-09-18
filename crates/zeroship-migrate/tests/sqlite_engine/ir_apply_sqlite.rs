@@ -231,8 +231,7 @@ async fn per_row_backfill_generates_a_fresh_exact_value_for_every_sqlite_row() {
             {"name":"id","type":"bigInt","nullable":false},
             {"name":"uuid4","type":"uuid"},
             {"name":"uuid7","type":"uuid"},
-            {"name":"type_id","type":"text","valueFormat":{"typeId":{"prefix":"order"}}},
-            {"name":"ulid","type":"text","valueFormat":"ulid"}
+            {"name":"type_id","type":{"string":{"length":36}},"idPrefix":"order"}
           ],"primaryKey":["id"]}
         ]}"#,
     );
@@ -244,8 +243,7 @@ async fn per_row_backfill_generates_a_fresh_exact_value_for_every_sqlite_row() {
            "cursorColumns":["id"],"cursorStability":{"mode":"guardUpdates"},"batchSize":2,"set":{
              "uuid4":{"perRow":"uuidV4"},
              "uuid7":{"perRow":"uuidV7"},
-             "type_id":{"perRow":{"typeId":{"prefix":"order"}}},
-             "ulid":{"perRow":"ulid"}
+             "type_id":{"perRow":{"typeId":{"prefix":"order"}}}
            }}
         ]}"#,
     );
@@ -322,7 +320,7 @@ async fn per_row_backfill_generates_a_fresh_exact_value_for_every_sqlite_row() {
         .expect("enter read mode");
     let rows = be
         .actor()
-        .query("SELECT uuid4, uuid7, type_id, ulid FROM samples ORDER BY id")
+        .query("SELECT uuid4, uuid7, type_id FROM samples ORDER BY id")
         .await
         .expect("read generated values");
     assert_eq!(rows.len(), 8);
@@ -331,21 +329,17 @@ async fn per_row_backfill_generates_a_fresh_exact_value_for_every_sqlite_row() {
         BTreeSet::new(),
         BTreeSet::new(),
         BTreeSet::new(),
-        BTreeSet::new(),
     ];
     for row in &rows {
         let uuid4 = row[0].as_deref().expect("uuid4 is populated");
         let uuid7 = row[1].as_deref().expect("uuid7 is populated");
         let type_id = row[2].as_deref().expect("TypeID is populated");
-        let ulid = row[3].as_deref().expect("ULID is populated");
         assert_exact_uuid(uuid4, 4);
         assert_exact_uuid(uuid7, 7);
         assert_exact_type_id(type_id, "order");
-        assert_exact_ulid(ulid);
         distinct[0].insert(uuid4.to_string());
         distinct[1].insert(uuid7.to_string());
         distinct[2].insert(type_id.to_string());
-        distinct[3].insert(ulid.to_string());
     }
     for values in distinct {
         assert_eq!(
@@ -377,26 +371,18 @@ async fn per_row_destination_mismatches_fail_before_any_sqlite_row_changes() {
             "TypeID prefix mismatch",
             serde_json::json!({
                 "name": "generated",
-                "type": "text",
-                "valueFormat": { "typeId": { "prefix": "declared" } }
+                "type":{"string":{"length":36}},"idPrefix":"decl"
             }),
-            serde_json::json!({ "perRow": { "typeId": { "prefix": "requested" } } }),
-            "stored prefix \"declared\"",
-            "declared stored prefix is exactly \"requested\"",
+            serde_json::json!({ "perRow": { "typeId": { "prefix": "reques" } } }),
+            "prefix \"decl\"",
+            "exactly \"reques\"",
         ),
         (
             "TypeID on generic text",
             serde_json::json!({ "name": "generated", "type": "text" }),
             serde_json::json!({ "perRow": { "typeId": { "prefix": "order" } } }),
             "perRow.typeId",
-            "generic text with no value-format contract",
-        ),
-        (
-            "ULID on generic text",
-            serde_json::json!({ "name": "generated", "type": "text" }),
-            serde_json::json!({ "perRow": "ulid" }),
-            "perRow.ulid",
-            "generic text with no value-format contract",
+            "with no typed-id prefix",
         ),
         (
             "UUIDv4 on generic text",

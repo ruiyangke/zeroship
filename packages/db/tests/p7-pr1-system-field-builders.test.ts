@@ -5,7 +5,7 @@ import { normalizeSchema } from "../../../crates/zeroship-data-v8/js/testing.js"
 
 describe("assignment builders", () => {
   test("ID type carries its prefix without assigning a value", () => {
-    assert.deepEqual(t.typedId("post").toFieldDef(), { type: "id", idPrefix: "post" });
+    assert.deepEqual(t.typedId("post").toFieldDef(), { type: "string", maxLength: 36, idPrefix: "post" });
     assert.throws(() => t.typedId(""), { code: "ID_INVALID_PREFIX" });
     assert.throws(() => t.typedId("Post-Type"), { code: "ID_INVALID_PREFIX" });
   });

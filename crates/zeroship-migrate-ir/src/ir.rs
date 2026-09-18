@@ -450,11 +450,12 @@ pub struct IrFlagsOverride {
     pub phase: Option<OnlinePhase>,
 }
 
-/// Maximum byte length of a TypeID 0.3 prefix.
+/// Maximum byte length of a typed-id prefix.
 ///
-/// TypeID prefixes are ASCII-only, so this is also the maximum character
-/// length. The optional separator is not part of the prefix.
-pub const TYPE_ID_MAX_PREFIX_LEN: usize = 63;
+/// Typed-id prefixes are ASCII-only, so this is also the maximum character
+/// length. The optional separator is not part of the prefix. Bounded so the
+/// stored `<prefix>_<26 base32>` value fits the column's `string(36)` storage.
+pub const TYPE_ID_MAX_PREFIX_LEN: usize = 6;
 
 /// Validate a TypeID 0.3 prefix.
 ///
@@ -498,25 +499,6 @@ pub fn validate_type_id_prefix(prefix: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Canonical value-level format metadata, independent of physical SQL storage.
-///
-/// The enum uses serde's natural externally-tagged representation. For example,
-/// a TypeID is encoded as `{ "typeId": { "prefix": "user" } }`, while a ULID
-/// is encoded as the unit-variant string `"ulid"`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub enum ValueFormat {
-    /// TypeID 0.3, stored canonically as `<prefix>_<suffix>` or as the bare
-    /// suffix when `prefix` is empty.
-    TypeId {
-        /// Stored TypeID prefix, without the separator underscore.
-        prefix: String,
-    },
-    /// ULID, stored as exactly 26 canonical uppercase Crockford Base32
-    /// characters with the 128-bit overflow bound enforced.
-    Ulid,
-}
-
 /// Apply-engine value generation evaluated independently for every row selected
 /// by a batched backfill.
 ///
@@ -535,8 +517,6 @@ pub enum PerRowGenerator {
         /// Stored TypeID prefix, without the separator underscore.
         prefix: String,
     },
-    /// Generate a canonical uppercase ULID.
-    Ulid,
 }
 
 /// The invariant that keeps a resumable backfill's ordered cursor tuple
@@ -648,14 +628,6 @@ pub enum ColType {
         /// the migration/op default schema. Additive optional field, skip-if-none.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schema: Option<String>,
-    },
-    /// Application-level encrypted column wrapping an inner type.
-    ///
-    /// Carries the plaintext type. Encryption is always randomised; the
-    /// runtime authenticates each value's collection, column and row identity.
-    Encrypted {
-        /// The inner (plaintext) type.
-        of: Box<Self>,
     },
 }
 
@@ -1040,7 +1012,7 @@ pub enum VectorMetric {
 #[serde(rename_all = "camelCase")]
 pub enum ColumnCollation {
     /// Compare and order this column by its stored BYTES, so a value whose byte
-    /// order is its semantic order (a ULID, a TypeID, a base36 UUIDv7) sorts the
+    /// order is its semantic order (a TypeID, a base36 UUIDv7) sorts the
     /// way it was minted.
     ///
     /// PostgreSQL `COLLATE "C"`, SQLite `COLLATE BINARY`, MySQL
@@ -1181,15 +1153,8 @@ impl IrClassification {
 /// this facet).
 ///
 /// An ENCRYPTED column's fail-safe auto-mask (`{ full, pii }`) is IMPLIED by the
-#[cfg_attr(
-    doc,
-    doc = "`ColType::Encrypted` carrier (recovered in `ir_column_to_field`),"
-)]
-#[cfg_attr(
-    not(doc),
-    doc = "`ColType::Encrypted` carrier (recovered in [`crate::ir_author::ir_column_to_field`]),"
-)]
-/// so it is NOT carried here; an explicit `.mask()` here OVERRIDES that auto-mask.
+/// [`IrColumn::encrypted`] facet (recovered in `ir_column_to_field`), so it is
+/// NOT carried here; an explicit `.mask()` here OVERRIDES that auto-mask.
 ///
 /// Default-absent + `skip_serializing_if` so a column declaring no mask is
 /// BYTE-IDENTICAL on the wire and in the checksum to the pre-mask image.
@@ -1343,14 +1308,6 @@ pub struct IrColumn {
     /// Whether the column carries a single-column UNIQUE.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unique: Option<bool>,
-    /// Canonical value-level format metadata. The physical storage type remains
-    /// explicit in [`Self::ty`]; validation checks the format/type pairing.
-    #[serde(
-        rename = "valueFormat",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub value_format: Option<ValueFormat>,
     /// A typed single-column foreign-key reference. The local column's storage
     /// type remains fully specified by [`Self::ty`]; this facet adds only the
     /// target identity and referential actions. In particular, it never infers
@@ -1365,14 +1322,12 @@ pub struct IrColumn {
     /// the whole story.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub references: Option<ColumnReference>,
-    /// Internal platform-ID prefix for the
-    /// `<prefix>_<25 base36 UUIDv7>` format. This is a DECLARED-ONLY hint DB
-    /// introspection cannot recover (the minted value is opaque text in the
-    /// catalog; the prefix is a mint-time input, not a stored column attribute).
-    /// It is used by internal platform descriptors; it is neither TypeID nor
-    /// public migration authoring. Carried so gen-types - and
-    /// the runtime, once it deletes the declared-schema cache - keep that legacy
-    /// internal brand.
+    /// The typed-id prefix for a `t.typedId(prefix)` column. A typed-id column is
+    /// [`ColType::String`] with `length` 36 plus this facet; the prefix is a
+    /// DECLARED-ONLY hint DB introspection cannot recover (the minted value is
+    /// opaque text in the catalog; the prefix is a mint-time input, not a stored
+    /// column attribute). Carried so gen-types re-emits `t.typedId("<prefix>")`
+    /// and the runtime derives the per-row prefix.
     /// Default-absent + `skip_serializing_if` so a column that declares no prefix is
     /// BYTE-IDENTICAL on the wire and in the checksum to the pre-facet image.
     ///
@@ -1423,10 +1378,6 @@ pub struct IrColumn {
     /// asks for BYTEWISE comparison. They are contradictory rather than composable,
     /// so the validator refuses a column carrying both.
     ///
-    /// A [`Self::value_format`] column already pins bytewise comparison as part of its
-    /// storage contract, so it needs nothing here; carrying both is refused too, to
-    /// keep ONE writer of the snapshot's collation per column.
-    ///
     /// Default-absent + `skip_serializing_if`, so a column that declares no collation
     /// is BYTE-IDENTICAL on the wire and in the checksum to the pre-facet image.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1436,13 +1387,18 @@ pub struct IrColumn {
     /// `zero-migrate:mask` sentinel by the RUNTIME - but the OFFLINE op fold + gen-types have no
     /// live DB, so the facet is carried here to keep it through author->generate->fold
     /// (and so the op lower emits the `zero-migrate:mask` sentinel the runtime later reads). An
-    /// encrypted column's auto-mask `{ full, pii }` is IMPLIED by the carrier and NOT
-    /// carried here; an explicit mask OVERRIDES it. Default-absent + `skip_serializing_if`
+    /// encrypted column's auto-mask `{ full, pii }` is IMPLIED by the [`Self::encrypted`]
+    /// facet and NOT carried here; an explicit mask OVERRIDES it. Default-absent + `skip_serializing_if`
     /// => a mask-less column is BYTE-IDENTICAL on the wire/checksum to the pre-mask image.
     /// Bounded STRUCTURALLY by the closed [`IrMask`]/[`IrMaskKind`]/[`IrClassification`]
     /// enums (serde rejects an out-of-set kind/classification at deserialize).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mask: Option<IrMask>,
+    /// Whether this column's plaintext is stored encrypted (AEAD, fresh nonce
+    /// per write, bound to collection/column/row). `ty` remains the PLAINTEXT
+    /// type: encryption is an ATTRIBUTE of the field, not a wrapper around its type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted: Option<bool>,
     /// A generated/computed column facet. The expression is closed structured
     /// [`Expr`] data, never raw SQL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3018,13 +2974,6 @@ pub enum Op {
         /// Structured default (typed literal or synth scalar) - never raw SQL.
         #[serde(skip_serializing_if = "Option::is_none")]
         default: Option<IrDefault>,
-        /// Canonical value-level format metadata for the added column.
-        #[serde(
-            rename = "valueFormat",
-            default,
-            skip_serializing_if = "Option::is_none"
-        )]
-        value_format: Option<ValueFormat>,
         /// The pgvector distance metric for a `t.vector(n, { metric })` added
         /// column (the same DECLARED-ONLY facet `IrColumn` carries on createTable).
         /// Meaningful on an added column (a vector ADD COLUMN renders the metric opclass),
@@ -3054,6 +3003,13 @@ pub enum Op {
         /// `skip_serializing_if` => byte-identical when absent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mask: Option<IrMask>,
+        /// Whether the added column's plaintext is stored encrypted (the same facet
+        /// `IrColumn` carries). Meaningful on an added column (an encrypted ADD COLUMN
+        /// emits the `zero-migrate:enc` sentinel + `_masked` sibling); `ty` remains the
+        /// PLAINTEXT type. Default-absent + `skip_serializing_if` => byte-identical when
+        /// absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted: Option<bool>,
         /// A generated/computed added column facet.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         generated: Option<GeneratedCol>,
@@ -4836,105 +4792,48 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[test]
-    fn type_id_value_format_uses_natural_external_tag() {
-        let format = ValueFormat::TypeId {
-            prefix: "user".to_string(),
-        };
-        let wire = serde_json::to_value(&format).unwrap();
-        assert_eq!(wire, serde_json::json!({ "typeId": { "prefix": "user" } }));
-        assert_eq!(serde_json::from_value::<ValueFormat>(wire).unwrap(), format);
-    }
-
-    #[test]
-    fn ulid_value_format_uses_natural_unit_tag() {
-        let wire = serde_json::to_value(&ValueFormat::Ulid).unwrap();
-        assert_eq!(wire, serde_json::json!("ulid"));
-        assert_eq!(
-            serde_json::from_value::<ValueFormat>(wire).unwrap(),
-            ValueFormat::Ulid
-        );
-    }
-
-    #[test]
-    fn type_id_value_format_round_trips_on_columns_and_add_column() {
+    fn typed_id_column_round_trips_its_id_prefix_on_the_wire() {
         let column_wire = serde_json::json!({
             "name": "id",
-            "type": "text",
-            "valueFormat": { "typeId": { "prefix": "" } }
+            "type": { "string": { "length": 36 } },
+            "idPrefix": "post"
         });
         let column: IrColumn = serde_json::from_value(column_wire.clone()).unwrap();
-        assert_eq!(
-            column.value_format,
-            Some(ValueFormat::TypeId {
-                prefix: String::new()
-            })
-        );
+        assert_eq!(column.id_prefix.as_deref(), Some("post"));
         assert_eq!(serde_json::to_value(column).unwrap(), column_wire);
-
-        let op_wire = serde_json::json!({
-            "op": "addColumn",
-            "table": "things",
-            "column": "id",
-            "type": "text",
-            "valueFormat": { "typeId": { "prefix": "thing" } }
-        });
-        let op: Op = serde_json::from_value(op_wire.clone()).unwrap();
-        assert_eq!(serde_json::to_value(op).unwrap(), op_wire);
 
         let plain: IrColumn = serde_json::from_value(serde_json::json!({
             "name": "body",
             "type": "text"
         }))
         .unwrap();
-        assert!(plain.value_format.is_none());
+        assert!(plain.id_prefix.is_none());
         assert!(
             serde_json::to_value(plain)
                 .unwrap()
-                .get("valueFormat")
+                .get("idPrefix")
                 .is_none(),
-            "an absent value format must remain checksum-neutral"
+            "an absent id prefix must remain checksum-neutral"
         );
     }
 
     #[test]
-    fn ulid_value_format_round_trips_on_columns_and_add_column() {
-        let column_wire = serde_json::json!({
-            "name": "id",
-            "type": "text",
-            "valueFormat": "ulid"
-        });
-        let column: IrColumn = serde_json::from_value(column_wire.clone()).unwrap();
-        assert_eq!(column.value_format, Some(ValueFormat::Ulid));
-        assert_eq!(serde_json::to_value(column).unwrap(), column_wire);
-
-        let op_wire = serde_json::json!({
-            "op": "addColumn",
-            "table": "things",
-            "column": "id",
-            "type": "text",
-            "valueFormat": "ulid"
-        });
-        let op: Op = serde_json::from_value(op_wire.clone()).unwrap();
-        assert_eq!(serde_json::to_value(op).unwrap(), op_wire);
-    }
-
-    #[test]
-    fn type_id_prefix_validator_accepts_the_type_id_0_3_grammar() {
-        for prefix in ["", "a", "user", "my__type"] {
+    fn typed_id_prefix_validator_accepts_canonical_prefixes() {
+        for prefix in ["", "a", "user", "my_t"] {
             validate_type_id_prefix(prefix).unwrap_or_else(|error| {
-                panic!("canonical TypeID prefix {prefix:?} was rejected: {error}")
+                panic!("canonical typed-id prefix {prefix:?} was rejected: {error}")
             });
         }
         validate_type_id_prefix(&"a".repeat(TYPE_ID_MAX_PREFIX_LEN))
-            .expect("a 63-character lowercase prefix is valid");
+            .expect("a prefix at the maximum length is valid");
     }
 
     #[test]
-    fn type_id_prefix_validator_rejects_noncanonical_prefixes() {
+    fn typed_id_prefix_validator_rejects_noncanonical_prefixes() {
         for prefix in ["_user", "user_", "User", "user1", "us-er", "týpe"] {
             assert!(
                 validate_type_id_prefix(prefix).is_err(),
-                "noncanonical TypeID prefix {prefix:?} must be rejected"
+                "noncanonical typed-id prefix {prefix:?} must be rejected"
             );
         }
         assert!(validate_type_id_prefix(&"a".repeat(TYPE_ID_MAX_PREFIX_LEN + 1)).is_err());
@@ -5047,13 +4946,13 @@ mod tests {
                 nullable: None,
                 default: Some(IrDefault::Json { value }),
                 unique: None,
-                value_format: None,
                 references: None,
                 id_prefix: None,
                 collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             }],
@@ -5150,13 +5049,13 @@ mod tests {
             nullable: None,
             default: None,
             unique: None,
-            value_format: None,
             references: None,
             id_prefix: None,
             collation: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,
+            encrypted: None,
             generated: None,
             identity: None,
         };
@@ -5496,10 +5395,10 @@ mod tests {
             ty: ColType::Int,
             nullable: None,
             default: None,
-            value_format: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,
+            encrypted: None,
             generated: None,
             identity: None,
             schema: None,
@@ -5512,10 +5411,10 @@ mod tests {
             ty: ColType::Int,
             nullable: None,
             default: None,
-            value_format: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,
+            encrypted: None,
             generated: None,
             identity: None,
             schema: None,
@@ -5544,10 +5443,10 @@ mod tests {
             ty: ColType::Int,
             nullable: None,
             default: None,
-            value_format: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,
+            encrypted: None,
             generated: None,
             identity: None,
             schema: None,
@@ -5573,16 +5472,28 @@ mod tests {
     }
 
     #[test]
-    fn coltype_nested_round_trips() {
-        let t = ColType::Encrypted {
-            of: Box::new(ColType::Decimal {
-                precision: 10,
-                scale: 2,
-            }),
+    fn encrypted_facet_round_trips_with_plaintext_type() {
+        let col = IrColumn {
+            name: "secret".into(),
+            ty: ColType::Text,
+            nullable: None,
+            default: None,
+            unique: None,
+            references: None,
+            id_prefix: None,
+            collation: None,
+            case_sensitive: None,
+            vector_metric: None,
+            mask: None,
+            encrypted: Some(true),
+            generated: None,
+            identity: None,
         };
-        let s = serde_json::to_string(&t).unwrap();
-        let back: ColType = serde_json::from_str(&s).unwrap();
-        assert_eq!(t, back);
+        let value = serde_json::to_value(&col).unwrap();
+        assert_eq!(value["type"], "text");
+        assert_eq!(value["encrypted"], true);
+        let back: IrColumn = serde_json::from_value(value).unwrap();
+        assert_eq!(back, col);
     }
 
     // ---- IrDefault expression defaults replace the old `{fn}` carrier ----
@@ -5759,13 +5670,13 @@ mod tests {
                 default: None,
                 unique: None,
                 // The new facets, all ABSENT (a plain `t.text()` column).
-                value_format: None,
                 references: None,
                 id_prefix: None,
                 collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             }],
@@ -5895,10 +5806,10 @@ mod tests {
             ty: ColType::Int,
             nullable: None,
             default: None,
-            value_format: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,
+            encrypted: None,
             generated: None,
             identity: None,
             schema: Some("app2".into()),
@@ -5920,10 +5831,10 @@ mod tests {
             ty: ColType::Int,
             nullable: None,
             default: None,
-            value_format: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,
+            encrypted: None,
             generated: None,
             identity: None,
             schema: None,
@@ -6106,13 +6017,13 @@ mod tests {
             nullable: None,
             default: None,
             unique: None,
-            value_format: None,
             references: None,
             id_prefix: None,
             collation: None,
             case_sensitive: Some(false),
             vector_metric: None,
             mask: None,
+            encrypted: None,
             generated: None,
             identity: None,
         };
@@ -6134,7 +6045,6 @@ mod tests {
             nullable: None,
             default: None,
             unique: None,
-            value_format: None,
             references: Some(ColumnReference {
                 relation: None,
                 table: "accounts".into(),
@@ -6148,6 +6058,7 @@ mod tests {
             case_sensitive: None,
             vector_metric: None,
             mask: None,
+            encrypted: None,
             generated: None,
             identity: None,
         };
@@ -6192,13 +6103,13 @@ mod tests {
             nullable: None,
             default: None,
             unique: None,
-            value_format: None,
             references: None,
             id_prefix: None,
             collation: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,
+            encrypted: None,
             generated: None,
             identity: None,
         };
@@ -6221,13 +6132,13 @@ mod tests {
             nullable: None,
             default: None,
             unique: None,
-            value_format: None,
             references: None,
             id_prefix: None,
             collation: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,
+            encrypted: None,
             generated: None,
             identity: None,
         };

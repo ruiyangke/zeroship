@@ -3,10 +3,9 @@
 // engine's single-source-of-truth schema `crates/zeroship-migrate/ir-envelope.schema.json`.
 //
 // WHY HAND-AUTHORED (not generated): these defs form a self-recursive `oneOf` AST
-// (`Expr` → `BinOp.lhs: Expr`; `ColType` → `encrypted.of: ColType`; `Op` carries
-// `Expr`), which `json-schema-to-typescript` v15 cannot express — it inlines the
-// `$ref` cycle and overflows the stack. So — manual types for any serde
-// shape codegen cannot express — the recursive structural types are authored
+// (`Expr` → `BinOp.lhs: Expr`; `Op` carries `Expr`), which `json-schema-to-typescript`
+// v15 cannot express — it inlines the `$ref` cycle and overflows the stack. So — manual
+// types for any serde shape codegen cannot express — the recursive structural types are authored
 // here, while the closed STRING-ENUM tokens (`BinaryOp`, `SynthFn`, `CastTarget`,
 // …) are GENERATED into `./enums.ts` and imported below.
 //
@@ -99,7 +98,7 @@ export type IrScalar =
   | { bytes: string };
 
 /** The dialect-NEUTRAL column-type lexicon. Closed; camel-cased on the
- *  wire. `encrypted.of` is itself a `ColType` (the recursive arm). */
+ *  wire. */
 export type ColType =
   | { string: { length: number } }
   | "text"
@@ -126,12 +125,7 @@ export type ColType =
   | { vector: { vector: number } }
   | { decimal: { precision: number; scale: number } }
   | { enum: { name: string; schema?: string } }
-  | { domain: { name: string; schema?: string } }
-  | { encrypted: { of: ColType } };
-
-/** Canonical, validated value formats carried independently from physical
- * column storage. The variants use Serde's externally tagged encoding. */
-export type ValueFormat = { typeId: { prefix: string } } | "ulid";
+  | { domain: { name: string; schema?: string } };
 
 /** The CLOSED pgvector distance-metric lexicon — drives the ivfflat/hnsw
  *  operator class. Camel-cased on the wire; faithful transcription of the schema
@@ -233,8 +227,7 @@ export type IrValue = IrScalar | Expr;
 export type PerRowGenerator =
   | "uuidV4"
   | "uuidV7"
-  | { typeId: { prefix: string } }
-  | "ulid";
+  | { typeId: { prefix: string } };
 
 /** A backfill assignment is either an ordinary DML value or an explicitly
  *  wrapped apply-engine generator. The wrapper keeps per-row authority distinct
@@ -287,9 +280,6 @@ export interface IrColumn {
   nullable?: boolean | null;
   default?: IrDefault | null;
   unique?: boolean | null;
-  /** Canonical value-format semantics. `ids.typeId()` and `ids.ulid()` store
-   *  text while this facet carries the exact persisted format. Default-absent. */
-  valueFormat?: ValueFormat | null;
   /** Typed single-column foreign-key reference. The local `type` remains
    *  explicit and is never selected from the referenced target or catalog.
    *
@@ -298,9 +288,8 @@ export interface IrColumn {
    *  `ColType` variant `{ ref: { references } }`, which names a table only.
    *  A transcription that stops at whichever it meets first loses the difference. */
   references?: ColumnReference | null;
-  /** An internal `<prefix>_<25 base36 UUIDv7>` platform-ID prefix used by
-   *  platform descriptors. It is not TypeID or public authoring.
-   *  Camel-cased on the wire and default-absent. */
+  /** The typed-id prefix for a `t.typedId(prefix)` column: storage is
+   *  `{ string: { length: 36 } }`. Camel-cased on the wire and default-absent. */
   idPrefix?: string | null;
   /** The `t.vector(n, { metric })` distance metric (closed
    *  {@link VectorMetric}). Default-absent. */
@@ -310,10 +299,14 @@ export interface IrColumn {
   caseSensitive?: boolean | null;
   /** Per-column collation INTENT (closed {@link ColumnCollation}), spelled per
    *  dialect by the engine. The sibling of `caseSensitive` and contradictory with
-   *  it; refused alongside `valueFormat`, which pins its own. Default-absent. */
+   *  it. Default-absent. */
   collation?: ColumnCollation | null;
   /** **#174** — a STANDALONE column mask. Default-absent. */
   mask?: IrMask | null;
+  /** Whether this column's plaintext is stored encrypted (AEAD, fresh nonce
+   *  per write, bound to collection/column/row). `type` remains the PLAINTEXT
+   *  type: encryption is an ATTRIBUTE of the field, not a wrapper. Default-absent. */
+  encrypted?: boolean | null;
   /** Generated/computed column facet. Default-absent. */
   generated?: GeneratedCol | null;
   /** SQL identity column facet. Default-absent. */
@@ -567,7 +560,7 @@ export type Op =
   | { op: "dropPartition"; parent: string; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null; cascade?: boolean | null }
   | { op: "dropTable"; table: string; cascade?: boolean | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "renameTable"; table: string; to: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
-  | { op: "addColumn"; table: string; column: string; type: ColType; nullable?: boolean | null; default?: IrDefault | null; valueFormat?: ValueFormat | null; vectorMetric?: VectorMetric | null; caseSensitive?: boolean | null; mask?: IrMask | null; generated?: GeneratedCol | null; identity?: IdentityCol | null; schema?: string | null; existenceGuard?: ExistenceGuard | null; attributes?: Attributes }
+  | { op: "addColumn"; table: string; column: string; type: ColType; nullable?: boolean | null; default?: IrDefault | null; vectorMetric?: VectorMetric | null; caseSensitive?: boolean | null; mask?: IrMask | null; encrypted?: boolean | null; generated?: GeneratedCol | null; identity?: IdentityCol | null; schema?: string | null; existenceGuard?: ExistenceGuard | null; attributes?: Attributes }
   | { op: "dropColumn"; table: string; column: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | {
       op: "createIndex";

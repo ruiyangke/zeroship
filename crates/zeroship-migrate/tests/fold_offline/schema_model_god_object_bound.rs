@@ -301,15 +301,15 @@ fn the_unified_model_would_grow_nineteen_fields_and_has_no_projection_private_st
 /// The neutral model's own size, pinned beside the projection's, so "the model must be
 /// RICHER than either current type" is a measurement rather than a slogan.
 #[test]
-fn the_neutral_column_carries_eighteen_fields_and_the_catalog_snapshot_carries_twenty_four() {
+fn the_neutral_column_carries_eighteen_fields_and_the_catalog_snapshot_carries_twenty_three() {
     let probes = support::field_probes::column_snapshot_probes();
     assert_eq!(
         probes.probes.len(),
-        24,
+        23,
         "`ColumnSnapshot` field count changed"
     );
 
-    // 24 catalog fields = 18 neutral + 5 vendor + one ephemeral schema-query token
+    // 23 catalog fields = 17 neutral + 5 vendor + one ephemeral schema-query token
     // carrier. The vendor five are `rowid_alias`,
     // `catalog_uuid_format_check`, `expression_default`, `text_storage` and
     // the vendor physical leg, and `crates/zeroship-migrate/tests/fold_live/schema_model_equivalence_mysql.rs` proves the
@@ -317,8 +317,8 @@ fn the_neutral_column_carries_eighteen_fields_and_the_catalog_snapshot_carries_t
     let neutral = schema_model::Column::default();
     let _: &schema_model::Column = &neutral;
     assert_eq!(
-        18 + 5 + 1,
-        24,
+        17 + 5 + 1,
+        23,
         "the neutral/vendor split plus the ephemeral token carrier must account for every catalog field"
     );
 }

@@ -27,7 +27,6 @@ import { createRaw as removedPublishedCreateRaw } from "@zeroship/migrate";
 import type {
   BackfillSetValue as PublishedBackfillSetValue,
   ColumnDef as PublishedColumnDef,
-  IdFormats as PublishedIdFormats,
   PerRowGenerator as PublishedPerRowGenerator,
   PerRowGeneratorValue as PublishedPerRowGeneratorValue,
   PerRowGenerators as PublishedPerRowGenerators,
@@ -35,7 +34,6 @@ import type {
   TableHandle as PublishedTableHandle,
   TypeIdOptions as PublishedTypeIdOptions,
   TypeLexicon as PublishedTypeLexicon,
-  ValueFormat as PublishedValueFormat,
 } from "@zeroship/migrate";
 
 import * as migrate from "../../src/index.js";
@@ -43,7 +41,6 @@ import {
   colTypeFromDbField,
   dbType as dbT,
   fromDb,
-  ids,
   perRow,
   t,
   table,
@@ -69,7 +66,6 @@ import {
   type Migration,
   type OrderedColumns,
   type BackfillSetValue,
-  type IdFormats,
   type PerRowGenerator,
   type PerRowGeneratorValue,
   type PerRowGenerators,
@@ -77,7 +73,6 @@ import {
   type TypeLexicon,
   type TypeIdOptions,
   type TableForeignKey,
-  type ValueFormat,
   type DecimalValue,
   type BytesValue,
 } from "../../src/index.js";
@@ -586,29 +581,11 @@ export function badColTypes(): void {
   t.vector({ dimensions: 8, metric: "cosine" });
 
   const typeIdOptions: TypeIdOptions = { prefix: "account" };
-  const idFormats: IdFormats = ids;
-  const valueFormat: ValueFormat = { typeId: typeIdOptions };
-  const ulidValueFormat: ValueFormat = "ulid";
   const typedId: ColumnDef = t.typedId(typeIdOptions.prefix).required().unique().primaryKey();
-  const ulid: ColumnDef = idFormats.ulid().required().unique().primaryKey();
   table("accounts").create({ columns: { id: typedId } });
-  void valueFormat;
-  void ulidValueFormat;
-  void ulid;
-
-
 
   // @ts-expect-error — a TypeID prefix is text.
   t.typedId(42 );
-
-  ids.ulid();
-
-  // @ts-expect-error — ULID takes no options.
-  ids.ulid({});
-
-  // @ts-expect-error — the ULID ValueFormat wire tag is canonical lowercase.
-  const invalidUlidValueFormat: ValueFormat = "ULID";
-  void invalidUlidValueFormat;
 
   // @ts-expect-error — `t.numeric` now takes a named options bag.
   t.numeric(12, 2);
@@ -867,7 +844,6 @@ export function perRowGeneratorShapes(): void {
       uuid_v4: generators.uuidV4(),
       uuid_v7: intent,
       type_id: generators.typeId({ prefix: "order" }),
-      ulid: generators.ulid(),
       database_uuid: uuidV4(),
     },
     cursorColumns: ["id"],
@@ -1102,13 +1078,11 @@ type UpdateOp = Extract<Op, { op: "update" }>;
 
 export function handwrittenIrTypeShapes(): void {
   expectExactType<Int64Carrier, { int64: string }>(true);
-  expectExactType<ValueFormat, { typeId: { prefix: string } } | "ulid">(true);
-  expectExactType<IrColumn["valueFormat"], ValueFormat | null | undefined>(true);
-  expectExactType<AddColumnOp["valueFormat"], ValueFormat | null | undefined>(true);
+  expectExactType<IrColumn["idPrefix"], string | null | undefined>(true);
   expectExactType<CreateTableOp["primaryKey"], string[] | null>(true);
   expectExactType<
     PerRowGenerator,
-    "uuidV4" | "uuidV7" | { typeId: { prefix: string } } | "ulid"
+    "uuidV4" | "uuidV7" | { typeId: { prefix: string } }
   >(true);
   expectExactType<BackfillOp["set"][string], IrBackfillSetValue>(true);
   expectExactType<UpdateOp["set"][string], IrValue>(true);
@@ -1133,12 +1107,10 @@ export function publishedDeclarationSurface(): void {
 
   const exportedTypes = null as unknown as readonly [
     PublishedBackfillSetValue,
-    PublishedIdFormats,
     PublishedPerRowGenerator,
     PublishedPerRowGeneratorValue,
     PublishedPerRowGenerators,
     PublishedTypeIdOptions,
-    PublishedValueFormat,
   ];
   void exportedTypes;
 }

@@ -86,9 +86,9 @@ import { schema as defineSchema, t } from "@zeroship/db";
 export const schema = {
   users: defineSchema({
     email: t.string().required().mask({ kind: "email", classification: "pii" }),
-    secret: t.encrypted(),
-    secretAmount: t.encrypted({ of: t.double() }),
-    secretBytes: t.encrypted({ of: t.bytes() }),
+    secret: t.string().encrypted(),
+    secretAmount: t.double().encrypted(),
+    secretBytes: t.bytes().encrypted(),
     age: t.double(),
     handle: t.string().required().unique(),
   })
@@ -321,7 +321,7 @@ describe("NormalizedSchema -> CollectionDescriptorDto mapping", () => {
     assert.equal(name.unique, true);
 
     const handle = fieldDefToDto("c", "handle", fields.handle.toFieldDef());
-    assert.equal(handle.type, "id");
+    assert.equal(handle.type, "string");
     assert.equal(handle.idPrefix, "handle");
 
     const owner = fieldDefToDto("c", "owner", fields.owner.toFieldDef());

@@ -1289,7 +1289,7 @@ Implementation: `crates/zeroship-data-orm/src/assignments.rs`,
 ## Masking
 
 **Encryption hides at rest. Masking hides at read time.** They are
-sibling concerns and compose: an `t.encrypted(...)` column without
+sibling concerns and compose: an `.encrypted()` column without
 an explicit `.mask(...)` declaration is treated as `.mask({ kind:
 "full", classification: "pii" })` by default. The full design lives
 in `docs/archive/sensitive-field-masking.md` (shipped; archived).
@@ -1342,11 +1342,11 @@ export default {
     table("users").create({
       columns: {
         name: t.text().notNull(),
-        email: t.encrypted({ of: t.text() })
+        email: t.text().encrypted()
           .mask({ kind: "email", classification: "pii" }),
-        ssn: t.encrypted({ of: t.text() })
+        ssn: t.text().encrypted()
           .mask({ kind: "last4", classification: "spi" }),
-        dob: t.encrypted({ of: t.text() })
+        dob: t.text().encrypted()
           .mask({ kind: "dateYear", classification: "phi" }),
       },
     });
@@ -1354,8 +1354,8 @@ export default {
 };
 ```
 
-`t.encrypted({ of })` without `.mask({...})` is shorthand for
-`.mask({ kind: "full", classification: "pii" })`. `t.text().mask({
+An `.encrypted()` field without `.mask({...})` gets the default
+`.mask({ kind: "full", classification: "pii" })` at seal time. `t.text().mask({
 kind: "full", classification: "public" })` (mask without encryption)
 is also valid — masking is the read-side; encryption is the
 storage-side; they're independent.
@@ -1408,7 +1408,7 @@ column it is attached to.
 | Classification | Scope                                          |
 |----------------|------------------------------------------------|
 | `public`       | Display names, public profile data — visible to all. |
-| `pii`          | Email, address, phone, DOB. Default for `t.encrypted()`. |
+| `pii`          | Email, address, phone, DOB. Default for `.encrypted()`. |
 | `spi`          | CPRA "sensitive PI": SSN, biometric, driver's licence. |
 | `phi`          | HIPAA scope: medical records, diagnosis.              |
 | `pci`          | PCI-DSS scope: card numbers, CVV.                     |
@@ -1543,7 +1543,7 @@ and protected writes use `storage.rawColumn`. The raw column holds the real
 value and its constraints; the visible column holds the mask. The ORM validates
 that the raw column is inaccessible to ordinary creator queries.
 
-`t.encrypted(...)` applies a full mask with `pii` classification by default.
+`.encrypted()` applies a full mask with `pii` classification by default.
 `.mask({ kind: "none" })` opts into plaintext reads and suppresses masked
 storage. Both operations follow the runtime descriptor rather than naming a
 mask column from a suffix (`crates/zeroship-data-orm/src/sql/mapping.rs`,
@@ -1579,7 +1579,7 @@ Runtime descriptors carry the logical plaintext type and an encryption flag:
 { "type": "number", "encrypted": true, "mask": { "kind": "full", "classification": "pii" } }
 ```
 
-The SDK declaration is `t.encrypted({ of: t.number() })`; `t.encrypted()`
+The SDK declaration is `t.number().encrypted()`; `t.string().encrypted()`
 selects string plaintext. Rust writes, reads and unmasking share a native
 plaintext codec selected by `type`. Binary values remain native buffers.
 The physical catalog marks the column as encrypted. It is not a second source

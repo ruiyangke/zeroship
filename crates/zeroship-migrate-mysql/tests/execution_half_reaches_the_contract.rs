@@ -63,10 +63,9 @@ use zeroship_migrate_backend::fault;
 use zeroship_migrate_backend::journal::AppliedEntry;
 use zeroship_migrate_backend::snapshot::{IdDefaultSnapshot, SchemaSnapshot};
 use zeroship_migrate_backend::value_format::{
-    catalog_id_default, column_metadata, recover_format_check, RecoveredFormatCheck,
+    catalog_id_default, recover_format_check, uuid_column_metadata,
 };
 use zeroship_migrate_ir::dialect::DialectId;
-use zeroship_migrate_ir::ir::ValueFormat;
 use zeroship_migrate_ir::migration::Migration;
 use zeroship_migrate_ir::probe::{GuardDir, GuardProbe};
 
@@ -283,8 +282,8 @@ fn the_catalog_id_default_comparison_answers_with_this_vendors_renderers() {
     );
 }
 
-/// The format-`CHECK` recovery `drift_sql.rs` runs over every catalog CHECK clause,
-/// reached with this vendor's renderers.
+/// The UUID format-`CHECK` recovery `drift_sql.rs` runs over every catalog CHECK
+/// clause, reached with this vendor's renderers.
 ///
 /// The discriminator is the MySQL-only charset introducer: its catalog echoes a
 /// CHECK back with `_utf8mb4'...'` in front of every string literal, and only MySQL's
@@ -293,39 +292,28 @@ fn the_catalog_id_default_comparison_answers_with_this_vendors_renderers() {
 #[test]
 fn the_format_check_recovery_answers_with_this_vendors_renderers() {
     let vendor = &zeroship_migrate_mysql::VENDOR;
-    let authored = column_metadata(
-        "public_id",
-        &ValueFormat::TypeId {
-            prefix: "user".to_string(),
-        },
-        vendor.value_format,
-        vendor.dml,
-    )
-    .expect("a valid TypeID prefix lowers to column metadata");
+    let authored = uuid_column_metadata("public_id", vendor.value_format, vendor.dml)
+        .expect("a UUID column lowers to column metadata")
+        .expect("MySQL declares a UUID format CHECK");
 
-    assert_eq!(
+    assert!(
         recover_format_check(
             "public_id",
             &authored.inline_check,
             vendor.value_format,
             vendor.dml
         ),
-        Some(RecoveredFormatCheck::Value(ValueFormat::TypeId {
-            prefix: "user".to_string(),
-        })),
-        "this vendor's own rendered format CHECK did not recover to the format it \
-         renders, so the recovery and the renderer disagree and every TypeID column \
-         would drift against itself"
+        "this vendor's own rendered UUID CHECK did not recover, so the recovery and the \
+         renderer disagree and every UUID column would drift against itself"
     );
 
-    assert_eq!(
-        recover_format_check(
+    assert!(
+        !recover_format_check(
             "public_id",
             "CHECK (public_id IS NOT NULL)",
             vendor.value_format,
             vendor.dml
         ),
-        None,
         "an unrelated CHECK was recovered as a format contract, so recovery is not \
          comparing the whole clause"
     );

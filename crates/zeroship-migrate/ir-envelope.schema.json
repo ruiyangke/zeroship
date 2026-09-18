@@ -517,17 +517,6 @@
                 }
               ]
             },
-            "valueFormat": {
-              "description": "Canonical value-level format metadata for the added column.",
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/ValueFormat"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
             "vectorMetric": {
               "description": "The pgvector distance metric for a `t.vector(n, { metric })` added\ncolumn (the same DECLARED-ONLY facet `IrColumn` carries on createTable).\nMeaningful on an added column (a vector ADD COLUMN renders the metric opclass),\nso it is carried here. Validated to co-occur ONLY with a [`ColType::Vector`]\ntype (`validate_column_facets`). Default-absent + `skip_serializing_if` =>\nbyte-identical when absent. (No `id_prefix` slot: an added column is NEVER the\nsystem PK, so the legacy internal platform-ID prefix is meaningless - the\nrecorder keeps that fail-closed.)",
               "anyOf": [
@@ -555,6 +544,13 @@
                 {
                   "type": "null"
                 }
+              ]
+            },
+            "encrypted": {
+              "description": "Whether the added column's plaintext is stored encrypted (the same facet\n`IrColumn` carries). Meaningful on an added column (an encrypted ADD COLUMN\nemits the `zero-migrate:enc` sentinel + `_masked` sibling); `ty` remains the\nPLAINTEXT type. Default-absent + `skip_serializing_if` => byte-identical when\nabsent.",
+              "type": [
+                "boolean",
+                "null"
               ]
             },
             "generated": {
@@ -2879,17 +2875,6 @@
             "null"
           ]
         },
-        "valueFormat": {
-          "description": "Canonical value-level format metadata. The physical storage type remains\nexplicit in [`Self::ty`]; validation checks the format/type pairing.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ValueFormat"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "references": {
           "description": "A typed single-column foreign-key reference. The local column's storage\ntype remains fully specified by [`Self::ty`]; this facet adds only the\ntarget identity and referential actions. In particular, it never infers\nor replaces the local type from a live catalog.\n\nNOT the only construct in this IR spelled `references`, and the two are not\ninterchangeable. This one is a COLUMN FACET, a sibling of `name` and `type`,\ncarrying a target TABLE AND COLUMN plus `ON DELETE` / `ON UPDATE`. The other\nis the column TYPE variant [`ColType::Ref`], which carries a target table\nname and nothing else. A reader searching this IR for `references` finds\nwhichever comes first; they are cross-linked so neither can be mistaken for\nthe whole story.",
           "anyOf": [
@@ -2902,7 +2887,7 @@
           ]
         },
         "idPrefix": {
-          "description": "Internal platform-ID prefix for the\n`<prefix>_<25 base36 UUIDv7>` format. This is a DECLARED-ONLY hint DB\nintrospection cannot recover (the minted value is opaque text in the\ncatalog; the prefix is a mint-time input, not a stored column attribute).\nIt is used by internal platform descriptors; it is neither TypeID nor\npublic migration authoring. Carried so gen-types - and\nthe runtime, once it deletes the declared-schema cache - keep that legacy\ninternal brand.\nDefault-absent + `skip_serializing_if` so a column that declares no prefix is\nBYTE-IDENTICAL on the wire and in the checksum to the pre-facet image.\n\n[`crate::model::validate`]: crate::validate\n\nValidation is bounded\nat validate-time ([`crate::validate`]) to the legacy internal prefix charset/length + the\nreserved-prefix deny-list (a hand-crafted IR envelope is the threat model).\n\nCamel-cased on the wire (`\"idPrefix\"`) - the op-region nested-field\nconvention (`ir_wire_contract`, asserted by\n`ir_column_facet_fields_are_camel_case`); this aligns the spelling with the\n`FieldDescriptor.id_prefix` (`#[serde(rename = \"idPrefix\")]`, `declarative.rs`)\n, so the same concept is spelled ONE way across the IR and the descriptor.",
+          "description": "The typed-id prefix for a `t.typedId(prefix)` column. A typed-id column is\n[`ColType::String`] with `length` 36 plus this facet; the prefix is a\nDECLARED-ONLY hint DB introspection cannot recover (the minted value is\nopaque text in the catalog; the prefix is a mint-time input, not a stored\ncolumn attribute). Carried so gen-types re-emits `t.typedId(\"<prefix>\")`\nand the runtime derives the per-row prefix.\nDefault-absent + `skip_serializing_if` so a column that declares no prefix is\nBYTE-IDENTICAL on the wire and in the checksum to the pre-facet image.\n\n[`crate::model::validate`]: crate::validate\n\nValidation is bounded\nat validate-time ([`crate::validate`]) to the legacy internal prefix charset/length + the\nreserved-prefix deny-list (a hand-crafted IR envelope is the threat model).\n\nCamel-cased on the wire (`\"idPrefix\"`) - the op-region nested-field\nconvention (`ir_wire_contract`, asserted by\n`ir_column_facet_fields_are_camel_case`); this aligns the spelling with the\n`FieldDescriptor.id_prefix` (`#[serde(rename = \"idPrefix\")]`, `declarative.rs`)\n, so the same concept is spelled ONE way across the IR and the descriptor.",
           "type": [
             "string",
             "null"
@@ -2927,7 +2912,7 @@
           ]
         },
         "collation": {
-          "description": "Per-column collation INTENT, spelled per dialect by the render seam.\n\nThe sibling of [`Self::case_sensitive`], and deliberately separate from it:\nthat one asks for case-INSENSITIVE comparison (PostgreSQL `citext`), this one\nasks for BYTEWISE comparison. They are contradictory rather than composable,\nso the validator refuses a column carrying both.\n\nA [`Self::value_format`] column already pins bytewise comparison as part of its\nstorage contract, so it needs nothing here; carrying both is refused too, to\nkeep ONE writer of the snapshot's collation per column.\n\nDefault-absent + `skip_serializing_if`, so a column that declares no collation\nis BYTE-IDENTICAL on the wire and in the checksum to the pre-facet image.",
+          "description": "Per-column collation INTENT, spelled per dialect by the render seam.\n\nThe sibling of [`Self::case_sensitive`], and deliberately separate from it:\nthat one asks for case-INSENSITIVE comparison (PostgreSQL `citext`), this one\nasks for BYTEWISE comparison. They are contradictory rather than composable,\nso the validator refuses a column carrying both.\n\nDefault-absent + `skip_serializing_if`, so a column that declares no collation\nis BYTE-IDENTICAL on the wire and in the checksum to the pre-facet image.",
           "anyOf": [
             {
               "$ref": "#/$defs/ColumnCollation"
@@ -2938,7 +2923,7 @@
           ]
         },
         "mask": {
-          "description": "A STANDALONE column mask (`t.string().mask({ kind, classification })`). Unlike\n`id_prefix`/`vector_metric` (declared-only), a mask IS recoverable from the live\n`zero-migrate:mask` sentinel by the RUNTIME - but the OFFLINE op fold + gen-types have no\nlive DB, so the facet is carried here to keep it through author->generate->fold\n(and so the op lower emits the `zero-migrate:mask` sentinel the runtime later reads). An\nencrypted column's auto-mask `{ full, pii }` is IMPLIED by the carrier and NOT\ncarried here; an explicit mask OVERRIDES it. Default-absent + `skip_serializing_if`\n=> a mask-less column is BYTE-IDENTICAL on the wire/checksum to the pre-mask image.\nBounded STRUCTURALLY by the closed [`IrMask`]/[`IrMaskKind`]/[`IrClassification`]\nenums (serde rejects an out-of-set kind/classification at deserialize).",
+          "description": "A STANDALONE column mask (`t.string().mask({ kind, classification })`). Unlike\n`id_prefix`/`vector_metric` (declared-only), a mask IS recoverable from the live\n`zero-migrate:mask` sentinel by the RUNTIME - but the OFFLINE op fold + gen-types have no\nlive DB, so the facet is carried here to keep it through author->generate->fold\n(and so the op lower emits the `zero-migrate:mask` sentinel the runtime later reads). An\nencrypted column's auto-mask `{ full, pii }` is IMPLIED by the [`Self::encrypted`]\nfacet and NOT carried here; an explicit mask OVERRIDES it. Default-absent + `skip_serializing_if`\n=> a mask-less column is BYTE-IDENTICAL on the wire/checksum to the pre-mask image.\nBounded STRUCTURALLY by the closed [`IrMask`]/[`IrMaskKind`]/[`IrClassification`]\nenums (serde rejects an out-of-set kind/classification at deserialize).",
           "anyOf": [
             {
               "$ref": "#/$defs/IrMask"
@@ -2946,6 +2931,13 @@
             {
               "type": "null"
             }
+          ]
+        },
+        "encrypted": {
+          "description": "Whether this column's plaintext is stored encrypted (AEAD, fresh nonce\nper write, bound to collection/column/row). `ty` remains the PLAINTEXT\ntype: encryption is an ATTRIBUTE of the field, not a wrapper around its type.",
+          "type": [
+            "boolean",
+            "null"
           ]
         },
         "generated": {
@@ -3235,28 +3227,6 @@
           },
           "required": [
             "domain"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "description": "Application-level encrypted column wrapping an inner type.\n\nCarries the plaintext type. Encryption is always randomised; the\nruntime authenticates each value's collection, column and row identity.",
-          "type": "object",
-          "properties": {
-            "encrypted": {
-              "type": "object",
-              "properties": {
-                "of": {
-                  "description": "The inner (plaintext) type.",
-                  "$ref": "#/$defs/ColType"
-                }
-              },
-              "required": [
-                "of"
-              ]
-            }
-          },
-          "required": [
-            "encrypted"
           ],
           "additionalProperties": false
         }
@@ -4435,39 +4405,6 @@
         "name"
       ]
     },
-    "ValueFormat": {
-      "description": "Canonical value-level format metadata, independent of physical SQL storage.\n\nThe enum uses serde's natural externally-tagged representation. For example,\na TypeID is encoded as `{ \"typeId\": { \"prefix\": \"user\" } }`, while a ULID\nis encoded as the unit-variant string `\"ulid\"`.",
-      "oneOf": [
-        {
-          "description": "TypeID 0.3, stored canonically as `<prefix>_<suffix>` or as the bare\nsuffix when `prefix` is empty.",
-          "type": "object",
-          "properties": {
-            "typeId": {
-              "type": "object",
-              "properties": {
-                "prefix": {
-                  "description": "Stored TypeID prefix, without the separator underscore.",
-                  "type": "string"
-                }
-              },
-              "additionalProperties": false,
-              "required": [
-                "prefix"
-              ]
-            }
-          },
-          "required": [
-            "typeId"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "description": "ULID, stored as exactly 26 canonical uppercase Crockford Base32\ncharacters with the 128-bit overflow bound enforced.",
-          "type": "string",
-          "const": "ulid"
-        }
-      ]
-    },
     "ColumnReference": {
       "description": "Target and behavior for a typed single-column foreign-key reference.\n\nComposite foreign keys deliberately do not use this shape; they remain\ntable-level constraints with ordered local and referenced column lists.\n\nReached through the column facet [`IrColumn::references`], and NOT to be\nconfused with the column type variant [`ColType::Ref`], which is also spelled\n`references` and carries a table name alone. `table` and `column` are both\nrequired here; that pair, plus the referential actions, is exactly what the\ntype variant cannot express.",
       "type": "object",
@@ -4577,14 +4514,14 @@
       "description": "The CLOSED per-column collation-INTENT lexicon.\n\nA collation NAME is dialect-private - `C` means nothing to SQLite, `BINARY`\nmeans nothing to PostgreSQL, and MySQL spells the same idea a third way - so\nthis carries the INTENT and lets the render seam spell it. That is the same\ntreatment [`IrColumn::case_sensitive`] already gets, and the reason it is a\nclosed enum rather than a string: an author-supplied collation name would land\nverbatim in emitted DDL, and it would have to be sound on three dialects at\nonce.\n\nThe one member is the one intent the engine can spell everywhere. Ordinary\ncase-insensitivity is [`IrColumn::case_sensitive`]'s job, not this one's, and\nthe DEFAULT (absent) is whatever the database's own collation is.\n\nOnly a text-family column may carry it; the validator refuses it elsewhere,\nand refuses it alongside `caseSensitive: false`, which asks for the opposite.",
       "oneOf": [
         {
-          "description": "Compare and order this column by its stored BYTES, so a value whose byte\norder is its semantic order (a ULID, a TypeID, a base36 UUIDv7) sorts the\nway it was minted.\n\nPostgreSQL `COLLATE \"C\"`, SQLite `COLLATE BINARY`, MySQL\n`utf8mb4_0900_bin`. Without it the column takes the database default,\nwhich may not use the same ordering rules as the encoded value.",
+          "description": "Compare and order this column by its stored BYTES, so a value whose byte\norder is its semantic order (a TypeID, a base36 UUIDv7) sorts the\nway it was minted.\n\nPostgreSQL `COLLATE \"C\"`, SQLite `COLLATE BINARY`, MySQL\n`utf8mb4_0900_bin`. Without it the column takes the database default,\nwhich may not use the same ordering rules as the encoded value.",
           "type": "string",
           "const": "bytewise"
         }
       ]
     },
     "IrMask": {
-      "description": "A column-masking facet (`.mask({ kind, classification })`) carried on the IR.\n\n**Why CARRIED, not recovered (unlike the runtime path).** The runtime recovers a\nmask from the LIVE `zero-migrate:mask` COMMENT sentinel on the `_masked` sibling\n(`crates/zeroship-data-orm` `introspect_schema`). But the OFFLINE op fold - the wire\n`FieldDef` map, produced by the single fold's `project_field_defs`\nprojection - and `gen-types` have NO live DB, so there\nis no sentinel to read. So a STANDALONE `.mask()` on a plaintext column must be carried\non the IR or it is DROPPED through author->generate->fold (the creator's\n`MaskedValue<T>` silently downgrades to `T`, and the runtime - which DOES read the\nsentinel - never gets a sentinel emitted because the op lower had no mask to emit).\nCarrying it closes BOTH the gen-types type-fidelity gap and the runtime\nmasking-fidelity gap in one move (the lower stamps the `zero-migrate:mask` sentinel from\nthis facet).\n\nAn ENCRYPTED column's fail-safe auto-mask (`{ full, pii }`) is IMPLIED by the\n`ColType::Encrypted` carrier (recovered in [`crate::ir_author::ir_column_to_field`]),\nso it is NOT carried here; an explicit `.mask()` here OVERRIDES that auto-mask.\n\nDefault-absent + `skip_serializing_if` so a column declaring no mask is\nBYTE-IDENTICAL on the wire and in the checksum to the pre-mask image.",
+      "description": "A column-masking facet (`.mask({ kind, classification })`) carried on the IR.\n\n**Why CARRIED, not recovered (unlike the runtime path).** The runtime recovers a\nmask from the LIVE `zero-migrate:mask` COMMENT sentinel on the `_masked` sibling\n(`crates/zeroship-data-orm` `introspect_schema`). But the OFFLINE op fold - the wire\n`FieldDef` map, produced by the single fold's `project_field_defs`\nprojection - and `gen-types` have NO live DB, so there\nis no sentinel to read. So a STANDALONE `.mask()` on a plaintext column must be carried\non the IR or it is DROPPED through author->generate->fold (the creator's\n`MaskedValue<T>` silently downgrades to `T`, and the runtime - which DOES read the\nsentinel - never gets a sentinel emitted because the op lower had no mask to emit).\nCarrying it closes BOTH the gen-types type-fidelity gap and the runtime\nmasking-fidelity gap in one move (the lower stamps the `zero-migrate:mask` sentinel from\nthis facet).\n\nAn ENCRYPTED column's fail-safe auto-mask (`{ full, pii }`) is IMPLIED by the\n[`IrColumn::encrypted`] facet (recovered in `ir_column_to_field`), so it is\nNOT carried here; an explicit `.mask()` here OVERRIDES that auto-mask.\n\nDefault-absent + `skip_serializing_if` so a column declaring no mask is\nBYTE-IDENTICAL on the wire and in the checksum to the pre-mask image.",
       "type": "object",
       "properties": {
         "kind": {
@@ -6091,11 +6028,6 @@
             "typeId"
           ],
           "additionalProperties": false
-        },
-        {
-          "description": "Generate a canonical uppercase ULID.",
-          "type": "string",
-          "const": "ulid"
         }
       ]
     },

@@ -22,7 +22,7 @@ use zeroship_migrate_ir::ir::{IdentityCol, IndexSortOrder};
 // renderer(dialect))`; a backend that already knows which vendor it is passes them
 // itself and the registry round trip disappears.
 use zeroship_migrate_backend::value_format::{
-    catalog_id_default, catalog_uuid_id_default, recover_format_check, RecoveredFormatCheck,
+    catalog_id_default, catalog_uuid_id_default, recover_format_check,
 };
 
 /// One member column of a composite foreign key, as `PRAGMA foreign_key_list`
@@ -303,12 +303,6 @@ async fn introspect_columns(
         let identity = (rowid_alias && column_declares_autoincrement(stored_create_sql, &name))
             .then_some(IdentityCol { always: false });
         let recovered_checks = recover_column_format_checks(stored_create_sql, &name);
-        if recovered_checks.mixed_uuid_and_value_format {
-            return Err(DriftError::Snapshot(format!(
-                "SQLite stored CREATE returned mixed UUID and TypeID/ULID format CHECKs for {table}.{name}"
-            )));
-        }
-        let value_format = recovered_checks.value_format;
         let has_uuid_format_check = recovered_checks.uuid;
         let catalog_default = if has_uuid_format_check {
             catalog_uuid_id_default(
@@ -337,8 +331,7 @@ async fn introspect_columns(
         let tracks_id_default = is_uuid_v4_default
             || identity.is_some()
             || rowid_alias
-            || has_uuid_format_check
-            || value_format.is_some();
+            || has_uuid_format_check;
         let id_default = tracks_id_default.then_some(catalog_default);
         t.columns.push(ColumnSnapshot {
             name: name.clone(),
@@ -366,12 +359,10 @@ async fn introspect_columns(
             generated: None,
             identity,
             rowid_alias,
-            value_format,
             // Retain the engine's own UUID contract as catalog evidence. The
             // id-default classification above consumes the recovered CHECK
             // without recording that the column enforces the UUID spelling
-            // locally, and `value_format` cannot carry it (UUID is not a
-            // `ValueFormat`).
+            // locally.
             catalog_uuid_format_check: has_uuid_format_check,
             id_default,
             expression_default: None,
@@ -1334,8 +1325,6 @@ fn sqlite_column_clause<'a>(create_sql: &'a str, column: &str) -> Option<&'a str
 #[derive(Default)]
 struct RecoveredColumnFormatChecks {
     uuid: bool,
-    value_format: Option<zeroship_migrate_ir::ir::ValueFormat>,
-    mixed_uuid_and_value_format: bool,
 }
 
 /// Recover only engine-owned, column-local format checks. SQLite stores both
@@ -1347,7 +1336,6 @@ struct RecoveredColumnFormatChecks {
 /// out of the semantic snapshot.
 fn recover_column_format_checks(create_sql: &str, column: &str) -> RecoveredColumnFormatChecks {
     let mut uuid_count = 0_usize;
-    let mut value_formats = Vec::new();
     for (start, end) in keyword_spans(create_sql, "CHECK", false) {
         let Some(open) = find_char_outside_quotes(create_sql, '(', end) else {
             continue;
@@ -1355,26 +1343,21 @@ fn recover_column_format_checks(create_sql: &str, column: &str) -> RecoveredColu
         let Some(close) = find_matching_paren(create_sql, open) else {
             continue;
         };
-        match recover_format_check(
+        if recover_format_check(
             column,
             &create_sql[start..=close],
             &crate::value_format::RENDERER,
             &crate::dml::RENDERER,
         ) {
-            Some(RecoveredFormatCheck::Uuid) => uuid_count += 1,
-            Some(RecoveredFormatCheck::Value(format)) => value_formats.push(format),
-            None => {}
+            uuid_count += 1;
         }
     }
 
     // Duplicate engine contracts are themselves a structural alteration. Keep
     // recovery fail-closed so a duplicate cannot masquerade as the one expected
     // format check merely because both clauses happen to be identical.
-    let mixed_uuid_and_value_format = uuid_count > 0 && !value_formats.is_empty();
     RecoveredColumnFormatChecks {
         uuid: uuid_count == 1,
-        value_format: (value_formats.len() == 1).then(|| value_formats.remove(0)),
-        mixed_uuid_and_value_format,
     }
 }
 
@@ -1732,24 +1715,17 @@ mod tests {
     }
 
     #[test]
-    fn recovers_an_exact_table_level_value_format_check() {
-        let check = zeroship_migrate_backend::value_format::column_metadata(
+    fn recovers_an_exact_table_level_uuid_format_check() {
+        let check = zeroship_migrate_backend::value_format::uuid_column_metadata(
             "id",
-            &zeroship_migrate_ir::ir::ValueFormat::TypeId {
-                prefix: "account".to_string(),
-            },
             &crate::value_format::RENDERER,
             &crate::dml::RENDERER,
         )
-        .expect("TypeID metadata")
+        .expect("uuid metadata call")
+        .expect("SQLite declares a UUID format CHECK")
         .inline_check;
         let create_sql = format!("CREATE TABLE ids (id TEXT PRIMARY KEY, {check})");
         let recovered = recover_column_format_checks(&create_sql, "id");
-        assert_eq!(
-            recovered.value_format,
-            Some(zeroship_migrate_ir::ir::ValueFormat::TypeId {
-                prefix: "account".to_string()
-            })
-        );
+        assert!(recovered.uuid);
     }
 }

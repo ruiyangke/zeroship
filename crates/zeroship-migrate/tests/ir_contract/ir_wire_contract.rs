@@ -158,8 +158,7 @@ fn per_row_generators_are_backfill_only_and_round_trip_without_sampling() {
         "set":{
             "uuid4":{"perRow":"uuidV4"},
             "uuid7":{"perRow":"uuidV7"},
-            "type_id":{"perRow":{"typeId":{"prefix":"order"}}},
-            "ulid":{"perRow":"ulid"}
+            "type_id":{"perRow":{"typeId":{"prefix":"order"}}}
         },"name":"generated_ids"}"#;
     let op: Op = serde_json::from_str(json).expect("all perRow generator arms deserialize");
     let Op::Backfill { set, .. } = &op else {
@@ -182,12 +181,6 @@ fn per_row_generators_are_backfill_only_and_round_trip_without_sampling() {
         Some(BackfillSetValue::PerRow {
             per_row: PerRowGenerator::TypeId { prefix }
         }) if prefix == "order"
-    ));
-    assert!(matches!(
-        set.get("ulid"),
-        Some(BackfillSetValue::PerRow {
-            per_row: PerRowGenerator::Ulid
-        })
     ));
 
     let wire = serde_json::to_value(&op).expect("perRow op serializes");
@@ -263,13 +256,13 @@ fn ir_column_facet_fields_are_camel_case() {
         nullable: Some(false),
         default: None,
         unique: None,
-        value_format: None,
         references: None,
         id_prefix: Some("post".into()),
         collation: None,
         case_sensitive: None,
         vector_metric: Some(VectorMetric::Cosine),
         mask: None,
+        encrypted: None,
         generated: None,
         identity: None,
     };
@@ -312,13 +305,13 @@ fn column_collation_round_trips_and_absent_collation_omits_key() {
         nullable: Some(false),
         default: None,
         unique: None,
-        value_format: None,
         references: None,
         id_prefix: None,
         case_sensitive: None,
         collation: Some(ColumnCollation::Bytewise),
         vector_metric: None,
         mask: None,
+        encrypted: None,
         generated: None,
         identity: None,
     };
@@ -361,13 +354,13 @@ fn identity_by_default_round_trips_and_absent_identity_omits_key() {
         nullable: None,
         default: None,
         unique: None,
-        value_format: None,
         references: None,
         id_prefix: None,
         collation: None,
         case_sensitive: None,
         vector_metric: None,
         mask: None,
+        encrypted: None,
         generated: None,
         identity: Some(IdentityCol { always: false }),
     };
@@ -410,13 +403,13 @@ fn create_table_primary_key_round_trips_and_schema_carries_field() {
                 nullable: Some(false),
                 default: None,
                 unique: None,
-                value_format: None,
                 references: None,
                 id_prefix: None,
                 collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             },
@@ -426,13 +419,13 @@ fn create_table_primary_key_round_trips_and_schema_carries_field() {
                 nullable: Some(false),
                 default: None,
                 unique: None,
-                value_format: None,
                 references: None,
                 id_prefix: None,
                 collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             },
@@ -1002,10 +995,10 @@ fn add_column_omits_absent_optionals() {
         ty: zeroship_migrate::model::ir::ColType::Int,
         nullable: None,
         default: None,
-        value_format: None,
         case_sensitive: None,
         vector_metric: None,
         mask: None,
+        encrypted: None,
         generated: None,
         identity: None,
         schema: None,
@@ -1085,13 +1078,13 @@ fn nested_ir_column_index_constraint_omit_absent_optionals() {
         nullable: None,
         default: None,
         unique: None,
-        value_format: None,
         references: None,
         id_prefix: None,
         collation: None,
         case_sensitive: None,
         vector_metric: None,
         mask: None,
+        encrypted: None,
         generated: None,
         identity: None,
     };
@@ -1174,13 +1167,13 @@ fn partition_ops_round_trip_and_absent_fields_stay_omitted() {
             nullable: None,
             default: None,
             unique: None,
-            value_format: None,
             references: None,
             id_prefix: None,
             collation: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,
+            encrypted: None,
             generated: None,
             identity: None,
         }],
@@ -1319,10 +1312,10 @@ fn checksum_of_ir_matches_js_idiomatic_omitted_optionals() {
         ty: ColType::Int,
         nullable: None,
         default: None,
-        value_format: None,
         case_sensitive: None,
         vector_metric: None,
         mask: None,
+        encrypted: None,
         generated: None,
         identity: None,
         schema: None,

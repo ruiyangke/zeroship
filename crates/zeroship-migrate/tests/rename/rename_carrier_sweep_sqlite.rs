@@ -52,9 +52,10 @@ const OLD_COLUMN: &str = "qty_on_hand";
 /// The post-rename column name.
 const NEW_COLUMN: &str = "amount_on_hand";
 
-/// The second renamed column: a TypeID-formatted TEXT column, which is the shape that
-/// makes the fold emit an inline format CHECK naming its own column. It is the only
-/// producer of `inline_checks`, so without it that carrier would sit unexercised.
+/// The second renamed column: a UUID column, which is the shape that makes the
+/// SQLite fold emit an inline format CHECK naming its own column. It is the
+/// producer of `inline_checks` on this dialect, so without it that carrier would
+/// sit unexercised.
 const OLD_FORMAT_COLUMN: &str = "sku_code";
 
 /// The post-rename name of [`OLD_FORMAT_COLUMN`].
@@ -118,8 +119,8 @@ fn exec_cfg() -> ExecutorConfig {
     ExecutorConfig::new(PROJECT, PROJECT, support::no_inject(PROJECT))
 }
 
-/// The CREATE half. Everything SQLite can carry: a generated column, a value-format
-/// column (the inline CHECK), a plain index, a partial index (a rendered predicate) and
+/// The CREATE half. Everything SQLite can carry: a generated column, a UUID column
+/// (the inline CHECK), a plain index, a partial index (a rendered predicate) and
 /// an expression-keyed index (a rendered expression).
 const CREATE_IR: &str = r#"{
   "ir_version": 1,
@@ -134,8 +135,7 @@ const CREATE_IR: &str = r#"{
        "generated":{"expr":{"node":"binOp","op":"add",
          "lhs":{"node":"colRef","name":"qty_on_hand"},
          "rhs":{"node":"literal","value":1}},"stored":true}},
-      {"name":"sku_code","type":"text","nullable":true,
-       "valueFormat":{"typeId":{"prefix":"sku"}}}
+      {"name":"sku_code","type":"uuid","nullable":true}
     ],"primaryKey":["id","qty_on_hand"]},
 
     {"op":"createIndex","table":"carrier_sweep_main","name":"carrier_sweep_main_plain",
@@ -177,7 +177,7 @@ const RENAME_FORMAT_IR: &str = r#"{
   "owner_app": "app_carrier_sweep",
   "ops": [
     {"op":"renameColumn","table":"carrier_sweep_main","from":"sku_code",
-     "to":"article_code","type":"text"}
+     "to":"article_code","type":"uuid"}
   ]
 }"#;
 
@@ -456,7 +456,7 @@ async fn does_live_sqlite_follow_the_rename_into_every_carrier_it_reports() {
 }
 
 /// The anti-corruption witness for the one rendered-SQL carrier SQLite does reach with a
-/// string literal in it. A TypeID format CHECK is a membership/regex predicate over its
+/// string literal in it. A UUID format CHECK is a membership/regex predicate over its
 /// own column, and it is dense with literals; the rename must move the REFERENCE and
 /// leave every literal byte-identical.
 #[compio::test]

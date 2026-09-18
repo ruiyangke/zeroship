@@ -92,22 +92,17 @@ function toFieldDef(field: DbSchemaField): FieldDef {
  */
 export function colTypeFromDbField(field: DbSchemaField): ColType {
   const def = toFieldDef(field);
-  // An encrypted column wraps an inner primitive (`string`/`number`/`bytes`); the
-  // db `FieldDef` keeps the wrapped primitive in `type` and carries the encryption
-  // facet alongside. Reduce to the neutral `encrypted` ColType whose `of` recurses
-  // on the inner token — the same shape the engine's `ColType::Encrypted { of }`
-  // carries. Checked before the type switch so the facet drives the arm.
-  if (def.encrypted === true) {
-    const inner = colTypeFromDbField({ type: def.type } as FieldDef);
-    return { encrypted: { of: inner } };
-  }
   switch (def.type) {
     // Scalars whose db token maps 1:1 onto a neutral ColType. A db `string` field
-    // has no bounded-length contract, so it maps to unbounded `text` (identical
-    // rendering to the retired bare `string` ColType); an explicit bounded string
-    // is authored with `t.string({ length })`.
-    case "string":
+    // with no `maxLength` has no bounded-length contract, so it maps to unbounded
+    // `text`; an explicit bound maps to the neutral bounded string.
+    case "string": {
+      const length = def.maxLength;
+      if (typeof length === "number" && Number.isInteger(length) && length > 0) {
+        return { string: { length } };
+      }
       return "text";
+    }
     case "number":
       return "double";
     // Descriptor-side tokens: integer widths and float precision that no `t.*`
@@ -136,11 +131,11 @@ export function colTypeFromDbField(field: DbSchemaField): ColType {
       return "bytes";
     case "geoPoint":
       return "geoPoint";
-    // `dbType.typedId(...)` is the internal platform ID field. The runtime mints
-    // `<prefix>_<25 base36 UUIDv7>` values; this is neither TypeID nor a public
-    // migration-column shortcut. Its bridge carrier is neutral `uuid`.
+    // `dbType.typedId(...)` is the creator typed-id field: storage is the
+    // bounded `string(36)` the `<prefix>_<26 base32>` value fits; the declared
+    // prefix rides on `FieldDef.idPrefix`.
     case "id":
-      return "uuid";
+      return { string: { length: 36 } };
     // A foreign-key column: the neutral `ref` arm carries the target table as a
     // PLAIN STRING (never live-schema-bound). `refTarget` is required on a
     // well-formed `dbType.ref(...)` FieldDef.

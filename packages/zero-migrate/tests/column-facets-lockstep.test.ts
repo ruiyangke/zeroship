@@ -21,7 +21,6 @@ import { test } from "node:test";
 import {
   __begin as pubBegin,
   __drain as pubDrain,
-  ids as pubIds,
   maxValue as pubMaxValue,
   minValue as pubMinValue,
   t as pubT,
@@ -35,7 +34,6 @@ import {
 import {
   __begin as engBegin,
   __drain as engDrain,
-  ids as engIds,
   maxValue as engMaxValue,
   minValue as engMinValue,
   t as engT,
@@ -47,7 +45,6 @@ type Rec = {
   drain: () => any[];
   table: any;
   t: any;
-  ids: any;
   minValue: any;
   maxValue: any;
 };
@@ -56,7 +53,6 @@ const PUBLIC: Rec = {
   begin: pubBegin,
   drain: pubDrain,
   t: pubT,
-  ids: pubIds,
   table: pubTable,
   minValue: pubMinValue,
   maxValue: pubMaxValue,
@@ -65,7 +61,6 @@ const ENGINE: Rec = {
   begin: engBegin,
   drain: engDrain,
   t: engT,
-  ids: engIds,
   table: engTable,
   minValue: engMinValue,
   maxValue: engMaxValue,
@@ -73,12 +68,11 @@ const ENGINE: Rec = {
 
 /** Author a facet-bearing migration against the given recorder + lexicon, return
  *  the recorded op list. The SAME author body runs against both impls. */
-function authorWith({ begin, drain, ids, t, table }: Rec): any[] {
+function authorWith({ begin, drain, t, table }: Rec): any[] {
   begin();
   // createTable carrying the column facets:
   //  - t.*.references(table, column, actions) -> IrColumn.references
-  //  - t.typedId(prefix)         → IrColumn.valueFormat.typeId
-  //  - ids.ulid()                  → IrColumn.valueFormat "ulid"
+  //  - t.typedId(prefix)         → IrColumn.idPrefix + string(36) storage
   //  - t.vector({ dimensions, metric }) → IrColumn.vectorMetric (closed cosine|l2|innerProduct)
   //  - t.text().mask({ kind, classification }) → IrColumn.mask:{kind,classification}
   //  - t.int().generated(expr)     → IrColumn.generated:{expr,stored}
@@ -86,9 +80,9 @@ function authorWith({ begin, drain, ids, t, table }: Rec): any[] {
   table("documents").create({
     columns: {
       id: t.typedId("doc" ).primaryKey(),
-      public_id: t.typedId("document" ).required().unique(),
+      public_id: t.typedId("docum" ).required().unique(),
       opaque_id: t.typedId("" ),
-      event_id: ids.ulid().required().unique(),
+      event_id: t.typedId("evt" ).required().unique(),
       owner_id: t.uuid().references("accounts", "id", {
         onDelete: "cascade",
         onUpdate: "restrict",
@@ -114,8 +108,7 @@ function authorWith({ begin, drain, ids, t, table }: Rec): any[] {
   });
   // addColumn carries valueFormat + vectorMetric + mask:
   table("documents").column("summary_vec").add({ type: t.vector({ dimensions: 768, metric: "innerProduct" }) });
-  table("documents").column("external_id").add({ type: t.typedId("external" ) });
-  table("documents").column("external_event_id").add({ type: ids.ulid() });
+  table("documents").column("external_id").add({ type: t.typedId("ext" ) });
   table("documents").column("phone").add({ type: t.text().mask({ kind: "last4" }) });
   table("documents").column("added_total").add({
     type: t.int().generated((col: any) => col("qty").mul(col("unit_cents"))),
@@ -136,18 +129,18 @@ test("the recorded facets carry the exact camelCase wire form", () => {
   assert.equal(create.op, "createTable");
   const byName = (n: string) => create.columns.find((column: any) => column.name === n);
 
-  // The public TypeID builder records valueFormat and never the legacy idPrefix facet.
-  assert.deepEqual(byName("id").valueFormat, { typeId: { prefix: "doc" } });
-  assert.ok(!("idPrefix" in byName("id")));
+  // A typed-id column records bounded string(36) storage plus its declared prefix.
+  assert.deepEqual(byName("id").type, { string: { length: 36 } });
+  assert.equal(byName("id").idPrefix, "doc");
 
   // t.vector({ dimensions, metric }) → vectorMetric (closed token)
   assert.equal(byName("embedding").vectorMetric, "cosine");
   assert.equal(byName("shard").type, "int");
   assert.equal(byName("ratio").type, "double");
   assert.equal(byName("source_ip").type, "inet");
-  assert.deepEqual(byName("public_id").valueFormat, { typeId: { prefix: "document" } });
-  assert.deepEqual(byName("opaque_id").valueFormat, { typeId: { prefix: "" } });
-  assert.equal(byName("event_id").valueFormat, "ulid");
+  assert.equal(byName("public_id").idPrefix, "docum");
+  assert.equal(byName("opaque_id").idPrefix, "");
+  assert.equal(byName("event_id").idPrefix, "evt");
   assert.equal(byName("owner_id").type, "uuid");
   assert.deepEqual(byName("owner_id").references, {
     table: "accounts",
@@ -183,7 +176,6 @@ test("the recorded facets carry the exact camelCase wire form", () => {
   const title = byName("title");
   assert.ok(
     !("idPrefix" in title) &&
-      !("valueFormat" in title) &&
       !("references" in title) &&
       !("vectorMetric" in title) &&
       !("collation" in title) &&
@@ -196,9 +188,8 @@ test("the recorded facets carry the exact camelCase wire form", () => {
   const addVec = ops.find((o: any) => o.op === "addColumn" && o.column === "summary_vec");
   assert.equal(addVec.vectorMetric, "innerProduct");
   const addTypeId = ops.find((o: any) => o.op === "addColumn" && o.column === "external_id");
-  assert.deepEqual(addTypeId.valueFormat, { typeId: { prefix: "external" } });
-  const addUlid = ops.find((o: any) => o.op === "addColumn" && o.column === "external_event_id");
-  assert.equal(addUlid.valueFormat, "ulid");
+  assert.deepEqual(addTypeId.type, { string: { length: 36 } });
+  assert.ok(!("idPrefix" in addTypeId), "addColumn has no typed-id prefix slot");
   const addPhone = ops.find((o: any) => o.op === "addColumn" && o.column === "phone");
   assert.deepEqual(addPhone.mask, { kind: "last4", classification: "pii" });
   const addGenerated = ops.find((o: any) => o.op === "addColumn" && o.column === "added_total");

@@ -1,7 +1,7 @@
 //! Neutral contract for vendor-owned value-format rendering, plus the ONE catalog
 //! normalization every backend compares through.
 //!
-//! Logical UUID, ULID and TypeID intent belongs to the IR. The exact storage type,
+//! Logical UUID and TypeID intent belongs to the IR. The exact storage type,
 //! collation, `CHECK` spelling, and catalog deparser normalization belong to the
 //! backend that emits or reads them. [`ValueFormatRenderer`] names that boundary
 //! without supplying a shared vendor answer.
@@ -40,7 +40,6 @@ use crate::snapshot::{
 };
 use zeroship_migrate_ir::dialect::DialectId;
 use zeroship_migrate_ir::expr::Expr;
-use zeroship_migrate_ir::ir::{validate_type_id_prefix, ValueFormat};
 
 /// The physical column details implied by one logical value format.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,32 +98,8 @@ pub trait ValueFormatRenderer: std::fmt::Debug + Sync {
     fn canonical_catalog_function_name<'a>(&self, name: &'a str) -> &'a str;
     fn canonical_unattributed_catalog_function_name<'a>(&self, name: &'a str) -> Option<&'a str>;
     fn uuid_generator_candidates(&self, rendered: &str) -> Vec<String>;
-    fn recovery_candidates(
-        &self,
-        literals: &[String],
-        type_id_alphabet: &str,
-        ulid_alphabet: &str,
-    ) -> Vec<ValueFormat>;
 
     fn uuid_column_metadata(&self, quoted: &str) -> Option<ValueFormatColumnMetadata>;
-    fn ulid_column_metadata(
-        &self,
-        quoted: &str,
-        regex: &str,
-        len: usize,
-    ) -> ValueFormatColumnMetadata;
-    // Exact TypeID metadata requires each independently derived storage property.
-    #[allow(clippy::too_many_arguments)]
-    fn type_id_column_metadata(
-        &self,
-        quoted: &str,
-        stored_prefix: &str,
-        suffix_start: usize,
-        total_len: usize,
-        suffix_len: usize,
-        alphabet: &str,
-        regex: &str,
-    ) -> ValueFormatColumnMetadata;
     fn bytewise_column_metadata(
         &self,
         rendered_type: &str,
@@ -200,11 +175,6 @@ impl CatalogRules for VendorRules<'_> {
     }
 }
 
-const TYPE_ID_SUFFIX_LEN: usize = 26;
-const TYPE_ID_ALPHABET: &str = "0123456789abcdefghjkmnpqrstvwxyz";
-const ULID_LEN: usize = 26;
-const ULID_ALPHABET: &str = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-
 /// Project a live catalog default into the same semantic key as
 /// the engine's `authored_id_default`. `expression_default` is the authoritative catalog
 /// expression/literal distinction when the backend exposes one: some catalogs strip SQL
@@ -254,7 +224,7 @@ pub fn catalog_uuid_id_default(
     value_format.normalize_uuid_literal_snapshot(snapshot)
 }
 
-/// [`catalog_id_default`] with the TypeID/ULID text surface's normalization applied.
+/// [`catalog_id_default`] with the TypeID text surface's normalization applied.
 pub fn catalog_text_id_default(
     default: Option<&str>,
     value_format: &dyn ValueFormatRenderer,
@@ -483,115 +453,26 @@ pub fn sql_literal_fingerprint(expression: &str, backend: &dyn CatalogRules) -> 
     )
 }
 
-/// Engine-owned format contract recovered from one catalog CHECK.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RecoveredFormatCheck {
-    /// The portable textual UUID spelling CHECK used on MySQL/SQLite.
-    Uuid,
-    /// A TypeID or ULID CHECK, including the exact TypeID prefix.
-    Value(ValueFormat),
-}
-
-/// Recover an engine-owned UUID/TypeID/ULID CHECK from catalog SQL.
+/// Recover the engine-owned portable UUID format CHECK from catalog SQL.
 ///
-/// A candidate format is first inferred from its anchored grammar literal, then
-/// the complete clause is compared against a freshly rendered authoritative
-/// contract after removing catalog-only syntax (redundant parentheses,
-/// whitespace, PostgreSQL's `::text`, identifier quote choices, and MySQL
-/// charset introducers). A partially edited CHECK therefore does not masquerade
-/// as a valid format contract.
+/// The clause is compared against a freshly rendered authoritative contract
+/// after removing catalog-only syntax (redundant parentheses, whitespace,
+/// PostgreSQL's `::text`, identifier quote choices, and MySQL charset
+/// introducers). A partially edited CHECK therefore does not masquerade as a
+/// valid format contract.
 pub fn recover_format_check(
     column: &str,
     check_sql: &str,
     value_format: &dyn ValueFormatRenderer,
     dml: &dyn DmlRenderer,
-) -> Option<RecoveredFormatCheck> {
+) -> bool {
     let rules = VendorRules(value_format);
-    if let Ok(Some(uuid)) = uuid_column_metadata(column, value_format, dml) {
-        if canonical_check_sql(column, check_sql, &rules)
-            == canonical_check_sql(column, &uuid.inline_check, &rules)
-        {
-            return Some(RecoveredFormatCheck::Uuid);
-        }
-    }
-
-    let literals = sql_string_literals(check_sql);
-    let mut candidates = Vec::new();
-    for literal in &literals {
-        let candidate = if literal == &ulid_regex() {
-            Some(ValueFormat::Ulid)
-        } else {
-            type_id_format_from_regex(literal)
-        };
-        if let Some(candidate) = candidate {
-            candidates.push(candidate);
-        }
-    }
-    candidates.extend(value_format.recovery_candidates(&literals, TYPE_ID_ALPHABET, ULID_ALPHABET));
-
-    let mut unique_candidates = Vec::new();
-    for candidate in candidates {
-        if !unique_candidates.contains(&candidate) {
-            unique_candidates.push(candidate);
-        }
-    }
-    for candidate in unique_candidates {
-        let expected = column_metadata(column, &candidate, value_format, dml).ok()?;
-        if canonical_check_sql(column, check_sql, &rules)
-            == canonical_check_sql(column, &expected.inline_check, &rules)
-        {
-            return Some(RecoveredFormatCheck::Value(candidate));
-        }
-    }
-    None
-}
-
-fn ulid_regex() -> String {
-    format!("^[0-7][{ULID_ALPHABET}]{{{}}}$", ULID_LEN - 1)
-}
-
-fn type_id_format_from_regex(regex: &str) -> Option<ValueFormat> {
-    let suffix = format!("[0-7][{TYPE_ID_ALPHABET}]{{{}}}$", TYPE_ID_SUFFIX_LEN - 1);
-    let stored_prefix = regex.strip_prefix('^')?.strip_suffix(&suffix)?;
-    let prefix = if stored_prefix.is_empty() {
-        String::new()
-    } else {
-        stored_prefix.strip_suffix('_')?.to_string()
-    };
-    validate_type_id_prefix(&prefix).ok()?;
-    Some(ValueFormat::TypeId { prefix })
-}
-
-fn sql_string_literals(sql: &str) -> Vec<String> {
-    let bytes = sql.as_bytes();
-    let mut literals = Vec::new();
-    let mut cursor = 0_usize;
-    while cursor < bytes.len() {
-        if bytes[cursor] != b'\'' {
-            cursor += 1;
-            continue;
-        }
-        cursor += 1;
-        let mut literal = String::new();
-        while cursor < bytes.len() {
-            if bytes[cursor] == b'\'' {
-                if bytes.get(cursor + 1) == Some(&b'\'') {
-                    literal.push('\'');
-                    cursor += 2;
-                    continue;
-                }
-                cursor += 1;
-                literals.push(literal);
-                break;
-            }
-            let start = cursor;
-            while cursor < bytes.len() && bytes[cursor] != b'\'' {
-                cursor += 1;
-            }
-            literal.push_str(&sql[start..cursor]);
-        }
-    }
-    literals
+    uuid_column_metadata(column, value_format, dml).is_ok_and(|uuid| {
+        uuid.is_some_and(|uuid| {
+            canonical_check_sql(column, check_sql, &rules)
+                == canonical_check_sql(column, &uuid.inline_check, &rules)
+        })
+    })
 }
 
 fn catalog_sql_tokens_with_backend(
@@ -1104,64 +985,3 @@ pub fn uuid_column_metadata(
     Ok(value_format.uuid_column_metadata(&quoted))
 }
 
-/// Lower one logical value format to its dialect-specific text representation.
-///
-/// Prefixes are validated here as well as in the policy validator because some
-/// internal tests and trusted callers exercise lowering directly. Malformed
-/// hand-built IR must fail closed at either entry point.
-pub fn column_metadata(
-    column: &str,
-    format: &ValueFormat,
-    value_format: &dyn ValueFormatRenderer,
-    dml: &dyn DmlRenderer,
-) -> Result<ValueFormatColumnMetadata, String> {
-    match format {
-        ValueFormat::TypeId { prefix } => {
-            type_id_column_metadata(column, prefix, value_format, dml)
-        }
-        ValueFormat::Ulid => ulid_column_metadata(column, value_format, dml),
-    }
-}
-
-fn ulid_column_metadata(
-    column: &str,
-    value_format: &dyn ValueFormatRenderer,
-    dml: &dyn DmlRenderer,
-) -> Result<ValueFormatColumnMetadata, String> {
-    let quoted = crate::dml::quote_ident_for_backend("ULID column", column, dml)
-        .map_err(|error| error.to_string())?;
-    let regex = ulid_regex();
-    Ok(value_format.ulid_column_metadata(&quoted, &regex, ULID_LEN))
-}
-
-fn type_id_column_metadata(
-    column: &str,
-    prefix: &str,
-    value_format: &dyn ValueFormatRenderer,
-    dml: &dyn DmlRenderer,
-) -> Result<ValueFormatColumnMetadata, String> {
-    validate_type_id_prefix(prefix)?;
-
-    let quoted = crate::dml::quote_ident_for_backend("TypeID column", column, dml)
-        .map_err(|error| error.to_string())?;
-    let stored_prefix = if prefix.is_empty() {
-        String::new()
-    } else {
-        format!("{prefix}_")
-    };
-    let suffix_start = stored_prefix.len() + 1; // SQL strings are one-indexed.
-    let total_len = stored_prefix.len() + TYPE_ID_SUFFIX_LEN;
-    let regex = format!(
-        "^{stored_prefix}[0-7][{TYPE_ID_ALPHABET}]{{{}}}$",
-        TYPE_ID_SUFFIX_LEN - 1
-    );
-    Ok(value_format.type_id_column_metadata(
-        &quoted,
-        &stored_prefix,
-        suffix_start,
-        total_len,
-        TYPE_ID_SUFFIX_LEN,
-        TYPE_ID_ALPHABET,
-        &regex,
-    ))
-}

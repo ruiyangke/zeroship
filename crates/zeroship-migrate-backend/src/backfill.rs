@@ -12,7 +12,6 @@ use zeroship_migrate_ir::ir::{CursorStability, IrScalar, PerRowGenerator};
 use crate::guard::GuardError;
 use crate::journal::JournalError;
 
-const CROCKFORD_UPPER: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const CROCKFORD_LOWER: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
 
 /// The canonical tagged-scalar representation used by a cursor component.
@@ -415,7 +414,6 @@ impl BackfillSpec {
                         h.update((prefix.len() as u64).to_be_bytes());
                         h.update(prefix.as_bytes());
                     }
-                    PerRowGenerator::Ulid => h.update(b"ulid"),
                 }
             }
         }
@@ -442,7 +440,6 @@ pub fn generate_per_row_value(generator: &PerRowGenerator) -> String {
                 format!("{prefix}_{suffix}")
             }
         }
-        PerRowGenerator::Ulid => crockford_u128(uuid::Uuid::now_v7().as_u128(), CROCKFORD_UPPER),
     }
 }
 
@@ -636,11 +633,6 @@ mod tests {
             "TypeID suffix must encode UUIDv7 bytes"
         );
         assert_eq!(type_id_uuid.get_variant(), uuid::Variant::RFC4122);
-
-        let ulid = generate_per_row_value(&PerRowGenerator::Ulid);
-        assert_eq!(ulid.len(), 26);
-        assert!(ulid.bytes().all(|byte| CROCKFORD_UPPER.contains(&byte)));
-        assert!(ulid.as_bytes()[0] <= b'7');
     }
 
     #[test]
@@ -651,7 +643,6 @@ mod tests {
             PerRowGenerator::TypeId {
                 prefix: "event".to_string(),
             },
-            PerRowGenerator::Ulid,
         ] {
             let values = (0..32)
                 .map(|_| generate_per_row_value(&generator))

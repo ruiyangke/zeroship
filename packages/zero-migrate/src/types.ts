@@ -47,7 +47,6 @@ import type {
   TableRef,
   TriggerAction,
   TriggerStmt,
-  ValueFormat,
   VectorMetric,
   ViewQuery,
 } from "./generated/ir.js";
@@ -85,7 +84,6 @@ export type {
   TableRef,
   TriggerAction,
   TriggerStmt,
-  ValueFormat,
   VectorMetric,
   ViewQuery,
 };
@@ -108,17 +106,10 @@ export type {
 // and re-exported above. The OPTION-BAG shapes the authoring `t.*` factories /
 // `.mask()` take live here.
 
-/** Options for the published TypeID 0.3 text format. The empty prefix is
+/** Options for the published typed-id text format. The empty prefix is
  * valid and stores the 26-character suffix without a leading underscore. */
 export interface TypeIdOptions {
   prefix: string;
-}
-
-/** First-class, validated textual ID formats. These builders select storage
- * and validation only; they remain nullable and carry no generator or key
- * semantics unless the ordinary {@link ColumnDef} modifiers opt in. */
-export interface IdFormats {
-  ulid(): ColumnDef;
 }
 
 declare const perRowGeneratorBrand: unique symbol;
@@ -136,7 +127,6 @@ export interface PerRowGenerators {
   uuidV4(): PerRowGeneratorValue;
   uuidV7(): PerRowGeneratorValue;
   typeId(options: TypeIdOptions): PerRowGeneratorValue;
-  ulid(): PerRowGeneratorValue;
 }
 
 /** Options for `t.text({ caseSensitive })`. `false` records the portable
@@ -268,12 +258,21 @@ export interface ColumnDef {
   /**
    * Declare a STANDALONE column mask — the field reads back as
    * `MaskedValue<T>` and the op lower emits the `zero-migrate:mask` sentinel + `_masked`
-   * sibling (the same shape `t.encrypted()`'s auto-mask uses). `kind` is REQUIRED
+   * sibling (the same shape `.encrypted()`'s auto-mask uses). `kind` is REQUIRED
    * (closed {@link MaskKind}); `classification` is optional and DEFAULTS to `"pii"`
    * (closed {@link Classification}). `kind: "none"` is the explicit opt-out. A
    * `.mask()` on an ENCRYPTED column OVERRIDES the auto-mask. Returns a fresh def.
    */
   mask(opts: MaskOptions): ColumnDef;
+  /**
+   * Declare that this column's plaintext is stored ENCRYPTED (AEAD, a fresh
+   * nonce per write, bound to collection/column/row). Encryption is an
+   * ATTRIBUTE of the field, not a wrapper around its type: the physical type
+   * remains the declared plaintext and this verb just sets the facet. Refused
+   * on a `.references()` or `.collation()` column (a foreign key compares
+   * plaintext; a collation orders it). Returns a fresh def.
+   */
+  encrypted(): ColumnDef;
   /**
    * Pin how the column COMPARES, as a closed INTENT token
    * ({@link ColumnCollation}) rather than a collation NAME — a name is
@@ -283,8 +282,8 @@ export interface ColumnDef {
    * comparison that must not move when the database's default collation does.
    *
    * REFUSED on a non-text type, alongside `caseSensitive: false` (the opposite
-   * ordering), and alongside a value format (`t.typedId()` / `ids.ulid()`,
-   * which pin bytewise comparison already). Create-table-only, like
+   * ordering), and alongside a typed id (`t.typedId()`, which pins bytewise
+   * comparison already). Create-table-only, like
    * {@link ColumnDef.references}: add/rename/set-type and nested type positions
    * reject the facet instead of dropping it. Returns a fresh def.
    */
@@ -345,8 +344,6 @@ export interface TypeLexicon {
   enum(name: string | EnumHandle): ColumnDef;
   /** A named domain reference declared with `domain(name).create(...)` from `@zeroship/migrate`. */
   domain(name: string | DomainHandle): ColumnDef;
-  /** An application-level encrypted column wrapping an inner type. */
-  encrypted(arg: { of: ColumnDef | ColType } | ColumnDef | ColType): ColumnDef;
 }
 
 export interface CreateEnumArgs {

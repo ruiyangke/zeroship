@@ -7,7 +7,7 @@ use zeroship_migrate_ir::expr::Expr;
 use zeroship_migrate_ir::ir::{
     ColType, ForEach, FuncArg, FuncArgMode, FuncLanguage, FuncVolatility, IdentityCol,
     IndexSortOrder, PartitionBounds, PartitionSpec, PolicyCmd, SafeI64, SafeU64, SequenceOwnedBy,
-    SequenceRef, TableRuntimeOptions, TriggerAction, TriggerEvent, TriggerTiming, ValueFormat,
+    SequenceRef, TableRuntimeOptions, TriggerAction, TriggerEvent, TriggerTiming,
 };
 
 /// Quote one identifier in the canonical constraint-definition normal form.
@@ -59,8 +59,7 @@ pub struct ColumnSnapshot {
     /// Column-level CHECK clauses to append at the use-site, e.g. the SQLite
     /// enum/domain inline forms. Each entry includes the `CHECK (...)` wrapper and
     /// is rendered only by the DDL emitter. Emission-only: live introspection tracks
-    /// table constraints separately; only recognized ID format CHECKs project
-    /// into [`Self::value_format`].
+    /// table constraints separately.
     ///
     /// These bodies NAME THEIR OWN COLUMN, so a rename has to follow them, and BOTH
     /// replays that own a `TableSnapshot` do: the fold's `Op::RenameColumn` arm
@@ -155,13 +154,6 @@ pub struct ColumnSnapshot {
     ///
     /// Drift-comparable.
     pub rowid_alias: bool,
-    /// A locally enforced TypeID/ULID format CHECK recovered from the catalog.
-    ///
-    /// This is deliberately separate from [`Self::inline_checks`], which may
-    /// contain unrelated emission-only CHECKs. Typed reference columns that
-    /// inherit format safety through their foreign key leave this field `None`;
-    /// their reference constraint is the drift contract.
-    pub value_format: Option<ValueFormat>,
     /// Whether the live catalog carries the engine's own exact UUID spelling
     /// CHECK for this column on MySQL or SQLite. PostgreSQL never sets it: its
     /// native `uuid` type is the contract and the renderer emits no CHECK.
@@ -285,7 +277,7 @@ pub struct ColumnSnapshot {
     pub vendor: crate::dialectal::Dialectal<dyn crate::dialectal::VendorColumnFacts>,
     /// The inline encryption sentinel to append after this
     /// column's type in CREATE / ADD COLUMN DDL, e.g.
-    /// `/* zero-migrate:enc:string */`. Emitted for a `t.encrypted(...)`
+    /// `/* zero-migrate:enc:string */`. Emitted for an `.encrypted()`
     /// column (its physical type is `BYTEA`); it is the schema-shape contract
     /// plugin-db reads at runtime to drive the AEAD encrypt/decrypt pass.
     ///
@@ -383,7 +375,6 @@ impl std::fmt::Debug for ColumnSnapshot {
         }
         s.field("identity", &self.identity)
             .field("rowid_alias", &self.rowid_alias)
-            .field("value_format", &self.value_format)
             .field("id_default", &self.id_default)
             .field("case_sensitive", &self.case_sensitive)
             .field("collation", &self.collation);
@@ -432,7 +423,7 @@ pub enum IdDefaultSnapshot {
     /// A scalar literal on PostgreSQL's native UUID surface. PostgreSQL
     /// canonicalizes accepted UUID text to lowercase hyphenated spelling, so
     /// this distinct semantic arm normalizes that representation without
-    /// weakening literal comparison on portable UUID/TypeID/ULID text columns.
+    /// weakening literal comparison on portable UUID/TypeID text columns.
     UuidLiteral(String),
     /// Another catalog expression on an ID-bearing column. The string is a
     /// dialect-normalized expression fingerprint, not emission SQL.
@@ -592,7 +583,6 @@ impl PartialEq for ColumnSnapshot {
             && self.nullable == other.nullable
             && self.identity == other.identity
             && self.rowid_alias == other.rowid_alias
-            && self.value_format == other.value_format
             && self.id_default == other.id_default
             && self.case_sensitive == other.case_sensitive
             && self.collation == other.collation

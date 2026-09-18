@@ -409,7 +409,7 @@ pub use model::ir::{
     IrIndex, IrJsonValue, IrMask, IrMaskKind, IrScalar, IrValue, IrVersionError, MigrationIr, Op,
     PartitionBoundValue, PartitionBounds, PartitionSpec, PerRowGenerator, RefAction, SafeI64,
     SafeU64, SequenceOwnedBy, SequenceRef, TableRuntimeOptions, TableRuntimeOptionsPatch,
-    TableStrictness, ValueFormat, VectorMetric, CURRENT_IR_VERSION, EXPR_INVALID_NUMERIC,
+    TableStrictness, VectorMetric, CURRENT_IR_VERSION, EXPR_INVALID_NUMERIC,
     TYPE_ID_MAX_PREFIX_LEN,
 };
 // The fail-closed IR envelope load gate: deserialize ->

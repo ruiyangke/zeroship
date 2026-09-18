@@ -191,7 +191,6 @@ fn walk_column(column: &ColumnSnapshot, set: &mut CarrierSet) {
         generated_kind,
         identity,
         rowid_alias,
-        value_format,
         catalog_uuid_format_check,
         id_default,
         expression_default,
@@ -248,12 +247,6 @@ fn walk_column(column: &ColumnSnapshot, set: &mut CarrierSet) {
         "TableSnapshot::columns[].rowid_alias",
         rowid_alias,
         "a bool.",
-    );
-    never_a_column_name(
-        "TableSnapshot::columns[].value_format",
-        value_format,
-        "a closed ID-format enum plus a TypeID PREFIX. The prefix is an application \
-         namespace (`user`, `org`), not a column reference.",
     );
     never_a_column_name(
         "TableSnapshot::columns[].catalog_uuid_format_check",

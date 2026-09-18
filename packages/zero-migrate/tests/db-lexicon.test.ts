@@ -35,9 +35,8 @@ test("ONE lexicon: a db field reduces to the same ColType the migration t.* prod
   assert.deepEqual(colTypeFromDbField(dbT.geoPoint()), migrateColType(t.geoPoint()));
   // `t.double()` (a db float) maps to the neutral `double` ColType.
   assert.deepEqual(colTypeFromDbField(dbT.double()), migrateColType(t.double()));
-  // The separate db schema's legacy internal platform ID reduces to its
-  // historical neutral `uuid` bridge carrier; it is not TypeID or migration sugar.
-  assert.equal(colTypeFromDbField(dbT.typedId("post")), "uuid");
+  // A typed-id db field reduces to the bounded `string(36)` neutral storage.
+  assert.deepEqual(colTypeFromDbField(dbT.typedId("post")), { string: { length: 36 } });
 });
 
 test("the legacy dbType.ref bridge remains distinct from typed migration references", () => {
@@ -55,12 +54,16 @@ test("ONE lexicon: a pgvector field carries its dims through the shared ColType"
   assert.deepEqual(colTypeFromDbField(dbT.vector(8)), migrateColType(t.vector({ dimensions: 8 })));
 });
 
-test("ONE lexicon: an encrypted column reduces to the recursive `encrypted` ColType arm", () => {
-  // db `t.encrypted({ of: t.double() })` → neutral { encrypted: { of: <inner> } }.
-  assert.deepEqual(colTypeFromDbField(dbT.encrypted({ of: dbT.double() })), {
-    encrypted: { of: "double" },
-  });
-  assert.deepEqual(colTypeFromDbField(dbT.encrypted()), { encrypted: { of: "text" } });
+test("ONE lexicon: an encrypted column reduces to its plaintext ColType plus the encrypted facet", () => {
+  // The type bridge sees only the PLAINTEXT type; encryption is a FACET, and
+  // `fromDb` lifts it onto the recorded column alongside that plaintext type.
+  assert.deepEqual(colTypeFromDbField(dbT.string().encrypted()), "text");
+  assert.deepEqual(colTypeFromDbField(dbT.double().encrypted()), "double");
+  __begin();
+  table("accounts").create({ columns: { secret: fromDb(dbT.string().encrypted()) } });
+  const ops = __drain();
+  assert.equal(ops[0].columns[0].type, "text");
+  assert.equal(ops[0].columns[0].encrypted, true);
 });
 
 test("fromDb keeps the legacy dbType.ref carrier and required facet", () => {

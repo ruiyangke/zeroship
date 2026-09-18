@@ -341,10 +341,10 @@ impl AuthoredState<'_> {
                 ty,
                 nullable,
                 default,
-                value_format,
                 vector_metric,
                 case_sensitive,
                 mask,
+                encrypted,
                 generated,
                 identity,
                 ..
@@ -353,12 +353,12 @@ impl AuthoredState<'_> {
                     state.core.columns.insert(
                         column.clone(),
                         IrColumn {
+                            encrypted: *encrypted,
                             name: column.clone(),
                             ty: ty.clone(),
                             nullable: *nullable,
                             default: default.clone(),
                             unique: None,
-                            value_format: value_format.clone(),
                             references: None,
                             id_prefix: None,
                             collation: None,
@@ -484,9 +484,9 @@ impl AuthoredState<'_> {
                     // them agree.
                     //
                     // RE-DERIVED. Every parameterised facet rides INSIDE `ColType`
-                    // (`String { length }`, `Char { length }`, `Vector { vector }`,
-                    // `Encrypted { of }`), so assigning `ty` re-derives `max_length`,
-                    // `char_len`, `vector_dims`, `unbounded_text` and `encrypted` by
+                    // (`String { length }`, `Char { length }`, `Vector { vector }`),
+                    // so assigning `ty` re-derives `max_length`,
+                    // `char_len`, `vector_dims` and `unbounded_text` by
                     // construction, at projection time, through the same
                     // `ir_column_to_field` a `createTable` column goes through. Assigning
                     // only the TOKEN would be wrong in both directions: it would keep
@@ -529,14 +529,13 @@ impl AuthoredState<'_> {
                     // refused outright), `mask` and `collation`.
                     //
                     // REFUSED, by the structural catalog replay this fold runs FIRST:
-                    // `value_format` and the encryption/mask sentinels are neither
+                    // the encryption/mask sentinels are neither
                     // cleared nor kept - `fold_ops`'s own `Op::SetColumnType` arm fails
                     // closed on them, because the apply path emits ONLY
                     // `ALTER COLUMN ... TYPE` and the database would keep a contract this
                     // side can no longer describe. The reasons are recorded at
                     // that refusal.
                     column.ty.clone_from(to_type);
-                    column.value_format = None;
                     column.vector_metric = None;
                     column.case_sensitive = None;
                     column.id_prefix = None;

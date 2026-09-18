@@ -9,7 +9,7 @@ const fields = {
   document: t.json(),
   embedding: t.vector(3),
   location: t.geoPoint(),
-  secret: t.encrypted(),
+  secret: t.string().encrypted(),
 };
 
 declare const records: Collection<typeof fields>;

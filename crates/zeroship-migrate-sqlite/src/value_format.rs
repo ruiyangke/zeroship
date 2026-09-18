@@ -1,13 +1,11 @@
 //! SQLite value-format spelling and catalog normalization.
 
-use zeroship_migrate_backend::dml::sql_string_literal;
 use zeroship_migrate_backend::snapshot::{ColumnCollationSnapshot, IdDefaultSnapshot};
 use zeroship_migrate_backend::value_format::{
     CatalogSqlContext, LiteralCastKind, ValueFormatColumnMetadata, ValueFormatRenderer,
 };
 use zeroship_migrate_ir::dialect::DialectId;
 use zeroship_migrate_ir::expr::Expr;
-use zeroship_migrate_ir::ir::{validate_type_id_prefix, ValueFormat};
 
 use crate::DIALECT;
 
@@ -152,32 +150,6 @@ impl ValueFormatRenderer for SqliteValueFormatRenderer {
         vec![rendered.to_string()]
     }
 
-    fn recovery_candidates(
-        &self,
-        literals: &[String],
-        type_id_alphabet: &str,
-        ulid_alphabet: &str,
-    ) -> Vec<ValueFormat> {
-        let mut candidates = Vec::new();
-        let lower_guard = format!("*[^{type_id_alphabet}]*");
-        let upper_guard = format!("*[^{ulid_alphabet}]*");
-        if literals.iter().any(|literal| literal == &upper_guard) {
-            candidates.push(ValueFormat::Ulid);
-        }
-        if literals.iter().any(|literal| literal == &lower_guard) {
-            let stored_prefix = literals.iter().find(|literal| {
-                literal.ends_with('_') && !literal.starts_with('*') && literal.as_str() != "[0-7]"
-            });
-            let prefix = stored_prefix.map_or_else(String::new, |stored| {
-                stored.strip_suffix('_').unwrap_or(stored).to_string()
-            });
-            if validate_type_id_prefix(&prefix).is_ok() {
-                candidates.push(ValueFormat::TypeId { prefix });
-            }
-        }
-        candidates
-    }
-
     fn uuid_column_metadata(&self, quoted: &str) -> Option<ValueFormatColumnMetadata> {
         Some(ValueFormatColumnMetadata {
             ddl_type: "TEXT COLLATE BINARY".to_string(),
@@ -193,59 +165,6 @@ impl ValueFormatRenderer for SqliteValueFormatRenderer {
                  replace({quoted}, '-', '') NOT GLOB '*[^0-9a-f]*'))"
             ),
         })
-    }
-
-    fn ulid_column_metadata(
-        &self,
-        quoted: &str,
-        _regex: &str,
-        len: usize,
-    ) -> ValueFormatColumnMetadata {
-        ValueFormatColumnMetadata {
-            ddl_type: "TEXT COLLATE BINARY".to_string(),
-            collation: None,
-            inline_check: format!(
-                "CHECK ({quoted} IS NULL OR (typeof({quoted}) = 'text' AND \
-                 length({quoted}) = {len} AND \
-                 length(CAST({quoted} AS BLOB)) = {len} AND \
-                 substr({quoted}, 1, 1) GLOB '[0-7]' AND \
-                 substr({quoted}, 1, {len}) NOT GLOB \
-                 '*[^0123456789ABCDEFGHJKMNPQRSTVWXYZ]*'))"
-            ),
-        }
-    }
-
-    fn type_id_column_metadata(
-        &self,
-        quoted: &str,
-        stored_prefix: &str,
-        suffix_start: usize,
-        total_len: usize,
-        suffix_len: usize,
-        alphabet: &str,
-        _regex: &str,
-    ) -> ValueFormatColumnMetadata {
-        let prefix_predicate = if stored_prefix.is_empty() {
-            String::new()
-        } else {
-            format!(
-                " AND substr({quoted}, 1, {}) = {} COLLATE BINARY",
-                stored_prefix.len(),
-                sql_string_literal(stored_prefix)
-            )
-        };
-        ValueFormatColumnMetadata {
-            ddl_type: "TEXT COLLATE BINARY".to_string(),
-            collation: None,
-            inline_check: format!(
-                "CHECK ({quoted} IS NULL OR (typeof({quoted}) = 'text' AND \
-                 length({quoted}) = {total_len} AND \
-                 length(CAST({quoted} AS BLOB)) = {total_len}{prefix_predicate} AND \
-                 substr({quoted}, {suffix_start}, 1) GLOB '[0-7]' AND \
-                 substr({quoted}, {suffix_start}, {suffix_len}) NOT GLOB \
-                 '*[^{alphabet}]*'))"
-            ),
-        }
     }
 
     fn bytewise_column_metadata(

@@ -593,21 +593,14 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         let needs_type_id = requirements
             .iter()
             .any(|feature| feature == DatabaseFeature::TypeIdValidation);
-        let needs_ulid = requirements
-            .iter()
-            .any(|feature| feature == DatabaseFeature::UlidValidation);
 
         let capabilities = session::database_capabilities(self.conn).await?;
-        let (minimum, requirement) = if needs_uuid_validation || needs_type_id || needs_ulid {
-            let requirement = match (needs_uuid_validation, needs_type_id, needs_ulid) {
-                (true, false, false) => "canonical UUID format validation",
-                (false, true, false) => "canonical TypeID format validation",
-                (false, false, true) => "canonical ULID format validation",
-                (false, true, true) => "canonical TypeID and ULID format validation",
-                (true, true, false) => "canonical UUID and TypeID format validation",
-                (true, false, true) => "canonical UUID and ULID format validation",
-                (true, true, true) => "canonical UUID, TypeID, and ULID format validation",
-                (false, false, false) => unreachable!("format-validation branch is guarded"),
+        let (minimum, requirement) = if needs_uuid_validation || needs_type_id {
+            let requirement = match (needs_uuid_validation, needs_type_id) {
+                (true, false) => "canonical UUID format validation",
+                (false, true) => "canonical TypeID format validation",
+                (true, true) => "canonical UUID and TypeID format validation",
+                (false, false) => unreachable!("format-validation branch is guarded"),
             };
             ([8, 0, 16], requirement)
         } else {
@@ -1372,7 +1365,7 @@ mod render_tests {
     }
 
     #[compio::test]
-    async fn ulid_validation_requires_mysql_8_0_16_only() {
+    async fn combined_format_validation_names_every_enforced_check_floor() {
         let old = RecordingSession::with_uuid_capabilities(
             "8.0.15",
             "MyISAM",
@@ -1380,47 +1373,17 @@ mod render_tests {
             "STATEMENT",
             "STATEMENT",
         );
-        let error = MysqlBackend::new_generic(&old)
-            .verify_database_requirements(&requirements(DatabaseFeature::UlidValidation))
-            .await
-            .expect_err("MySQL before enforced CHECK constraints must fail closed");
-        let message = error.to_string();
-        assert!(message.contains("ULID"), "got: {message}");
-        assert!(message.contains("8.0.16"), "got: {message}");
-        assert!(message.contains("8.0.15"), "got: {message}");
-
         let mut both_formats = DatabaseRequirements::default();
+        both_formats.require(DatabaseFeature::UuidValidation);
         both_formats.require(DatabaseFeature::TypeIdValidation);
-        both_formats.require(DatabaseFeature::UlidValidation);
         let error = MysqlBackend::new_generic(&old)
             .verify_database_requirements(&both_formats)
             .await
             .expect_err("both text formats share the enforced-CHECK version floor");
         let message = error.to_string();
         assert!(
-            message.contains("TypeID") && message.contains("ULID"),
+            message.contains("UUID") && message.contains("TypeID"),
             "got: {message}"
-        );
-
-        let current = RecordingSession::with_uuid_capabilities(
-            "8.0.16",
-            "MyISAM",
-            None,
-            "STATEMENT",
-            "MIXED",
-        );
-        MysqlBackend::new_generic(&current)
-            .verify_database_requirements(&requirements(DatabaseFeature::UlidValidation))
-            .await
-            .expect("MySQL 8.0.16+ enforces the ULID CHECK independently of UUID generation");
-        assert_eq!(
-            current
-                .log
-                .borrow()
-                .iter()
-                .filter(|entry| entry.contains("VERSION() AS server_version"))
-                .count(),
-            1
         );
     }
 

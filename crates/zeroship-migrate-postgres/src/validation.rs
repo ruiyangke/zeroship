@@ -149,7 +149,7 @@ impl ValidationPolicy for PostgresValidationPolicy {
             ColType::Uuid => "uuid".to_string(),
             ColType::Inet => "inet".to_string(),
             ColType::TextArray => "text[]".to_string(),
-            ColType::Bytes | ColType::Encrypted { .. } => "bytea".to_string(),
+            ColType::Bytes => "bytea".to_string(),
             ColType::Char { length } => format!("char({length})"),
             ColType::Vector { vector } => format!("vector({vector})"),
             ColType::GeoPoint => "geography(point,4326)".to_string(),

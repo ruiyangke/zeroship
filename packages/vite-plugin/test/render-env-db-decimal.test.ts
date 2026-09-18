@@ -18,5 +18,5 @@ test("generated database types preserve exact decimal facets", () => {
   };
   const output = renderGeneratedEnvDb(descriptor);
   assert.match(output, /amount: t\.numeric\(\{ precision: 30, scale: 2 \}\)\.required\(\)/);
-  assert.match(output, /secret: t\.encrypted\(\{ of: t\.numeric\(\{ precision: 20, scale: 4 \}\) \}\)/);
+  assert.match(output, /secret: t\.numeric\(\{ precision: 20, scale: 4 \}\)\.encrypted\(\)/);
 });

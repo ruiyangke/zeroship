@@ -380,8 +380,7 @@ The **op-producer registry** (`defineOp(kind, producer, { deferrable })`, `ops.t
 ### 3.5 The `t.*` ColType lexicon (full enumeration)
 
 `t` is the physical `TypeLexicon` of immutable factories, each returning a
-chainable `ColumnDef`. `ids` is the separate validated-text-format lexicon for
-TypeID and ULID columns. The universal-ID shortcut, untyped-reference factory,
+chainable `ColumnDef`. The universal-ID shortcut, untyped-reference factory,
 loose `integer` alias, and `{notNull,default}` options-bag overload are removed.
 Every factory returns a fresh `ColumnDefImpl`; the emitted wire `ColType` plus
 its optional facets are what the engine renders per dialect.
@@ -409,15 +408,13 @@ its optional facets are what the engine renders per dialect.
 | `t.inet()` | — | `inet` | PG `inet` |
 | `t.enum(name)` | `string \| EnumHandle` | `{ enum: { name } }` | references an enum type |
 | `t.domain(name)` | `string \| DomainHandle` | `{ domain: { name } }` | references a Postgres domain |
-| `t.encrypted(arg)` | `{ of } \| ColumnDef \| ColType` | `{ encrypted: { of: innerType } }` | app-level encrypted column |
 
-Validated ID formats are ordinary text columns until the normal column facets
-opt into constraints; neither helper supplies a key or database default:
+A typed id is an ordinary bounded string column until the normal column facets
+opt into constraints; the factory supplies no key and no database default:
 
-| ID factory | Wire facet | Effect |
+| Typed-id factory | Wire facet | Effect |
 | --- | --- | --- |
-| `ids.typeId({ prefix })` | `valueFormat: { typeId: { prefix } }` | TypeID 0.3 text validation; prefix may be empty and is at most 63 bytes |
-| `ids.ulid()` | `valueFormat: "ulid"` | canonical ULID text validation |
+| `t.typedId(prefix)` | `idPrefix: prefix` | a bounded `String{36}` carrying the declared prefix; the DDL has no format check. The prefix is positional: empty, or at most 6 lowercase ASCII letters and underscores beginning and ending with a letter |
 
 Closed token sets validated client-side (friendly `OP_INVALID` before serde): `VECTOR_METRICS = ["cosine","l2","innerProduct"]` (`ops.ts:631`); `SEQUENCE_AS_TYPES = ["int","bigInt"]` (`ops.ts:634`); `MASK_KINDS = ["full","last4","first4","email","name","date-year","date-decade","none"]` (`ops.ts:642-651`); `MASK_CLASSIFICATIONS = ["public","pii","spi","phi","pci","internal"]` (`ops.ts:652-659`); `COLUMN_COLLATIONS = ["bytewise"]` (`ops.ts`, `COLUMN_COLLATIONS`).
 
@@ -434,16 +431,17 @@ Closed token sets validated client-side (friendly `OP_INVALID` before serde): `V
 | `.unique()` | `(): ColumnDef` | single-column UNIQUE |
 | `.references(table, column, opts?)` | `string`, `string`, `{ onDelete?, onUpdate?, name? }` | typed single-column FK **facet** (`IrColumn.references`): keeps this column's storage type and records the full target `{ table, column }`. Both names required (a missing target column is `OP_INVALID`); create-table only — an added/retyped/nested position rejects it |
 | `.default(v)` | `DefaultValue \| DefaultExprFn \| ExprChain \| Expr` | structured default (never raw SQL) |
-| `.collation(intent)` | `ColumnCollation` (closed: `bytewise`) | pins how the column compares (`IrColumn.collation`), as an INTENT the engine spells per dialect — PG `COLLATE "C"`, SQLite `COLLATE BINARY`, MySQL `utf8mb4_0900_bin`. Refused on a non-text type, alongside `caseSensitive:false`, alongside a `valueFormat`, and outside create-table |
+| `.collation(intent)` | `ColumnCollation` (closed: `bytewise`) | pins how the column compares (`IrColumn.collation`), as an INTENT the engine spells per dialect — PG `COLLATE "C"`, SQLite `COLLATE BINARY`, MySQL `utf8mb4_0900_bin`. Refused on a non-text type, alongside `caseSensitive:false`, alongside a typed id (`t.typedId()`), and outside create-table |
 | `.mask(opts)` | `{ kind, classification? }` | column mask; `classification` defaults `"pii"`; `kind:"none"` opts out; overrides an encrypted column's auto-mask (`ops.ts:763-786`) |
+| `.encrypted()` | `(): ColumnDef` | encrypted storage (`IrColumn.encrypted`); the physical type stays the declared plaintext. Refused on a `.references()` or `.collation()` column. Carried on create-table AND add-column |
 | `.generated(expr, opts?)` | `expr`, `{ virtual? }` | computed column; omitted ⇒ STORED, `{virtual:true}` ⇒ SQLite VIRTUAL (rejected on PG) |
 | `.identity(opts?)` | `{ always? }` | `GENERATED ALWAYS` if `always:true`, else `BY DEFAULT` |
 | `.autoIncrement()` | `(): ColumnDef` | portable sugar for `.identity({ always: false })` |
 
 Two lowering rules matter here: a column that is both `.unique()` and
-`.primaryKey()` emits no separate UNIQUE; `.references(...)` and `.collation(...)`
-are create-table-only, while `ids.typeId(...)` and `ids.ulid()` retain their
-`valueFormat` facet on both create-table and add-column operations.
+`.primaryKey()` emits no separate UNIQUE; `.references(...)`, `.collation(...)`
+and the `t.typedId(...)` `idPrefix` facet are create-table-only — the add-column
+operation has no slot for them.
 
 **Default forms** (resolved by `toIrDefault`, `ops.ts:1189-1214`):
 
@@ -1051,8 +1049,8 @@ Every `CODE_*` constant (`validate.rs:55-141`):
 | `CROSS_SCHEMA` | An op naming a `schema` the active `SchemaScope` does not permit (Confined pins the project schema). `:73` |
 | `INVALID_SCHEMA_IDENT` | A `schema` qualifier that is not a safe bare identifier — injection defense. `:79` |
 | `GUARD_DIRECTION` | An existence guard with illegal direction (`ifExists` on create/add, `ifNotExists` on drop/rename/alter). `:83` |
-| `INVALID_ID_PREFIX` | A malformed legacy internal platform `idPrefix`; this is not the public TypeID-format helper. `:101` |
-| `INVALID_TYPE_ID_PREFIX` | An `ids.typeId({ prefix })` value outside the TypeID 0.3 grammar or 63-byte bound. `:104` |
+| `INVALID_ID_PREFIX` | A `t.typedId(prefix)` prefix outside the typed-id grammar or length bound, or the reserved platform prefix `usr`. `:101` |
+| `INVALID_TYPE_ID_PREFIX` | A `perRow.typeId({ prefix })` generator prefix outside the typed-id grammar or length bound. `:104` |
 | `VECTOR_METRIC_MISPLACED` | A `vector_metric` on a non-`Vector` column. `:95` |
 | `COLUMN_FACET_CONFLICT` | Mutually-exclusive facets (`default`+`generated`, `identity`+`generated`). `:98` |
 | `COLUMN_DEFAULT_TYPE` | A default invalid for the declared type (e.g. `{}` on `text[]`). `:101` |

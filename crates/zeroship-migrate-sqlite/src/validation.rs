@@ -152,7 +152,7 @@ impl ValidationPolicy for SqliteValidationPolicy {
                 "integer".to_string()
             }
             ColType::Double | ColType::Real => "real".to_string(),
-            ColType::Bytes | ColType::Encrypted { .. } => "blob".to_string(),
+            ColType::Bytes => "blob".to_string(),
             ColType::Vector { vector } => format!("vector({vector})"),
             ColType::Domain { name, .. } => format!("domain:{name}"),
         }

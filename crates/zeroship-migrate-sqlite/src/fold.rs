@@ -12,7 +12,7 @@ use zeroship_migrate_backend::snapshot::{
 };
 use zeroship_migrate_backend::stored_ddl::StoredDdl;
 use zeroship_migrate_ir::expr::Expr;
-use zeroship_migrate_ir::ir::{ColType, ValueFormat};
+use zeroship_migrate_ir::ir::ColType;
 use zeroship_migrate_ir::precondition::PreconditionCheck;
 
 #[derive(Debug)]
@@ -307,13 +307,6 @@ impl CatalogFoldPolicy for SqliteCatalogFoldPolicy {
         &self,
         _ty: &ColType,
         _is_reference: bool,
-    ) -> Option<FoldDatabaseFeature> {
-        None
-    }
-
-    fn database_requirement_for_value_format(
-        &self,
-        _value_format: &ValueFormat,
     ) -> Option<FoldDatabaseFeature> {
         None
     }

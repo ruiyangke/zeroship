@@ -1,7 +1,7 @@
 // `@zeroship/migrate` — the fluent-only op-builder DSL implementation.
 //
 // This is the TS authoring surface a creator imports:
-//   import { ids, table, t } from "@zeroship/migrate";
+//   import { table, t } from "@zeroship/migrate";
 //
 //   // Schema and data are SEPARATE migrations; one module may not do both.
 //   export default {
@@ -95,7 +95,6 @@ import type {
   GeneratedColumnExprFn,
   GeneratedOptions,
   GroupByItem,
-  IdFormats,
   IdentityOptions,
   Int64Value,
   IndexExprBuilder,
@@ -168,7 +167,6 @@ import type {
   MaskKind,
   PerRowGenerator,
   Privilege,
-  ValueFormat,
   VectorMetric,
 } from "./generated/ir.js";
 
@@ -666,14 +664,14 @@ function requirePlainObject(v: unknown, what: string): asserts v is Record<strin
   }
 }
 
-/** Validate the persisted TypeID 0.3 prefix at the authoring boundary. The
+/** Validate the persisted typed-id prefix at the authoring boundary. The
  * Rust validator repeats this check for hand-authored IR envelopes. */
-function requireTypeIdPrefix(v: unknown, what = "a TypeID prefix"): asserts v is string {
+function requireTypeIdPrefix(v: unknown, what = "a typed-id prefix"): asserts v is string {
   requireString(v, what);
-  if (v.length > 63 || (v !== "" && !/^[a-z](?:[a-z_]*[a-z])?$/.test(v))) {
+  if (v.length > 6 || (v !== "" && !/^[a-z](?:[a-z_]*[a-z])?$/.test(v))) {
     throw structuredError(
       "OP_INVALID",
-      `${what}: prefix must be empty or at most 63 lowercase ASCII ` +
+      `${what}: prefix must be empty or at most 6 lowercase ASCII ` +
         "letters/underscores beginning and ending with a letter",
       { prefix: v },
     );
@@ -831,6 +829,13 @@ function collatableColumnType(type: ColType): boolean {
   return type === "text" || (typeof type === "object" && type !== null && "string" in type);
 }
 
+function encryptableColumnType(type: ColType): boolean {
+  if (type === "text" || type === "int" || type === "bigInt" || type === "double" || type === "bytes") {
+    return true;
+  }
+  return typeof type === "object" && type !== null && "string" in type;
+}
+
 const REF_ACTIONS: readonly RefAction[] = [
   "cascade",
   "restrict",
@@ -866,15 +871,16 @@ class ColumnDefImpl implements ColumnDefType {
   readonly _primaryKey: boolean;
   readonly _unique: boolean;
   readonly _reference: ColumnReferenceFacet | undefined;
-  // Semantic facets carried on the IrColumn: canonical value format
+  // Semantic facets carried on the IrColumn: the typed-id prefix
   // (`t.typedId(prefix)`), pgvector distance metric, and the remaining
   // standalone column facets.
   // Absent ⇒ omitted on the wire.
-  readonly _valueFormat: ValueFormat | undefined;
+  readonly _idPrefix: string | undefined;
   readonly _vectorMetric: string | undefined;
   readonly _caseSensitive: boolean | undefined;
   readonly _collation: ColumnCollation | undefined;
   readonly _mask: { kind: string; classification: string } | undefined;
+  readonly _encrypted: boolean | undefined;
   readonly _generated: { expr: Node; stored: boolean } | undefined;
   readonly _identity: { always: boolean } | undefined;
 
@@ -886,11 +892,12 @@ class ColumnDefImpl implements ColumnDefType {
       primaryKey?: boolean;
       unique?: boolean;
       reference?: ColumnReferenceFacet;
-      valueFormat?: ValueFormat;
+      idPrefix?: string;
       vectorMetric?: string;
       caseSensitive?: boolean;
       collation?: ColumnCollation;
       mask?: { kind: string; classification: string };
+      encrypted?: boolean;
       generated?: { expr: Node; stored: boolean };
       identity?: { always: boolean };
     },
@@ -901,11 +908,12 @@ class ColumnDefImpl implements ColumnDefType {
     this._primaryKey = fields?.primaryKey ?? false;
     this._unique = fields?.unique ?? false;
     this._reference = fields?.reference;
-    this._valueFormat = fields?.valueFormat;
+    this._idPrefix = fields?.idPrefix;
     this._vectorMetric = fields?.vectorMetric;
     this._caseSensitive = fields?.caseSensitive;
     this._collation = fields?.collation;
     this._mask = fields?.mask;
+    this._encrypted = fields?.encrypted;
     this._generated = fields?.generated;
     this._identity = fields?.identity;
   }
@@ -918,11 +926,12 @@ class ColumnDefImpl implements ColumnDefType {
     primaryKey?: boolean;
     unique?: boolean;
     reference?: ColumnReferenceFacet;
-    valueFormat?: ValueFormat;
+    idPrefix?: string;
     vectorMetric?: string;
     caseSensitive?: boolean;
     collation?: ColumnCollation;
     mask?: { kind: string; classification: string };
+    encrypted?: boolean;
     generated?: { expr: Node; stored: boolean };
     identity?: { always: boolean };
   }): ColumnDefImpl {
@@ -932,14 +941,20 @@ class ColumnDefImpl implements ColumnDefType {
       primaryKey: over.primaryKey ?? this._primaryKey,
       unique: over.unique ?? this._unique,
       reference: "reference" in over ? over.reference : this._reference,
-      valueFormat: "valueFormat" in over ? over.valueFormat : this._valueFormat,
+      idPrefix: "idPrefix" in over ? over.idPrefix : this._idPrefix,
       vectorMetric: "vectorMetric" in over ? over.vectorMetric : this._vectorMetric,
       caseSensitive: "caseSensitive" in over ? over.caseSensitive : this._caseSensitive,
       collation: "collation" in over ? over.collation : this._collation,
       mask: "mask" in over ? over.mask : this._mask,
+      encrypted: "encrypted" in over ? over.encrypted : this._encrypted,
       generated: "generated" in over ? over.generated : this._generated,
       identity: "identity" in over ? over.identity : this._identity,
     });
+  }
+
+  /** Internal: carry the declared typed-id prefix (`t.typedId(prefix)`). */
+  __withIdPrefix(prefix: string): ColumnDefImpl {
+    return this.with({ idPrefix: prefix });
   }
 
   /** Internal: carry the pgvector distance metric (`t.vector({ dimensions, metric })`). */
@@ -957,6 +972,13 @@ class ColumnDefImpl implements ColumnDefType {
     return this.with({ primaryKey: true, nullable: false });
   }
   unique(): ColumnDefImpl {
+    if (this._encrypted === true) {
+      throw structuredError(
+        "OP_INVALID",
+        "t.*.unique(): an encrypted column cannot be unique; randomized ciphertext " +
+          "never collides, so a unique index would not enforce anything. Drop .unique() or .encrypted()",
+      );
+    }
     return this.with({ unique: true });
   }
   references(
@@ -979,6 +1001,13 @@ class ColumnDefImpl implements ColumnDefType {
       );
     }
     requirePlainObject(options, "t.*.references(table, column, options): options");
+    if (this._encrypted === true) {
+      throw structuredError(
+        "OP_INVALID",
+        "t.*.references(table, column): an encrypted column cannot carry a reference; " +
+          "foreign-key integrity compares plaintext",
+      );
+    }
     if (options.name !== undefined) {
       requireNonEmptyString(options.name, "t.*.references(table, column, { name })");
     }
@@ -1039,6 +1068,24 @@ class ColumnDefImpl implements ColumnDefType {
     return this.with({ mask: { kind: opts.kind, classification } });
   }
 
+  /** `.encrypted()` — store this column's PLAINTEXT encrypted. The physical
+   *  type stays the declared plaintext; this verb sets only the encryption
+   *  facet. Refused on a `.references()` column (a foreign key compares
+   *  plaintext, and randomized ciphertext never matches) and on a
+   *  `.collation()` column (a collation orders plaintext). Returns a fresh def. */
+  encrypted(): ColumnDefImpl {
+    rejectCreateTableOnlyFacets(this, "t.*.encrypted()");
+    if (!encryptableColumnType(this._type)) {
+      throw structuredError(
+        "OP_INVALID",
+        "t.*.encrypted(): only text / string / int / bigInt / double / bytes columns can " +
+          `be encrypted, got ${JSON.stringify(this._type)}`,
+        { type: this._type },
+      );
+    }
+    return this.with({ encrypted: true });
+  }
+
   /** `.collation(intent)` — pin the column's comparison order to a CLOSED
    *  intent token (`COLUMN_COLLATIONS`), never a dialect collation name. Each
    *  refusal below mirrors one the engine's validator already makes, so an
@@ -1068,10 +1115,17 @@ class ColumnDefImpl implements ColumnDefType {
           "contradictory orderings, not composable ones",
       );
     }
-    if (this._valueFormat !== undefined) {
+    if (this._encrypted === true) {
       throw structuredError(
         "OP_INVALID",
-        "t.*.collation(intent): a value format already pins the column's comparison " +
+        "t.*.collation(intent): a collation orders plaintext and has no meaning on an " +
+          "encrypted column; drop the collation",
+      );
+    }
+    if (this._idPrefix !== undefined) {
+      throw structuredError(
+        "OP_INVALID",
+        "t.*.collation(intent): a typed id already pins the column's comparison " +
           "order; drop the collation",
       );
     }
@@ -1120,15 +1174,16 @@ class ColumnDefImpl implements ColumnDefType {
       // which never emits a separate UNIQUE for the PK column).
       unique: this._unique && !this._primaryKey ? true : undefined,
       // Carry the semantic facets onto the wire IrColumn (camelCase keys
-      // `valueFormat`/`references`/`vectorMetric`/`collation`/`mask`). Absent ⇒
+      // `idPrefix`/`references`/`vectorMetric`/`collation`/`mask`). Absent ⇒
       // omitted, so a plain column is byte-identical to the pre-facet image
       // (checksum-neutral).
-      valueFormat: this._valueFormat,
+      idPrefix: this._idPrefix,
       references: this._reference,
       vectorMetric: this._vectorMetric,
       caseSensitive: this._caseSensitive === false ? false : undefined,
       collation: this._collation,
       mask: this._mask,
+      encrypted: this._encrypted,
       generated: this._generated,
       identity: this._identity,
     });
@@ -1139,12 +1194,12 @@ class ColumnDefImpl implements ColumnDefType {
       type: this._type,
       nullable: this._nullable === false ? false : undefined,
       default: this._default,
-      // Carry the value format + remaining column facets onto the addColumn op tail
+      // Carry the remaining column facets onto the addColumn op tail
       // (camelCase keys, lock-step with `Op::AddColumn`). Absent ⇒ omitted (compact).
-      valueFormat: this._valueFormat,
       vectorMetric: this._vectorMetric,
       caseSensitive: this._caseSensitive === false ? false : undefined,
       mask: this._mask,
+      encrypted: this._encrypted,
       generated: this._generated,
       identity: this._identity,
     });
@@ -1158,8 +1213,9 @@ function isColumnDef(x: unknown): x is ColumnDefImpl {
 /** Refuse the facets only a `table(...).create({ columns })` column can carry.
  *
  *  `Op::AddColumn` is flat and has no slot for either, and `Op::SetColumnType`
- *  carries a bare `ColType`; a nested type position (`t.encrypted({ of })`,
- *  `domain(...).create({ as })`) reduces its argument to that `ColType` too. So
+ *  carries a bare `ColType`; a nested type position (`domain(...).create({ as })`,
+ *  `sequence(...).create({ as })`, `.column().setType()`) reduces its argument to
+ *  that `ColType` too. So
  *  the choice at these positions is refuse or silently drop, and a dropped facet
  *  is a column that reads as referencing or collated in the migration source and
  *  is neither in the database. */
@@ -1760,12 +1816,6 @@ export function interval(duration: Duration): ExprChainType {
   });
 }
 
-/** Validated textual ID formats. These helpers select storage + format only;
- * ordinary `ColumnDef` modifiers opt into nullability/key constraints. */
-export const ids: IdFormats = {
-  ulid: () => new ColumnDefImpl("text", { valueFormat: "ulid" }),
-};
-
 /** Apply-engine generator intents. These functions deliberately sample no
  * randomness: the recorder preserves only the requested generator, and the
  * backfill executor evaluates it independently for every affected row. */
@@ -1780,7 +1830,6 @@ export const perRow: PerRowGenerators = Object.freeze({
     });
     return perRowGeneratorValue(generator);
   },
-  ulid: () => perRowGeneratorValue("ulid"),
 });
 
 export const t: TypeLexicon = {
@@ -1793,6 +1842,12 @@ export const t: TypeLexicon = {
     }
     if ((item as { _type?: string })._type !== "text") {
       throw structuredError("OP_INVALID", "t.array(item): native array storage supports string elements only - use t.text()");
+    }
+    if (isColumnDef(item) && item._encrypted === true) {
+      throw structuredError(
+        "OP_INVALID",
+        "t.array(item): an encrypted element is not supported; encrypt the array column or store plaintext elements",
+      );
     }
     return new ColumnDefImpl("textArray");
   },
@@ -1814,8 +1869,8 @@ export const t: TypeLexicon = {
   calendarDate: () => new ColumnDefImpl("date" as ColType),
   typedId: (prefix: string) => {
     requireTypeIdPrefix(prefix, "t.typedId(prefix)");
-    return new ColumnDefImpl("text", {
-      valueFormat: { typeId: { prefix } },
+    return new ColumnDefImpl({ string: { length: 36 } } as ColType, {
+      idPrefix: prefix,
     });
   },
   uuid: () => new ColumnDefImpl("uuid"),
@@ -1861,22 +1916,18 @@ export const t: TypeLexicon = {
     requireString(n, "t.domain(name)");
     return new ColumnDefImpl({ domain: { name: n } } as ColType);
   },
-  encrypted: (arg) => {
-    const inner = arg && typeof arg === "object" && "of" in arg ? (arg as { of: unknown }).of : arg;
-    if (isColumnDef(inner)) {
-      rejectCreateTableOnlyFacets(inner, "t.encrypted({ of })");
-    }
-    const innerType = isColumnDef(inner) ? inner._type : (inner as ColType);
-    if (innerType === undefined) {
-      throw structuredError("OP_INVALID", "t.encrypted({ of }): of must be a ColumnDef or ColType");
-    }
-    return new ColumnDefImpl({ encrypted: { of: innerType } } as ColType);
-  },
 };
 
 function colTypeOf(typeArg: ColumnDefType | ColType): ColType {
   if (isColumnDef(typeArg)) {
     rejectCreateTableOnlyFacets(typeArg, "this lifecycle or nested type position");
+    if (typeArg._encrypted === true) {
+      throw structuredError(
+        "OP_INVALID",
+        "this lifecycle or nested type position cannot use an .encrypted() ColumnDef; " +
+          "encryption is supported on table(...).create({ columns }) and .column(...).add(...)",
+      );
+    }
     return typeArg._type;
   }
   return typeArg as ColType;
@@ -2141,6 +2192,16 @@ export function fromDb(field: DbSchemaField): ColumnDefType {
   }
   if (fd && typeof fd === "object" && (fd as { unique?: boolean }).unique === true) {
     def = def.unique();
+  }
+  if (fd && typeof fd === "object" && (fd as { encrypted?: boolean }).encrypted === true) {
+    def = def.encrypted();
+  }
+  if (
+    fd &&
+    typeof fd === "object" &&
+    typeof (fd as { idPrefix?: unknown }).idPrefix === "string"
+  ) {
+    def = def.__withIdPrefix((fd as { idPrefix: string }).idPrefix);
   }
   return def;
 }

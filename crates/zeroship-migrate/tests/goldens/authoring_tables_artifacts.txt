@@ -145,12 +145,6 @@ carrier:pk_column_renamed|Postgres|sha|runtime.json|5735ea1497c38fb8dce9c5ea5d6e
 carrier:pk_column_renamed|Sqlite|column|orders|0|order_id: t.text().primaryKey(),
 carrier:pk_column_renamed|Sqlite|primary_key|orders|single:order_id
 carrier:pk_column_renamed|Sqlite|sha|runtime.json|5735ea1497c38fb8dce9c5ea5d6e9f7f1fdd325d063ff241d706282b0905bf0f
-carrier:pk_composite_from_create_table|Mysql|primary_key|orders|primaryKey: ["account", "id"]
-carrier:pk_composite_from_create_table|Mysql|sha|runtime.json|71ed99933847d34dca2bbd81ffe4ea5006daf1852d8e4acccce5aab859d17824
-carrier:pk_composite_from_create_table|Postgres|primary_key|orders|primaryKey: ["account", "id"]
-carrier:pk_composite_from_create_table|Postgres|sha|runtime.json|71ed99933847d34dca2bbd81ffe4ea5006daf1852d8e4acccce5aab859d17824
-carrier:pk_composite_from_create_table|Sqlite|primary_key|orders|primaryKey: ["account", "id"]
-carrier:pk_composite_from_create_table|Sqlite|sha|runtime.json|71ed99933847d34dca2bbd81ffe4ea5006daf1852d8e4acccce5aab859d17824
 carrier:pk_drop|Mysql|primary_key|orders|primaryKey: null
 carrier:pk_drop|Mysql|sha|runtime.json|7e1265635b38aa6864267a1164b46307756288b0af4571381f9e1076ccee4e8e
 carrier:pk_drop|Postgres|primary_key|orders|primaryKey: null
@@ -610,15 +604,9 @@ carrier:pk_column_renamed|Postgres|column|orders|1|legacy_id: t.text().required(
 carrier:pk_column_renamed|Postgres|sha|env.db.ts|ed8b8271ac14354184c789aafb290a866bcc12b11fa3af2fb1ea59d32064cdaa
 carrier:pk_column_renamed|Sqlite|column|orders|1|legacy_id: t.text().required(),
 carrier:pk_column_renamed|Sqlite|sha|env.db.ts|ed8b8271ac14354184c789aafb290a866bcc12b11fa3af2fb1ea59d32064cdaa
-carrier:pk_composite_from_create_table|Mysql|column|orders|0|account: t.text().required(),
 carrier:pk_composite_from_create_table|Mysql|column|orders|1|id: t.text().required(),
-carrier:pk_composite_from_create_table|Mysql|sha|env.db.ts|86f713add700d23a61ef9f190f0eb9d813022e99e0b699660c264ff6ea9a10fe
-carrier:pk_composite_from_create_table|Postgres|column|orders|0|account: t.text().required(),
 carrier:pk_composite_from_create_table|Postgres|column|orders|1|id: t.text().required(),
-carrier:pk_composite_from_create_table|Postgres|sha|env.db.ts|86f713add700d23a61ef9f190f0eb9d813022e99e0b699660c264ff6ea9a10fe
-carrier:pk_composite_from_create_table|Sqlite|column|orders|0|account: t.text().required(),
 carrier:pk_composite_from_create_table|Sqlite|column|orders|1|id: t.text().required(),
-carrier:pk_composite_from_create_table|Sqlite|sha|env.db.ts|86f713add700d23a61ef9f190f0eb9d813022e99e0b699660c264ff6ea9a10fe
 carrier:pk_drop|Mysql|column|orders|0|id: t.text().required(),
 carrier:pk_drop|Mysql|column|orders|1|legacy_id: t.text().required(),
 carrier:pk_drop|Mysql|sha|env.db.ts|597766e3ef6c07f9c8132449f7e21b69857ca45e3c43feb71e168ccdd3706a44
@@ -782,3 +770,15 @@ fixture:runtime_options|Sqlite|column|posts|7|title: t.text().required(),
 fixture:runtime_options|Sqlite|column|posts|8|author_id: t.uuid().required(),
 fixture:runtime_options|Sqlite|column|posts|9|status: t.text().required().default("draft"),
 fixture:runtime_options|Sqlite|sha|env.db.ts|17da479e4dbf02323c8a9a4abb8b7483f76b9c05abe50f465f590f67c404c54e
+carrier:pk_composite_from_create_table|Mysql|column|orders|0|account: t.text().required(),
+carrier:pk_composite_from_create_table|Mysql|primary_key|orders|primaryKey: ["account", "id"]
+carrier:pk_composite_from_create_table|Mysql|sha|env.db.ts|86f713add700d23a61ef9f190f0eb9d813022e99e0b699660c264ff6ea9a10fe
+carrier:pk_composite_from_create_table|Mysql|sha|runtime.json|71ed99933847d34dca2bbd81ffe4ea5006daf1852d8e4acccce5aab859d17824
+carrier:pk_composite_from_create_table|Postgres|column|orders|0|account: t.text().required(),
+carrier:pk_composite_from_create_table|Postgres|primary_key|orders|primaryKey: ["account", "id"]
+carrier:pk_composite_from_create_table|Postgres|sha|env.db.ts|86f713add700d23a61ef9f190f0eb9d813022e99e0b699660c264ff6ea9a10fe
+carrier:pk_composite_from_create_table|Postgres|sha|runtime.json|71ed99933847d34dca2bbd81ffe4ea5006daf1852d8e4acccce5aab859d17824
+carrier:pk_composite_from_create_table|Sqlite|column|orders|0|account: t.text().required(),
+carrier:pk_composite_from_create_table|Sqlite|primary_key|orders|primaryKey: ["account", "id"]
+carrier:pk_composite_from_create_table|Sqlite|sha|env.db.ts|86f713add700d23a61ef9f190f0eb9d813022e99e0b699660c264ff6ea9a10fe
+carrier:pk_composite_from_create_table|Sqlite|sha|runtime.json|71ed99933847d34dca2bbd81ffe4ea5006daf1852d8e4acccce5aab859d17824

@@ -28,7 +28,5 @@ mod set_column_type_generation_contracts_pg;
 mod synchronize_identity_mysql;
 mod synchronize_identity_pg;
 mod synchronize_identity_sqlite;
-mod type_id_value_format;
 mod typed_references;
-mod ulid_value_format;
 mod uuid_generation;

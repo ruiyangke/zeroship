@@ -25,7 +25,8 @@ describe("Row<S> shape under masking", () => {
     const usersSchema = {
       name: t.string().required(),
       ssn: t
-        .encrypted({ of: t.string() })
+        .string()
+        .encrypted()
         .mask({ kind: "last4", classification: "spi" })
         .required(),
     };
@@ -54,7 +55,8 @@ describe("Row<S> shape under masking", () => {
   test("the raw column is NOT part of Row<S>", () => {
     const usersSchema = {
       ssn: t
-        .encrypted({ of: t.string() })
+        .string()
+        .encrypted()
         .mask({ kind: "last4", classification: "spi" })
         .required(),
     };
@@ -86,7 +88,7 @@ describe("Row<S> shape under masking", () => {
 
   test("encrypted column WITHOUT explicit .mask() still infers as MaskedValue (default full mask)", () => {
     const usersSchema = {
-      email: t.encrypted({ of: t.string() }).required(),
+      email: t.string().encrypted().required(),
     };
     type UsersRow = Row<typeof usersSchema & typeof generatedSchema>;
 
@@ -113,7 +115,8 @@ describe("Row<S> shape under masking", () => {
       // wrapper is NOT applied on reads. This is the
       // intentional "I accept the risk" path.
       plaintext: t
-        .encrypted({ of: t.string() })
+        .string()
+        .encrypted()
         .mask({ kind: "none", classification: "internal" })
         .required(),
     };
@@ -141,7 +144,8 @@ describe("Row<S> shape under masking", () => {
     const usersSchema = {
       name: t.string().required(),
       ssn: t
-        .encrypted({ of: t.string() })
+        .string()
+        .encrypted()
         .mask({ kind: "last4", classification: "spi" })
         .required(),
     };

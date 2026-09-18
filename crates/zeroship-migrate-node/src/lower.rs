@@ -1149,10 +1149,10 @@ fn synthetic_rename_source_column(
         ty: ty.clone(),
         nullable: None,
         default: None,
-        value_format: None,
         vector_metric: None,
         case_sensitive: None,
         mask: None,
+        encrypted: None,
         generated: None,
         identity: None,
         schema: None,
@@ -3320,10 +3320,8 @@ scope = "all"
                     { "name": "uuid_id", "type": "uuid" },
                     {
                         "name": "type_id",
-                        "type": "text",
-                        "valueFormat": { "typeId": { "prefix": "order" } }
-                    },
-                    { "name": "ulid_id", "type": "text", "valueFormat": "ulid" }
+                        "type":{"string":{"length":36}},"idPrefix":"order"
+                    }
                 ],
                 "primaryKey": ["cursor"],
                 "constraints": [],
@@ -3343,8 +3341,7 @@ scope = "all"
                 "batchSize": 10,
                 "set": {
                     "uuid_id": { "perRow": "uuidV7" },
-                    "type_id": { "perRow": { "typeId": { "prefix": "order" } } },
-                    "ulid_id": { "perRow": "ulid" }
+                    "type_id": { "perRow": { "typeId": { "prefix": "order" } } }
                 },
                 "name": "fill_cross_artifact_ids"
             }]

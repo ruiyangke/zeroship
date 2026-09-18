@@ -1370,9 +1370,9 @@ all.** The paragraph was written from the runtime, where the mode is real
 (`aad.rs:75-78`, `backend/postgres.rs:1173`, `zeroship-data-sqlite/src/lib.rs:2074`,
 `crud/mask_drift.rs:575`, `crud/unmask.rs:234`). It is unreachable from the
 authoring surface, which is the only surface a creator has:
-`ColType::Encrypted { of }` (`crates/zeroship-migrate-ir/src/ir.rs:670`) carries
-the inner type and nothing else, and lowering hardcodes `"mode": "randomised"`
-at `crates/zeroship-migrate-core/src/render/lower.rs:9513`.
+`IrColumn.encrypted` (`crates/zeroship-migrate-ir/src/ir.rs`) is a boolean
+facet and carries no mode, and lowering hardcodes `"mode": "randomised"`
+at `crates/zeroship-migrate-core/src/render/lower.rs`.
 
 **This changes the deferral's cost.** "Keep it, decide later" was weighed as
 keeping a selectable-but-incomplete feature. What is being kept is reachable
