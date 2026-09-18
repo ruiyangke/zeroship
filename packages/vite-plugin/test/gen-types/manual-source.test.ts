@@ -354,4 +354,13 @@ describe("NormalizedSchema -> CollectionDescriptorDto mapping", () => {
       /calendarDate|cannot be mapped|no CollectionDescriptorDto home/,
     );
   });
+
+  test("an SDK-evaluated .clientDefault(fn) THROWS (no silent drop)", async () => {
+    const { t } = await import("@zeroship/db");
+    const field = t.string().clientDefault(() => "tok").toFieldDef();
+    assert.throws(
+      () => fieldDefToDto("c", "token", field),
+      /clientDefault|JSON boundary|database default/,
+    );
+  });
 });

@@ -253,6 +253,18 @@ export function fieldDefToDto(
     dto.default = def.default;
   }
 
+  if (def.clientDefault !== undefined) {
+    // An SDK-evaluated default is a live function. The CollectionDescriptorDto
+    // crosses a JSON boundary into the engine, where a function cannot survive,
+    // so the runtime descriptor would silently lose the default. Refuse rather
+    // than drop it; a database default belongs on `.default(value)`.
+    throw new Error(
+      `gen-types: field ${where} has a .clientDefault(fn) SDK-evaluated default ` +
+        `that cannot cross the CollectionDescriptorDto JSON boundary. Use ` +
+        `.default(value) for a database default.`,
+    );
+  }
+
   if (def.min !== undefined) dto.min = def.min;
   if (def.max !== undefined) dto.max = def.max;
   if (def.enum !== undefined) dto.enum = [...def.enum];
