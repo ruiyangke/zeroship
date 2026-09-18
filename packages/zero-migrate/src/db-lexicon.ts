@@ -104,7 +104,20 @@ export function colTypeFromDbField(field: DbSchemaField): ColType {
       return "text";
     }
     case "number":
+    case "float":
+    case "double": {
+      // `number` is a TWO-type token: a `precision` facet decides whether it is
+      // the fixed-precision decimal or the float. Reading it keeps the bridge
+      // total instead of collapsing `t.numeric(20, 4)` to a float.
+      const precision = def.precision;
+      if (typeof precision === "number" && Number.isInteger(precision) && precision > 0) {
+        const scale = def.scale;
+        if (typeof scale === "number" && Number.isInteger(scale) && scale >= 0) {
+          return { decimal: { precision, scale } };
+        }
+      }
       return "double";
+    }
     // Descriptor-side tokens: integer widths and float precision that no `t.*`
     // factory authors (`TypeName`'s `DescriptorOnlyTypeName`). They reach the
     // bridge only from a descriptor-read `FieldDef`, and still reduce portably.
@@ -113,8 +126,6 @@ export function colTypeFromDbField(field: DbSchemaField): ColType {
       return "int";
     case "bigInt":
       return "bigInt";
-    case "float":
-      return "double";
     case "timestamp":
       return "timestamp";
     case "boolean":
@@ -154,6 +165,41 @@ export function colTypeFromDbField(field: DbSchemaField): ColType {
       }
       return { vector: { vector: dims } };
     }
+    // The DDL-only tokens the migration lexicon contributes. Each is a MAPPING,
+    // not a boundary: the neutral `ColType` carries the exact counterpart.
+    case "char": {
+      const length = def.charLength;
+      if (typeof length !== "number" || !Number.isInteger(length) || length <= 0) {
+        throw new TypeError("colTypeFromDbField: a char field must carry a positive integer charLength");
+      }
+      return { char: { length } };
+    }
+    case "uuid":
+      return "uuid";
+    case "inet":
+      return "inet";
+    case "enum": {
+      const name = def.enumName;
+      if (typeof name !== "string" || name.length === 0) {
+        throw new TypeError("colTypeFromDbField: an enum field must carry a non-empty enumName");
+      }
+      return def.enumSchema === undefined ? { enum: { name } } : { enum: { name, schema: def.enumSchema } };
+    }
+    case "domain": {
+      const name = def.domainName;
+      if (typeof name !== "string" || name.length === 0) {
+        throw new TypeError("colTypeFromDbField: a domain field must carry a non-empty domainName");
+      }
+      return def.domainSchema === undefined ? { domain: { name } } : { domain: { name, schema: def.domainSchema } };
+    }
+    // A NATIVE text array is the one array shape with a neutral `ColType`; the
+    // portable JSON-stored array has none, so it stays a structured boundary.
+    case "array": {
+      if (def.items === "string" && def.arrayStorage === "native") {
+        return "textArray";
+      }
+      throw new UnsupportedColTypeError(def.type);
+    }
     // Non-storage / type-only db field shapes that have no single portable
     // column type are a hard structured boundary (property A): they reduce to
     // `UnsupportedColTypeError`, never a silent fallback. These ARE part of the
@@ -162,7 +208,6 @@ export function colTypeFromDbField(field: DbSchemaField): ColType {
     case "object":
     case "union":
     case "literal":
-    case "array":
       throw new UnsupportedColTypeError(def.type);
     default: {
       // Exhaustiveness guard: every member of `DbFieldType` (= the db `TypeName`
