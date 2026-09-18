@@ -1,7 +1,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { t, type Row, type RowInput } from "../src/index.js";
-import { normalizeSchema } from "../../../crates/zeroship-data-v8/js/testing.js";
+import { fieldsOf } from "./_install-helper.js";
 
 describe("assignment builders", () => {
   test("ID type carries its prefix without assigning a value", () => {
@@ -27,7 +27,7 @@ describe("assignment builders", () => {
 
   test("ordinary names carry no implicit behavior", () => {
     for (const name of ["id", "created_at", "updated_at", "created_by", "updated_by", "version", "deleted_at"]) {
-      assert.deepEqual(normalizeSchema({ [name]: t.string() }), { [name]: { type: "string" } });
+      assert.deepEqual(fieldsOf({ [name]: t.string() }), { [name]: { type: "string" } });
     }
     const schema = { id: t.number().required(), created_at: t.string().required() };
     const input: RowInput<typeof schema> = { id: 12, created_at: "user value" };
@@ -48,6 +48,6 @@ describe("assignment builders", () => {
     void invalid;
     const row: Row<typeof schema> = { ...input, id: "post_a", born: 1, editor: null };
     assert.equal(row.id, "post_a");
-    assert.equal(normalizeSchema(schema).id.primaryKey, true);
+    assert.equal(fieldsOf(schema).id.primaryKey, true);
   });
 });

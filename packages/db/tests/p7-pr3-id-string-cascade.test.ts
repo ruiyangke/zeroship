@@ -1,4 +1,4 @@
-import { generatedSchema } from "./_install-helper.js";
+import { fieldsOf, generatedSchema } from "./_install-helper.js";
 /**
  * **P7 PR 3** — SDK-side cascade of the `id: string` (typed_id) shape.
  *
@@ -15,12 +15,14 @@ import { generatedSchema } from "./_install-helper.js";
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { IdLoader } from "../src/loader.js";
-import { model } from "../../../crates/zeroship-data-v8/js/testing.js";
+import { IdLoader } from "../../../crates/zeroship-data-v8/js/runtime/loader.js";
+import { Collection } from "../../../crates/zeroship-data-v8/js/runtime/collection.js";
 import { t, type Row, type TypeBuilder } from "../src/index.js";
 import type { NativeDb } from "../src/native.js";
 
 type AnyRec = Record<string, unknown>;
+
+const postsSchema = { ...generatedSchema, title: t.string().required() };
 
 describe("P7 PR 3 — IdLoader accepts typed_id strings", () => {
   test("id_loader_accepts_typed_id_string", async () => {
@@ -90,11 +92,7 @@ describe("P7 PR 3 — Collection.get(string) routes through the loader", () => {
       post_01: { id: "post_01", title: "hello" },
       post_02: { id: "post_02", title: "world" },
     });
-    const Posts = model(
-      "posts",
-      { ...generatedSchema, title: t.string().required() },
-      native,
-    );
+    const Posts = new Collection<typeof postsSchema>("posts", fieldsOf(postsSchema), native);
     const [a, b] = await Promise.all([
       Posts.get("post_01"),
       Posts.get("post_02"),
@@ -156,11 +154,7 @@ describe("P7 PR 3 — insert returns the platform-minted id", () => {
         };
       },
     } as unknown as NativeDb;
-    const Posts = model(
-      "posts",
-      { ...generatedSchema, title: t.string().required() },
-      native,
-    );
+    const Posts = new Collection<typeof postsSchema>("posts", fieldsOf(postsSchema), native);
 
     const { data, error } = await Posts.insert({ title: "hello" });
     assert.equal(error, null);
@@ -184,11 +178,7 @@ describe("P7 PR 3 — insert returns the platform-minted id", () => {
         };
       },
     } as unknown as NativeDb;
-    const Posts = model(
-      "posts",
-      { ...generatedSchema, title: t.string().required() },
-      native,
-    );
+    const Posts = new Collection<typeof postsSchema>("posts", fieldsOf(postsSchema), native);
     const { data, error } = await Posts.insert({ title: "no id supplied" });
     assert.equal(error, null);
     assert.ok(data);

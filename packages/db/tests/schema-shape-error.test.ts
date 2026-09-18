@@ -15,7 +15,7 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { t, schema, TypeBuilder } from "../src/index.js";
+import { t, schema } from "../src/index.js";
 import { installSchemaForTest } from "./_install-helper.js";
 import type { NativeDb } from "../src/native.js";
 
@@ -53,22 +53,5 @@ describe("schema-shape error clarity (R3 IMPORTANT-5)", () => {
       { native },
     );
     assert.equal(typeof db.events.insert, "function");
-  });
-
-  test("runtime: a bare value in the field map fails normalizeSchema at install", () => {
-    // The runtime layer still has the existing `every field must be a t.*
-    // builder` check — this test asserts the path is still wired up; the
-    // *type-level* error is verified by tsc successfully compiling this
-    // file (i.e. valid shapes compile; the project's tsconfig surfaces
-    // a literal-error type for invalid shapes).
-    assert.throws(
-      () => installSchemaForTest(
-        // The validator's literal-error string fires for users who type
-        // a bare value here; the runtime defends against `as any` escapes.
-        { users: { name: "string" as unknown as TypeBuilder<string, true> } },
-        { native },
-      ),
-      /every field must be a t\.\* builder/,
-    );
   });
 });

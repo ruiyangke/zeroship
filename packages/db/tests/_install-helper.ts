@@ -15,16 +15,34 @@
  */
 import {
   installSchema,
-  normalizeSchema,
   type InstallSchemaOptions,
-  type RuntimeSchemaDescriptor,
+  type ProjectedCollection,
+  type SchemaProjection,
 } from "../../../crates/zeroship-data-v8/js/testing.js";
 // Use the source entry throughout SDK unit tests so branded builders and the
 // crate-owned adapter resolve one implementation instance. The separate
 // package-surface test exercises the compiled public artifact.
 import { SchemaBuilder, t } from "../src/index.js";
-import type { Db, SchemaInput } from "../src/index.js";
+import type { Db, FieldDef, SchemaInput } from "../src/index.js";
 import type { NativeDb } from "../src/native.js";
+
+export type FieldDeclaration = FieldDef | { toFieldDef(): FieldDef };
+
+/**
+ * Map a declared field record to the decoded `FieldDef` map a projection
+ * carries: `t.*` builders unwrap via `.toFieldDef()`, already-decoded
+ * `FieldDef`s pass through. Test-only stand-in for the Rust descriptor
+ * fold's field step.
+ */
+export function fieldsOf(
+  schema: Record<string, FieldDeclaration>,
+): Record<string, FieldDef> {
+  const out: Record<string, FieldDef> = {};
+  for (const [key, value] of Object.entries(schema)) {
+    out[key] = "toFieldDef" in value ? { ...value.toFieldDef() } : { ...value };
+  }
+  return out;
+}
 
 export const generatedSchema = {
   id: t.string().required().primaryKey().assigned({ by: "typedId", on: "insert" }),
@@ -41,40 +59,34 @@ type FixtureSchemas<T> = {
 };
 
 /**
- * Build the descriptor the toolchain would have emitted for `schemas`.
+ * Build the projection the host would emit for `schemas`: the decoded
+ * `FieldDef` map plus the declared named indexes, with no per-collection
+ * options (the installer no longer reads them).
  *
- * A declaration is either a `SchemaBuilder` — which carries collection
- * options and named indexes alongside its fields — or a bare field record,
- * which carries only fields and takes the installer's defaults.
+ * A declaration is either a `SchemaBuilder` — which carries named indexes
+ * alongside its fields — or a bare field record, which carries only fields.
  *
  * Exported for tests that call `installSchema` directly to exercise install
  * mechanics (reserved names and re-entrancy) rather
- * than Collection behaviour. Those still need a descriptor, or the installer
+ * than Collection behaviour. Those still need a projection, or the installer
  * has no collections to apply the mechanics to and the assertions pass
  * vacuously.
  */
-export function descriptorFor(schemas: Record<string, unknown>): RuntimeSchemaDescriptor {
-  const collections = Object.create(null) as Record<string, unknown>;
+export function descriptorFor(schemas: Record<string, unknown>): SchemaProjection {
+  const collections = Object.create(null) as Record<string, ProjectedCollection>;
 
   for (const [name, declared] of Object.entries(schemas)) {
     const builder = declared instanceof SchemaBuilder ? declared : null;
     const fields = builder ? builder.fields : declared;
     const options = builder?.options;
 
-    const normalized = normalizeSchema(fields as Parameters<typeof normalizeSchema>[0]);
-    const generated = normalizeSchema(generatedSchema);
+    const normalized = fieldsOf(fields as Record<string, FieldDeclaration>);
+    const generated = fieldsOf(generatedSchema);
     if (options?.softDelete) generated.deleted_at.softDelete = true;
     if (options?.versioning) generated.version.concurrency = true;
     collections[name] = {
-      // The descriptor carries wire FieldDefs, not `t.*` builders.
-      // `normalizeSchema` is the same conversion the installer applies to
-      // descriptor fields, so running it here is idempotent downstream.
+      // The projection carries decoded wire FieldDefs, not `t.*` builders.
       fields: { ...generated, ...normalized },
-      options: {
-        softDelete: options?.softDelete ?? false,
-        versioning: options?.versioning ?? false,
-        ...(options?.strictness !== undefined ? { strictness: options.strictness } : {}),
-      },
       indexes: (builder?.indexes ?? []).map((idx) => ({
         name: idx.name,
         fields: [...idx.fields],
@@ -83,7 +95,7 @@ export function descriptorFor(schemas: Record<string, unknown>): RuntimeSchemaDe
     };
   }
 
-  return { version: 2, collections } as RuntimeSchemaDescriptor;
+  return { collections };
 }
 
 export function installSchemaForTest<

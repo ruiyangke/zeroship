@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Collection } from "../src/index.js";
-import { installSchema, type RuntimeSchemaDescriptor } from "../../../crates/zeroship-data-v8/js/testing.js";
+import { Collection } from "../../../crates/zeroship-data-v8/js/runtime/collection.js";
+import { installSchema } from "../../../crates/zeroship-data-v8/js/testing.js";
 
 const id = { type: "string" as const, required: true, primaryKey: true };
 
@@ -32,13 +32,11 @@ test("invalid identities fail before collections are published", () => {
     assert.throws(() => new Collection("invalid", fields, native), {
       code: "INVALID_COLLECTION_IDENTITY",
     });
-    const collection = (fields: unknown) => ({
-      fields, options: { softDelete: false, versioning: false }, indexes: [],
-    });
-    const descriptor = { version: 2, collections: {
+    const collection = (fields: unknown) => ({ fields, indexes: [] });
+    const projection = { collections: {
       entries: collection({ id }), invalid: collection(fields),
-    } } as RuntimeSchemaDescriptor;
-    assert.throws(() => installSchema(native, descriptor), {
+    } };
+    assert.throws(() => installSchema(native, projection as never), {
       code: "INVALID_COLLECTION_IDENTITY",
     });
     assert.equal("entries" in native, false);

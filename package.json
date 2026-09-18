@@ -19,8 +19,9 @@
   },
   "scripts": {
     "preinstall": "npx only-allow pnpm",
-    "build": "pnpm --filter zeroship-migrate-node build && pnpm --filter @zeroship/migrate build && pnpm --filter zero-migrate-cli build && pnpm --filter @zeroship/db build && pnpm build:data-v8-adapter && pnpm -r --filter './packages/*' --filter '!./packages/zero-migrate*' --filter '!@zeroship/db' build",
-    "build:data-v8-adapter": "pnpm --dir packages/db exec tsup ../../crates/zeroship-data-v8/js/adapter.ts --format esm --platform neutral --target es2022 --out-dir ../../crates/zeroship-data-v8/dist --clean --external zeroship --no-config",
+    "build": "pnpm --filter zeroship-migrate-node build && pnpm --filter @zeroship/migrate build && pnpm --filter zero-migrate-cli build && pnpm --filter @zeroship/db build && pnpm typecheck:data-v8-js && pnpm build:data-v8-adapter && pnpm -r --filter './packages/*' --filter '!./packages/zero-migrate*' --filter '!@zeroship/db' build",
+    "build:data-v8-adapter": "pnpm --dir packages/db exec tsup ../../crates/zeroship-data-v8/js/adapter.ts --format esm --platform neutral --target es2022 --out-dir ../../crates/zeroship-data-v8/dist --clean --external zeroship --minify --no-config",
+    "typecheck:data-v8-js": "pnpm --dir packages/db exec tsc -p ../../crates/zeroship-data-v8/js/tsconfig.json",
     "publish:packages": "deploy/scripts/publish-packages.sh",
     "test": "pnpm -r --filter './packages/*' --filter '!./packages/zero-migrate*' test",
     "check": "pnpm -r --filter './packages/*' --filter '!./packages/zero-migrate*' check",

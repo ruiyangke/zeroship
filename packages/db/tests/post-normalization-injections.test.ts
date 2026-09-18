@@ -1,9 +1,15 @@
 /** Collection options do not invent columns or assignment metadata. */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { model } from "../../../crates/zeroship-data-v8/js/testing.js";
+import { Collection } from "../../../crates/zeroship-data-v8/js/runtime/collection.js";
 import { t } from "../src/index.js";
+import { fieldsOf } from "./_install-helper.js";
 import type { NativeDb } from "../src/native.js";
+
+const postsSchema = {
+  id: t.string().required().primaryKey().assigned({ by: "typedId", on: "insert" }),
+  title: t.string().required(),
+};
 
 /** A native stub that records the document each insert receives. */
 function recordingNative(): { native: NativeDb; seen: unknown[] } {
@@ -22,9 +28,9 @@ function recordingNative(): { native: NativeDb; seen: unknown[] } {
 describe("normalization preserves declared columns", () => {
   test("an insert does not carry the version seed to the native op", async () => {
     const { native, seen } = recordingNative();
-    const Posts = model(
+    const Posts = new Collection<typeof postsSchema>(
       "posts",
-      { id: t.string().required().primaryKey().assigned({ by: "typedId", on: "insert" }), title: t.string().required() },
+      fieldsOf(postsSchema),
       native,
     );
 
@@ -40,9 +46,9 @@ describe("normalization preserves declared columns", () => {
 
   test("soft delete does not carry a deletedAt to the native op", async () => {
     const { native, seen } = recordingNative();
-    const Posts = model(
+    const Posts = new Collection<typeof postsSchema>(
       "posts",
-      { id: t.string().required().primaryKey().assigned({ by: "typedId", on: "insert" }), title: t.string().required() },
+      fieldsOf(postsSchema),
       native,
     );
 
@@ -59,9 +65,9 @@ describe("normalization preserves declared columns", () => {
   // above, so prove the creator's own column still arrives.
   test("the creator's own field still reaches the native op", async () => {
     const { native, seen } = recordingNative();
-    const Posts = model(
+    const Posts = new Collection<typeof postsSchema>(
       "posts",
-      { id: t.string().required().primaryKey().assigned({ by: "typedId", on: "insert" }), title: t.string().required() },
+      fieldsOf(postsSchema),
       native,
     );
 

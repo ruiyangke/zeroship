@@ -16,14 +16,14 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { t } from "../src/index.js";
-import { validateDoc } from "../src/validate.js";
-import { normalizeSchema } from "../../../crates/zeroship-data-v8/js/testing.js";
+import { validateDoc } from "../../../crates/zeroship-data-v8/js/runtime/validate.js";
+import { fieldsOf } from "./_install-helper.js";
 import { ValidationError } from "../src/errors.js";
-import { validateArrayPushOps } from "../src/collection.js";
+import { validateArrayPushOps } from "../../../crates/zeroship-data-v8/js/runtime/collection.js";
 
 test("documents and array operators reject unknown item metadata", () => {
   for (const kind of ["unknown", "constructor", "toString", "__proto__"]) {
-    const schema = normalizeSchema({ values: t.array(t.string()) });
+    const schema = fieldsOf({ values: t.array(t.string()) });
     (schema.values as { items: string }).items = kind;
     assert.throws(() => validateDoc({ values: ["item"] }, schema), ValidationError);
     assert.throws(() => validateArrayPushOps({ $push: { values: "item" } }, schema), ValidationError);
@@ -122,7 +122,7 @@ describe("R5 MINOR — t.array() rejects non-primitive item types", () => {
  * passed through unvalidated. Cover both validators here.
  */
 describe("R6 MINOR — t.array(t.calendarDate()) validates each item", () => {
-  const schema = normalizeSchema({ days: t.array(t.calendarDate()) });
+  const schema = fieldsOf({ days: t.array(t.calendarDate()) });
 
   test("accepts a list of YYYY-MM-DD strings", () => {
     assert.doesNotThrow(() =>
@@ -178,7 +178,7 @@ describe("R6 MINOR — t.array(t.calendarDate()) validates each item", () => {
 });
 
 describe("R6 MINOR — t.array(t.json()) validates each item", () => {
-  const schema = normalizeSchema({ data: t.array(t.json()) });
+  const schema = fieldsOf({ data: t.array(t.json()) });
 
   test("accepts JSON-serialisable items (objects, arrays, scalars, null)", () => {
     assert.doesNotThrow(() =>

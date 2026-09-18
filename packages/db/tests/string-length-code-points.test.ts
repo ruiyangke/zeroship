@@ -15,12 +15,12 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { t } from "../src/index.js";
-import { validateDoc } from "../src/validate.js";
-import { normalizeSchema } from "../../../crates/zeroship-data-v8/js/testing.js";
+import { validateDoc } from "../../../crates/zeroship-data-v8/js/runtime/validate.js";
+import { fieldsOf } from "./_install-helper.js";
 
 describe("string length bounds count characters, not UTF-16 code units", () => {
   // Three characters, whatever plane they come from.
-  const schema = normalizeSchema({ title: t.string().min(1).max(3) });
+  const schema = fieldsOf({ title: t.string().min(1).max(3) });
 
   const THUMB = "\u{1F44D}"; // 1 character, 2 code units, 4 bytes
 

@@ -1,7 +1,7 @@
 /** Coalesce key lookups while preserving the transaction scope at enqueue time. */
 
-import type { IdValue } from "./types.js";
-import { identityKey } from "./identity.js";
+import type { IdValue } from "../../../../packages/db/src/types";
+import { identityKey } from "./identity";
 
 interface QueuedLoad<R, K extends IdValue> {
   id: K;
@@ -10,7 +10,7 @@ interface QueuedLoad<R, K extends IdValue> {
   txDepthAtEnqueue: number;
 }
 
-import { MAX_ID_BATCH } from "./membership-cap.js";
+import { MAX_ID_BATCH } from "./membership-cap";
 
 /**
  * Coalesces `.load(id)` calls within a microtask into a single batched

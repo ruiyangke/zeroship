@@ -160,11 +160,10 @@ describe("installSchema", () => {
     const descriptorCollections = Object.create(null) as Record<string, unknown>;
     descriptorCollections.__proto__ = {
       fields: { id: { type: "string", required: true, primaryKey: true } },
-      options: { softDelete: false, versioning: false, strictness: "strict" },
       indexes: [],
     };
 
-    const { collections } = installSchema(native, { version: 2, collections: descriptorCollections } as never);
+    const { collections } = installSchema(native, { collections: descriptorCollections } as never);
 
     assert.ok(Object.hasOwn(collections, "__proto__"));
     assert.equal(typeof native.collection("__proto__").find, "function");
@@ -206,11 +205,9 @@ describe("installSchema", () => {
     let caught: unknown = null;
     const collection = {
       fields: { id: { type: "string", required: true, primaryKey: true }, name: { type: "string", required: true } },
-      options: { softDelete: false, versioning: false },
       indexes: [],
     };
     const reentrantDescriptor = {
-      version: 2,
       collections: {
         get first() {
           try {

@@ -2,9 +2,9 @@ import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 
 import { t } from "../src/index.js";
-import type { Collection } from "../src/collection.js";
+import type { Collection } from "../../../crates/zeroship-data-v8/js/runtime/collection.js";
 import type { TxCollection, TxQuery } from "../src/db-types.js";
-import type { Query } from "../src/query.js";
+import type { Query } from "../../../crates/zeroship-data-v8/js/runtime/query.js";
 import { installSchemaForTest } from "./_install-helper.js";
 import type { NativeDb } from "../src/native.js";
 

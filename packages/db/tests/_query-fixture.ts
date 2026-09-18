@@ -1,4 +1,4 @@
-import { Query } from "../src/query.js";
+import { Query } from "../../../crates/zeroship-data-v8/js/runtime/query.js";
 import type { PlainObject, Row } from "../src/types.js";
 
 /** Query fixtures use mock rows keyed by the explicitly declared id field. */
