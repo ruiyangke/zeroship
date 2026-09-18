@@ -375,7 +375,7 @@ function checkField(
           childVal === null ||
           (childDef.type === "string" && childDef.required === true && childVal === "");
         if (missing) {
-          if (childDef.required === true && childDef.default === undefined) {
+          if (childDef.required === true && childDef.default === undefined && childDef.clientDefault === undefined) {
             errors[childPath] = { path: childPath, message: `${childPath} is required` };
           }
           continue;
@@ -435,7 +435,7 @@ function checkField(
         childVal === null ||
         (childDef.type === "string" && childDef.required === true && childVal === "");
       if (missing) {
-        if (childDef.required === true && childDef.default === undefined) {
+        if (childDef.required === true && childDef.default === undefined && childDef.clientDefault === undefined) {
           errors[childPath] = { path: childPath, message: `${childPath} is required` };
         }
         continue;
@@ -571,7 +571,9 @@ export function validateDoc(doc: Doc, schema: NormalizedSchema): Doc {
         delete result[key];
         continue;
       }
-      if (def.default !== undefined) {
+      if (def.clientDefault !== undefined) {
+        result[key] = def.clientDefault();
+      } else if (def.default !== undefined) {
         result[key] =
           typeof def.default === "function" ? def.default() : def.default;
       } else if (def.required) {
@@ -638,7 +640,9 @@ function validateUnionDoc(
       value === null ||
       (def.type === "string" && def.required === true && value === "");
     if (missing) {
-      if (def.default !== undefined) {
+      if (def.clientDefault !== undefined) {
+        result[key] = def.clientDefault();
+      } else if (def.default !== undefined) {
         result[key] =
           typeof def.default === "function" ? def.default() : def.default;
       } else if (def.required === true) {
@@ -700,7 +704,7 @@ export function checkPartial(doc: Doc, schema: NormalizedSchema): void {
         for (const [vKey, vDef] of Object.entries(matched)) {
           if (vDef.type === "literal") continue;
           if (vDef.required !== true) continue;
-          if (vDef.default !== undefined) continue;
+          if (vDef.default !== undefined || vDef.clientDefault !== undefined) continue;
           const patchVal = doc[vKey];
           if (patchVal === undefined || patchVal === null) {
             missing.push(vKey);

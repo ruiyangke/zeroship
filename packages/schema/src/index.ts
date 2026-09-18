@@ -521,7 +521,18 @@ export interface FieldDef {
   required?: boolean;
   unique?: boolean;
   index?: boolean;
+  /**
+   * The DATABASE default: a scalar or container literal lowered to SQL
+   * `DEFAULT`. The function arm exists only for the runtime descriptor's bytes
+   * carrier, which holds a decoded byte literal as a lazy thunk — an SDK
+   * factory function is spelled {@link clientDefault}, never here.
+   */
   default?: FieldDefaultValue | (() => FieldDefaultValue);
+  /**
+   * An SDK-EVALUATED default: a zero-argument factory the SDK runs at insert
+   * time. Never lowered to SQL `DEFAULT` — that is what {@link default} is for.
+   */
+  clientDefault?: () => FieldDefaultValue;
   /** Generator and lifecycle event supplied by the runtime descriptor. */
   assign?: ColumnAssignment;
   primaryKey?: boolean;
@@ -700,7 +711,7 @@ export class TypeBuilder<
   declare readonly _mask: M;
   /** @internal Type-level brand for encrypted-filter legality. */
   declare readonly _encryption: E;
-  /** @internal Type-level brand for `.default()`-backed insert optionality. */
+  /** @internal Type-level brand for `.default()`/`.clientDefault()`-backed insert optionality. */
   declare readonly _hasDefault: D;
   /** @internal Type-level brand for portable filter operators. */
   declare readonly _filterKind: F;
@@ -816,9 +827,39 @@ export class TypeBuilder<
     return this.clone({ index: true });
   }
 
-  /** Sets the default value (or factory function) used when the field is absent on insert. */
-  default(val: FieldDefaultValue | (() => FieldDefaultValue)): TypeBuilder<T, R, M, E, true, F> & BuilderMetadata<this> {
+  /**
+   * Sets the DATABASE default: a scalar or container literal lowered to SQL
+   * `DEFAULT`. An SDK-evaluated factory belongs on {@link clientDefault};
+   * passing one here is refused so the evaluation point is never ambiguous.
+   */
+  default(val: FieldDefaultValue): TypeBuilder<T, R, M, E, true, F> & BuilderMetadata<this> {
+    if (typeof val === "function") {
+      throw Object.assign(
+        new Error(
+          ".default(): a factory function is an SDK-evaluated default; spell it .clientDefault(fn). " +
+            ".default(value) is the database default, lowered to SQL DEFAULT",
+        ),
+        { code: "DEFAULT_FACTORY_REQUIRES_CLIENT_DEFAULT" as const },
+      );
+    }
     return this.clone({ default: val }) as unknown as TypeBuilder<T, R, M, E, true, F> & BuilderMetadata<this>;
+  }
+
+  /**
+   * Sets an SDK-EVALUATED default: a zero-argument factory run at insert time,
+   * never lowered to SQL `DEFAULT`. Scalar and expression defaults use
+   * {@link default} instead.
+   */
+  clientDefault(fn: () => FieldDefaultValue): TypeBuilder<T, R, M, E, true, F> & BuilderMetadata<this> {
+    if (typeof fn !== "function") {
+      throw Object.assign(
+        new Error(
+          ".clientDefault(fn): fn must be a zero-argument factory function; use .default(value) for a database default",
+        ),
+        { code: "CLIENT_DEFAULT_REQUIRES_FUNCTION" as const },
+      );
+    }
+    return this.clone({ clientDefault: fn }) as unknown as TypeBuilder<T, R, M, E, true, F> & BuilderMetadata<this>;
   }
 
   /** For strings: minimum length. For numbers: minimum value. */
