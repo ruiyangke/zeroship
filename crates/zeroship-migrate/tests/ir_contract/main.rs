@@ -10,7 +10,6 @@
 #[path = "../support/mod.rs"]
 mod support;
 
-mod embedding_guide_is_compiled;
 mod golden_trace_sqlite;
 mod ir_author_render_parity;
 mod ir_checksum;

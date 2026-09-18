@@ -1,426 +1,295 @@
 # Auth
 
-Zeroship authentication is a native OpenID Connect 1.0 / OAuth 2.1 provider.
-`crates/auth` is the sole OP: it serves the login UI, first-party identity
-flows, OAuth/OIDC protocol endpoints, token signing, refresh-token rotation,
-consent, device authorization, UserInfo, discovery, and JWKS.
+`@zeroship/auth` is the platform's authentication contract for an app. It has
+three parts:
 
-Every authenticated hosted app is an OIDC relying party of
-`auth.zeroship.ai/oauth2`:
+- `@zeroship/auth` (the server helper) — read the current user inside a
+  request handler.
+- `@zeroship/auth/client` (the headless browser client) — sign a user in, hold
+  the session, and sign them out.
+- `@zeroship/auth/react` (the React adapter) — the same client as components
+  and a hook.
 
-- **Gateway** runs the RP flow for every hosted creator app at `*.zeroship.ai`.
-- **Console** is a normal hosted app at `console.zeroship.ai`; it uses the same
-  gateway RP flow as every other hosted app.
-- **Control** is a resource server and client registry manager. It does not run
-  a browser RP of its own.
+Sign-in itself always runs in the platform's own sign-in UI. Your app never
+handles a password or a social credential: it receives a signed-in session on
+the browser side and a `User` object on the server side.
 
-This gives the platform one global user pool, one issuer, and one process that
-holds raw credentials.
+The identity your app receives is **per-app**. `id` is a pairwise subject that
+differs for every app the same person signs in to, and `email` is a relay
+address, so one person looks different to two of your apps and cannot be
+correlated across them.
 
-## Topology
+## Reading the user server-side
 
-```text
-End user
-  |
-  | GET https://myapp.zeroship.ai/anything
-  v
-gateway
-  | no __Host-zeroship_app_session cookie
-  | -> 302 to auth service /oauth2/authorize
-  v
-crates/auth
-  | /oauth2/authorize -> /login or /consent when interaction is needed
-  | /login verifies password, magic link, or federated identity
-  | /oauth2/token exchanges the code and mints tokens
-  v
-gateway callback
-  | validates the ID token, creates the app session cookie,
-  | then forwards ZeroShip-User to the worker
-  v
-worker runtime
-```
+Import `auth` from `@zeroship/auth` and call it inside a handler:
 
-`ZEROSHIP_AUTH_PUBLIC_URL` is the externally visible auth origin, for example
-`https://auth.zeroship.ai`. The issuer stamped into tokens and discovery is
-`${ZEROSHIP_AUTH_PUBLIC_URL}/oauth2`.
-
-## Endpoints
-
-### Native OP endpoints
-
-All of these are served by `crates/auth` under `/oauth2`.
-
-| Path | Notes |
-|---|---|
-| `/oauth2/authorize` | Authorization-code endpoint, PKCE S256 only |
-| `/oauth2/token` | Authorization-code, refresh-token, and device-code exchange |
-| `/oauth2/device/authorization` | RFC 8628 device authorization start |
-| `/oauth2/revoke` | RFC 7009 refresh-family revocation |
-| `/oauth2/introspect` | RFC 7662 token introspection |
-| `/oauth2/userinfo` | OIDC UserInfo |
-| `/oauth2/logout` | RP-initiated logout confirmation |
-| `/oauth2/.well-known/openid-configuration` | OIDC discovery |
-| `/oauth2/.well-known/oauth-authorization-server` | RFC 8414 metadata |
-| `/oauth2/.well-known/jwks.json` | EdDSA public signing key |
-
-### Identity UI and webhooks
-
-These are also served by `crates/auth` on the auth host.
-
-| Method | Path | Purpose |
-|---|---|---|
-| GET, POST | `/login` | Password login and challenge continuation |
-| GET, POST | `/signup` | Account creation |
-| GET, POST | `/consent` | Consent screen and accept/deny handling |
-| GET, POST | `/device` | User-code entry for device authorization |
-| GET | `/oauth/google/start`, `/oauth/google/callback` | Google federation, when configured |
-| GET | `/oauth/github/start`, `/oauth/github/callback` | GitHub federation, when configured |
-| GET, POST | `/link` | Link a federated identity to an existing account |
-| POST | `/magic/start` | Issue and email a magic-link token |
-| GET | `/magic/await`, `/magic/verify` | Magic-link wait and landing pages |
-| POST | `/magic/verify/redeem`, `/magic/complete` | Cross-device and final magic-link redemption |
-| GET | `/verify` | Email-verification landing |
-| POST | `/verify/redeem` | Consume an email-verification token |
-| GET, POST | `/forgot`, `/reset` | Password reset issue and redeem |
-| GET | `/me` | Signed-in profile page |
-| GET | `/me/sessions` | List the caller's active IdP and per-app sessions |
-| POST | `/me/sessions/{id}/revoke` | Revoke one of the caller's own sessions |
-| POST | `/me/unlink/{provider}` | Unlink a federated identity |
-| POST | `/me/2fa/enroll`, `/me/2fa/confirm`, `/me/2fa/disable` | TOTP self-service |
-| POST | `/me/delete` | Request account deletion (GDPR Art. 17): schedules the erasure, revokes every credential, mails the undo link |
-| GET, POST | `/me/delete/cancel` | Redeem the mailed undo token within the grace window |
-| POST | `/webhooks/postmark`, `/webhooks/ses-sns`, `/webhooks/relay-inbound` | Mailer and relay webhooks |
-| GET | `/healthz`, `/readyz`, `/static/style.css` | Health checks and static CSS |
-
-Turning the second factor off takes more than the session cookie.
-`/me/2fa/disable`, and `/me/2fa/enroll` when it replaces a confirmed credential,
-both require a re-auth proof: a current TOTP code or the account password.
-Neither revokes anything, on purpose - whoever supplies that proof can sign back
-in through `/login` the moment 2FA is off, so a teardown would evict only the
-account holder. Both instead mail the registered address a second-factor-removed
-notice whose call to action is a password reset, the flow that does revoke
-everything. To end other sessions deliberately, use `/me/sessions` and
-`/me/sessions/{id}/revoke`.
-
-`/me/delete` is a request, not an erasure. It is REFUSED, with nothing written,
-while the caller is the only owner of a live organization - the refusal names
-each organization and whether to transfer it, empty it, or dissolve it - and
-refused the same way if the control plane cannot answer that question at all.
-When it succeeds it schedules the erasure a grace window out, revokes every
-session and token family, and mails a confirmation carrying a single-use undo
-token.
-
-That token is the ONLY way to change your mind, and deliberately so: the request
-revokes the session in the same transaction that schedules the deletion, so
-there is no signed-in caller left to authenticate an undo. `/me/delete/cancel`
-therefore takes the token, not a cookie. Cancelling clears the schedule; it does
-not restore the revoked sessions, so you sign in fresh exactly as after a
-password reset.
-
-### Gateway BFF endpoints
-
-Per hosted-app host, the gateway serves the same-origin browser BFF endpoints
-used by `@zeroship/auth`.
-
-| Method | Path | Purpose |
-|---|---|---|
-| GET | `/__zeroship/auth/authorize` | Builds the OP authorize URL and stores PKCE/state in an app-origin stash cookie |
-| GET | `/__zeroship/auth/popup-callback` | Same-origin relay page for popup/iframe flows |
-| GET | `/__zeroship/auth/callback?code=...&state=...` | Exchanges the code, validates tokens, creates the app session |
-| GET, POST | `/__zeroship/auth/session` | Reads or re-mints the BFF session projection |
-| POST | `/__zeroship/auth/signout` | Clears the app session and revokes refresh-family state |
-| POST | `/oidc/backchannel-logout` | Back-channel logout receiver |
-
-## Cookies
-
-All auth cookies are `HttpOnly` and `Path=/`. No JavaScript ever needs to read
-one: where a value has to reach a form, the server renders it into both the
-cookie and the hidden field in the same response. `Secure` is always set, in
-every environment: there is no mode that drops it. Local runs work because
-browsers treat `localhost` and `*.localhost` as trustworthy origins, so a
-`Secure` cookie is accepted over plain `http` there. The `__Host-` prefix is
-used where RFC 6265bis allows it.
-
-`SameSite` is `Lax` for the cookies that must survive a top-level redirect back
-from an external identity provider or an emailed link, and `Strict` for those
-that are only ever presented by a form on an auth page the user is already
-looking at.
-
-| Cookie | Set by | Host | SameSite | Max-Age |
-|---|---|---|---|---|
-| `__Host-zsidp_session` | auth | `auth.zeroship.ai` | Lax | 12 h hard / 30 min idle |
-| `__Host-zsidp_csrf` | auth | `auth.zeroship.ai` | Strict | per form |
-| `__Host-zsidp_google_stash` | auth | `auth.zeroship.ai` | Lax | 10 min |
-| `__Host-zsidp_github_stash` | auth | `auth.zeroship.ai` | Lax | 10 min |
-| `__Host-zsidp_magic_csrf` | auth | `auth.zeroship.ai` | Lax | 15 min |
-| `__Host-zeroship_app_session` | gateway | each hosted app origin | Lax | 15 min |
-| `__Host-zeroship_app_anchor` | gateway | each hosted app origin | Strict | 30 d |
-| `__Host-zs_oidc_stash` | gateway | each hosted app origin | Lax | 10 min |
-
-`__Host-zeroship_app_session` is a gateway-signed `zeroship-sess+jwt` identity
-assertion, not an opaque session id, so its lifetime is the token's own 15-minute
-`exp`. The durable credential is the 30-day server-held
-`__Host-zeroship_app_anchor`, which silently re-signs a fresh session cookie via
-`GET /__zeroship/auth/session` once the short one lapses.
-
-**Ending an app session is therefore not a delete.** The gateway authenticates a
-request from that signed cookie plus the `(client_id, sub)` marker in
-`zeroship.token_revocations`; it does not read `zeroship.gateway_sessions`, which
-is the audit and visibility record. So every surface that ends an app session
-must write the family marker and tear down the anchor. The gateway's own
-`POST /__zeroship/auth/signout` does both directly. The OP cannot (the anchor is
-the gateway's row), so `POST /me/sessions/{id}/revoke` with `kind=app` emits a
-back-channel logout to that app's client and the gateway's BCL receiver runs the
-same teardown. Deleting the audit row alone leaves the cookie valid to its `exp`
-and the anchor re-minting for the next 30 days.
-
-That teardown is keyed on `(client_id, sub)`, which has no per-device dimension,
-so revoking one of a user's sessions at an app ends every session that user
-holds at that app. The logout token names the subject and no `sid` for the same
-reason: the OP session has not ended, only the app session.
-
-The app-origin stash cookies carry HMAC-signed PKCE verifier, state, nonce, and
-return path. They are cleared on successful callback. The federation stash names
-are provider-specific so separate tabs do not overwrite each other.
-
-## SDK Surface
-
-`@zeroship/auth` exposes the server helper surface:
-
-- `auth.getUser()` returns the authenticated user or `null`.
-- `auth.requireUser()` returns the user or throws a 401-carrying error.
-- `auth.isLoggedIn()` is a convenience boolean.
-- `auth.signOut(returnTo?)` returns a redirect `Response` to sign out.
-
-All server helpers read `env.auth.user`, which the runtime populates from the
-gateway's HMAC-signed `ZeroShip-User` header. The browser client uses only the
-BFF endpoints above; it never receives an access token or refresh token.
-
-**`requireUser()` reads identity; it is not the gate.** A route declared
-`auth: "user"` is refused by the platform before your handler is entered, twice:
-at the gateway, and again inside the worker
-(`crates/zeroship-worker/src/policy.rs`). Forgetting to call `requireUser()`
-therefore does not leave a declared route open — which is the whole reason the
-worker fence exists, since a gate that depends on the creator remembering is
-not a gate. Call it when you want the user object, or when you want a 401 on a
-route you deliberately declared `anonymous`.
-
-```javascript
+```js
 import { auth } from "@zeroship/auth";
 
-export default {
-  async fetch(req, env) {
-    const user = auth.requireUser();
-    return Response.json({ hello: user.name ?? user.id });
-  }
-};
+const user = auth.getUser(); // User | null
+if (!user) return new Response("sign in please", { status: 401 });
+return Response.json({ hello: user.name ?? user.id });
 ```
 
-## Token Formats
+Three helpers:
 
-All token operations are native to `crates/auth`.
+- `auth.getUser()` — the authenticated `User`, or `null` when the request is
+  anonymous.
+- `auth.requireUser()` — the same `User`, or a thrown error carrying
+  `status: 401` and `code: "UNAUTHENTICATED"` when the request is anonymous.
+- `auth.isLoggedIn()` — `true` when the request is authenticated, `false`
+  otherwise.
 
-- **ID token:** EdDSA-signed JWT, 15 min TTL. Standard OIDC claims plus
-  scope-gated identity claims such as `email`, `email_verified`, `name`, and
-  `picture`.
-- **Access token:** RFC 9068-style EdDSA JWT, 15 min TTL, `typ = at+jwt`.
-- **Refresh token:** opaque `zrt_...` token, and the presentable half of a
-  SESSION. Only HMAC-SHA256 verifiers are stored, on the `zeroship.sessions`
-  row itself. A session is 7 d idle / 30 d hard and its secret rotates in place
-  on every refresh. A lost response can be retried once inside a bounded
-  window; the record is single-use, so a second presentation of the superseded
-  secret revokes the session.
-- **Authorization code:** single-use, PKCE-bound, 60 s TTL.
-- **Device code:** 10 min TTL, polling interval enforced by the OP.
+`getUser()` never throws; `requireUser()` is the spelling that turns "anonymous"
+into a `401` inside your handler. There is no server-side sign-out helper — sign
+out from the browser with the client below.
 
-### CLI platform tokens
+### The User object
 
-`zeroship login` runs the OP's own device grant. It first reads control's RFC
-9728 metadata at `GET {control}/.well-known/oauth-protected-resource` to learn
-which authorization server control accepts tokens from, then drives
-`POST {issuer}/device/authorization` and `POST {issuer}/token` against that
-issuer. It asks for `offline_access`, so the OP returns a refresh token
-alongside a 15-minute access token, and `zeroship deploy` rotates that refresh
-token when the access token expires. The rotated credential is written to disk
-before it is used: the presented token is already spent, and re-presenting it
-is a reuse detection that revokes the family.
+The server helpers return the platform's identity projection directly. On the
+server the verified flag is spelled `email_verified` (snake_case); the browser
+client renames that one field to `emailVerified`. The fields `auth.getUser()`
+returns are:
 
-Control no longer runs a parallel device flow. It used to exchange an approved
-grant for a platform access token through `POST /internal/platform-token`, but
-`zeroship login` drives the OP directly, so both the flow and the mint were
-deleted; the entitlement narrowing that mint performed now happens on control's
-bearer path at request time (`crates/zeroship-authn/src/lib.rs`).
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `id` | `string` | Per-app pairwise subject (`pws_…`). Not the person's platform id; distinct for each app. |
+| `email` | `string` | A per-app relay address, never the user's real inbox. Empty string when the `email` scope was not granted. |
+| `email_verified` | `boolean` | Whether the identity's email is verified. |
+| `name` | `string` | Display name, empty string when none is available. |
+| `avatar` | `string \| null` | Avatar URL, or `null` when none is available. |
+| `scopes` | `string[]` | The scopes granted to your app for this user (empty when none). |
 
-Auth reconciles a first-party `zeroship-cli` OAuth client registration at
-startup. It may request `apps:deploy`, `apps:read`, `apps:write`,
-`secrets:read` and `offline_access`; a token request cannot expand that set,
-and `offline_access` asks for the refresh family without conferring any
-resource authority of its own. An approved OP device grant for this client
-produces a 15-minute access token with the configured control audience and a
-public `sub` equal to the canonical platform `UserId`: `usr_` followed by the
-fixed-width lowercase base36 UUIDv7 body. Generic app clients receive
-app-sector pairwise `pws_...` subjects instead.
+`auth.getUser()` returns `email_verified`, not `emailVerified`. The camelCase
+`emailVerified` exists only in the browser client (`@zeroship/auth/client`),
+where the same projection is normalized; there `email` and `name` are also
+typed nullable. This table is the server-side spelling.
 
-The refresh rotation mints through the same code path as the device
-redemption, so a rotated CLI token keeps that principal shape rather than
-silently becoming a pairwise token control would refuse. The refresh row
-stores the principal subject too, which is what makes reuse detection write
-the `zeroship.token_revocations` marker described below.
+These helpers only *read* identity. Whether a route requires a user at all is
+declared separately, in the app's resource policy, and `auth: "user"` is the
+fail-closed default: a procedure that declares no `auth` still requires a
+signed-in user.
 
-`PLATFORM_TOKEN_MAX_TTL_SECS` (12 hours) is the ceiling on any registered
-client's token lifetime, and it sets the signing-key retention horizon: a
-retired key is kept for that ceiling plus the JWKS cache window and the
-clock-skew allowance, so no issued token outlives the key that verifies it.
-The constant is named for the mint described above, which no longer exists;
-what it bounds today is the OP's own issuance.
+Declare the requirement per procedure in the wrapper config:
 
-Control's bearer verification path honors a
-`zeroship.token_revocations` marker for `zeroship-cli`. Account deletion writes
-that marker, so credentials issued before a deletion request stay revoked even
-if the request is cancelled. Refresh reuse detection now writes it too: a
-rotated-away CLI refresh token, presented once more after its one lost-response
-retry, revokes the family AND stamps the marker, which recalls the access token
-the attacker may already be holding.
+```js
+import { query } from "@zeroship/rpc/server";
+import { auth } from "@zeroship/auth";
 
-Everything else still relies on expiry. The current `zeroship logout` deletes
-only the local credential and calls no RFC 7009 endpoint, so a token already
-copied off the machine stays valid for the rest of its lifetime: at most 15
-minutes for a login-issued token, at most 12 hours for one minted through
-control's parallel flow.
-
-## OAuth Clients
-
-OAuth clients live in `zeroship.oauth_clients`; per-app clients additionally
-have `zeroship.app_oauth_clients` rows. Control creates and updates app clients
-as apps are created, deployed, and custom-domain redirect URIs change.
-
-Client IDs for hosted apps are deterministic `oac_...` identifiers. The OP
-loads the client row during authorize/token flows, validates exact redirect URI
-matches, enforces PKCE S256, and uses the app client's sector identifier to
-derive pairwise `pws_...` subjects. The reconciled first-party `zeroship-cli`
-row has no app-client extension and uses the public platform-principal subject
-policy described above.
-
-Brokered clients authenticate at token exchange with a per-client broker secret
-derived from `AUTH_BROKER_SECRET_FILE`. Any other client registered with a
-`client_secret_basic` or `client_secret_post` method presents that secret on
-every grant it uses, `authorization_code` included; only clients registered
-with `token_endpoint_auth_method = none` are PKCE-only. A client that fails
-authentication gets `401` with `invalid_client` and a `WWW-Authenticate`
-challenge.
-
-## Data Model
-
-The auth tables live in the `zeroship` PostgreSQL schema and are created by the
-platform corpus in `db/migrations-ts/`, applied by the `zero-migrate` CLI
-(`deploy/ops/db-migrate.sh` is the sanctioned wrapper):
-
-| Table | Purpose |
-|---|---|
-| `zeroship.users` | Global user pool keyed by canonical `UserId` text |
-| `zeroship.federated_identities` | Google/GitHub identity links |
-| `zeroship.idp_sessions` | Auth-origin login sessions |
-| `zeroship.gateway_sessions` | Per-app session audit/revocation state |
-| `zeroship.oauth_clients` | Native OP client registry |
-| `zeroship.app_oauth_clients` | Per-app client extension rows |
-| `zeroship.oauth_grants` | User consent grants |
-| `zeroship.oauth_authorization_codes` | Pending authorization codes |
-| `zeroship.sessions` | Session state, including the rotating secret and its single-use replay record |
-| `zeroship.grants` | One row per (person, audience): the subject, the consented scopes, the suspension status |
-| `zeroship.device_grants` | Device authorization grants |
-| `zeroship.principal_grants` | Platform grants; auth has SELECT-only access for CLI mint capping |
-| `zeroship.signing_keys` | Public JWK lifecycle and maximum issued-expiry watermark |
-| `zeroship.magic_links`, `zeroship.magic_completions` | Magic-link and reset flows |
-| `zeroship.email_verifications`, `zeroship.email_suppressions` | Email verification and suppression |
-| `zeroship.rate_limits` | Login throttling state |
-| `zeroship.audit_events` | Structured audit log |
-| `zeroship.dpop_jti`, `zeroship.token_revocations` | DPoP replay and revocation state |
-| `zeroship.cron_state` | Durable cron bookkeeping |
-
-### Signing-key retention
-
-JWKS publishes keys in `active`, `next`, or `retiring` state. Every production
-token issuance atomically advances that key row's `max_issued_expires_at`
-before returning the signed token. A concurrent retirement that wins the row
-race changes the status first, so issuance affects zero rows and discards the
-token instead of returning a token whose key is no longer published.
-
-The hourly signing-key retention cron changes only elapsed `retiring` keys to
-terminal `retired`; it never deletes the audit row and never selects `active`
-or `next`. The normal cutoff is the greatest exact issued expiry plus the full
-JWKS cache window and clock-skew allowance: 300 seconds `max-age` + 300 seconds
-`stale-while-revalidate` + 120 seconds skew. A row without an issuance
-watermark uses the conservative fallback of `retiring_at` + the 43,200-second
-maximum token lifetime + those 720 seconds. The full fallback horizon is
-43,920 seconds (12 hours 12 minutes).
-
-## Operator Notes
-
-Local compose runs the native OP as the `auth` service. In production, configure
-at minimum:
-
-- `AUTH_DB_URL`
-- `ZEROSHIP_AUTH_PUBLIC_URL`
-- `AUTH_SIGNING_KEY_FILE`
-- `AUTH_PAIRWISE_SALT_FILE`
-- `AUTH_BROKER_SECRET_FILE`
-- `REFRESH_HASH_KEY_FILE`
-- `REFRESH_IDEM_KEY_FILE`
-- `AUTH_STASH_SIGNING_KEY`
-- `AUTH_TOTP_ENC_KEY`
-
-Run platform migrations before booting services:
-
-```bash
-pnpm install && pnpm build
-ZEROSHIP_MIGRATE_DSN="$DATABASE_URL" deploy/ops/db-migrate.sh
+export const me = query(
+  async () => {
+    const user = auth.getUser(); // User | null
+    return { id: user?.id, name: user?.name };
+  },
+  { id: "account.me", auth: "user" },
+);
 ```
 
-The DSN never reaches an argument list. `db-migrate.sh` writes it into a
-per-run `zero-migrate.toml` under a `mktemp -d` directory at mode 0700/0600 and
-passes `--config <path>`; the file is removed by an EXIT trap. The CLI does
-advertise a `--database-url <value>` flag and this path deliberately does not
-use it, because argv is readable through `ps` and `/proc/<pid>/cmdline` by every
-process of that user. The owner-only requirement is enforced by the reader, not
-the wrapper: `enforceOwnerOnly` in `packages/zero-migrate-cli/src/config.ts`
-refuses a config supplying a literal `url` with any bit set in `0o077`.
+`auth` accepts only `"user"` or `"anonymous"`. To make a procedure public,
+declare `auth: "anonymous"` together with `publiclyAccessible: true` in the
+app's resource policy (`src/server/config.ts`), under a resource key `rpc:<id>`
+that names one procedure or a `.`-delimited family:
 
-THIS BLOCK WAS BROKEN UNTIL 2026-09-04. It built
-`-p zeroship-migrate-adapter --bin zeroship-platform-migrate`; that crate was
-deleted on 2026-08-28 and neither the package nor the binary has existed since,
-so the first line failed and nothing after it ran. The `--project-schema` /
-`--project-id` pair went with it - the CLI derives its advisory-lock key and
-journal project from the schema alone, which the corpus spells itself, so there
-is nothing left for a second name to select.
+```js
+import { defineApp } from "@zeroship/server";
 
-Then start `zeroship-auth` with the variables above. On boot it publishes the
-active public JWK metadata from `AUTH_SIGNING_KEY_FILE` into Postgres and serves
-discovery from `${ZEROSHIP_AUTH_PUBLIC_URL}/oauth2`.
+export default defineApp({
+  resources: {
+    "rpc:wizard": { auth: "anonymous", publiclyAccessible: true },
+  },
+});
+```
 
-## DPoP and Bearer Access
+`publiclyAccessible: true` is the deliberate confirmation the build requires
+with `auth: "anonymous"`, and it belongs to the resource policy, not the wrapper
+config. `requireUser()` is how you fetch the user object, not the gate that
+protects the route. See [RPC](rpc.md) for the full resource-tree grammar.
 
-Browser apps use the BFF session cookie. Non-browser clients may present native
-OP access tokens directly.
+## Signing in a browser user
 
-When the gateway receives `Authorization: DPoP <token>`, it verifies the DPoP
-proof (`htu`, `htm`, `iat`, `ath`, signature, and replay `jti`), then
-introspects the token at `/oauth2/introspect`, binds the resulting `client_id`
-to the route's OAuth client, projects the global user to the app's pairwise
-subject, enforces revocation markers, and forwards `ZeroShip-User`.
+The browser client is a headless client (Auth0/Supabase-shaped) that drives the
+platform's same-origin sign-in:
 
-Plain `Authorization: Bearer <token>` is accepted for non-browser clients on the
-same native-token arm, with local JWKS verification plus the same per-app
-`client_id` and revocation checks.
+```ts
+import { createAuthClient } from "@zeroship/auth/client";
 
-| Token | Binding | Verifier | Notes |
-|---|---|---|---|
-| Native access token | per-app `client_id` claim | Local JWKS verify + revocation marker | Token compromise is enough to impersonate until expiry/revocation |
-| Native access token + DPoP proof | DPoP proof + per-app `client_id` | DPoP verifier + introspection + revocation marker | Adds replay protection; access tokens are not `cnf.jkt`-bound |
+const client = createAuthClient();
+
+// Popup window (default): password, Google, or GitHub.
+const { user } = await client.signInWithOAuth({ provider: "password" });
+```
+
+`signInWithOAuth(options?)` resolves to a `Session` — `{ user, expires_at,
+scopes }` — on success and rejects with an `AuthError` on failure. The
+`provider` option selects the sign-in surface:
+
+- `"password"` — the platform's own password UI.
+- `"google"`, `"github"` — a federated sign-in via that provider, when the
+  platform has it configured.
+
+By default sign-in opens a popup window. Pass `popup: false` to use a full-page
+redirect instead; `redirectTo` sets where the redirect returns. The credential
+never reaches your JavaScript: it is typed into the platform's own sign-in UI,
+and your app only receives the completed session.
+
+After sign-in the session lives in an `HttpOnly` session cookie set on your
+app's own origin. That cookie rides automatically on every same-origin request
+and is what authenticates your RPC and API calls to the browser. Your code
+never holds a token to attach.
+
+### Reading the session
+
+| Method | What it does |
+| --- | --- |
+| `getSession()` | The in-memory `Session` snapshot, or `null`. Local only, no network. |
+| `getUser()` | Server-validated `User \| null`; always re-probes the server. |
+| `refreshSession()` | Re-mints the session cookie from the server and refreshes the snapshot. |
+| `checkSession()` | Session recovery on page load — restores a signed-in session after a reload. |
+| `isAuthenticated()` | `true` when a non-expired session is held; local, no network. |
+| `hasScope(scope)` | `true` when the current session carries `scope`; local. |
+| `onAuthStateChange(cb)` | Subscribes to state transitions; returns `{ unsubscribe() }`. |
+| `signOut(options?)` | Ends the session. |
+| `exchangeCodeForSession(code, state?)` | Completes a code exchange (used by `AuthProvider`; rarely called directly). |
+
+`onAuthStateChange` delivers one of `SIGNED_IN`, `SIGNED_OUT`,
+`SESSION_REFRESHED`, `USER_UPDATED`, or `RECOVERING`.
+
+### Options and defaults
+
+`createAuthClient(options?)` accepts:
+
+- `appOrigin` — the app's own origin; defaults to the page's origin.
+- `scope` — scopes to request on sign-in; defaults to
+  `["openid", "profile", "email"]`.
+- `refreshSkewSeconds` — seconds before `expires_at` to re-mint the session
+  cookie early; defaults to `60`.
+
+`signInWithOAuth(options?)` accepts:
+
+- `provider` — `"password" | "google" | "github"`.
+- `scopes` — override the default scope set for this sign-in.
+- `popup` — popup (`true`, the default) vs full-page redirect (`false`).
+- `redirectTo` — where to return after a redirect flow.
+- `prompt` — `"login"` to force a fresh credential, or `"consent"` to re-show
+  the consent screen.
+
+Note the spellings: the client option is the singular `scope` (the default
+scope set), while the per-sign-in override and the `Session` field are the
+plural `scopes`.
+
+`signOut(options?)` accepts `scope: "local" | "global"` (default `"local"`):
+`"local"` ends the session on this device, `"global"` this app on every device.
+
+## React
+
+`@zeroship/auth/react` re-exports the client and layers components on top. Wrap
+your app in `AuthProvider`, then read the reactive snapshot with `useAuth()`:
+
+```tsx
+import { AuthProvider, useAuth, SignInButton, SignOutButton } from "@zeroship/auth/react";
+
+function App() {
+  return (
+    <AuthProvider>
+      <Gate />
+    </AuthProvider>
+  );
+}
+
+function Gate() {
+  const { user, isAuthenticated, isLoading } = useAuth();
+  if (isLoading) return <p>…</p>;
+  if (!isAuthenticated) return <SignInButton />;
+  return (
+    <>
+      <p>hi {user.name ?? user.id}</p>
+      <SignOutButton />
+    </>
+  );
+}
+```
+
+`useAuth()` returns `{ user, session, isAuthenticated, isLoading, error,
+signInWithOAuth, signOut, requestScopes, hasScope }`. `SignInButton` and
+`SignOutButton` render ready buttons; `SignIn` is a zero-config sign-in
+launcher; `SignedIn` / `SignedOut` render children only on the matching side of
+the gate; `AuthModal` hosts the platform's password UI in a styled overlay;
+`hasAuthParams(search?)` reports whether the URL is a sign-in redirect return.
+
+## The session and its lifetime
+
+A `Session` is identity only: `{ user, expires_at, scopes }`. `expires_at` is the
+Unix-second instant the session cookie expires — about 15 minutes after sign-in.
+The browser client re-mints the cookie from a server-held, 30-day anchor when it
+lapses or on page load, so a user stays signed in across reloads without
+re-entering their credential. The browser never sees the anchor or any token:
+the only client-visible artifact is the `HttpOnly` session cookie, which your
+JavaScript cannot read.
+
+`signOut()` clears the session for the requested scope. It resolves even if the
+server-side revoke is unavailable — the local sign-out is authoritative, so a
+network failure never strands the user signed in.
+
+## Scopes and consent
+
+Scopes are the permissions your app asks the user to grant. The default request
+is `openid`, `profile`, and `email`. `email` gates the `User.email` field: when
+it was not granted, `email` is an empty string on the server (null/empty in the
+browser client).
+
+To ask for more later, call the client method
+`requestScopes(scopes: string[]): Promise<Session>` — it re-opens the consent
+screen for the union of the current and requested scopes and resolves to the
+refreshed `Session`. In React, `useAuth()` exposes the same call bound to the
+provider's client as `requestScopes(scopes: string[]): Promise<void>`. Consented
+grants are remembered, so a scope already granted is not asked for again.
+
+## Errors
+
+The browser client rejects with `AuthError`, which extends `Error` and carries:
+
+- `code` — one of the codes below.
+- `status` — the HTTP status, when one was observed.
+- `name` — always `"AuthError"`.
+
+Branch on `error.code`:
+
+| `code` | When |
+| --- | --- |
+| `login_required` | No session; the user must sign in. |
+| `consent_required` | The user must consent to the requested scopes. |
+| `interaction_required` | The authorization server needs interaction to proceed. |
+| `invalid_grant` | A code or token exchange was rejected. |
+| `invalid_credentials` | The password the user entered was rejected. |
+| `invalid_request` | A request was malformed or missing a required field. |
+| `missing_code_verifier` | A code arrived with no matching open sign-in flow. |
+| `popup_closed` | The user closed the sign-in popup or dismissed the modal. |
+| `popup_blocked` | The browser blocked the sign-in popup. |
+| `timeout` | The sign-in flow timed out (60 seconds). |
+| `scope_required` | The route requires scopes the caller has not granted (`403`). |
+| `invalid_state` | The sign-in response's state did not match the request. |
+| `network_error` | A request failed at the network level. |
+| `server_error` | The server answered unexpectedly. |
+| `config_error` | The client was misconfigured. |
+| `client_not_provisioned` | Your app's sign-in is not provisioned yet (`503`); retryable. |
+
+Server-side, `auth.requireUser()` throws a plain `Error` (no subclass; it is
+not the browser client's `AuthError` — that type is browser-only) whose own
+properties are `status: 401` and `code: "UNAUTHENTICATED"`. A handler detects
+the failure by branching on `error.code === "UNAUTHENTICATED"` (or
+`error.status === 401`); there is no server-side `instanceof` guard. It is the
+same `code` an RPC `401` surfaces under [RPC](rpc.md).
+
+## Non-browser clients
+
+A browser authenticates through the session cookie described above. A
+**non-browser** client authenticates requests to your app by presenting an
+OAuth access token from the platform auth service as
+`Authorization: Bearer <token>`. The RPC client attaches whatever its `auth`
+resolver returns as that header (see [RPC](rpc.md)); where a non-browser
+client obtains the token is the platform's own OAuth flow, not this SDK.
 
 ## See Also
 
-- [Auth deployment runbook](../runbooks/auth-deploy.md)
-- [Auth dev tier](auth-dev-tier.md)
-- [Control plane architecture](../architecture/control-plane.md)
-- [Gateway routing architecture](../architecture/gateway-routing.md)
-- [Historical auth-server design](../archive/auth-server.md)
+- [RPC](rpc.md) — the route policy that decides which procedures require a
+  user, and how RPC clients authenticate.

@@ -52,6 +52,11 @@ paired!(
     postgres_continuation_rollback_and_retired_authority_preserve_chain,
     rollback
 );
+paired!(
+    sqlite_continuation_owing_a_compensator_fails_under_its_own_name,
+    postgres_continuation_owing_a_compensator_fails_under_its_own_name,
+    compensable_carry
+);
 
 async fn parent(
     service: &WorkflowService,
@@ -410,6 +415,97 @@ async fn rollback(store: Rc<OrmStore>) {
         .unwrap()
         .to_owned();
     assert_ne!(successor, child);
+    assert_eq!(
+        scope.status(&successor).await.unwrap().state,
+        RunState::Queued
+    );
+}
+
+/// A compensator belongs to the generation whose step registered it, so a
+/// generation that still owes one cannot hand the obligation to a successor
+/// with an empty journal. The transition is refused, the generation settles
+/// under the name the reference documents, and the obligations it blocked on
+/// are discharged rather than stranded.
+///
+/// The control differs in `compensable` alone: the same body, the same
+/// transition, no obligation, and the successor is created.
+async fn compensable_carry(store: Rc<OrmStore>) {
+    let (service, app_id, _, _deployments) = registered_service(store).await;
+    let scope = service.fixture_app(app_id.clone());
+    let worker = WorkerIdentity::new("compensable-carry".into()).unwrap();
+
+    let owing = scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let task = service.poll(&worker).await.unwrap().unwrap();
+    assert_eq!(task.invocation.run_id, owing.id);
+    service
+        .complete(
+            &worker,
+            &task.id,
+            &task.token,
+            execution(json!([
+                {"kind":"StepCompleted", "ordinal":0, "name":"reserve", "compensable":true, "output":0},
+                {"kind":"ContinueAsNew", "input":"next"},
+            ])),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        scope.status(&owing.id).await.unwrap().state,
+        RunState::Compensating,
+        "a refused continuation discharges the obligation that refused it"
+    );
+    let task = service.poll(&worker).await.unwrap().unwrap();
+    assert_eq!(task.invocation.run_id, owing.id);
+    assert_eq!(task.invocation.phase, "compensating");
+    service
+        .complete(
+            &worker,
+            &task.id,
+            &task.token,
+            execution(json!([{"kind":"CompensationCompleted", "ordinal":0, "name":"reserve"}])),
+        )
+        .await
+        .unwrap();
+    let status = scope.status(&owing.id).await.unwrap();
+    assert_eq!(status.state, RunState::Failed);
+    assert!(
+        status.output.is_none(),
+        "a refused continuation records no successor"
+    );
+    let error = status.error.unwrap();
+    assert_eq!(error["type"], json!("CompensableCarryError"));
+    assert_eq!(
+        error["message"],
+        json!("cannot continue as new while compensable steps are pending")
+    );
+
+    let carried = scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let task = service.poll(&worker).await.unwrap().unwrap();
+    assert_eq!(task.invocation.run_id, carried.id);
+    service
+        .complete(
+            &worker,
+            &task.id,
+            &task.token,
+            execution(json!([
+                {"kind":"StepCompleted", "ordinal":0, "name":"reserve", "compensable":false, "output":0},
+                {"kind":"ContinueAsNew", "input":"next"},
+            ])),
+        )
+        .await
+        .unwrap();
+    let status = scope.status(&carried.id).await.unwrap();
+    assert_eq!(status.state, RunState::Completed);
+    let successor = status.output.unwrap()["continuedAsNew"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     assert_eq!(
         scope.status(&successor).await.unwrap().state,
         RunState::Queued

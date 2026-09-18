@@ -197,15 +197,13 @@ pub(crate) fn inspect_value_pairs(items: &[ImplItem]) -> ValuePairsSig {
                 }) => {
                     sig.is_mut = mutability.is_some();
                 }
-                FnArg::Typed(pt) => {
-                    // Detect a `&mut PinScope`-shaped argument by
-                    // sniffing the trailing path segment. We don't
-                    // require a specific lifetime spelling — the user
-                    // may write `&mut v8::PinScope<'s, '_>` or just
-                    // `&mut PinScope` if they `use v8::PinScope`.
-                    if takes_pin_scope(&pt.ty) {
-                        sig.takes_scope = true;
-                    }
+                // Detect a `&mut PinScope`-shaped argument by
+                // sniffing the trailing path segment. We don't
+                // require a specific lifetime spelling — the user
+                // may write `&mut v8::PinScope<'s, '_>` or just
+                // `&mut PinScope` if they `use v8::PinScope`.
+                FnArg::Typed(pt) if takes_pin_scope(&pt.ty) => {
+                    sig.takes_scope = true;
                 }
                 _ => {}
             }

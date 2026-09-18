@@ -957,12 +957,10 @@ fn process_line(line: &[u8], parser: &mut ParserState, state: &EventSourceState)
             }
             parser.data_buffer.push_str(value_str);
         }
-        b"id" => {
-            // Per spec: only set if value contains no NUL.
-            if !value.contains(&0) {
-                parser.last_event_id = value_str.to_string();
-                *state.last_event_id.borrow_mut() = value_str.to_string();
-            }
+        // Per spec: only set if value contains no NUL.
+        b"id" if !value.contains(&0) => {
+            parser.last_event_id = value_str.to_string();
+            *state.last_event_id.borrow_mut() = value_str.to_string();
         }
         b"retry" => {
             if let Ok(s) = std::str::from_utf8(value)

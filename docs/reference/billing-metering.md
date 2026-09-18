@@ -1,237 +1,289 @@
 # Billing And Metering
 
-Zeroship infra billing is a stream-to-provider pipeline. Trusted platform
-producers emit immutable `UsageEvent` records, the durable stream buffers them,
-the control-plane event forwarder ships them to the selected billing provider,
-and the provider is the canonical source for metered usage, rating, and
-invoicing.
+Zeroship bills you for the infrastructure your apps consume. This page is the
+contract: what is measured, how it is priced, what you can read back, and what
+happens at every limit. It is written for the person building an app.
 
-Spend enforcement is local and per app. A periodic control-plane recompute reads
-the retained stream, writes the current-period usage snapshot into
-`app_spend_state` through the existing spend engine, and the gateway enforces
-that state at the edge.
+The platform invariant that shapes everything below: **metering is
+infrastructure, not an app API.** There is no `env.meter`. Usage is measured
+server-side at the platform and primitive boundaries, so your app code can
+neither forge nor suppress what it costs. What this page documents is the part
+you can observe and rely on — the metric names, the pricing model, the read
+endpoints, and the enforcement states.
 
-```
-worker + primitives
-  -> UsageEvent
-  -> durable stream (crates/stream, Redpanda in production)
-  -> event_forwarder
-  -> billing provider (meter/rater/invoicer/webhooks)
+## What is measured
 
-retained stream
-  -> spend_recompute
-  -> app_spend_state
-  -> gateway edge enforcement
+The platform records named counters, one set per app, at the boundaries where
+your app does work. The names you will see (in the order you would first
+encounter them):
 
-retained stream + provider aggregates + invoice records
-  -> billing_reconcile safety net
-  -> provider correction capability
-```
+- `requests` — one per dispatched request.
+- `cpu_us` — CPU time, in microseconds.
+- `wall_us` — wall-clock time, in microseconds.
+- `egress_bytes` / `ingress_bytes` — bytes out and in.
+- `gateway_egress_bytes` — bytes the platform itself serves against your route
+  (static assets, redirects, gateway-owned streams) rather than your worker.
+- `db_reads` — one database read operation: a query, count, or search. Counts
+  operations, not rows.
+- `db_writes` — one database mutation: an insert, update, or delete.
+- `db_rows_written` — rows a mutation affected or returned.
+- `kv_reads` / `kv_writes` — key-value operations.
+- `storage_ops` / `storage_bytes` — object-storage operations and bytes.
+- `net_egress_bytes` / `net_ingress_bytes` — bytes on raw outbound sockets
+  (`node:net`, `node:tls`, outbound WebSocket), recorded in addition to
+  `egress_bytes` / `ingress_bytes`.
 
-## Producer Model
+Every successful operation is measured; failures on a primitive are not. You
+cannot emit a metric yourself, and you cannot zero one out: the only inputs are
+the platform counters and the trusted primitives (`env.db`, `env.kv`,
+`env.storage`, and the network/runtime boundaries).
 
-There is no creator-facing `env.meter` API. Metering is infrastructure so app
-code can neither forge nor suppress billable usage.
+This list is not closed, and you should not assume it is the whole set for your
+deployment. The authoritative view of what your app accrued is the usage
+endpoint below; a metric it reports is one the platform measured.
 
-Trusted producers feed the process-wide `Meter` in `crates/metering`:
+## How usage is priced
 
-- The worker records platform counters once per dispatch: `requests`, `cpu_us`,
-  `wall_us`, `egress_bytes`, and `ingress_bytes`.
-- Native outbound TCP records accepted network bytes into the same ingress and
-  egress counters plus network-specific counters.
-- `env.db`, `env.kv`, and `env.storage` record raw usage metrics in the success
-  arm of each native operation, such as `db_reads`, `db_writes`, `kv_reads`,
-  `kv_writes`, `storage_ops`, and storage byte counters.
-
-`MeterHandle` binds the process meter to the server-injected app id. Native
-primitives receive a handle for their app and cannot meter another app. The ORM
-behind `env.db` has no meter of its own: the V8 adapter hands each creator
-dispatch a usage sink wrapping that app's handle, and ORM work for any other
-binding reports nothing.
-
-`Meter::drain` emits one `UsageEvent` per drained `(app_id, metric)` window. The
-stable JSON contract lives in `crates/zeroship-core/src/usage_event.rs`:
-
-- `event_id`: provider idempotency key.
-- `source`: producer namespace.
-- `subject`: app and creator attribution.
-- `meter`: metric name.
-- `value`: unsigned quantity.
-- `event_time`: Unix seconds.
-- `dims`: optional string dimensions.
-
-The worker outbox in `crates/zeroship-metering/src/outbox.rs` publishes each event as one
-stream record. The partition key is the app id, so one app's usage remains
-ordered within a stream partition.
-
-## Durable Stream
-
-`crates/stream` provides the `StreamTransport` trait, registry, Redpanda adapter,
-and memory adapter. The contract is Kafka-family scoped: partition offsets,
-consumer groups, and partition-key ordering are required.
-
-The production transport is Redpanda through `rust-rdkafka` and librdkafka. It
-uses an idempotent producer with `acks=all`, manual consumer commits, and
-transport-owned offsets. The in-process memory transport is for tests and local
-fixtures.
-
-Control builds the stream from:
-
-- `--stream-transport` / `ZEROSHIP_CONTROL_STREAM_TRANSPORT`
-- `--stream-config` / `ZEROSHIP_CONTROL_STREAM_CONFIG`
-- `--spend-recompute-interval` / `ZEROSHIP_CONTROL_SPEND_RECOMPUTE_INTERVAL`
-
-There is no Postgres raw-event table. Postgres stores config, spend limits,
-spend state, invoice bookkeeping, provider refs, dead letters, and
-reconciliation findings.
-
-## Provider Stack
-
-Billing providers live under `crates/zeroship-control/src/metering/provider/`. The
-registry maps a string id to a provider factory. Boot builds a role-addressed
-`BillingStack`:
-
-- `--meter-provider` / `ZEROSHIP_CONTROL_METER_PROVIDER`
-- `--invoicer-provider` / `ZEROSHIP_CONTROL_INVOICER_PROVIDER`
-- `--provider-config` / `ZEROSHIP_CONTROL_PROVIDER_CONFIG`
-- `--allow-unsupported-billing` / `ALLOW_UNSUPPORTED_BILLING`
-
-Each provider declares its capabilities:
-
-- `Meter`: ingest usage events, read provider aggregates, ensure subjects.
-- `Invoicer`: close periods and record adjustment notes.
-- `Backfiller`: submit corrected totals when the provider supports backfill.
-
-The built-in adapters are:
-
-- `openmeter`: meter provider.
-- `stripe_meters`: Stripe Billing Meters provider.
-- `stripe_invoice`: Stripe invoice provider backed by the platform invoice
-  store.
-- `lago`: full-stack provider with meter, invoicer, and backfill capability.
-- `lite`: evaluation-grade self-hosted provider backed by platform storage.
-
-Factories parse opaque JSON config and resolve secrets through `SecretResolver`.
-Missing required URLs, meter ids, customer mapping fields, or secrets are boot
-errors. A provider whose advertised capability flags do not match its `as_*`
-methods also fails boot.
-
-A secret inside `--provider-config` is written the way every other zeroship
-secret is written: the material itself, or `urn:zeroship:file:<path>` naming the
-file that holds it (owner-only permissions are enforced on the file). A value
-starting with `urn:` or `arn:` that is not that file reference is refused, never
-taken as literal material.
-
-```json
-{"lago": {"api_url": "https://lago.example", "api_key": "urn:zeroship:file:/etc/zeroship/secrets/lago_api_key"}}
-```
-
-## Event Forwarder
-
-`crates/zeroship-control/src/cron/event_forwarder.rs` consumes the stream and forwards
-usage to the meter-capable provider.
-
-For each batch:
-
-1. Poll stream records.
-2. Decode each payload as `UsageEvent`.
-3. Call `Meter::ingest`.
-4. Commit stream offsets only after the provider accepts the batch or the batch
-   is quarantined as a permanent provider reject.
-
-Transient provider or stream errors do not commit offsets; the batch is retried.
-Permanent provider rejects are written to `provider_dead_letter` and recorded as
-billing reconciliation findings before offsets are committed. Provider-side
-deduplication on `event_id`, transaction id, or the provider's declared key keeps
-retries from double-counting.
-
-## Pricing Catalog
-
-The platform plan catalog is data-driven, held in `zeroship.plans` and read
-through `crates/zeroship-control/src/plan_catalog.rs`. It is edited in the DATABASE:
-the operator HTTP surface that used to front it (`/api/plans`,
-`/api/pricing-config`) was gated on a fleet-wide grant that no principal holds
-since the platform staff roles were deleted, and it went with them. Per tier:
-
-- `base_fee_cents`
-- included quota by metric
-- overage rate by metric
-- `spend_limit_default_cents`
-- runtime and network limits
-
-Pricing math lives in `crates/zeroship-control/src/pricing.rs`. Money is integer cents
-with widened intermediates and line-boundary rounding. For a period:
+Usage is priced in **compute units (CU)** — an integer unit, never a float. Each
+metric the platform measures has a cost weight, written as an exact ratio: so
+many CU per so many operations (for example "1 CU per 1,000 bytes"). A metric's
+raw total is multiplied by that ratio, the result floored per metric, and the
+floors summed. For a billing period (a calendar month in UTC, from 00:00 UTC on
+the 1st):
 
 ```text
-charge = base_fee + sum(max(0, usage[metric] - included[metric]) * overage_rate[metric])
+total_units    = Σ  floor( max(0, usage[m]) × units_per_op[m] / per_units[m] )
+billable_units = max(0, total_units − included_units)
+charge         = base_fee + round_half_up(billable_units × fx)
 ```
 
-Providers that own rating and invoicing use their provider-side configuration as
-the billing source. Providers that rely on the platform invoice store use the
-same catalog and frozen invoice records that the creator billing APIs expose.
+- A metric's weight is the pair `units_per_op` over `per_units` (the number of
+  CU credited per `per_units` operations), so a sub-unit weight stays exact
+  rather than rounding to a fraction.
+- A metric with no weight contributes zero CU. Metering something and then not
+  weighting it is free, not an error.
+- The floor is applied per metric before summing, and the currency conversion
+  rounds exactly once, at the end — so rounding can only under-count, never
+  over-bill.
+- The per-CU price `fx` is held as an integer number of pico-cents (10⁻¹² cent)
+  per CU, so a sub-cent unit price is exact. `base_fee` and the amounts on your
+  invoices are integer cents.
 
-## Spend Enforcement
+The weight table and the `fx` value are operator configuration, set per
+deployment and changeable between billing periods; they are not published as
+fixed numbers. You never need them in order to see what you owe — your own
+charge is readable without them. The projected-charge endpoint returns a figure
+already priced through this formula, and every finalized invoice freezes the
+exact `fx`, `base_fee`, `included_units`, and weight snapshot that were applied
+(see "Reading your bill").
 
-Spend limits are per app and are distinct from included quota. The effective
-limit is either the app override in `app_spend_limit` or the plan default.
+## Plans
 
-`crates/zeroship-control/src/cron/spend_recompute.rs` periodically reads the retained
-stream for the current billing period, computes a full sum per `(app_id, metric)`,
-overwrites the `usage_aggregates` snapshot for that period, and runs the spend
-evaluator. The default recompute cadence is hourly and is configurable with
-`ZEROSHIP_CONTROL_SPEND_RECOMPUTE_INTERVAL`.
+Every app belongs to a plan, and a plan is what carries the numbers above plus
+your runtime and network limits. A plan is an operator-managed catalog entry you
+assign by id, not a value you author. The three built-in tiers, with their
+catalog ids (`pln_…`) and pricing:
 
-`crates/zeroship-control/src/spend.rs` derives `SpendState`:
+- `free` — `pln_0pmepeesn0v30md0sick7lo65`. Base fee `$0.00`, `100,000` CU
+  included, and a `$0.00` spend cap, so no card is required. Its included quota
+  is the only usage you get before the app blocks: there is no paid headroom.
+- `pro` — `pln_7einr1yv1u9nabqjohrit3f7y`. Base fee `$5.00`, `1,000,000` CU
+  included, and a `$50.00` default spend cap. Usage past the included quota is
+  billed at the per-CU `fx`, up to the cap.
+- `unlimited` — `pln_4cklt6kbysmsugjft40bdetjx`. No base fee, no included quota,
+  and no runtime caps. This tier is **operator-only**: a creator app cannot
+  self-assign it.
 
-- `Allow`: below warning threshold.
-- `Warn`: near the limit; the gateway can surface a warning header.
-- `Degrade`: soft cap; the gateway applies tighter rate and concurrency limits.
-- `Block`: hard cap; the gateway returns 402 before dispatch.
+A plan carries a flag telling you whether you may assign it yourself. The only
+built-in tiers you can assign are `free` and `pro`; an operator may assign any
+plan. Assigning one you may not self-select is refused with
+`403 plan not assignable by creator`, and naming a plan id that does not exist
+(or has been archived) is refused with `400`. There is **no plan-list endpoint**:
+you set a plan by id and read your current `plan_id` back through the
+billing-status endpoint, not through a catalog you browse.
 
-The gateway pulls route and spend state from control on its normal registry poll
-and enforces locally in `crates/zeroship-gateway/src/enforce.rs`. No provider call is made
-on the request path.
+The change is made with `PUT /api/apps/{id}/plan`, body `{"plan_id": "<pln_…>"}`
+(wrapped by `@zeroship/control` as `control.apps.setPlan(id, { plan_id })`). A
+mid-period plan change is priced in segments — the period is split at the
+change, and each segment is priced under the plan that was in force for it.
 
-The gateway also applies a coarse per-app throughput backstop with rate and
-concurrency limits. That caps worst-case overshoot between recompute ticks. Free
-tier apps use tighter limits because they have little or no paid headroom.
+## Reading your usage
 
-## Reconciliation Safety Net
+`GET /api/apps/{id}/usage` returns your app's usage for the current calendar
+month (UTC) as a plain object mapping metric name to total:
 
-`crates/zeroship-control/src/cron/billing_reconcile.rs` is the safety net for provider
-drift and late period adjustments. It compares:
+```json
+{ "requests": 12841, "cpu_us": 9400000, "egress_bytes": 510000000 }
+```
 
-- the local stream witness for the period,
-- provider aggregate read-back when the meter supports it,
-- invoice records and provider refs for the period,
-- prior correction history.
+In `@zeroship/control` this is `control.apps.usage(id)` (typed
+`Record<string, number>`). This read requires the same billing authority as the
+invoice reads in "Reading your bill".
 
-The reconciler records findings for provider drift, late adjustments, and
-provider rejects. When correction is possible, it uses the provider's declared
-`CorrectionCapability`:
+Three things to rely on about this number:
 
-- `Backfill`: call `Backfiller::backfill` with the corrected total inside the
-  declared window.
-- `InvoiceCredit`: issue an idempotent signed adjustment note through the
-  invoicer.
-- `None`: record the finding for operator action.
+- It is the **current calendar-month** total, in raw metric units — not CU and
+  not money.
+- It is a **periodic snapshot, not a live counter**. Within a billing month a
+  total only grows, and the snapshot is recomputed on an operator-tunable
+  cadence (one hour by default), so a value you read may lag the most recent
+  requests. Only a finalized invoice is authoritative; the usage view is for
+  orientation.
+- The projected-charge endpoint below is held for a brief cache window (60
+  seconds) and answers with an `as_of` timestamp, so you can tell how fresh its
+  figure is.
 
-Correction actions carry deterministic idempotency keys and correction sequence
-numbers so a re-run with the same corrected quantity is a no-op.
+## Spend limits and enforcement
 
-## Operator Checklist
+Separate from pricing, each app has a **spend limit**: a cap on the money value
+of the current period, enforced at the edge before your code runs. The
+effective limit is your plan's default unless you set a per-app override.
 
-For production billing:
+The override is deliberately **reduction-only**: `PUT /api/apps/{id}/spend-limit`
+with body `{"cents": <number|null>}` sets a cap, and `null` clears it back to the
+plan default. You can only lower your cap — an override above the plan default
+is refused with `403 spend limit exceeds plan maximum`. Raising your headroom
+means upgrading the plan, which is a billing-gated action.
+`GET /api/apps/{id}/spend-limit` returns `effective_limit_cents`, your
+`override_cents`, the `plan_default_cents`, and the current `state`.
 
-1. Run a durable stream transport, normally Redpanda, with retention long enough
-   for spend recompute and reconciliation.
-2. Configure `ZEROSHIP_CONTROL_STREAM_TRANSPORT=redpanda` and a `ZEROSHIP_CONTROL_STREAM_CONFIG` JSON object with
-   broker, topic, and consumer group fields.
-3. Select provider roles with `ZEROSHIP_CONTROL_METER_PROVIDER` and `ZEROSHIP_CONTROL_INVOICER_PROVIDER`.
-4. Put provider config in `ZEROSHIP_CONTROL_PROVIDER_CONFIG` using secret handles, not plaintext
-   secrets.
-5. Keep plan catalog pricing, included quotas, spend-limit defaults, and network
-   backstops aligned with the tier you sell. These are database rows, not an
-   API: there is no operator endpoint to change them.
-6. Monitor event-forwarder retries, provider dead letters, reconciliation
-   findings, spend-state transitions, and gateway 402/degrade rates.
+As your priced spend approaches the cap, your app moves through four states.
+You can read the state as one of `allow`, `warn`, `degrade`, or `block`, entered
+at fractions of the effective cap:
+
+- `allow` — served normally. Below 80% of the cap.
+- `warn` — at or above 80%. Still served; the gateway adds an
+  `x-zs-spend-warn: 1` header to responses so your frontend or your callers can
+  key on it.
+- `degrade` — at or above 95%. Still served, but throttled: the app's
+  concurrency ceiling is divided by 8 (to a minimum of one in-flight request)
+  and each request spends eight times the normal rate-limit allowance — an
+  eight-fold slowdown against the same limits, not a refusal.
+- `block` — at 100% of the cap. Refused before dispatch with `402` and body
+  `{"code": "SPEND_LIMIT"}`, for every action class: worker, redirect, rewrite,
+  and static assets alike. Raising your spend limit or moving to a higher plan
+  recovers it.
+
+States tighten immediately at the threshold but relax only once spend falls five
+points past it — an anti-flap deadband (`degrade` relaxes to `warn` only below
+90%, `warn` to `allow` only below 75%). Raising the cap yourself recovers the
+app immediately rather than waiting out the deadband.
+
+There is a second, account-level gate in front of the spend gate. Your
+organization's account state is one of `active`, `past_due`, or `suspended`:
+
+- `active` — payment current.
+- `past_due` — a payment has failed and is being retried. This is a grace
+  window: your apps keep serving.
+- `suspended` — the dunning window (an operator setting, seven days by default)
+  has elapsed. Requests are refused with `402` and body
+  `{"code": "ACCOUNT_SUSPENDED"}`. Suspension is reversible: a completed payment
+  moves the account straight back to `active`. The seven-day figure is a
+  default, not a guarantee — your deployment's operator may tune the window.
+
+The two refusals carry distinct codes on purpose, so you can tell a usage cap
+(`SPEND_LIMIT`) from a payment failure (`ACCOUNT_SUSPENDED`).
+
+## Reading your bill
+
+The organization is the billing subject: an app's invoices and money state are
+owned by the organization that owns the app, not by the app or a single user.
+App-scoped reads resolve that organization server-side, and every billing read
+below requires a seat that holds billing authority at that organization.
+Organizations rank money authority separately from app authority: the `billing`
+seat outranks `admin` for money actions, while `admin` outranks it for app
+administration — so a seat that can administer apps may still be unable to read
+invoices, and vice versa.
+
+The organization id you need below (`?organization_id=`) is the `id` of an
+organization you hold a seat in, listed by `GET /api/organizations`.
+
+- `GET /api/apps/{id}/invoices?limit=&offset=` — your organization's invoice
+  history, newest first. The response is `{"invoices": […]}`; each entry carries
+  `id`, `period`, `status`, `currency`, `subtotal_cents`, `credit_cents`,
+  `tax_cents`, `total_cents`, and `finalized_at`. `limit` defaults to `50` and
+  is clamped to `1..200`.
+- `GET /api/invoices/{id}` — one invoice in full, including a frozen line per
+  app/segment. Each line carries `app_id`, `segment_no`, `plan_id`,
+  `included_units`, `fx_pico_cents_per_unit`, `base_fee_cents`, `amount_cents`,
+  `usage_snapshot`, and `weights_snapshot`, plus the derived `compute_units` and
+  `billable_units`. Together these reproduce the charge exactly.
+- `GET /api/apps/{id}/projected-charge` — your current-period charge as
+  projected over live usage. The response is
+  `{ "projected_charge_cents": …, "authoritative": false, "period": "…", "as_of": … }`.
+  It is explicitly **non-authoritative** (`authoritative` is always `false`):
+  promises only an orientation figure, not a bill. Only a finalized invoice
+  bills.
+- `GET /api/apps/{id}/billing-status` — `plan_id`, the effective spend cap
+  (`effective_limit_cents`, with `override_cents` and `plan_default_cents`
+  beside it), `spend_state`, and `account_state`.
+- `GET /api/billing/credit-balance?organization_id=` — your USD credit balance
+  (`balance_cents`, `currency`) plus recent ledger entries. `currency` is always
+  `usd`; each `recent` entry carries `id`, `kind`, `amount_cents`, `currency`,
+  `applied_invoice_id`, `note`, `expires_at`, and `created_at`.
+- `GET /api/billing/payment-method?organization_id=` — whether a default
+  payment method is on file (`default_pm_set`) and whether a billing identity
+  exists (`customer_ref_present`). These are presence flags only — no provider
+  id is exposed.
+
+Credit balance is readable, not writable: credit grants, refunds, and disputes
+are operator actions, not something your app can issue. You read the balance
+and see it applied at invoice finalization.
+
+## Paying for infrastructure
+
+The platform charges your organization's card for its infrastructure use. You
+attach (or replace) that card with `POST /api/organizations/{id}/billing/setup`,
+which returns a Stripe-hosted URL (`{ "url": …, "customer_id": … }`) to redirect
+to. The card lives on the provider; the platform stores only whether one exists.
+
+The address the platform contacts — and where billing notices are sent — is the
+organization's `billing_email`, set when the organization is created and edited
+with `PATCH /api/organizations/{organization_id}`. It is deliberately the
+organization's address, not whichever member happened to mint it.
+
+## Selling to your own end users
+
+Separate from the infrastructure bill above, you can take payments from your
+own customers through Stripe Connect. This is a different money direction: your
+customers pay you, and the platform takes an application fee on each charge.
+The fee is a platform-held policy, **15% of the charge by default**, and an
+operator may set a different per-organization policy.
+
+The `@zeroship/payments` SDK wraps it. `startOnboarding()` returns the Stripe
+onboarding link, and `checkout({ amountCents, currency, cartId })` creates a
+payment intent. `checkout` returns
+`{ paymentIntentId, clientSecret, applicationFeeCents }`: hand `clientSecret` to
+Stripe.js in the browser to confirm the payment, and read `applicationFeeCents`
+only to display the fee the platform stamped. The fee is **server-stamped and
+cannot be named, set, or overridden by your code** — there is no fee parameter
+on any method, and the wire body carries only business fields. The server-side
+routes are `POST /api/organizations/{id}/stripe/onboard` and
+`POST /api/organizations/{id}/connect/checkout`, with your earnings readable at
+`GET /api/organizations/{id}/earnings`.
+
+The `@zeroship/payments` package also exports
+`verifyWebhook(rawBody, signatureHeader, secret, opts?)` to verify Stripe
+webhook signatures with WebCrypto HMAC-SHA256 before trusting a webhook. Pass the
+exact bytes Stripe sent (never re-stringified JSON); it resolves to
+`{ valid: true, timestamp }` or `{ valid: false, reason }`. The optional `opts`
+accepts a `tolerance` in seconds (default 300) and a `now` clock override for
+tests.
+
+## Summary of errors
+
+The two gateway refusals (spend and account blocks) return a `402` whose body is
+a single `{"code": …}` key. Every other error below comes from the control plane
+and returns its message under an `"error"` key.
+
+| Situation | Result |
+| --- | --- |
+| Spend state reaches `block` | `402` `{"code":"SPEND_LIMIT"}` |
+| Account is `suspended` | `402` `{"code":"ACCOUNT_SUSPENDED"}` |
+| Spend override above the plan default | `403` `{"error":"spend limit exceeds plan maximum","plan_max_cents":N}` |
+| Assigning a plan you may not self-select | `403` `{"error":"plan not assignable by creator","detail":"…"}` |
+| Assigning an archived or unknown plan | `400` `{"error":"plan archived"}` / `{"error":"unknown plan"}` |
+| Checkout with an unready connected account | `400` `{"error":"organization stripe account not ready (complete onboarding)"}` |
+| Checkout with a missing cart id | `400` `{"error":"cart_id is required"}` |
+| Checkout with a zero amount | `400` `{"error":"amount_cents must be positive"}` |
+| Checkout with a non-ISO currency | `400` `{"error":"currency must be a 3-letter ISO code (lowercase)"}` |

@@ -99,8 +99,13 @@ zeroship dev init \
   --env-file=/path/to/.env
 ```
 
-The command creates exactly these eight files, with a mode of 0600 on Unix (and
-0700 on the directory):
+The command creates eleven private files with a mode of 0600 on Unix (and 0700
+on the directory): the ten entries in `secret_specs()` (`migrate-dsn`,
+`svc-gateway.pem`, `svc-control.pem`, `svc-auth.pem`, `join-signer.json`,
+`auth-signing.pem`, `gateway-signing.pem`, `broker-secret`, `refresh-hash-key`,
+`refresh-idem-key`) plus `pairwise-salt`, written separately so its bytes equal
+the `.env` scalar. It also publishes two derived public documents,
+`service-peers.json` and `join-signers.json`. Auth reads this subset:
 
 `gateway-signing.pem` `auth-signing.pem` `broker-secret`
 `pairwise-salt` `refresh-hash-key` `refresh-idem-key`
@@ -346,7 +351,6 @@ Record the operator action in the incident/audit trail.
 ## Reference
 
 - [Auth](../reference/auth.md)
-- [Auth dev tier](../reference/auth-dev-tier.md)
 - [Docker Compose runbook](docker-compose.md)
 - [Database migrations](db-migrations.md)
 - [Historical auth-server design](../archive/auth-server.md)

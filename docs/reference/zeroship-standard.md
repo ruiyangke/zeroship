@@ -1,26 +1,30 @@
 # zeroship standard
 
-The deploy contract is centered on the app entry module's default export. The
-[runtime loader](../../crates/zeroship-runtime/src/core/init.rs) prepares the
-module graph and the [native RPC dispatcher](../../crates/zeroship-runtime/src/rpc/dispatch/mod.rs)
-invokes retained procedures.
+This page states the deploy contract: the module and export conventions an app
+entry must satisfy, the names the platform reserves, and where the schema your
+`env.db` sees comes from.
 
 Module specifiers `zeroship`, `zeroship.js` and the `zeroship:` prefix are
-reserved for host-provided modules, including plugin adapters. Creator artifacts
-must not supply entries under these names, including their `./` spellings.
-Import `zeroship` to access the runtime's exports.
+reserved for the platform. A creator artifact must not supply an entry under
+these names, including their `./` spellings. Import `zeroship` to reach the
+runtime's exports.
 
-The [native module](../../crates/zeroship-runtime/src/core/zeroship_module.rs)
-provides `env`, `waitUntil`, `getRequest`, request-context accessors and the
-`runQuery` / `runMutation` composition helpers. Static imports, dynamic imports
-and Vite's dev ModuleRunner use the same module instance in an isolate. These
-exports read host state directly; replacing JavaScript globals does not change
-their environment, request identity or capability checks.
+The `zeroship` module exposes the request environment, the request context, and
+the runtime's composition helpers:
 
-Composition helpers return a promise and call the supplied procedure with its
-input under the requested kind. Native awaits and thenable adoption retain the
-inner kind, while the caller's continuation and user `AsyncLocalStorage` stores
-are restored. The helpers preserve returned values and original thrown errors.
+- `env` — the per-request environment (your variables, secrets, and the `db`,
+  `kv`, `storage`, `auth` and `workflows` namespaces).
+- `waitUntil` — schedules a promise the request keeps alive until it settles.
+- `getRequest` — the current `Request`, available only inside a `fetch` handler.
+- `getRequestContext` — the current RPC context.
+- `runQuery` / `runMutation` — invoke a supplied procedure under the requested
+  kind (see below).
+- `currentUser`, `currentRequestId`, `currentTraceId`, `currentSignal`,
+  `currentHeaders`, `currentIdempotencyKey` — per-request context accessors.
+
+`runQuery` and `runMutation` return a promise and call the supplied procedure
+with its input under the requested kind. The returned promise resolves to the
+procedure's return value and rejects with its original error.
 
 ## Default export
 
@@ -34,31 +38,22 @@ export default {
 ```
 
 - `fetch` is the WinterCG-style request handler.
-- `rpc` is a dictionary whose own string keys name procedures. Values are
-  callable procedures or `{ load: () => Promise<Procedure> }` records.
-  The native HTTP dispatcher loads and retains the actual procedure and its
-  metadata before invoking it. A shared lazy load and its failure are cached
-  for that registry generation.
+- `rpc` is a dictionary whose own string keys are wire IDs. A value is either a
+  callable procedure or a `{ load: () => Promise<Procedure> }` record whose
+  `load` returns the procedure. A lazy procedure is loaded once; the result, or
+  the failure, is reused for the rest of that deploy.
 
-The default export is not a schema contract. The runtime does not read or
-honor a schema property on it.
+The default export is not a schema contract. The runtime does not read or honor
+a `schema` property on it.
 
 ## RPC authoring
 
-`@zeroship/rpc/server` (in `packages/rpc/src/server.ts`) provides the wrapper
-helpers (`procedure`, `query`, `mutation`, `action`, `stream`,
-`subscription`) — see [docs/reference/rpc.md](./rpc.md) for the canonical
-list and signatures.
+`@zeroship/rpc/server` provides the wrapper helpers (`procedure`, `query`,
+`mutation`, `action`, `stream`, `subscription`) — see [`rpc.md`](./rpc.md) for
+the canonical list and signatures.
 
-Named exports are normalized into the runtime RPC object by the Vite plugin's
-[synthetic server entry](../../packages/vite-plugin/src/rpc-registry.ts). It preserves
-the original callable and metadata. The generated fetch export retains the
-user's receiver without wrapping RPC dispatch. The runtime-owned dispatch path
-is `/__zeroship/v1/<wireId>`; user code does not route that path manually.
-
-The Vite development host builds live entry snapshots through
-`packages/vite-plugin/src/dev-bootstrap/entry.ts`. It returns the same dictionary
-shape to the runtime; native code invokes the captured procedures.
+Exported procedures are published under the runtime-owned dispatch path
+`/__zeroship/v1/<wireId>`. Your code does not route that path manually.
 
 Production RPC resources require explicit wire IDs:
 
@@ -66,65 +61,53 @@ Production RPC resources require explicit wire IDs:
 export const listTodos = query(handler, { id: "todos.list" });
 ```
 
-Development accepts export-name IDs so local iteration stays fast, but deploy
-builds reject implicit names.
+Development accepts export-name IDs; deploy builds reject implicit ones.
 
-`subscription` is currently server-side metadata plus lower-level transport work; the generic `@zeroship/rpc/client` API intentionally excludes it until the public subscription client shape is finalized.
+`subscription` is recognized by discovery, but the public `@zeroship/rpc/client`
+surface does not expose subscriptions yet — use `stream(...)` for shipped live
+feeds.
 
 ## Reserved paths
 
 The `/__zeroship/*` URL prefix is platform-reserved — user code does not route
 it. Paths under it today:
 
-- `/__zeroship/v1/<wireId>` — runtime-owned RPC dispatch (see RPC authoring above).
-- `GET /__zeroship/health` (alias `GET /__zeroship/healthz`) — the `zeroship serve`
-  (single-tenant dev) liveness probe, answered by the kernel without entering V8.
-  The bare `GET /health` route is **not** reserved: it reaches the user app's
-  own handler.
+- `/__zeroship/v1/<wireId>` — runtime-owned RPC dispatch (see RPC authoring
+  above).
+- `GET /__zeroship/health` (alias `GET /__zeroship/healthz`) — the `zeroship
+  serve` (single-tenant dev) liveness probe, answered without running your code.
+  The bare `GET /health` route is **not** reserved: it reaches your app's own
+  handler.
 
 ## Local env injection (`zeroship serve`)
 
 Under `zeroship serve` there is no control plane to supply per-app vars/secrets,
 so the app-facing `env` (the `zeroship` module's `env` import and `fetch`'s 2nd
-argument) is seeded from process-env vars carrying the `ZS_VAR_` prefix, with the
-prefix stripped: `ZS_VAR_API_KEY=xyz zeroship serve app.js` makes
+argument) is seeded from process-env vars carrying the `ZS_VAR_` prefix, with
+the prefix stripped: `ZS_VAR_API_KEY=xyz zeroship serve app.js` makes
 `env.API_KEY === "xyz"`. Only prefixed vars cross into `env`; every other host
 var stays in `process.env` exclusively, so the host environment is never handed
 to app code wholesale.
 
 ## Schema source of truth
 
-The schema source of truth is the committed `op.*` migration set. The build
-toolchain folds those migrations into:
+The committed `op.*` migration set is the schema source of truth. The build
+folds those migrations into two generated artifacts under `generated/zeroship`:
 
-- `generated/zeroship/env.db.ts` — the app's typed `Env.db` augmentation.
-- `generated/zeroship/schema.runtime.json` — the v2
-  `RuntimeSchemaDescriptor` carried into the `.zship` manifest as
-  `runtime_descriptor`.
+- `env.db.ts` — the app's typed `Env.db` augmentation.
+- `schema.runtime.json` — the v2 `RuntimeSchemaDescriptor` carried into the
+  `.zship` manifest as `runtime_descriptor`.
 
-  **v2, and a v1 artifact is refused rather than upgraded.** Every field in a
-  v2 descriptor carries a `storage` block naming the physical column a default
-  projection reads and, where they differ, the column holding the authoritative
-  value. The runtime stopped deriving that second name by formatting a suffix,
-  so it depends on `storage` being present on every field it is handed - which
-  a v1 artifact does not carry. Refusing outright is the reason the version
-  moved.
+The descriptor is version 2, and a deploy that carries any other version is
+refused rather than upgraded.
 
-If a project keeps a `schema.ts` file, it is only an authoring input for tooling
-that generates migrations from a typed `@zeroship/db` field record. It is not
-shipped as part of the app entry default export, and it is not a runtime source
-of truth. Runtime boot installs `env.db` from the descriptor generated by the
-migration fold; a schema property on the default export is ignored.
-
-**The descriptor is the ONLY source, and that is now enforced rather than
-merely stated.** The data plane performs no live introspection: it does not read
-the catalog to discover a collection, and a collection the descriptor does not
-declare is refused with `collection_not_declared` however the underlying table
-came to exist. So a deploy that creates tables by raw SQL and ships no
-descriptor has no `env.db` access to them - previously such a deploy worked by
-falling back to catalog introspection, which is the fallback that has been
-removed. If you are hand-writing a deploy and want `env.db`, ship the
-descriptor the migration fold generates.
+The descriptor is the only source of collection schema. The runtime does not
+introspect the database to discover a collection: a collection the descriptor
+does not declare is refused with `collection_not_declared`, however the
+underlying table came to exist. A deploy that creates tables by raw SQL and
+ships no descriptor therefore has no `env.db` access to them. If you are
+hand-writing a deploy and want `env.db`, ship the descriptor the build
+generates.
 
 See also:
 

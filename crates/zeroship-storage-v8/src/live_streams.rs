@@ -72,7 +72,7 @@ impl LiveStreams {
     pub fn open(&self, source: BoxByteStream) -> Result<u32, String> {
         if self.budget.live.get() >= self.cap {
             return Err(format!(
-                "storage: too many live download streams ({} max per app); drain or cancelStream an open handle",
+                "storage: too many live download streams ({} max per app); read one to the end, or cancel it",
                 self.cap,
             ));
         }

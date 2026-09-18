@@ -180,11 +180,11 @@ fn normalize_row_on_read(
             LogicalType::Bytes => normalize_bytes_value(value)?,
             LogicalType::Timestamp => normalize_timestamp_value(key, value)?,
             LogicalType::CalendarDate => {
-                if !value.is_null()
+                let invalid = !value.is_null()
                     && value.as_str().is_none_or(|date| {
                         crate::sql::temporal::parse_calendar_date(date).is_none()
-                    })
-                {
+                    });
+                if invalid {
                     return Err(CodecError::Decode {
                         column: key.clone(),
                         reason: "invalid calendar date storage",

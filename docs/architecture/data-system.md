@@ -235,15 +235,16 @@ most - the moment of creation.
 **The service already exists; it runs at the wrong time.** The migration service already issues
 every statement provisioning needs, from a process that already does not execute creator code -
 which is the boundary that matters, and the reason provisioning can never live in the worker:
-`CREATE ROLE` at `crates/zeroship-migrate-server/src/provisioning.rs:121`, `ALTER SCHEMA ... OWNER`
-at `:143`, and the workflow journal's own `CREATE SCHEMA ... AUTHORIZATION` at `:232`.
+`CREATE ROLE` in `crates/zeroship-migrate-server/src/provisioning.rs` (`provision_migrator`, the
+dynamic `CREATE ROLE` at `:176`) and `ALTER SCHEMA ... OWNER` at `:198`.
 
 What is wrong is the trigger. Provisioning is a **side effect of applying a migration**. The apply
-path takes `let schema = app_id.to_string()`
-(`crates/zeroship-migrate-server/src/apply.rs:257`) and issues `CREATE SCHEMA IF NOT EXISTS` over it
-before any migration runs (`:268-271`); the journal schema follows from the same path, keyed
-`format!("app_{schema}")` (`:1178`). That is the conflation this design removes, in executable
-form - **a database exists because an app deployed.**
+path takes `let schema_text = app_derivation::schema_name(app_id)`
+(`crates/zeroship-migrate-server/src/apply.rs:294`) and issues `CREATE SCHEMA IF NOT EXISTS` over that
+schema before any migration runs; the engine journal lives in the same data schema under the
+`__zeroship_` prefix (`crates/zeroship-migrate-server/src/provisioning.rs:21-22`, with `meta_schema` reset
+to the data schema at `:94`), not in a separate `app_{schema}` schema. That is the conflation this
+design removes, in executable form - **a database exists because an app deployed.**
 
 So the work is inversion, not construction:
 
@@ -420,9 +421,10 @@ the role graph ships.
 `__zeroship_admin` **does not exist.** It was deleted on 2026-08-27 - six tables and 32
 definer-rights routines - because the worker could call every one of them, and a privileged call the
 worker can make is not a boundary. `tests/fixtures/data/roles.rs` records
-that nothing replaced it, and `db/migrations-ts/` provisions no such schema. One live statement still
-names it and therefore fails on every database: the PITR placeholder at
-`crates/zeroship-data-orm/src/backend/postgres/implementation.rs`, whose own comment at `:839-844` says so.
+that nothing replaced it, and `db/migrations-ts/` provisions no such schema. The name is now gone
+from the tree entirely: the PITR placeholder that briefly kept it alive in
+`crates/zeroship-data-orm/src/backend/postgres/implementation.rs` has been removed, so no shipped
+statement names it.
 
 **This work creates it**, and the shape is the invariant's one permitted use - state a separate
 service writes and the worker only reads:

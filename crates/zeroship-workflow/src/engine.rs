@@ -288,6 +288,16 @@ pub struct StepCheckpoint {
     pub compensation_state: Option<String>,
     #[serde(default = "default_compensation_max_attempts", rename = "compensationMaxAttempts")]
     pub compensation_max_attempts: i32,
+    /// Executions of this step's body that have reported an outcome.
+    ///
+    /// A completed row records what it cost; a `retrying` row records what has
+    /// been spent so far, and is what the next failure counts from.
+    #[serde(default)]
+    pub attempts: i32,
+    /// The ceiling the body declared through `StepConfig.retries`, already
+    /// checked against the app's own ceiling.
+    #[serde(default = "default_max_attempts", rename = "maxAttempts")]
+    pub max_attempts: i32,
 }
 
 impl StepCheckpoint {
@@ -313,6 +323,8 @@ impl StepCheckpoint {
             child_options: None,
             compensation_state: None,
             compensation_max_attempts: 1,
+            attempts: 0,
+            max_attempts: 1,
         }
     }
 }
@@ -322,6 +334,11 @@ pub fn default_step_kind() -> String {
 }
 
 pub fn default_compensation_max_attempts() -> i32 {
+    1
+}
+
+/// One execution: a step with no declared `retries` is attempted once.
+pub fn default_max_attempts() -> i32 {
     1
 }
 
@@ -468,6 +485,8 @@ pub enum StepOutcome {
         name_occurrence: i32,
         #[serde(default)]
         error: Value,
+        #[serde(default = "default_max_attempts", rename = "maxAttempts")]
+        max_attempts: i32,
     },
     RunCompleted {
         #[serde(default)]
@@ -489,6 +508,10 @@ pub enum StepOutcome {
         #[serde(default, rename = "nameOccurrence")]
         name_occurrence: i32,
         error: Value,
+        /// Only meaningful with an `ordinal`: a terminal run failure names no
+        /// step, so there is nothing to attempt again.
+        #[serde(default = "default_max_attempts", rename = "maxAttempts")]
+        max_attempts: i32,
     },
     Sleep {
         ordinal: i32,
@@ -830,6 +853,8 @@ pub fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, R
                     compensation_state: (*compensable && step_kind == "run")
                         .then(|| "pending".to_string()),
                     compensation_max_attempts: (*compensation_max_attempts).max(1),
+                    attempts: 0,
+                    max_attempts: 1,
                 });
             }
             StepOutcome::StepFailed {
@@ -837,6 +862,7 @@ pub fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, R
                 name,
                 name_occurrence,
                 error,
+                max_attempts,
             } => {
                 checkpoints.push(StepCheckpoint {
                     ordinal: *ordinal,
@@ -858,6 +884,8 @@ pub fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, R
                     child_options: None,
                     compensation_state: None,
                     compensation_max_attempts: 1,
+                    attempts: 0,
+                    max_attempts: (*max_attempts).max(1),
                 });
                 saw_step_failure = true;
                 run_update = RunUpdate::Queued;
@@ -879,6 +907,7 @@ pub fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, R
                 name,
                 name_occurrence,
                 error,
+                max_attempts,
             } => {
                 match (ordinal, name) {
                     (Some(ordinal), Some(name)) => {
@@ -902,6 +931,8 @@ pub fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, R
                             child_options: None,
                             compensation_state: None,
                             compensation_max_attempts: 1,
+                            attempts: 0,
+                            max_attempts: (*max_attempts).max(1),
                         });
                         saw_step_failure = true;
                         run_update = RunUpdate::Queued;
@@ -945,6 +976,8 @@ pub fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, R
                     child_options: None,
                     compensation_state: None,
                     compensation_max_attempts: 1,
+                    attempts: 0,
+                    max_attempts: 1,
                 });
                 if !saw_step_failure {
                     run_update = RunUpdate::Sleeping {
@@ -984,6 +1017,8 @@ pub fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, R
                     child_options: None,
                     compensation_state: None,
                     compensation_max_attempts: 1,
+                    attempts: 0,
+                    max_attempts: 1,
                 });
                 if !saw_step_failure {
                     run_update = RunUpdate::Waiting {
@@ -1019,6 +1054,8 @@ pub fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, R
                     child_options: Some(options.clone()),
                     compensation_state: None,
                     compensation_max_attempts: 1,
+                    attempts: 0,
+                    max_attempts: 1,
                 });
                 if !saw_step_failure {
                     run_update = RunUpdate::Waiting {
@@ -1036,6 +1073,18 @@ pub fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, R
     }
 
     Ok((checkpoints, run_update))
+}
+
+/// The creator-visible reason a generation that asked to continue instead failed.
+///
+/// A compensator belongs to the generation whose step registered it, and a
+/// successor starts from an empty journal, so carrying the obligation across
+/// the transition would strand an undo nothing could ever run.
+pub fn compensable_carry_error() -> Value {
+    serde_json::json!({
+        "type": "CompensableCarryError",
+        "message": "cannot continue as new while compensable steps are pending",
+    })
 }
 
 /// The creator-visible reason a run rests in `stalled`: its dispatches kept
@@ -1068,7 +1117,7 @@ pub fn outcomes_from_apply_parts(
                 output: checkpoint.output.clone(),
                 output_ref: checkpoint.output_ref.clone(),
             }),
-            ("run", "failed") => {
+            ("run", "failed" | "retrying") => {
                 failed_checkpoint_encoded = true;
                 outcomes.push(StepOutcome::StepFailed {
                     ordinal: checkpoint.ordinal,
@@ -1077,6 +1126,7 @@ pub fn outcomes_from_apply_parts(
                     error: checkpoint.error.clone().unwrap_or_else(|| {
                         serde_json::json!({"type": "Error", "message": "workflow step failed"})
                     }),
+                    max_attempts: checkpoint.max_attempts,
                 });
             }
             ("sleep", "running") => {
@@ -1137,6 +1187,7 @@ pub fn outcomes_from_apply_parts(
                 name: None,
                 name_occurrence: 0,
                 error: error.clone(),
+                max_attempts: 1,
             });
         }
         // The executor cannot report a stall: it is the host's verdict on

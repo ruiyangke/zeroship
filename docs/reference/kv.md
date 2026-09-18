@@ -1,39 +1,32 @@
 # `@zeroship/kv`
 
-`@zeroship/kv` is the public SDK wrapper around the native `env.kv`
-namespace. It is for ephemeral, hot-path, expiring state: rate-limit
-counters, short-lived leases, cache-aside values, session-like scratch data,
-and prefix scans. Use `@zeroship/db` for relational source-of-truth data,
-audited workflows, durable idempotency, and exact large-number accounting.
+`@zeroship/kv` is the key-value SDK a creator app imports to store ephemeral,
+hot-path, expiring state: rate-limit counters, short-lived leases, cache-aside
+values, session-like scratch data, and prefix scans. Every operation is atomic
+for a single key and strongly consistent — a write is immediately visible to a
+later read, and counters and create-if-missing are atomic. Use `@zeroship/db`
+for relational source-of-truth data, audited workflows, durable idempotency,
+and exact large-number accounting.
 
-The TypeScript wrapper lives in `packages/kv/src/index.ts`. Rust support is split by
-responsibility:
+The simplest working call writes a value and reads it back:
 
-- `crates/zeroship-kv/` owns the backend contract, Redis/redb implementations,
-  runtime configuration, scoped Rust handles, shared limits, and storage errors.
-  It is independent of V8.
-- `crates/zeroship-kv-v8/` provides `KvBinding`, which registers the native class
-  and owns JavaScript conversion, promises, isolate state, and usage metering.
+```ts
+import { kv } from "@zeroship/kv";
 
-Hosts open a `KvStore` from `KvConfig` at startup and pass it to the binding.
-Cargo features determine which backend implementations are available; runtime
-configuration selects the active implementation. Rust platform code receives
-`Kv` handles bound to `Namespace::platform`, while the V8 binding uses
-`Namespace::app` and the same scoped operations. The CLI loads TOML from
-`ZEROSHIP_KV_CONFIG_FILE`, otherwise redb from `ZEROSHIP_KV_PATH` or its local default.
-The distributed worker uses its configured Redis store and shares it across
-worker threads. See [KV configuration](kv-configuration.md) for standalone,
-cluster, and Sentinel deployments, and `crates/zeroship-kv/README.md` for Rust usage.
+await kv.set("session:abc", { userId: "usr_..." }, { ttlMs: 30 * 60_000 });
+const { data: session } = await kv.get<{ userId: string }>("session:abc");
 
-Backend and scoped-handle tests run in the storage crate. The binding's suite
-drives the real runtime against those backends and verifies Rust/V8 data sharing.
+// session is the stored object, or null if the key was missing or expired.
+```
+
+The backend is selected by the host; the SDK contract is identical either way.
 
 ## Authoring surface
 
 ```ts
 import { kv } from "@zeroship/kv";
 
-await kv.set("session:abc", { userId: "user_..." }, { ttlMs: 30 * 60_000 });
+await kv.set("session:abc", { userId: "usr_..." }, { ttlMs: 30 * 60_000 });
 
 const { data: session, error } = await kv.get<{ userId: string }>("session:abc");
 if (error) throw error;
@@ -43,32 +36,97 @@ if (session) {
 }
 ```
 
-All SDK calls return `Result<T>`:
+The `kv` export is a ready-to-use client for the running app. `createKv()` is
+the test factory: it returns a fresh client, and accepts a mock native handle
+so you can exercise your code without the runtime.
+
+All calls return a `Result<T>`:
 
 ```ts
 type Result<T> = { data: T; error: null } | { data: null; error: Error };
 ```
 
-Branch on `error.code` for known native failures such as
-`kv_non_numeric` and `kv_overflow`; do not branch on message text.
+On success `error` is `null`. On failure `data` is `null` and `error` is set;
+branch on `error.code` for known native failures such as `kv_non_numeric` and
+`kv_overflow`, never on message text. See [Errors](#errors).
+
+## Testing
+
+`createKv()` returns a fresh client over a mock you supply instead of the
+runtime, so you can exercise your code without a running app. The mock is a
+plain object with nine async methods mirroring the handle the runtime gives a
+real client; the SDK owns the JSON round-trip, so your mock stores and returns
+strings, never objects:
+
+```ts
+import { createKv } from "@zeroship/kv";
+
+const store = new Map<string, string>();
+
+const kv = createKv({
+  async get(key) { return store.get(key) ?? null; },            // string | null
+  async set(key, value) { store.set(key, value); return { ok: true }; },
+  async delete(key) { return { deleted: store.delete(key) }; },
+  async incr(key, opts) { /* ... */ return 1; },                // number | bigint
+  async setIfAbsent(key, value) { /* ... */ return { stored: true }; },
+  async expire(key, ttlMs) { return { updated: false }; },
+  async ttl(key) { return { ttlMs: null }; },                   // { ... } | null
+  async persist(key) { return { updated: false }; },
+  async list(prefix, opts) { return { keys: [], cursor: null }; },
+});
+```
+
+A mock method may also throw to simulate a failure; the SDK wraps the thrown
+value into `error` exactly as it does for a real backend.
 
 ## Methods
 
-| Method | Behavior |
-| --- | --- |
-| `get<T>(key)` | Reads a JSON value and returns `T | null`; `null` means missing or expired. |
-| `getString(key)` | Reads a JSON-encoded string and returns the string directly. |
-| `set(key, value, { ttlMs? })` | JSON-encodes and stores a value, optionally with a TTL. |
-| `delete(key)` | Removes a key; returns `{ deleted }`. |
-| `incr(key, { by?, ttlMs? })` | Atomically increments an integer counter; `ttlMs` applies only when the key is created. |
-| `setIfAbsent(key, value, { ttlMs? })` | Atomic "create if missing"; returns `{ stored }`. |
-| `expire(key, ttlMs)` | Sets or replaces a key's TTL; returns `{ updated }`. |
-| `ttl(key)` | Returns `null` when missing, `{ ttlMs: null }` when permanent, or `{ ttlMs: number }`. |
-| `persist(key)` | Removes a key's TTL; returns `{ updated }`. |
-| `list(prefix?, { cursor?, limit? })` | Paginates keys by literal prefix. Cursor is opaque. |
-| `has(key)` | SDK helper over `get`. |
-| `getOrSet(key, opts, factory)` | Cache-aside helper; not atomic under concurrent misses. |
-| `namespace(prefix)` | Returns a sub-client that prepends `prefix` to every key. |
+| Method | Returns | Behavior |
+| --- | --- | --- |
+| `get<T>(key)` | `Result<T \| null>` | JSON-decoded value, or `null` when missing or expired. |
+| `getString(key)` | `Result<string \| null>` | Equivalent to `get<string>(key)`: returns the stored string, JSON-decoded, or `null` when missing or expired. |
+| `set(key, value, { ttlMs? })` | `Result<void>` | JSON-encodes and stores; replaces the value and any existing expiry. |
+| `delete(key)` | `Result<{ deleted: boolean }>` | Removes a key; `deleted` is `false` if it was already absent. |
+| `incr(key, { by?, ttlMs? })` | `Result<number>` | Atomic increment; `by` defaults to `1`; `ttlMs` applies only on creation. |
+| `setIfAbsent(key, value, { ttlMs? })` | `Result<{ stored: boolean }>` | Atomic create-if-missing; `stored` is `false` if the key existed. |
+| `expire(key, ttlMs)` | `Result<{ updated: boolean }>` | Sets or replaces a key's TTL; `updated` is `false` if the key is absent. |
+| `ttl(key)` | `Result<{ ttlMs: number \| null } \| null>` | `data` is `null` when missing; otherwise `{ ttlMs: number \| null }` — `null` when permanent, else remaining ms. |
+| `persist(key)` | `Result<{ updated: boolean }>` | Removes a key's TTL; `updated` is `false` if it had none or was absent. |
+| `list(prefix?, { cursor?, limit? })` | `Result<{ keys: string[], cursor: string \| null }>` | Paginates keys by literal prefix; the cursor is opaque. |
+| `has(key)` | `Result<boolean>` | SDK helper over `get`. |
+| `getOrSet<T>(key, { ttlMs? }, factory)` | `Result<T>` | Read-through: returns the stored value, or runs `factory() => T \| Promise<T>`, stores it, and returns it; not atomic under concurrent misses. |
+| `namespace(prefix)` | a `Kv` sub-client | Same surface as `kv`; prepends `prefix` to every key. |
+
+## Keys, values, and limits
+
+Keys are strings that identify an entry. A key must be non-empty and no longer
+than 512 bytes, and may not contain `{`, `}`, the NUL character, or any control
+character.
+
+Values are JSON-serialized on write and JSON-parsed on read, so store anything
+JSON-serializable: objects, arrays, strings, numbers, booleans, or `null`. A
+stored value may be at most 256 KiB. Values that JSON cannot represent, such as
+`undefined`, functions, or `bigint`, cannot be stored.
+
+TTLs are whole milliseconds. A TTL must be greater than `0` and no more than
+100 years (`3,153,600,000,000` ms); fractional and negative values are
+rejected. `incr`'s `by` must be an integer and defaults to `1`; fractions are
+rejected, and the resulting counter stays within the 64-bit signed range.
+
+## Errors
+
+Every failure comes back through `Result` as `error`. Two kinds occur:
+
+- An invalid key, value, or option is rejected before the operation runs and
+  surfaces in `error` as a `TypeError` with no `.code`.
+- A known native failure carries an `.code`. Branch on it:
+
+| Code | Meaning | Retry? |
+| --- | --- | --- |
+| `kv_non_numeric` | `incr` on a key whose value is not a base-10 integer. | no |
+| `kv_overflow` | `incr` would push the counter past the signed 64-bit range. | no |
+| `kv_connection` | Transient connection failure; `error.hint` carries the retry guidance string. | yes, with backoff |
+| `kv_backend` | Any other backend failure; carries no retry hint. | depends: retry a read; retry a write only if idempotent |
 
 ## TTL and counters
 
@@ -95,9 +153,8 @@ if (count > 100) throw new Error("rate limited");
 The TTL on `incr` is set only when the counter is created. Existing counters
 keep their current expiry, which is what fixed-window counters need.
 
-Counters are exact in the native layer up to i64, but the JS wrapper returns a
-`number`. Values past `Number.MAX_SAFE_INTEGER` lose precision; use DB rows for
-exact large accumulators.
+Counters are exact up to `Number.MAX_SAFE_INTEGER` (2^53). Above that the
+result loses precision past 2^53; use DB rows for exact large accumulators.
 
 ## Leases and idempotency
 
@@ -139,13 +196,13 @@ do {
 
 ### `limit` is a request, not a bound
 
-`limit` asks for a page size; it does not cap one. The embedded store used by
-`pnpm dev` fills a page to exactly `limit` and stops, but a Redis-backed
-deployment passes `limit` to `SCAN` as a `COUNT` hint, so a page can come back
-shorter or longer than asked, including empty while keys still remain.
+`limit` asks for a page size; it does not cap one. The default is `1000` and
+any value above `10000` is clamped to `10000`. During local development the
+store fills a page to exactly `limit` and stops, but a deployed app can return
+a page shorter or longer than asked, including empty while keys still remain.
 
 That difference bites one common idiom: stopping once a page comes back short.
-Against the dev backend it terminates correctly, because that backend returns a
+Against the local store it terminates correctly, because that store returns a
 cursor only when it filled the page. Against a deployed app it truncates the
 listing silently. `cursor === null` is the only exhaustion signal, which is why
 the loop above tests the cursor and not the page length.
@@ -153,10 +210,9 @@ the loop above tests the cursor and not the page length.
 ### Key order is unspecified
 
 `list` makes no ordering guarantee, and the order genuinely differs between
-backends: the embedded store used by `pnpm dev` iterates keys in sorted order,
-while a Redis-backed deployment returns them in scan order. Code that renders or
-compares a key list will therefore see one order locally and another in
-production.
+backends: the local store iterates keys in sorted order, while a deployed app
+may return them in any order. Code that renders or compares a key list will
+therefore see one order locally and another in production.
 
 Sort explicitly whenever order matters:
 
@@ -182,26 +238,7 @@ const page = await sessions.list("");
 
 ## Backends
 
-The runtime selects the backend; the SDK contract is the same:
-
-- redb: single-process persistent local backend, used by dev by default.
-- Redis-compatible storage: distributed backend configured through host TOML.
-
-Dev redb state lives under the app's `.zeroship/` directory. Treat it as local
-runtime state that should survive restarts, like the SQLite dev database.
-
-## Demo coverage
-
-`examples/kv-dashboard/` exercises every SDK method: JSON values, strings,
-TTL, counters, leases, cache-aside, namespacing, prefix list pagination, and
-cleanup.
-
-`pnpm --dir examples/kv-dashboard smoke` probes an existing dashboard, using
-`ZEROSHIP_URL` when supplied. It resets the demo namespace.
-
-`pnpm --dir examples/kv-dashboard test` builds this demo and checks its SDK
-contract and browser UI through local Vite and the deployed gateway. The
-example owns its Vitest/Playwright suites and TypeScript Testcontainers setup.
-No shared Compose stack or backend URLs are needed.
-See the [KV test commands](../../crates/zeroship-kv/README.md) for the native
-driver, storage, and V8 suites and nextest usage.
+Local development and a deployed app may run on different underlying stores;
+the host picks, and the SDK contract — every method, error code, and return
+shape — is identical either way. The only creator-visible difference is `list`
+ordering and page fill, described above.

@@ -1,225 +1,25 @@
 # `@zeroship/workflows`
 
-`@zeroship/workflows` is the creator-facing SDK for durable workflows. A
-workflow is a named TypeScript class whose `run(trigger, step)` body can pause,
-wait for signals, call child workflows, and survive process restarts because all
-durable progress is recorded in an app-scoped workflow journal.
+> **Availability.** Not published to the creator registry as of 2026-09-17, so
+> this SDK is not installable from a scaffolded app; the runtime's workflow host
+> runs regardless.
 
-The SDK types live in `packages/workflows/`. The native `env.workflows` binding
-starts and controls runs from app code, and the control client exposes the
-token and topic broadcast helpers used by systems outside the app.
+`@zeroship/workflows` is the SDK for durable workflows. A workflow is a named
+TypeScript class whose `run(trigger, step)` body can pause, wait for a signal,
+call other workflows, and use timers, without writing the orchestration state
+itself. The platform records that progress in an app-scoped journal, so a run
+survives process restarts, worker replacement, and redeploys: when a dispatch
+replays, completed steps return their recorded values instead of running again.
 
-This reference describes the current implementation. The revised
-[manager and job queue design](../proposals/2026-09-11-workflow-worker.md) assigns
-cron, timers and durable job delivery to the workflow server. Workers consume
-jobs and keep execution history and payloads in creator storage. Native manager
-scheduling and creator Cron acceptance exist; production and local host
-composition remain incomplete. The creator calendar loop has been removed,
-so the current CLI task loop does not generate scheduled jobs.
+A run is pinned to the deployment that created its journal prefix. Replay always
+loads that deployment's code, so a redeploy does not change the code an in-flight
+run is halfway through. A run carries its state in the journal, not in process
+memory, so it can move between machines between dispatches while one dispatch
+executes on a single machine.
 
-## Workflow class exports
+## Quick start
 
-The retained app entry names workflows through its named class exports or an
-explicit `default.workflows` dictionary. The export key is the workflow name;
-the constructor's JavaScript `name` property has no routing meaning. Synthetic
-entries can preserve named exports with `export *` from the creator entry.
-
-`step.call(Child, input)` and `step.startMany(Child, items)` resolve the actual
-constructor against these bindings before producing a child frontier. Frozen
-classes and minified identifiers work without renaming the constructor. An
-unexported constructor cannot select another workflow by copying its name.
-Each constructor must have an unambiguous export name, and each name must select
-the same constructor wherever it is declared. Repeating the same binding in
-named exports and `default.workflows` is allowed. Resolving a conflicting binding
-fails dispatch. Unrelated callable exports are not instantiated during lookup.
-Both prototype methods and instance-field implementations of `run` are supported.
-Inherited dictionary properties and a bare default constructor do not
-declare workflows, and a missing name never falls back to another class.
-
-Development workflow execution uses the retained normal app bundle. Live
-HTTP/RPC development snapshots do not supply workflow lookup, so reloading the
-page handler does not replace the code selected by an existing workflow run.
-
-## Workflow class exports
-
-The retained app entry names workflows through its named class exports or an
-explicit `default.workflows` dictionary. The export key is the workflow name;
-the constructor's JavaScript `name` property has no routing meaning. Synthetic
-entries can preserve named exports with `export *` from the creator entry.
-
-`step.call(Child, input)` and `step.startMany(Child, items)` resolve the actual
-constructor against these bindings before producing a child frontier. Frozen
-classes and minified identifiers work without renaming the constructor. An
-unexported constructor cannot select another workflow by copying its name.
-Each constructor must have an unambiguous export name, and each name must select
-the same constructor wherever it is declared. Repeating the same binding in
-named exports and `default.workflows` is allowed. Conflicting bindings fail the
-dispatch. Inherited dictionary properties and a bare default constructor do not
-declare workflows, and a missing name never falls back to another class.
-
-Development workflow execution uses the retained normal app bundle. Live
-HTTP/RPC development snapshots do not supply workflow lookup, so reloading the
-page handler does not replace the code selected by an existing workflow run.
-
-## Rust integration
-
-`zeroship-workflow` owns the journal engine, claim/apply protocol, scoped HTTP
-client, and customer persistence through `zeroship-data-orm`. It has no V8 dependency.
-`zeroship-workflow-v8` installs `env.workflows` and supplies the V8 executor
-used by the local engine. The control plane uses the Rust engine directly.
-
-The replacement service accepts an `OrmStore` built from the host's `OrmContext`,
-`DbBinding` and `BackendHandle`. The ORM selects the configured database and owns
-transactions. Journal operations use ORM collections and migration-derived Rust
-models. Rust and creator ORM access permits workflow table
-names within the bound customer schema; prefixes are not an authorization check.
-`AppWorkflows::into_backend` exposes a bounded client for V8 and Rust callers on
-other runtime threads; database operations remain on the engine's owning thread.
-The existing Control PostgreSQL store remains until production cutover.
-
-The replacement service retains accepted app-operation `RequestId` receipts in
-the creator journal. Retrying the same request returns its original result even
-after later lifecycle changes; changing its operation or body conflicts. These
-receipts have no time-based expiry. A signal-token retry returns the original
-token and preserves its expiration and revocation rules. Safe receipt retirement
-requires a protocol that fences future retries.
-
-A trusted Rust host can use `HttpWorkflowBackend` through `WorkflowBackend`
-to start runs, read status, signal, restart, or change lifecycle state. Construct
-it with `WorkflowClientConfig`, binding the app identity and its scoped token
-once. Individual operations cannot select another app. The control plane still
-authorizes the request; possession of a Rust handle does not bypass it.
-
-The `operations` module defines typed requests and responses for these calls:
-`StartOptions`, `SignalOptions`, `RestartOptions`, `RunOperation` and `RunState`.
-Only workflow input, output and signal payloads are arbitrary JSON. Transport
-serialization belongs to the HTTP client and V8 binding.
-Operations return `WorkflowServiceError`, so Rust callers can match not-found,
-conflict, authorization and capacity failures without interpreting HTTP status
-codes. The V8 adapter exposes the corresponding `workflow_*` error codes.
-
-`WorkflowBinding` performs the same binding for JavaScript. The host derives
-its app-scoped credential with `app_scoped_token`; the control key stays outside
-V8. Workflow execution remains replay of the deployed JavaScript class.
-
-Native executors receive `WorkflowInvocation` and return `WorkflowExecution`
-outcomes. Local development and deployed workers use the same replay input,
-journal types and outcome decoder. The invocation carries no lease credential;
-the Rust host binds outcomes to its claimed run before applying them. Run IDs
-or nonces returned by JavaScript do not select the mutation target.
-
-## Local development
-
-Workflows belong to the app's normal `.zship` deployment. Runs pin that app
-deployment and load its code and runtime descriptor through the app bundle
-loader. Activation acquires a durable deployment hold before selecting code;
-replay verifies the held app manifest and its referenced blobs. Republishing
-supersedes that deployment, and both its holders give it back once nothing needs
-it: the manager releases the queue hold, then asks the engine to release the
-journal hold, which it refuses while any run or retained generation still names
-the deployment. Local development uses the same app build and retains normal
-deployment metadata beside the artifacts. The
-[worker design](../proposals/2026-09-11-workflow-worker.md) describes the
-remaining production retention cutover, which keeps platform bundle collection
-independent of customer SQL.
-
-The CLI runs workflows through the same native manager and delivered jobs as a
-deployment, independently of HTTP requests. `zeroship serve dist/app.zship`
-loads the app's server modules for HTTP and workflow execution. Vite builds and
-publishes the local app artifact automatically while serving client assets and
-live modules through its dev bridge, and restarts the CLI when the artifact
-changes. There is no workflow-only archive argument or TOML bundle setting.
-Workflow execution reads from the retained app bundle store without making
-separate executable copies.
-
-A manager thread owns the local platform metadata file,
-`.zeroship/platform/metadata.sqlite`, which holds both the normal deployment
-catalog and the manager's queue, placement, scheduling and recovery records.
-Starting the CLI with an archive records that deployment, registers its
-schedules and activates it unless it is already selected; each restart with a
-new archive activates the new deployment while existing runs keep their pinned
-code. The creator applies the activation as a delivered job, and the CLI accepts
-requests only after that activation has committed. A second thread runs the
-ordinary job consumer over the app database with a trusted local worker
-identity. Starts, signals and settled jobs publish their pending jobs
-immediately; periodic manager reconciliation publishes anything a crash left
-behind, and periodic collection removes abandoned payload uploads. Restart keeps
-queued jobs, timers, receipts and retained bundles.
-
-The CLI resolves one app identity for HTTP handlers, workflow execution and app
-storage. A configured `APP_ID` must be canonical; when absent, the CLI uses the
-shared `local_dev_app_id()` identity. Restart with the same configuration selects
-the same app and rediscovers its durable work.
-
-The journal uses the app database selected by `DATABASE_URL`, and payloads use
-the app's normal storage configuration. With default SQLite configuration, the
-ORM places the app tables and workflow journal in `.zeroship/zs-<app_id>.sqlite`;
-object storage defaults to `.zeroship/storage`. Workflow execution uses this
-host-selected identity without a separate identity file, database or object
-directory. Incompatible journals are refused without resetting them, and
-initialization preserves business tables. An incompatible platform metadata file
-is likewise refused without being rewritten.
-
-`--workflow-config=workflow.toml` configures native execution limits. Its optional
-`consumer` table bounds execution slots, claim polling, backoff, execution and
-per-operation time; `manager` bounds delivery leases, the worker's placement
-lifetime, maintenance cadence and lanes, the minimum time the manager keeps a
-deployment held before it may release one a republished archive replaced
-(`hold_grace_ms`), and the reconciliation and collection interval; `payloads`
-configures `TaskPayloadLimits`. Database paths and object
-storage belong to normal app configuration; workflow TOML rejects separate
-`journal`, `objects` and database settings. The CLI has no dedicated workflow
-reset command.
-
-## Testing
-
-Run `cargo xtask test workflow` after building the workspace SDKs. Rust tests
-own backing services through Testcontainers and include API isolation, journal
-fencing, scheduling, real worker replay, and gateway dispatch authorization.
-Docker is required; unavailable services fail the tests.
-
-The workflow examples own their Vitest and Playwright tests, fixtures, and
-configuration. Run `pnpm test` from `examples/workflow-probe` or
-`examples/workflows-order` to test an example independently. The test runner
-builds the example and platform binaries before starting its services.
-
-## Journal provisioning
-
-Nothing you run provisions a journal. It happens on its own, and the reason is
-worth knowing when you are reading a log.
-
-The journal is a platform-owned schema inside your creator database. The
-migration service installs it, but it does not know what a workflow is: it
-receives a **schema bundle** - an ordered series of versions, the policy the
-bundle runs under, and where its stamp lives - and installs or upgrades the
-schema the bundle names. The workflow manager holds the journal's artifacts and
-sends that bundle.
-
-Two things trigger it, and both are idempotent:
-
-- **Deploy.** A deploy of an app that declares a workflow brings that app's
-  journal to the current version BEFORE it answers, so the first run never waits
-  on provisioning and an app that is deployed and not yet run still has one. A
-  deploy that cannot provision is refused rather than accepted: you see the
-  fault in the deploy, not in the first run. An app that declares no workflow
-  provisions nothing. This is why a schema change rolls out without a migration
-  step on your side - a redeploy carries it.
-- **A host that refuses a journal.** A worker verifies the journal against the
-  fingerprint it was built with. If it finds an older one, or none, it asks the
-  manager to provision and retries once. This is the repair path for an app that
-  has not redeployed since the schema moved.
-
-The stamp is one row per creator database, not per app, so an upgrade moves every
-app in that database at once and does so in a single transaction: an upgrade that
-fails part way leaves the journal at the version that is actually installed. A
-journal a NEWER platform installed is never downgraded.
-
-Local workflows create their SQLite journal automatically, from the same ordered
-series.
-
-## Model
-
-A workflow is a class extending `Workflow<Params, Output>`:
+Define a workflow as a class written in TypeScript, exported with a stable name:
 
 ```ts
 import { Workflow, type Step, type WorkflowTrigger } from "@zeroship/workflows";
@@ -236,6 +36,98 @@ export class Checkout extends Workflow<{ orderId: string }, { charged: boolean }
 }
 ```
 
+The type parameters are the run's input and its result. `trigger.input` carries
+the input a start supplied; `step.run(name, fn)` marks `fn` as a durable step
+whose result is journaled and replayed.
+
+The active deploy must declare the workflow name before it can run. A class
+exported by name is declared; a raw-JavaScript deploy declares names through a
+`default.workflows` dictionary. See [Workflow class exports](#workflow-class-exports).
+
+Start it from an app handler through `env.workflows`:
+
+```ts
+import { env } from "zeroship";
+
+export async function order(request: Request): Promise<Response> {
+  const { orderId } = await request.json();
+  const run = await env.workflows.Checkout.start({ input: { orderId } });
+  return Response.json({ runId: run.id }, { status: 202 });
+}
+```
+
+Then observe it and await a result:
+
+```ts
+const status = await env.workflows.Checkout.get(runId).status();
+// status.state is "queued", "running", "sleeping", "waiting", ...
+// status.output carries the workflow's result once it is "completed".
+```
+
+`start()` returns once the run is accepted and appends its `id`. The steps then
+execute asynchronously; the caller polls `status()` until `state` reaches a
+terminal value.
+
+## Workflow class exports
+
+Workflows are named by their exported names. Either form declares a workflow:
+
+- A named class export, where the export key is the workflow name.
+- A `default.workflows` dictionary, mapping a name to its class.
+
+```ts
+export class Checkout extends Workflow<...> { ... }
+```
+
+```ts
+export default {
+  workflows: { Checkout },
+};
+```
+
+Both may coexist and repeat the same name for the same class. The constructor's
+JavaScript `name` property has no routing meaning; the export key is the only
+name a workflow has.
+
+Each constructor must resolve to one unambiguous name, and each name must select
+the same constructor everywhere it is declared. A name bound to two different
+classes is ambiguous, and dispatching it fails. A workflow with no exported name
+cannot be started, and an unexported constructor cannot become a child target by
+copying a name. Minification and frozen classes do not change these bindings.
+
+`step.call(Child, input)` and `step.startMany(Child, items)` resolve `Child`
+against these bindings, so the child you call is the exported class, not a name
+string.
+
+## Model
+
+A workflow extends `Workflow<Params, Output>`:
+
+```ts
+export class Checkout extends Workflow<{ orderId: string }, { charged: boolean }> {
+  async run(
+    trigger: WorkflowTrigger<{ orderId: string }>,
+    step: Step,
+  ): Promise<{ charged: boolean }> { ... }
+}
+```
+
+`Workflow` is an abstract class with two type parameters — the run's input and
+its result — and one abstract method to implement:
+
+```ts
+abstract class Workflow<Params = unknown, Output = unknown> {
+  abstract run(
+    trigger: WorkflowTrigger<Params>,
+    step: WorkflowStep,
+  ): Output | Promise<Output>;
+}
+```
+
+It also declares optional static `concurrency` and `compensationConcurrency`
+fields. These are reserved declarations and are not yet enforced by the
+platform.
+
 `trigger` is:
 
 ```ts
@@ -247,39 +139,10 @@ interface WorkflowTrigger<Params = unknown> {
 }
 ```
 
-The platform runs `run()` once per dispatch against the run's journal. Completed
-steps are memoized: on replay, the SDK returns the journaled value instead of
-calling the step body again. Sleeps, waits, child calls, failed steps, large
-output refs, and compensator progress are all journal rows.
-
-Durability is the journal plus the deploy pin. A run survives crashes, worker
-eviction, process restarts, and redeploys because replay uses the deploy that
-created the retained journal prefix. One dispatch executes on one node, but a
-run can move across nodes between dispatches because state lives in the journal,
-not in process memory.
-
-Workflow classes can be exported by name:
-
-```ts
-export class Checkout extends Workflow<{ orderId: string }, { ok: boolean }> {
-  async run(trigger: WorkflowTrigger<{ orderId: string }>, step: Step) {
-    await step.run("work", () => doWork(trigger.input.orderId));
-    return { ok: true };
-  }
-}
-```
-
-Raw JavaScript deploys can also expose a workflow namespace on the default
-export:
-
-```ts
-export default {
-  workflows: { Checkout },
-};
-```
-
-The active deploy manifest must declare the workflow name before
-`env.workflows.<Name>.start(...)` can create a run.
+`run()` is invoked once per dispatch against the run's journal. Completed steps
+are memoized: on replay the SDK returns the journaled value instead of calling
+the step body again. Sleeps, waits, child calls, failed steps, large output
+refs, and compensator progress are all journal rows.
 
 ## Determinism
 
@@ -334,7 +197,8 @@ Calling another `step.*` method from inside a step body is also unsupported.
 
 ## Step Surface
 
-The public `Step` type is:
+The step parameter is the `WorkflowStep` interface; `Step` is an exported alias
+for it, so `step: Step` and `step: WorkflowStep` name the same type:
 
 ```ts
 type StepBody<T> = (ctx: StepContext) => T | Promise<T>;
@@ -385,17 +249,8 @@ interface RetryConfig {
   maxAttempts?: number;
 }
 
-interface BackoffConfig {
-  base?: string;
-  max?: string;
-  factor?: number;
-}
-
 interface StepConfig<T = unknown> {
-  /** Declared, and read by nothing. See the note under Semantics. */
   retries?: RetryConfig;
-  /** Declared, and read by nothing. See the note under Semantics. */
-  backoff?: BackoffConfig;
   timeout?: string;
   output?:
     | "auto"
@@ -425,11 +280,11 @@ interface StepContext {
 }
 ```
 
-A step body runs *before* its journal row is committed. If the worker crashes
-or its lease expires in that window, the frontier is discarded, the run is
-reassigned, and the body runs again -- against an effect that already landed.
-`ctx.idempotencyKey` is the defence: pass it to the external system so the
-duplicate is recognised and dropped.
+`ctx.idempotencyKey` is the idempotency defence. A step body runs *before* its
+journal row is committed. If the worker crashes or its lease expires in that
+window, the frontier is discarded, the run is reassigned, and the body runs
+again — against an external effect that already landed. Pass the key to the
+external system so the duplicate is recognised and dropped:
 
 ```ts
 const charge = await step.run("charge-card", (ctx) =>
@@ -441,16 +296,13 @@ const charge = await step.run("charge-card", (ctx) =>
 ```
 
 The key is stable across re-execution of the same step, and distinct for every
-step a restart re-runs: restarting from before a step gives that step a new key,
-so the re-run is not mistaken for the execution it replaces.
-
-Declaring the parameter is optional; a body that does not need the context
-omits it.
+step a restart re-runs. Declaring the parameter is optional; a body that does
+not need the context omits it.
 
 Semantics:
 
 - The first miss runs `fn`, records the result or failure, and suspends the
-  dispatch so the control plane can commit the journal row.
+  dispatch so the journal row can be committed.
 - A replay hit returns the recorded result and does not call `fn`.
 - `timeout` bounds the step body. A body still running when the bound expires
   fails the step with `StepTimeoutError`, and the recorded error is retryable.
@@ -460,23 +312,58 @@ Semantics:
 - `output` controls how the step output is represented. Explicit `"ref"`,
   `"blob"`, or `"stream"` returns a `StepOutputRef`.
 - `compensate` attaches a rollback function for terminal failure.
+- `retries.maxAttempts` is how many times the body may run. It counts
+  executions, not re-executions, so the default of one is the same step you get
+  by declaring nothing. A value that is not a positive integer fails the run
+  before the body is invoked, the way an unreadable `timeout` does.
 
-**`retries` and `backoff` are declared and read by nothing.** No component
-inspects either: a step whose body throws records that failure once and the run
-fails. Re-running a step needs per-step attempt state the journal does not
-carry. Do not write a workflow that depends on either field.
+A step timeout is not the only bound a slow step meets. The host that executes
+the run carries its own execution timeout, invisible to app code, and whichever
+bound is smaller ends the step: past the host's, the step's own timeout never
+fires and no `StepTimeoutError` is recorded. The host bound is 30 seconds by
+default and may be tuned per deployment, so size step timeouts well below
+30 seconds if you want the step's own failure in the journal.
+
+#### Retries
+
+A failing step with attempts left does not fail its run. The platform records
+the attempt, requeues the run, and re-executes the body on the next dispatch;
+only the last failure is recorded as the step's outcome and rethrown into your
+`run()`.
+
+What matters when you use it:
+
+- **Attempts share one `ctx.idempotencyKey`.** A retry is at-least-once against
+  whatever the body touched, exactly as a re-execution after a lost lease is.
+  Pass the key to the external system and let it recognise the duplicate.
+  Spacing does not make an effect safe to repeat; the key does.
+- **An error that declares `retryable: false` spends no further attempt.**
+  `PermanentError` declares it, so a business failure ends the step however many
+  attempts remain. `StepTimeoutError` declares `true`. An error that declares
+  nothing is retried.
+- **The wait between attempts is platform-provisioned, not set by the app.** It
+  is durable on the run rather than a timer in the worker — the worker that
+  failed the attempt is gone before the next one starts — and it defaults to
+  1 second. `RetryConfig` exposes no knob for it. The platform also provisions
+  a ceiling on how many attempts a step may declare, defaulting to 8:
+  `maxAttempts` above the app's ceiling is refused rather than quietly becoming
+  a smaller number.
+
+```ts
+const charge = await step.run(
+  "charge-card",
+  { retries: { maxAttempts: 3 } },
+  (ctx) =>
+    stripe.paymentIntents.create(
+      { amount: order.totalCents, currency: "usd" },
+      { idempotencyKey: ctx.idempotencyKey },
+    ),
+);
+```
 
 Duration strings accepted by workflow sleeps and timeouts include suffixes such
 as `ms`, `s`, `m`, `h`, and `d`; plain positive numbers are milliseconds.
-
-A step timeout is not the only bound a slow step meets. The host that executes
-a delivered job carries its own execution timeout, invisible to app code, and
-whichever bound is smaller ends the step: past the host's, the job is torn down
-and the configured step timeout never fires, so no `StepTimeoutError` is
-recorded. Size step timeouts below the host bound if you want the step's own
-failure in the journal. The pairing is gated in
-`crates/zeroship-workflow-v8/tests/runner.rs`; the host constant is
-`EXECUTION_TIMEOUT` in `crates/zeroship-worker/src/workflow_host.rs`.
+ISO 8601 durations such as `PT5M` are also accepted.
 
 ### `step.sideEffect`
 
@@ -489,7 +376,7 @@ configuration reads whose value must be stable across replay.
 Its body receives the same `StepContext` as `step.run`, on the same terms: the
 value is computed before the journal row commits, so the body can re-execute.
 The context is there for deriving a stable value, not as licence to do I/O here
--- that belongs in `step.run`.
+— that belongs in `step.run`.
 
 ### `step.sleep` and `step.sleepUntil`
 
@@ -570,8 +457,9 @@ does not finish before `timeout`, the parent receives `ChildTimeoutError`.
 
 `cascade: true` means cancelling the parent also requests cancellation of a live
 child. Without it, the child remains independent. The request reaches children
-in bounded batches after the parent settles; a cascading child cannot continue as
-new or restart while its parent's cancellation is still reaching its children.
+in bounded batches after the parent settles; a cascading child cannot continue
+as new or restart while its parent's cancellation is still reaching its
+children.
 
 `step.startMany(WorkflowClass, items, opts?)` is the in-workflow fan-out helper:
 
@@ -611,9 +499,14 @@ The call never returns. Use it as the final action in the workflow body. The
 fresh generation starts from ordinal `0`, receives the supplied input as its
 trigger input, and uses the active deploy when the transition is applied.
 
-`step.continueAsNew` cannot be called from inside a step body. If the current
-generation has pending compensators, the transition is rejected with
-`CompensableCarryError` and no successor generation is created.
+`step.continueAsNew` cannot be called from inside a step body. A compensator
+belongs to the generation whose step registered it, and a successor starts from
+an empty journal, so a generation that still owes one cannot carry it across.
+The transition is refused and no successor is created: the pending compensators
+run, and the generation rests `failed` with `CompensableCarryError` on the run.
+Read it from `run.status()`, the same way a `StalledError` is read; the body
+cannot catch it, because the call that asked for the transition already ended
+the dispatch.
 
 ## Instances
 
@@ -634,7 +527,7 @@ const status = await run.status();
 
 `start({ input, key, onConflict })` creates a run and returns a `WorkflowRun`.
 `key` is optional. When present, it deduplicates starts for the same app,
-workflow, and key while the run is live. Once that run is completed, failed or
+workflow, and key while the run is live. Once that run is completed, failed, or
 cancelled, an app start may reuse the key. This does not make the key a
 permanent receipt for retrying an ambiguous transport request.
 
@@ -645,14 +538,34 @@ permanent receipt for retrying an ambiguous transport request.
 - `"replace"`: cancel the incumbent run, clear its key, and create a new run.
 - `{ policy: "join" | "reject" | "replace" }`: object form of the same policy.
 
-The native binding exposes a typed handle per workflow name. Rehydrate a known
-run with:
+The namespace exposes a typed handle per workflow name. Rehydrate a known run
+with:
 
 ```ts
 const run = env.workflows.Checkout.get(runId);
 ```
 
-The SDK `WorkflowRun` interface is:
+`@zeroship/types` declares `env` as an open index signature and publishes no
+`workflows` namespace, so `env.workflows` is untyped. `@zeroship/workflows`
+exports `WorkflowRun`, so a typed handler declares a narrow wrapper and casts
+once, in one place, instead of casting `any` throughout:
+
+```ts
+import type { WorkflowRun } from "@zeroship/workflows";
+import { env } from "zeroship";
+
+const workflows = env.workflows as {
+  Checkout: {
+    start(opts: {
+      input: { orderId: string };
+      key?: string;
+    }): Promise<WorkflowRun<{ charged: boolean }>>;
+    get(runId: string): WorkflowRun<{ charged: boolean }>;
+  };
+};
+```
+
+The `WorkflowRun` interface is:
 
 ```ts
 type WorkflowRunState =
@@ -676,32 +589,25 @@ interface WorkflowRun<Output = unknown> {
   resume(): Promise<void>;
   cancel(opts?: { mode?: "abort" | "compensate" }): Promise<void>;
   restart(opts?: RestartOptions): Promise<WorkflowRun<Output>>;
-  createSignalToken(opts: { types: string[]; ttl: string }): Promise<string>;
 }
 ```
 
-`pause()` stops dispatching until `resume()`. `cancel()` aborts the run
-without running compensators, and ends it as `cancelled`.
+The SDK type also declares `createSignalToken(opts: { types: string[]; ttl: string })`
+on `WorkflowRun`, but the runtime binding that backs `env.workflows` does not
+implement it, and minting the scoped signal bearer token is part of the public
+ingress surface that is not yet exposed to creator apps. It is therefore not
+part of the supported surface above, and calling it is not supported today.
 
-> **`mode` is not implemented on either backend.** `cancel()` accepts the
-> options object and ignores it, so `{ mode: "compensate" }` aborts exactly
-> like `{ mode: "abort" }` and no rollback runs. This is not a gap at one call
-> site: the backend contract is
-> `transition(run_id, op: RunOperation)`, so there is nowhere for a
-> runtime-chosen mode to travel. Implementing it means changing that contract,
-> not forwarding an argument. Until then, do not read a `compensate` cancel as
-> a rollback: to roll back completed steps, let the run FAIL, which is the
-> path that does run compensators.
+`pause()` stops dispatching until `resume()`. `cancel()` aborts the run and
+ends it as `cancelled`.
+
+> **`mode` is not implemented.** `cancel()` accepts the options object and
+> ignores it, so `{ mode: "compensate" }` aborts exactly like `{ mode: "abort" }`
+> and no rollback runs. Do not read a `compensate` cancel as a rollback: to roll
+> back completed steps, let the run FAIL, which is the path that does run
+> compensators.
 
 `restart(opts?)` requeues the same run ID:
-
-The SQLite and PostgreSQL adapters share deploy-policy and quiescence checks.
-A restart rejects live execution leases, active descendants, active
-compensation, and a cascading child whose parent's cancellation is still
-propagating. A partial restart retains the prefix and its original deploy;
-it cannot retain steps whose compensation already finished. SQLite rewrites
-the discarded checkpoints, their signal consumption and run state in a
-transaction, so a failed restart preserves the previous journal.
 
 ```ts
 interface RestartTarget {
@@ -721,35 +627,15 @@ await run.restart({ deploy: "started" });
 
 With `from`, the journal prefix before the named step is retained and the target
 step plus everything after it is dropped. Without `from`, the full journal is
-dropped. The run input is retained; use a new `start()` to change input.
+dropped. A restart rejects live execution leases, active descendants, active
+compensation, and a cascading child whose parent's cancellation is still
+propagating. A partial restart retains the prefix and its original deploy; it
+cannot retain steps whose compensation already finished. The run input is
+retained; use a new `start()` to change input.
 
-## Local Development
-
-`zeroship serve` runs `env.workflows` through an in-process SQLite mini-engine.
-It uses the same `@zeroship/workflows` SDK surface and the same runtime replay
-shim as deployed runs, but stores the journal in a dev-local SQLite database
-owned by the local process.
-
-Local `start()`, `signal()` and `restart()` return after their journal
-transaction commits. The local runner executes accepted work separately;
-execution failure does not turn an accepted start into a failed API call.
-Checkpoint batches and their resulting run state also commit together.
-
-The local engine is dev-only by construction: the CLI serve path is the only
-construction vector that can create the SQLite backend. Production workers build
-`env.workflows` with the HTTP control-plane backend and never select the local
-engine.
-
-Intentional local divergences:
-
-- Single process only. There are no multi-node leases, lease reclaim races, or
-  cross-worker handoffs in the SQLite engine.
-- No gateway ingress edge. `run.signal(...)` works locally; public signal
-  routes and topic ingress are deployed-only features.
-- SQLite lifetime is local to the dev process and configured file path. Deleting
-  the file deletes the local workflow journal.
-- Schedules and large workflow blobs are deployed-engine parity items unless
-  explicitly listed as local support.
+`deploy` selects the code the restarted run re-executes under. A full restart
+defaults to `"latest"` (the current deploy); a partial restart keeps the
+`"started"` pin and rejects `"latest"`.
 
 ## Schedules
 
@@ -779,13 +665,9 @@ schedule({ name: "poll", schedule: every(15, "minutes"), workflow: PollInbox });
 schedule({ name: "heartbeat", schedule: cronExpr("*/5 * * * *"), workflow: Heartbeat });
 ```
 
-Schedule registrations are discovered at build time and stored in the deploy
-manifest. The manager evaluates calendar metadata and persists each occurrence
-with its deployment, activation revision and run identity. The creator worker
-verifies that deployment, resolves its static input and atomically accepts the
-occurrence with a run and Advance publication intent. It performs no calendar
-evaluation. Completed acceptance and overlap skips survive redelivery;
-unavailable prerequisites and capacity failures remain retryable.
+Registrations are discovered at build time and stored in the deploy manifest.
+An occurrence is accepted atomically with a run start when the manager fires it,
+exactly as if a handler had called `start`, so scheduled runs are ordinary runs.
 
 Supported schedule forms:
 
@@ -816,76 +698,23 @@ daylight-saving transitions. Fixed intervals are duration based and do not
 shift for daylight saving time. Use cron forms for "at this local time" and
 interval forms for "every N units".
 
-Invalid schedules throw `InvalidScheduleError` during build/deploy
-compilation, not at fire time. Sub-minute cron, unknown timezones, and
-unsupported cron tokens are rejected.
+Invalid schedules throw `InvalidScheduleError` during build/deploy compilation,
+not at fire time. Sub-minute cron, unknown timezones, and unsupported cron
+tokens are rejected.
 
 ## External Signals And Broadcast
 
-There are three signal producers:
+A signal is how a run learns about an event outside its own steps. There are two
+surfaces today:
 
-- `run.signal({ type, payload, idempotencyKey? })` from app code.
-- A public signal route for systems outside the app.
-- Topic broadcast, which fans one signal out to all matching topic waits.
-
-A run-addressed public signal uses:
-
-```text
-POST https://{app}.zeroship.ai/__zeroship/signals/v1/run/{runId}
-Authorization: Bearer <signal-token>
-Content-Type: application/json
-Idempotency-Key: <event-id>
-
-{ "type": "payment.approved", "payload": { "approved": true } }
-```
-
-A topic signal uses:
-
-```text
-POST https://{app}.zeroship.ai/__zeroship/signals/v1/topic/{topic}
-Authorization: Bearer <signal-token>
-Content-Type: application/json
-Idempotency-Key: <event-id>
-
-{ "type": "price.updated", "payload": { "price": 42 } }
-```
-
-Public route handling verifies the token, checks the allowed signal types, and
-writes journal rows. It does not run app code on the ingress path. The matching
-workflow dispatch happens later.
-
-Mint a narrow per-run token through the run handle where that helper is
-available:
+- `run.signal({ type, payload })` from app code delivers a signal to a known run.
+- `step.waitForSignal({ type, ... })` consumes a matching signal inside a run.
+  Pass `topic` to subscribe to a broadcast topic instead of the run's own
+  mailbox.
 
 ```ts
-const token = await run.createSignalToken({
-  types: ["payment.approved", "payment.failed"],
-  ttl: "48h",
-});
+await run.signal({ type: "payment.approved", payload: { approved: true } });
 ```
-
-The control client exposes the concrete token and broadcast helpers:
-
-```ts
-import { createControlClient } from "@zeroship/control";
-
-const control = createControlClient({ baseUrl, token });
-
-const runToken = await control.workflows.createSignalToken(runId, {
-  appId,
-  types: ["payment.approved"],
-  ttl: "48h",
-});
-
-await control.workflows.publishTopic(`order:${orderId}`, {
-  appId,
-  type: "payment.approved",
-  payload: { approved: true },
-  idempotencyKey: eventId,
-});
-```
-
-Inside a workflow, subscribe to a topic by passing `topic`:
 
 ```ts
 const signal = await step.waitForSignal("market-tick", {
@@ -895,12 +724,21 @@ const signal = await step.waitForSignal("market-tick", {
 });
 ```
 
+A signal reaches a run that is waiting; a waiting run that has been signalled
+becomes due and its dispatch resumes with the consumed signal.
+
+Public signal ingress — receiving signals from systems outside the app over the
+edge, and minting the scoped bearer token those systems would present — is not
+yet exposed to creator apps. `createSignalToken`, which mints that bearer token,
+is declared on the SDK `WorkflowRun` type but not implemented by the runtime
+binding, so there is no way to obtain a token today. Signal delivery from within
+the app itself is the supported path.
+
 ## Large Outputs
 
-Saved step outputs are read through the app-scoped native workflow backend.
-`run.readStepOutput(name, occurrence)` returns bytes; replay uses that same
-operation for lazy `StepOutputRef` reads. The host keeps the control endpoint
-and credential in Rust. Local development reads the saved SQLite checkpoint.
+Saved step outputs are read through the run. `run.readStepOutput(name,
+occurrence)` returns bytes; replay uses that same operation for lazy
+`StepOutputRef` reads.
 
 Small JSON outputs are inlined in the journal. Larger outputs, or outputs with
 an explicit by-reference mode, are stored as workflow blobs and replayed as
@@ -937,7 +775,9 @@ const report = await ref.json<{ rows: unknown[] }>();
 returns a `StepOutputRef`; use `ref.stream()` to read it. `run.status()` returns
 a ref for a blob-backed final output instead of inlining it into the status JSON.
 
-If an output exceeds the platform blob cap, the run fails with
+The inline threshold is 1 MiB: outputs at or under it are journaled inline, and
+anything larger — or explicitly by-reference — becomes a workflow blob. A single
+blob may not exceed 64 MiB; an output over that cap fails the run with
 `LimitExceededError`.
 
 ## Compensation
@@ -972,7 +812,7 @@ const reservation = await step.run(
 );
 ```
 
-When the run reaches terminal failure, the engine walks completed compensable
+When the run reaches terminal failure, the platform walks completed compensable
 steps in reverse journal order and runs their compensators. A compensator may
 run more than once after crash, retry, or lease handoff. Make the undo effect
 idempotent by using `ctx.idempotencyKey` with the external system or durable
@@ -983,10 +823,9 @@ signals, child waits, incomplete steps, and steps whose errors were caught and
 handled are not compensated.
 
 `run.cancel()` is a hard abort and does not run compensators. Nor does
-`run.cancel({ mode: "compensate" })`: the `mode` option is accepted and
-ignored on both backends, so cancelling is never a rollback today. See the
-note on `cancel()` above. A failing run is currently the only path that runs
-compensators.
+`run.cancel({ mode: "compensate" })`: the `mode` option is accepted and ignored,
+so cancelling is never a rollback today. A failing run is currently the only
+path that runs compensators.
 
 `NondeterministicError` and `StalledError` fail closed and do not enter
 rollback. They indicate the engine cannot trust replay enough to safely rebuild
@@ -1013,20 +852,19 @@ compensator that reported one.
 
 A compensator that never returns is not a `partial` rollback: nothing reported,
 so nothing is known. The platform reclaims those dispatches against the same
-`maxStuckDispatches` budget a forward run gets, and when it is spent the
-rollback is abandoned. The run still rests `failed` with the creator's original
-error, because a rollback the platform gave up on does not overturn the verdict
-the workflow body produced. The summary reads `abandoned`, `abandoned` lists
-the steps whose compensators never reported, and `reason` carries the
+stuck-dispatch budget a forward run gets — 4 consecutive reclaimed dispatches —
+and when it is spent the rollback is abandoned. The run still rests `failed`
+with the creator's original error,
+because a rollback the platform gave up on does not overturn the verdict the
+workflow body produced. The summary reads `abandoned`, `abandoned` lists the
+steps whose compensators never reported, and `reason` carries the
 `StalledError` that stopped the wait. Those steps are outside `total`,
-`completed` and `failed`, which count only compensators that reached a final
+`completed`, and `failed`, which count only compensators that reached a final
 result.
 
 Treat an abandoned obligation as an undo of unknown state: the compensator may
 have applied part of its effect before it stopped reporting. The step name and
 ordinal are what let you go and check.
-
-Local development and deployed apps run compensators the same way.
 
 ## Errors
 
@@ -1034,17 +872,30 @@ The SDK exports these workflow error classes:
 
 | Error | When it fires | Catchable? |
 | --- | --- | --- |
-| `PermanentError` | Business failure that should not retry. If it escapes `run()`, the run fails and eligible compensators run. | Yes, if you intend to handle it and continue. |
-| `StepTimeoutError` | A step body is still running when `StepConfig.timeout` expires. Recorded as retryable. | Yes around `step.run`; if uncaught, normal failure handling applies. |
+| `PermanentError` | Business failure that cannot be cleared by running the body again. Declares `retryable: false`, so it ends the step whatever `retries` allowed; if it escapes `run()`, the run fails and eligible compensators run. | Yes, if you intend to handle it and continue. |
+| `StepTimeoutError` | A step body is still running when `StepConfig.timeout` expires. Declares `retryable: true`, so it spends an attempt rather than ending the step. | Yes around `step.run`; if uncaught, normal failure handling applies. |
 | `NondeterministicError` | Bare workflow-body I/O/timers, journal name/kind/order mismatch, or unsupported step-promise control flow. | Treat as terminal misuse; do not swallow it. No rollback. |
-| `StalledError` | The platform reclaimed `maxStuckDispatches` dispatches of one frontier without the run reporting an outcome. | Not raised in your body: it is the platform's verdict. On a forward frontier it is recorded on the run, which rests `stalled`. On a rollback frontier it is recorded as `compensation.reason` and the run rests `failed` with the rollback abandoned. Terminal either way. No rollback. |
+| `StalledError` | The platform reclaimed 4 consecutive dispatches of one frontier without the run reporting an outcome. | Not raised in your body: it is the platform's verdict. On a forward frontier it is recorded on the run, which rests `stalled`. On a rollback frontier it is recorded as `compensation.reason` and the run rests `failed` with the rollback abandoned. Terminal either way. No rollback. |
 | `ChildCancelledError` | A `step.call` child is cancelled before the parent join completes. | Yes around `step.call`; if uncaught, normal failure handling applies. |
 | `ChildTimeoutError` | A `step.call` child exceeds `ChildWorkflowOptions.timeout`. | Yes around `step.call`; if uncaught, normal failure handling applies. |
 | `LimitExceededError` | A platform cap is exceeded, such as `step.startMany` over the batch cap or output over the blob cap. | Once recorded, yes. The `step.startMany` cap cannot be caught in the dispatch that raises it: the catch resumes the body outside the replay boundary and the run fails `NondeterministicError` instead. |
 | `WorkflowTimeoutError` | A `step.waitForSignal` timeout that was recorded against the run rather than resolved to `null`. | Yes around `step.waitForSignal`; if uncaught, normal failure handling applies. |
 | `NestedStepError` | A `step.*` method is called from inside a step body or compensator. | Treat as terminal misuse. Fix the body rather than handling it. |
-| `CompensableCarryError` | `step.continueAsNew` is requested while the current generation still has pending compensators. | No. Finish or clear compensation first; no successor generation is created. |
-| `RestartError` | A run restart request is invalid or cannot be applied. | Outside `run()` only, around `run.restart(...)`. |
+| `CompensableCarryError` | `step.continueAsNew` is requested while the current generation still has pending compensators. | No. It is the platform's verdict: the transition is refused, no successor generation is created, the pending compensators run, and the generation rests `failed` carrying this name. |
+| `InvalidScheduleError` | A schedule registration is invalid — a malformed or unsupported cron expression, an unknown IANA timezone, or a non-positive interval count or backfill. Thrown when the schedule is compiled at build/deploy time, never at fire time or on a run. Exported from `@zeroship/workflows/schedule`. | Yes, at registration time; catch it beside the `schedule(...)` call that raised it. |
+
+Except `InvalidScheduleError`, which is thrown at build time, every class above
+names a condition the platform records on a run or on a step. The control
+operations an app handler calls on a `WorkflowRun` — `signal`, `pause`,
+`resume`, `cancel`, `restart`, `readStepOutput` — never enter the journal, so
+they never carry one of those names. They reject through a different path with a
+stable failure shape: a plain `Error` whose `code` is one of
+`workflow_not_found`, `workflow_conflict`, `workflow_unavailable`,
+`workflow_timeout`, `workflow_resource_exhausted`, `workflow_payload_too_large`,
+`workflow_permission_denied`, or `workflow_unauthenticated`. An argument that
+does not parse rejects as a built-in `TypeError` carrying the engine's own
+message and no `code`. The SDK exports no class for either shape; branch on
+`error.code` and on the operation you called, not on the identity of what threw.
 
 ### Matching an error
 
@@ -1116,3 +967,26 @@ Dont:
   not inline them.
 - A compensator receives the original step output. Use that output to undo the
   exact effect the forward step produced.
+
+## Local Development
+
+`zeroship serve` runs `env.workflows` through an in-process SQLite engine. It
+uses the same `@zeroship/workflows` SDK surface and the same runtime replay
+behavior as deployed runs, but stores the journal in a dev-local SQLite
+database owned by the local process.
+
+Local `start()`, `signal()`, and `restart()` return after their journal
+transaction commits. The local runner executes accepted work separately;
+execution failure does not turn an accepted start into a failed API call.
+Checkpoint batches and their resulting run state also commit together.
+
+Intentional local divergences:
+
+- Single process only. There are no multi-node leases, lease reclaim races, or
+  cross-worker handoffs in the local engine.
+- No gateway ingress edge. `run.signal(...)` works locally; public signal
+  routes and topic ingress are deployed-only features.
+- SQLite lifetime is local to the dev process and its configured file path.
+  Deleting the file deletes the local workflow journal.
+- Schedules and large workflow blobs are deployed-engine parity items unless
+  explicitly listed as local support.

@@ -1,50 +1,22 @@
 # `@zeroship/migrate` — the op DSL
 
-`@zeroship/migrate` is the single structured authoring package and recorder for
-zeroship database migrations. It lives in `packages/zero-migrate/`; the former
-second implementation in `sdks/migrate/` is gone. Platform and creator
-migrations therefore import the same module instance and record into the same
-ambient singleton the host drains.
+`@zeroship/migrate` is the package you import to author zeroship database
+migrations. You describe each change as structured operations in a `.ts` module;
+the package records them and the platform applies them. There is no SQL string in
+the authoring surface.
 
-A migration is a `.ts` module with exactly one forward phase:
+A migration is a single `.ts` module with exactly one forward phase:
 
-- `schema()` records DDL. The engine synthesizes its structural inverse.
+- `schema()` records DDL. The engine derives a structural inverse, so a schema
+  migration declares no reverse.
 - `data()` records DML and must declare either a recorded `inverse()` or a
   non-empty `irreversible` reason.
 
-Schema and data changes cannot share one module. All phase functions are
-parameterless, synchronous, and return `void`; they describe operations rather
-than executing SQL. PostgreSQL is the first-class target, and constructs with no
-native realization on another target fail closed unless the author supplies an
-explicit dialect leg.
-
-There is one import root: `@zeroship/migrate`. Core value exports include
-`table`, `view`, `enumType`, `domain`, `schema`, `extension`, `role`,
-`sequence`, `grant`, `revoke`, `createFunction`, `dropFunction`, `dropOwnedBy`,
-`raw`, `comment`, `t`, `fromDb`, and `lintDeterminism`. `index`/`foreignKey`/
-`check`/`unique` stay fluent methods on the table handle; they are not
-top-level exports. Postgres-vendor ops are first-class root exports, and the
-security gate remains the engine's per-op `VendorCapability` validation:
-confined creator migrations receive `VENDOR_OP_DENIED`.
-
-`table(name, { schema? })` is the table authoring entry. There is no flat
-`createTable`/`addColumn`/… vocabulary — table operations are methods (or selector
-terminals) on the handle `table()` returns. `enumType(name)` is also an inert
-handle: it records nothing until `.create({ values, schema? })`, `.drop(...)`, or
-`.comment(...)` is called.
-
-There is no raw **expression** escape: no `Raw` expression type, no `sql\`\``
-tag, and no string fragments in predicates or transforms. Every expression is a
-fluent `(col) => Expr` callback over a closed AST, and the engine owns rendering.
-The one deliberate whole-statement escape is `raw({ sql, reason })`, a
-reason-required, trust-gated DDL operation for operator migrations. Confined
-creator migrations cannot use it and receive `VENDOR_OP_DENIED`.
-
-The TypeScript source and internal recorder live together in
-`packages/zero-migrate/src/`. The engine CLI and Vite plugin both consume its
-`@zeroship/migrate/internal/recorder` export. There is no package alias or second
-recorder. The dialect-neutral IR emitted by this one package is the frozen
-contract.
+Schema and data changes cannot share one module. Every phase function is
+parameterless, synchronous, and returns `void`; calling the helpers describes the
+change and does not connect to a database. PostgreSQL is the first-class target;
+constructs with no realization on another target fail closed unless you supply an
+explicit dialect leg (see [dialect()](#dialect-at-value-and-op-position)).
 
 ```ts
 // migrations/0007_create_orders.ts
@@ -75,31 +47,86 @@ type Migration =
   | { name?: string; data(): void; irreversible: string };
 ```
 
-- `schema()` accepts DDL only. Any recorded DML is refused, and its reverse is
-  synthesized from the structural operations.
+- `schema()` accepts DDL only. Any recorded DML is refused, and the reverse is
+  derived from the structural operations.
 - `data()` accepts DML only. `inverse()` is recorded independently through the
-  same DSL, making the reverse checksummed and lintable. If no safe reverse
+  same DSL, so the reverse is checksummed and lintable. If no safe reverse
   exists, replace it with a non-empty `irreversible` explanation.
 - Every phase is parameterless and synchronous. A terminal records a plain-data
-  operation onto the ambient recorder; it never connects to a database.
-- Authoring **outside an active recorder** — at module top level or after the
-  active phase returns (e.g. from a stray `setTimeout`) — throws a structured
-  `OP_OUTSIDE_RECORDER` error. The op cannot be silently lost.
+  operation; it never connects to a database.
+- `up()` and `down()` are not accepted. Choose `schema()` or `data()`
+  explicitly; a data reverse belongs in `inverse()`. An authored phase that
+  returns a promise (an `async` function) is refused with
+  `ASYNC_PHASE_UNSUPPORTED`.
+- `name` is optional. When omitted it falls back to the filename label.
+- Authoring **outside an active phase** — at module top level, or after the phase
+  returns (for example from a stray `setTimeout`) — throws `OP_OUTSIDE_RECORDER`.
+  The op cannot be silently lost.
 - A **selector that is never terminated** (`table("u").column("email")` with no
-  terminal such as `.add()`/`.drop()`/`.rename()`/`.setNotNull()`) is a hard `SELECTOR_NOT_TERMINATED`
-  build error at drain — never a silent no-op (see
-  [Selectors must be terminated](#selectors-must-be-terminated)).
+  terminal such as `.add()` / `.drop()` / `.rename()`) is a hard
+  `SELECTOR_NOT_TERMINATED` build error when the phase ends, never a silent
+  no-op. See [Selectors must be terminated](#selectors-must-be-terminated).
 
 The former generic phase names are deliberately rejected rather than retained as
-aliases. Authors must choose schema or data semantics explicitly.
+aliases.
 
 ### Data reversal is recorded or explicitly impossible
 
 The engine never fabricates a reverse for data. A reversible data migration
 records `inverse()` as its own DML stream. An irreversible data migration carries
 the reason in `irreversible`; the reason appears in lint and status output so an
-operator sees it before attempting rollback. Destructive DDL still belongs in a
+operator sees it before attempting rollback. Destructive DDL belongs in a
 `schema()` migration, where policy and approval gates decide whether it may run.
+
+## Authoring, ordering, and running migrations
+
+**Authoring** uses `@zeroship/migrate`. **Running** — apply, plan, lint, status —
+uses the `zero-migrate` CLI, a separate package:
+
+```
+npm install @zeroship/migrate             # what your migration files import
+npm install zero-migrate-cli @zeroship/migrate pg   # PostgreSQL driver (or mysql2)
+```
+
+The CLI discovers migrations under `./migrations` (override with `--dir`) as
+`*.{ts,mts,cts,js,mjs,cjs}` files, excluding `.d.ts`. **Migration order is
+filename order** — the filenames are sorted and applied oldest-first, and that
+sorted order is the contract both `plan` and `apply` follow. Author in that
+order: `zero-migrate new <name>` scaffolds a fresh `<14-digit-timestamp>_<name>.ts`,
+and the timestamp prefix (left-padded) keeps lexicographic order equal to
+creation order. Never renumber or rename an already-applied file — a name is the
+migration's journal identity, so a rename reads as a new version or a missing
+one.
+
+The command surface:
+
+```
+zero-migrate new <name>     scaffold a migration          (offline)
+zero-migrate lint           DB-free validation, all dialects (offline)
+zero-migrate plan           render pending SQL against the live database
+zero-migrate apply          apply pending migrations, oldest first
+zero-migrate status         reconcile the set against the applied journal
+zero-migrate history        print the applied migration audit trail (~PostgreSQL)
+zero-migrate rollback       undo applied versions (--to/--steps/--all)
+zero-migrate resolve        resolve an online-rename pending contract
+zero-migrate baseline       adopt an already-migrated database
+```
+
+`plan`, `apply`, `status`, `history`, and `rollback` read `--database-url`
+(or `DATABASE_URL` / a configured `zero-migrate.toml` environment). Live
+commands require at least one table-shape policy file passed with `--policy`
+(there is no embedded default); destructive steps (deletes, backfills)
+also require `--approve`.
+
+The CLI (and the dev/build type-generation tooling) evaluates each exported
+phase and records its operations into an ordered list; that recorded list is
+what `lint`, `plan`, `apply`, and `status` operate on. An op authored outside a
+phase is refused at that step (`OP_OUTSIDE_RECORDER`), never silently dropped.
+
+A migration set is **validated** before it runs: `lint`
+(and the validate step that `plan` and `apply` impose) checks the recorded
+operations against every supported dialect and returns the structured error
+envelope described under [Error and finding envelopes](#error-and-finding-envelopes).
 
 ## Core Entry Points
 
@@ -110,8 +137,7 @@ The portable authoring surface is reached through direct named exports from
 import { table, view, enumType, comment, t, now, uuidV4 } from "@zeroship/migrate";
 ```
 
-The principal exports used throughout this guide
-(`packages/zero-migrate/src/index.ts`) are:
+The principal exports are:
 
 | Export | Purpose |
 | --- | --- |
@@ -119,147 +145,139 @@ The principal exports used throughout this guide
 | `view` | cross-dialect view entry — returns a `ViewHandle` |
 | `enumType` | portable enum entry — returns an inert `EnumHandle`; `.create({ values })` records |
 | `comment` | standalone structured object comments |
+| `check` | a named table-level `CHECK` definition for `create({ checks })` |
 | `t` | the immutable column-type lexicon |
+| `perRow` | apply-time ID generators for `backfill({ set })` — `perRow.uuidV4()` / `.uuidV7()` / `.typeId({ prefix })` (see [Value-constructor signatures](#value-constructor-signatures)) |
 | `dialect` | per-dialect value or whole-op escape hatch |
 | `fromDb` | the `@zeroship/db` field → migration `ColumnDef` bridge |
 | `lintDeterminism` | the best-effort determinism source scan |
-| `countStar` | receiver-less aggregate helper for `COUNT(*)`; receiver aggregates are `ExprChain` methods |
+
+Value constructors and helpers used in expression slots:
+
+| Export | Purpose |
+| --- | --- |
+| `now()` · `uuidV4()` · `uuidV7()` · `genRandomUuid()` | database-evaluated apply-time values |
+| `currentSetting(name, opts?)` · `currentUser()` | database session values |
+| `interval(duration)` | a structured interval value |
+| `concatWs(sep, ...parts)` | NULL-skipping concatenation (the one receiver-less scalar helper) |
+| `countStar()` | receiver-less `COUNT(*)` |
+| `lit(value)` | an explicit literal node |
+| `nextval(name, opts?)` | a sequence-backed default |
+| `int64(value)` · `decimal(value)` · `byteValue(bytes)` | widened scalar carriers |
+| `minValue` · `maxValue` | ordered partition-bound sentinels |
+
+### Value-constructor signatures
+
+The helpers above take the following arguments and return the following values:
+
+- `now()`, `uuidV4()`, `uuidV7()` — return a **database-evaluated apply-time
+  value** (an expression node, not a frozen scalar). Use them in a column
+  default or DML value; the database computes them at apply time. `uuidV4` /
+  `uuidV7` are RFC 9562 UUIDv4 / UUIDv7 respectively. `genRandomUuid()` records
+  the **same UUIDv4 node as `uuidV4()`**; prefer `uuidV4()`.
+- `currentSetting(name, opts?)` — the SQL session value of setting `name`;
+  `opts` is `{ missingOk?: boolean }` (the `missing_ok` flag on the underlying
+  `current_setting`).
+  `currentUser()` returns the SQL session user, with no arguments.
+- `interval(duration)` — a structured interval from `duration`, an object of
+  optional non-negative integer fields `{ years?, months?, days?, hours?,
+  minutes?, seconds? }` (at least one required).
+- `literals`: `lit(value)` builds an explicit literal node from a
+  `string | number | boolean | null` (or an `int64`/`decimal`/`byteValue`
+  carrier); bare JS values auto-wrap in most expression slots, so `lit` is for
+  the rare slot where you must be explicit.
+- `nextval(name, opts?)` — a sequence-backed **column default** referencing the
+  sequence `name`; `opts` is `{ schema?: string }`. Use it in `.default(...)`,
+  not as a DML value.
+- `int64(value)`, `decimal(value)`, `byteValue(bytes)` — **widened scalar
+  carriers** for row values and defaults where a shift beyond JS-safe-number or
+  a precise decimal/byte spelling is load-bearing:
+  - `int64(value: bigint | string)` — an exact signed 64-bit integer (validates
+    against the signed-64 range).
+  - `decimal(value: string)` — an exact decimal from a well-formed decimal
+    string (for example `decimal("0.01")`); the way to carry an integer beyond
+    2^53 or a fixed-scale numeric.
+  - `byteValue(bytes: Uint8Array | string)` — bytes from a `Uint8Array` or a
+    base64 string. A bare `Uint8Array` row value is accepted and normalized to
+    the same carrier.
+  - All three record a tagged, normalized IR scalar; a raw JS `bigint` is
+    rejected (use `int64(...)`).
+- `minValue`, `maxValue` — **sentinel constants** (not functions) marking the
+  unbounded low / high end of an ordered partition bound; pass them as the
+  `from`/`to` elements of `partition(name).create({ from: [minValue], to: [...] })`
+  (and the other partition-bound args).
+- `perRow.uuidV4()` / `.uuidV7()` / `.typeId({ prefix })` — apply-time
+  generator intents valid **only** inside `backfill({ set })`; each is evaluated
+  once per affected row at apply time. They are not scalars, column defaults, or
+  runtime ID generators (see [Table data — direct named DML](#table-data--direct-named-dml)).
+
+### The three CHECK shapes
+
+`check` exists in three cooperating spellings; they are the same concept at
+different positions:
+
+- **Inline** in `create({ checks: [{ name, expr }] })` — the field form
+  (see [The table itself](#the-table-itself)).
+- **Top-level** `check(name, expr)` — builds that same `{ name, expr }` object
+  for reuse, usually before passing it to `create({ checks })`.
+- **Selector method** `table(name).check(name).add({ expr })` — adds a named
+  `CHECK` to an *existing* table (see
+  [Constraints](#constraints--per-kind-add-name-keyed-drop)).
+
+`check` is not a top-level fluent selectable on its own; the table-handle method
+is the only add-path, and the top-level function is a data builder.
+
+Postgres-vendor ops are first-class root exports too: `schema`, `extension`,
+`role`, `sequence`, `domain`, `grant`, `revoke`, `createFunction`,
+`dropFunction`, `dropOwnedBy`, and `raw`. They are capability-gated: a confined
+creator migration that reaches them receives `VENDOR_OP_DENIED`. `index` /
+`foreignKey` / `check` / `unique` stay fluent methods on the table handle; they
+are not top-level exports.
 
 `table(name, { schema? })` returns a handle whose methods are the whole DDL+DML
 surface (see [The `table()` surface](#the-table-surface)). The handle's terminals
 record eagerly and return the handle, so calls chain and a handle is reusable
-across statements ([Var-assign + reuse](#var-assign--reuse)).
+across statements (see [Var-assign + reuse](#var-assign--reuse)).
 
-`view(name, opts?)` returns a structured `SelectAst` builder by default. Its
-query callback supports `from`, `select`, `join`/`innerJoin`/`leftJoin`, `where`,
+`view(name, opts?)` returns a structured select builder by default. Its query
+callback supports `from`, `select`, `join` / `innerJoin` / `leftJoin`, `where`,
 `groupBy`, `having`, `orderBy`, and `limit`; `groupBy` accepts column names or
 expressions, and `having` may use aggregate expressions such as `countStar()`,
-`col("amount").sum()`, or PG-first aggregates like `col("name").stringAgg(", ")`.
-The raw view body escape remains for constructs outside the structured view
-surface.
+`col("amount").sum()`, or PostgreSQL aggregates like
+`col("name").stringAgg(", ")`. A raw view body remains available for constructs
+outside the structured view surface.
 
-There is **no scalar-function namespace**: scalar functions with a natural receiver are
-chain methods on `ExprChain` (see [The fluent expression surface](#the-fluent-expression-surface)).
-The one receiver-less scalar helper is the top-level `concatWs(...)` import.
-Aggregates follow the same receiver-first shape (`col("x").sum()`, `col("x").count({ distinct: true })`);
-receiver-less `COUNT(*)` is the top-level `countStar()` import. The common
-PostgreSQL aggregates `stringAgg(delimiter)`, `arrayAgg()`, `boolAnd()`, and
-`boolOr()` are first-class chain methods, but validate fail-closed on SQLite and
-MySQL (`DIALECT_UNSUPPORTED`) unless the value is wrapped in `dialect({...})`.
-`jsonb_agg`, aggregate-local `ORDER BY`, and aggregate `FILTER` clauses are
-outside the current surface.
-
-## `dialect()` at value and op position
-
-`dialect(legs)` is the explicit portability escape. It has two modes, selected
-by the leg values:
-
-- **Expression/value position**: legs are expression values. The recorder emits
-  `Expr::Dialectal`, and a target with no own leg and no `default` leg is a hard
-  portability error. Use this inside defaults, predicates, generated expressions,
-  DML values, and other expression slots.
-- **Statement/op position**: legs are thunks. The recorder runs each present
-  thunk in canonical order (`default`, `pg`, `sqlite`, `mysql`), captures the ops
-  it emitted, removes those captured ops from the outer recorder, and emits one
-  `dialectal` op containing the per-target op lists. A target with no own leg
-  and no `default` leg skips the op entirely.
-
-```ts
-import { dialect, table } from "@zeroship/migrate";
-
-dialect({
-  pg: () => table("docs").index("docs_embedding_hnsw_idx").add({
-    on: ["embedding"],
-    using: "hnsw",
-  }),
-});
-```
-
-An explicit empty thunk is a present no-op leg for that target. An absent key is
-different: absent own leg plus absent `default` means "skip" for op-level
-`dialect()` and "error" for expression-level `dialect()`. Mixing thunk legs with
-expression-value legs in the same call throws `OP_INVALID`.
-
-Spec-level dialectal fragments, such as wrapping one index element inside
-`indexes: []` or wrapping a `ColumnDef`, are not accepted. Use op-level
-`dialect()` around the whole op or op sequence.
-
-## Names are strings (and why)
-
-**Every table/column/name reference is a plain `string`.** There is no generic
-`S extends Schema` parameter, no `TableName<S>` / `keyof RowOf<S,T>` binding to
-the live `@zeroship/db` schema. `table`, `column`, `from`, `to`, `name`,
-`cursorColumns`, every `set` key, every `where`-referenced column, and every
-`col("…")` argument are strings whose existence is validated at **apply time
-against the real DB**, never at `tsc` time (the typing-stance prose lives in the
-module header, `packages/zero-migrate/src/types.ts`, "names are plain
-`string`, NOT live-schema-bound", and on the `Row`/`ScalarValue` types,
-strings").
-
-This is deliberate, and it is the single most important typing rule of the DSL.
-
-**Why binding names to the live schema is wrong (the rot bug).** Migration files
-are immutable historical artifacts. If `.column().add()`/`.update()` typed their
-names against the *current* schema, a migration that referenced `users.lastSeen` would
-**stop compiling** after a *later* migration dropped that column — the whole
-history would become un-compilable as the schema evolves, and authors would be
-tempted to edit committed migrations to make them compile, changing the op list,
-changing the plan checksum, and triggering a drift abort. "A migration
-referencing a column that does not exist fails `tsc`" is an anti-feature: it
-confuses the schema *at authoring time* with the schema *as it evolves*, and
-punishes the correct behavior (never editing applied migrations).
-
-No mature migration tool binds migration files to the live schema:
-
-- **Kysely** deliberately uses `Kysely<any>` inside migrations — its docs state
-  migrations should not be typed against the current schema, precisely because
-  the schema changes over time.
-- **Alembic** uses string names: `op.add_column("users", …)`. zeroship's
-  `table("users").column(…)` likewise carries plain-string names.
-- **Drizzle** migrations are generated SQL, not type-checked against the live
-  schema.
-
-**What IS type-checked (structural safety, preserved):**
-
-- **Op argument shapes** — you cannot pass a number where a `ColumnDef`
-  is expected, or omit a required field on a terminal's args object.
-- **The `t` column-type lexicon** — `t.text()` / `t.numeric()` and their
-  chainable modifiers (`.notNull()` / `.default()`) are typed.
-- **The fluent-expression node shapes** — `c`'s methods (`.eq` / `.concat` /
-  `.gt` / `.splitPart` …) have typed arities and return an `Expr`; calling a
-  non-existent operator method fails `tsc`. (Method *names* are the typed builder
-  API; that is not the forbidden string-vs-typed mix, because every *identifier*
-  `c` references is still a plain string.)
-- **Insert-row VALUE shapes** — rows are a loose `Record<string, ScalarValue>`
-  by default; a caller may supply a generic `insert<R>(…)` for editor
-  convenience, but `R` is never auto-derived from the live schema.
-
-So the guarantee: op shapes, the `t` lexicon, expression node shapes, and value
-kinds are typed; **names are validated at apply/render time, never `tsc`-bound to
-the live schema.** The part most likely to be semantically wrong (a transform's
-referenced names) is exactly what the type system cannot see — you test it with
-the shadow-DB dry-run.
+There is **no scalar-function namespace**: scalar functions with a natural
+receiver are chain methods on the expression chain (see
+[The fluent expression surface](#the-fluent-expression-surface)). Aggregates
+follow the same receiver-first shape (`col("x").sum()`,
+`col("x").count({ distinct: true })`). The PostgreSQL aggregates
+`stringAgg(delimiter)`, `arrayAgg()`, `boolAnd()`, and `boolOr()` are chain
+methods but validate fail-closed off PostgreSQL (`DIALECT_UNSUPPORTED`) unless
+the value is wrapped in `dialect(...)`. `jsonb_agg`, aggregate-local `ORDER BY`,
+and aggregate `FILTER` clauses are outside the current surface.
 
 ## The column-type lexicon (`t.*`)
 
 Every column-type position (`create`'s `columns`, `.column().add()`,
-`.column().rename()`, `.column().setType()`) takes a chainable `ColumnDef` produced
-by the fluent `t.*` lexicon. **Columns are nullable by default**; `.notNull()` is
-the rarer, riskier opt-in.
+`.column().rename()`, `.column().setType()`) takes a chainable `ColumnDef`
+produced by the fluent `t.*` lexicon. **Columns are nullable by default**;
+`.notNull()` is the rarer, riskier opt-in.
 
 The `t.*` chain is **immutable**: every modifier returns a **fresh** `ColumnDef`
 rather than mutating the receiver, so a hoisted type var is safe to reuse across
 columns without aliasing (see [Var-assign + reuse](#var-assign--reuse)).
 
-The shipped factories (`packages/zero-migrate/src/ops.ts`):
+The shipped factories:
 
 | Factory | Column type |
 | --- | --- |
 | `t.typedId(prefix)` | a typed-id column: bounded string storage carrying the prefix; nullable and constraint-neutral until modifiers opt in |
 | `t.text({ caseSensitive? })` | unbounded text |
 | `t.string({ length?, caseSensitive? })` | bounded string; length defaults to 255 |
-| `t.textArray()` | text array (JSON text on non-PG targets) |
+| `t.textArray()` | text array — see the note below |
 | `t.char({ length })` | fixed-length character string |
+| `t.smallInt()` | 16-bit integer |
 | `t.int()` | 32-bit integer |
 | `t.bigInt()` | 64-bit integer |
 | `t.real()` | single-precision float (float4) |
@@ -269,25 +287,34 @@ The shipped factories (`packages/zero-migrate/src/ops.ts`):
 | `t.timestamp()` | timestamp |
 | `t.date()` | SQL date |
 | `t.uuid()` | uuid |
+| `t.inet()` | IP network/address |
 | `t.bytes()` | byte array |
 | `t.json()` | json |
-| `t.vector({ dimensions, metric? })` | a pgvector column; `metric` pins the distance metric — see [Sensitive-data facets](#sensitive-data-facets) |
+| `t.vector({ dimensions, metric? })` | a vector column; `metric` pins the distance metric — see [Sensitive-data facets](#sensitive-data-facets) |
 | `t.geoPoint()` | a geo point |
 | `t.enum(name)` / `t.domain(name)` | a reference to a declared enum or domain type |
 
-> The `string`/`integer`/`float` aliases and the `t.X({ notNull, default })`
-> options-bag overload are **removed**. Use the canonical `t.text()`/`t.int()`
+> `t.textArray()` records a PostgreSQL `text[]` column (JSON text on
+> non-PostgreSQL targets). The descriptor type it emits is **rejected by the
+> runtime database validator**, so it cannot back an app table. Use `t.json()`
+> to store a list of strings.
+
+> The `string` / `integer` / `float` aliases and the `t.X({ notNull, default })`
+> options-bag overload are **removed**. Use the canonical `t.text()` / `t.int()`
 > and the chain (`t.text().notNull().default("pending")`).
 
-Chainable modifiers (`packages/zero-migrate/src/ops.ts`), each returning a fresh `ColumnDef`:
+Chainable modifiers, each returning a fresh `ColumnDef`:
 
 | Modifier | Effect |
 | --- | --- |
 | `.notNull()` | mark `NOT NULL` |
 | `.default(value)` | a typed scalar literal, `now()` / `uuidV4()`, **or** a function-expression callback for composed defaults — never raw SQL |
-| `.primaryKey()` | mark the table primary key (implies `NOT NULL`) |
+| `.primaryKey()` | mark the table primary key (implies `NOT NULL`; the single-column shorthand) |
 | `.unique()` | add a single-column `UNIQUE` |
-| `.references(table, column, options?)` | a typed single-column foreign key — keeps this column's storage type and adds the target `{ table, column }` (+ optional `onDelete`/`onUpdate`/`name`/`relation`) |
+| `.references(table, column, options?)` | a typed single-column foreign key — keeps this column's storage type and adds the target `{ table, column }` (+ optional `onDelete` / `onUpdate` / `name` / `relation`) |
+| `.generated(expr, { virtual? })` | a generated/computed column; stored by default, `{ virtual: true }` on SQLite |
+| `.identity({ always? })` | a SQL identity column; `BY DEFAULT` unless `always: true` |
+| `.autoIncrement()` | portable auto-increment intent for integer columns (sugar for `.identity()`) |
 | `.collation(intent)` | pin how the column compares, as a closed intent token — see [Column collation](#column-collation) |
 | `.mask({ kind, classification? })` | declare a standalone column mask (the field reads back as `MaskedValue<T>`) — see [Sensitive-data facets](#sensitive-data-facets) |
 | `.encrypted()` | store this column's plaintext encrypted (AEAD, fresh nonce per write); the type stays the plaintext — see [Sensitive-data facets](#sensitive-data-facets) |
@@ -321,26 +348,23 @@ target are required — a missing target column is an `OP_INVALID` at authoring
 time, never a silently table-only reference.
 
 `relation` declares the ORM navigation name: the example exposes
-`.with({ customer: true })` while keeping `customer_id` as the scalar foreign key.
-The name must be a nonreserved output identifier, unique within its collection,
-and cannot collide with a column. It is carried in runtime metadata; `name`
-independently names the SQL constraint.
+`.with({ customer: true })` while keeping `customer_id` as the scalar foreign
+key. The name must be a nonreserved output identifier, unique within its
+collection, and cannot collide with a column. `name` independently names the SQL
+constraint.
 
-The facet is **create-table only**: `.column().add()`, `.setType()`, and nested
-type positions (a domain's `as`) reject a `.references()`
-`ColumnDef` rather than dropping the reference. Add a foreign key to an existing
-table with `.foreignKey(name).add({ columns, references })`, which is also the
-only shape for a **composite** key.
+The reference facet is **create-table only**: `.column().add()`, `.setType()`,
+and nested type positions (a domain's base) reject a `.references()` definition
+rather than dropping the reference. Add a foreign key to an existing table with
+`.foreignKey(name).add({ columns, references })`, which is also the only shape
+for a **composite** key.
 
 ### Sensitive-data facets
 
 Column facets carry intent that must survive the offline author→generate→fold
-round-trip. Each lands on the wire `IrColumn` (`idPrefix` /
-`vectorMetric` / `mask` / `encrypted`), is **closed** (the engine rejects an
-out-of-set token
-at deserialize, and the SDK gives a friendly `OP_INVALID` at authoring time), and
-is **checksum-neutral when absent** (a facet-less column is byte-identical to the
-pre-facet image).
+round-trip. Each lands on the wire `IrColumn` (`idPrefix` / `vectorMetric` /
+`mask` / `encrypted`), is **closed** (an out-of-set token is rejected with
+`OP_INVALID` at authoring time) and is checksum-neutral when absent.
 
 **`t.typedId(prefix)` — typed id.** It selects storage only: a bounded string
 carrying the declared prefix in `idPrefix`. It does not imply `NOT NULL`, a
@@ -349,15 +373,14 @@ explicitly. The prefix is validated at author time and carried as `idPrefix`
 because the catalog cannot recover it; the DDL has no database-level format
 check.
 
-**`t.vector({ dimensions, metric })` — pgvector distance metric.** Pins the ivfflat/hnsw
-operator class. Closed set: `cosine | l2 | innerProduct`. Declared-only (pgvector
-stores dimensions, not the search metric).
+**`t.vector({ dimensions, metric })` — vector distance metric.** Pins the
+ivfflat/hnsw operator class. Closed set: `cosine | l2 | innerProduct`.
+Declared-only.
 
 **`.mask({ kind, classification? })` — standalone column mask.** The field reads
-back as `MaskedValue<T>`; the op lower emits the `zero-migrate:mask` sentinel + `_masked`
-sibling (the same shape `.encrypted()`'s auto-mask uses; an explicit `.mask()`
-on an encrypted column **overrides** the auto-mask). `kind` is **required**;
-`classification` is **optional and defaults to `"pii"`**.
+back as `MaskedValue<T>`. `kind` is **required**; `classification` is optional
+and **defaults to `"pii"`**. An explicit `.mask()` on an encrypted column
+overrides the encryption's automatic mask.
 
 **`.encrypted()` — encrypted storage.** The physical type remains the declared
 plaintext; this verb sets the `encrypted` facet, and the op lower emits the
@@ -388,11 +411,10 @@ export default {
 ```
 
 > `vectorMetric` and `mask` also ride on `.column().add({ type })`; neither
-> silently disappears from an added column.
-
-These facets are also what the migration set carries into the generated types:
-the typed-id `prefix`, the vector `metric`, and the `mask` brand survive the op
-fold into `env.db.ts` (see [Generating types from the migration set](#generating-types-from-the-migration-set-gen-types)).
+> silently disappears from an added column. These facets survive into the
+> generated types: the typed-id `prefix`, the vector `metric`, and the `mask`
+> brand flow into the generated `env.db.ts` (see
+> [gen-types](#generating-types-from-the-migration-set-gen-types)).
 
 ## Column collation
 
@@ -422,44 +444,28 @@ a collation (anything but `t.text()` / `t.string()`); alongside
 `caseSensitive: false`, which asks for the opposite ordering; alongside a typed
 id (`t.typedId()`), which pins bytewise comparison as part
 of its storage contract; and outside `table(...).create({ columns })` —
-`.column().add()`, `.column().setType()`, `.column().rename()` and nested type
-positions have no slot for the facet, and refuse it rather than leave the
-migration source claiming an ordering the database does not have.
-
-## Bridging a `@zeroship/db` field (`fromDb`)
-
-The migration DSL and the runtime `@zeroship/db` schema share **one** type
-lexicon. `fromDb(field)` lifts a live-schema `@zeroship/db` `t.*` field into a
-migration `ColumnDef` through the identical `ColType` path
-(`packages/zero-migrate/src/ops.ts` `fromDb`). It carries the field's physical
-type and nullability (`.required()` → `.notNull()`) and returns a chainable
-`ColumnDef` so you can still layer migration modifiers on top. The bridge does
-not turn a runtime-schema ref into a migration foreign-key constraint: migration
-references use an explicit physical type plus `.references(table, column)`. A
-non-storage `@zeroship/db` field (a json `array`, a nested
-`object`, a `union`) has no portable column type and throws
-`UnsupportedColTypeError` (`packages/zero-migrate/src/db-lexicon.ts`) — a hard
-boundary, never a silent fallback.
+`.column().add()`, `.setType()`, `.rename()` and nested type positions have no
+slot for the facet.
 
 ## The `table()` surface
 
-`table(name, { schema? })` returns a `TableHandle`. Everything — DDL and DML — is
+`table(name, { schema? })` returns a table handle. Everything — DDL and DML — is
 a method (or a selector terminal) on that handle. Every terminal takes **exactly
 one named-object** argument (identity — the table name and a selector name — is
-positional; payload + options are a named object), records eagerly, and **returns
-the handle** so calls chain.
+positional; payload + options are a named object), records eagerly, and
+**returns the handle** so calls chain.
 
 ### The table itself
 
 ```ts
 table("audit_log").create({
   columns: {
-    id: t.typedId("evt").primaryKey(),
+    id: t.typedId("evt"),
     org_id: t.typedId("org").notNull(),
     email: t.text().notNull(),
     role: t.text().notNull().default("member"),
   },
-  primaryKey: ["org_id", "email"], // composite PK; use `.primaryKey()` for a single column
+  primaryKey: ["org_id", "email"], // composite PK; use `.primaryKey()` for one column
   uniques: [{ name: "members_org_email_uq", columns: ["org_id", "email"] }],
   checks: [{ name: "members_role_nonempty", expr: (col) => col("role").ne("") }],
   foreignKeys: [
@@ -480,27 +486,59 @@ table("accounts").rename({ to: "members" }); // ALTER TABLE … RENAME TO … (P
 
 `create({...})` is the one all-object form (no `build` callback): table-level
 constraints and indexes are **fields**, and each carries a **required `name`**
-(name-first, so a later migration can deterministically drop it). Foreign-key
-actions are `cascade | restrict | setNull | setDefault | noAction` (the index
-method set is `btree | gin | gist | ivfflat | hnsw`).
+(name-first, so a later migration can deterministically drop it).
+
+| `create` field | What it declares |
+| --- | --- |
+| `columns` | required; the ordered column map |
+| `primaryKey` | an ordered table-level primary key (composite keys); `null` requests no key; a column's `.primaryKey()` is the single-column shorthand |
+| `uniques` | named `UNIQUE` constraints: `{ name, columns }` |
+| `checks` | named `CHECK` constraints: `{ name, expr }` |
+| `foreignKeys` | named, ordered foreign keys: `{ name, columns, references: { table, columns }, onDelete?, onUpdate?, deferrable?, initiallyDeferred? }` |
+| `exclusions` | named exclusion constraints |
+| `indexes` | named indexes: `{ name, on, unique?, using?, where?, include?, only?, nullsNotDistinct? }` |
+| `options` | collection runtime (lifecycle) options — see below |
+| `partitionBy` | partitioning for a partitioned table |
+| `ifNotExists` | existence guard for the create |
+| `schema` | overrides the handle's default schema |
+
+Foreign-key actions are `cascade | restrict | setNull | setDefault | noAction`;
+the index method set is
+`btree | hash | gin | gist | spgist | brin | ivfflat | hnsw`. An unsupported
+combination fails closed at build time, never silently lowers to something else.
+
+**Lifecycle options.** `create({ options })` and `table(name).setOptions({...})`
+record collection runtime metadata:
+
+| Option | Values | Default | Effect |
+| --- | --- | --- | --- |
+| `softDelete` | boolean | `false` | select the injected `now`-on-delete generator as the visibility marker |
+| `versioning` | boolean | `false` | select the injected increment-on-write generator for optimistic concurrency |
+| `strictness` | `strict \| lenient \| off` | `strict` | recorded on the collection; does not change write validation today |
+
+`setOptions` must set at least one of the three, or it is an `OP_INVALID`. These
+options select roles; the platform-injected system columns determine the
+assignments, so `softDelete` and `versioning` work with no column declaration.
+
+`table("scratch").drop({ ifExists, cascade, schema? })` drops the table;
+`table(name).comment(text)` records a comment on the table; and
+`table(name).primaryKey()` changes an existing table's primary key through
+`add({ columns })`, `replace({ expectedColumns, columns, dropIdentityFrom? })`,
+or `drop({ expectedColumns, dropIdentityFrom? })`. `replace` / `drop` name the
+expected current key as a drift precondition; they change only the key
+constraint.
 
 #### `.rename({ to })` — whole-table rename
 
-`table(name).rename({ to, ifExists?, schema? })` records a `renameTable` op
-(`Op::RenameTable`) that lowers to a single, **direct** `ALTER TABLE … RENAME TO
-…` on **both** Postgres and SQLite — a fast catalog-metadata change, **not** the
-online column expand-contract (a whole table has no per-column dual-write that
-lets it coexist under two names). Because the change is a pure metadata rename,
-it is **auto-reversible**: the engine emits the inverse `RENAME TO` as the
-structural inverse, so a renaming-only migration needs no authored reverse.
-
-The fold re-targets every **incoming** FK / `ref` reference to the new name (the
-offline mirror of what live PG does on `RENAME TO`), so a later migration may
-reference the table under its new name and the generated types resolve. `ifExists`
-guards the **source** table (presence-only — an `ifExists` rename of an absent
-table is a satisfied no-op, the same probe shape `.drop({ ifExists })` uses). This
-is distinct from `.column().rename()` (the online column rename, see
-[Online rename](#online-rename)).
+`table(name).rename({ to, ifExists?, schema? })` records a whole-table rename.
+It lowers to a single, **direct** `ALTER TABLE … RENAME TO …` on both PostgreSQL
+and SQLite — a fast catalog-metadata change, **not** the online column
+expand-contract (a whole table has no per-column dual-write that lets it coexist
+under two names). Because the change is a pure metadata rename, the engine
+derives the inverse rename, so a renaming-only migration needs no authored
+reverse. `ifExists` guards the source table (an `ifExists` rename of an absent
+table is a satisfied no-op). This is distinct from `.column().rename()` (the
+online column rename, see [Online rename](#online-rename)).
 
 ### Columns — the `.column(name)` selector
 
@@ -517,7 +555,10 @@ orders.column("note").dropDefault();
 
 `.column(name).add({ type })` honors **all** modifiers on `type`, including
 `.unique()` (which emits a follow-on `UNIQUE` constraint) and `.primaryKey()` —
-they are not silently dropped.
+they are not silently dropped. The other terminals are
+`.drop({ ifExists? })`, `.rename({ to, type })`, `.setType({ to, using? })`,
+`.setNotNull()`, `.dropNotNull()`, `.setDefault(value)`, `.dropDefault()`, and
+`.comment(text)`.
 
 ### Constraints — per-kind `.add`, name-keyed `.drop`
 
@@ -533,8 +574,9 @@ table("orders").check("orders_total_nonneg").add({ expr: (col) => col("total").g
 table("orders").constraint("orders_total_nonneg").drop({ ifExists: true }); // kind-agnostic drop
 ```
 
-`.foreignKey/.unique/.check(name)` each have one terminal, `.add(...)`;
-`.constraint(name)` has one terminal, `.drop(...)` (kind-agnostic, by name).
+`.foreignKey(name)` / `.unique(name)` / `.check(name)` each have one terminal,
+`.add(...)`; `.constraint(name)` has `.drop(...)` (kind-agnostic, by name),
+`.comment(...)`, and `.validate(...)`.
 
 ### Indexes — the `.index(name)` selector
 
@@ -554,14 +596,13 @@ table("members").index("members_active_email_idx").add({
 });
 ```
 
-Indexes are **name-first** (the selector name), so a later migration can drop them
-deterministically. `.index().drop()` does not accept an author-declared
+Indexes are **name-first** (the selector name), so a later migration can drop
+them deterministically. `.index().drop()` does not accept an author-declared
 `unique` flag; the engine derives whether the target index is unique from the
-live/folded schema and gates a UNIQUE-index drop as destructive (it silently
-removes a data-integrity guarantee).
-PostgreSQL-specific index options (`using`, `where`, `include`, `with`, `only`,
-`nullsNotDistinct`, per-element `opclass`/`collation`) are authored with
-`table(...).index(...)` from `@zeroship/migrate`.
+schema and gates a UNIQUE-index drop as destructive (it silently removes a
+data-integrity guarantee). PostgreSQL-specific index options (`using`, `where`,
+`include`, `with`, `only`, `nullsNotDistinct`, per-element `opclass` /
+`collation`) are authored here.
 
 ### Table data — direct named DML
 
@@ -575,7 +616,7 @@ plans.insert({
   ],
 });
 
-// PG-only upsert: on a conflicting `id`, update the listed columns.
+// Upsert: on a conflicting `id`, update the listed columns.
 plans.insert({
   rows: [{ id: "pro", price_cents: 3900 }],
   onConflict: { columns: ["id"], doUpdate: { price_cents: 3900 } },
@@ -589,105 +630,72 @@ table("orders").update({
 table("sessions").delete({ where: (col) => col("expires_at").lt("2026-01-01T00:00:00Z") });
 
 table("orders").backfill({
+  name: "normalize_totals", // optional; defaults to `backfill_<table>`
   set: { total_norm: (col) => col("total").coalesce(0) },
   cursorColumns: ["id"], // REQUIRED ordered cursor tuple (no default)
   cursorStability: { mode: "guardUpdates" }, // REQUIRED; or { mode: "externalInvariant", name }
-  batchSize: 1000, // defaults to the engine's chosen size
+  batchSize: 1000, // the engine's default; omit to keep it
 });
 ```
 
 - The predicate keyword is **`where` everywhere** — there is no `filter`
   synonym.
-- `.del`'s `where` is **mandatory** — an unguarded full-table delete is rejected
-  at record time.
+- `.delete({ where })`'s `where` is **mandatory** — an unguarded full-table
+  delete is rejected at record time.
+- `.insert({ rows })`'s `rows` is a **single row object or an array of row
+  objects** — `{ id: 1 }` and `[{ id: 1 }, { id: 2 }]` both record. A row is a
+  loose `{ column: value }` record, never bound to the live schema.
 - `.backfill` requires an ordered `cursorColumns` tuple and an explicit
   `cursorStability` mode. Neither is defaulted: the cursor decides which rows a
   resume revisits, and the stability mode is the invariant that keeps the cursor
   components immutable across an interrupted apply
   (`{ mode: "guardUpdates" }` installs an engine-owned guard;
   `{ mode: "externalInvariant", name }` acknowledges an operator-owned one).
-- `.backfill` is a batched, per-batch-transactional,
-  resumable loop that persists crash-safe cursor progress under the project
-  lock. It runs on **both backends** (PG via the existing windowed executor;
-  SQLite via the committed batched executor).
-- Row values may be a string / safe number / `decimal("…")` / boolean / `null`
-  / `Uint8Array`. Use `decimal("<n>")` for integers beyond 2^53 or fixed-scale
-  numeric values; it records the IR `{ decimal }` carrier. A `Uint8Array` is
-  normalized to a base64 `{ bytes }` carrier before recording, so the wire shape
-  matches the engine's scalar deserializer.
+  `name` optionally names the backfill for journal/status identity; omit it and
+  the engine records `backfill_<table>`.
+- `.backfill` is a batched, per-batch-transactional, resumable loop that persists
+  crash-safe cursor progress. `batchSize` defaults to the engine's default
+  (`1000`); pass a different positive integer to tune a specific backfill.
+- A backfill `set` value may additionally be a `perRow.*` generator
+  (`perRow.uuidV4()` / `.uuidV7()` / `.typeId({ prefix })`),
+  evaluated independently for every affected row. These are reserved to
+  `backfill({ set })` — they are not accepted as scalars, column defaults, or
+  runtime ID generators (see [Value-constructor signatures](#value-constructor-signatures)).
+- Row values may be a string / safe number / boolean / `null` / a widened
+  carrier `int64(...)`, `decimal("…")`, `byteValue(...)`, or a bare
+  `Uint8Array`. Use `int64(...)` or `decimal("<n>")` for integers beyond 2^53 or
+  fixed-scale numeric values. A `Uint8Array` (or `byteValue(...)` input) is
+  normalized to a base64 carrier before recording; a raw JS `bigint` is rejected.
 - DML carries **no existence guard** (it is not guardable); `schema` rides on the
   args object.
-
-`.insert`'s `onConflict` (upsert) is **Postgres-only**. There is no portable
-SQLite upsert and no raw route; a SQLite-targeted `onConflict` is a hard build
-error (`dialect_scope = PgOnly`), surfaced at build, never at runtime.
+- `.insert({ rows, onConflict })` is a structured upsert. `onConflict.doUpdate`
+  renders on PostgreSQL, SQLite, and MySQL 8. On MySQL the conflict target must
+  exactly match one full primary or unique index, every target column must be
+  present in `rows`, and the target column must not be assigned from `doUpdate`.
+  Targeted do-nothing has no exact MySQL form and is refused there.
 
 ## The `schema` qualifier (profile-gated)
 
-Every table-targeting op accepts an optional `schema` (a plain identifier string —
-names-are-strings, never live-schema-bound). It selects the schema the op renders
-into. Its meaning is **profile-gated**:
+Every table-targeting op accepts an optional `schema` (a plain identifier
+string). It selects the schema the op renders into. Its meaning is
+**profile-gated**:
 
-- **General / dbmate-like CLI (Trusted profile):** the qualifier is **honored**.
-  The op renders `"schema"."table"` on Postgres. The default schema, when an op
-  omits its own, is the connection default (a `--schema`/search-path flag,
-  threaded as the engine's `default_schema`) → else the connection `search_path`
-  head. On **SQLite** the implicit target is `main` (the app file); a `schema`
-  that resolves to `main` (or to the bound project schema) renders unqualified.
-  A **non-`main` schema is refused fail-closed at lower** (`SqliteSchemaUnsupported`):
-  the SQLite emitter renders unqualified `main` DDL and the engine does **NOT**
-  auto-`ATTACH`, so honoring a non-`main` qualifier would silently drop it and land
-  the op in `main` — a silent wrong-target. Rather than that, lowering refuses; a
-  non-`main` SQLite schema requires an explicit `ATTACH … AS <schema>` arranged
-  by the caller, never an implicit re-pin to `main`.
+- **Platform creator deploy (confined):** the project schema is **pinned**. An
+  op that omits `schema`, or names the project schema, is fine; an explicit
+  `schema` that differs from the project schema is **refused, fail-closed**,
+  with `CROSS_SCHEMA` — before any SQL runs.
+- **Platform-internal:** an explicit `schema` must be a member of the configured
+  platform schema allow-list, else `CROSS_SCHEMA`.
+- **Standalone / trusted CLI:** the qualifier is honored.
 
-- **Backfill + an explicit schema (profile-gated):** the resumable
-  backfill executor now threads a **per-spec schema** (`BackfillSpec.schema`), so a
-  schema-qualified `backfill` **runs** against
-  `"schema"."table"` — the windowed `UPDATE`, the `search_path` anchor, and the
-  catalog introspection all target that schema, and the progress row records it
-  (`target_schema`). Which schemas are reachable is decided **upstream** by the
-  same cross-schema scope gate as every other op, so confinement is unchanged:
-  - **Confined (creator deploy):** the project schema is pinned; a foreign
-    qualifier is refused at validate-time (`CROSS_SCHEMA`) before the backfill is
-    lowered, so the spec's schema is always the project schema (the render is
-    byte-identical to the pre-threading project pin).
-  - **Trusted / Platform (standalone CLI):** the widened scope admits the
-    gate-approved schema, so the cross-schema backfill runs — under Trusted as the
-    connecting/admin role (no migrator `SET ROLE`), the documented posture.
-
-    > **Trusted backfill SQL fragments are trusted SQL.** The backfill's
-    > authored `set` clause and `where` filter are interpolated into the windowed
-    > `UPDATE`. Under **Confined** they run through the confined guard (deny-list
-    > + cross-schema walk), so a creator's fragments are statically bounded. Under
-    > **Trusted / Platform** the runner uses the **trusted guard** — the deny-list
-    > and cross-schema walk are **skipped by design** (only the structural checks
-    > remain: cursor-not-mutated + parse). So a trusted
-    > `set`/`where` is run as trusted SQL, and a Trusted *cross-schema* backfill
-    > runs those fragments cross-schema under that non-deny-listed guard. This
-    > exactly mirrors the one-shot DML Trusted posture (capability-token-gated,
-    > caller-owned DB access) and is **not** a confinement hole: creators can never
-    > reach the Trusted profile, so they cannot author these fragments.
-  - **SQLite (any profile):** a non-`main` schema is still refused **earlier**
-    (`SqliteSchemaUnsupported`, before the backfill lower); SQLite's single `main`
-    db renders the table unqualified.
-
-- **Platform creator deploy (Confined profile):** the project schema is **pinned**.
-  An op that omits `schema`, or names the project schema, is fine; an explicit
-  `schema` that differs from the project schema is **refused at validate-time,
-  fail-closed**, with a structured `CROSS_SCHEMA` authoring error — *before* lower,
-  earlier and friendlier than the least-privilege migrator role's `42501` and the
-  parse-guard's cross-schema denial (both of which stay in force as line-2/line-3
-  defenses). The confinement invariant is unchanged; this is an additional, earlier
-  gate.
-
-- **Platform-internal (Platform profile):** an explicit `schema` must be a member
-  of the configured platform schema allow-list, else `CROSS_SCHEMA`.
+The default schema, when an op omits its own, is set by `table(name, { schema })`
+and overridden per op; with neither, the connection default applies. On SQLite
+the implicit target is `main`, and any other schema is refused.
 
 The schema string is an identifier the engine double-quotes, so it is also
-**validated for injection** at validate-time (`INVALID_SCHEMA_IDENT`): it must be a
-non-empty, alpha/`_`-leading bare identifier of `[A-Za-z0-9_]` — an injection-shaped
-value (`"; DROP …`, an embedded quote) is rejected on every profile.
+**validated for injection** (`INVALID_SCHEMA_IDENT`): it must be a non-empty,
+alpha- or `_`-leading bare identifier of `[A-Za-z0-9_]`. An injection-shaped
+value (an embedded quote, `"; DROP …`) is rejected on every profile.
 
 ```ts
 // Trusted CLI: render into a non-default schema — set once on the handle.
@@ -701,111 +709,62 @@ table("other_app_table", { schema: "some_other_app" }).drop(); // → CROSS_SCHE
 ## Existence guards (`ifExists` / `ifNotExists`)
 
 The create/add family (`.create`, `.column().add`, `.index().add`,
-`.foreignKey/.unique/.check().add`) carries an `ifNotExists` option; the
-drop family (`.drop`, `.column().drop`, `.index().drop`,
-`.constraint().drop`) carries an `ifExists` option. A guard on
-the wrong family is a `GUARD_DIRECTION` authoring error.
+`.foreignKey` / `.unique` / `.check().add`) carries an `ifNotExists` option; the
+drop family (`.drop`, `.column().drop`, `.index().drop`, `.constraint().drop`)
+carries an `ifExists` option. A guard on the wrong family is a `GUARD_DIRECTION`
+authoring error.
 
-The option types are plain `boolean`; the guard is honored at apply time by a
-probe under the held advisory lock + the open per-step transaction (see the
-semantics list and the fail-closed defaults below).
+The guard is honored at apply time. The default semantic is
+**shape-verify-or-fail**, never a bare skip:
 
-These are **NOT** lowered to a native `IF [NOT] EXISTS` clause. Native support is
-patchy and asymmetric: Postgres has no `ADD CONSTRAINT IF NOT EXISTS` and none on
-`ALTER COLUMN`/`RENAME`; SQLite has no `ADD COLUMN IF NOT EXISTS`, none on
-drop-column, and none on rename. Lowering to native SQL would therefore silently
-support the guard on some ops/dialects and explode on others.
-
-Instead the engine **synthesizes** the guard uniformly via an **executor-side
-catalog probe**, run under the held project advisory lock (so probe→act is
-TOCTOU-free, the same interlock argument as the §2.0.3 contract): it queries the
-catalog (PG `pg_catalog`/`information_schema`; SQLite `sqlite_master` + PRAGMAs),
-decides **in Rust** whether the object is present, then runs the bare op or skips
-it. The default semantic is **shape-verify-or-fail**, never a bare skip:
-
-- `ifNotExists`, object **absent** → run the bare op.
+- `ifNotExists`, object **absent** → the op runs.
 - `ifNotExists`, object **present and its shape matches** the declared op → a
-  journaled **satisfied** no-op (the migration still records a version — satisfied,
-  not failed).
-- `ifNotExists`, object **present but its shape DIFFERS** (e.g. `addColumn
-  ifNotExists` where the column exists with a different type) → **FAIL CLOSED** with
-  a drift error naming the divergence. It is never a silent skip over a divergent
-  object.
-- `ifExists`, object **present** → run the bare drop/alter.
-- `ifExists`, object **absent** → a journaled satisfied no-op (a drop has no shape
-  to verify — presence alone governs).
+  journaled **satisfied** no-op (the migration still records a completed
+  version).
+- `ifNotExists`, object **present but its shape differs** (for example a column
+  that exists with a different type) → **fails closed** with a drift error
+  naming the divergence. It is never a silent skip over a divergent object.
+- `ifExists`, object **present** → the drop/alter runs.
+- `ifExists`, object **absent** → a journaled satisfied no-op.
 
-> The probe reads the live catalog (PG `information_schema`/`pg_catalog`; SQLite `sqlite_master`
-> + PRAGMAs) inside the SAME open transaction that will run the `up`, under the
-> project advisory lock the whole plan already holds — so there is no probe→act
-> TOCTOU window. `decide` is pure Rust over the snapshot, never a SQL-level
-> conditional. On `SatisfiedNoop` the version still lands (a journaled completed row)
-> so a re-deploy skips it via normal pending computation; on `FailDrift` the txn is
-> rolled back and nothing is applied or journaled.
-> (`crates/zeroship-migrate-backend/src/existence_probe.rs`,
-> `executor.rs` PG `apply_transactional`, `backend_sqlite/mod.rs` SQLite
-> `apply_up_transactional`.)
->
-> **Fail-closed defaults (a shape that cannot be fully introspected fails CLOSED,
-> never optimistically runs):**
-> - **Constraint `ifNotExists` — KIND check plus definition refusal.** A kind clash
->   (`PRIMARY KEY` vs `UNIQUE` …) is `FailDrift` naming `kind`. A PRESENT same-name +
->   same-kind constraint is ALSO `FailDrift` (naming `definition`), NOT a silent
->   no-op: the live `pg_get_constraintdef` body cannot be byte-proven equal to the
->   IR's un-normalized constraint, so a possibly-rewritten CHECK / different FK target
->   is refused rather than skipped. The realistic `ifNotExists` use (the constraint is
->   ABSENT) still runs bare.
-> - **Index `ifNotExists` over an expression / partial predicate** — `FailDrift`
->   naming `expression`: the IR `createIndex` (a column-list) cannot render a
->   byte-comparable `pg_get_expr` form, so equivalence is unprovable. A plain
->   column-list index compares `(unique, columns)` fully. This is guard-only:
->   unguarded partial indexes render on Postgres and SQLite; MySQL refuses them
->   fail-closed because it has no partial-index support.
-> - **SQLite type-affinity collision** — SQLite stores TEXT affinity for
->   string/date/json/ref alike, so a same-name TEXT-affinity column whose SDK facet
->   changed within one affinity is invisible to the catalog. The SQLite `ifNotExists`
->   column/table verify compares the introspected token exactly; a differing token
->   that still reduces to TEXT affinity is `FailDrift` (it cannot prove full-shape
->   equality), never an affinity-only no-op (the same limitation the SQLite drift path
->   already lives with).
->
-> **`renameColumn ifExists` is refused fail-closed at lower** (`GuardProbeUnbuildable`):
-> the online-rename plan step is a multi-migration shape with no single Migration the
-> probe can attribute its verdict to, and `lower_rename` ALREADY mandates the live
-> `from` column exist (an absent source is a hard error today — stricter than the
-> guard's "absent → no-op"). The guard is refused rather than silently dropped.
-> Every other guarded op (`createTable`/`addColumn`/`createIndex`/`addConstraint`
-> family; `dropTable`/`dropColumn`/`dropIndex`/`dropConstraint`;
-> `setColumnType`/`setColumnNotNull`/`dropColumnNotNull`/`setColumnDefault`/
-> `dropColumnDefault`) is honored by the probe.
+A shape that cannot be fully verified fails closed rather than optimistically
+running: for example, a constraint guarded by `ifNotExists` whose live
+definition cannot be proven byte-equal to the declared one is refused, and a
+partial or expression index guarded by `ifNotExists` is refused because
+equivalence is unprovable. An `ifExists` guard is not accepted on a column
+rename; the rename already requires the source column to exist.
 
 ### SQLite-safe rebuild (automatic)
 
 A SQLite `ALTER` that SQLite cannot do in place (drop a column on an old SQLite,
 re-type, a stand-alone constraint add/drop) is lowered by the engine to the
-12-step table rebuild automatically — there is no author-facing `batchAlterTable`
-grouping. Author the column/constraint changes as ordinary `.column()` /
-`.constraint()` terminals; the engine groups the rebuild per table at lower time.
+12-step table rebuild automatically — there is no author-facing
+`batchAlterTable` grouping. Author the column/constraint changes as ordinary
+`.column()` / `.constraint()` terminals; the engine groups the rebuild per table
+at lower time.
 
 ## Selectors must be terminated
 
 A selector (`.column(x)` / `.foreignKey(x)` / `.unique(x)` / `.check(x)` /
 `.constraint(x)` / `.index(x)`) returns a sub-builder that records **only** when
 its terminal (`.add` / `.drop` / `.rename` / `.alter`) is called. A forgotten
-terminal would otherwise silently record nothing — so the recorder makes it a
-**hard, structured error**: when the active phase drains, any selector handed out but
-never terminated throws `{ code: "SELECTOR_NOT_TERMINATED", selector, name }`.
-Terminating the same selector twice throws `SELECTOR_ALREADY_TERMINATED`.
+terminal would otherwise silently record nothing — so it is a **hard,
+structured error**: when the phase ends, a selector handed out but never
+terminated throws an error whose `code` is `"SELECTOR_NOT_TERMINATED"`, with
+`selector` and `name` fields (and a `suggested_fix`). Terminating the same
+selector twice throws an error with code `"SELECTOR_ALREADY_TERMINATED"`. See
+[Error and finding envelopes](#error-and-finding-envelopes) for the two error
+shapes.
 
-The check runs **at drain, not eagerly**, so a selector held in a variable and
-terminated on a later line is fine:
+The check runs **when the phase ends, not eagerly**, so a selector held in a
+variable and terminated on a later line is fine:
 
 ```ts
 import { table, t } from "@zeroship/migrate";
 
 export default {
   schema() {
-    // FINE — terminated on a later line (the guard checks at drain).
+    // FINE — terminated on a later line (the guard checks when the phase ends).
     const email = table("users").column("email");
     email.add({ type: t.text().notNull() });
     // ERROR — `table("users").column("nickname")` with no terminal is a hard
@@ -814,12 +773,60 @@ export default {
 };
 ```
 
+## Error and finding envelopes
+
+Refusals surface in **two shapes**, depending on where they are raised.
+
+**Authoring-time errors** — thrown synchronously while the migration module runs
+or the recorder drains. These are JavaScript `Error` objects (not JSON) carrying
+a `code` string property plus contextual fields. The codes raised here are:
+
+- `OP_INVALID` — a structurally invalid argument, facet, or value.
+- `OP_OUTSIDE_RECORDER` — an op recorded outside an active phase.
+- `SELECTOR_NOT_TERMINATED` and `SELECTOR_ALREADY_TERMINATED` — a selector ended
+  unterminated or was terminated twice; both carry `selector` and `name` fields.
+- `ASYNC_PHASE_UNSUPPORTED` — a phase returned a promise; carries `suggested_fix`.
+- `COLTYPE_UNSUPPORTED` — a `fromDb` field has no portable column type; carries
+  the offending `dbType`.
+
+Read `err.code` for the code and `err.suggested_fix` (when present) for the
+remedy; other fields name the offending selector, name, or type. `OP_INVALID` is
+also raised by the validate stage for structurally-valid-but-inconsistent
+hand-authored envelopes, where it uses the JSON shape below instead.
+
+**Validate/render errors** — raised when `lint`, `plan`, or `apply` checks the
+recorded operations against each supported dialect. These arrive as a structured
+JSON object. The canonical envelope is:
+
+```jsonc
+{
+  "suggested_fix": "…", // optional; the remedy, leads human rendering
+  "code": "EXPR_NOT_PORTABLE",
+  "kind": "expr",       // present only for code "UNSUPPORTED": "op" | "expr"
+  "op_index": 2,        // 0-based index of the offending op in the op list
+  "dialect": "sqlite",  // the dialect the rejection pertains to
+  "reason": "…"         // a precise human-readable reason
+}
+```
+
+Codes in this envelope include `UNSUPPORTED` (with `kind: "op" | "expr"`),
+`EXPR_NOT_PORTABLE`, `DIALECT_UNSUPPORTED`, `CROSS_SCHEMA`,
+`INVALID_SCHEMA_IDENT`, `GUARD_DIRECTION`, `VENDOR_OP_DENIED`, and the
+column-facet / sequence / partition codes named throughout this page. A source
+location (the offending migration file and position) is carried alongside when
+the engine knows it, as in the `EXPR_NOT_PORTABLE` example under
+[Out of envelope is a hard error](#out-of-envelope-is-a-hard-error-not-a-silent-mis-apply).
+
+**Advisory findings** are neither thrown nor fatal. `lintDeterminism(source)`
+returns a list of finding objects `{ code: "NONDETERMINISTIC_OP_ARG", accessor,
+suggested_fix, reason }` — a warning you act on, never a hard reject.
+
 ## Var-assign + reuse
 
 Both authoring styles are first-class — pick per readability. Every terminal
 **returns the handle**, so calls chain; and the handle is a reusable value
-(carrying only `{ name, schemaDefault }`), so it can be assigned once and reused
-across statements with `{ schema }` set a single time:
+(carrying only its name and default schema), so it can be assigned once and
+reused across statements with `{ schema }` set a single time:
 
 ```ts
 import { table, t } from "@zeroship/migrate";
@@ -840,10 +847,10 @@ export default {
 ```
 
 The `{ schema }` passed to `table()` is the **default schema** stamped onto every
-op the handle records; a per-op `schema` (on the terminal's args) **overrides** it
-for that one call, and an args bag that omits `schema` keeps the default (an absent
-key never wipes it). `table("users")` with no schema records ops with **no**
-`schema` key.
+op the handle records; a per-op `schema` on the terminal's args **overrides** it
+for that one call, and an args bag that omits `schema` keeps the default (an
+absent key never wipes it). `table("users")` with no schema records ops with
+**no** `schema` key.
 
 Because the `t.*` chain is **immutable** (every modifier returns a fresh
 `ColumnDef`), a hoisted type var is safe to reuse across columns:
@@ -864,9 +871,9 @@ export default {
 ## C1 — foreign-key referential actions
 
 A `.foreignKey(name).add({...})` (and a `create({ foreignKeys: [...] })` entry)
-takes optional `onDelete` / `onUpdate` of `cascade | restrict | setNull |
-setDefault | noAction`, and they are **actually rendered** (`ON DELETE CASCADE`,
-…). An action-free FK records byte-identically to before:
+takes optional `onDelete` / `onUpdate` of
+`cascade | restrict | setNull | setDefault | noAction`, and they are **actually
+rendered** (`ON DELETE CASCADE`, …). An action-free FK records no action clause:
 
 ```ts
 import { table } from "@zeroship/migrate";
@@ -885,8 +892,9 @@ export default {
 ## C2 — `.column().add()` honors `.unique()` / `.primaryKey()`
 
 `.column(name).add({ type })` honors **every** modifier on `type`. An ADD COLUMN
-has no inline `UNIQUE`, so a `t.*.unique()` / `t.*.primaryKey()` on an added column
-records the column **plus** a follow-on constraint (it is not silently dropped):
+has no inline `UNIQUE`, so a `t.*.unique()` / `t.*.primaryKey()` on an added
+column records the column **plus** a follow-on constraint (it is not silently
+dropped):
 
 ```ts
 import { table, t } from "@zeroship/migrate";
@@ -901,30 +909,33 @@ export default {
 
 ## The fluent expression surface
 
-Every expression position — a DML `set` value, a `where`, a `check(name).add` body, a
-partial-index `where:` — is a callback `(col) => Expr` with a **single injected
-builder handle** `c`. It is never a raw string; it constructs a node of a closed
-AST via an all-strings fluent builder
-(`packages/zero-migrate/src/ops.ts`, `packages/zero-migrate/src/types.ts`).
+Every expression position — a DML `set` value, a `where`, a
+`check(name).add` body, a partial-index `where:` — is a callback `(col) => Expr`
+with a **single injected builder handle**. It is never a raw string; it
+constructs a node of a closed AST through an all-strings fluent builder.
 
-**`c` is both a column accessor and the function namespace.** `col("first")`
-returns an unqualified `ColRef` chain; `col("table", "col")` returns a qualified
-`ColRef`. Arguments are plain strings; there is no dotted-string form like
+**`col` is both a column accessor and the function namespace.** `col("first")`
+returns an unqualified column reference; `col("table", "col")` returns a
+qualified one. Arguments are plain strings; there is no dotted-string form like
 `col("other.col")` (cross-table references remain limited by
 [the portability boundary](#the-dml-portability-boundary)).
 
 **Chainable operator methods** (each builds one closed-AST node; a bare JS value
-passed to a method auto-wraps to a `Literal` and is bound via `$n`/`?n`, never
+passed to a method auto-wraps to a literal and is bound as a parameter, never
 interpolated):
 
-- comparison: `.eq(x)`, `.ne(x)`, `.lt(x)`, `.le(x)`, `.gt(x)`, `.ge(x)`
-- boolean: `.and(...es)`, `.or(...es)`, `.not()`
+- comparison: `.eq(x)`, `.ne(x)`, `.lt(x)`, `.le(x)`, `.gt(x)`, `.ge(x)` —
+  `null` is rejected here; use `.isNull()` / `.isNotNull()`
+- predicates: `.and(...es)`, `.or(...es)`, `.not()`, `.between(low, high)`,
+  `.like(pattern)`, `.in(values)`, `.notIn(values)`, `.distinctFrom(x)`
 - arithmetic: `.add(x)`, `.sub(x)`, `.mul(x)`, `.div(x)`
 - string/value: `.concat(...parts)` (raw `||`, NULL-propagating). The
   NULL-skipping `concatWs` is a top-level import; `coalesce` is a chain method.
 - null/bool tests: `.isNull()`, `.isNotNull()`, `.isTrue()`, `.isFalse()`
 - cast: `.cast({ to: "text" | "int" | "real" | "boolean" | "bytes" | "uuid" })`
-  (the closed scalar `ColType` target set only)
+  (the closed scalar target set only)
+- PostgreSQL-first: `.regex(pattern)` and `.columnSize()` fail closed on other
+  targets (`DIALECT_UNSUPPORTED`)
 
 **Scalar chain methods + top-level `concatWs`**:
 
@@ -932,119 +943,132 @@ interpolated):
 - `e.coalesce(...rest)`, `e.nullif(b)`
 - `e.mod(b)`, `e.round(n?)`, `e.floor()`, `e.ceil()`, `e.substr(start, len?)`,
   `e.replace(from, to)`, `e.extract(field)`, `e.splitPart(delim, n)`
-- `concatWs(sep, ...parts)` — NULL-skipping concatenation, the safe form
-  for joining first+last name. Engine-synthesized to be byte-identical across PG
-  (`concat_ws`) and SQLite (a proven `coalesce`-folded `||`). For empty-string
-  join use `concatWs("", …)`.
-- `col.case({ branches: [{ when: cond, then: val }, …], else?: elseVal })` — the searched `CASE` form
-- `e.splitPart(delim, n)` — the engine-synthesized portable split helper,
-  within its pinned envelope (see below)
+- `concatWs(sep, ...parts)` — NULL-skipping concatenation, the safe form for
+  joining first+last name. Rendered byte-identically across PostgreSQL
+  (`concat_ws`) and SQLite (a proven `coalesce`-folded `||`). For an
+  empty-string join use `concatWs("", …)`.
+- `col.case({ branches: [{ when: cond, then: val }, …], else?: elseVal })` —
+  the searched `CASE` form
+
+**Aggregates** (receiver-first):
+
+- `e.count({ distinct? })`, `e.sum({ distinct? })`, `e.avg({ distinct? })`,
+  `e.min({ distinct? })`, `e.max({ distinct? })`, plus the top-level
+  `countStar()` for `COUNT(*)`
+- PostgreSQL-first: `e.stringAgg(delimiter)`, `e.arrayAgg()`, `e.boolAnd()`,
+  `e.boolOr()` fail closed on other targets unless wrapped in `dialect(...)`
 
 **Top-level value constructors**:
 
-- `now()`, `uuidV4()`, `uuidV7()` — DB-evaluated apply-time values
-  (render to `now()` / `gen_random_uuid()` per dialect). Use these instead of
-  baking a build-time `Date.now()` / UUID literal into the artifact. As an
-  ergonomic shorthand, the **bare native symbol** (no parens) `Date.now`,
-  `Math.random`, or `crypto.randomUUID` used as an op value records as the
-  identical DB-evaluated node — `Date.now` ⇒ `now()`, `Math.random` /
-  `crypto.randomUUID` ⇒ `uuidV4()` — so the DB evaluates it at apply
-  time. Calling it (`Date.now()`, with parens) just evaluates to a frozen
-  build-time value instead (see Determinism below).
+- `now()`, `uuidV4()`, `uuidV7()` — database-evaluated apply-time values. Use
+  these instead of baking a build-time `Date.now()` / UUID literal into the
+  artifact. As an ergonomic shorthand, the **bare native symbol** (no parens)
+  `Date.now`, `Math.random`, or `crypto.randomUUID` used as an op value records
+  the identical database-evaluated node — `Date.now` ⇒ `now()`,
+  `Math.random` / `crypto.randomUUID` ⇒ `uuidV4()`.
 
-The expression records as **dialect-neutral data, never SQL** — the engine owns
-all per-dialect lowering, so the plan checksum is dialect-stable. There is no
-author-named `split_part` / `instr`: those cross-dialect semantics diverge, so
-the split surface is the engine-pinned `.splitPart(...)` chain method.
+The expression is recorded as **dialect-neutral data, never SQL** — the engine
+owns all per-dialect lowering, so the same migration behaves the same way across
+backends. There is no author-named `split_part` / `instr`: those cross-dialect
+semantics diverge, so the split surface is the built-in `.splitPart(...)` chain
+method.
+
+### Expression slots and context typing
+
+An expression slot accepts three forms:
+
+- a **callback** `(col) => Expr`, where `col` is the injected builder handle;
+- a **pre-built chain value** — `now()`, or a chain saved in a variable; and
+- a **closed expression node object** carrying a `"node"` string field, the
+  escape for machine-generated operations.
+
+`col` is a callable builder: `col("name")` is an unqualified column reference,
+`col("table", "col")` a qualified one, and `col.case({ branches, else? })` the
+searched `CASE` form. Its chain methods are the expression surface below.
+
+**Contexts restrict which nodes are valid**, enforced at validate time,
+fail-closed:
+
+- An **immutable context** — an index expression or predicate, a generated
+  column, a `CHECK` — rejects volatile nodes: `now()`, `uuidV4()` / `uuidV7()`,
+  `currentSetting()` / `currentUser()`, and the PostgreSQL-only nodes, unless a
+  PostgreSQL-immutable allowance applies.
+- A **column-default context** additionally cannot reference a column at all: a
+  default has no row, so `col(...)` is refused. `now()`, `uuidV4()`, `uuidV7()`,
+  `concatWs` and `splitPart` remain permitted there.
 
 ### Determinism: don't bake a clock or RNG into a migration
 
-A migration is recorded by the sandboxed recorder whenever build/gen-types needs
-IR, so a **called** `Date.now()` / `Math.random()` / `crypto.randomUUID()` /
-`new Date()` in an op argument still freezes a build-time value for that
-recording (almost never what you want). The recorder handles this by translation,
-not by a gate:
+A migration is recorded whenever build/gen-types needs the operation stream, so
+a **called** `Date.now()` / `Math.random()` / `crypto.randomUUID()` /
+`new Date()` in an op argument freezes a build-time value for that recording
+(almost never what you want). The package handles this by translation, not by a
+gate:
 
 - The **bare native symbol** (no parens) — `Date.now`, `Math.random`,
-  `crypto.randomUUID` — records as the DB-evaluated node (identical IR
-  to `now()` / `uuidV4()`). This is the recommended way to get
-  an apply-time value.
-- A **call** (`Date.now()`) just evaluates and the resulting scalar is recorded
-  verbatim; `lintDeterminism(source)` emits an advisory **warning** steering you
-  to the symbol / top-level constructor form — it is advisory-only, never a hard reject (there
-  is no record-twice / invocation determinism gate).
-- A **function value** (native symbol or otherwise) nested inside a container/JSON
-  op value is rejected fail-closed (a function can't be DB-evaluated inside a JSON
-  literal), as is a non-native function used directly as an op value.
+  `crypto.randomUUID` — records as the database-evaluated node (identical to
+  `now()` / `uuidV4()`). This is the recommended way to get an apply-time value.
+- A **call** (`Date.now()`) just evaluates, and the resulting scalar is recorded
+  verbatim; `lintDeterminism(source)` — where `source` is the migration module's
+  source text — emits an advisory **warning** finding
+  (`{ code: "NONDETERMINISTIC_OP_ARG", accessor, suggested_fix, reason }`)
+  steering you to the symbol / constructor form. It is a coarse whole-source
+  scan (it over-flags, never under-flags) and is advisory-only, never a hard
+  reject.
+- A **function value** (native symbol or otherwise) nested inside a container /
+  JSON op value is rejected fail-closed (a function cannot be database-evaluated
+  inside a JSON literal), as is a non-native function used directly as an op
+  value.
 
 ## The DML portability boundary
 
-Portability is real but **bounded**, and the boundary is honest. The principle
-(Alembic/Kysely): the engine owns control flow and statement assembly; the
-author owns the data-transform expression — but here the author expresses that
-transform only through the closed fluent AST, never raw SQL.
+Portability is real but **bounded**, and the boundary is honest. The engine owns
+control flow and statement assembly; you own the data-transform expression — but
+you express that transform only through the closed fluent AST, never raw SQL.
 
-**Portable — works on both PG and SQLite from one op:**
+**Portable — works on both PostgreSQL and SQLite from one op:**
 
-- `insert` with literal rows (`onConflict` excepted — PG-only).
-- `del` with a `where`.
+- `insert` with literal rows.
+- `delete` with a `where`.
 - One-shot `update` / `backfill` whose `set` / `where` use only the closed
   fluent AST: column refs, auto-wrapped literals, arithmetic,
-  comparison/boolean operators, `col.case`, the allow-listed
-  provably-identical scalars (`coalesce`, `nullif`, `lower`, `upper`, `trim`,
-  `length`, `abs`, `.cast({ to })`, `.concat`), and `concatWs`.
-- The engine-synthesized `.splitPart` helper **within its pinned envelope**.
+  comparison/boolean operators, `col.case`, the allow-listed provably-identical
+  scalars (`coalesce`, `nullif`, `lower`, `upper`, `trim`, `length`, `abs`,
+  `.cast({ to })`, `.concat`), and `concatWs`.
+- The built-in `.splitPart` helper **within its pinned envelope**.
 
 ### The `splitPart` / `concatWs` portable-expression envelope
 
-`col.splitPart(delim, n)` lowers to `split_part(col, 'd', n)` on Postgres
-and to a pinned, exhibited `instr`/`substr` expression on SQLite, proven
-byte-identical to PG against real SQLite 3.51.2. The full portability envelope —
-admitting it on **both** backends — is:
+`col.splitPart(delim, n)` lowers to `split_part(col, 'd', n)` on PostgreSQL and
+to a pinned `instr` / `substr` expression on SQLite, proven byte-identical to
+PostgreSQL. The full portability envelope — admitting it on **both** backends —
+is:
 
 - `delim` is a literal, **non-empty, single ASCII character** (one byte, code
   point < 0x80);
 - `n` is a literal **positive integer** — and on the SQLite leg, `1 ≤ n ≤ 8`
-  (the inline unroll grows O(2ⁿ); past 8 it can exceed SQLite's expression-depth
-  limit);
+  (the inline unroll grows quickly; past 8 it can exceed SQLite's
+  expression-depth limit);
 - `col` is a column ref or an in-AST sub-expression.
-
-This envelope is enforced across **two layers**, not one:
-
-- The record-time JS grammar lint (`splitPartGrammarLint`,
-  `packages/zero-migrate/src/ops.ts`) rejects only the
-  *dialect-neutral, clearly-malformed* shapes — a non-string or empty `delim`,
-  and a non-integer or non-positive `n`. It does **not** check single-ASCII,
-  multi-character, or the `1 ≤ n ≤ 8` bound. There is exactly one recorder to
-  keep in step: the engine-embedded recorder and the SDK recorder are the same
-  single package's recorder build output, so
-  the lint has no twin that can drift away from it.
-- The single-ASCII delimiter and the SQLite-leg `1 ≤ n ≤ 8` bound are enforced
-  by the **Rust validator**: a multi-character / non-ASCII delimiter or `n > 8`
-  is *admitted on Postgres* (`dialect_scope = PgOnly`) and is a hard
-  `EXPR_NOT_PORTABLE` only on the SQLite leg. That is dialect-gated, so it
-  cannot live in the dialect-neutral JS lint.
 
 The value being split *may* contain multibyte UTF-8 content — it is the
 **delimiter** that is constrained to single-ASCII, because an ASCII byte never
-occurs inside a UTF-8 multibyte sequence, which is precisely why the byte-wise
-SQLite scan finds the same boundaries as PG's character-wise `split_part`.
+occurs inside a UTF-8 multibyte sequence, which is why the byte-wise SQLite scan
+finds the same boundaries as PostgreSQL's character-wise `split_part`.
 
-`concatWs(sep, …)` is the NULL-skipping join, engine-synthesized to render
-byte-identically on both backends. Prefer it over `.concat(...)` for joining
-values: `.concat` maps to `||`, whose NULL rule is documented (a NULL operand
-yields NULL on both backends) — fine when you want propagation, a footgun when
-you don't.
+`concatWs(sep, …)` is the NULL-skipping join, rendered byte-identically on both
+backends. Prefer it over `.concat(...)` for joining values: `.concat` maps to
+`||`, whose NULL rule is documented (a NULL operand yields NULL on both
+backends) — fine when you want propagation, a footgun when you don't.
 
 ### Out of envelope is a hard error, not a silent mis-apply
 
-A `.splitPart` call outside the envelope — a multi-character / empty /
-non-ASCII delimiter, `n = 0`, negative `n`, `n > 8`, or non-literal args — is a
-hard `EXPR_NOT_PORTABLE` error on the SQLite leg. The clearly-malformed shapes
-(empty delimiter, non-positive / non-integer `n`) are caught earlier, at record
-time, by the JS grammar lint above; the dialect-gated single-ASCII and `n ≤ 8`
-bounds are caught by the Rust validator. It is **never** silently mis-split. The
-structured error names the two real resolutions:
+A `.splitPart` call outside the envelope — a multi-character / empty / non-ASCII
+delimiter, `n = 0`, negative `n`, `n > 8`, or non-literal args — is a hard
+`EXPR_NOT_PORTABLE` error on the SQLite leg. The clearly-malformed shapes (empty
+delimiter, non-positive / non-integer `n`) are caught earlier, at record time.
+It is **never** silently mis-split. The structured error names the two real
+resolutions:
 
 ```jsonc
 {
@@ -1059,80 +1083,163 @@ structured error names the two real resolutions:
 
 ## No raw-SQL escape hatch (property A)
 
-There is no `Raw` type, no `sql\`\``, no string-fragment route — on either
-dialect. Where a transform is dialect-divergent and not expressible in the closed
-AST (an exotic PG-only function, a subquery/window, a cross-table reference,
-an out-of-envelope split), there is **no raw fallback**. It surfaces as a hard
-structured error (`UNSUPPORTED` with `kind:"expr"`/`"op"`, or
-`EXPR_NOT_PORTABLE`), and the only resolutions are:
+There is no raw-SQL **expression** surface — no raw expression type, no
+SQL-tagged template literal, no string fragments — on either dialect. Where a
+transform is dialect-divergent
+and not expressible in the closed AST (an exotic PostgreSQL-only function, a
+subquery/window, a cross-table reference, an out-of-envelope split), there is
+**no raw fallback**. It surfaces as a hard structured error
+(`UNSUPPORTED` with `kind: "expr"` / `"op"`, or `EXPR_NOT_PORTABLE`), and the
+only resolutions are:
 
-1. **Reshape** the migration into the portable surface (e.g. split into ≤ 8
-   parts), or
-2. **Accept `dialect_scope = PgOnly`** — the engine renders the PG form; the
-   migration is then not authorable on the SQLite dev tier. `dialect_scope` is
-   *derived* from the ops and the engine's allow-list version, never
-   author-declared via a raw string.
+1. **Reshape** the migration into the portable surface (for example split into
+   ≤ 8 parts), or
+2. **Accept a PostgreSQL-only reach.** Author the PostgreSQL form — typically a
+   `dialect({ postgres: … })` leg with no other leg and no `default` leg — and
+   leave the divergent construct out of the SQLite/MySQL surface. The engine
+   *derives* the migration's reach (`dialect_scope`, PostgreSQL-only) from the op
+   list and the engine's allow-list version; you never declare it as a string.
+   The consequence you accept is that such a migration is not authorable on the
+   SQLite dev tier: applying it against a non-PostgreSQL target is refused at
+   apply, never silently mis-applied on one backend.
 
-The expressible surface is the supported surface. This is what keeps "one script,
-both backends" honest: a migration that passes the both-backends dry-run applies
-faithfully on both; a migration that cannot, fails loudly at authoring/render
-time, not silently at runtime on one backend.
+The one deliberate whole-statement escape is `raw({ sql, reason })`, a
+reason-required, trust-gated DDL operation for operator migrations. It carries
+its reason with the operation. A confined creator migration cannot use it and
+receives `VENDOR_OP_DENIED`.
+
+The expressible surface is the supported surface. This is what keeps "one
+script, both backends" honest: a migration that passes the both-backends dry-run
+applies faithfully on both; a migration that cannot, fails loudly at
+authoring/render time, not silently at runtime on one backend.
+
+## `dialect()` at value and op position
+
+`dialect(legs)` is the explicit portability escape. It has two modes, selected
+by the leg values:
+
+- **Expression/value position**: legs are expression values. A target with no
+  own leg and no `default` leg is a hard portability error
+  (`EXPR_NOT_PORTABLE`). Use this inside defaults, predicates, generated
+  expressions, DML values, and other expression slots.
+- **Statement/op position**: legs are thunks. Each present thunk runs and the
+  ops it records are grouped under that backend id, emitted as one target-aware
+  operation. A target with no own leg and no `default` leg skips the op
+  entirely.
+
+Backend ids are lowercase identifiers; the supported targets are `postgres`,
+`sqlite`, and `mysql` (a `default` leg is also accepted).
+
+```ts
+import { dialect, table } from "@zeroship/migrate";
+
+dialect({
+  postgres: () => table("docs").index("docs_embedding_hnsw_idx").add({
+    on: ["embedding"],
+    using: "hnsw",
+  }),
+});
+```
+
+An explicit empty thunk is a present no-op leg for that target. An absent key is
+different: absent own leg plus absent `default` means "skip" for op-level
+`dialect()` and "error" for expression-level `dialect()`. Mixing thunk legs with
+expression-value legs in the same call throws `OP_INVALID`; an empty leg set is
+also `OP_INVALID`.
+
+Spec-level dialectal fragments, such as wrapping one index element inside
+`indexes: []` or wrapping a `ColumnDef`, are not accepted. Use op-level
+`dialect()` around the whole op or op sequence.
+
+## Names are strings (and why)
+
+**Every table/column/name reference is a plain `string`.** There is no generic
+schema parameter, no binding to the live `@zeroship/db` schema. `table`,
+`column`, `from`, `to`, `name`, `cursorColumns`, every `set` key, every
+`where`-referenced column, and every `col("…")` argument are strings whose
+existence is validated at **apply time against the real database**, never at
+type-check time.
+
+This is deliberate, and it is the single most important typing rule of the DSL.
+Migration files are immutable historical artifacts: if names were typed against
+the *current* schema, a migration that referenced a column a later migration
+dropped would stop compiling, the whole history would become un-compilable as
+the schema evolves, and authors would be tempted to edit committed migrations —
+changing the operation list and triggering a drift abort. No mature migration
+tool binds migration files to the live schema.
+
+**What IS type-checked (structural safety, preserved):**
+
+- **Op argument shapes** — you cannot pass a number where a `ColumnDef` is
+  expected, or omit a required field on a terminal's args object.
+- **The `t` column-type lexicon** — `t.text()` / `t.numeric()` and their
+  chainable modifiers (`.notNull()` / `.default()`) are typed.
+- **The fluent-expression node shapes** — the builder's methods (`.eq` /
+  `.concat` / `.gt` / `.splitPart` …) have typed arities and return an
+  expression; calling a non-existent operator method fails type-checking.
+  (Method names are the typed builder API; every *identifier* they reference is
+  still a plain string.)
+- **Insert-row value shapes** — rows are a loose record by default; a caller may
+  supply a generic for editor convenience, but it is never auto-derived from the
+  live schema.
+
+So the guarantee: op shapes, the `t` lexicon, expression node shapes, and value
+kinds are typed; **names are validated at apply/render time, never bound to the
+live schema at author time.** The part most likely to be semantically wrong (a
+transform's referenced names) is exactly what the type system cannot see — you
+test it with the shadow-DB dry-run.
+
+## Bridging a `@zeroship/db` field (`fromDb`)
+
+The migration DSL and the runtime `@zeroship/db` schema share **one** type
+lexicon. `fromDb(field)` lifts a live-schema `@zeroship/db` field into a
+migration `ColumnDef` through the identical column-type path. It carries the
+field's physical type and nullability (`.required()` → `.notNull()`) and returns
+a chainable `ColumnDef` so you can still layer migration modifiers on top. The
+bridge does not turn a runtime-schema ref into a migration foreign-key
+constraint: migration references use an explicit physical type plus
+`.references(table, column)`. A non-storage `@zeroship/db` field (a json array,
+a nested object, a union) has no portable column type and throws
+`COLTYPE_UNSUPPORTED` — a hard boundary, never a silent fallback.
 
 ## Online rename
 
-`renameColumn` lowering works and is exercised end-to-end in dev/CLI and tests.
-The production control-plane deploy handler does **not** apply online renames
-today — see below.
+`table(t).column(from).rename({ to, type })` records a single online column
+rename. The engine lowers it to a dual-dialect online change:
 
-`table(t).column(from).rename({ to, type })` records a single op that the engine
-lowers to a dual-dialect online change:
-
-- **Postgres** — an expand-contract online flow: add the new column, install a
+- **PostgreSQL** — an expand-contract flow: add the new column, install a
   dual-write trigger, backfill, then (in a later phase) drop the old column. The
   app stays up throughout.
-- **SQLite** — the offline 12-step table rebuild (`RenameStep::SqliteRebuild`),
-  applied via the engine's rebuild path. A rebuild on a populated table is
-  destructive, so it requires approval.
+- **SQLite** — the offline 12-step table rebuild, applied through the engine's
+  rebuild path. A rebuild on a populated table is destructive, so it requires
+  approval.
 
-Both lowerings are implemented and covered by tests (the PG expand-contract and
-the SQLite rebuild apply end-to-end in
-`crates/zeroship-migrate/tests/pg_engine/pg_scenarios.rs` /
-`ir_rename_sqlite_basic.rs`).
-
-**What is not yet wired for routine production deploy.** Creator-app Postgres
-migrations are applied by the standalone `zeroship-migrate-server` service, not by the
-deleted in-control deploy-time applier. The routine
-`POST /v1/apps/{id}/migrations/apply` flow uses `Approval::None`, so it refuses
-an online rename's approval-gated phase before it can complete; approved
-migrations go through the explicit
-`POST /v1/apps/{id}/migrations/{migration_id}/approve` operator path instead.
+**What is not yet wired for routine production deploy.** Creator-app PostgreSQL
+migrations are applied by the platform's migration service. The routine apply
+flow uses no approval, so it refuses an online rename's approval-gated phase
+before it can complete; approved migrations go through the explicit operator
+approval path instead.
 
 Production go-live gating:
 
-1. The cross-deploy **pending-contract interlock** — the PG expand/contract is a
+1. The cross-deploy **pending-contract interlock** — the expand/contract is a
    multi-deploy flow (the contract that drops the old column owes a later
-   approved deploy). This owed contract **IS** journaled as a durable
-   obligation and **IS** fail-closed enforced across deploys: a completed EXPAND
-   records the obligation (keyed on a deterministic, re-lower-stable version,
-   §2.0.1), a later deploy whose ops touch the pending table is refused with
+   approved deploy). This owed contract is journaled as a durable obligation and
+   enforced across deploys: a completed expand records the obligation, a later
+   deploy whose ops touch the pending table is refused with
    `TABLE_HAS_PENDING_CONTRACT`, an orphaned obligation is surfaced by `status`,
-   and `resolve-pending --apply|--abort` discharges it. The whole-deploy project
-   advisory lock is held across the entire multi-file IR deploy, so the read-back
-   is race-free. (Resolved: the interlock is implemented + enforced — the
-   previously remaining orphan/blocked deterministic-keying gap is closed too.)
+   and an operator resolves it explicitly.
 2. **Per-version approval scoping** — the current approved surface is a coarse,
    bundle-wide approval; production needs approval scoped to the specific
    reviewed version-ids. This is the remaining gate.
 
-Until per-version approval scoping lands, the approved go-live surface stays
-test-only (the regression test above pins it); treat online `renameColumn` as a
+Until per-version approval scoping lands, treat online `renameColumn` as a
 dev/CLI capability, not a shipped production deploy path.
 
 ## Apply-time lock safety (`lock_timeout`)
 
 The apply path runs each migration under **two separate, deliberately-split
-timeouts** (the safe-migration lock-safety envelope — `strong_migrations` / Atlas
-PG101 & PG103). They bound different things:
+timeouts**:
 
 - **`statement_timeout`** (default **60s**) — how long a statement may **run**
   once it holds its lock. A runaway DDL/DML is cancelled after this.
@@ -1141,61 +1248,49 @@ PG101 & PG103). They bound different things:
   lock_not_available`. It is **NOT** folded into `statement_timeout`.
 
 Why the split matters: on a populated, live multi-tenant table a blocking DDL
-(e.g. an `ALTER TABLE` taking an `ACCESS EXCLUSIVE` lock) queues behind any
-long-running transaction holding a conflicting lock — and because it is itself
-waiting on `ACCESS EXCLUSIVE`, every subsequent query on that table queues behind
-*it*. That is a tenant-wide availability outage for the lifetime of the wait. A
-**short** `lock_timeout` makes the blocked DDL fail fast and roll back cleanly
-(the lock-timeout failure is retryable, never data-corrupting — the two-phase
-recovery handles the abort), freeing the table immediately; retry during a quieter
-window. A long lock-acquisition budget would make the outage
-last that long.
+(for example an `ALTER TABLE` taking an `ACCESS EXCLUSIVE` lock) queues behind
+any long-running transaction holding a conflicting lock — and because it is
+itself waiting on `ACCESS EXCLUSIVE`, every subsequent query on that table
+queues behind *it*. That is a tenant-wide availability outage for the lifetime
+of the wait. A **short** `lock_timeout` makes the blocked DDL fail fast and roll
+back cleanly (the failure is retryable, never data-corrupting), freeing the
+table immediately; retry during a quieter window. A long lock-acquisition budget
+would make the outage last that long.
 
-The 3s default is the **executor-wide** floor. A single migration that
-legitimately needs to wait longer — a planned maintenance-window change run
-during a quiet period where a brief stall is acceptable — raises **only its own**
-lock-acquisition budget via the per-migration `lock_timeout_ms` flag override
-(the `IrFlagsOverride.lock_timeout_ms` facet, mirroring the existing per-migration
-`timeout_ms` ceiling). The conservative fail-fast default stays in force for every
-other migration in the same deploy. Both timeout overrides are folded into the
-migration checksum, so changing one re-versions the migration like any other
-apply-relevant change.
+The 3s default is the executor-wide floor. A migration that legitimately needs
+to wait longer is a planned maintenance-window change and is arranged at the
+policy level, not by the migration author; the conservative fail-fast default
+stays in force for every other migration in the same deploy.
 
 ## Generating types from the migration set (`gen-types`)
 
-Migration-first: the op.* migration set is the source of truth for the schema,
-and the typed `env.db` surface is **generated from it** rather than from a
-separate declared schema object on the app entry. The in-process gen-types path
-in `@zeroship/vite-plugin` records each `migrations/*.ts` source through its
-pure-JS recorder in version order, passes the resulting IR envelopes to
-`zeroship-migrate-node`'s `genArtifacts` renderer, and emits two artifacts:
+Migration-first: your migration set is the source of truth for the schema, and
+the typed `env.db` surface is **generated from it** rather than from a separate
+declared schema object on the app entry. Type generation records each migration
+in version order and emits two artifacts:
 
-- **`schema.runtime.json`** — the v2 `RuntimeSchemaDescriptor`:
+- **`schema.runtime.json`** — the runtime schema descriptor:
   `{ version, collections: { [name]: { fields, options, indexes } } }`. It is
-  content-addressed into the `.zship` artifact (a manifest `runtime_descriptor`
-  blob) so the runtime can read the schema without re-evaluating a schema
-  authoring module.
+  content-addressed into the deploy artifact so the runtime can read the schema
+  without re-evaluating an authoring module.
 - **`env.db.ts`** — a generated `@zeroship/db` schema **module** reconstructing
-  `const schema = { … t.text() … } as const` of `t.*()` builder calls (the SDK type
-  inference keys only off the builder-call value expressions, so the emitter emits
-  builder calls, never a hand-rolled interface), wraps collections in
-  `schema(...)` when folded options/indexes exist, and declares the single
-  `Env.db` augmentation for the app.
+  the `t.*` builder calls, wrapping collections in `schema(...)` when folded
+  options/indexes exist, and declaring the single `Env.db` augmentation for the
+  app.
 
-Development regenerates the artifacts on server boot and migration changes. A
+Development regenerates the artifacts on server boot and on migration changes. A
 production build regenerates them in memory and fails if the committed files
-have drifted. Generation is in-process; there is no standalone `gen-types`
-executable or subprocess.
+have drifted.
 
-The declared-only facets ([Sensitive-data facets](#sensitive-data-facets)) survive
-the fold: the typed-id `prefix`, the vector `metric`, and the `mask` brand all flow
-into the generated `env.db.ts`, so `env.db.users.email` reads back as
-`MaskedValue<T>` purely from the migration history. Because `env.db.ts` is a real
-`.ts` module (not a `.d.ts`), `tsc` type-checks it like any source file — a
-generated type that does not compile is a hard build failure.
+The declared-only facets ([Sensitive-data facets](#sensitive-data-facets))
+survive the fold: the typed-id `prefix`, the vector `metric`, and the `mask`
+brand all flow into the generated `env.db.ts`, so `env.db.users.email` reads
+back as `MaskedValue<T>` purely from the migration history. Because `env.db.ts`
+is a real `.ts` module (not a `.d.ts`), the type-checker checks it like any
+source file — a generated type that does not compile is a hard build failure.
 
-Include the generated module in the app's `tsconfig.json` and do not also add the
-retired `@zeroship/db/env` declared-schema alias:
+Include the generated module in the app's `tsconfig.json` and do not also add
+the retired declared-schema alias:
 
 ```json
 {
@@ -1203,86 +1298,97 @@ retired `@zeroship/db/env` declared-schema alias:
 }
 ```
 
-The `@zeroship/vite-plugin` owns this in-process library path: it regenerates the
-artifacts on dev-server boot and on any change under the migrations dir, and
-performs the generated-artifact drift check on a production build. See
-[vite-plugin.md → Migration-first type generation](./vite-plugin.md#migration-first-type-generation-gen-types)
+Type generation runs in-process in the dev/build tooling. See
+[vite-plugin.md](./vite-plugin.md#migration-first-type-generation-gen-types)
 for the build/watch wiring.
 
-> **Implemented: Postgres vendor primitives.** `@zeroship/migrate` exposes direct
-> named exports and one PG-first `table()` handle, not a `pg` namespace object.
-> The current vendor value exports are `schema`, `extension`, `role`, `dropOwnedBy`,
+> **Postgres vendor primitives.** `@zeroship/migrate` exposes direct named
+> exports and one PG-first `table()` handle, not a `pg` namespace object. The
+> current vendor value exports are `schema`, `extension`, `role`, `dropOwnedBy`,
 > `grant`, `revoke`, `createFunction`, `dropFunction`, `domain`, `sequence`, and
 > `raw`; table-scoped vendor operations are methods on `table(name)`.
-> Policies are authored as `table(name).policy(policyName).create/drop(...)`.
-> These are Postgres-only and capability-gated so the platform's own privileged
-> DDL can be authored in the DSL.
-> The engine lowers
-> these vendor ops through the Postgres vendor renderer, hard-gated to the
-> Trusted/Platform profile and unreachable from a Confined creator migration by
-> construction.
+> Policies are authored as `table(name).policy(policyName).create/drop(...)`,
+> and row-level security with `table(name).setRls({...})`. These are
+> PostgreSQL-only and capability-gated, so they are unreachable from a confined
+> creator migration.
 
 ## Offline SQL preview (`plan`)
 
-The former in-workspace operator CLI exposed an offline `plan` verb that rendered
-the exact per-dialect SQL a pending migration set would execute. That binary was
-removed when the engine was extracted out of the workspace; the engine has since
-been in-sourced as the `crates/zeroship-migrate*` crates, but the workspace still
-exposes no replacement preview command.
+Pending migrations can be previewed before they run. The `zero-migrate plan`
+command reconciles the pending set against the live database and renders the
+exact per-dialect SQL those migrations would execute; the same rendering backs
+apply, so previewed SQL is what apply runs.
 
-`zeroship-platform-migrate` is deliberately apply-only and must not be used as a
-substitute for preview or validation. Engine-level preview remains a surfacing
-layer over the same lowerer, but its host now belongs to the standalone engine
-project.
-
-The preview is a **surfacing layer**, not a second renderer: it prints back the SQL
-the engine already lowers (the `Migration.up` / DML `template`). It never
-re-implements rendering, so the previewed DDL/DML is byte-identical to what apply
-runs.
-
-**What renders (the offline-renderable subset).** The DB-independent ops render
-their real SQL: `createTable` / `dropTable` / `addColumn` / `dropColumn` /
-`addConstraint` (fk / unique / check / exclusion) / `dropConstraint` / `createIndex` /
-`dropIndex` / `createSequence` / `alterSequence` / `dropSequence` / `comment`;
-Postgres also renders native exclusion constraints, while SQLite/MySQL refuse
-them fail-closed. Partial indexes render on Postgres and SQLite; MySQL refuses
-them fail-closed because it has no partial indexes. One-shot `insert` / `update` /
-`delete` also render (the DML prints its placeholder template — `$n` on Postgres,
-`?n` on SQLite — with a bind-count note; bind values are bound natively, never
-interpolated into the SQL).
-
-**The honest boundary — `-- [runtime-resolved]`.** Some ops cannot be faithfully
-rendered offline because their SQL depends on the **live database state**. The
-preview never fabricates SQL for these; it emits a clearly-labeled
+**The honest boundary — `-- [runtime-resolved]`.** Some operations cannot be
+faithfully rendered offline because their SQL depends on the **live database
+state**. The preview never fabricates SQL for these; it emits a clearly-labeled
 `-- [runtime-resolved] …` line stating *why*:
 
 - **online `renameColumn`** — needs the live `from` column's type/structure to
-  reconcile the type and author the expand-contract dual-write (PG) or the 12-step
-  rebuild (SQLite); the **backfill is windowed by PK** and the PG **contract cutover
-  is partitioned across deploys**, so the exact statement stream depends on live
-  state.
-- **`backfill`** — a runtime windowed batch loop (statement stream depends on live
-  row count / PK ranges).
-- **existence-guarded ops** (`ifExists` / `ifNotExists`) — the apply is a runtime
-  catalog probe + run / satisfied-noop / fail-drift decision. The **bare** DDL the
-  apply would run when the probe says "run" *is* printed (it is real SQL), under the
-  label — but no `IF [NOT] EXISTS` clause is invented (the engine emits none; the
-  guard is a probe, not a native clause).
+  reconcile the type and author the expand-contract dual-write (PostgreSQL) or
+  the 12-step rebuild (SQLite); the backfill is windowed by primary key and the
+  contract cutover is partitioned across deploys, so the exact statement stream
+  depends on live state.
+- **`backfill`** — a runtime windowed batch loop (the statement stream depends on
+  live row count / key ranges).
+- **existence-guarded ops** (`ifExists` / `ifNotExists`) — the apply is a
+  runtime catalog probe + run / satisfied-no-op / fail-drift decision. The bare
+  DDL that the apply would run when the probe says "run" *is* printed (it is real
+  SQL), under the label — but no `IF [NOT] EXISTS` clause is invented (the guard
+  is a probe, not a native clause).
 - **stand-alone SQLite `alterColumn*` / `addConstraint` / `dropConstraint`** —
   reconciled via the live 12-step rebuild, which needs the live table structure.
 
-The preview's header and trailing `-- preview: N statement(s) rendered, M
-runtime-resolved` summary make the offline-renderable subset and the labeled
-remainder explicit. Both `.sql` (Flyway/dbmate) and explicit `.ir.json` IR files
-in the directory are previewed.
+The preview's header and trailing
+`-- preview: N statement(s) rendered, M runtime-resolved` summary make the
+offline-renderable subset and the labeled remainder explicit.
+
+## The recorded operation stream (IR)
+
+A migration never ships SQL. The package records each phase into a
+**dialect-neutral, checksummed JSON operation stream** — the `.ir.json`
+document — and the platform loads that document and lowers each operation to
+per-dialect SQL at apply time. You never hand-write it; the appendix below shows
+the module it is derived from.
+
+The stream is hashed over its neutral operation list, so a single portable
+migration has **one identity checksum** across every render target. Two streams
+carrying the same operations in the same order compare equal by value, not by
+JSON formatting, so a formatting difference never reads as drift.
+
+The document envelope carries:
+
+| Field | Meaning |
+| --- | --- |
+| `ir_version` | the stream's version; a future version is refused fail-closed, a past or equal version validates |
+| `name` | the migration's name |
+| `owner_app` | a hint the server overrides at submit |
+| `ops` | the ordered operation list |
+| `flags` | per-migration flags |
+| `depends_on`, `supersedes` | ordering relationships to other migrations |
+| `preconditions` | state/data conditions checked before apply |
+| `checksum` | an advisory integrity hint the engine recomputes and is authoritative over |
+
+The vocabularies are closed: an operation is tagged by a stable top-level `"op"`
+key, an expression node by a `"node"` key, and an unknown key is refused. Absent
+optional fields are omitted, never written as `null`. Identifier fields are
+plain strings with no binding to the live schema — existence is checked at apply
+time, not at author time.
+
+Numeric leaves are constrained: a fractional or exponential number, or an
+integer at or beyond 2^53, is refused (`EXPR_INVALID_NUMERIC`) before any
+checksum. Carry an exact large integer with `int64(...)` or `decimal(...)`, and
+bytes as a `Uint8Array` or base64 string. Raw SQL appears only in the
+operator-gated vendor islands — a function body, the `raw` escape, a raw view
+body — and a confined creator migration cannot reach them.
 
 ## Appendix: a data migration as IR
 
-A migration records into dialect-neutral IR (the frozen wire contract the engine
-loads). The following artifact represents a `data()` migration that backfills
-two already-created columns and declares why it has no safe inverse. The
-preceding schema migration that adds those columns is a separate module; the
-recorder refuses a module that mixes DDL and DML.
+A migration is recorded into a dialect-neutral operation stream that the engine
+loads. The following module represents a `data()` migration that backfills two
+already-created columns and declares why it has no safe inverse. The preceding
+schema migration that adds those columns is a separate module; a module that
+mixes DDL and DML is refused.
 
 ```ts
 import { table } from "@zeroship/migrate";
@@ -1305,56 +1411,43 @@ export default {
 };
 ```
 
-```json
-{
-  "ir_version": 1,
-  "name": "split_name",
-  "irreversible": "the original name cannot be reconstructed from split fields",
-  "ops": [
-    {
-      "op": "backfill",
-      "table": "people",
-      "cursorColumns": ["id"],
-      "cursorStability": { "mode": "guardUpdates" },
-      "batchSize": 50,
-      "name": "split_name_bf",
-      "set": {
-        "first_name": { "node": "fnSynth", "fn": "splitPart", "args": [
-          { "node": "colRef", "name": "name" },
-          { "node": "literal", "value": " " },
-          { "node": "literal", "value": 1 }
-        ]},
-        "last_name": { "node": "fnSynth", "fn": "splitPart", "args": [
-          { "node": "colRef", "name": "name" },
-          { "node": "literal", "value": " " },
-          { "node": "literal", "value": 2 }
-        ]}
-      }
-    }
-  ]
-}
-```
+You never hand-write the recorded stream; it is derived from your `.ts`. It is
+shown here so the "one script, both backends" claim is concrete.
 
-This is the one place authors see the IR — you never hand-write it; the build
-evaluator records it from your `.ts`. It is shown here so the "one script, both
-backends" claim is concrete.
+## The security model
 
-The examples above are illustrative. The repository does not parse documentation
-as test input. Recorder behavior is covered by
-`packages/zero-migrate/tests/ops.test.ts`, while engine and database tests cover
-the migration contract itself.
+Every migration is treated as **untrusted input** — creator-authored operations
+and prompt-injectable AI output flow through the same pipeline. The model is
+defense-in-depth and untrusted-by-default, with each layer naming the residual
+the next one covers:
+
+1. **Capability gate at load.** A privileged vendor operation is refused with
+   `VENDOR_OP_DENIED`, because a confined creator deploy grants no vendor
+   capability. The import path is not the security boundary; the gate is.
+2. **Parse-time SQL guard.** The SQL the engine does render is parsed and the
+   dangerous surface hard-denied, including inside `DO` blocks and function
+   bodies and constructs carried in string literals.
+3. **Least-privilege role.** Whatever slips past parse — runtime-constructed
+   `EXECUTE format(...)`, dynamic names — fails at execution with
+   `permission denied`, because the migration runs under a role with no grant
+   outside its own schema.
+4. **Immutable journal.** The migration cannot forge or erase its own history:
+   the journal is append-only and written outside the migration's own
+   privilege.
+
+The trust posture is fixed at the call site, never derived from SQL content. A
+creator deploy runs confined — no vendor capability and the project schema
+pinned; platform migrations run under a widened profile. `SUPERUSER` is denied in
+every profile. There is no raw-SQL expression surface for creators: the only raw
+forms are the operator-gated vendor islands named above.
 
 ## Further reading
 
-- **Security / threat model** — the recorder runs untrusted creator code inside
-  a kernel sandbox (seccomp + landlock + netns); the apply path runs under a
-  least-privilege per-app migrator role behind a parse deny-list and an immutable
-  journal. See [zeroship-migrate-guide.md](./zeroship-migrate-guide.md) for the
-  engine threat model and apply path.
-- **The IR and expression contract** — [zeroship-migrate-guide.md](./zeroship-migrate-guide.md)
-  covers the IR wire contract, typing stance, closed expression AST, and DML
-  portability boundary.
-- **SQLite divergences** — intentional Postgres↔SQLite differences in search,
+- **Engine internals** — [zeroship-migrate-engine.md](../architecture/zeroship-migrate-engine.md)
+  is the long-form engine reference: crate architecture, the IR wire contract,
+  the validate gate, rendering, the apply engine, and the security substrate in
+  full.
+- **SQLite divergences** — intentional PostgreSQL↔SQLite differences in search,
   isolation, locking, and ordering: [sqlite-divergences.md](./sqlite-divergences.md).
 - **The schema SDK** — [db.md](./db.md): the `@zeroship/db` `t.*` lexicon the
   migration lexicon mirrors and `fromDb` bridges.
