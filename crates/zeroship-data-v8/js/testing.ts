@@ -2,8 +2,8 @@
  * Test-only access to the DB SDK implementation and crate-owned facade adapter.
  * This file is not part of the production adapter bundle or an npm export.
  */
-export { Collection } from "../../../packages/db/src/collection";
-export { TRANSACTION_READ } from "../../../packages/db/src/collection/crud";
+export { Collection } from "./runtime/collection";
+export { TRANSACTION_READ } from "./runtime/crud";
 export { captureNativeTransaction } from "../../../packages/db/src/native";
 export type {
   NativeDb,
@@ -11,20 +11,20 @@ export type {
   NativeSubscriptionLike,
   NativeTransactionFn,
 } from "../../../packages/db/src/native";
-export { Query } from "../../../packages/db/src/query";
-export type { PaginationResult } from "../../../packages/db/src/query";
+export { Query } from "./runtime/query";
+export type { PaginationResult } from "../../../packages/db/src/db-types";
 export type { TransactionDb, TxCollection, TxQuery, TransactionOptions } from "../../../packages/db/src/db-types";
-export { createLive } from "../../../packages/db/src/live";
-export type { LiveOptions, LiveQuery } from "../../../packages/db/src/live";
+export { createLive } from "./runtime/live";
+export type { LiveOptions, LiveQuery } from "../../../packages/db/src/db-types";
 export { subscribe } from "../../../packages/db/src/subscribe";
 export type { Subscription, SubscriptionEvent } from "../../../packages/db/src/subscribe";
 export {
   drainCollectionLoaders,
-} from "../../../packages/db/src/tx-state";
-export type { TransactionStateCarrier } from "../../../packages/db/src/tx-state";
+} from "./runtime/tx-state";
+export type { TransactionStateCarrier } from "./runtime/tx-state";
 export { naming, SchemaBuilder, TypeBuilder, ok, err } from "../../../packages/db/src/types";
-export { readFrom, scopeAliasedCollection } from "../../../packages/db/src/read";
-export type { ReadFrom, AliasedCollection } from "../../../packages/db/src/read";
+export { readFrom, scopeAliasedCollection } from "./runtime/read";
+export type { ReadFrom, AliasedCollection } from "../../../packages/db/src/db-types";
 export type {
   NamingStrategy,
   Actor,
@@ -55,28 +55,30 @@ export { validateCollectionIdentity } from "../../../packages/db/src/schema";
 export {
   __zeroshipDbResetIndexWarnings,
   __zeroshipDbWarnedShapesSize,
-} from "../../../packages/db/src/collection";
+} from "./runtime/collection";
 export {
   __zeroshipDbResetAccShapeWarnings,
   __zeroshipDbWarnedAccShapesSize,
-} from "../../../packages/db/src/utils";
+} from "./runtime/utils";
 
 // Internal validation entry points — used by the c2-union tests which
 // exercise the validator against synthetic schemas without going
 // through Collection.{insert,update}. Same module-identity logic as
 // the warning hooks above.
-export { validateDoc, checkPartial } from "../../../packages/db/src/validate";
+export { validateDoc, checkPartial } from "./runtime/validate";
 
 // Aggregate-pipeline translator — used by warned-acc-shapes-cap to
 // drive the dedup state the matching test hook inspects.
-export { translateAggregatePipeline } from "../../../packages/db/src/utils";
+export { translateAggregatePipeline } from "./runtime/utils";
 
 export type { MaskPolicy } from "../../../packages/db/src/policy";
 
 export {
-  installSchema, model, normalizeSchema, expandUnionToFlatColumns, validateRefTargets,
-} from "./install-schema";
+  installSchema,
+} from "./runtime/install-schema";
 export type {
-  RuntimeSchemaDescriptor, InstallSchemaOptions, SchemaInput, ValidateSchemaShape,
-  Collections, DbExtensions, Db,
-} from "./install-schema";
+  SchemaProjection, ProjectedCollection, InstallSchemaOptions,
+} from "./runtime/install-schema";
+export type {
+  Db, DbExtensions, Collections, SchemaInput, SchemaShape,
+} from "../../../packages/db/src/db-types";

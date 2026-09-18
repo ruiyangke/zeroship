@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { t } from "../src/index.js";
-import type { Collection } from "../src/collection";
+import type { Collection } from "../../../crates/zeroship-data-v8/js/runtime/collection";
 import type { TxCollection } from "../src/db-types";
 import type { NativeDb } from "../src/native";
 import { installSchemaForTest } from "./_install-helper";

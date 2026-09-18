@@ -10,13 +10,13 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { t } from "../src/index.js";
-import { validateDoc } from "../src/validate.js";
-import { normalizeSchema } from "../../../crates/zeroship-data-v8/js/testing.js";
+import { validateDoc } from "../../../crates/zeroship-data-v8/js/runtime/validate.js";
+import { fieldsOf } from "./_install-helper.js";
 import { ValidationError } from "../src/errors.js";
-import { validateArrayPushOps } from "../src/collection.js";
+import { validateArrayPushOps } from "../../../crates/zeroship-data-v8/js/runtime/collection.js";
 
 describe("R7 m1 — validateArrayPushOps date branch parity with array-validate", () => {
-  const schema = normalizeSchema({ dates: t.array(t.timestamp()) });
+  const schema = fieldsOf({ dates: t.array(t.timestamp()) });
 
   test("validateDoc rejects an unparseable date string in the array", () => {
     assert.throws(

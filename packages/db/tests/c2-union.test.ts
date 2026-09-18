@@ -2,22 +2,19 @@
  * @zeroship/db — Phase 7 / C2: discriminated union document shapes.
  *
  * Exercises `t.literal()`, `t.union(...)`, the auto-detected
- * discriminator, validation dispatch, and the normalized flat-column
- * expansion that hands off to the Rust DDL emitter.
+ * discriminator, and validator dispatch over the flat projection the Rust
+ * migration fold emits for a top-level union.
  *
  * ORM value validation is covered by the typed codec tests.
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { t } from "../src/index.js";
-import { normalizeSchema, expandUnionToFlatColumns } from "../../../crates/zeroship-data-v8/js/testing.js";
+import { Collection } from "../../../crates/zeroship-data-v8/js/runtime/collection.js";
+import { t, ValidationError, type FieldDef } from "../src/index.js";
 // Import validation helpers through crate test support so thrown errors share
 // the source entry's module instance.
 import { validateDoc, checkPartial } from "../../../crates/zeroship-data-v8/js/testing.js";
-// Public source export — matches the ValidationError instances that
-// Collection's CRUD path throws.
-import { ValidationError } from "../src/index.js";
-import { model } from "../../../crates/zeroship-data-v8/js/testing.js";
+import { fieldsOf } from "./_install-helper.js";
 import type { NativeDb } from "../src/native.js";
 
 // ---------------------------------------------------------------------------
@@ -125,77 +122,36 @@ describe("C2 — t.union() discriminator auto-detection", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Flat-column expansion (normalizeSchema accepts a top-level union)
-// ---------------------------------------------------------------------------
-
-describe("C2 — normalizeSchema flat expansion", () => {
-  test("top-level t.union expands to flat columns + discriminator", () => {
-    const events = t.union(
-      t.object({ kind: t.literal("login"), userId: t.number().required(), ip: t.string().required() }),
-      t.object({ kind: t.literal("error"), message: t.string().required() }),
-      t.object({ kind: t.literal("metric"), name: t.string().required(), value: t.number().required() }),
-    );
-    const flat = normalizeSchema(events);
-
-    // Discriminator column
-    assert.ok(flat.kind);
-    assert.equal(flat.kind.type, "string");
-    assert.equal(flat.kind.required, true);
-    assert.deepEqual(flat.kind.enum, ["login", "error", "metric"]);
-    assert.equal(flat.kind.discriminator, "__discriminator__");
-    assert.ok(flat.kind.variants);
-    assert.equal(flat.kind.variants!.length, 3);
-
-    // Non-discriminator columns are present at the top level — each
-    // nullable since they only apply to a subset of variants.
-    for (const k of ["userId", "ip", "message", "name", "value"]) {
-      assert.ok(flat[k], `expected flat column ${k}`);
-      assert.notEqual(flat[k].required, true, `${k} must be column-level nullable`);
-    }
-  });
-
-  test("fields shared across variants with the same type dedupe", () => {
-    // Both `login` and `error` carry an `ip` string — must collapse.
-    const events = t.union(
-      t.object({ kind: t.literal("login"), ip: t.string().required() }),
-      t.object({ kind: t.literal("error"), ip: t.string(), message: t.string().required() }),
-    );
-    const flat = normalizeSchema(events);
-    assert.ok(flat.ip);
-    assert.equal(flat.ip.type, "string");
-    assert.notEqual(flat.ip.required, true);
-  });
-
-  test("fields shared across variants with conflicting types throw", () => {
-    assert.throws(
-      () =>
-        normalizeSchema(
-          t.union(
-            t.object({ kind: t.literal("a"), x: t.string() }),
-            t.object({ kind: t.literal("b"), x: t.number() }),
-          ),
-        ),
-      /incompatible types/,
-    );
-  });
-
-  test("top-level non-union TypeBuilder is rejected", () => {
-    // A bare t.string() at the top level isn't a valid schema input —
-    // it must be a union (top-level row shape).
-    assert.throws(
-      () => normalizeSchema(t.string() as unknown as Parameters<typeof normalizeSchema>[0]),
-      /must be a t\.union/,
-    );
-  });
-});
-
-// ---------------------------------------------------------------------------
 // Validation — discriminator dispatch
 // ---------------------------------------------------------------------------
 
+/**
+ * The flat projection Rust's migration fold emits for a top-level
+ * `t.union(...)`: the discriminator column the runtime validator dispatches
+ * on. The JS side no longer expands unions, so this fixture stands in for the
+ * Rust output and keeps validator dispatch covered.
+ */
+function flatUnionSchema(union: { toFieldDef(): FieldDef }): Record<string, FieldDef> {
+  const def = union.toFieldDef();
+  const discriminator = def.discriminator;
+  const variants = def.variants;
+  if (discriminator === undefined || variants === undefined) {
+    throw new Error("flatUnionSchema: expected a discriminated union FieldDef");
+  }
+  return {
+    [discriminator]: {
+      type: "string",
+      required: true,
+      enum: variants.map((variant) => variant[discriminator].literalValue) as (string | number)[],
+      discriminator: "__discriminator__",
+      variants,
+    },
+  };
+}
+
 describe("C2 — validation dispatch on discriminator", () => {
   function eventsSchema() {
-    return normalizeSchema(
+    return flatUnionSchema(
       t.union(
         t.object({
           kind: t.literal("login"),
@@ -311,22 +267,23 @@ describe("C2 — partial update against a flat-expanded union", () => {
     // The flat expansion turns the discriminator into a `string` column
     // with `enum: ["login", "error"]`. `checkPartial` exercises the
     // enum branch — invalid literals must reject.
-    const Events = model(
+    const eventsSchema = {
+      ...flatUnionSchema(t.union(
+        t.object({
+          kind: t.literal("login"),
+          userId: t.number().required(),
+          ip: t.string().required(),
+        }),
+        t.object({
+          kind: t.literal("error"),
+          message: t.string().required(),
+        }),
+      )),
+      id: t.string().required().primaryKey(),
+    };
+    const Events = new Collection<Record<string, unknown>>(
       "events",
-      {
-        ...normalizeSchema(t.union(
-          t.object({
-            kind: t.literal("login"),
-            userId: t.number().required(),
-            ip: t.string().required(),
-          }),
-          t.object({
-            kind: t.literal("error"),
-            message: t.string().required(),
-          }),
-        )),
-        id: t.string().required().primaryKey(),
-      } as Record<string, unknown>,
+      fieldsOf(eventsSchema),
       makeMockNative(),
     );
     const { data, error } = await Events.update({ id: "1" }, { kind: "invalidLiteral" });
@@ -341,7 +298,7 @@ describe("C2 — partial update against a flat-expanded union", () => {
   // the new variant's required fields used to silently succeed and
   // leave the row in an inconsistent state.
   test("c2_union_gap_j_discriminator_only_patch_rejects_missing_variant_required", () => {
-    const s = normalizeSchema(
+    const s = flatUnionSchema(
       t.union(
         t.object({
           kind: t.literal("login"),
@@ -365,7 +322,7 @@ describe("C2 — partial update against a flat-expanded union", () => {
   });
 
   test("c2_union_gap_j_discriminator_with_variant_fields_passes", () => {
-    const s = normalizeSchema(
+    const s = flatUnionSchema(
       t.union(
         t.object({
           kind: t.literal("login"),
@@ -385,7 +342,7 @@ describe("C2 — partial update against a flat-expanded union", () => {
   test("c2_union_gap_j_non_discriminator_patch_unaffected", () => {
     // A patch that doesn't touch the discriminator must not invoke
     // the Gap J variant-required check.
-    const s = normalizeSchema(
+    const s = flatUnionSchema(
       t.union(
         t.object({
           kind: t.literal("login"),
@@ -401,7 +358,7 @@ describe("C2 — partial update against a flat-expanded union", () => {
   });
 
   test("c2_union_gap_j_multiple_missing_listed_in_message", () => {
-    const s = normalizeSchema(
+    const s = flatUnionSchema(
       t.union(
         t.object({ kind: t.literal("a"), x: t.string().required() }),
         t.object({
@@ -429,7 +386,7 @@ describe("C2 — partial update against a flat-expanded union", () => {
 
 describe("C2 — nested t.union() inside t.object()", () => {
   test("nested union dispatch via t.object validator", () => {
-    const s = normalizeSchema({
+    const s = fieldsOf({
       payload: t.union(
         t.object({ kind: t.literal("a"), x: t.string().required() }),
         t.object({ kind: t.literal("b"), y: t.number().required() }),
@@ -446,30 +403,6 @@ describe("C2 — nested t.union() inside t.object()", () => {
     assert.throws(
       () => validateDoc({ payload: { kind: "nope" } }, s),
       ValidationError,
-    );
-  });
-});
-
-// ---------------------------------------------------------------------------
-// expandUnionToFlatColumns — direct unit
-// ---------------------------------------------------------------------------
-
-describe("C2 — expandUnionToFlatColumns", () => {
-  test("produces the same shape as normalizeSchema(t.union(...))", () => {
-    const u = t.union(
-      t.object({ kind: t.literal("a"), x: t.string() }),
-      t.object({ kind: t.literal("b"), y: t.number() }),
-    );
-    const def = u.toFieldDef();
-    const flat = expandUnionToFlatColumns(def as Parameters<typeof expandUnionToFlatColumns>[0]);
-    assert.ok(flat.kind);
-    assert.ok(flat.x);
-    assert.ok(flat.y);
-  });
-
-  test("rejects a non-union def", () => {
-    assert.throws(() =>
-      expandUnionToFlatColumns({ type: "string" } as Parameters<typeof expandUnionToFlatColumns>[0]),
     );
   });
 });

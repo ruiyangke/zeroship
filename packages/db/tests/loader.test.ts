@@ -1,4 +1,3 @@
-import { generatedSchema } from "./_install-helper.js";
 /**
  * DataLoader / per-collection batch tests.
  *
@@ -9,12 +8,18 @@ import { generatedSchema } from "./_install-helper.js";
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { installSchemaForTest } from "./_install-helper.js";
-import { model } from "../../../crates/zeroship-data-v8/js/testing.js";
+import { fieldsOf, generatedSchema, installSchemaForTest } from "./_install-helper.js";
+import { Collection } from "../../../crates/zeroship-data-v8/js/runtime/collection.js";
 import { t } from "../src/index.js";
 import type { NativeDb } from "../src/native.js";
 
 type AnyRec = Record<string, unknown>;
+
+const usersSchema = {
+  ...generatedSchema,
+  email: t.string().required().unique(),
+  name: t.string().required(),
+};
 
 /**
  * **P9 PR 1** — the SDK's `get()` (and every other "first matching row"
@@ -117,12 +122,9 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
       1: { id: "1", email: "a@b.com", name: "Alice" },
       2: { id: "2", email: "b@b.com", name: "Bob" },
     });
-    const Users = model(
+    const Users = new Collection<typeof usersSchema>(
       "users",
-      { ...generatedSchema,
-        email: t.string().required().unique(),
-        name: t.string().required(),
-      },
+      fieldsOf(usersSchema),
       native,
     );
 
@@ -148,12 +150,9 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
       rows[`${i}`] = { id: `${i}`, email: `u${i}@b.com`, name: `User ${i}` };
     }
     const { native, calls } = makeMockNative(rows);
-    const Users = model(
+    const Users = new Collection<typeof usersSchema>(
       "users",
-      { ...generatedSchema,
-        email: t.string().required().unique(),
-        name: t.string().required(),
-      },
+      fieldsOf(usersSchema),
       native,
     );
 
@@ -189,12 +188,9 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     const { native, calls } = makeMockNative({
       1: { id: "1", email: "a@b.com", name: "Alice" },
     });
-    const Users = model(
+    const Users = new Collection<typeof usersSchema>(
       "users",
-      { ...generatedSchema,
-        email: t.string().required().unique(),
-        name: t.string().required(),
-      },
+      fieldsOf(usersSchema),
       native,
     );
 
@@ -216,12 +212,9 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     const { native, calls } = makeMockNative({
       1: { id: "1", email: "a@b.com", name: "Alice" },
     });
-    const Users = model(
+    const Users = new Collection<typeof usersSchema>(
       "users",
-      { ...generatedSchema,
-        email: t.string().required().unique(),
-        name: t.string().required(),
-      },
+      fieldsOf(usersSchema),
       native,
     );
 
@@ -235,12 +228,9 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     const { native, calls } = makeMockNative({
       1: { id: "1", email: "a@b.com", name: "Alice" },
     });
-    const Users = model(
+    const Users = new Collection<typeof usersSchema>(
       "users",
-      { ...generatedSchema,
-        email: t.string().required().unique(),
-        name: t.string().required(),
-      },
+      fieldsOf(usersSchema),
       native,
     );
 
@@ -254,12 +244,9 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
   test("an error in the batched find rejects every queued caller", async () => {
     const boom = new Error("batched fetch failed");
     const { native, calls } = makeMockNative({}, { findThrows: boom });
-    const Users = model(
+    const Users = new Collection<typeof usersSchema>(
       "users",
-      { ...generatedSchema,
-        email: t.string().required().unique(),
-        name: t.string().required(),
-      },
+      fieldsOf(usersSchema),
       native,
     );
 
@@ -423,7 +410,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     // IdLoader still rejects a caller-provided scope transition between
     // enqueue and flush. Collection transaction routing does not use this
     // shared-depth mechanism.
-    const { IdLoader } = await import("../src/loader.js");
+    const { IdLoader } = await import("../../../crates/zeroship-data-v8/js/runtime/loader.js");
     let currentDepth = 0;
     let flushCalls = 0;
     // **P7 PR 3** — IdLoader is generic over `R extends { id: string }`;
@@ -454,7 +441,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
   });
 
   test("tx-race: snapshot==current (both 0 or both > 0) resolves normally", async () => {
-    const { IdLoader } = await import("../src/loader.js");
+    const { IdLoader } = await import("../../../crates/zeroship-data-v8/js/runtime/loader.js");
     let currentDepth = 0;
     // **P7 PR 3** — typed_id string key (see sibling test).
     const loader = new IdLoader<{ id: string; v: string }>(
@@ -478,12 +465,9 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     const { native, calls } = makeMockNative({
       7: { id: "7", email: "x@y.com", name: "Same" },
     });
-    const Users = model(
+    const Users = new Collection<typeof usersSchema>(
       "users",
-      { ...generatedSchema,
-        email: t.string().required().unique(),
-        name: t.string().required(),
-      },
+      fieldsOf(usersSchema),
       native,
     );
 

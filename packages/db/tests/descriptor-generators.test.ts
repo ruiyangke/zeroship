@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { t, type Collection, type RowInput, type UpdateExpression } from "../src/index.js";
-import { installSchema, normalizeSchema } from "../../../crates/zeroship-data-v8/js/testing.js";
+import { installSchema } from "../../../crates/zeroship-data-v8/js/testing.js";
+import { fieldsOf } from "./_install-helper.js";
 
 const fields = {
   id: t.string().primaryKey().assigned({ by: "typedId", on: "insert" }).required(),
@@ -25,12 +26,11 @@ test("id and renamed assignments drive SDK dispatch", async () => {
       restore: async (filter: unknown) => { calls.push({ op: "restore", filter }); return row; },
     }),
   };
-  const normalized = normalizeSchema(fields);
+  const normalized = fieldsOf(fields);
   normalized.revision.concurrency = true;
   normalized.removed.softDelete = true;
   installSchema(native as never, {
-    version: 2, collections: { entries: { fields: normalized,
-      options: { softDelete: true, versioning: true, strictness: "strict" }, indexes: [] } },
+    collections: { entries: { fields: normalized, indexes: [] } },
   } as never);
   const db = native as unknown as { entries: Collection<typeof fields> };
   const input: RowInput<typeof fields> = { title: "hello" };

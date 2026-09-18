@@ -4,7 +4,7 @@ import {
   mapResultDoc,
   mapFilterOutbound,
   translateAggregatePipeline,
-} from "../src/utils.js";
+} from "../../../crates/zeroship-data-v8/js/runtime/utils.js";
 import { naming } from "../src/index.js";
 
 const { toColumn, toField } = naming.snakeCase;

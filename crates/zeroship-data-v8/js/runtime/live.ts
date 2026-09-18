@@ -41,7 +41,10 @@
  *     MUST pass `db.live(queryFn, { tables: ["todos"] })` explicitly.
  */
 
-import { subscribe, type Subscription, type SubscriptionEvent } from "./subscribe";
+import { subscribe, type Subscription, type SubscriptionEvent } from "../../../../packages/db/src/subscribe";
+import type { LiveOptions, LiveQuery } from "../../../../packages/db/src/db-types";
+
+export type { LiveOptions, LiveQuery };
 
 /**
  * The minimal contract a `queryFn` return value must satisfy. Either a
@@ -78,28 +81,6 @@ let _warnedEmptyTables = false;
 /** @internal — test-only handle. */
 export function __zeroshipLiveTrackerCurrentForTest(): { collections: Set<string> } | null {
   return liveTracker.current;
-}
-
-/** Options for `db.live`. */
-export interface LiveOptions {
-  /**
-   * Explicit list of tables to subscribe to. When provided, the
-   * Collection-method auto-tracking is bypassed — useful if `queryFn`
-   * returns a raw `Promise<R[]>` that doesn't go through a Collection
-   * (e.g. fetch from an external service, then transform).
-   */
-  tables?: string[];
-}
-
-/**
- * The handle returned by `db.live`. AsyncIterable so callers write
- * `for await (const rows of live) ...`; `close()` is an explicit
- * teardown channel.
- */
-export interface LiveQuery<R> extends AsyncIterableIterator<R[]> {
-  /** Idempotent. Cancels every underlying subscription and resolves
-   *  any pending `next()` with `{done: true}`. */
-  close(): void;
 }
 
 /**

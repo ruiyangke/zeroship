@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { installSchema, type NativeDb, type RuntimeSchemaDescriptor } from "../../../crates/zeroship-data-v8/js/testing.js";
+import { installSchema, type NativeDb, type SchemaProjection } from "../../../crates/zeroship-data-v8/js/testing.js";
 
-test("artifact binary defaults reach inserts as independent native buffers", async () => {
+test("decoded binary defaults reach inserts as independent native buffers", async () => {
   const writes: Record<string, unknown>[] = [];
   const native = {
     collection() {
@@ -15,25 +15,22 @@ test("artifact binary defaults reach inserts as independent native buffers", asy
       };
     },
   } as unknown as NativeDb;
-  const descriptor: RuntimeSchemaDescriptor = {
-    version: 2,
+  const projection: SchemaProjection = {
     collections: {
       blobs: {
         fields: {
           id: { type: "string", required: true, primaryKey: true },
-          payload: { type: "bytes", required: true, default: "AP8=" },
-          empty: { type: "bytes", required: true, default: "" },
+          payload: { type: "bytes", required: true, default: [0, 255] },
+          empty: { type: "bytes", required: true, default: [] },
         },
-        options: { softDelete: false, versioning: false, strictness: "strict" },
         indexes: [],
       },
     },
   };
-  const original = structuredClone(descriptor);
   const db = native as unknown as {
     blobs: { insert(row: Record<string, unknown>): Promise<{ error: Error | null }> };
   };
-  installSchema(native, descriptor);
+  installSchema(native, projection);
   assert.equal((await db.blobs.insert({ id: "first" })).error, null);
   assert.deepEqual(writes[0].payload, new Uint8Array([0, 255]));
   assert.deepEqual(writes[0].empty, new Uint8Array());
@@ -44,16 +41,8 @@ test("artifact binary defaults reach inserts as independent native buffers", asy
   const beforeInvalid = writes.length;
   assert.ok((await db.blobs.insert({ id: "invalid", payload: "AP8=" })).error);
   assert.equal(writes.length, beforeInvalid);
-  assert.deepEqual(descriptor, original);
 
-  installSchema(native, descriptor);
+  installSchema(native, projection);
   assert.equal((await db.blobs.insert({ id: "reinstalled" })).error, null);
-  assert.deepEqual(writes.at(-1)?.payload, new Uint8Array([0, 255]));
-
-  for (const invalid of ["%%%", "AP8", "AP8=\n", "AP9="]) {
-    descriptor.collections.blobs.fields.payload.default = invalid;
-    assert.throws(() => installSchema(native, descriptor), { code: "INVALID_RUNTIME_DESCRIPTOR" });
-  }
-  assert.equal((await db.blobs.insert({ id: "after-invalid-install" })).error, null);
   assert.deepEqual(writes.at(-1)?.payload, new Uint8Array([0, 255]));
 });

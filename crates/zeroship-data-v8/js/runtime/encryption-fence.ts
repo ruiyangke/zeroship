@@ -1,5 +1,5 @@
-import type { NormalizedSchema } from "../schema";
-import type { PlainObject } from "../types";
+import type { NormalizedSchema } from "../../../../packages/db/src/schema";
+import type { PlainObject } from "../../../../packages/db/src/types";
 
 /** Encrypted values cannot participate in predicates, including nested filters. */
 export function validateEncryptedFieldsInFilter(

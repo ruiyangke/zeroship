@@ -1,5 +1,5 @@
 import type { IdLoader } from "./loader";
-import type { IdValue } from "./types";
+import type { IdValue } from "../../../../packages/db/src/types";
 
 type LoaderRow = { id: IdValue };
 

@@ -15,7 +15,7 @@ import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { schema, t } from "../src/index.js";
 import { installSchemaForTest } from "./_install-helper.js";
-import { __zeroshipDbResetIndexWarnings } from "../src/collection.js";
+import { __zeroshipDbResetIndexWarnings } from "../../../crates/zeroship-data-v8/js/runtime/collection.js";
 import type { NativeDb } from "../src/native.js";
 
 // ---------------------------------------------------------------------------

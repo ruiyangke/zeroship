@@ -27,6 +27,7 @@ use zeroship_data_orm::{backend, descriptor, transaction, tx_route};
 pub(crate) mod context;
 pub mod op_error;
 mod read_capture;
+mod schema_projection;
 mod startup_policy;
 #[cfg(test)]
 mod tests;
@@ -99,7 +100,12 @@ impl NativePlugin for DbPlugin {
         let Some(descriptor) = descriptor else {
             return Ok(None);
         };
-        let json = serde_json::to_string(descriptor).map_err(|error| error.to_string())?;
+        // Rust is the single schema authority: decode and normalize once here,
+        // then hand the JS adapter an already-decoded projection so it builds
+        // collections with no re-validation or re-decode.
+        let schema = descriptor_schemas(Some(descriptor))?;
+        let projection = schema_projection::project_schema(&schema, descriptor)?;
+        let json = serde_json::to_string(&projection).map_err(|error| error.to_string())?;
         let json = v8::String::new(scope, &json).ok_or("could not allocate DB descriptor")?;
         let descriptor = v8::json::parse(scope, json).ok_or("could not parse DB descriptor")?;
         zeroship_runtime::modules::invoke_module_export(
@@ -129,7 +135,7 @@ impl NativePlugin for DbPlugin {
         &self,
         scope: &mut v8::PinScope<'s, '_>,
         app_id: &str,
-        namespace: v8::Local<'s, v8::Object>,
+        _namespace: v8::Local<'s, v8::Object>,
         descriptor: Option<&serde_json::Value>,
     ) -> Result<(), String> {
         // The runtime validates the complete descriptor before invoking this
@@ -137,10 +143,6 @@ impl NativePlugin for DbPlugin {
         // context anyway, so a future validator change cannot publish a
         // partial schema on error.
         let schemas = descriptor_schemas(descriptor)?;
-        let collection_names = schemas
-            .collections()
-            .map(|(name, _)| name.to_owned())
-            .collect::<Vec<_>>();
         // Same refusal as `mint_db`: an app id that is not a legal schema name
         // has no binding to key the descriptor under, so publish nothing rather
         // than key it under a schema that cannot be addressed.
@@ -149,7 +151,6 @@ impl NativePlugin for DbPlugin {
         startup_policy::initialize(scope, binding.clone());
         zeroship_data_orm::descriptor::install_collections(&binding, schemas)
             .map_err(|error| error.to_string())?;
-        install_native_collection_properties(scope, namespace, &collection_names)?;
         Ok(())
     }
 
@@ -170,35 +171,6 @@ impl NativePlugin for DbPlugin {
             context.set_meter(self.meter.clone());
         });
     }
-}
-
-fn install_native_collection_properties<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    namespace: v8::Local<'s, v8::Object>,
-    collection_names: &[String],
-) -> Result<(), String> {
-    for name in collection_names {
-        let key = v8::String::new(scope, name)
-            .ok_or_else(|| format!("could not allocate collection name {name:?}"))?;
-        match namespace.has(scope, key.into()) {
-            Some(true) => continue,
-            Some(false) => {}
-            None => return Err(format!("could not inspect collection name {name:?}")),
-        }
-        let collection = v8_classes::db::collection_for_namespace(scope, namespace, name)?;
-        let installed = namespace.define_own_property(
-            scope,
-            key.into(),
-            collection.into(),
-            // The DB adapter replaces this native placeholder with its SDK
-            // facade during startup, so the property remains configurable.
-            v8::PropertyAttribute::READ_ONLY,
-        );
-        if installed != Some(true) {
-            return Err(format!("could not install collection {name:?} on env.db"));
-        }
-    }
-    Ok(())
 }
 
 fn descriptor_schemas(

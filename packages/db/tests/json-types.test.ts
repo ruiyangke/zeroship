@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { t, type InferFieldDef, type RowInput, type UpdateExpression } from "../src/types";
-import { validateDoc } from "../src/validate";
+import { validateDoc } from "../../../crates/zeroship-data-v8/js/runtime/validate";
 
 test("JSON fields infer every JSON root for inserts and updates", () => {
   const fields = { payload: t.json() };
