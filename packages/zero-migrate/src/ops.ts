@@ -153,7 +153,13 @@ import type {
 } from "./types.js";
 import { flattenVendorAttributes, type VendorAttributeArgs } from "./vendor-attributes.js";
 
-import { TypeBuilder as DbTypeBuilder } from "@zeroship/schema";
+import {
+  TypeBuilder as DbTypeBuilder,
+  type FieldDef,
+  type RefOptions,
+  type ReferenceValue,
+  type RelationMetadata,
+} from "@zeroship/schema";
 
 import { colTypeFromDbField, type DbSchemaField } from "./db-lexicon.js";
 
@@ -820,20 +826,23 @@ export const MASK_CLASSIFICATIONS: readonly Classification[] = [
  *  rejects an out-of-set token with a friendly client-side OP_INVALID. */
 export const COLUMN_COLLATIONS: readonly ColumnCollation[] = ["bytewise"];
 
-/** The column types a collation may be pinned on, in the wire spelling. A
- *  collation is a rule for comparing TEXT, so the engine's validator refuses it
- *  on anything else (`validate_column_facets`, matching `ColType::Text |
- *  ColType::String`). This mirrors that predicate so an author is refused where
- *  they wrote the call rather than deep inside the engine. */
-function collatableColumnType(type: ColType): boolean {
-  return type === "text" || (typeof type === "object" && type !== null && "string" in type);
-}
+/** The shared `FieldDef` types whose plaintext is encryptable. Mirrors the
+ *  engine's encryptable-plaintext predicate so an author is refused where they
+ *  wrote the call rather than after the whole migration lowers. */
+const ENCRYPTABLE_FIELD_TYPES: ReadonlySet<FieldDef["type"]> = new Set<FieldDef["type"]>([
+  "string",
+  "integer",
+  "int",
+  "bigInt",
+  "double",
+  "bytes",
+]);
 
-function encryptableColumnType(type: ColType): boolean {
-  if (type === "text" || type === "int" || type === "bigInt" || type === "double" || type === "bytes") {
-    return true;
-  }
-  return typeof type === "object" && type !== null && "string" in type;
+function encryptableField(def: FieldDef): boolean {
+  // `number` is the two-type token: the float is encryptable, the
+  // fixed-precision decimal (a `precision` facet) is not.
+  if (def.type === "number") return def.precision === undefined;
+  return ENCRYPTABLE_FIELD_TYPES.has(def.type);
 }
 
 const REF_ACTIONS: readonly RefAction[] = [
@@ -864,128 +873,107 @@ function requireReferenceAction(v: unknown, what: string): RefAction | undefined
   return v as RefAction;
 }
 
-class ColumnDefImpl implements ColumnDefType {
-  readonly _type: ColType;
-  readonly _nullable: boolean;
-  readonly _default: unknown;
-  readonly _primaryKey: boolean;
-  readonly _unique: boolean;
-  readonly _reference: ColumnReferenceFacet | undefined;
-  // Semantic facets carried on the IrColumn: the typed-id prefix
-  // (`t.typedId(prefix)`), pgvector distance metric, and the remaining
-  // standalone column facets.
-  // Absent ⇒ omitted on the wire.
-  readonly _idPrefix: string | undefined;
-  readonly _vectorMetric: string | undefined;
-  readonly _caseSensitive: boolean | undefined;
-  readonly _collation: ColumnCollation | undefined;
-  readonly _mask: { kind: string; classification: string } | undefined;
-  readonly _encrypted: boolean | undefined;
-  readonly _generated: { expr: Node; stored: boolean } | undefined;
-  readonly _identity: { always: boolean } | undefined;
-
-  constructor(
-    colType: ColType,
-    fields?: {
-      nullable?: boolean;
-      default?: unknown;
-      primaryKey?: boolean;
-      unique?: boolean;
-      reference?: ColumnReferenceFacet;
-      idPrefix?: string;
-      vectorMetric?: string;
-      caseSensitive?: boolean;
-      collation?: ColumnCollation;
-      mask?: { kind: string; classification: string };
-      encrypted?: boolean;
-      generated?: { expr: Node; stored: boolean };
-      identity?: { always: boolean };
-    },
-  ) {
-    this._type = colType;
-    this._nullable = fields?.nullable ?? true;
-    this._default = fields?.default;
-    this._primaryKey = fields?.primaryKey ?? false;
-    this._unique = fields?.unique ?? false;
-    this._reference = fields?.reference;
-    this._idPrefix = fields?.idPrefix;
-    this._vectorMetric = fields?.vectorMetric;
-    this._caseSensitive = fields?.caseSensitive;
-    this._collation = fields?.collation;
-    this._mask = fields?.mask;
-    this._encrypted = fields?.encrypted;
-    this._generated = fields?.generated;
-    this._identity = fields?.identity;
+class ColumnDefBuilder extends DbTypeBuilder<any, any, any, any, any, any> implements ColumnDefType {
+  constructor(def: FieldDef) {
+    super(def);
   }
 
-  /** Clone with the named fields overridden — the basis of immutability. */
-  private with(over: {
-    type?: ColType;
-    nullable?: boolean;
-    default?: unknown;
-    primaryKey?: boolean;
-    unique?: boolean;
-    reference?: ColumnReferenceFacet;
-    idPrefix?: string;
-    vectorMetric?: string;
-    caseSensitive?: boolean;
-    collation?: ColumnCollation;
-    mask?: { kind: string; classification: string };
-    encrypted?: boolean;
-    generated?: { expr: Node; stored: boolean };
-    identity?: { always: boolean };
-  }): ColumnDefImpl {
-    return new ColumnDefImpl(over.type ?? this._type, {
-      nullable: over.nullable ?? this._nullable,
-      default: "default" in over ? over.default : this._default,
-      primaryKey: over.primaryKey ?? this._primaryKey,
-      unique: over.unique ?? this._unique,
-      reference: "reference" in over ? over.reference : this._reference,
-      idPrefix: "idPrefix" in over ? over.idPrefix : this._idPrefix,
-      vectorMetric: "vectorMetric" in over ? over.vectorMetric : this._vectorMetric,
-      caseSensitive: "caseSensitive" in over ? over.caseSensitive : this._caseSensitive,
-      collation: "collation" in over ? over.collation : this._collation,
-      mask: "mask" in over ? over.mask : this._mask,
-      encrypted: "encrypted" in over ? over.encrypted : this._encrypted,
-      generated: "generated" in over ? over.generated : this._generated,
-      identity: "identity" in over ? over.identity : this._identity,
-    });
+  // The recorder reads the shared `FieldDef`; these accessors derive the
+  // neutral `ColType` and the per-facet values the IR image needs. The names
+  // avoid the base class's type-level brands (`_type`, `_mask`).
+  get _colType(): ColType {
+    return colTypeFromDbField(this.toFieldDef());
+  }
+  get _nullable(): boolean {
+    return this.toFieldDef().required !== true;
+  }
+  get _default(): unknown {
+    return this.toFieldDef().default;
+  }
+  get _primaryKey(): boolean {
+    return this.toFieldDef().primaryKey === true;
+  }
+  get _unique(): boolean {
+    return this.toFieldDef().unique === true;
+  }
+  get _reference(): ColumnReferenceFacet | undefined {
+    const def = this.toFieldDef();
+    // A db `t.ref` lowers through the ColType `ref` arm; only a migration
+    // `.references()` call records the richer facet beside a scalar type.
+    if (def.refTarget === undefined || def.type === "ref") return undefined;
+    return compact({
+      table: def.refTarget,
+      column: def.refColumn,
+      name: def.refName,
+      relation: def.relation,
+      onDelete: def.onDelete,
+      onUpdate: def.onUpdate,
+    }) as ColumnReferenceFacet;
+  }
+  get _idPrefix(): string | undefined {
+    return this.toFieldDef().idPrefix;
+  }
+  get _vectorMetric(): string | undefined {
+    return this.toFieldDef().vectorMetric;
+  }
+  get _caseSensitive(): boolean | undefined {
+    return this.toFieldDef().caseSensitive;
+  }
+  get _collation(): ColumnCollation | undefined {
+    return this.toFieldDef().collation;
+  }
+  get _maskFacet(): { kind: string; classification: string } | undefined {
+    // Read the RAW stored facet, not `toFieldDef()`: the shared builder's
+    // seal-time rule auto-populates a mask for every encrypted field, and the
+    // migration IR only carries a mask the author declared.
+    return this._def.mask;
+  }
+  get _encrypted(): boolean | undefined {
+    return this.toFieldDef().encrypted;
+  }
+  get _generated(): { expr: Node; stored: boolean } | undefined {
+    const generated = this.toFieldDef().generated;
+    return generated === undefined ? undefined : { expr: generated.expr as Node, stored: generated.stored };
+  }
+  get _identity(): { always: boolean } | undefined {
+    return this.toFieldDef().identity;
   }
 
-  /** Internal: carry the declared typed-id prefix (`t.typedId(prefix)`). */
-  __withIdPrefix(prefix: string): ColumnDefImpl {
-    return this.with({ idPrefix: prefix });
+  override required(): this {
+    return this.clone({ required: true });
   }
-
-  /** Internal: carry the pgvector distance metric (`t.vector({ dimensions, metric })`). */
-  __withVectorMetric(metric: string): ColumnDefImpl {
-    return this.with({ vectorMetric: metric });
+  override default(value: unknown): this {
+    return this.clone({ default: toIrDefault(value as DefaultValue | DefaultExprFn | ExprChainType | Expr) as never });
   }
-
-  required(): ColumnDefImpl {
-    return this.with({ nullable: false });
+  override primaryKey(): this {
+    return this.clone({ primaryKey: true, required: true });
   }
-  default(value: DefaultValue | DefaultExprFn | ExprChainType | Expr): ColumnDefImpl {
-    return this.with({ default: toIrDefault(value) });
-  }
-  primaryKey(): ColumnDefImpl {
-    return this.with({ primaryKey: true, nullable: false });
-  }
-  unique(): ColumnDefImpl {
-    if (this._encrypted === true) {
+  override unique(): this {
+    if (this._def.encrypted === true) {
       throw structuredError(
         "OP_INVALID",
         "t.*.unique(): an encrypted column cannot be unique; randomized ciphertext " +
           "never collides, so a unique index would not enforce anything. Drop .unique() or .encrypted()",
       );
     }
-    return this.with({ unique: true });
+    return this.clone({ unique: true });
   }
+  override references<Target extends string, const N extends string = never>(
+    this: DbTypeBuilder<any, any, any, any, any, any>,
+    table: Target,
+    opts?: RefOptions & { relation?: N },
+  ): DbTypeBuilder<ReferenceValue<any, Target>, any, any, any, any, any> & Pick<this, Extract<keyof this, "_assigned">> & RelationMetadata<N>;
   references(
     table: string,
     column: string,
+    options?: { onDelete?: RefAction; onUpdate?: RefAction; name?: string; relation?: string },
+  ): this;
+  override references(
+    table: string,
+    columnOrOpts?: string | (RefOptions & { relation?: string }),
     options: { onDelete?: RefAction; onUpdate?: RefAction; name?: string; relation?: string } = {},
-  ): ColumnDefImpl {
+  ): unknown {
+    const column = typeof columnOrOpts === "string" ? columnOrOpts : columnOrOpts?.column;
     requireString(table, "t.*.references(table, column, options): table");
     if (table.length === 0) {
       throw structuredError(
@@ -1019,21 +1007,17 @@ class ColumnDefImpl implements ColumnDefType {
         throw structuredError("OP_INVALID", "references relation must be a nonreserved output identifier");
       }
     }
-    const reference = compact({
-      table,
-      column,
-      name: options.name,
-      relation: options.relation,
-      onDelete: requireReferenceAction(
-        options.onDelete,
-        "t.*.references(table, column, { onDelete })",
-      ),
-      onUpdate: requireReferenceAction(
-        options.onUpdate,
-        "t.*.references(table, column, { onUpdate })",
-      ),
-    }) as ColumnReferenceFacet;
-    return this.with({ reference: Object.freeze(reference) });
+    const next: FieldDef = { ...this._def };
+    for (const key of ["refColumn", "refName", "relation", "onDelete", "onUpdate"] as const) delete next[key];
+    next.refTarget = table;
+    next.refColumn = column;
+    if (options.name !== undefined) next.refName = options.name;
+    if (options.relation !== undefined) next.relation = options.relation;
+    const onDelete = requireReferenceAction(options.onDelete, "t.*.references(table, column, { onDelete })");
+    const onUpdate = requireReferenceAction(options.onUpdate, "t.*.references(table, column, { onUpdate })");
+    if (onDelete !== undefined) next.onDelete = onDelete as never;
+    if (onUpdate !== undefined) next.onUpdate = onUpdate as never;
+    return this.replaceDef(next);
   }
 
   /** `.mask({ kind, classification? })` — declare a STANDALONE column mask so
@@ -1043,7 +1027,7 @@ class ColumnDefImpl implements ColumnDefType {
    *  `MASK_CLASSIFICATIONS`). The closed-set checks mirror `t.vector({ dimensions, metric })`:
    *  a friendly client-side OP_INVALID over the SAME closed set the engine's enums
    *  enforce authoritatively. */
-  mask(opts: MaskOptions): ColumnDefImpl {
+  mask(opts: MaskOptions): this {
     if (opts === null || typeof opts !== "object") {
       throw structuredError("OP_INVALID", "t.*.mask(opts): opts must be { kind, classification? }");
     }
@@ -1065,7 +1049,7 @@ class ColumnDefImpl implements ColumnDefType {
         { classification },
       );
     }
-    return this.with({ mask: { kind: opts.kind, classification } });
+    return this.clone({ mask: { kind: opts.kind, classification } });
   }
 
   /** `.encrypted()` — store this column's PLAINTEXT encrypted. The physical
@@ -1073,17 +1057,17 @@ class ColumnDefImpl implements ColumnDefType {
    *  facet. Refused on a `.references()` column (a foreign key compares
    *  plaintext, and randomized ciphertext never matches) and on a
    *  `.collation()` column (a collation orders plaintext). Returns a fresh def. */
-  encrypted(): ColumnDefImpl {
+  encrypted(): this {
     rejectCreateTableOnlyFacets(this, "t.*.encrypted()");
-    if (!encryptableColumnType(this._type)) {
+    if (!encryptableField(this._def)) {
       throw structuredError(
         "OP_INVALID",
         "t.*.encrypted(): only text / string / int / bigInt / double / bytes columns can " +
-          `be encrypted, got ${JSON.stringify(this._type)}`,
-        { type: this._type },
+          `be encrypted, got ${JSON.stringify(this._colType)}`,
+        { type: this._colType },
       );
     }
-    return this.with({ encrypted: true });
+    return this.clone({ encrypted: true });
   }
 
   /** `.collation(intent)` — pin the column's comparison order to a CLOSED
@@ -1091,7 +1075,7 @@ class ColumnDefImpl implements ColumnDefType {
    *  refusal below mirrors one the engine's validator already makes, so an
    *  author is told at the call site rather than after the whole migration
    *  lowers. Returns a fresh def. */
-  collation(intent: ColumnCollation): ColumnDefImpl {
+  collation(intent: ColumnCollation): this {
     if (!COLUMN_COLLATIONS.includes(intent)) {
       throw structuredError(
         "OP_INVALID",
@@ -1100,12 +1084,12 @@ class ColumnDefImpl implements ColumnDefType {
         { collation: intent },
       );
     }
-    if (!collatableColumnType(this._type)) {
+    if (this._def.type !== "string") {
       throw structuredError(
         "OP_INVALID",
         "t.*.collation(intent): a collation orders text and has no meaning on this " +
           "column's type; declare the column as t.text() or t.string()",
-        { type: this._type },
+        { type: this._colType },
       );
     }
     if (this._caseSensitive === false) {
@@ -1129,17 +1113,17 @@ class ColumnDefImpl implements ColumnDefType {
           "order; drop the collation",
       );
     }
-    return this.with({ collation: intent });
+    return this.clone({ collation: intent });
   }
 
-  generated(expr: GeneratedColumnExprFn | ExprChainType | Expr, opts?: GeneratedOptions): ColumnDefImpl {
+  generated(expr: GeneratedColumnExprFn | ExprChainType | Expr, opts?: GeneratedOptions): this {
     if (opts !== undefined && (opts === null || typeof opts !== "object")) {
       throw structuredError("OP_INVALID", "t.*.generated(expr, opts): opts must be { virtual?: boolean }");
     }
     if (opts?.virtual !== undefined && typeof opts.virtual !== "boolean") {
       throw structuredError("OP_INVALID", "t.*.generated(expr, { virtual }): virtual must be a boolean");
     }
-    return this.with({
+    return this.clone({
       generated: {
         expr: resolveImmutableExpr(expr as GeneratedColumnExprFn | ExprChainType | Node, "generated column expression")!,
         stored: opts?.virtual === true ? false : true,
@@ -1147,24 +1131,24 @@ class ColumnDefImpl implements ColumnDefType {
     });
   }
 
-  identity(opts?: IdentityOptions): ColumnDefImpl {
+  identity(opts?: IdentityOptions): this {
     if (opts !== undefined && (opts === null || typeof opts !== "object")) {
       throw structuredError("OP_INVALID", "t.*.identity(opts): opts must be { always?: boolean }");
     }
     if (opts?.always !== undefined && typeof opts.always !== "boolean") {
       throw structuredError("OP_INVALID", "t.*.identity({ always }): always must be a boolean");
     }
-    return this.with({ identity: { always: opts?.always === true } });
+    return this.clone({ identity: { always: opts?.always === true } });
   }
 
-  autoIncrement(): ColumnDefImpl {
-    return this.with({ identity: { always: false } });
+  autoIncrement(): this {
+    return this.clone({ identity: { always: false } });
   }
 
   __toIrColumn(name: string): Node {
     return compact({
       name,
-      type: this._type,
+      type: this._colType,
       nullable: this._nullable === false ? false : undefined,
       default: this._default,
       // A PRIMARY KEY already IMPLIES uniqueness, so a column that is BOTH
@@ -1182,7 +1166,7 @@ class ColumnDefImpl implements ColumnDefType {
       vectorMetric: this._vectorMetric,
       caseSensitive: this._caseSensitive === false ? false : undefined,
       collation: this._collation,
-      mask: this._mask,
+      mask: this._maskFacet,
       encrypted: this._encrypted,
       generated: this._generated,
       identity: this._identity,
@@ -1191,14 +1175,14 @@ class ColumnDefImpl implements ColumnDefType {
   __toAddColumnTail(): Node {
     rejectCreateTableOnlyFacets(this, ".column(name).add({ type })");
     return compact({
-      type: this._type,
+      type: this._colType,
       nullable: this._nullable === false ? false : undefined,
       default: this._default,
       // Carry the remaining column facets onto the addColumn op tail
       // (camelCase keys, lock-step with `Op::AddColumn`). Absent ⇒ omitted (compact).
       vectorMetric: this._vectorMetric,
       caseSensitive: this._caseSensitive === false ? false : undefined,
-      mask: this._mask,
+      mask: this._maskFacet,
       encrypted: this._encrypted,
       generated: this._generated,
       identity: this._identity,
@@ -1206,8 +1190,8 @@ class ColumnDefImpl implements ColumnDefType {
   }
 }
 
-function isColumnDef(x: unknown): x is ColumnDefImpl {
-  return x instanceof ColumnDefImpl;
+function isColumnDef(x: unknown): x is ColumnDefBuilder {
+  return x instanceof ColumnDefBuilder;
 }
 
 /** Refuse the facets only a `table(...).create({ columns })` column can carry.
@@ -1219,7 +1203,7 @@ function isColumnDef(x: unknown): x is ColumnDefImpl {
  *  the choice at these positions is refuse or silently drop, and a dropped facet
  *  is a column that reads as referencing or collated in the migration source and
  *  is neither in the database. */
-function rejectCreateTableOnlyFacets(def: ColumnDefImpl, where: string): void {
+function rejectCreateTableOnlyFacets(def: ColumnDefBuilder, where: string): void {
   if (def._reference !== undefined) {
     throw structuredError(
       "OP_INVALID",
@@ -1234,19 +1218,19 @@ function rejectCreateTableOnlyFacets(def: ColumnDefImpl, where: string): void {
   }
 }
 
-function textColumn(opts?: TextOptions): ColumnDefImpl {
+function textColumn(opts?: TextOptions): ColumnDefBuilder {
   if (opts !== undefined && (opts === null || typeof opts !== "object")) {
     throw structuredError("OP_INVALID", "t.text(opts): opts must be { caseSensitive?: boolean }");
   }
   if (opts?.caseSensitive !== undefined && typeof opts.caseSensitive !== "boolean") {
     throw structuredError("OP_INVALID", "t.text({ caseSensitive }): caseSensitive must be a boolean");
   }
-  return new ColumnDefImpl("text", {
-    caseSensitive: opts?.caseSensitive === false ? false : undefined,
-  });
+  const def: FieldDef = { type: "string" };
+  if (opts?.caseSensitive === false) def.caseSensitive = false;
+  return new ColumnDefBuilder(def);
 }
 
-function stringColumn(opts?: StringOptions): ColumnDefImpl {
+function stringColumn(opts?: StringOptions): ColumnDefBuilder {
   if (opts !== undefined && (opts === null || typeof opts !== "object")) {
     throw structuredError(
       "OP_INVALID",
@@ -1258,9 +1242,9 @@ function stringColumn(opts?: StringOptions): ColumnDefImpl {
   if (opts?.caseSensitive !== undefined && typeof opts.caseSensitive !== "boolean") {
     throw structuredError("OP_INVALID", "t.string({ caseSensitive }): caseSensitive must be a boolean");
   }
-  return new ColumnDefImpl({ string: { length } } as ColType, {
-    caseSensitive: opts?.caseSensitive === false ? false : undefined,
-  });
+  const def: FieldDef = { type: "string", maxLength: length };
+  if (opts?.caseSensitive === false) def.caseSensitive = false;
+  return new ColumnDefBuilder(def);
 }
 
 /** Base64-encode raw bytes (the `IrScalar::Bytes` wire carrier) without a Node
@@ -1840,7 +1824,7 @@ export const t: TypeLexicon = {
     if (storage !== "native") {
       throw structuredError("OP_INVALID", "t.array(item, { storage: json }): the migration DSL expresses native text arrays only");
     }
-    if ((item as { _type?: string })._type !== "text") {
+    if ((item as { _colType?: ColType })._colType !== "text") {
       throw structuredError("OP_INVALID", "t.array(item): native array storage supports string elements only - use t.text()");
     }
     if (isColumnDef(item) && item._encrypted === true) {
@@ -1849,13 +1833,13 @@ export const t: TypeLexicon = {
         "t.array(item): an encrypted element is not supported; encrypt the array column or store plaintext elements",
       );
     }
-    return new ColumnDefImpl("textArray");
+    return new ColumnDefBuilder({ type: "array", items: "string", arrayStorage: "native" });
   },
   numeric: (opts = {}) => {
     requirePlainObject(opts, "t.numeric(opts)");
     const precision = requireOptionalPositiveInteger(opts.precision, "t.numeric({ precision })") ?? 38;
     const scale = requireOptionalNonNegativeInteger(opts.scale, "t.numeric({ scale })") ?? 9;
-    return new ColumnDefImpl({ decimal: { precision, scale } } as ColType);
+    return new ColumnDefBuilder({ type: "number", precision, scale });
   },
   char: (opts) => {
     requirePlainObject(opts, "t.char(opts)");
@@ -1863,27 +1847,25 @@ export const t: TypeLexicon = {
     if (n === undefined) {
       throw structuredError("OP_INVALID", "t.char({ length }) requires length");
     }
-    return new ColumnDefImpl({ char: { length: n } } as ColType);
+    return new ColumnDefBuilder({ type: "char", charLength: n });
   },
-  timestamp: () => new ColumnDefImpl("timestamp"),
-  calendarDate: () => new ColumnDefImpl("date" as ColType),
+  timestamp: () => new ColumnDefBuilder({ type: "timestamp" }),
+  calendarDate: () => new ColumnDefBuilder({ type: "calendarDate" }),
   typedId: (prefix: string) => {
     requireTypeIdPrefix(prefix, "t.typedId(prefix)");
-    return new ColumnDefImpl({ string: { length: 36 } } as ColType, {
-      idPrefix: prefix,
-    });
+    return new ColumnDefBuilder({ type: "string", maxLength: 36, idPrefix: prefix });
   },
-  uuid: () => new ColumnDefImpl("uuid"),
-  bytes: () => new ColumnDefImpl("bytes"),
-  boolean: () => new ColumnDefImpl("boolean"),
-  json: () => new ColumnDefImpl("json"),
+  uuid: () => new ColumnDefBuilder({ type: "uuid" }),
+  bytes: () => new ColumnDefBuilder({ type: "bytes" }),
+  boolean: () => new ColumnDefBuilder({ type: "boolean" }),
+  json: () => new ColumnDefBuilder({ type: "json" }),
   vector: (opts: VectorOptions) => {
     requirePlainObject(opts, "t.vector(opts)");
     const n = requireOptionalPositiveInteger(opts.dimensions, "t.vector({ dimensions })");
     if (n === undefined) {
       throw structuredError("OP_INVALID", "t.vector({ dimensions }) requires dimensions");
     }
-    let col = new ColumnDefImpl({ vector: { vector: n } } as ColType);
+    const def: FieldDef = { type: "vector", vectorDims: n };
     if (opts.metric !== undefined) {
       requireString(opts.metric, "t.vector({ metric })");
       // A closed-set check on the metric token gives a friendly OP_INVALID at
@@ -1897,24 +1879,24 @@ export const t: TypeLexicon = {
           { metric: opts.metric },
         );
       }
-      col = col.__withVectorMetric(opts.metric);
+      def.vectorMetric = opts.metric as NonNullable<FieldDef["vectorMetric"]>;
     }
-    return col;
+    return new ColumnDefBuilder(def);
   },
-  geoPoint: () => new ColumnDefImpl("geoPoint"),
-  int: () => new ColumnDefImpl("int"),
-  bigInt: () => new ColumnDefImpl("bigInt"),
-  double: () => new ColumnDefImpl("double"),
-  inet: () => new ColumnDefImpl("inet"),
+  geoPoint: () => new ColumnDefBuilder({ type: "geoPoint" }),
+  int: () => new ColumnDefBuilder({ type: "integer" }),
+  bigInt: () => new ColumnDefBuilder({ type: "bigInt" }),
+  double: () => new ColumnDefBuilder({ type: "number" }),
+  inet: () => new ColumnDefBuilder({ type: "inet" }),
   enum: (name) => {
     const n = typeof name === "string" ? name : name.name;
     requireString(n, "t.enum(name)");
-    return new ColumnDefImpl({ enum: { name: n } } as ColType);
+    return new ColumnDefBuilder({ type: "enum", enumName: n });
   },
   domain: (name) => {
     const n = typeof name === "string" ? name : name.name;
     requireString(n, "t.domain(name)");
-    return new ColumnDefImpl({ domain: { name: n } } as ColType);
+    return new ColumnDefBuilder({ type: "domain", domainName: n });
   },
 };
 
@@ -1928,7 +1910,7 @@ function colTypeOf(typeArg: ColumnDefType | ColType): ColType {
           "encryption is supported on table(...).create({ columns }) and .column(...).add(...)",
       );
     }
-    return typeArg._type;
+    return typeArg._colType;
   }
   return typeArg as ColType;
 }
@@ -2185,25 +2167,31 @@ export function raw(args: RawArgs): Node {
  * (immutable) `ColumnDef`, so a caller can still layer migration modifiers on top.
  */
 export function fromDb(field: DbSchemaField): ColumnDefType {
-  let def: ColumnDefImpl = new ColumnDefImpl(colTypeFromDbField(field));
   const fd = field instanceof DbTypeBuilder ? field.toFieldDef() : field;
-  if (fd && typeof fd === "object" && (fd as { required?: boolean }).required === true) {
-    def = def.required();
-  }
-  if (fd && typeof fd === "object" && (fd as { unique?: boolean }).unique === true) {
-    def = def.unique();
-  }
-  if (fd && typeof fd === "object" && (fd as { encrypted?: boolean }).encrypted === true) {
-    def = def.encrypted();
-  }
-  if (
-    fd &&
-    typeof fd === "object" &&
-    typeof (fd as { idPrefix?: unknown }).idPrefix === "string"
-  ) {
-    def = def.__withIdPrefix((fd as { idPrefix: string }).idPrefix);
-  }
-  return def;
+  // The bridge has always carried exactly the type, nullability, uniqueness,
+  // encryption and typed-id prefix; other db facets (masks, defaults, FK
+  // navigation) stay out of the recorded migration image, so the shared
+  // `FieldDef` is narrowed to that same set rather than forwarded wholesale.
+  const def: FieldDef = { type: fd.type };
+  if (fd.required === true) def.required = true;
+  if (fd.unique === true) def.unique = true;
+  if (fd.encrypted === true) def.encrypted = true;
+  if (fd.idPrefix !== undefined) def.idPrefix = fd.idPrefix;
+  // Type parameters the `colTypeFromDbField` reduction reads.
+  if (fd.maxLength !== undefined) def.maxLength = fd.maxLength;
+  if (fd.precision !== undefined) def.precision = fd.precision;
+  if (fd.scale !== undefined) def.scale = fd.scale;
+  if (fd.charLength !== undefined) def.charLength = fd.charLength;
+  if (fd.vectorDims !== undefined) def.vectorDims = fd.vectorDims;
+  if (fd.vectorMetric !== undefined) def.vectorMetric = fd.vectorMetric;
+  if (fd.refTarget !== undefined) def.refTarget = fd.refTarget;
+  if (fd.items !== undefined) def.items = fd.items;
+  if (fd.arrayStorage !== undefined) def.arrayStorage = fd.arrayStorage;
+  if (fd.enumName !== undefined) def.enumName = fd.enumName;
+  if (fd.enumSchema !== undefined) def.enumSchema = fd.enumSchema;
+  if (fd.domainName !== undefined) def.domainName = fd.domainName;
+  if (fd.domainSchema !== undefined) def.domainSchema = fd.domainSchema;
+  return new ColumnDefBuilder(def);
 }
 
 // ── (B) The fluent `(col) => Expr` builder ──
@@ -3883,7 +3871,7 @@ function recordRenameTable(
 function recordAddColumn(
   table: string,
   column: string,
-  type: ColumnDefImpl,
+  type: ColumnDefBuilder,
   args: { ifNotExists?: boolean; schema?: string },
 ): void {
   emitAddColumn({
@@ -4845,7 +4833,7 @@ function pickViewColumns(
   return dflt;
 }
 
-function requireColumnDef(x: unknown, where: string): asserts x is ColumnDefImpl {
+function requireColumnDef(x: unknown, where: string): asserts x is ColumnDefBuilder {
   if (!isColumnDef(x)) {
     throw structuredError("OP_INVALID", `${where} must be a t.* ColumnDef`);
   }
