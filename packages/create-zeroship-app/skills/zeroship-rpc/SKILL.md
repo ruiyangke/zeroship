@@ -17,7 +17,7 @@ export const listNotes = query(async () => {
   const { data, error } = await env.db.notes.find().sort({ id: -1 });
   if (error) throw error;
   return data ?? [];
-}, { id: "notes.list", auth: "anonymous", publiclyAccessible: true });
+}, { id: "notes.list" });
 ```
 
 ## Pick the wrapper by capability
@@ -69,26 +69,37 @@ policy works perfectly on your machine and returns 401 for every caller once
 deployed. The build prints a warning naming each such procedure. Do not ignore
 it.
 
-To make a procedure public, both keys are required:
+To make a procedure public, declare both keys in the app's resource policy. The
+wrapper config accepts `auth`, but `publiclyAccessible` is a resource-tree field
+only, so the confirmation lives in `src/server/config.ts`:
 
 ```ts
-export const listNotes = query(handler, {
-  id: "notes.list",
-  auth: "anonymous",
-  publiclyAccessible: true,
+import { defineApp } from "@zeroship/server";
+export default defineApp({
+  resources: {
+    "rpc:notes": { auth: "anonymous", publiclyAccessible: true },
+  },
 });
 ```
 
-`auth: "anonymous"` alone fails the build: `publiclyAccessible: true` is the
-deliberate confirmation that the endpoint is meant to be world-callable.
+`auth: "anonymous"` without `publiclyAccessible: true` fails a production
+build: the flag is the deliberate confirmation that the endpoint is meant to be
+world-callable.
 
 For user-scoped data, leave the default and read identity inside the handler
 with `env.auth.getUser()` or `env.auth.requireUser()`.
 
 ### Where to declare the policy
 
-Per-procedure policy belongs at the call site, as above. It cannot drift from
-the procedure it governs, and it has no inheritance to reason about.
+Per-procedure `auth` belongs at the call site, in the wrapper's config:
+
+```ts
+export const listNotes = query(handler, { id: "notes.list", auth: "user" });
+```
+
+It cannot drift from the procedure it governs, and it has no inheritance to
+reason about. The public confirmation is the exception: `publiclyAccessible` is
+a resource-tree field, so it goes in `defineApp`.
 
 Use `defineApp({ resources })` in `src/server/config.ts` for what a call site
 cannot express:
@@ -105,7 +116,8 @@ export default defineApp({
 
 That tree also covers the `*` root, non-RPC URL paths, static/redirect/rewrite
 actions, and app-wide RPC defaults. Both inputs are merged and the resource
-tree wins, so a family policy is overridden by a call-site one.
+tree wins, so a resource-tree entry overrides the procedure's own config for the
+fields it names.
 
 Be careful with a `*` root: policy is inherited, so a root that declares
 `auth: "anonymous"` makes every procedure in the app anonymous, including ones

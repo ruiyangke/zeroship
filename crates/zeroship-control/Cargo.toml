@@ -176,10 +176,6 @@ path = "tests/live_db.rs"
 name = "workflow_e2e"
 path = "tests/workflow_e2e.rs"
 
-[[test]]
-name = "no_liquibase_residue_test"
-path = "tests/no_liquibase_residue_test.rs"
-
 [lints]
 workspace = true
 

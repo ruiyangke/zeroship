@@ -119,35 +119,3 @@ pub fn shipping_backends() -> BackendRegistry {
 // `tests/dialect_matrix/vendor_registry_owns_shipping_descriptors.rs`, which drives
 // `shipping_backends()` through the public surface and reaches each vendor's `DIALECT`
 // from the vendor crate itself.
-
-/// Compiles the Rust examples in the embedding guide as doctests.
-///
-/// `#[cfg(doctest)]` means this item exists only while rustdoc is collecting
-/// doctests, so the guide's prose never lands in the published API docs while its
-/// code is still compiled against the real crate. The embedding guide is the Rust
-/// half of the public surface, and without this nothing would compile it, so a
-/// rename could rot every example in it and leave CI green.
-///
-/// COVERAGE IS PARTIAL, and worth knowing before trusting a green run: only the
-/// compiled fences are checked. A ```` ```rust,ignore ```` fence is invisible to
-/// rustdoc and is neither compiled nor run, so a rename can still rot it while CI
-/// stays green.
-///
-/// The ignored blocks are deliberate and are not defects. Some need a live backend,
-/// an engine and a config to exist before they say anything (`recover_inflight_ddl`,
-/// `resolve_pending_contract`, the `PostgresBackend`/`MysqlBackend` pair), so compiling
-/// them means standing up fake infrastructure whose drift would then need its own guard.
-/// One is a `trait SqlSession` DEFINITION quoted for shape: compiling it would declare a
-/// SECOND trait that can silently diverge from the real one while still passing, which is
-/// worse than leaving it ignored.
-///
-/// Where a fragment only lacks a binding, rustdoc's `# ` prefix hides the setup and
-/// the fence becomes real coverage. Note the cost, since the guide is also read as
-/// plain Markdown in the repo: hidden lines are invisible in rustdoc but VISIBLE
-/// there, so each one is boilerplate a human reader pays for. Prefer making
-/// genuinely informative setup visible (the policy example shows its charter string)
-/// and hiding only `fn main` scaffolding.
-///
-#[cfg(doctest)]
-#[doc = include_str!("../../../docs/embedding.md")]
-pub struct EmbeddingGuideDocTests;

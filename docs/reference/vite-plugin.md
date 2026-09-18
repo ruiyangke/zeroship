@@ -1,19 +1,29 @@
 # `@zeroship/vite-plugin`
 
-Reference for the public plugin exported from [`packages/vite-plugin/src/index.ts`](../../packages/vite-plugin/src/index.ts).
+`zeroship()` is the build plugin a zeroship app installs in `vite.config.ts`. It
+turns server modules into RPC, runs server code in a real runtime during
+development, folds your committed migrations into typed `env.db`, and packs the
+deployable `.zship`. This page covers what you configure and what the build does
+with it.
 
 ## What it owns
 
-- Node-compat shims and `zeroship` module resolution
-- Server-procedure discovery for the SSR bundle
-- The synthetic server entry `virtual:zeroship/_server-entry`
-- The zeroship dev runtime and production `.zship` build
+One plugin installed once carries the whole server half of your app:
 
-The `zeroship` import stays external in the built server artifact. The runtime
-provides its native exports. In dev, the environment preserves that reserved
-specifier and ModuleRunner imports the same runtime module through its evaluator.
-The plugin does not emit JavaScript implementations of these helpers or resolve
-them to the Node test stub.
+- **Discovery.** A module whose first statement is `"use server"` is a server
+  module, and its wrapped exports become RPC procedures.
+- **Client rewriting.** Importing a wrapped procedure from client code is
+  rewritten into a typed RPC call, so you call server exports like local
+  functions.
+- **The runtime module.** `import { env } from "zeroship"` resolves to the
+  runtime environment in dev and in the deployed artifact. You never configure
+  this import; both paths resolve it to the same runtime.
+- **The dev runtime.** `pnpm dev` starts a zeroship runtime beside Vite and
+  forwards your server routes to it.
+- **Schema typing.** Your committed migrations are folded into the generated
+  `env.db` types (see below).
+- **The artifact.** `pnpm build` emits the `.zship` that `zeroship deploy`
+  uploads.
 
 ## Usage
 
@@ -40,63 +50,91 @@ per developer machine, plus the three levers that point at the file.
 | `devAuth` | `true` in dev | Dev-tier auth. See below. |
 | `configPath` | auto-discovery | Path to `zeroship.jsonc`, absolute or relative to the Vite root. An explicit path takes precedence over `ZEROSHIP_CONFIG` and app-root auto-discovery. A path that does not exist throws. |
 | `env` | none | Selects a named entry from the file's `environments` block - the plugin's equivalent of the CLI's `--env=`. There is no implicit environment and no `ZEROSHIP_ENV`. |
-| `config` | none | Escape hatch: a partial config object, or `(resolved) => partial` applied after the file loads and after environment selection. It may not change `app`, `control`, `runtime_date`, `build.output`, `migrations.dir` or `migrations.out`; attempting to is an error naming the field. |
+| `config` | none | Escape hatch: a partial config object, or `(resolved) => partial` applied after the file loads and after environment selection. It may not change `name`, `app`, `control`, `runtime_date`, `build.output`, `migrations.dir`, `migrations.out`, `secrets` or an environment's `protected`; attempting to fails the build naming the field. |
 
 With no `zeroship.jsonc` anywhere, the plugin runs on the schema defaults
 (`build.mode: "full"`, `build.dist: "dist"`, `build.output: "dist/app.zship"`,
 `migrations.dir: "migrations"`, `migrations.out: "generated/zeroship"`), which
 is what keeps `zeroship()` working in a scratch directory.
 
+`devServerPort` takes precedence over the `ZEROSHIP_DEV_PORT` environment
+variable, which in turn takes precedence over the `3001` default. The runtime
+listens on that port; Vite serves your app on its own port. The two are
+independent, so `vite --port` does not move the runtime. If another app already
+holds the runtime port, server calls fail with an `RpcError` whose `code` is
+`UNAVAILABLE` (see [rpc.md](rpc.md#errors-and-retries)), and the dev server
+prints a banner naming the clash and the `devServerPort` fix.
+
 ### `devAuth`
 
-The `pnpm dev` implementation of the platform auth contract - the peer of
-`env.db` to SQLite and `env.kv` to redb. When enabled, Vite middleware serves
-the same-origin `/__zeroship/auth/*` endpoints the `@zeroship/auth` client
-drives and supplies a logged-in identity to `env.auth.getUser()` server-side,
-with no gateway, no external auth service and no control plane.
+The `pnpm dev` implementation of the [platform auth contract](auth.md):
+`env.db`, `env.kv` and the auth session are all served locally, with no gateway,
+no external auth service and no control plane. When enabled, the dev server
+serves the same-origin `/__zeroship/auth/*` endpoints the `@zeroship/auth`
+client drives and supplies a logged-in identity to `env.auth.getUser()`
+server-side.
 
 | Value | Effect |
 | --- | --- |
 | `true` (the dev default) | One built-in dev user (`pws_dev...`, `dev@localhost`, scopes `openid profile email`). |
 | `{ id?, email?, ... }` or `{ user: {...} }` | One configured dev user. |
-| `{ users: [...], defaultUserId? }` | Several users; `/authorize` renders a dev picker so you can switch identity or scope set. |
-| `false` | Disabled. `/__zeroship/auth/*` falls through to the user module and `env.auth.getUser()` returns `null`. |
+| `{ users: [...], defaultUserId? }` | Several users; the dev sign-in form renders a picker so you can switch identity or scope set. |
+| `false` | Disabled. `/__zeroship/auth/*` falls through to your own routes and `env.auth.getUser()` returns `null`. |
 
 A configured user is `{ id?, email?, name?, avatar?, scopes? }`. **There is no
-`password` field.** The dev login form prefills and validates the deterministic
-password produced by `devPasswordFor` in `packages/vite-plugin/src/dev-auth.ts`.
-It is a local test credential rather than a secret, and the deployed platform's
-signup policy refuses it.
+`password` field.** The dev sign-in form prefills and validates a password
+derived from the user id; it is visible on the form, is a local test credential
+rather than a secret, and the deployed platform's signup policy refuses it. A
+custom `id` must be `pws_` followed by exactly 20 lowercase base36 characters -
+the only subject shape the deployed gateway accepts - so omit `id` unless you
+need a specific one.
 
-The provider lives in Vite's development middleware and is structurally absent
-from any production `.zship`. Full contract:
-[`auth-dev-tier.md`](auth-dev-tier.md).
+The dev auth provider is dev-only: it is not part of any production `.zship`.
 
 ## Migration-first type generation (`gen-types`)
 
-The plugin records the migrations under `migrations.dir` in-process through its
-pure-JS recorder, then passes the resulting IR envelopes to `zeroship-migrate-node`'s
-`genArtifacts` renderer. It writes into `migrations.out` (both keys come from
-[`zeroship.jsonc`](project-config.md), defaults `migrations` and
-`generated/zeroship`): `env.db.ts` (a generated `@zeroship/db` `t.*()` schema
-module), `schema.runtime.json` (the `RuntimeSchemaDescriptor`), and
-`migrations.ir.json` (the recorded migration set `zeroship migrate` posts).
-Commit that directory. There is no CLI subprocess, and `.zship` packing does not
-carry or read migration documents.
+Your committed migrations are the schema source of truth. The build folds them
+into generated artifacts under `migrations.out` (default `generated/zeroship`):
+
+- `env.db.ts` - the typed `env.db` surface, as a generated `@zeroship/db`
+  schema module.
+- `schema.runtime.json` - the runtime schema descriptor carried into the
+  `.zship`.
+- `migrations.ir.json` - the recorded migration set that `zeroship migrate`
+  posts.
+
+Commit that directory. The `.zship` does not carry migration documents:
+`zeroship migrate` posts the recorded set, and the artifact carries only the
+generated descriptor (see [the project config](project-config.md) and
+[the deploy contract](zeroship-standard.md)).
 
 When it runs:
 
-- **Dev** — the plugin regenerates the artifacts **on dev-server boot** (`configureServer`, so a migration changed while the server was down is picked up immediately) and **on any change under the migrations dir** (`hotUpdate`). It is fire-and-forget: a malformed migration **logs** an error and never crashes the dev server. The migrations dir is added to the Vite watcher so changes are observed even though app code does not import the `.ts` sources.
-- **Build** — `buildStart` runs gen-types once. In a **production** build it runs `--check` (a generated-artifact check: `env.db.ts` or `schema.runtime.json` that no longer tracks the migrations fails the build, exit non-zero). A non-production `vite build --mode development` **regenerates** (writes) instead.
+- **Dev** - the artifacts are regenerated when the dev server boots (so a
+  migration changed while the server was down is picked up immediately) and on
+  any change under the migrations directory. Regeneration is fire-and-forget: a
+  malformed migration logs an error to the dev server console and never crashes
+  the dev server. The migrations directory is watched so edits are seen even
+  though app code does not import the `.ts` sources.
+- **Build** - generation runs once at build start. A **production** build runs
+  a generated-artifact check: if `env.db.ts` or `schema.runtime.json` has
+  drifted from the migrations, the build fails, non-zero. A non-production
+  `vite build --mode development` **regenerates** (writes) instead, which is how
+  you refresh the committed types locally.
+- **`pnpm migrate`** - regenerates the artifacts and then applies the migrations
+  to the dev database, in one command. It is a separate, explicit step: `pnpm
+  dev` reports the dev schema state but never applies migrations.
 
-The gen-types orchestrator links the N-API renderer in-process. A renderer load,
-recording, or fold error is logged in dev without taking down the dev server. In
-production, the generated-artifact check is a hard build error; there is no
-missing-CLI no-op path.
+A malformed migration is a fault in your source, so it is logged to the dev
+server console and survived. A platform fault - an unwritable output directory,
+say - is not one you can fix in a migration, so it stops the dev server at boot
+instead of leaving `env.db` stale. The production check is a hard build error
+rather than a build that ships a drifted artifact.
 
 ### Type activation
 
-The generated `env.db.ts` is the canonical `Env.db` augmentation. Apps include it in `tsconfig.json`:
+The generated `env.db.ts` is the canonical `Env.db` augmentation. Apps include
+it in `tsconfig.json`:
 
 ```json
 {
@@ -107,20 +145,32 @@ The generated `env.db.ts` is the canonical `Env.db` augmentation. Apps include i
 That path is `<migrations.out>/env.db.ts`; if the project moves `migrations.out`,
 the `include` moves with it.
 
-Do not also add `@zeroship/db/env` or a `zeroship-schema` path alias. That declared-schema alias path is retired; the generated file is the single source of strong `env.db` typing.
+Do not also add a `@zeroship/db/env` or a `zeroship-schema` path alias. The
+generated file is the single source of strong `env.db` typing.
 
 ## Procedure discovery in the active build path
 
-Today, a procedure is recorded for the manifest only when all of the following are true:
+A procedure is published as an RPC endpoint only when all of the following are
+true:
 
 1. The file has a top-level `"use server"` directive.
 2. The exported binding is initialized by a recognized wrapper call.
 3. The wrapper is a named import from `@zeroship/rpc/server`.
 
-The static matcher recognizes the full set of `@zeroship/rpc/server` wrappers as discovery markers — see [docs/reference/rpc.md](./rpc.md) for the canonical list and signatures.
+The recognized wrappers are the full `@zeroship/rpc/server` set - see
+[`rpc.md`](./rpc.md) for the canonical list and signatures.
 
-Namespace imports and default imports are ignored by the static matcher. Plain exports stay private to the server bundle.
-Client stubs for `subscription` preserve `{ kind: "subscription" }` metadata, but the generic `@zeroship/rpc/client` surface does not expose a public subscription API yet; invoking one fails with `UNIMPLEMENTED` instead of falling back to the stream transport.
+Namespace imports (`import * as rpc`) and default imports are ignored. Plain
+exports stay private to the server bundle: other server code can call them, but
+they are not network-reachable. A path such as `src/server/` does not opt a file
+in by itself; without the directive the build warns that the file will not be
+published as an RPC endpoint.
+
+Client stubs for `subscription` preserve `{ kind: "subscription" }` metadata, but
+the generic `@zeroship/rpc/client` surface does not expose a public subscription
+API yet; invoking one fails with an `RpcError` whose `code` is `UNIMPLEMENTED`
+(see [rpc.md](rpc.md#errors-and-retries)) instead of falling back to the stream
+transport.
 
 ```ts
 "use server";
@@ -137,14 +187,13 @@ export async function helper() {
 }
 ```
 
-In that file, `listTodos` and `addTodo` become RPC procedures. `helper()` does not.
-
-The old `src/server.{ts,tsx,js,jsx}` and `src/server/**` path convention is no longer sufficient by itself. Legacy paths without the directive only trigger a migration warning.
+In that file, `listTodos` and `addTodo` become RPC procedures. `helper()` does
+not.
 
 ## Generated client stubs
 
-Client modules can import server procedure exports directly. The transform
-replaces those imports with callable procedure references backed by
+Client modules can import server procedure exports directly. The build replaces
+those imports with callable procedure references created by
 `@zeroship/rpc/client`:
 
 ```ts
@@ -155,56 +204,63 @@ await addTodo({ userId, title: "Ship docs" });
 ```
 
 The generated stubs do not own transport behavior. They delegate to the shared
-RPC runtime, so `configureRpcClient({ baseUrl, auth, headers, timeout, retry,
-transformer })` affects generated stubs and manual `createRpcClient()` calls in
-the same way. This is why app code does not need per-procedure
-`clientProcedure(...)` wrappers.
+RPC runtime, so `configureRpcClient({ ... })` - `baseUrl`, `auth`, `headers`,
+`timeout`, `retry`, `transformer` - affects generated stubs and manual
+`createRpcClient()` calls in the same way (see [rpc.md](rpc.md#vite-generated-calls)
+for what each option does). This is why app code does not need per-procedure
+client wrappers.
 
 ## Config, kind, and `wireId`
 
-- The wrapper's second argument and the legacy `fn.config = { ... }` assignment are both read.
+A procedure's config may be given as the wrapper's second argument, as a
+`<fn>.config = { ... }` assignment, or both; the assignment wins where they
+overlap.
+
 - `fn.config.id` wins; otherwise the default `wireId` is the bare export name.
-- Production manifest emission rejects procedures that still rely on the default name. Add an explicit `id` before deploy.
+- A production build rejects procedures that still rely on the default name.
+  Add an explicit `id` before deploy. An `id` is any non-empty string; it is
+  published verbatim as the segment after `/__zeroship/v1/`, so the documented
+  convention is a dotted `namespace.verb` such as `todos.list` (see
+  [rpc.md](rpc.md)).
 - Duplicate `wireId`s fail the build.
 
 Kind resolution is:
 
-- explicit wrapper kind for `query`, `mutation`, `action`, `stream`, `subscription`
+- explicit wrapper kind for `query`, `mutation`, `action`, `stream`,
+  `subscription`
 - async generators => `stream`
 - generic unary `procedure()` => `mutation`
 
-Names are never used to infer `query`. Reads opt in via `query(...)` or an explicit `config.kind = "query"` so cache and retry policy do not depend on identifier spelling.
+Names never imply `query`. Reads opt in via `query(...)` or an explicit
+`config.kind = "query"` so cache and retry policy do not depend on identifier
+spelling.
 
-`lazy: true` is recorded from either the wrapper config or `fn.config`.
-When the entry generator receives explicit server bindings, it emits a
-`{ load: () => Promise<Procedure> }` record for a lazy binding. The loader
-returns the actual exported procedure, including its validation and kind
-metadata. Non-literal `lazy` values warn and stay eager. A module already
-statically imported by the app still evaluates during startup.
+`lazy: true` is recorded from either the wrapper config or `fn.config`. A lazy
+procedure is loaded on first call instead of at startup. Non-literal `lazy`
+values warn and stay eager. A module the app already statically imports still
+evaluates during startup.
 
 ## Synthetic server entry
 
-[`packages/vite-plugin/src/rpc-registry.ts`](../../packages/vite-plugin/src/rpc-registry.ts)
-emits `virtual:zeroship/_server-entry`. It normalizes the app's exports for
-native runtime dispatch:
+Your exports reach the runtime through your module's default export, which must
+satisfy [the deploy contract](zeroship-standard.md):
 
-- Schema preparation uses the host's generated `schema.runtime.json` descriptor.
-- `default.fetch` retains the user's handler and original default-object
-  receiver. When absent, a top-level `fetch` export is used. When neither is
-  present, the runtime handles the missing handler.
-- `default.rpc` is a dictionary of procedure references or lazy load records,
-  keyed by string wire IDs. Declared own string properties are copied first;
-  named exports or explicit bindings take precedence. Names such as
-  `__proto__` and `constructor` are ordinary own keys. A callable or array
+- Schema preparation uses the generated `schema.runtime.json` descriptor from
+  your migrations.
+- `default.fetch` is your request handler, called with its original `this`.
+  When absent, a top-level `fetch` export is used. When neither is present, the
+  runtime handles the missing handler.
+- `default.rpc` is a dictionary of procedures keyed by wire ID. Own string keys
+  are kept, and the procedures the build discovered from your `"use server"`
+  modules take precedence over keys you declared by hand. A callable or array
   `default.rpc` is rejected.
-
-The generated entry supplies callable references and module imports. The
-[native dispatcher](../../crates/zeroship-runtime/src/rpc/dispatch/mod.rs)
-owns HTTP RPC invocation, validation, capability context and response framing.
-See [the deploy contract](zeroship-standard.md).
 
 ## See also
 
 - [`vite-environment-api.md`](vite-environment-api.md)
+- [`project-config.md`](project-config.md)
 - [`rpc.md`](rpc.md)
+- [`db.md`](db.md)
+- [`auth.md`](auth.md)
 - [`zeroship-standard.md`](zeroship-standard.md)
+- [`zship.md`](zship.md)

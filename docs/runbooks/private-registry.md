@@ -24,20 +24,33 @@ The compose service persists registry state in the `verdaccio_storage` volume an
 
 ## Create A Publish User
 
-Publishing is restricted to authenticated users; anonymous package reads are allowed.
+Publishing is restricted to the named `zeroship-publisher` account; anonymous
+package reads are allowed. The committed config
+(`deploy/verdaccio/config.yaml`) sets `auth.htpasswd.max_users: -1`, which
+DISABLES self-registration (SEC-8), so both the `npm adduser` step below and the
+`PUT /-/user/...` endpoint are REFUSED. Provision the publisher out of band
+first: write the `zeroship-publisher` entry into
+`deploy/verdaccio/storage/htpasswd` (the operator-provisioned path the config's
+SEC-8 comment describes), then use `npm adduser` only to cache that existing
+account's token.
 
 ```bash
 REGISTRY=http://localhost:4873
 NPM_CONFIG_USERCONFIG="$(pwd)/.verdaccio-npmrc"
 export REGISTRY NPM_CONFIG_USERCONFIG
 
+# caches a token for the ALREADY provisioned zeroship-publisher account;
+# does not create it (self-registration is disabled).
 npm adduser --registry "$REGISTRY" --auth-type=legacy --userconfig "$NPM_CONFIG_USERCONFIG"
 npm whoami --registry "$REGISTRY" --userconfig "$NPM_CONFIG_USERCONFIG"
 ```
 
 Keep `.verdaccio-npmrc` local. Do not commit publish tokens.
 
-For non-interactive smoke tests, create the same user through Verdaccio's npm-compatible user endpoint and write the returned token into a temporary npmrc:
+For non-interactive smoke tests, write the returned token for the same
+out-of-band-provisioned user into a temporary npmrc (the account must already
+exist in the htpasswd file — the `PUT` below is refused under
+`max_users: -1`):
 
 ```bash
 REGISTRY=http://localhost:4873

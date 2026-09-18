@@ -126,7 +126,7 @@ point; non-edge publications are loopback-only debugging paths):
 - `auth` (`zeroship-auth`) -> `localhost:9092`
 - `redpanda` (Kafka-wire billing stream) -> `127.0.0.1:19092`. The producers
   take it as `--metering-brokers` / `ZEROSHIP_METERING_BROKERS`.
-- `redis` (`env.kv` store) has no host port
+- `redis` (`env.kv` store) -> `127.0.0.1:6390`
 - `worker` (`zeroship-worker`) has no host port; scale it with `--scale worker=N`
 
 The one-shot `migrate` service runs to completion and exits; `verdaccio`
