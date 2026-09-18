@@ -138,6 +138,7 @@ pub(super) async fn drain(scope: &super::AppWorkflows) {
 
 mod activation;
 mod background_scope;
+mod child_errors;
 mod closure;
 mod compensation_summary;
 mod continuations;
