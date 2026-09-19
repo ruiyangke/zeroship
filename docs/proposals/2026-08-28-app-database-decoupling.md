@@ -1853,6 +1853,20 @@ Each records something that was tried or specified and broke.
   becomes the only separation in the stream. The check is right; its operand is the schema of the
   one database the subscriber is entitled to, resolved from that app's binding, never the app id.
 
+- **Do not trust a control that shares the case's contaminant.** `dbd-datapath` reported
+  `nested_timestamps_follow_worker_descriptors` as pre-existing, having done the right thing:
+  measured it at base, in a separate worktree, before concluding. It passes on a correctly built
+  tree. The cause was a stale `crates/zeroship-data-v8/dist/adapter.js`, which was equally stale at
+  base - so the test failed on BOTH sides and the control confirmed the wrong answer confidently.
+  Pairing a case with a control is not sufficient: the control must differ in the variable under
+  test AND not share the environmental defect. A gitignored build artifact is invisible to both
+  readings, which is what makes this one hard. Three of them bite here:
+  `crates/zeroship-data-v8/dist/adapter.js`, the napi addon under
+  `crates/zeroship-migrate-node/`, and `crates/zeroship-runtime/tests/wpt/` - the last has ZERO
+  tracked files, so there is nothing for it to be stale against and nothing looks wrong at all.
+  Build the JavaScript packages before Cargo, and compare a generator's build time against its
+  sources before ever regenerating an artifact to clear a failure.
+
 ---
 
 ## History
