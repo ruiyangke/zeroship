@@ -155,13 +155,11 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
     assert_eq!(restored.app_id, scope.app_id);
     assert_eq!(restored.worker_id, worker);
     assert_eq!(restored.revision, scope.assignment_revision);
-    // RED, and the assertion is right. `claim` in
-    // `crates/zeroship-workflow-server/src/api/jobs.rs` observes the app's policy
-    // before the manager authorizes the scope, so a worker claiming for an app it
-    // holds no placement on is answered `Unavailable` instead of `Denied`. That
-    // tells the worker to retry a scope it can never hold. Fixing the order is a
-    // signature change in `zeroship-workflow-manager`, not a slip - do not make
-    // this pass by expecting `Unavailable`.
+    // A worker claiming for an app it holds no placement on is denied, not told
+    // the service is unavailable. `claim` in
+    // `crates/zeroship-workflow-server/src/api/jobs.rs` hands `claim_job` an
+    // unresolved ceiling so authorization settles first; an `Unavailable` here
+    // would tell the worker to retry a scope it can never hold.
     assert_eq!(
         client
             .claim_job(&AssignedScope {
@@ -674,8 +672,8 @@ async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_prot
         StatusCode::OK
     );
     let foreign = json!({"appId":AppId::mint(),"assignmentRevision":assignment.revision});
-    // RED, and the assertion is right - same ordering defect as the earlier
-    // claim_job case in this file. Do not relax it to 503.
+    // Same contract as the earlier claim_job case in this file, over HTTP: a
+    // foreign scope is 403, never 503.
     assert_eq!(
         post(
             &client,
