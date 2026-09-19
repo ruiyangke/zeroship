@@ -54,7 +54,7 @@ pub struct WorkflowSettings {
     /// Maximum connections per HTTP thread.
     #[config(name = "workflow.max_connections", default = 1024)]
     pub max_connections: Operational<usize>,
-    /// Maximum cached app policy observations per HTTP thread.
+    /// Maximum cached app policy observations, shared by every HTTP thread.
     #[config(name = "workflow.policy_cache_entries", default = 1024)]
     pub policy_cache_entries: Operational<usize>,
     /// Maximum metadata JSON request size.
