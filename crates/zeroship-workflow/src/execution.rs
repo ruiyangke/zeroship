@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::engine::{JournalStep, StepOutcome, StepResult};
+use crate::engine::{JournalStep, StepOutcome};
 use crate::WorkflowServiceError;
 
 /// Replay input without journal mutation authority.
@@ -65,24 +65,6 @@ impl WorkflowExecution {
             WorkflowServiceError::InvalidRequest(format!("invalid workflow outcomes: {e}"))
         })?;
         Ok(Self { outcomes })
-    }
-
-    /// Bind outcomes to the host's claim, then fold them into journal changes.
-    ///
-    /// # Errors
-    /// Rejects invalid outcome ordering or an empty completion.
-    pub fn into_step_result(
-        self,
-        run_id: String,
-        dispatch_nonce: String,
-    ) -> Result<StepResult, WorkflowServiceError> {
-        if self.outcomes.is_empty() {
-            return Err(WorkflowServiceError::InvalidRequest(
-                "workflow outcome batch is empty".into(),
-            ));
-        }
-        StepResult::from_outcomes(run_id, dispatch_nonce, self.outcomes)
-            .map_err(WorkflowServiceError::InvalidRequest)
     }
 }
 
