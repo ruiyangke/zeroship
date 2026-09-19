@@ -146,11 +146,11 @@ impl NativePlugin for DbPlugin {
         // context anyway, so a future validator change cannot publish a
         // partial schema on error.
         let schemas = descriptor_schemas(descriptor)?;
-        // Same refusal as `mint_db`: an app id that is not a legal schema name
-        // has no binding to key the descriptor under, so publish nothing rather
-        // than key it under a schema that cannot be addressed.
+        // Same refusal as `mint_db`: an app the host resolved no binding for has
+        // nothing to key the descriptor under, so publish nothing rather than key
+        // it under a schema no reconciler converged.
         let binding = v8_classes::db::binding_for_isolate(scope, app_id)
-            .ok_or_else(|| format!("app id {app_id:?} is not a legal database schema name"))?;
+            .ok_or_else(|| format!("app id {app_id:?} has no resolved database binding"))?;
         startup_policy::initialize(scope, binding.clone());
         zeroship_data_orm::descriptor::install_collections(&binding, schemas)
             .map_err(|error| error.to_string())?;
@@ -211,6 +211,10 @@ mod runtime_descriptor_binding_tests {
         env.insert("ZEROSHIP_DEPLOY_ID".to_string(), DEPLOY.to_string());
         let state: SharedState = std::rc::Rc::new(RefCell::new(RuntimeState::new(env, None, None)));
         scope.set_slot(state);
+        // The tests that call this drive the plugin directly rather than
+        // through a Runtime, so `register` never runs and the thread would
+        // carry no binding store at all.
+        crate::tests::fixtures::supply_app_bindings([APP]);
     }
 
     fn plugin() -> std::sync::Arc<DbPlugin> {

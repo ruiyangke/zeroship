@@ -15,8 +15,9 @@
 
 use crate::binding::DbBinding;
 use zeroship_data_orm::error::{
-    DbError, DenyReason, GRANT_REVOKED, GRANT_REVOKED_MESSAGE, SCHEMA_EPOCH_STALE,
-    STALE_EPOCH_HINT, STALE_EPOCH_MESSAGE, SessionSetupDisposition, SessionSetupError,
+    DbError, DenyReason, GRANT_REVOKED, GRANT_REVOKED_MESSAGE, NOT_MIGRATED_HINT,
+    NOT_MIGRATED_MESSAGE, SCHEMA_EPOCH_STALE, SCHEMA_NOT_MIGRATED, STALE_EPOCH_HINT,
+    STALE_EPOCH_MESSAGE, SessionSetupDisposition, SessionSetupError,
 };
 
 /// Does this server error name the binding role the setup batch asked for?
@@ -157,6 +158,12 @@ pub fn classify(e: &compio_postgres::Error) -> DbError {
         DbError::Serialization { message: msg }
     } else if code == &SqlState::LOCK_NOT_AVAILABLE || code == &SqlState::OBJECT_IN_USE {
         DbError::LockContention { message: msg }
+    } else if code == &SqlState::UNDEFINED_TABLE || code == &SqlState::UNDEFINED_COLUMN {
+        // The session already narrowed, so the binding resolved and the grant
+        // stands: what is absent is the relation, which is what an apply puts
+        // there. A converged but unmigrated database reaches exactly here, and
+        // so does a build asking for a column its migrations never added.
+        DbError::config_hinted(SCHEMA_NOT_MIGRATED, NOT_MIGRATED_MESSAGE, NOT_MIGRATED_HINT)
     } else if code == &SqlState::DISK_FULL
         || code == &SqlState::OUT_OF_MEMORY
         || code == &SqlState::CONNECTION_EXCEPTION
