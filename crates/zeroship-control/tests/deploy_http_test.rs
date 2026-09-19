@@ -74,10 +74,9 @@ fn tmpdir(label: &str) -> PathBuf {
 /// Seed the principal that will BOTH own the app and send the deploy.
 ///
 /// These tests exercise the deploy HTTP path rather than authz, but the owner
-/// identity is not immaterial: `create_app` binds an `app_members` owner row,
-/// and that row is now the only thing that authorizes `apps:deploy`. The
-/// previous helper seeded a throwaway owner unrelated to the bearer, which
-/// passed only because the deleted universal-allow policy covered the gap.
+/// identity is not immaterial: `create_app` seats the caller as owner of the
+/// personal organization the app lands in, and that seat is what authorizes
+/// `apps:deploy`.
 async fn seed_owner(state: &AppState, _label: &str) -> common::authz_fixture::SeededPrincipal {
     common::authz_fixture::seeded_principal(state).await
 }

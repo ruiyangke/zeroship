@@ -74,10 +74,10 @@ pub struct NetEgressEntry {
 
 /// Plan-catalog tier limits for creator outbound raw TCP.
 ///
-/// Hosts live in `app_net_grants`; plans only determine "how much". The
+/// Hosts live in `app_egress_rules`; plans only determine "how much". The
 /// creator chooses WHICH hosts within these caps and can never raise them.
 ///
-/// `max_grants` bounds the NUMBER of `app_net_grants` rows an app may hold. It
+/// `max_grants` bounds the NUMBER of `app_egress_rules` rows an app may hold. It
 /// exists because the grant author is the creator: `max_sockets` and
 /// `egress_ceiling_bytes` bound concurrency and volume, and neither bounds how
 /// wide a destination set a creator can enumerate one exact host at a time.

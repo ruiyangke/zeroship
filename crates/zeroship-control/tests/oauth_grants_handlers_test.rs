@@ -214,13 +214,6 @@ async fn cleanup_user(state: &AppState, user_id: &UserId) {
     let _ = state
         .control_pg
         .execute(
-            "DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1",
-            &[&user_id.as_str()],
-        )
-        .await;
-    let _ = state
-        .control_pg
-        .execute(
             "DELETE FROM zeroship.users WHERE id = $1",
             &[&user_id.as_str()],
         )
@@ -1286,10 +1279,9 @@ async fn app_archive_returns_200_with_retained_record() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "atomic-ok").await;
 
-    // The caller OWNS the app: `create_app` binds the owner `app_members` row,
-    // and that row is the only thing that authorizes `apps:archive` now. This
-    // used to seed an unrelated owner and delete as a platform admin, which
-    // worked only because of the deleted universal-allow policy.
+    // The caller OWNS the app: `create_app` seats them as owner of the
+    // personal organization the app lands in, and that seat is what authorizes
+    // `apps:archive`.
     let caller = common::authz_fixture::seeded_principal(&fx.state).await;
     let app_name = format!("atomicok{}", Uuid::new_v4().simple());
     let record = fx

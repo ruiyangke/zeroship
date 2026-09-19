@@ -396,7 +396,7 @@ table("orders").constraint("orders_pkey").comment("surrogate key");
 import { table } from "@zeroship/migrate";
 
 // Basic
-table("app_members").index("app_members_user_idx").add({ on: ["user_id"] });
+table("organization_members").index("organization_members_user_idx").add({ on: ["user_id"] });
 
 // Composite + partial (PostgreSQL and SQLite; MySQL has no partial indexes)
 table("app_session_anchors").index("app_session_anchors_user_idx").add({

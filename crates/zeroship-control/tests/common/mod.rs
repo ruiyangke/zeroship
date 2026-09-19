@@ -360,11 +360,10 @@ pub async fn unowned_project_in(pg: &compio_postgres::Client, organization_id: &
 ///
 /// THE ORGANIZATION IS FRESH PER CALL AND HAS NO MEMBERS. That is deliberate:
 /// two fixture apps never share a billing subject or an authority root unless a
-/// test seats the same member in both, which is the isolation the deleted
-/// `zeroship.app_members` row used to give per app. Ownership is therefore NOT
-/// expressed here - a test that means "this user owns this app" follows with
-/// [`seat_app_organization_member`], the direct replacement for an
-/// `app_members` owner row.
+/// test seats the same member in both. Ownership is therefore NOT expressed
+/// here - a test that means "this user owns this app" follows with
+/// [`seat_app_organization_member`], which seats them in the organization
+/// behind the app's project.
 ///
 /// See [`unowned_project`] for which tests a member-less organization is right
 /// for, and for what to do instead when the placement IS the thing under test.
@@ -482,11 +481,10 @@ pub async fn app_organization(pg: &compio_postgres::Client, app: &AppId) -> Stri
 
 /// Seat `user` in the organization behind `app`'s project, at `role`.
 ///
-/// The replacement for a `zeroship.app_members` row. An app reaches its
-/// authority root through exactly one path - `apps.project_id ->
-/// projects.organization_id` - so the seat is written by joining that path
-/// rather than by the caller carrying an organization id it would have to keep
-/// in agreement.
+/// An app reaches its authority root through exactly one path -
+/// `apps.project_id -> projects.organization_id` - so the seat is written by
+/// joining that path rather than by the caller carrying an organization id it
+/// would have to keep in agreement.
 ///
 /// `role` must name a row in `zeroship.organization_roles`; the foreign key
 /// there makes an invented role unspellable rather than silently powerless.
