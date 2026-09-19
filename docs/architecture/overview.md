@@ -17,11 +17,6 @@ App runtime
     -> worker (`crates/worker`)
     -> runtime (`crates/runtime`)
     -> env.{db,kv,storage} plugins
-
-Builder sandbox (NOT in this repo)
-  Editor / operator traffic
-    -> sandbox controller (standalone `zeroship-sandbox` project)
-    -> backend runtime (docker, k8s, or nomad-ch)
 ```
 
 ## Crates
@@ -40,11 +35,6 @@ Builder sandbox (NOT in this repo)
 | KV V8 binding | `crates/zeroship-kv-v8` | `env.kv.*` |
 | Object storage | `crates/zeroship-storage` | Scoped Rust operations, LocalFs and S3 backends |
 | Storage V8 binding | `crates/zeroship-storage-v8` | `env.storage.*` |
-
-The sandbox/preview backend used to be a crate here. It is not: it was extracted
-to the standalone `zeroship-sandbox` project and is not built by this repo. The
-control plane reaches it over HTTP (`SANDBOX_URL`/`SANDBOX_TOKEN`), and it shares
-this deployment's Postgres through the `sandbox_*` roles.
 
 ## End-user request path
 
@@ -90,11 +80,9 @@ For SDK-facing contracts:
 - [Control plane architecture](../architecture/control-plane.md): app deploy lifecycle, route registry, and metadata updates.
 - [Runtime architecture](../architecture/runtime.md): V8 execution, async model, native host bridges, and request execution.
 - [Blob store and bundle storage](../architecture/blob-store.md): `BlobStore`, `.zship` blobs, and object layout.
-- [Builder sandbox](../architecture/builder.md): where the sandbox/preview backend went, and the seam this repo still owns.
 
 ## Current architecture notes
 
 - The runtime stack is all compio/io_uring. There is no tokio in the app-serving path.
 - The gateway's hot path is the compiled resource tree from `Manifest.resources`, not the older rule walker.
 - The shipping blob-store backend in this worktree is `LocalDiskBlobStore`; gateway-side memory and disk LRUs live in `crates/zeroship-gateway/src/blob_cache.rs`.
-- Sandbox infrastructure is a separate service. It is not on the end-user request path.

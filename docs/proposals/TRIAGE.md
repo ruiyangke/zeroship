@@ -23,11 +23,7 @@ Verify every claim against code before promoting. Reference docs must be accurat
 - [x] node-crypto-native.md → 2026-05-05-node-crypto-native ADR
 
 ### SHIPPED — merged to main, no ADR (promote any reference-grade content, then archive)
-- [x] nomad-driver-ch.md (merged dde08ca2; ops covered by runbooks/sandbox-nomad-ch.md)
-- [x] sandbox-snapshot-restore.md (merged d1054adb)
 - [x] sqlite-pg-parity.md (merged; reference/sqlite-divergences.md exists)
-- [x] sandbox-pg-state.md (feat/sandbox-pg merged)
-- [x] sandbox-preview-urls.md (sandbox preview merged)
 - [x] kv-redesign-implementation-plan-2026-05-24.md (kv redesign; reference/kv.md exists)
 - [x] zeroship-db.md (db SDK; reference/db.md exists)
 - [x] db-system-design.md (db; reference/db.md)
@@ -60,7 +56,6 @@ The 7 architecture docs were refreshed for *accuracy* in the prior pass. This ph
 - [x] docs/architecture/control-plane.md — VERIFIED: Registry::get_routes/get_versions, Manifest::passthrough, /internal/versions all exist.
 - [x] docs/architecture/runtime.md — VERIFIED: call_fetch_handler, FetchOutcome, RuntimeBuilder::heap_limit_mb/idle_gc_after_ms, start_pump, src/{core,transport,web}/ layout all match.
 - [x] docs/architecture/blob-store.md — VERIFIED: LocalDiskBlobStore, PutOutcome, put_blob_stream, blob.rs all exist.
-- [x] docs/architecture/builder.md — VERIFIED: Backend docker/k8s/nomad-ch, nomad_ch.rs, sandbox routes match.
 
 ## Phase 3 — cross-cutting (optional, after Phase 2)
 - [x] Ensure AGENTS.md task-router links all resolve — VERIFIED: every cited docs/crates/packages path resolves; broken docs/reference-to-proposals links repointed to docs/archive/ (c71a6a7a).
@@ -70,17 +65,15 @@ The 7 architecture docs were refreshed for *accuracy* in the prior pass. This ph
 
 - sqlite-pg-parity.md — 2 divergences promoted + archived
 
-- sandbox-snapshot-restore.md + nomad-driver-ch.md — archived + runbook ops promotions (MemoryMaxMB, driver-behavior notes)
-
 - 4 DB proposals archived; db.md promotions: strictness/t.ref/collection-names landed; System Fields + Encrypted/Masked CLOBBERED by concurrent write, re-promoting serially
 
 - p0/p1/p4/p5 implementation plans — archived (no promotion needed; db.md covers)
 
 - runtime-macros-refactor.md — archived (design in plugin-system.md + macro ADRs)
 
-- zs-standard-and-vite-v2 + sandbox-pg-state — archived (shipped)
+- zs-standard-and-vite-v2 — archived (shipped)
 
-- sandbox-preview-urls + kv-redesign — archived (shipped)
+- kv-redesign — archived (shipped)
 
 - rpc.md — ACTIVE (Status: Proposal; RPC-v2 seamless-functions vision aspirational — /__zeroship/v1 dispatch primitive shipped but full codegen/declarative-gateway vision not). KEPT in docs/proposals/.
 - plugins-workers-distributed.md — ACTIVE (Status: In progress; kv/storage distributed correctness + stateless-worker migration not yet shipped). KEPT in docs/proposals/.
