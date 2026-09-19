@@ -424,6 +424,10 @@ stall the defect fixes that motivate the move.
    payload-free and `input`/`output` live only in creator schemas, or the assertion is narrowed
    deliberately and the reason recorded here.
 
+   Decide it here rather than inside the slice that trips it. This assertion is the kind that
+   reads as protection: narrowing it to make a step land would look like housekeeping in a diff,
+   and the property would be gone with nothing marking its departure.
+
 ---
 
 ## Do-not notes
