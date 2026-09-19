@@ -13,7 +13,9 @@ Built:
 - `Resource::Database` and its policy bands (`crates/zeroship-authz/`,
   `deploy/policies/zeroship.cedarschema`)
 - the three tables and the project's zone
-  (`db/migrations-ts/20260919000100_database_entities.ts`)
+  (`db/migrations-ts/20260919000100_project_execution_zone.ts`,
+  `db/migrations-ts/20260919000200_database_entities.ts`,
+  `db/migrations-ts/20260919000300_database_placement_keys.ts`)
 - the tenant fence measurement target
   (`crates/zeroship-data-orm/tests/postgres_tenant_fence.rs`) - see Open 5
 
