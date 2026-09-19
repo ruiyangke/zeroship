@@ -138,6 +138,30 @@ pub trait NativePlugin: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Additional `env.*` members this plugin owns, built after its own
+    /// namespace and after the descriptor is bound.
+    ///
+    /// The database plugin publishes `env.databases` this way: one handle per
+    /// database the deployment declares, the primary being the SAME object as
+    /// `env.db`, so there is one concept and one code path and a
+    /// single-database app sees no difference.
+    ///
+    /// The runtime refuses a name any plugin's own namespace already uses, or
+    /// that another companion took, so two plugins cannot silently fight over
+    /// one member.
+    ///
+    /// # Errors
+    /// Return an error to reject startup without publishing anything.
+    fn companion_namespaces<'s>(
+        &self,
+        _scope: &mut v8::PinScope<'s, '_>,
+        _app_id: &str,
+        _namespace: v8::Local<'s, v8::Object>,
+        _descriptor: Option<&serde_json::Value>,
+    ) -> Result<Vec<(&'static str, v8::Local<'s, v8::Value>)>, String> {
+        Ok(Vec::new())
+    }
+
     /// Prepare SDK facades before creator evaluation. The module graph is
     /// compiled and native namespaces are bound. Any returned promise is
     /// retained by startup and must settle before creator code runs.
@@ -175,6 +199,53 @@ pub(crate) fn runtime_app_id(scope: &mut v8::PinScope<'_, '_>) -> String {
         .get_slot::<crate::state::SharedState>()
         .and_then(|state| state.borrow().app_id().map(str::to_owned))
         .unwrap_or_else(|| zeroship_core::app_id::LOCAL_DEV_APP_ID.to_string())
+}
+
+/// Publish one companion member onto the `env` object.
+///
+/// Only the runtime's own startup calls this, after checking the name is free;
+/// a plugin returns its companions and never writes `env` itself.
+pub(crate) fn publish_env_member(
+    scope: &mut v8::PinScope<'_, '_>,
+    name: &str,
+    value: v8::Local<'_, v8::Value>,
+) -> Result<(), String> {
+    let env_global = scope
+        .get_slot::<crate::state::SharedState>()
+        .and_then(|state| state.borrow().env_obj.clone())
+        .ok_or_else(|| "runtime: plugin namespaces are not initialized".to_string())?;
+    let env = v8::Local::new(scope, env_global);
+    let key = v8::String::new(scope, name)
+        .ok_or_else(|| format!("runtime: could not allocate env member {name:?}"))?;
+    env.set(scope, key.into(), value)
+        .ok_or_else(|| format!("runtime: could not publish env member {name:?}"))?;
+    Ok(())
+}
+
+/// Return one `env.*` member already published on this isolate.
+///
+/// A plugin reads back a companion it published itself; the runtime is what
+/// decided the name was free.
+///
+/// # Errors
+/// When `env` is not initialized, the member is absent, or it is not an object.
+pub fn runtime_env_member<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    name: &str,
+) -> Result<v8::Local<'s, v8::Object>, String> {
+    let env_global = scope
+        .get_slot::<crate::state::SharedState>()
+        .and_then(|state| state.borrow().env_obj.clone())
+        .ok_or_else(|| "runtime: plugin namespaces are not initialized".to_string())?;
+    let env = v8::Local::new(scope, env_global);
+    let key = v8::String::new(scope, name)
+        .ok_or_else(|| format!("runtime: could not allocate env member {name:?}"))?;
+    let value = env
+        .get(scope, key.into())
+        .ok_or_else(|| format!("runtime: env member {name:?} is missing"))?;
+    value
+        .try_into()
+        .map_err(|_| format!("runtime: env member {name:?} is not an object"))
 }
 
 /// Return the namespace object already built for a plugin on this isolate.

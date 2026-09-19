@@ -382,10 +382,27 @@ fn cmd_serve(args: &[String]) {
             .executable
             .as_ref()
             .expect("loaded app deployment");
-        if let Some(descriptor) = executable.primary_schema() {
-            env_vars.insert("ZEROSHIP_RUNTIME_DESCRIPTOR".into(), descriptor.to_string());
-        } else {
+        // One entry per database the deployment declares, each carrying that
+        // database's schema. The dev runtime reads the same document shape the
+        // worker hands a hosted isolate, so the two tiers install `env.db` and
+        // `env.databases` through one code path.
+        let databases: Vec<_> = executable
+            .databases()
+            .iter()
+            .map(|database| zeroship_runtime::databases::RuntimeDatabase {
+                label: database.label.clone(),
+                database_id: database.database_id.as_str().to_owned(),
+                primary: database.primary,
+                schema: database.schema.clone(),
+            })
+            .collect();
+        if databases.is_empty() {
             env_vars.remove("ZEROSHIP_RUNTIME_DESCRIPTOR");
+        } else {
+            env_vars.insert(
+                "ZEROSHIP_RUNTIME_DESCRIPTOR".into(),
+                zeroship_runtime::databases::RuntimeDatabases::document(databases),
+            );
         }
         std::iter::once(executable.entry())
             .chain(

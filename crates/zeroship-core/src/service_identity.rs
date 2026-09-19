@@ -441,8 +441,8 @@ pub mod endpoints {
         ServiceEndpoint::new("control", "GET", "/internal/apps/{app_id}/env");
     pub const CONTROL_APP_DATA_KEY: ServiceEndpoint =
         ServiceEndpoint::new("control", "GET", "/internal/apps/{app_id}/data-key");
-    pub const CONTROL_APP_BINDING: ServiceEndpoint =
-        ServiceEndpoint::new("control", "GET", "/internal/apps/{app_id}/binding");
+    pub const CONTROL_APP_BINDINGS: ServiceEndpoint =
+        ServiceEndpoint::new("control", "GET", "/internal/apps/{app_id}/bindings");
     pub const CONTROL_DEPLOYMENT_HOLD_ACQUIRE: ServiceEndpoint =
         ServiceEndpoint::new("control", "POST", "/v1/deployment-holds/acquire");
     pub const CONTROL_DEPLOYMENT_HOLD_RELEASE: ServiceEndpoint =
@@ -655,7 +655,7 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                     // no part of it: the database id, the edge id and the
                     // schema epoch are Control facts, and the role a session
                     // narrows to is derived from two of them.
-                    endpoints::CONTROL_APP_BINDING,
+                    endpoints::CONTROL_APP_BINDINGS,
                     // A worker leaving gracefully declares its OWN instance
                     // gone. The endpoint takes no instance selector: Control
                     // retires exactly the instance whose key verified the call.

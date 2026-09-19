@@ -122,11 +122,7 @@ impl WorkerWorkflowRuntimeLoader {
                 source: executable.modules()[name].clone(),
             })
             .collect();
-        let descriptor = executable
-            .primary_schema()
-            .map(serde_json::to_string)
-            .transpose()
-            .map_err(|_| invalid("invalid workflow runtime descriptor"))?;
+        let descriptor = crate::executable::descriptor_document(executable);
         let mut builder = Runtime::builder()
             .app_id(app)
             .modules(modules)

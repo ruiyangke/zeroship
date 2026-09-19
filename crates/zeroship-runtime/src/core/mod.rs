@@ -6,6 +6,7 @@
 
 pub(crate) mod application_entry;
 pub mod channel;
+pub mod databases;
 pub mod dev_auth;
 pub(crate) mod dev_entry;
 pub mod dispatch;

@@ -47,8 +47,14 @@ export function installSchema(env, descriptor, options) {
         namespace: v8::Local<'s, v8::Object>,
         descriptor: Option<&serde_json::Value>,
     ) -> Result<Option<v8::Global<v8::Promise>>, String> {
+        // The hook receives the DOCUMENT; the adapter installs one database's
+        // schema, so this probe mirrors the real plugin and passes the
+        // PRIMARY's.
         let Some(descriptor) = descriptor else { return Ok(None); };
-        let json = v8::String::new(scope, &descriptor.to_string()).unwrap();
+        let Some(primary) = zeroship_runtime::databases::primary_of(descriptor) else {
+            return Ok(None);
+        };
+        let json = v8::String::new(scope, &primary.schema.to_string()).unwrap();
         let descriptor = v8::json::parse(scope, json).unwrap();
         zeroship_runtime::modules::invoke_module_export(
             scope,
@@ -123,6 +129,17 @@ fn dummy_db_noop(
     rv.set_undefined();
 }
 
+/// The runtime descriptor DOCUMENT for one database, the primary. Every host
+/// hands the runtime this envelope; a bare v2 schema is what goes inside it.
+fn document(schema: &str) -> String {
+    zeroship_runtime::databases::RuntimeDatabases::single(
+        "main",
+        "dbs_03evr3oqx1200yyd6zj2cebfw",
+        schema,
+    )
+    .expect("a test schema is valid JSON")
+}
+
 fn descriptor_hook_observed(runtime_descriptor: Option<String>) -> String {
     init_v8();
     let modules = vec![ModuleEntry {
@@ -163,8 +180,10 @@ export default {
 #[test]
 fn native_descriptor_hook_receives_validated_descriptor_before_module_evaluation() {
     let descriptor = r#"{"version":2,"collections":{"posts":{"fields":{"title":{"type":"string"}},"options":{"softDelete":false,"versioning":false},"indexes":[]}}}"#;
-    let observed = descriptor_hook_observed(Some(descriptor.to_string()));
-    let expected: serde_json::Value = serde_json::from_str(descriptor).unwrap();
+    let observed = descriptor_hook_observed(Some(document(descriptor)));
+    // The hook receives the DOCUMENT, envelope and all: one entry per database
+    // the deployment declares, each carrying that database's schema.
+    let expected: serde_json::Value = serde_json::from_str(&document(descriptor)).unwrap();
     let observed: serde_json::Value = serde_json::from_str(&observed).unwrap();
     assert_eq!(observed, expected);
 }
@@ -334,7 +353,7 @@ export default {
     let runtime = Runtime::builder()
         .modules(modules)
         .plugin(DummyDbPlugin)
-        .runtime_descriptor(Some(descriptor.to_string()))
+        .runtime_descriptor(Some(document(descriptor)))
         .build();
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());
@@ -418,7 +437,7 @@ export default defaultExport;
     let runtime = Runtime::builder()
         .modules(modules)
         .plugin(DummyDbPlugin)
-        .runtime_descriptor(Some(descriptor.to_string()))
+        .runtime_descriptor(Some(document(descriptor)))
         .build();
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());
@@ -547,7 +566,7 @@ fn corrupt_runtime_descriptor_json_fails_isolate_init() {
         .now_or_never().expect("invalid descriptor fails before async work")
         .expect_err("invalid descriptor JSON must fail isolate init");
     assert!(
-        err.contains("manifest.runtime_descriptor is not valid JSON"),
+        err.contains("the runtime descriptor document is not valid JSON"),
         "error should name corrupt runtime descriptor JSON, got: {err}"
     );
 }
@@ -566,7 +585,7 @@ fn non_v2_runtime_descriptor_fails_isolate_init() {
     // would panic.
     let runtime = Runtime::builder()
         .modules(modules)
-        .runtime_descriptor(Some(r#"{"version":1,"collections":{}}"#.to_string()))
+        .runtime_descriptor(Some(document(r#"{"version":1,"collections":{}}"#)))
         .build();
 
     let err = runtime

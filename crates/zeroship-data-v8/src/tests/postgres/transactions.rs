@@ -427,7 +427,10 @@ fn dispatch_zs_for_app_with_descriptor(
         .modules(modules)
         .env_vars(env_vars)
         .plugins(plugins)
-        .runtime_descriptor(Some(descriptor))
+        .runtime_descriptor(Some(crate::tests::fixtures::harness_descriptor_document(
+            app_id.unwrap_or(zeroship_core::app_id::LOCAL_DEV_APP_ID),
+            &descriptor,
+        )))
         .build();
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());

@@ -67,11 +67,20 @@ Built:
   to a `dbs_` locally before any request and prints both, and with a file present `--app` names
   a label rather than an id.
 
-Not built: `env.databases` in the V8 surface, the deploy-time binding verification, the migration
-service's own app-id-to-database re-key, the encryption salt and AAD, and capacity-aware
-placement. No apply advances an epoch. The runtime still binds only the PRIMARY entry's schema
-(`LoadedWorker::primary_schema`), and the deploy gate still compares that entry's hash, which is
-what Open 8(f) replaces.
+- `env.databases`. The host hands the runtime ONE descriptor document
+  (`crates/zeroship-runtime/src/core/databases.rs`) carrying an entry per database, which the
+  runtime validates for exactly one primary and distinct labels and ids before any plugin sees
+  it. `SuppliedAppBindings` holds a SET per app, keyed on the DATABASE id, and Control serves it
+  at `GET /internal/apps/{app_id}/bindings`. `DbPlugin` installs each database's collections
+  under the binding the host resolved for THAT database and publishes `env.databases` through
+  the new `NativePlugin::companion_namespaces` hook, with the primary's handle being the SAME
+  OBJECT as `env.db` - identity, not equality, so there is one concept and one code path. A
+  masked value rehydrates against the binding its rows were read through rather than against
+  whatever `env.db` names.
+
+Not built: the deploy-time binding verification, the migration service's own app-id-to-database
+re-key, the encryption salt and AAD, and capacity-aware placement. No apply advances an epoch.
+The deploy gate still compares the PRIMARY entry's hash, which is what Open 8(f) replaces.
 
 Three things are narrower than "built" and are recorded here rather than discovered later. The CDC
 relay DOES filter on the bound database's schema
