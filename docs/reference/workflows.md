@@ -783,8 +783,9 @@ a ref for a blob-backed final output instead of inlining it into the status JSON
 
 The inline threshold is 1 MiB: outputs at or under it are journaled inline, and
 anything larger — or explicitly by-reference — becomes a workflow blob. A single
-blob may not exceed 64 MiB; an output over that cap fails the run with
-`LimitExceededError`.
+blob may not exceed 64 MiB; an output over that cap fails the `step.run` that
+produced it with `LimitExceededError`, which a `catch` around that step can
+handle.
 
 ## Compensation
 
@@ -883,7 +884,7 @@ The SDK exports these workflow error classes:
 | `StalledError` | The platform reclaimed 4 consecutive dispatches of one frontier without the run reporting an outcome. | Not raised in your body: it is the platform's verdict. On a forward frontier it is recorded on the run, which rests `stalled`. On a rollback frontier it is recorded as `compensation.reason` and the run rests `failed` with the rollback abandoned. Terminal either way. No rollback. |
 | `ChildCancelledError` | A `step.call` child is cancelled before the parent join completes. | Yes around `step.call`; if uncaught, normal failure handling applies. |
 | `ChildTimeoutError` | A `step.call` child exceeds `ChildWorkflowOptions.timeout`. | Yes around `step.call`; if uncaught, normal failure handling applies. |
-| `LimitExceededError` | A platform cap is exceeded, such as an output over the blob cap. | Not raised in the body of the run that exceeded the cap: it is the platform's verdict, recorded on that run, which rests `failed`. The step whose output exceeded it is never journalled, so that body has no row to resume at. A cap the platform applies to a dispatch rather than to a step, such as `maxFrontier`, refuses the dispatch without recording anything and raises no class here. |
+| `LimitExceededError` | A platform cap is exceeded, such as an output over the blob cap. | Yes when one `step.run` output busted the cap: that step is recorded `failed` carrying this class with `retryable: false`, the run continues, and the body resumes at the row, so a `catch` around the step can take another path. Every other cap names no step and is the platform's verdict, recorded on the run, which rests `failed`: a `step.sideEffect` output, a whole dispatch result, a run output, a continuation seed. A cap the platform applies to a dispatch rather than to a payload, such as `maxFrontier`, refuses the dispatch without recording anything and raises no class here. |
 | `NestedStepError` | A `step.*` method is called from inside a step body or compensator. | Treat as terminal misuse. Fix the body rather than handling it. |
 | `CompensableCarryError` | `step.continueAsNew` is requested while the current generation still has pending compensators. | No. It is the platform's verdict: the transition is refused, no successor generation is created, the pending compensators run, and the generation rests `failed` carrying this name. |
 | `InvalidScheduleError` | A schedule registration is invalid — a malformed or unsupported cron expression, an unknown IANA timezone, or a non-positive interval count or backfill. Thrown when the schedule is compiled at build/deploy time, never at fire time or on a run. Exported from `@zeroship/workflows/schedule`. | Yes, at registration time; catch it beside the `schedule(...)` call that raised it. |
