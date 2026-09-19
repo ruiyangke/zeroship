@@ -406,40 +406,91 @@ stall the defect fixes that motivate the move.
    service decides what a worker is told. That is a stronger boundary and probably a better
    one, but it is a change in authority that should be described rather than arrived at.
 
-7. **ANSWERED - no. The platform-schema journal is structurally payload-free.** Creator payload
-   does not live in the platform's coordination schema; payloads reach the journal only by
-   reference into object storage, and the assertion below stays unnarrowed. The two rejected
-   answers were narrowing the assertion to the manager's own tables, and moving the journal to a
-   schema of its own so the assertion never applies to it.
-
-   What that costs, established by reading the code rather than assumed: this is a build, not a
-   threshold. `promote` in `crates/zeroship-workflow/src/service/payloads.rs` attaches a
-   `WorkflowOutputRef` that already exists; it does not move an inline payload into storage, and
-   the reference path is creator-initiated. Making the journal payload-free means building
-   service-side promotion, and the SQLite dev tier shares the one generated artifact, so whether
-   the end state is one journal shape or two is settled in the slice that implements this.
-
-   The assertion it protects:
-   `metadata_schema_has_no_customer_authority_and_ids_are_bytewise` in
-   `crates/zeroship-workflow-server/tests/coordinator.rs` asserts that no column in
+7. **ANSWERED - no, and the assertion is not narrowed.** Creator payload does not live in the
+   platform's coordination schema. `metadata_schema_has_no_customer_authority_and_ids_are_bytewise`
+   in `crates/zeroship-workflow-server/tests/coordinator.rs` stands as written: no column of
    `workflow_manager` is json, jsonb or bytea, or named `input`, `output`, `history`,
-   `payload_url`, `database_url` or `task_token`. It reads `information_schema.columns` and
-   requires the result empty. The journal installed by step 1 declares `input` and `output` on
-   `__zeroship_workflow_generations`.
+   `payload_url`, `database_url` or `task_token`.
 
-   It passes today only because that fixture builds `workflow_manager` from the manager's own
-   generated artifact rather than from the migration corpus, and because step 1 writes nothing.
-   Step 2 is where a reader appears and the columns stop being empty.
+   **One journal shape, not two.** The dev tier is not a constraint that forces a second shape.
+   `main` in `crates/zeroship-cli/src/main.rs` opens a `StorageStore` unconditionally - the
+   comment there reads "Storage plugin: always on in dev" and the backend defaults to
+   `file://.zeroship/storage`, the `LocalFs` backend in
+   `crates/zeroship-storage/src/backend/local.rs` - and hands it to the workflow host as
+   `HostStorage.objects`. `LocalHost::start` in `crates/zeroship-cli/src/workflow/host.rs` then
+   calls `.with_payload_storage(storage.objects)`, the same call
+   `crates/zeroship-worker/src/workflow_creator.rs` makes in production. A dev-tier journal can
+   reach object storage on the same code path a production one does, so the SQLite tier takes
+   the payload-free shape too.
 
-   This is a tenancy statement, not a naming rule, so re-scoping the assertion to the manager's
-   own tables is a decision about where creator payload may live rather than a fixture repair.
-   Settle it before a reader is built: either the platform-schema journal is structurally
-   payload-free and `input`/`output` live only in creator schemas, or the assertion is narrowed
-   deliberately and the reason recorded here.
+   **What the decision requires, and why it is not a threshold flip.** `promote` in
+   `crates/zeroship-workflow/src/service/payloads.rs` does not move an inline value into
+   storage: it takes a `WorkflowOutputRef` that a worker already staged through `stage_payload`,
+   resolves the owning row with `owned_reference`, and attaches it through `payload_refs`. The
+   only promotion of an inline value anywhere is `PreparedExecution::from_runtime_json` in
+   `crates/zeroship-workflow/src/service/runner/outputs.rs`, which runs in the worker and
+   references a value only when the creator asked for it or it exceeds
+   `TaskPayloadLimits::max_inline_bytes`; it covers `RunCompleted`, `ContinueAsNew` and a
+   `step.run` completion, and nothing else.
 
-   Decide it here rather than inside the slice that trips it. This assertion is the kind that
-   reads as protection: narrowing it to make a step land would look like housekeeping in a diff,
-   and the property would be gone with nothing marking its departure.
+   `generations.input` is written in one place, `insert_run`, and four production callers reach
+   it (`crates/zeroship-workflow/src/service/app.rs`). `AppWorkflows::start` is outside any fold.
+   The other three are inside one: `journal.rs` starts a child run from
+   `StepCheckpoint.child_input`, `cron.rs` starts a scheduled run from the `ScheduleRegistration`
+   carried on the deploy registration that `__zeroship_workflow_deploys.manifest` stores, and
+   `frontier.rs` starts the successor of a continuation. Promoting there means object I/O under
+   the app and run locks `lock_app` and `lock_run` already hold, and neither `child_input` nor a
+   schedule's input has a reference form to arrive in. Making those two referenceable is a
+   change to `StepOutcome` and to the deploy manifest, not a mechanism added beside them.
+
+   `generations.output` has one writer, `finish_run` in `crates/zeroship-workflow/src/service/frontier.rs`,
+   and it carries three things: nothing, a creator run output, and `{"continuedAsNew":id}`, which
+   is platform data rather than payload and needs a home that is not a payload reference.
+
+   **An empty list is not a payload-free journal.** The assertion matches a column's type or its
+   name, so creator payload held in a text column under another name passes it.
+   `__zeroship_workflow_steps.record` is a serialized `StoredCheckpoint` wrapping the
+   `StepCheckpoint` declared in `crates/zeroship-workflow/src/engine.rs`, whose `output`, `error`
+   and `child_input` are creator values. `finish_run` writes a creator error into
+   `__zeroship_workflow_generations.error`, the column beside the two this entry is about.
+   `publish` in `crates/zeroship-workflow/src/service/signals.rs` and `crates/zeroship-workflow/src/service/fanout.rs`
+   store `options.payload` into `__zeroship_workflow_signals.payload` and
+   `__zeroship_workflow_broadcasts.payload`, and `__zeroship_workflow_deploys.manifest` carries
+   every `ScheduleRegistration` input a deployment declared. Removing `input` and `output` alone
+   turns the assertion green and leaves the property false, which is the failure this entry was
+   written to prevent. A payload-free journal is the whole set becoming references, and the two
+   named columns are where it starts, not where it ends.
+
+   **Where the property is checked.** The coordinator fixture builds `workflow_manager` from
+   `zeroship_workflow_server::coordinator::SCHEMA_SQL` and
+   `zeroship_workflow_manager::deployments::POSTGRES_SCHEMA`, and the journal is in neither, so
+   that assertion reads a schema the journal never reached.
+   `journal_payload_columns_are_a_closed_set` in
+   `crates/zeroship-workflow-server/tests/platform_schema.rs` runs the same predicate against the
+   schema the migration corpus installs, as a closed set: a payload-shaped column appearing
+   anywhere in `workflow_manager` fails there, and emptying the set it names is what this
+   decision looks like from the gate. Plan step 2 waits on that set being empty: a reader in
+   `workflow_manager` is what puts creator payload at rest in the platform schema, so the
+   promotion lands before the reader rather than beside it.
+
+8. **Four creator-visible decisions the payload-free journal forces.** These are not
+   implementation detail: each changes something a creator can observe, so they are settled here
+   before a slice assumes one.
+
+   - Does a `Value::Null` run input mint a storage object, or does `input_ref` stay nullable? The
+     second turns `trigger.input` into `undefined` for a run started without one.
+   - Do run inputs count against `max_payload_objects` and `max_payload_storage_bytes`? They are
+     creator-visible limits, and run inputs have never consumed them.
+   - Does `RunStatus.output` materialize the object, or return a reference descriptor? The first
+     keeps the shape and adds a read to every status call; the second changes the contract.
+   - Where does `{"continuedAsNew":id}` live? `finish_run` writes it into
+     `generations.output` today, and it is platform data, so a payload reference is the wrong
+     home for it.
+
+   Two of the four `insert_run` callers also have no reference form for their input to arrive in
+   at all - a child run's `child_input` and a schedule's input - so making them referenceable is
+   a change to `StepOutcome` and to the deploy manifest rather than a mechanism added beside
+   them.
 
 ---
 
