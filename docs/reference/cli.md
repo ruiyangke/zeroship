@@ -130,9 +130,10 @@ never written — are in [`project-config.md`](project-config.md).
 **Order matters for an app with a database.** `deploy` ships code and never
 touches the database; `migrate` creates the schema, its tables, and the runtime
 database access that `env.db` depends on. For a brand-new database app the first
-`deploy` is refused with `409 schema_not_applied`, then `migrate` applies the
-schema, then `deploy` again goes live. The refusal and its remedy are in
-[`db.md`](db.md).
+`deploy` ships the code and `migrate` applies the schema; deploy does not
+check that you ran it, so a build reaching a column the database lacks fails at
+query time naming that column. What deploy DOES refuse is a database the app
+holds no live binding to - see [`db.md`](db.md).
 
 ## `zeroship deploy`
 
@@ -173,7 +174,7 @@ not check declared secrets for app <id>: <reason>` and the upload continues.
 
 A deploy whose generated schema descriptor (the schema the build recorded for
 `env.db`) disagrees with the app's newest applied migration is refused with
-`409 schema_not_applied`, and nothing goes live. When a migration set exists
+`409 database_not_bound`, and nothing goes live. When a migration set exists
 beside the project config, deploy prints a reminder naming `zeroship migrate`
 before uploading. That reminder is a hint, not a verdict: it fires on the
 presence of the migration set, not on whether the migrations are already applied.
@@ -381,7 +382,7 @@ result can be piped. A successful command exits `0`; a command that fails exits
 non-zero with a `zeroship <command>: <message>` line on stderr. The CLI defines
 no numeric error codes; when a failure comes back from the platform, the message
 carries the HTTP status and the server's response body verbatim, which is where
-codes such as the `409 schema_not_applied` refusal on deploy come from.
+codes such as the `409 database_not_bound` refusal on deploy come from.
 
 `zeroship` with no command, and an unrecognized top-level command, print the
 command list. There is no `zeroship build`.

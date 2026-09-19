@@ -1,8 +1,8 @@
 //! Native ORM mappings for the Control catalog rows that deploy, archive,
 //! restore, publication and deployment collection share.
 //!
-//! `apps` and `app_schema_applies` declare only the columns these operations
-//! read or write. The deployment catalog models come from
+//! `apps`, `app_schema_applies` and `database_bindings` declare only the
+//! columns these operations read or write. The deployment catalog models come from
 //! `zeroship_workflow_manager::deployments` so retention fences and this
 //! catalog agree on one mapping. `tests/deploy_publication/schema.rs` compares
 //! every declared field with the migrated platform catalog.
@@ -31,6 +31,16 @@ zeroship_data_orm::orm::schema! {
             descriptor_sha256: Text,
             submitted_at: Timestamp,
             applied_at: Nullable<Timestamp>,
+        }
+
+        database_bindings {
+            #[orm(primary_key)]
+            id: Text,
+            app_id: Text,
+            database_id: Text,
+            status: Text,
+            generation: Integer,
+            observed_generation: Integer,
         }
 
         app_deploy_commands {

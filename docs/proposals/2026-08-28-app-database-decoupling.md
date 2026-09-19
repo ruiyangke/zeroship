@@ -78,9 +78,23 @@ Built:
   masked value rehydrates against the binding its rows were read through rather than against
   whatever `env.db` names.
 
-Not built: the deploy-time binding verification, the migration service's own app-id-to-database
-re-key, the encryption salt and AAD, and capacity-aware placement. No apply advances an epoch.
-The deploy gate still compares the PRIMARY entry's hash, which is what Open 8(f) replaces.
+- the deploy-time binding verification, and the deletion of the schema-equality gate in the same
+  change. `catalog::admit_bindings` refuses a deployment naming a database the app holds no LIVE
+  binding to - `active` with `observed_generation` caught up, the same predicate the worker's own
+  resolution uses - and `api::database_binding_response` carries the call that grants one,
+  `POST /api/databases/{database_id}/bindings`, one per unbound database.
+  `catalog::admit_schema` and its applied-row read are gone with
+  `CatalogError::SchemaNotApplied`, `RegistryError::SchemaNotApplied` and
+  `schema_precondition_response`: equality coupled every app on a shared database to every other,
+  because one app migrating changed the newest applied row and broke every other bound app's next
+  deploy. The artifact-self-consistency arm survives where it needs no knowledge of any database -
+  `Manifest::validate` refuses a malformed descriptor hash and `collect_expected_hashes` refuses
+  an entry whose blob the archive does not carry.
+
+Not built: the migration service's own app-id-to-database re-key, the encryption salt and AAD, and
+capacity-aware placement. No apply advances an epoch. Open 11's subset test at isolate build does
+not exist, so a build reaching a column the database lacks fails at query time with
+`42703 undefined_column`.
 
 Three things are narrower than "built" and are recorded here rather than discovered later. The CDC
 relay DOES filter on the bound database's schema
@@ -1632,9 +1646,16 @@ app's requests and cannot protect a shared cluster from an app under its limit. 
     transaction on each at once, which is the lane key measured as behaviour; a key without the
     database half turns the second into `nested_top_level_transaction`.
 
-    BUILDABLE: (e) two databases each declaring `users`, which needs the CDC routing key. (f) a
-    deploy naming a database the app holds no active binding to. (g) a migration applied to a
-    shared database not failing any bound app's deploy.
+    BUILT: (f) `deploy_naming_an_unbound_database_is_refused_and_names_the_binding_call`
+    (`crates/zeroship-control/tests/deploy_http_test.rs`) asserts the 409, the database named in
+    the body, the binding CALL in the remedy, and that nothing became live - with
+    `deploy_declaring_no_database_needs_no_binding_and_goes_live` as its control, differing in one
+    variable.
+
+    BUILDABLE: (e) two databases each declaring `users`, which needs the CDC routing key. (g) a
+    migration applied to a shared database not failing any bound app's deploy. (g) is now free of
+    a mechanism rather than guarded by one: deploy compares no schema at all, so the test asserts
+    a property nothing can break from the control plane.
 
 9. **Make the project config plural without losing cross-target protection.** DECIDED AND BUILT.
     `schema/project-v1.json` declares `app` as a single string, and the environments block requires

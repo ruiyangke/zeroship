@@ -12,7 +12,7 @@ use super::command::{
 };
 use super::models::catalog::{
     app_deploy_commands as commands, app_lifecycle_intents as intents,
-    app_schema_applies as applies, apps,
+    app_schema_applies as applies, apps, database_bindings as bindings,
 };
 use std::{future::Future, num::NonZeroUsize, pin::Pin};
 use zeroship_core::{
@@ -45,11 +45,8 @@ pub enum CatalogError {
     AppAbsent,
     #[error("the deploy command id is bound to a different deploy")]
     CommandConflict,
-    #[error("the deployment's runtime schema descriptor is not the app's applied schema")]
-    SchemaNotApplied {
-        descriptor_sha256: Option<String>,
-        applied_sha256: Option<String>,
-    },
+    #[error("the app holds no live binding to a database this deployment declares")]
+    DatabaseNotBound { databases: Vec<String> },
     #[error("deployment retention has closed activation")]
     DeploymentReclaimed,
     #[error("a schema apply is in progress")]
@@ -182,9 +179,11 @@ struct AppRow {
 }
 
 #[derive(FromRow)]
-#[orm(entity = applies)]
-struct AppliedSchema {
-    descriptor_sha256: String,
+#[orm(entity = bindings)]
+struct LiveBinding {
+    database_id: String,
+    generation: i32,
+    observed_generation: i32,
 }
 
 #[derive(FromRow)]
@@ -307,7 +306,7 @@ pub async fn accept(
     if let Some(receipt) = find_receipt(tx, &binding.id).await? {
         return receipt.answer(binding).map(Acceptance::Replayed);
     }
-    admit_schema(tx, app, command.deployment.descriptor_sha256()).await?;
+    admit_bindings(tx, app, command.deployment.databases()).await?;
     let deployment = acquire_deployment(tx, app, &command.deployment, now).await?;
     changed(
         tx.entity::<apps::Entity>()?
@@ -480,12 +479,12 @@ pub async fn restore(
         (None, None) => None,
         _ => return Err(CatalogError::Storage("app pointer without its manifest")),
     };
-    admit_schema(
+    admit_bindings(
         tx,
         app,
         staged
             .as_ref()
-            .and_then(VerifiedDeployment::descriptor_sha256),
+            .map_or(&[][..], |staged| staged.databases()),
     )
     .await?;
     changed(
@@ -569,32 +568,57 @@ async fn find_receipt(
 /// only when the app has no applied schema. Newest, not any: a rollback across
 /// a migration boundary must not pass because an older descriptor was once
 /// applied.
-async fn admit_schema(
+/// Refuse a deployment that names a database the app holds no LIVE binding to.
+///
+/// This is what deploy checks about a database, and the whole of it. It
+/// compares no schema: equality coupled every app on a shared database to
+/// every other, because one app migrating changed the newest applied row and
+/// broke every other app's next deploy although their own schemas were fine.
+/// What replaces it is a SUBSET test at isolate build - refuse when the
+/// database lacks something the app requires, say nothing when it has grown
+/// things the app does not use - and until that exists a build expecting a
+/// missing column fails at query time with `42703 undefined_column`, which
+/// names the column.
+///
+/// DEPLOY NEVER CREATES A BINDING. A deploy that reconciled bindings from the
+/// artifact would silently restore access somebody revoked, because the
+/// artifact is a stale snapshot of an intent that has since changed.
+///
+/// LIVE means what the worker's own resolution means: `active` and with the
+/// reconciler's `observed_generation` caught up. A binding control has
+/// declared but no cluster has converged would let an app deploy and then fail
+/// every statement at session setup.
+async fn admit_bindings(
     tx: &Database,
     app: &AppId,
-    descriptor_sha256: Option<&str>,
+    databases: &[zeroship_core::DatabaseId],
 ) -> Result<(), CatalogError> {
-    let applied = tx
-        .entity::<applies::Entity>()?
+    if databases.is_empty() {
+        return Ok(());
+    }
+    let live = tx
+        .entity::<bindings::Entity>()?
         .query()
         .filter(
-            applies::app_id
+            bindings::app_id
                 .eq(app.as_str())?
-                .and(applies::status.eq("applied")?),
+                .and(bindings::status.eq("active")?),
         )
-        .order_by(applies::applied_at.desc().nulls_last())
-        .order_by(applies::submitted_at.desc())
-        .order_by(applies::id.desc())
-        .first::<AppliedSchema>()
-        .await?
-        .map(|row| row.descriptor_sha256);
-    if descriptor_sha256 == applied.as_deref() {
+        .all::<LiveBinding>()
+        .await?;
+    let missing: Vec<String> = databases
+        .iter()
+        .filter(|database| {
+            !live.iter().any(|row| {
+                row.database_id == database.as_str() && row.observed_generation >= row.generation
+            })
+        })
+        .map(|database| database.as_str().to_owned())
+        .collect();
+    if missing.is_empty() {
         Ok(())
     } else {
-        Err(CatalogError::SchemaNotApplied {
-            descriptor_sha256: descriptor_sha256.map(str::to_owned),
-            applied_sha256: applied,
-        })
+        Err(CatalogError::DatabaseNotBound { databases: missing })
     }
 }
 

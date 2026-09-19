@@ -1407,115 +1407,73 @@ async fn deploy_is_rate_limited() {
 }
 
 // ---------------------------------------------------------------------------
-// The deploy schema precondition
+// The deploy binding precondition
 //
-// The runtime descriptor carried by the `.zship` is the SOLE schema authority
-// for `env.db` - there is no live introspection left. So if a deploy goes live
-// before its migrations apply, the descriptor says a column is masked while the
-// database still holds plaintext there, and the runtime serves the plain value
-// believing it is masked. Nothing downstream detects it.
+// Declaring a database in the artifact grants nothing. A grant is an explicit
+// act, and a deploy that reconciled bindings from the artifact would silently
+// restore access somebody revoked, because the artifact is a stale snapshot of
+// an intent that has since changed. So deploy VERIFIES and never creates.
+//
+// WHAT IS DELIBERATELY NOT CHECKED HERE IS THE SCHEMA. A shared database has
+// many bound apps; refusing an artifact whose descriptor differs from the
+// newest applied row would mean one app migrating breaks every other bound
+// app's next deploy although their builds are fine. That coupling is what
+// per-database identity exists to remove, so the comparison is gone and a
+// build reaching a column the database lacks fails at query time with
+// `42703 undefined_column`, naming the column.
 //
 // The guard runs under the app row lock in `publication::catalog::accept`, the
 // transaction that makes a deploy live. These cases drive the full HTTP
 // handler, so they measure the shipped path rather than the registry call.
 //
 // ON THE FIXTURE, AND WHY IT IS NOT `manifest_for`. Every other deploy case in
-// this file uses `manifest_for`, which declares no database at all
-// (correctly - those are schema-less apps). A case that reused it unchanged
-// would take the "no descriptor, no applied schema" arm, which the guard
-// PERMITS, and would print exactly what a working guard prints while ruling on
-// nothing. `manifest_with_descriptor` below is the whole difference, and the
-// fixture mutation named on the first case is what pins it.
+// this file uses `manifest_for`, which declares no database at all (correctly
+// - those are schema-less apps) and therefore takes the "nothing to verify"
+// arm. A case that reused it unchanged would print exactly what a working
+// guard prints while ruling on nothing. `manifest_with_descriptor` below is
+// the whole difference.
 // ---------------------------------------------------------------------------
 
-/// Bytes that stand in for `schema.runtime.json`.
-///
-/// Deliberately NOT a real descriptor. Control's ingest validates the blob's
-/// HASH FORMAT and its PRESENCE in the tar and never parses the body
-/// (`zeroship-bundle/src/unpack.rs`, the `runtime_descriptor` arm of the blob
-/// gather), so the guard is reachable with any bytes. Lifting a committed
-/// `examples/*/generated/schema.runtime.json` would be worse than useless: all
-/// of them are `"version": 1` while the packer accepts only v2, so they would
-/// fail for a reason that has nothing to do with this guard.
 fn descriptor_blob(marker: &str) -> Vec<u8> {
     format!(r#"{{"version":2,"marker":"{marker}","collections":{{}},"storage":{{}}}}"#).into_bytes()
 }
 
-/// A manifest that CARRIES a runtime schema descriptor - the state
-/// [`manifest_for`] cannot construct.
-fn manifest_with_descriptor(worker_hash: &str, descriptor_hash: &str) -> Manifest {
+/// A manifest that DECLARES A DATABASE - the state [`manifest_for`] cannot
+/// construct.
+fn manifest_with_descriptor(
+    worker_hash: &str,
+    descriptor_hash: &str,
+    database: &zeroship_core::DatabaseId,
+) -> Manifest {
     let mut m = manifest_for(Some(worker_hash), &[]);
     m.runtime_descriptor = vec![zeroship_bundle::RuntimeDescriptorEntry {
         label: "main".into(),
-        database_id: zeroship_core::DatabaseId::mint(),
+        database_id: database.clone(),
         primary: true,
         hash: descriptor_hash.to_string(),
     }];
     m
 }
 
-/// A `.zship` whose manifest names the descriptor and whose tar carries the
-/// matching blob. `None` builds the schema-less artifact instead.
-fn zship_with_descriptor(descriptor: Option<&[u8]>) -> Vec<u8> {
+/// A `.zship` declaring `database`, carrying its descriptor blob. `None`
+/// builds the artifact that declares no database at all.
+fn zship_with_descriptor(
+    descriptor: Option<&[u8]>,
+    database: Option<&zeroship_core::DatabaseId>,
+) -> Vec<u8> {
     let server = b"export default { fetch() { return new Response('ok'); } }";
     let server_hash = sha256_hex(server);
     let mut blobs = vec![(server_hash.clone(), server.to_vec())];
-    let manifest = match descriptor {
-        Some(bytes) => {
+    let manifest = match (descriptor, database) {
+        (Some(bytes), Some(database)) => {
             let hash = sha256_hex(bytes);
             blobs.push((hash.clone(), bytes.to_vec()));
-            manifest_with_descriptor(&server_hash, &hash)
+            manifest_with_descriptor(&server_hash, &hash, database)
         }
-        None => manifest_for(Some(&server_hash), &[]),
+        _ => manifest_for(Some(&server_hash), &[]),
     };
     let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
     build_zship(&manifest_bytes, &blobs, true)
-}
-
-/// Write the ledger row `migrated` writes when an apply request succeeds.
-///
-/// `applied_at` is a parameter so a case can order two rows deterministically:
-/// the predicate compares against the NEWEST applied row, and a case that
-/// cannot control which row is newest cannot tell "newest" from "any".
-async fn insert_applied_migration(
-    conn: &compio_postgres::Client,
-    app_id: &AppId,
-    submitted_by: &UserId,
-    descriptor_sha256: &str,
-    applied_at: &str,
-) {
-    conn.execute(
-        "INSERT INTO zeroship.app_schema_applies \
-            (app_id, migration_id, status, request_body, effective_profile, \
-             ceiling_id, ceiling_version, applied_versions, submitted_by, \
-             applied_at, descriptor_sha256) \
-         VALUES ($1, $2, 'applied', '{}'::jsonb, '{}'::jsonb, 'test-ceiling', 1, \
-                 '[]'::jsonb, $3, $4::text::timestamptz, $5)",
-        &[
-            &app_id.as_str(),
-            &Uuid::now_v7(),
-            &submitted_by.as_str(),
-            &applied_at,
-            &descriptor_sha256,
-        ],
-    )
-    .await
-    .expect("insert applied migration row");
-}
-
-/// The app's live deploy hash AS THE GATEWAY WOULD READ IT.
-///
-/// Read through `get_routes()` rather than off `zeroship.apps`, because that is
-/// the projection the gateway polls. Asserting the 409 alone would pass on a
-/// build that answers 409 AND commits the UPDATE.
-async fn live_deploy_hash(state: &AppState, app_id: &AppId) -> Option<String> {
-    state
-        .registry
-        .get_routes()
-        .await
-        .expect("get_routes")
-        .get(app_id)
-        .and_then(|entry| entry.deploy_hash.clone())
 }
 
 async fn post_zship(
@@ -1560,23 +1518,117 @@ async fn create_labelled_app(state: &AppState, label: &str, owner_id: &UserId) -
         .id
 }
 
-/// ARM 1. A descriptor-carrying deploy over an app with NO applied schema is
-/// refused, and nothing goes live.
+/// Seed the chain a LIVE binding needs: a cluster in the app's zone, a
+/// database in the app's project, and the edge joining the two - with the
+/// reconciler's `observed_generation` caught up, which is what "live" means to
+/// the worker and therefore to deploy.
+async fn seed_live_binding(state: &AppState, app_id: &AppId, database: &zeroship_core::DatabaseId) {
+    let project_id: String = state
+        .control_pg
+        .query(
+            "SELECT project_id FROM zeroship.apps WHERE id = $1",
+            &[&app_id.as_str()],
+        )
+        .await
+        .expect("read the app's project")
+        .first()
+        .map(|row| row.get::<_, String>("project_id"))
+        .expect("a labelled app belongs to a project");
+    let zone_id: String = state
+        .control_pg
+        .query(
+            "SELECT execution_zone_id FROM zeroship.projects WHERE id = $1",
+            &[&project_id],
+        )
+        .await
+        .expect("read the project's zone")
+        .first()
+        .map(|row| row.get::<_, String>("execution_zone_id"))
+        .expect("a project is pinned to a zone");
+    let datastore_id = zeroship_core::typed_id::from_uuid_string("dst", &uuid::Uuid::new_v4().to_string())
+        .expect("a fresh uuid composes a datastore id");
+    // `datastores_system_identifier_key` is the natural key, so every fixture
+    // cluster needs a distinct one.
+    let system_identifier: i64 = i64::from(std::process::id()) + rand_suffix();
+    state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.datastores (id, system_identifier, execution_zone_id, status) \
+             VALUES ($1, $2, $3, 'active')",
+            &[&datastore_id, &system_identifier, &zone_id],
+        )
+        .await
+        .expect("register a fixture datastore");
+    state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.databases \
+                 (id, project_id, execution_zone_id, datastore_id, name, status) \
+             VALUES ($1, $2, $3, $4, 'main', 'active')",
+            &[
+                &database.as_str(),
+                &project_id,
+                &zone_id,
+                &datastore_id,
+            ],
+        )
+        .await
+        .expect("create a fixture database");
+    state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.database_bindings \
+                 (id, app_id, database_id, project_id, capability, status, \
+                  generation, observed_generation) \
+             VALUES ($1, $2, $3, $4, 'readwrite', 'active', 1, 1)",
+            &[
+                &zeroship_core::BindingId::mint().as_str(),
+                &app_id.as_str(),
+                &database.as_str(),
+                &project_id,
+            ],
+        )
+        .await
+        .expect("bind the fixture app to the fixture database");
+}
+
+/// A distinct-enough tail for a fixture cluster's natural key.
+fn rand_suffix() -> i64 {
+    i64::from(u32::from_le_bytes(
+        uuid::Uuid::new_v4().as_bytes()[..4]
+            .try_into()
+            .expect("four bytes"),
+    ))
+}
+
+/// The app pointer the gateway reads. `None` when nothing is live.
+async fn live_deploy_hash(state: &AppState, app_id: &AppId) -> Option<String> {
+    state
+        .control_pg
+        .query(
+            "SELECT deploy_hash FROM zeroship.apps WHERE id = $1",
+            &[&app_id.as_str()],
+        )
+        .await
+        .expect("read the live deploy pointer")
+        .first()
+        .and_then(|row| row.get::<_, Option<String>>("deploy_hash"))
+}
+
+/// A deploy naming a database the app holds no live binding to is refused, and
+/// the refusal NAMES the call that grants one.
 ///
-/// MUTATIONS THIS MUST SURVIVE, both run:
-///  - CODE: skip the schema admission in `publication::catalog::accept`.
-///    This case must go RED.
-///  - FIXTURE: build the bundle with `zship_with_descriptor(None)`. This case
-///    must ALSO go red - with no descriptor and no applied schema the guard
-///    correctly answers 200, so a case that cannot tell those two apart is not
-///    measuring the guard.
+/// The remedy is the route the control surface actually serves. Naming a
+/// command that does not exist would send a creator looking for a verb the CLI
+/// has never had.
 #[compio::test]
-async fn deploy_with_unapplied_schema_is_refused_and_nothing_goes_live() {
+async fn deploy_naming_an_unbound_database_is_refused_and_names_the_binding_call() {
     let db_url = db_url();
-    let fx = build_test_state(&db_url, "schema-unapplied").await;
+    let fx = build_test_state(&db_url, "binding-absent").await;
     let app = deploy_service(fx.state.clone()).await;
-    let pat = seed_owner(&fx.state, "schema-unapplied").await;
-    let app_id = create_labelled_app(&fx.state, "schemaunapplied", &pat.user_id).await;
+    let pat = seed_owner(&fx.state, "binding-absent").await;
+    let app_id = create_labelled_app(&fx.state, "bindingabsent", &pat.user_id).await;
+    let database = zeroship_core::DatabaseId::mint();
 
     assert_eq!(
         live_deploy_hash(&fx.state, &app_id).await,
@@ -1589,22 +1641,36 @@ async fn deploy_with_unapplied_schema_is_refused_and_nothing_goes_live() {
         &app,
         &app_id,
         &pat.bearer(),
-        zship_with_descriptor(Some(&descriptor_blob("v1"))),
+        zship_with_descriptor(Some(&descriptor_blob("v1")), Some(&database)),
     )
     .await;
 
     assert_eq!(status, StatusCode::CONFLICT, "expected 409, body: {body}");
     assert_eq!(
         body.get("error").and_then(|v| v.as_str()),
-        Some("schema_not_applied"),
+        Some("database_not_bound"),
     );
     assert!(
+        body.get("databases")
+            .and_then(|v| v.as_array())
+            .is_some_and(|ids| ids
+                .iter()
+                .any(|id| id.as_str() == Some(database.as_str()))),
+        "the body must name the database that is unbound, got {body}",
+    );
+    // NAMING THE CALL is the half a status code cannot carry. A 409 whose body
+    // says only "not bound" leaves a creator with nowhere to go.
+    assert!(
         body.get("remedy")
-            .and_then(|v| v.as_str())
-            .is_some_and(
-                |remedy| remedy.contains("zeroship migrate") && remedy.contains(app_id.as_str())
-            ),
-        "the body must carry the remedy command naming this app, got {body}",
+            .and_then(|v| v.as_array())
+            .is_some_and(|calls| calls.iter().any(|call| {
+                let call = call.as_str().unwrap_or_default();
+                call.contains("POST /api/databases/")
+                    && call.contains(database.as_str())
+                    && call.contains("/bindings")
+                    && call.contains(app_id.as_str())
+            })),
+        "the body must carry the binding call naming this database and app, got {body}",
     );
     // THE ASSERTION THAT MAKES THE 409 MEAN SOMETHING. A build that answers 409
     // and commits the UPDATE anyway satisfies every check above and leaks
@@ -1622,39 +1688,31 @@ async fn deploy_with_unapplied_schema_is_refused_and_nothing_goes_live() {
     common::drain_pg().await;
 }
 
-/// ARM 2. THE CONTROL, differing from arm 1 in ONE variable: the same bytes,
-/// over an app whose newest applied migration recorded THIS descriptor.
+/// THE CONTROL, differing from the case above in ONE variable: the same app,
+/// the same handler, an artifact that declares NO database.
+///
+/// Without it, a guard that refused every deploy would print exactly what the
+/// refusal above prints.
 #[compio::test]
-async fn deploy_matching_the_applied_descriptor_goes_live() {
+async fn deploy_declaring_no_database_needs_no_binding_and_goes_live() {
     let db_url = db_url();
-    let fx = build_test_state(&db_url, "schema-applied").await;
+    let fx = build_test_state(&db_url, "binding-none").await;
     let app = deploy_service(fx.state.clone()).await;
-    let pat = seed_owner(&fx.state, "schema-applied").await;
-    let app_id = create_labelled_app(&fx.state, "schemaapplied", &pat.user_id).await;
-
-    let blob = descriptor_blob("v1");
-    insert_applied_migration(
-        &fx.state.control_pg,
-        &app_id,
-        &pat.user_id,
-        &sha256_hex(&blob),
-        "2026-08-28T00:00:00Z",
-    )
-    .await;
+    let pat = seed_owner(&fx.state, "binding-none").await;
+    let app_id = create_labelled_app(&fx.state, "bindingnone", &pat.user_id).await;
 
     let (status, body) = post_zship(
         &app,
         &app_id,
         &pat.bearer(),
-        zship_with_descriptor(Some(&blob)),
+        zship_with_descriptor(None, None),
     )
     .await;
 
     assert_eq!(status, StatusCode::OK, "expected 200, body: {body}");
-    assert_eq!(
-        live_deploy_hash(&fx.state, &app_id).await.as_deref(),
-        body.get("deploy_hash").and_then(|v| v.as_str()),
-        "the accepted deploy is live in the projection the gateway reads",
+    assert!(
+        live_deploy_hash(&fx.state, &app_id).await.is_some(),
+        "an app that declares no database has nothing to verify and goes live",
     );
 
     let _ = fx.state.registry.archive_app(&app_id).await;
@@ -1664,121 +1722,6 @@ async fn deploy_matching_the_applied_descriptor_goes_live() {
     common::drain_pg().await;
 }
 
-/// ARM 3. The bypass that costs one JSON key.
-///
-/// `runtime_descriptor` is `skip_serializing_if = "Vec::is_empty"` on a
-/// creator-produced artifact, so a one-armed guard is defeated by deleting the
-/// field. The app would then boot with `env.db` uninstalled over a live
-/// database.
-#[compio::test]
-async fn deploy_without_a_descriptor_is_refused_when_the_app_has_applied_schema() {
-    let db_url = db_url();
-    let fx = build_test_state(&db_url, "schema-missing").await;
-    let app = deploy_service(fx.state.clone()).await;
-    let pat = seed_owner(&fx.state, "schema-missing").await;
-    let app_id = create_labelled_app(&fx.state, "schemamissing", &pat.user_id).await;
-
-    insert_applied_migration(
-        &fx.state.control_pg,
-        &app_id,
-        &pat.user_id,
-        &sha256_hex(&descriptor_blob("v1")),
-        "2026-08-28T00:00:00Z",
-    )
-    .await;
-
-    let (status, body) =
-        post_zship(&app, &app_id, &pat.bearer(), zship_with_descriptor(None)).await;
-
-    assert_eq!(status, StatusCode::CONFLICT, "expected 409, body: {body}");
-    assert_eq!(
-        body.get("error").and_then(|v| v.as_str()),
-        Some("schema_descriptor_missing"),
-    );
-    assert_eq!(
-        live_deploy_hash(&fx.state, &app_id).await,
-        None,
-        "a descriptor-less deploy over a schema'd app must not go live",
-    );
-
-    let _ = fx.state.registry.archive_app(&app_id).await;
-    pat.cleanup(&fx.state).await;
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
-}
-
-/// ARM 4. NEWEST APPLIED, NOT MEMBERSHIP.
-///
-/// This is the case an `IN (...)` implementation passes: N-1's descriptor WAS
-/// applied once, so it is a member of the set forever, and a rollback across a
-/// migration boundary would go live while the database sits at N. The two rows
-/// differ only in `applied_at`, which is what "newest" is decided on.
-#[compio::test]
-async fn deploy_rolling_back_to_a_previously_applied_descriptor_is_refused() {
-    let db_url = db_url();
-    let fx = build_test_state(&db_url, "schema-rollback").await;
-    let app = deploy_service(fx.state.clone()).await;
-    let pat = seed_owner(&fx.state, "schema-rollback").await;
-    let app_id = create_labelled_app(&fx.state, "schemarollback", &pat.user_id).await;
-
-    let old = descriptor_blob("v1");
-    let new = descriptor_blob("v2");
-    insert_applied_migration(
-        &fx.state.control_pg,
-        &app_id,
-        &pat.user_id,
-        &sha256_hex(&old),
-        "2026-08-27T00:00:00Z",
-    )
-    .await;
-    insert_applied_migration(
-        &fx.state.control_pg,
-        &app_id,
-        &pat.user_id,
-        &sha256_hex(&new),
-        "2026-08-28T00:00:00Z",
-    )
-    .await;
-
-    let (status, body) = post_zship(
-        &app,
-        &app_id,
-        &pat.bearer(),
-        zship_with_descriptor(Some(&old)),
-    )
-    .await;
-
-    assert_eq!(
-        status,
-        StatusCode::CONFLICT,
-        "a descriptor that was applied ONCE but is not the newest must be refused, body: {body}",
-    );
-    assert_eq!(
-        live_deploy_hash(&fx.state, &app_id).await,
-        None,
-        "the rolled-back deploy must not be live",
-    );
-
-    // The control: the NEWEST descriptor over the SAME two rows is accepted, so
-    // the refusal above is about which row is newest and not about the app
-    // holding two rows at all.
-    let (status, body) = post_zship(
-        &app,
-        &app_id,
-        &pat.bearer(),
-        zship_with_descriptor(Some(&new)),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "expected 200, body: {body}");
-    assert!(live_deploy_hash(&fx.state, &app_id).await.is_some());
-
-    let _ = fx.state.registry.archive_app(&app_id).await;
-    pat.cleanup(&fx.state).await;
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
-}
 
 // ---------------------------------------------------------------------------
 // Deploy command identity
@@ -1964,15 +1907,6 @@ async fn an_exact_retry_returns_the_first_acceptance_without_republishing() {
     // that the replay does not put it back.
     std::fs::remove_file(fx.blob_store.local_path(&first_module).expect("local blob"))
         .expect("remove the first module blob");
-    // Admission would now refuse the first artifact, which declares no schema.
-    insert_applied_migration(
-        &fx.state.control_pg,
-        &app_id,
-        &pat.user_id,
-        &sha256_hex(b"a schema applied after the first deploy"),
-        "2026-09-14T00:00:00Z",
-    )
-    .await;
     let before = publication_rows(&fx.state, &app_id).await;
     assert_eq!(before.0, 2);
 
@@ -2211,7 +2145,8 @@ async fn a_refused_deploy_commits_nothing_and_the_same_command_can_succeed_later
     let pat = seed_owner(&fx.state, "command-refused").await;
     let app_id = create_labelled_app(&fx.state, "commandrefused", &pat.user_id).await;
     let blob = descriptor_blob("refused");
-    let body = zship_with_descriptor(Some(&blob));
+    let database = zeroship_core::DatabaseId::mint();
+    let body = zship_with_descriptor(Some(&blob), Some(&database));
     let command = DeployCommandId::mint();
 
     let (status, _, json) = post_command(
@@ -2223,7 +2158,7 @@ async fn a_refused_deploy_commits_nothing_and_the_same_command_can_succeed_later
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{json}");
-    assert_eq!(json["error"], "schema_not_applied");
+    assert_eq!(json["error"], "database_not_bound");
     assert_eq!(publication_rows(&fx.state, &app_id).await, (0, vec![], 0));
     assert_eq!(live_deploy_hash(&fx.state, &app_id).await, None);
 
@@ -2254,14 +2189,10 @@ async fn a_refused_deploy_commits_nothing_and_the_same_command_can_succeed_later
     assert_eq!(json["error"], "invalid_workflow_schedules");
     assert_eq!(publication_rows(&fx.state, &app_id).await, (0, vec![], 0));
 
-    insert_applied_migration(
-        &fx.state.control_pg,
-        &app_id,
-        &pat.user_id,
-        &sha256_hex(&blob),
-        "2026-09-14T00:00:00Z",
-    )
-    .await;
+    // Clear the CAUSE, not the command: the same bytes under the same id must
+    // now be evaluated afresh rather than answered from a receipt a refusal
+    // never wrote.
+    seed_live_binding(&fx.state, &app_id, &database).await;
     let (status, replayed, json) =
         post_command(&app, &app_id, &pat.bearer(), &[command.as_str()], body).await;
     assert_eq!(status, StatusCode::OK, "{json}");

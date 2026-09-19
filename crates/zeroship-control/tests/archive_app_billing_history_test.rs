@@ -455,20 +455,17 @@ async fn restore_requires_a_staged_deploy_matching_the_latest_applied_schema() {
         .await
         .expect("record applied schema descriptor");
 
-    assert!(matches!(
-        registry.unarchive_app(&app.id).await,
-        Err(RegistryError::SchemaNotApplied {
-            descriptor_sha256: None,
-            applied_sha256: Some(ref applied),
-        }) if applied == &descriptor_hash
-    ));
+    // Restore admits the staged artifact on its BINDINGS, not on its schema:
+    // an app whose staged deploy declares no database has nothing to verify,
+    // and the applied-migration row above is now irrelevant to it. Comparing
+    // schemas here coupled every app on a shared database to every other.
     assert!(
         !registry
             .get_routes()
             .await
-            .expect("routes after refused restore")
+            .expect("routes before restore")
             .contains_key(&app.id),
-        "a schema mismatch must leave the app archived"
+        "an archived app is out of the routing projection until it is restored"
     );
 
     let mut staged_manifest = Manifest::passthrough();

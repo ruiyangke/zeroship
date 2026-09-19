@@ -742,12 +742,13 @@ fn record_created_app(
 /// app's migrations are already applied. It cannot tell you that you FORGOT;
 /// only that there is something to run.
 ///
-/// The deploy handler compares the artifact's `runtime_descriptor.hash`
-/// against the descriptor recorded on the app's newest applied migration and
-/// answers 409 `schema_not_applied` when they disagree (`Registry::deploy`).
-/// That refusal is the guarantee and this line is the warning on the way in,
-/// which is why it prints first: printed after a 200 it would name a step the
-/// deploy had already made it too late to take in order.
+/// NOTHING BEHIND IT CHECKS. The deploy handler verifies that the app holds a
+/// live BINDING to every database the artifact declares; it compares no
+/// schema, because equality coupled every app on a shared database to every
+/// other. So a deploy whose migrations are unapplied is accepted, and the
+/// build's first query against a missing column fails at query time with
+/// `42703 undefined_column`, which names the column. This line is the only
+/// warning on the way in, which is why it prints before the upload.
 fn print_migrate_reminder(
     app: &str,
     control_url: &str,
@@ -780,7 +781,7 @@ fn print_migrate_reminder(
     for database in pending {
         eprintln!("  zeroship migrate --app={app} --database={database} --control={control_url}");
     }
-    eprintln!("Until you do, this deploy is REFUSED with 409 schema_not_applied.");
+    eprintln!("Deploy does not check this: an unmigrated column fails at query time.");
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -61,14 +61,14 @@ pub enum DeploymentRejected {
 
 /// A manifest verified against its content hash.
 ///
-/// It carries the runtime descriptor schema admission compares and the
-/// allowlisted schedule projection the manager receives. Static schedule input
-/// and unknown fields stay in the manifest.
+/// It carries the databases the artifact declares, which deploy verifies a
+/// live binding for, and the allowlisted schedule projection the manager
+/// receives. Static schedule input and unknown fields stay in the manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedDeployment {
     hash: String,
     manifest_json: String,
-    descriptor_sha256: Option<String>,
+    databases: Vec<zeroship_core::DatabaseId>,
     schedules: Vec<ScheduleDescriptor>,
     workflows: bool,
 }
@@ -100,15 +100,14 @@ impl VerifiedDeployment {
         Ok(Self {
             hash,
             manifest_json,
-            // The PRIMARY database, the one `env.db` reaches, is the one this
-            // app-keyed gate can be about: the migration service addresses an
-            // app, so that is the only database a deploy can have applied
-            // migrations to through it.
-            descriptor_sha256: manifest
+            // EVERY database this artifact declares. Deploy verifies a live
+            // binding for each; it compares no schema, because equality is
+            // what coupled every app on a shared database to every other.
+            databases: manifest
                 .runtime_descriptor
                 .into_iter()
-                .find(|entry| entry.primary)
-                .map(|entry| entry.hash),
+                .map(|entry| entry.database_id)
+                .collect(),
             schedules,
             workflows,
         })
@@ -124,9 +123,13 @@ impl VerifiedDeployment {
         &self.manifest_json
     }
 
+    /// Every database this artifact declares, by id.
+    ///
+    /// The creator's labels stay inside the artifact: what a server verifies
+    /// and stores is the id.
     #[must_use]
-    pub fn descriptor_sha256(&self) -> Option<&str> {
-        self.descriptor_sha256.as_deref()
+    pub fn databases(&self) -> &[zeroship_core::DatabaseId] {
+        &self.databases
     }
 
     #[must_use]
