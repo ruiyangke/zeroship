@@ -200,8 +200,7 @@ impl WorkflowHost {
         config.validate()?;
         let (stop, stopped) = oneshot::channel::<()>();
         let (finished, exit) = oneshot::channel::<Result<(), String>>();
-        let thread = std::thread::Builder::new()
-            .name("workflow-host".into())
+        let thread = zeroship_workflow::service::runner::host::thread()
             .spawn(move || {
                 let result = match compio::runtime::Runtime::new() {
                     Ok(runtime) => runtime.block_on(run(config, resources, ready, stopped)),
