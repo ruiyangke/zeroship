@@ -251,7 +251,7 @@ impl Fixture {
     }
 
     pub fn binding(&self) -> DbBinding {
-        DbBinding::new("workflow_manager", "manager-test", self.schema().clone())
+        DbBinding::platform("workflow_manager", "manager-test", self.schema().clone())
     }
 
     pub fn options(&self) -> ConnectOptions {

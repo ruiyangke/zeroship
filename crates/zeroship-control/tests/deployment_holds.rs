@@ -465,7 +465,7 @@ impl Fixture {
 
 async fn database(url: &str) -> Database {
     Database::connect(
-        DbBinding::new(
+        DbBinding::platform(
             "platform",
             "control-deployments",
             SchemaName::new("zeroship").unwrap(),

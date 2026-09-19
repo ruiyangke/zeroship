@@ -431,7 +431,7 @@ fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
             // Drops the schema and the cluster-scoped per-app role, then
             // recreates the schema. `ensure_per_app_role` below creates the role
             // the read path checks for -- without it the unmask SELECT refuses
-            // with `schema_not_provisioned` before authorization is ever reached.
+            // with `schema_epoch_stale` before authorization is ever reached.
             let role = provision_app_with_role(&pool, app).await;
             crate::tests::fixtures::roles::ensure_binding_ladder(&pool, &crate::tests::fixtures::harness_binding(app))
                 .await

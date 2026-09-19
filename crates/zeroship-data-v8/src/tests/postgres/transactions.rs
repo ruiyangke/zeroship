@@ -144,7 +144,7 @@ CREATE INDEX IF NOT EXISTS "notes_created_by_idx" ON "{app}"."notes" ("created_b
         crate::tests::fixtures::roles::ensure_binding_ladder(&pool, &crate::tests::fixtures::harness_binding(&app))
             .await
             .expect("per-app role must be re-established after the CASCADE");
-        fixtures::grant_all_runtime_table_columns(&pool, &app, "notes").await;
+        fixtures::grant_all_runtime_table_columns(&pool, &crate::tests::fixtures::harness_binding(&app), "notes").await;
         pool.close().await;
         drop(pool);
         drain_open_connections().await;
@@ -223,7 +223,7 @@ CREATE INDEX "users_created_by_idx" ON "{app}"."users" (created_by);"#
         crate::tests::fixtures::roles::ensure_binding_ladder(&pool, &crate::tests::fixtures::harness_binding(&app))
             .await
             .expect("per-app role must exist for encrypted users");
-        fixtures::grant_all_runtime_table_columns(&pool, &app, "users").await;
+        fixtures::grant_all_runtime_table_columns(&pool, &crate::tests::fixtures::harness_binding(&app), "users").await;
         pool.close().await;
         drop(pool);
         drain_open_connections().await;
@@ -348,6 +348,7 @@ fn dispatch_zs_for_app_with_descriptor(
         source: source.into(),
     }];
     let plugins: Vec<Arc<dyn NativePlugin>> = vec![DbService::new(DbServiceConfig {
+        app_bindings: Default::default(),
         project_keys: crate::tests::fixtures::project_keys(),
         connection: crate::tests::fixtures::recording::connection(url),
         cdc_relay: None,
@@ -572,7 +573,7 @@ const _procedures = { autocommitBeforeMigrate };
     );
     assert_eq!(
         body.get("code").and_then(|v| v.as_str()),
-        Some("schema_not_provisioned"),
+        Some("schema_epoch_stale"),
         "autocommit must preserve the provisioning classification; body={body}"
     );
     assert!(
@@ -617,7 +618,7 @@ const _procedures = { transactionBeforeMigrate };
     );
     assert_eq!(
         body.get("code").and_then(|v| v.as_str()),
-        Some("schema_not_provisioned"),
+        Some("schema_epoch_stale"),
         "transaction setup must preserve the provisioning classification; body={body}"
     );
     assert!(
@@ -684,7 +685,7 @@ fn revoked_grant_transaction_surfaces_grant_revoked() {
             let _ = worker_connection.run().await;
         })
         .detach();
-        let set_local_role_sql = crate::tests::fixtures::roles::set_local_role_sql(&app_id)
+        let set_local_role_sql = crate::tests::fixtures::roles::set_local_role_sql(&crate::tests::fixtures::harness_binding(&app_id))
             .expect("grant-revocation app id must produce valid SET LOCAL ROLE SQL");
         worker.batch_execute("BEGIN").await.expect("control BEGIN");
         worker
@@ -835,7 +836,7 @@ export default { rpc: { streamBeforeMigrate } };
     );
     let text = body.as_str().expect("SSE body must be text");
     assert!(
-        text.contains("schema_not_provisioned") || text.contains("SCHEMA_NOT_PROVISIONED"),
+        text.contains("schema_epoch_stale") || text.contains("SCHEMA_EPOCH_STALE"),
         "streaming response must preserve the provisioning code; body={text}"
     );
     assert!(

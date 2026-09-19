@@ -316,7 +316,7 @@ impl Fixture {
         ))
         .unwrap();
         let store = OrmStore::connect(
-            DbBinding::new("workflow", "fixture", SchemaName::new("workflow").unwrap()),
+            DbBinding::platform("workflow", "fixture", SchemaName::new("workflow").unwrap()),
             &factory,
             ProjectKeySource::unavailable(),
         )

@@ -220,7 +220,7 @@ fn is_public_error_code(code: &str) -> bool {
     matches!(
         code,
         "capability_violation"
-            | "schema_not_provisioned"
+            | "schema_epoch_stale"
             | "concurrency_mismatch"
             | "concurrency_filter_must_be_top_level"
             | "multi_row_concurrency_filter_unsupported"
@@ -231,7 +231,7 @@ fn is_public_error_code(code: &str) -> bool {
             | "immutable_assigned_field"
             | "filter_nesting_too_deep"
             | "CAPABILITY_VIOLATION"
-            | "SCHEMA_NOT_PROVISIONED"
+            | "SCHEMA_EPOCH_STALE"
             | "OPTIMISTIC_CONCURRENCY"
             | "CONCURRENCY_FILTER_MUST_BE_TOP_LEVEL"
             | "MULTI_ROW_CONCURRENCY_FILTER_UNSUPPORTED"
@@ -672,7 +672,7 @@ mod tests {
     }
 
     /// A missing per-app Postgres role must reach the caller as
-    /// `schema_not_provisioned` WITH its message, so the response itself
+    /// `schema_epoch_stale` WITH its message, so the response itself
     /// names `zeroship migrate`. The sanitiser is right to blank unlisted
     /// codes; the classifier is what must stamp this one.
     ///
@@ -694,8 +694,8 @@ mod tests {
     /// it names `zeroship migrate` (that is `error.rs`'s own unit test).
     /// This test would pass if the code were stamped on an empty string.
     #[test]
-    fn schema_not_provisioned_survives_the_5xx_rail_in_both_spellings() {
-        for code in ["schema_not_provisioned", "SCHEMA_NOT_PROVISIONED"] {
+    fn schema_epoch_stale_survives_the_5xx_rail_in_both_spellings() {
+        for code in ["schema_epoch_stale", "SCHEMA_EPOCH_STALE"] {
             let body = build_error_body(
                 500,
                 1,
@@ -725,7 +725,7 @@ mod tests {
     fn genuinely_internal_db_failure_is_still_blanked() {
         let leaky = "this app's database is not provisioned: its per-app Postgres role \
                      does not exist. Run `zeroship migrate` for this app, then retry.";
-        for code in ["internal", "transient", "schema_not_provisioned_typo"] {
+        for code in ["internal", "transient", "schema_epoch_stale_typo"] {
             let body = build_error_body(500, 1, leaky, "Error", extras_with_code(code));
             assert_eq!(
                 body, r#"{"message":"internal error","name":"Error","request_id":"1"}"#,

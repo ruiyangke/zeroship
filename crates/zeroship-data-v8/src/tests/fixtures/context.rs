@@ -42,13 +42,7 @@ impl Drop for SuppliedProjectKeysGuard {
 }
 
 pub(crate) fn binding(app_id: impl Into<String>) -> zeroship_data_orm::binding::DbBinding {
-    let app_id = app_id.into();
-    let schema = zeroship_data_orm::sql::SchemaName::new(&app_id).expect("fixture schema name");
-    zeroship_data_orm::binding::DbBinding::new(
-        app_id,
-        zeroship_data_orm::binding::COLD_START_DEPLOY_TOKEN,
-        schema,
-    )
+    crate::tests::fixtures::harness_binding(&app_id.into())
 }
 pub(crate) fn install_schema(
     binding: &zeroship_data_orm::binding::DbBinding,

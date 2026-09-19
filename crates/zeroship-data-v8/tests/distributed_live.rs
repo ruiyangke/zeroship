@@ -264,6 +264,7 @@ fn runtime_for(
     let mut env_vars = HashMap::new();
     env_vars.insert("APP_ID".to_string(), app_id.to_string());
     let plugins: Vec<Arc<dyn NativePlugin>> = vec![DbService::new(DbServiceConfig {
+        app_bindings: Default::default(),
         project_keys: Default::default(),
         connection: zeroship_data_orm::connection::ConnectionFactory::for_url(url)
             .expect("valid database configuration"),
@@ -1031,6 +1032,7 @@ fn db_live_stream_crosses_relay_and_v8_isolates_without_worker_replication() {
 
     let app_delete_result = io.block_on(async {
         let service = DbService::new(DbServiceConfig {
+            app_bindings: Default::default(),
             project_keys: Default::default(),
             connection: zeroship_data_orm::connection::ConnectionFactory::for_url(&url)
                 .expect("valid database configuration"),

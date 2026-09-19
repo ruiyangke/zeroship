@@ -63,7 +63,7 @@ fn platform_round_trip(directory: &std::path::Path) -> Result<Vec<Value>, DbErro
     let url = format!("sqlite:{}", directory.join("platform.sqlite").display());
     parity::block_on(async move {
         let database = Database::connect(
-            DbBinding::new(PLATFORM, "platform-deploy", SchemaName::new(PLATFORM)?),
+            DbBinding::platform(PLATFORM, "platform-deploy", SchemaName::new(PLATFORM)?),
             ConnectOptions::new(url, ProjectKeySource::unavailable()),
             Schema::from_collections(vec![(
                 NOTES.into(),
