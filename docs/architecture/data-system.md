@@ -418,20 +418,19 @@ the role graph ships.
 
 ### The system schema
 
-`__zeroship_admin` **does not exist.** It was deleted on 2026-08-27 - six tables and 32
-definer-rights routines - because the worker could call every one of them, and a privileged call the
-worker can make is not a boundary. `tests/fixtures/data/roles.rs` records
-that nothing replaced it, and `db/migrations-ts/` provisions no such schema. The name is now gone
-from the tree entirely: the PITR placeholder that briefly kept it alive in
-`crates/zeroship-data-orm/src/backend/postgres/implementation.rs` has been removed, so no shipped
-statement names it.
+`__zeroship_admin` carried six tables and 32 definer-rights routines until 2026-08-27, when it was
+deleted because the worker could call every one of them, and a privileged call the worker can make
+is not a boundary.
 
-**This work creates it**, and the shape is the invariant's one permitted use - state a separate
-service writes and the worker only reads:
+**This work recreates it on a tenant cluster**, in the invariant's one permitted shape - state a
+separate service writes and the worker only reads:
 
-- **An installer**, in `db/migrations-ts/`, so the schema is a provisioned platform object rather
-  than something a test helper conjures. The deleted version was `#[cfg]`-gated to tests, which is
-  why deleting it cost nothing and why recreating it is genuinely new work.
+- **An installer in the datastore bootstrap corpus**
+  (`zeroship_migrate_server::datastore::cluster::apply_bootstrap_corpus`), so the schema is a
+  provisioned platform object rather than something a test helper conjures. Not in
+  `db/migrations-ts/`: that corpus is applied to the CONTROL database, which holds no creator
+  schema and no database roles, so an installer there would create the schema on the one server
+  that never needs it and on none of the servers that do.
 - **Exactly one table**, holding the current schema epoch per database. The migration service writes
   it inside the apply transaction that mints the new epoch's roles, so the recorded epoch and the
   roles in the catalog cannot disagree. Its grant posture is write-to-the-migration-service,

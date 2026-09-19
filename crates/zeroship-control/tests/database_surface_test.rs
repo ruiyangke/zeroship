@@ -12,8 +12,9 @@
 //!   by id. The refusals are a zone with no active cluster and a cluster that
 //!   is active in ANOTHER zone; the control in both cases is one active cluster
 //!   in the right zone.
-//! - **The status ceiling.** No reconciler exists, so no schema and no role is
-//!   ever created. Every row this surface can produce is asserted to stop at
+//! - **The status ceiling.** This surface creates no schema and no role: a
+//!   per-cluster reconciler does that, in the service holding the cluster's
+//!   credential. Every row this surface can produce is asserted to stop at
 //!   `provisioning` / `pending` - read back from `PostgreSQL` rather than from
 //!   the returned record, because the record is what the module says and the
 //!   row is what it did.

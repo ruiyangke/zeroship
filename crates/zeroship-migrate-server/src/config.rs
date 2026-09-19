@@ -85,6 +85,26 @@ pub struct MigrateServerSettings {
     #[config(name = "migrate_server.mutation_rate_limit_per_minute", default = 3)]
     pub mutation_rate_limit_per_minute: Operational<u32>,
 
+    /// The execution zone the cluster behind `provision_database_url` serves.
+    ///
+    /// Empty resolves it from `zeroship.execution_zones`, which is unambiguous
+    /// exactly when a deployment declares one zone. A zone is DECLARED, never
+    /// registered: reaching a cluster proves the cluster exists and proves
+    /// nothing about which zone it serves, so a service that invented one would
+    /// undo the rule that a join signer may only mint for zones it is listed
+    /// against.
+    #[config(name = "migrate_server.execution_zone", default = String::new())]
+    pub execution_zone: Operational<String>,
+
+    /// Seconds between cluster reconciliation passes.
+    ///
+    /// The loop is how control's declarations reach a cluster, and how a
+    /// cluster that was briefly unreachable is noticed coming back. Zero
+    /// disables it, which is what a deployment whose migration service must not
+    /// converge anything sets.
+    #[config(name = "migrate_server.reconcile_interval_seconds", default = 30)]
+    pub reconcile_interval_seconds: Operational<u64>,
+
     /// Expected OAuth audience for accepted bearer tokens.
     #[config(shared = OAUTH_AUDIENCE, default = "control.zeroship.ai".to_owned())]
     pub oauth_audience: Operational<String>,
