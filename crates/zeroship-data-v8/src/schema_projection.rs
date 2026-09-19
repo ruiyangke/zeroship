@@ -210,7 +210,7 @@ fn project_field(column: &ColumnSchema) -> Result<Json, String> {
         let variants = column
             .variants
             .iter()
-            .map(|variant| project_fields(variant))
+            .map(project_fields)
             .collect::<Result<Vec<_>, _>>()?;
         out.insert("variants".into(), Json::Array(variants));
     }
