@@ -25,6 +25,7 @@ use zeroship_core::{
         RunOperation, WorkerId, AUDIENCE,
     },
     workflow_jobs::{DeliveryLease, JobOperation, JobOutcome, ManagementCommand, Settlement},
+    workflow_policy::AppPolicy,
 };
 
 fn assertion(issuer: &ServiceIssuer, key: &ServiceSigningKey) -> String {
@@ -416,11 +417,6 @@ async fn verify_native_policy_source(
     scope: &zeroship_core::workflow_coordination::AssignedScope,
 ) {
     use std::time::Instant;
-    use zeroship_core::{schema_name::SchemaName, workflow_policy::AppPolicy};
-    use zeroship_data_orm::{
-        binding::DbBinding, encryption::ProjectKeySource, orm::Database, ConnectOptions,
-    };
-    use zeroship_workflow_manager::policy::control::{self, ControlPolicyStore, RolloutPolicy};
     assert!(matches!(
         client.policy_lease(&plain_request(scope)).await,
         Err(zeroship_workflow_client::Error::Refused(
@@ -428,34 +424,13 @@ async fn verify_native_policy_source(
         ))
     ));
     let plan = policy_fixture::seed_app(fixture, &scope.app_id).await;
-    let url = fixture
-        .runtime_url
-        .replacen("zeroship_workflow@", "zeroship_control@", 1);
-    let database = Database::connect(
-        DbBinding::new(
-            "platform",
-            "policy-operator",
-            SchemaName::new("zeroship").unwrap(),
-        ),
-        ConnectOptions::new(&url, ProjectKeySource::unavailable()).connection_authority(),
-        control::collections().unwrap(),
-    )
-    .await
-    .unwrap();
-    let operator = ControlPolicyStore::new(database).unwrap();
+    let operator = policy_fixture::operator(fixture).await;
     let policy = AppPolicy {
         admission: false,
         ..AppPolicy::default()
     };
     operator.set_plan_policy(&plan, &policy).await.unwrap();
-    operator
-        .set_rollout(RolloutPolicy {
-            dispatch_paused: false,
-            ingress_disabled: false,
-            source_validity_ms: 30_000,
-        })
-        .await
-        .unwrap();
+    operator.set_rollout(policy_fixture::rollout()).await.unwrap();
     let leased = client.policy_lease(&plain_request(scope)).await.unwrap();
     assert_eq!(leased.policy(), &policy);
     assert_eq!(leased.app_id(), &scope.app_id);
@@ -613,7 +588,7 @@ async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_prot
     );
 
     let app = AppId::mint();
-    fixture.seed_app(&app).await;
+    policy_fixture::provision(&fixture, &app, &AppPolicy::default()).await;
     let assignment = fixture
         .seed_placement(&app, &worker, Duration::from_secs(30))
         .await;
