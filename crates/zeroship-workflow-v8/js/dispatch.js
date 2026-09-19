@@ -326,6 +326,19 @@ function wfNormalizeOutputRef(value) {
     };
 }
 
+// The envelope a consumed signal wait resolves to, with `createdAt` as the
+// `Date` the SDK declares. The journal carries the instant as an RFC 3339
+// string, and rebuilding it here is the same move `wfTrigger` makes for the
+// trigger's own `startedAt`: a creator reads one date surface, not two that
+// differ by which journal row they came from. The record is copied rather than
+// patched, because replay hands the same row to every dispatch.
+function wfSignalEnvelope(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+    const created = value.createdAt;
+    if (typeof created !== "string" && typeof created !== "number") return value;
+    return { ...value, createdAt: new Date(created) };
+}
+
 function wfOutputReader(envelope) {
     const workflows = globalThis.__zs_env?.()?.workflows;
     const run = workflows?.[envelope.workflowName]?.get(String(envelope.runId ?? ""));
@@ -492,6 +505,14 @@ class ZsJournalBackedStep {
     #phase = "running";
     #trigger = {};
     #compensatorRegistry = new Map();
+    // Whether this dispatch has entered a compensator. A compensator reaches the
+    // step surface the same way a step body does, and the journal is closed to
+    // both: past the rebuilt prefix there is no record to issue against, so an
+    // issue from here would raise the bridge's own replay signal into creator
+    // code and record its name as the rollback's failure. Set once and never
+    // cleared, because a compensating dispatch replays its prefix first and
+    // runs compensators afterwards, so nothing legitimate issues a step again.
+    #inCompensator = false;
     #workflowNames;
     #generation = 0;
 
@@ -639,7 +660,9 @@ class ZsJournalBackedStep {
         const issued = this.#issue(name, "wait_signal");
         if (issued.record) {
             if (issued.record.state === "completed") {
-                if (issued.record.output !== undefined) return brandStepPromise(Promise.resolve(issued.record.output));
+                if (issued.record.output !== undefined) {
+                    return brandStepPromise(Promise.resolve(wfSignalEnvelope(issued.record.output)));
+                }
                 return brandStepPromise(Promise.resolve(issued.record.consumedSignal ?? null));
             }
             if (issued.record.state === "failed") return this.#recordPromise(issued.record);
@@ -875,6 +898,7 @@ class ZsJournalBackedStep {
             ),
             trigger: this.#trigger,
         };
+        this.#inCompensator = true;
         try {
             await zsWorkflowDispatchAls.run(
                 { mode: "step" },
@@ -952,11 +976,12 @@ class ZsJournalBackedStep {
 
     #assertNotNested() {
         if (
-            this.#activeStepCallbacks > 0 &&
-            (this.#callbackSyncDepth > 0 || !this.#parallelIssueWindow)
+            this.#inCompensator ||
+            (this.#activeStepCallbacks > 0 &&
+                (this.#callbackSyncDepth > 0 || !this.#parallelIssueWindow))
         ) {
             throw wfErr(
-                "workflow step methods cannot be called from inside a step body",
+                "workflow step methods cannot be called from inside a step body or compensator",
                 500,
                 "WORKFLOW_DEFINITION_ERROR",
                 "NestedStepError",
