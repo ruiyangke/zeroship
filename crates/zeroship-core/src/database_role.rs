@@ -69,6 +69,37 @@ impl DatabaseCapability {
             Self::ReadOnly => "ro",
         }
     }
+
+    /// The spelling `zeroship.database_bindings.capability` stores.
+    ///
+    /// The column's CHECK admits exactly these two values
+    /// (`db/migrations-ts/20260919000200_database_entities.ts`) and the
+    /// control-plane surface refuses anything else before it reaches a
+    /// statement. Writing them once here is what stops a producer and a
+    /// consumer disagreeing about which text names which capability: the
+    /// cluster reconciler reads the stored text back and composes a role name
+    /// from it, and a second spelling would compose a role nothing created.
+    #[must_use]
+    pub const fn as_wire(self) -> &'static str {
+        match self {
+            Self::ReadWrite => "readwrite",
+            Self::ReadOnly => "readonly",
+        }
+    }
+
+    /// Parse the stored spelling, or refuse it.
+    ///
+    /// `None` is not a shrug. A row whose capability this cannot read is a row
+    /// whose binding role cannot be composed, so the caller has to stop rather
+    /// than pick a capability for it.
+    #[must_use]
+    pub fn from_wire(text: &str) -> Option<Self> {
+        match text {
+            "readwrite" => Some(Self::ReadWrite),
+            "readonly" => Some(Self::ReadOnly),
+            _ => None,
+        }
+    }
 }
 
 /// Compose the per-app `PostgreSQL` role name.
@@ -378,5 +409,40 @@ mod tests {
             29,
             "the control: the same input is well under the limit counted in chars"
         );
+    }
+
+    /// The stored spelling round-trips, and nothing else parses.
+    ///
+    /// The refusal arm is the one that matters: a capability the reconciler
+    /// cannot read must not silently become the other one, because the two
+    /// compose different role names and one of them carries write grants.
+    #[test]
+    fn the_stored_capability_spelling_round_trips_and_refuses_everything_else() {
+        let mut round_tripped = 0;
+        for capability in [DatabaseCapability::ReadWrite, DatabaseCapability::ReadOnly] {
+            assert_eq!(
+                DatabaseCapability::from_wire(capability.as_wire()),
+                Some(capability),
+                "{capability:?} must survive its own spelling"
+            );
+            round_tripped += 1;
+        }
+        assert_eq!(round_tripped, 2, "the arm must not pass over an empty set");
+
+        assert_eq!(DatabaseCapability::ReadWrite.as_wire(), "readwrite");
+        assert_eq!(DatabaseCapability::ReadOnly.as_wire(), "readonly");
+        assert_ne!(
+            DatabaseCapability::ReadWrite.as_wire(),
+            DatabaseCapability::ReadOnly.as_wire(),
+            "two capabilities must not share one stored spelling"
+        );
+
+        for refused in ["", "READWRITE", "read_write", "rw", "owner", "readwrite "] {
+            assert_eq!(
+                DatabaseCapability::from_wire(refused),
+                None,
+                "`{refused}` is not a capability the CHECK admits"
+            );
+        }
     }
 }

@@ -1126,11 +1126,11 @@ fn ir_apply_error_kind(err: &IrApplyError) -> (ntex::http::StatusCode, &'static 
     }
 }
 
-fn quote_ident(ident: &str) -> String {
+pub(crate) fn quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
 }
 
-fn quote_lit(value: &str) -> String {
+pub(crate) fn quote_lit(value: &str) -> String {
     value.replace('\'', "''")
 }
 

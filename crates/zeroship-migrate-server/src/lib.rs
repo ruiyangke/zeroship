@@ -19,6 +19,7 @@ pub mod apply;
 pub mod auth;
 pub mod bundle;
 pub mod config;
+pub mod datastore;
 pub mod policy;
 pub mod provisioning;
 pub mod publication;
