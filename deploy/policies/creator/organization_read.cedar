@@ -24,6 +24,8 @@
 // a route names a concrete app, while the consent probe and the "act inside
 // this project" surfaces name the project. The project is the app's only path
 // to an organization, so the two are the same authority seen from two heights.
+// The Database statement below pairs with the project the same way, and for
+// the same reason: is_authorized_anywhere probes no database.
 
 permit (
   principal is User,
@@ -31,9 +33,22 @@ permit (
   resource is App
 ) when { context.effective_rank >= 10 };
 
+// A database is PROJECT-owned. `database:read` is deliberately absent from the
+// App statement above: an app holds a BINDING to a database, which is data
+// access for running code, and it must not read back as authority over the
+// database for the app's own members. The seat that answers here is the seat on
+// the database's project, resolved by zeroship_authz::authority::resolve
+// through zeroship.databases.project_id, never through a binding.
+permit (
+  principal is User,
+  action in [Action::"database:read"],
+  resource is Database
+) when { context.effective_rank >= 10 };
+
 permit (
   principal is User,
   action in [Action::"apps:read", Action::"env:read", Action::"deployments:read",
+             Action::"database:read",
              Action::"project:read", Action::"project:members:read"],
   resource is Project
 ) when { context.effective_rank >= 10 };

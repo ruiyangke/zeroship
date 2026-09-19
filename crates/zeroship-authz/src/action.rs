@@ -29,6 +29,24 @@ pub enum Action {
     /// the moment they pass a non-empty approval set.
     AppsApproveMigration,
     AppsArchive,
+    /// View a database and the apps bound to it. A database is PROJECT-owned,
+    /// so this and its two siblings are satisfiable at `Database` and at
+    /// `Project` scope, and at `App` scope by no band at all: an app holds a
+    /// binding to a database, never authority over one.
+    DatabaseRead,
+    /// Create, rename and delete a database, and bind or unbind an app to it.
+    /// Creating one names the PROJECT - the database does not exist yet - which
+    /// is why the project statement is not merely the consent probe's copy.
+    DatabaseWrite,
+    /// Apply a migration plan to a database.
+    ///
+    /// Separate from [`Self::DatabaseWrite`] for the reason
+    /// [`Self::AppsDeploy`] is separate from [`Self::AppsWrite`]: this one
+    /// rewrites the shape of live creator data, so it is the line a consent
+    /// screen has to be able to draw. It is NOT
+    /// [`Self::AppsApproveMigration`], which is the operator-only go-live
+    /// channel for a destructive op and is permitted by no band.
+    DatabaseMigrate,
     DeploymentsRead,
     EnvRead,
     EnvWrite,
@@ -75,6 +93,9 @@ const ALL_ACTIONS: &[Action] = &[
     Action::AppsDeploy,
     Action::AppsApproveMigration,
     Action::AppsArchive,
+    Action::DatabaseRead,
+    Action::DatabaseWrite,
+    Action::DatabaseMigrate,
     Action::DeploymentsRead,
     Action::EnvRead,
     Action::EnvWrite,
@@ -113,6 +134,9 @@ impl Action {
             Self::AppsDeploy => "apps:deploy",
             Self::AppsApproveMigration => "migrations:approve",
             Self::AppsArchive => "apps:archive",
+            Self::DatabaseRead => "database:read",
+            Self::DatabaseWrite => "database:write",
+            Self::DatabaseMigrate => "database:migrate",
             Self::DeploymentsRead => "deployments:read",
             Self::EnvRead => "env:read",
             Self::EnvWrite => "env:write",

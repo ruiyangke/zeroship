@@ -54,6 +54,9 @@ fn action_cedar_ids_are_canonical() {
         (Action::AppsDeploy, "apps:deploy"),
         (Action::AppsApproveMigration, "migrations:approve"),
         (Action::AppsArchive, "apps:archive"),
+        (Action::DatabaseRead, "database:read"),
+        (Action::DatabaseWrite, "database:write"),
+        (Action::DatabaseMigrate, "database:migrate"),
         (Action::DeploymentsRead, "deployments:read"),
         (Action::EnvRead, "env:read"),
         (Action::EnvWrite, "env:write"),
@@ -97,6 +100,14 @@ fn resource_cedar_uids_are_canonical() {
     assert_eq!(
         Resource::App { id: app.clone() }.cedar_uid(),
         format!("App::\"{}\"", app.as_str())
+    );
+    let database = zeroship_id::DatabaseId::mint();
+    assert_eq!(
+        Resource::Database {
+            id: database.clone()
+        }
+        .cedar_uid(),
+        format!("Database::\"{}\"", database.as_str())
     );
     // Both halves come from ONE value. Spelling the id twice lets the input and
     // the expectation drift apart, and the assertion then measures nothing but
