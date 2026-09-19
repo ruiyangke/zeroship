@@ -1,4 +1,4 @@
-//! The control-plane database surface, against a live PostgreSQL.
+//! The control-plane database surface, against a live `PostgreSQL`.
 //!
 //! Every case here is about a REFUSAL, and every refusal is paired with a
 //! CONTROL that differs in exactly one variable - otherwise a green says only
@@ -14,7 +14,7 @@
 //!   in the right zone.
 //! - **The status ceiling.** No reconciler exists, so no schema and no role is
 //!   ever created. Every row this surface can produce is asserted to stop at
-//!   `provisioning` / `pending` - read back from PostgreSQL rather than from
+//!   `provisioning` / `pending` - read back from `PostgreSQL` rather than from
 //!   the returned record, because the record is what the module says and the
 //!   row is what it did.
 //! - **Authority.** The Cedar band is `developer` for writes. The rank
@@ -593,7 +593,7 @@ async fn placement_never_reaches_a_cluster_in_another_zone() {
 
 /// Nothing this surface writes reaches a converged state.
 ///
-/// Read back from PostgreSQL rather than from the returned records: the record
+/// Read back from `PostgreSQL` rather than from the returned records: the record
 /// is what the module says, the row is what it did. `schema_epoch` is asserted
 /// at zero for the same reason - it is a role-name input the cluster owns, and
 /// Control minting one would be a claim about roles that do not exist.

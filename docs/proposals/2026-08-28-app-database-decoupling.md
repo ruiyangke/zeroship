@@ -18,12 +18,23 @@ Built:
   `db/migrations-ts/20260919000300_database_placement_keys.ts`)
 - the tenant fence measurement target
   (`crates/zeroship-data-orm/tests/postgres_tenant_fence.rs`) - see Open 5
+- the control-plane management surface (`crates/zeroship-control/src/databases.rs`): the
+  placement query below, create and delete a database, bind and unbind an app, and the two
+  listings. Every mutation carries the project-seat rank predicate inside its effect statement
+  and authorizes at `Resource::Database` or at the project, so this is the first surface that
+  constructs that Cedar resource. Control writes no `datastores` row: placement READS that
+  table, and a cluster registers itself through the service holding its credential.
 
 Not built, and this is the whole data path: `zeroship_core::app_derivation::schema_name`
 (`crates/zeroship-core/src/app_derivation.rs`) still returns the app id itself; `DbBinding`
 (`crates/zeroship-data-orm/src/binding.rs`) still carries `{ app_id, deploy_token, schema }`;
-no role chain is provisioned, no epoch is produced, and nothing constructs a
-`Resource::Database`, so a database row is inert.
+no role chain is provisioned and no epoch is produced.
+
+**Nothing reaches `active`.** The cluster reconciler does not exist, so no schema and no role is
+created for anything the management surface declares: a database stops at `provisioning` and a
+binding at `pending`. Placement admits `active` datastores only, so nothing downstream can
+consume a row this surface writes. That ceiling is asserted from the stored rows in
+`crates/zeroship-control/tests/database_surface_test.rs`, not left to inspection.
 
 Four things this design depends on HAVE landed and are relied on below: the organization and
 project ladder with its composite ownership keys
@@ -580,6 +591,22 @@ to its end.
 
 `main` is the local label from `zeroship.jsonc`; the CLI dereferences it to a `dbs_` before any
 request, so a label never travels as an identifier.
+
+The routes those commands call are mounted by `zeroship_control::databases::configure`
+(`crates/zeroship-control/src/databases.rs`):
+
+```
+  POST   /api/projects/{project_id}/databases            create, placed here
+  GET    /api/projects/{project_id}/databases            list
+  POST   /api/databases/{database_id}/bindings           bind, capability in the body
+  GET    /api/databases/{database_id}/bindings           list, with each capability
+  DELETE /api/databases/{database_id}/bindings/{app_id}  unbind
+  DELETE /api/databases/{database_id}                    delete, refuses while bound
+```
+
+The first two name the PROJECT, because the database either does not exist yet or is not
+singled out; the rest name the database, and they are what make `Resource::Database` a resource
+Cedar is asked about.
 
 ---
 
