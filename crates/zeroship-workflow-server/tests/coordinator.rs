@@ -340,7 +340,7 @@ async fn release_needs_neither_a_wake_hint_nor_a_responsible_peer() {
     let outsider = register_worker(&a, 1).await;
     assert_eq!(
         a.manager
-            .claim_job(&outsider, &assigned(&foreign), AppPolicy::default().max_delivery_attempts, || async {
+            .claim_job(&outsider, &assigned(&foreign), Ok(AppPolicy::default().max_delivery_attempts), || async {
                 Ok(outsider.clone())
             })
             .await
@@ -473,7 +473,7 @@ async fn management_is_durable_bounded_typed_and_assignment_scoped() {
     let scope = assigned(&assignment);
     let grant = b
         .manager
-        .claim_job(&worker, &scope, AppPolicy::default().max_delivery_attempts, || async { Ok(worker.clone()) })
+        .claim_job(&worker, &scope, Ok(AppPolicy::default().max_delivery_attempts), || async { Ok(worker.clone()) })
         .await
         .unwrap()
         .unwrap();
@@ -570,7 +570,7 @@ async fn management_is_durable_bounded_typed_and_assignment_scoped() {
     let reopened = fixture.options(options).await;
     let grant = reopened
         .manager
-        .claim_job(&worker, &assigned(&renewed), AppPolicy::default().max_delivery_attempts, || async {
+        .claim_job(&worker, &assigned(&renewed), Ok(AppPolicy::default().max_delivery_attempts), || async {
             Ok(worker.clone())
         })
         .await

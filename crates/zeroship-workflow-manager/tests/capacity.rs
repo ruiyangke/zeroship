@@ -182,7 +182,7 @@ async fn scale_from_zero(fixture: &Fixture) {
                         app_id: app.clone(),
                         assignment_revision: assignment.revision,
                     },
-                    support::delivery_ceiling(),
+                    Ok(support::delivery_ceiling()),
                     || ready(Ok(worker.clone())),
                 )
                 .await

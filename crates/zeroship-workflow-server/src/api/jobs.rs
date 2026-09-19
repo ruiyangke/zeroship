@@ -3,6 +3,7 @@ use crate::{auth::VerifiedWorker, coordinator::Error, SharedState};
 use ntex::web::{self, types::State};
 use std::time::Duration;
 use zeroship_core::{
+    app_id::AppId,
     service_identity::{endpoints, ServiceEndpoint},
     workflow_coordination::{AssignedScope, WorkerId},
     workflow_jobs::{Delivery, Settlement, SubmitJob},
@@ -52,6 +53,19 @@ async fn revalidate(state: &SharedState, actor: &VerifiedWorker) -> Result<Worke
     })
 }
 
+/// The delivery ceiling is operator policy, so it is read from the authoritative
+/// source rather than accepted from the worker. The result is handed to the
+/// manager unresolved: a source that cannot answer for an app must not preempt
+/// that app's placement refusal, which would tell the worker to retry a scope it
+/// can never hold.
+async fn ceiling(state: &SharedState, app: &AppId) -> Result<i64, NativeError> {
+    let source = state
+        .policy_source
+        .as_ref()
+        .ok_or(NativeError::Unavailable)?;
+    Ok(source.observe(app).await?.policy().max_delivery_attempts)
+}
+
 async fn submit(
     request: web::HttpRequest,
     state: State<SharedState>,
@@ -81,15 +95,10 @@ async fn claim(
         async {
             let actor = authenticate(&request, &state, endpoints::WORKFLOW_JOB_CLAIM).await?;
             let command: AssignedScope = read_json(&request, body).await?;
-            // The delivery ceiling is operator policy, so it is read from the
-            // authoritative source rather than accepted from the worker.
-            let source = state.policy_source.as_ref().ok_or(Error::Unavailable)?;
-            let observed = source.observe(&command.app_id).await?;
-            let ceiling = observed.policy().max_delivery_attempts;
             state
                 .service
                 .manager
-                .claim_job(actor.id(), &command, ceiling, || {
+                .claim_job(actor.id(), &command, ceiling(&state, &command.app_id).await, || {
                     revalidate(&state, &actor)
                 })
                 .await?

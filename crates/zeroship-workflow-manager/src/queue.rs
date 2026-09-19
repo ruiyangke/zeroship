@@ -320,7 +320,7 @@ impl Queue {
     pub async fn claim(&self, assignment: &Assignment) -> Result<Option<DeliveryGrant>, Error> {
         self.claim_authorized(
             &assignment.into(),
-            AppPolicy::default().max_delivery_attempts,
+            Ok(AppPolicy::default().max_delivery_attempts),
             |_| ready(Ok(assignment.clone())),
         )
         .await
@@ -334,22 +334,24 @@ impl Queue {
     /// The exhausted row keeps its attempt history; nothing settles it, because
     /// no executor produced an outcome for it.
     ///
+    /// The ceiling arrives as its caller's already-settled result, and is read
+    /// only once placement holds. A policy authority that cannot answer for an
+    /// app therefore never preempts that app's placement refusal, and a caller
+    /// denied the scope is told so rather than told to retry.
+    ///
     /// # Errors
-    /// Refuses revoked assignments, invalid ceilings, exhausted attempt numbering
-    /// and failed transactions.
+    /// Refuses revoked assignments, unreadable or invalid ceilings, exhausted
+    /// attempt numbering and failed transactions.
     pub async fn claim_authorized<F, Fut>(
         &self,
         assignment: &VerifyAssignment,
-        max_delivery_attempts: i64,
+        max_delivery_attempts: Result<i64, Error>,
         mut authorize: F,
     ) -> Result<Option<DeliveryGrant>, Error>
     where
         F: FnMut(Database) -> Fut,
         Fut: Future<Output = Result<Assignment, Error>>,
     {
-        if max_delivery_attempts <= 0 {
-            return Err(Error::Invalid);
-        }
         let budget = Budget::new(self.options.transaction_timeout);
         self.transact_for(budget.clone(), |tx| async move {
             lock_scope(&tx, &assignment.app_id).await?;
@@ -357,6 +359,10 @@ impl Queue {
             let sample = self.clock.sample().await?;
             let authority = current(assignment, observed, sample.millis)?;
             budget.cap(sample, authority.expires_at.get())?;
+            let max_delivery_attempts = max_delivery_attempts?;
+            if max_delivery_attempts <= 0 {
+                return Err(Error::Invalid);
+            }
             let now = sample.millis;
             let assignment_expires = local_deadline(sample, authority.expires_at.get())?;
             crate::management::validate_pending(&tx, &assignment.app_id).await?;
