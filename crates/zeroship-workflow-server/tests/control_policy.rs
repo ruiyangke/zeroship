@@ -73,7 +73,7 @@ impl Fixture {
 
 async fn connect_store(url: &str) -> ControlPolicyStore {
     let database = Database::connect(
-        DbBinding::new(
+        DbBinding::platform(
             "platform",
             "workflow-policy",
             SchemaName::new("zeroship").unwrap(),

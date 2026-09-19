@@ -4,13 +4,17 @@ use zeroship_core::app_id::LOCAL_DEV_APP_ID;
 pub(crate) struct Inspector(rusqlite::Connection);
 impl Inspector {
     pub(crate) fn open(directory: &std::path::Path) -> Self {
+        // The dev tier is one file per DATABASE, attached under the schema the
+        // binding addresses, so this inspector opens the file the runtime wrote
+        // rather than one named after the tenant.
+        let alias = crate::tests::fixtures::harness_alias(LOCAL_DEV_APP_ID);
         let connection =
             rusqlite::Connection::open_in_memory().expect("open inspection connection");
         connection
             .execute(
-                &format!(r#"ATTACH DATABASE ?1 AS "{LOCAL_DEV_APP_ID}""#),
+                &format!(r#"ATTACH DATABASE ?1 AS "{alias}""#),
                 [directory
-                    .join(format!("zs-{LOCAL_DEV_APP_ID}.sqlite"))
+                    .join(format!("zs-{alias}.sqlite"))
                     .to_str()
                     .expect("fixture path")],
             )

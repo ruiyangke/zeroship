@@ -99,7 +99,7 @@ pub const APPLICATION_NAME: &str = "zeroship-control-catalog";
 /// Reports invalid model declarations and unreachable storage.
 pub async fn connect(url: &str) -> Result<Database, DbError> {
     Database::connect(
-        DbBinding::new(
+        DbBinding::platform(
             "platform",
             "control-catalog",
             SchemaName::new("zeroship")

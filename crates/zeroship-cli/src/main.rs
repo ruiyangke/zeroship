@@ -29,6 +29,7 @@ mod migrate;
 mod organizations;
 mod parent_death;
 mod project_config;
+mod dev_binding;
 mod project_keys;
 mod secrets;
 mod workflow;
@@ -240,6 +241,13 @@ fn cmd_serve(args: &[String]) {
                 .map_err(|error| {
                     zeroship_data_orm::error::DbError::config("local_project_key", error)
                 })?,
+                app_bindings: dev_binding::load(
+                    std::path::Path::new(".zeroship/private"),
+                    &dev_app_id,
+                )
+                .map_err(|error| {
+                    zeroship_data_orm::error::DbError::config("local_dev_binding", error)
+                })?,
                 connection,
                 cdc_relay: None,
                 meter: Some(Arc::clone(&dev_meter)),
@@ -346,7 +354,7 @@ fn cmd_serve(args: &[String]) {
             keys: zeroship_data_orm::encryption::ProjectKeySource::supplied(
                 database.project_keys().clone(),
             ),
-            binding: zeroship_data_orm::binding::DbBinding::new(
+            binding: zeroship_data_orm::binding::DbBinding::platform(
                 dev_app_id.as_str(),
                 zeroship_data_orm::binding::COLD_START_DEPLOY_TOKEN,
                 zeroship_core::schema_name::SchemaName::new(

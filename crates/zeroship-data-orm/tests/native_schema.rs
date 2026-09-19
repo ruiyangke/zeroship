@@ -353,7 +353,7 @@ fn conflicting_physical_storage_cannot_replace_an_installed_schema() {
 
     let context = OrmContext::new();
     context.with(|| {
-        let binding = DbBinding::new(
+        let binding = DbBinding::platform(
             "app_storage_contract",
             "revision",
             zeroship_data_orm::sql::SchemaName::new("storage_contract").unwrap(),

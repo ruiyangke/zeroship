@@ -21,6 +21,7 @@ Current internal endpoints are:
 - `GET /internal/apps/{app_id}`
 - `GET /internal/apps/{app_id}/env`
 - `GET /internal/apps/{app_id}/data-key`
+- `GET /internal/apps/{app_id}/binding`
 - `POST /internal/workers/join`, `POST /internal/workers/renew`, `POST /internal/workers/retire`
 - `POST /internal/billing/reconcile`
 - `POST /internal/spend/reconcile`
@@ -129,12 +130,22 @@ These feeds are polled rather than pushed so the control plane stays stateless w
 
 Before loading an app with a database service, the worker fetches its project
 column key from `/internal/apps/{app_id}/data-key` into the host's shared
-`SuppliedProjectKeys`. Control resolves the app's project from the registry and
-serializes initial provisioning by locking that project. The wrapped key lives
+`SuppliedProjectKeys`, and its resolved database binding from
+`/internal/apps/{app_id}/binding` into the host's shared `SuppliedAppBindings`.
+The binding response carries the database id, the edge id and the schema epoch;
+the worker composes no part of it, and Control serves only a binding whose
+status is active and whose `observed_generation` has caught up to its
+`generation`. An app Control serves no live binding for has no `env.db`.
+
+Control resolves the app's project from the registry and serializes initial
+provisioning by locking that project. The wrapped key lives
 in `zeroship.project_data_keys`, accessible only to control's database role.
 Wrapping-key rotation preserves the data key. App environments, runtime
 descriptors, and bundles contain no key material. Standalone local development
-persists a separate key in `.zeroship/private/project-data-key.json`.
+persists a separate key in `.zeroship/private/project-data-key.json` and its own
+binding in `.zeroship/private/dev-database-binding.json`; both are minted on
+first start and never replaced, because a new database id would abandon the
+schema the existing rows are in.
 
 ## Deploy ingest
 

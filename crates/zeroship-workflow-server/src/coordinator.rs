@@ -146,7 +146,7 @@ impl Coordinator {
             .acquire_timeout(options.acquire_timeout)
             .command_timeout(options.command_timeout);
         let pool = Pool::connect_with_pool_config(url, config).await?;
-        let binding = DbBinding::new(
+        let binding = DbBinding::platform(
             "workflow_manager",
             "workflow_manager",
             SchemaName::new("workflow_manager").map_err(|_| Error::Invalid)?,
@@ -179,7 +179,7 @@ impl Coordinator {
         )?;
         let latest = compio::time::timeout(options.acquire_timeout, async {
             let database = Database::connect(
-                DbBinding::new(
+                DbBinding::platform(
                     "platform",
                     "workflow-latest-deployment",
                     SchemaName::new("zeroship").map_err(|_| Error::Invalid)?,
@@ -301,7 +301,7 @@ pub async fn connect_eligibility(url: &str, options: Options) -> Result<ControlE
     options.validate()?;
     compio::time::timeout(options.acquire_timeout, async {
         let database = Database::connect(
-            DbBinding::new(
+            DbBinding::platform(
                 "platform",
                 "workflow-eligibility",
                 SchemaName::new("zeroship").map_err(|_| Error::Invalid)?,

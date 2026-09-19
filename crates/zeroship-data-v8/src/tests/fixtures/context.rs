@@ -41,14 +41,23 @@ impl Drop for SuppliedProjectKeysGuard {
     }
 }
 
+/// Install the bindings a trusted host would have resolved for these apps.
+///
+/// A test that mints a `Db` on a bare isolate never runs `DbPlugin::register`,
+/// which is the only writer of the thread's binding store in production, so
+/// without this the isolate reads an absent binding and `env.db` is missing.
+/// Reaching for it directly is the point: an isolate composes no part of a
+/// binding, so a fixture standing in for the host has to install one the same
+/// way the host does.
+///
+/// Call it AFTER [`reset_context`], which replaces the whole context.
+pub(crate) fn supply_app_bindings<'a>(app_ids: impl IntoIterator<Item = &'a str>) {
+    let bindings = crate::tests::fixtures::harness_app_bindings(app_ids);
+    ctx_mut(|c| c.set_app_bindings(Some(bindings)));
+}
+
 pub(crate) fn binding(app_id: impl Into<String>) -> zeroship_data_orm::binding::DbBinding {
-    let app_id = app_id.into();
-    let schema = zeroship_data_orm::sql::SchemaName::new(&app_id).expect("fixture schema name");
-    zeroship_data_orm::binding::DbBinding::new(
-        app_id,
-        zeroship_data_orm::binding::COLD_START_DEPLOY_TOKEN,
-        schema,
-    )
+    crate::tests::fixtures::harness_binding(&app_id.into())
 }
 pub(crate) fn install_schema(
     binding: &zeroship_data_orm::binding::DbBinding,

@@ -56,12 +56,19 @@ impl CdcTxBuffer {
 #[derive(Debug, Clone)]
 pub(crate) struct PendingEvent {
     pub(crate) op: ChangeOp,
-    /// ATTACH alias the preupdate hook reported — typically the
-    /// per-app schema name (since the ATTACH
-    /// ATTACHes each app file as its own alias). The publisher uses
-    /// this as the `ChangeEvent::app_id` and as the schema-qualifier
-    /// for the column-name PRAGMA.
+    /// ATTACH alias the preupdate hook reported: the physical schema the
+    /// binding addresses, which on this tier is one file per DATABASE.
+    ///
+    /// It is the schema-qualifier for the column-name PRAGMA, and it is not
+    /// the tenant: the broker routes on the app id, and one database may be
+    /// bound by several apps.
     pub(crate) db_name: String,
+    /// The tenant this event is published under.
+    ///
+    /// Filled at the commit boundary by expanding one physical change into one
+    /// event per app bound to that alias, which is the dev tier's form of the
+    /// fan-out the relay does from a datastore.
+    pub(crate) app_id: String,
     pub(crate) table: String,
     /// Positional values for the new tuple (INSERT / UPDATE). `None`
     /// for DELETE.
@@ -209,8 +216,8 @@ fn preupdate_callback(
     // suppressed - every app-side write lands against an ATTACHed
     // alias, and "main" only carries the control session's own
     // bookkeeping (none today - the control session is empty).
-    // Filtering here keeps the publisher's per-event app_id derivation
-    // straightforward (`app_id = db_name`).
+    // Filtering here keeps the commit boundary's fan-out to one lookup per
+    // alias rather than one per row.
     if db_name == "main" {
         return;
     }
@@ -223,6 +230,9 @@ fn preupdate_callback(
         PreUpdateCase::Insert(new_acc) => PendingEvent {
             op: ChangeOp::Insert,
             db_name: db_name.to_string(),
+            // The commit boundary fills this by expanding the change into one
+            // event per app bound to this alias; the hook knows no tenant.
+            app_id: String::new(),
             table: table.to_string(),
             new_values: Some(materialise_new(new_acc)),
             old_values: None,
@@ -230,6 +240,9 @@ fn preupdate_callback(
         PreUpdateCase::Delete(old_acc) => PendingEvent {
             op: ChangeOp::Delete,
             db_name: db_name.to_string(),
+            // The commit boundary fills this by expanding the change into one
+            // event per app bound to this alias; the hook knows no tenant.
+            app_id: String::new(),
             table: table.to_string(),
             new_values: None,
             old_values: Some(materialise_old(old_acc)),
@@ -240,6 +253,9 @@ fn preupdate_callback(
         } => PendingEvent {
             op: ChangeOp::Update,
             db_name: db_name.to_string(),
+            // The commit boundary fills this by expanding the change into one
+            // event per app bound to this alias; the hook knows no tenant.
+            app_id: String::new(),
             table: table.to_string(),
             new_values: Some(materialise_new(new_value_accessor)),
             old_values: Some(materialise_old(old_value_accessor)),
@@ -312,16 +328,31 @@ fn commit_callback(
     let mut sampled: HashMap<String, DeliveryDisposition> = HashMap::new();
     let events: Vec<DispositionedEvent> = events
         .into_iter()
-        .map(|event| {
-            let disposition = match sampled.get(&event.db_name) {
-                Some(d) => *d,
-                None => {
-                    let d = packet_tx.sink.disposition(&event.db_name);
-                    sampled.insert(event.db_name.clone(), d);
-                    d
-                }
-            };
-            DispositionedEvent { event, disposition }
+        .flat_map(|event| {
+            // One physical change becomes one event per app bound to that
+            // alias. A database with no recorded binding publishes nothing:
+            // the broker routes on the app id, and stamping the alias as a
+            // tenant would deliver to a subscription nobody holds.
+            super::tenants_for_alias(&event.db_name)
+                .into_iter()
+                .map(|app_id| {
+                    let disposition = match sampled.get(&app_id) {
+                        Some(d) => *d,
+                        None => {
+                            let d = packet_tx.sink.disposition(&app_id);
+                            sampled.insert(app_id.clone(), d);
+                            d
+                        }
+                    };
+                    DispositionedEvent {
+                        event: PendingEvent {
+                            app_id,
+                            ..event.clone()
+                        },
+                        disposition,
+                    }
+                })
+                .collect::<Vec<_>>()
         })
         .collect();
 
@@ -574,7 +605,7 @@ async fn publisher_loop(
             });
 
             let event = ChangeEvent {
-                app_id: pending.db_name,
+                app_id: pending.app_id,
                 collection: pending.table,
                 op: pending.op,
                 pk,
@@ -717,9 +748,11 @@ mod tests {
         let db_path = dir.path().join("cdc-window.sqlite");
         // The preupdate hook drops writes to `main` (that is the control
         // session's own file), so the fixture writes through an ATTACHed alias
-        // exactly as an app does — the alias IS the app id.
+        // exactly as a binding does. The commit boundary publishes one event
+        // per app recorded against that alias, so the fixture records one.
         let app_path = dir.path().join("zs-app_window.sqlite");
         let app_path = app_path.to_string_lossy().into_owned();
+        super::super::record_alias_tenant("app_window", "app_window_tenant");
 
         let (tx, rx) = flume::unbounded::<CommitPacket>();
         let sink = Arc::new(GuardSink::new(at_commit));

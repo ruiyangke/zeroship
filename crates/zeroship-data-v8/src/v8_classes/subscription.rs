@@ -425,6 +425,9 @@ mod tests {
         let app_id = format!("subscription-cap-{}", uuid::Uuid::new_v4());
         let mut env_vars = HashMap::new();
         env_vars.insert("APP_ID".to_string(), app_id.clone());
+        // A bare Runtime registers no plugin, so the host binding store has to
+        // be installed directly for `mint_db` to reach one.
+        crate::tests::fixtures::supply_app_bindings([app_id.as_str()]);
         let runtime = Runtime::builder().env_vars(env_vars).build();
 
         let outcome = runtime.with_scope(|scope| {

@@ -186,7 +186,7 @@ mod backup_sqlite {
         //    `run_vacuum_into` constructs the literal-quoted SQL and
         //    runs `VACUUM "<app>" INTO '<dest>'` against the per-app
         //    ATTACH alias on the control connection (which is where
-        //    the attach_app_file path attached the per-app file).
+        //    the attach_alias_file path attached the file).
         //
         //    Busy-policy retry: 3 attempts at 0/100/500ms when
         //    `opts.if_busy == Retry`. SQLite's bootstrap PRAGMA

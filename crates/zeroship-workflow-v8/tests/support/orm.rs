@@ -9,7 +9,7 @@ use zeroship_workflow::service::{
 
 pub async fn store(directory: &Path) -> OrmStore {
     let store = OrmStore::connect(
-        DbBinding::new(
+        DbBinding::platform(
             "workflow",
             "test-deployment",
             SchemaName::new("workflow").unwrap(),

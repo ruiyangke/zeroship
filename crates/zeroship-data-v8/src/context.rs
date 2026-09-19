@@ -19,6 +19,7 @@ use zeroship_data_orm::{
 #[derive(Default)]
 pub(crate) struct ThreadDbContext {
     connection: Option<LocalConnection>,
+    app_bindings: Option<Arc<zeroship_data_orm::resolved_bindings::SuppliedAppBindings>>,
     cdc_relay: Option<zeroship_data_orm::cdc::relay::RelayConfig>,
     supplied_project_keys: Option<Arc<SuppliedProjectKeys>>,
     meter: Option<Arc<zeroship_metering::Meter>>,
@@ -67,6 +68,18 @@ impl ThreadDbContext {
             Some(keys) => ProjectKeySource::supplied(Arc::clone(keys)),
             None => ProjectKeySource::unavailable(),
         }
+    }
+    /// The bindings a trusted host resolved for the apps on this thread.
+    pub(crate) fn app_binding(&self, app_id: &str, deploy_token: &str) -> Option<zeroship_data_orm::binding::DbBinding> {
+        self.app_bindings
+            .as_ref()
+            .and_then(|bindings| bindings.binding_for(app_id, deploy_token))
+    }
+    pub(crate) fn set_app_bindings(
+        &mut self,
+        bindings: Option<Arc<zeroship_data_orm::resolved_bindings::SuppliedAppBindings>>,
+    ) {
+        self.app_bindings = bindings;
     }
     pub(crate) fn set_supplied_project_keys(&mut self, keys: Option<Arc<SuppliedProjectKeys>>) {
         let same = match (&self.supplied_project_keys, &keys) {

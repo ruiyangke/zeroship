@@ -10,14 +10,14 @@ pub enum BackendUrl {
 
 /// Authority applied to sessions opened by a built-in backend.
 ///
-/// Worker databases use [`Self::PerAppRole`]. A trusted native service whose
+/// Worker databases use [`Self::PerBindingRole`]. A trusted native service whose
 /// connection already authenticates as its provisioned database role can use
 /// [`Self::Connection`] to retain that role while the ORM still installs its
 /// transaction-scoped resource limits.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub(crate) enum SessionAuthority {
     #[default]
-    PerAppRole,
+    PerBindingRole,
     Connection,
 }
 
@@ -98,7 +98,7 @@ impl ConnectOptions {
             url: url.into(),
             key_source,
             max_connections: None,
-            session_authority: SessionAuthority::PerAppRole,
+            session_authority: SessionAuthority::PerBindingRole,
             transaction_setting_namespaces: Vec::new(),
         }
     }

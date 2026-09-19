@@ -108,7 +108,7 @@ fn test_storage(root: &Path, app: &AppId) -> HostStorage {
         ))
         .unwrap(),
         keys: zeroship_data_orm::encryption::ProjectKeySource::unavailable(),
-        binding: zeroship_data_orm::binding::DbBinding::new(
+        binding: zeroship_data_orm::binding::DbBinding::platform(
             app.as_str(),
             "test-deployment",
             zeroship_core::schema_name::SchemaName::new(
@@ -175,6 +175,7 @@ fn metered_database(
             ))
             .unwrap(),
             project_keys: crate::project_keys::load(&root.join(".zeroship/private"), app).unwrap(),
+            app_bindings: crate::dev_binding::load(&root.join(".zeroship/private"), app).unwrap(),
             cdc_relay: None,
             meter: Some(meter.clone()),
         })

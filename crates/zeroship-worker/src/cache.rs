@@ -147,6 +147,20 @@ pub fn project_keys() -> Option<Arc<zeroship_data_orm::encryption::SuppliedProje
     })
 }
 
+/// The app-to-database bindings this host has resolved.
+///
+/// A process-wide store, not per-thread state: every worker thread that builds
+/// an isolate for one app must narrow to the same role, and a per-thread copy
+/// would let two threads disagree about which epoch is live.
+pub fn app_bindings() -> Option<Arc<zeroship_data_orm::resolved_bindings::SuppliedAppBindings>> {
+    DB_SERVICE.with(|service| {
+        service
+            .borrow()
+            .as_ref()
+            .map(|service| service.app_bindings().clone())
+    })
+}
+
 thread_local! {
     /// The thread's plugin prototype set, minted once and cloned thereafter.
     ///

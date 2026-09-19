@@ -28,14 +28,14 @@ impl Completion {
         Rc::ptr_eq(&self.sender, &other.sender)
     }
 
-    pub(crate) fn is_current_in(&self, lanes: &crate::tx_lanes::TxLanes, app: &str) -> bool {
+    pub(crate) fn is_current_in(&self, lanes: &crate::tx_lanes::TxLanes, route: &crate::binding::DbRoute) -> bool {
         lanes
-            .transaction_completion(app)
+            .transaction_completion(route)
             .is_some_and(|current| self.same_attempt(&current))
     }
 
-    pub(super) fn is_current(&self, app: &str) -> bool {
-        crate::tx_lanes::with(|lanes| self.is_current_in(lanes, app))
+    pub(super) fn is_current(&self, route: &crate::binding::DbRoute) -> bool {
+        crate::tx_lanes::with(|lanes| self.is_current_in(lanes, route))
     }
 
     pub(super) fn finish(&self, result: Driven) {

@@ -19,7 +19,6 @@ use crate::sql::mapping::{raw_column_name, read_surface_columns, validate_field_
 use crate::sql::{registration::SqlRegistration, SchemaName};
 use crate::value::{value, Value};
 use compio_postgres::{NoTls, Pool};
-use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
 use zeroship_data_orm::protection::mask_policy::install_mask_policy;
 use zeroship_data_orm::protection::unmask::{
@@ -37,7 +36,7 @@ async fn unmask_backend(host: &Host) -> zeroship_data_orm::backend::BackendHandl
 
 /// Bind a route from the fixture’s backend and current transaction scope.
 async fn unmask_route(host: &Host, app: &str) -> zeroship_data_orm::tx_route::TxRoute {
-    zeroship_data_orm::exec::ambient_route_for_tests(app, unmask_backend(host).await)
+    zeroship_data_orm::exec::ambient_route_for_tests(&crate::tests::fixtures::harness_binding(app), unmask_backend(host).await)
 }
 
 /// Connect, or fail the test.
@@ -120,8 +119,8 @@ fn two_class_schema() -> Value {
     })
 }
 
-/// Create `<app>.<collection>` from the DDL the platform actually emits, and
-/// install the descriptor entry the deploy would have installed.
+/// Create `<binding schema>.<collection>` from the DDL the platform actually
+/// emits, and install the descriptor entry the deploy would have installed.
 async fn fixture(
     host: &Host,
     pool: &Rc<Pool>,
@@ -130,14 +129,15 @@ async fn fixture(
     collection: &str,
     schema: &Value,
 ) {
-    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+    let alias = crate::tests::fixtures::harness_alias(app);
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{alias}\" CASCADE"), &[])
         .await
         .unwrap();
-    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+    pool.execute(&format!("CREATE SCHEMA \"{alias}\""), &[])
         .await
         .unwrap();
     let ddl = fixture_table_sql(
-        &crate::sql::SchemaName::new(app).expect("fixture schema name"),
+        crate::tests::fixtures::harness_binding(app).schema(),
         collection,
         schema,
         &FkEmission::Inline,
@@ -197,7 +197,7 @@ async fn insert_through_the_pipeline(
         .to_string();
     let schema = &crate::tests::fixtures::generated_schema(schema.clone());
     let bq = compile_insert(
-        &crate::sql::SchemaName::new(app).expect("fixture schema name"),
+        crate::tests::fixtures::harness_binding(app).schema(),
         collection,
         schema,
         &docs[0],
@@ -322,7 +322,7 @@ fn compile_filter(
 async fn run_find(pool: &Rc<Pool>, app: &str, filter: &Value, schema: &Value) -> Vec<Value> {
     let schema = &crate::tests::fixtures::generated_schema(schema.clone());
     let bq = compile_find(
-        &crate::sql::SchemaName::new(app).expect("fixture schema name"),
+        crate::tests::fixtures::harness_binding(app).schema(),
         "people",
         filter,
         Some(50),
@@ -373,6 +373,7 @@ fn the_real_value_is_still_stored_and_still_reachable_by_the_audited_path() {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_reachable";
+            let alias = crate::tests::fixtures::harness_alias(app);
             let schema = flip_schema();
             fixture(host, &pool, &url, app, "people", &schema).await;
 
@@ -395,7 +396,7 @@ fn the_real_value_is_still_stored_and_still_reachable_by_the_audited_path() {
                 .query_text_params(
                     &format!(
                         "SELECT \"ssn\" AS mask, \"{raw_col}\" AS raw \
-                 FROM \"{app}\".\"people\" WHERE id = $1"
+                 FROM \"{alias}\".\"people\" WHERE id = $1"
                     ),
                     &[person.id.as_str()],
                 )
@@ -423,20 +424,22 @@ fn the_real_value_is_still_stored_and_still_reachable_by_the_audited_path() {
             // column: pointing it back at the field's own column reddens no other test
             // in this file, because every other assertion here is about what a query
             // CANNOT reach. The unmask path is the one reader that must reach it.
-            pool.batch_execute(&zeroship_migrate_server::provisioning::audit_unmask_table_sql(app))
+            pool.batch_execute(&zeroship_migrate_server::provisioning::audit_unmask_table_sql(
+                &alias,
+            ))
+            .await
+            .expect("the audit table the deploy provisions");
+            // The unmask fetch narrows to the binding role, so that role and the
+            // capability role carrying its grants have to exist - the deploy's
+            // `zeroship migrate` creates them, and this stands in for it.
+            crate::tests::fixtures::roles::ensure_binding_ladder(&pool, &crate::tests::fixtures::harness_binding(app))
                 .await
-                .expect("the audit table the deploy provisions");
-            // The unmask fetch runs `SET LOCAL ROLE app_<id>_role`, so the per-app role
-            // and its grants have to exist - the deploy's `zeroship migrate` creates
-            // them, and this stands in for it.
-            crate::tests::fixtures::roles::ensure_per_app_role(&pool, app)
-                .await
-                .expect("per-app role, as the deploy would provision it");
-            fixtures::grant_runtime_select_columns(&pool, app, "people", &["id", &raw_col]).await;
+                .expect("the binding ladder, as the deploy would provision it");
+            fixtures::grant_runtime_select_columns(&pool, &crate::tests::fixtures::harness_binding(app), "people", &["id", &raw_col]).await;
 
             let result = zeroship_data_orm::protection::unmask::dispatch_unmask(
                 &unmask_route(host, app).await,
-                &zeroship_data_orm::binding::DbBinding::cold_start(app),
+                &crate::tests::fixtures::harness_binding(app),
                 zeroship_data_orm::protection::unmask::UnmaskFieldArgs {
                     collection: "people".to_string(),
                     row_pk: person.id.clone(),
@@ -458,7 +461,7 @@ fn the_real_value_is_still_stored_and_still_reachable_by_the_audited_path() {
             let audit = pool
                 .query_text_params(
                     &format!(
-                        "SELECT outcome, \"column\" FROM \"{app}\".\"__zeroship_audit_unmask\""
+                        "SELECT outcome, \"column\" FROM \"{alias}\".\"__zeroship_audit_unmask\""
                     ),
                     &[],
                 )
@@ -537,24 +540,25 @@ async fn audited_unmask_fixture_with(
     doc: Value,
     masked: &[(&str, &str)],
 ) -> Inserted {
+    let alias = crate::tests::fixtures::harness_alias(app);
     fixture(host, pool, url, app, "people", schema).await;
     let person = insert_through_the_pipeline(host, pool, app, "people", schema, doc).await;
-    pool.batch_execute(&zeroship_migrate_server::provisioning::audit_unmask_table_sql(app))
+    pool.batch_execute(&zeroship_migrate_server::provisioning::audit_unmask_table_sql(&alias))
         .await
         .expect("the audit table the deploy provisions");
-    // The audit INSERT and value SELECT both run under the per-app role. The
+    // The audit INSERT and value SELECT both run under the binding role. The
     // deploy provisions that role after creating the schema tables; this
     // fixture follows the same order.
-    crate::tests::fixtures::roles::ensure_per_app_role(pool, app)
+    crate::tests::fixtures::roles::ensure_binding_ladder(pool, &crate::tests::fixtures::harness_binding(app))
         .await
-        .expect("per-app role, as the deploy would provision it");
+        .expect("the binding ladder, as the deploy would provision it");
     let raw_columns: Vec<String> = masked
         .iter()
         .map(|(column, _)| raw_column_name(column))
         .collect();
     let mut readable: Vec<&str> = vec!["id"];
     readable.extend(raw_columns.iter().map(String::as_str));
-    fixtures::grant_runtime_select_columns(pool, app, "people", &readable).await;
+    fixtures::grant_runtime_select_columns(pool, &crate::tests::fixtures::harness_binding(app), "people", &readable).await;
 
     // Control zero, read as the admin principal: the plaintext really is on
     // disk under the minted id. Every refusal asserted below is therefore a
@@ -562,7 +566,7 @@ async fn audited_unmask_fixture_with(
     for ((column, plaintext), raw_col) in masked.iter().zip(&raw_columns) {
         let stored = pool
             .query_text_params(
-                &format!("SELECT \"{raw_col}\" AS raw FROM \"{app}\".\"people\" WHERE id = $1"),
+                &format!("SELECT \"{raw_col}\" AS raw FROM \"{alias}\".\"people\" WHERE id = $1"),
                 &[person.id.as_str()],
             )
             .await
@@ -585,12 +589,13 @@ async fn audited_unmask_fixture_with(
 /// carries no audit information at all, so a test that inspected the return
 /// value could not tell a written row from an unwritten one.
 async fn audit_rows(pool: &Rc<Pool>, app: &str) -> Vec<Value> {
+    let alias = crate::tests::fixtures::harness_alias(app);
     let rows = pool
         .query_text_params(
             &format!(
                 "SELECT actor_id, actor_role, claimed_actor, collection, row_pk, \"column\", \
                  classification, reason, outcome \
-                 FROM \"{app}\".\"__zeroship_audit_unmask\" ORDER BY id"
+                 FROM \"{alias}\".\"__zeroship_audit_unmask\" ORDER BY id"
             ),
             &[],
         )
@@ -652,7 +657,7 @@ fn an_actor_the_policy_does_not_permit_is_refused_and_the_refusal_is_audited() {
             // fallback denies it. This is the case `mask_flip` never had.
             let err = dispatch_unmask(
                 &unmask_route(host, app).await,
-                &DbBinding::cold_start(app),
+                &crate::tests::fixtures::harness_binding(app),
                 unmask_args(
                     &person.id,
                     Some(value!({ "kind": "support", "id": "usr_support_1" })),
@@ -702,11 +707,7 @@ fn an_actor_the_policy_does_not_permit_is_refused_and_the_refusal_is_audited() {
             );
 
             // A new deployment declares the grant; the same actor can now unmask.
-            let redeployed = DbBinding::new(
-                app,
-                "granted_policy",
-                DbBinding::cold_start(app).schema().clone(),
-            );
+            let redeployed = crate::tests::fixtures::harness_binding_at_deploy(app, "granted_policy");
             crate::tests::fixtures::cache_schema_for_deploy(
                 &redeployed,
                 "people",
@@ -781,7 +782,7 @@ fn an_unmask_with_no_usable_actor_is_refused_and_audited() {
             let ssn = "987-65-4321";
             let person = audited_unmask_fixture(host, &pool, &url, app, &schema, ssn).await;
 
-            install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pci"] }))
+            install_mask_policy(&crate::tests::fixtures::harness_binding(app), value!({ "support": ["pci"] }))
                 .expect("install the app's declared mask policy");
 
             // `None` is exactly what `sanitize_app_actor` produces from an app-JS
@@ -794,7 +795,7 @@ fn an_unmask_with_no_usable_actor_is_refused_and_audited() {
             ] {
                 let err = match dispatch_unmask(
                     &unmask_route(host, app).await,
-                    &DbBinding::cold_start(app),
+                    &crate::tests::fixtures::harness_binding(app),
                     unmask_args(&person.id, actor),
                 )
                 .await
@@ -836,7 +837,7 @@ fn an_unmask_with_no_usable_actor_is_refused_and_audited() {
             // ---- THE CONTROL: the same fixture DOES hand out the plaintext ----
             let result = dispatch_unmask(
                 &unmask_route(host, app).await,
-                &DbBinding::cold_start(app),
+                &crate::tests::fixtures::harness_binding(app),
                 unmask_args(
                     &person.id,
                     Some(value!({ "kind": "support", "id": "usr_2" })),
@@ -932,7 +933,7 @@ fn app_js_claiming_the_auto_system_actor_is_refused_by_the_parser() {
             let ssn = "123-45-6789";
             let person = audited_unmask_fixture(host, &pool, &url, app, &schema, ssn).await;
 
-            install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pci"] }))
+            install_mask_policy(&crate::tests::fixtures::harness_binding(app), value!({ "support": ["pci"] }))
                 .expect("install the app's declared mask policy");
 
             // ---- the forged system actor, parsed from the JSON a handler sends ----
@@ -947,7 +948,7 @@ fn app_js_claiming_the_auto_system_actor_is_refused_by_the_parser() {
             );
             let err = match dispatch_unmask(
                 &unmask_route(host, app).await,
-                &DbBinding::cold_start(app),
+                &crate::tests::fixtures::harness_binding(app),
                 forged,
             )
             .await
@@ -1012,7 +1013,7 @@ fn app_js_claiming_the_auto_system_actor_is_refused_by_the_parser() {
             .expect("the same payload shape must parse");
             let result = dispatch_unmask(
                 &unmask_route(host, app).await,
-                &DbBinding::cold_start(app),
+                &crate::tests::fixtures::harness_binding(app),
                 permitted,
             )
             .await
@@ -1063,7 +1064,7 @@ fn app_js_claiming_the_auto_system_actor_is_refused_by_the_bulk_parser() {
             let ssn = "987-65-4321";
             let person = audited_unmask_fixture(host, &pool, &url, app, &schema, ssn).await;
 
-            install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pci"] }))
+            install_mask_policy(&crate::tests::fixtures::harness_binding(app), value!({ "support": ["pci"] }))
                 .expect("install the app's declared mask policy");
 
             // ---- the forged system actor, parsed from the JSON a handler sends ----
@@ -1075,7 +1076,7 @@ fn app_js_claiming_the_auto_system_actor_is_refused_by_the_bulk_parser() {
             .expect("the payload must PARSE; DB-3 is an authorization fence");
             let err = match dispatch_bulk_unmask(
                 &unmask_route(host, app).await,
-                &DbBinding::cold_start(app),
+                &crate::tests::fixtures::harness_binding(app),
                 forged,
             )
             .await
@@ -1133,7 +1134,7 @@ fn app_js_claiming_the_auto_system_actor_is_refused_by_the_bulk_parser() {
             .expect("the same payload shape must parse");
             let granted = dispatch_bulk_unmask(
                 &unmask_route(host, app).await,
-                &DbBinding::cold_start(app),
+                &crate::tests::fixtures::harness_binding(app),
                 permitted,
             )
             .await
@@ -1191,7 +1192,7 @@ fn a_rejected_impersonation_is_distinguishable_from_an_absent_actor() {
             let person =
                 audited_unmask_fixture(host, &pool, &url, app, &schema, "123-45-6789").await;
 
-            install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pci"] }))
+            install_mask_policy(&crate::tests::fixtures::harness_binding(app), value!({ "support": ["pci"] }))
                 .expect("install the app's declared mask policy");
 
             // ---- (1) a forged claim on the reserved system kind, naming a real user
@@ -1202,7 +1203,7 @@ fn a_rejected_impersonation_is_distinguishable_from_an_absent_actor() {
             .expect("the forged payload must parse; DB-3 is a fence, not a shape check");
             dispatch_unmask(
                 &unmask_route(host, app).await,
-                &DbBinding::cold_start(app),
+                &crate::tests::fixtures::harness_binding(app),
                 forged,
             )
             .await
@@ -1213,7 +1214,7 @@ fn a_rejected_impersonation_is_distinguishable_from_an_absent_actor() {
                 .expect("an actor-less payload must parse");
             dispatch_unmask(
                 &unmask_route(host, app).await,
-                &DbBinding::cold_start(app),
+                &crate::tests::fixtures::harness_binding(app),
                 anonymous,
             )
             .await
@@ -1322,14 +1323,14 @@ fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
 
             // The policy grants `support` exactly ONE of the two classifications:
             // `email` is pii and permitted, `ssn` is pci and is not.
-            install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pii"] }))
+            install_mask_policy(&crate::tests::fixtures::harness_binding(app), value!({ "support": ["pii"] }))
                 .expect("install the app's declared mask policy");
             let actor = value!({ "kind": "support", "id": "usr_support_1" });
 
             // ---- the half-authorised batch ----
             let err = dispatch_bulk_unmask(
                 &unmask_route(host, app).await,
-                &DbBinding::cold_start(app),
+                &crate::tests::fixtures::harness_binding(app),
                 bulk_args(&person.id, &["email", "ssn"], Some(actor.clone())),
             )
             .await
@@ -1398,7 +1399,7 @@ fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
             // which is what makes the fence ATOMIC rather than merely right per column.
             let granted = dispatch_bulk_unmask(
                 &unmask_route(host, app).await,
-                &DbBinding::cold_start(app),
+                &crate::tests::fixtures::harness_binding(app),
                 bulk_args(&person.id, &["email"], Some(actor.clone())),
             )
             .await
@@ -1455,7 +1456,7 @@ fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
             };
             let err = dispatch_bulk_unmask(
                 &unmask_route(host, app).await,
-                &DbBinding::cold_start(app),
+                &crate::tests::fixtures::harness_binding(app),
                 two_rows.clone(),
             )
             .await
@@ -1516,7 +1517,7 @@ fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
             };
             let err = dispatch_bulk_unmask(
                 &unmask_route(host, app).await,
-                &DbBinding::cold_start(app),
+                &crate::tests::fixtures::harness_binding(app),
                 both_denied,
             )
             .await
@@ -1552,11 +1553,7 @@ fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
             );
 
             // A new deployment grants both classifications. The same batch now passes.
-            let redeployed = DbBinding::new(
-                app,
-                "wider_policy",
-                DbBinding::cold_start(app).schema().clone(),
-            );
+            let redeployed = crate::tests::fixtures::harness_binding_at_deploy(app, "wider_policy");
             crate::tests::fixtures::cache_schema_for_deploy(&redeployed, "people", schema.clone());
             install_mask_policy(&redeployed, value!({ "support": ["pii", "pci"] }))
                 .expect("install the new deployment's policy");
@@ -1618,15 +1615,15 @@ fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
             )
             .await;
 
-            install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pii"] }))
+            install_mask_policy(&crate::tests::fixtures::harness_binding(app), value!({ "support": ["pii"] }))
                 .expect("install the app's declared mask policy");
             let actor = Some(value!({ "kind": "support", "id": "usr_support_2" }));
             let reason = Some("mask_flip integration test".to_string());
             let both = ["email".to_string(), "ssn".to_string()];
 
             let err = authorize_query_hint(
-                &crate::exec::ambient_route_for_tests(app, unmask_backend(host).await),
-                &DbBinding::cold_start(app),
+                &crate::exec::ambient_route_for_tests(&crate::tests::fixtures::harness_binding(app), unmask_backend(host).await),
+                &crate::tests::fixtures::harness_binding(app),
                 "people",
                 &both,
                 &actor,
@@ -1701,8 +1698,8 @@ fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
             // `audit_query_hint_granted` so a failing SELECT leaves no ghost, which is
             // why the count staying at 1 is the assertion here.
             authorize_query_hint(
-                &crate::exec::ambient_route_for_tests(app, unmask_backend(host).await),
-                &DbBinding::cold_start(app),
+                &crate::exec::ambient_route_for_tests(&crate::tests::fixtures::harness_binding(app), unmask_backend(host).await),
+                &crate::tests::fixtures::harness_binding(app),
                 "people",
                 &["email".to_string()],
                 &actor,
@@ -1718,16 +1715,12 @@ fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
             );
 
             // A new deployment grants both classifications, allowing the same hint.
-            let redeployed = DbBinding::new(
-                app,
-                "wider_policy",
-                DbBinding::cold_start(app).schema().clone(),
-            );
+            let redeployed = crate::tests::fixtures::harness_binding_at_deploy(app, "wider_policy");
             crate::tests::fixtures::cache_schema_for_deploy(&redeployed, "people", schema.clone());
             install_mask_policy(&redeployed, value!({ "support": ["pii", "pci"] }))
                 .expect("install the new deployment's policy");
             authorize_query_hint(
-                &crate::exec::ambient_route_for_tests(app, unmask_backend(host).await),
+                &crate::exec::ambient_route_for_tests(&crate::tests::fixtures::harness_binding(app), unmask_backend(host).await),
                 &redeployed,
                 "people",
                 &both,
@@ -1755,7 +1748,7 @@ fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
             );
             assert_eq!(rows[0]["email"], value!(email));
             audit_query_hint_granted(
-                &crate::exec::ambient_route_for_tests(app, unmask_backend(host).await),
+                &crate::exec::ambient_route_for_tests(&crate::tests::fixtures::harness_binding(app), unmask_backend(host).await),
                 &redeployed,
                 "people",
                 &both,
@@ -1826,7 +1819,7 @@ fn a_query_hint_reads_the_column_its_alias_resolved_to() {
             )
             .await;
 
-            install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pii"] }))
+            install_mask_policy(&crate::tests::fixtures::harness_binding(app), value!({ "support": ["pii"] }))
                 .expect("install the app's declared mask policy");
             let actor = Some(value!({ "kind": "support", "id": "usr_support_3" }));
             let reason = Some("mask_flip integration test".to_string());
@@ -1834,8 +1827,8 @@ fn a_query_hint_reads_the_column_its_alias_resolved_to() {
             let hinted = ["contactEmail".to_string()];
 
             authorize_query_hint(
-                &crate::exec::ambient_route_for_tests(app, unmask_backend(host).await),
-                &DbBinding::cold_start(app),
+                &crate::exec::ambient_route_for_tests(&crate::tests::fixtures::harness_binding(app), unmask_backend(host).await),
+                &crate::tests::fixtures::harness_binding(app),
                 "people",
                 &hinted,
                 &actor,
@@ -1856,7 +1849,7 @@ fn a_query_hint_reads_the_column_its_alias_resolved_to() {
             })];
             dispatch_unmask_for_query(
                 &unmask_route(host, app).await,
-                &DbBinding::cold_start(app),
+                &crate::tests::fixtures::harness_binding(app),
                 "people",
                 &hinted,
                 &mut rows,
@@ -1908,6 +1901,7 @@ fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_returning";
+            let alias = crate::tests::fixtures::harness_alias(app);
             let schema = flip_schema();
             fixture(host, &pool, &url, app, "people", &schema).await;
 
@@ -1947,7 +1941,7 @@ fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
             let stored = pool
                 .query_text_params(
                     &format!(
-                        r#"SELECT {} AS raw FROM "{app}"."people" WHERE "id" = $1"#,
+                        r#"SELECT {} AS raw FROM "{alias}"."people" WHERE "id" = $1"#,
                         crate::sql::mapping::quote_ident(&raw_column_name("ssn")),
                     ),
                     &[minted_id.as_str()],
@@ -2229,6 +2223,7 @@ fn the_declared_type_and_constraints_travel_to_the_raw_column() {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_ddl";
+            let alias = crate::tests::fixtures::harness_alias(app);
             let schema = value!({
                 "score": {
                     "type": "number",
@@ -2250,7 +2245,7 @@ fn the_declared_type_and_constraints_travel_to_the_raw_column() {
                 .query_text_params(
                     "SELECT column_name, data_type FROM information_schema.columns \
              WHERE table_schema = $1 AND table_name = 'accounts' ORDER BY column_name",
-                    &[app],
+                    &[alias.as_str()],
                 )
                 .await
                 .unwrap();
@@ -2298,7 +2293,7 @@ fn the_declared_type_and_constraints_travel_to_the_raw_column() {
                         // `::text` on the raw score because it is a real `float8` on
                         // the server - which is the point of the test.
                         "SELECT \"score\" AS mask, \"{}\"::text AS raw, \"tier\" AS tier_mask, \
-                 \"{}\" AS tier_raw FROM \"{app}\".\"accounts\" WHERE id = $1",
+                 \"{}\" AS tier_raw FROM \"{alias}\".\"accounts\" WHERE id = $1",
                         raw_column_name("score"),
                         raw_column_name("tier"),
                     ),
@@ -2335,6 +2330,7 @@ fn a_unique_masked_field_admits_rows_that_share_a_mask() {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_unique";
+            let alias = crate::tests::fixtures::harness_alias(app);
             let schema = value!({
                 "ssn": {
                     "type": "string",
@@ -2348,7 +2344,7 @@ fn a_unique_masked_field_admits_rows_that_share_a_mask() {
             // implicit transaction `batch_execute` uses, so the fixture's DDL carries
             // the table alone. Apply the index the platform would build.
             for spec in schema::fixture_indexes(
-                &crate::sql::SchemaName::new(app).expect("fixture schema name"),
+                crate::tests::fixtures::harness_binding(app).schema(),
                 "people",
                 &schema,
             )
@@ -2383,7 +2379,7 @@ fn a_unique_masked_field_admits_rows_that_share_a_mask() {
 
             let count = pool
                 .query_text_params(
-                    &format!("SELECT count(*)::text AS n FROM \"{app}\".\"people\""),
+                    &format!("SELECT count(*)::text AS n FROM \"{alias}\".\"people\""),
                     &[],
                 )
                 .await
@@ -2398,7 +2394,7 @@ fn a_unique_masked_field_admits_rows_that_share_a_mask() {
             let named = pool
                 .query_text_params(
                     &format!(
-                        "SELECT count(*)::text AS n FROM \"{app}\".\"people\" \
+                        "SELECT count(*)::text AS n FROM \"{alias}\".\"people\" \
                  WHERE \"id\" IN ($1, $2)"
                     ),
                     &[first.id.as_str(), second.id.as_str()],
@@ -2422,7 +2418,7 @@ fn a_unique_masked_field_admits_rows_that_share_a_mask() {
                 .expect("write pipeline");
             let runtime_schema = crate::tests::fixtures::generated_schema(schema.clone());
             let bq = compile_insert(
-                &crate::sql::SchemaName::new(app).expect("fixture schema name"),
+                crate::tests::fixtures::harness_binding(app).schema(),
                 "people",
                 &runtime_schema,
                 &docs[0],
@@ -2485,10 +2481,11 @@ async fn physical_rows(
     columns: &str,
     ids: [&str; 2],
 ) -> BTreeMap<String, Value> {
+    let alias = crate::tests::fixtures::harness_alias(app);
     let rows = pool
         .query_text_params(
             &format!(
-                "SELECT \"id\", {columns} FROM \"{app}\".\"people\" \
+                "SELECT \"id\", {columns} FROM \"{alias}\".\"people\" \
                  WHERE \"id\" IN ($1, $2) ORDER BY \"id\""
             ),
             &ids,
@@ -2519,6 +2516,7 @@ fn deleting_the_mask_key_from_the_descriptor_must_not_write_plaintext() {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_mask_key_deleted";
+            let alias = crate::tests::fixtures::harness_alias(app);
             let masked = flip_schema();
             fixture(host, &pool, &url, app, "people", &masked).await;
 
@@ -2587,7 +2585,7 @@ fn deleting_the_mask_key_from_the_descriptor_must_not_write_plaintext() {
             // there is untouched.
             let count = pool
                 .query_text_params(
-                    &format!("SELECT count(*)::text AS n FROM \"{app}\".\"people\""),
+                    &format!("SELECT count(*)::text AS n FROM \"{alias}\".\"people\""),
                     &[],
                 )
                 .await
@@ -2602,7 +2600,7 @@ fn deleting_the_mask_key_from_the_descriptor_must_not_write_plaintext() {
             let leaked = pool
                 .query_text_params(
                     &format!(
-                        "SELECT count(*)::text AS n FROM \"{app}\".\"people\" WHERE \"ssn\" = $1"
+                        "SELECT count(*)::text AS n FROM \"{alias}\".\"people\" WHERE \"ssn\" = $1"
                     ),
                     &["987-65-4321"],
                 )
@@ -2627,6 +2625,7 @@ fn deleting_the_encrypted_key_from_the_descriptor_must_not_write_plaintext() {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_enc_key_deleted";
+            let alias = crate::tests::fixtures::harness_alias(app);
             let _keys = host.supply_project_key(&[app], &"01".repeat(32));
             let encrypted = encrypted_schema();
             fixture(host, &pool, &url, app, "people", &encrypted).await;
@@ -2678,7 +2677,7 @@ fn deleting_the_encrypted_key_from_the_descriptor_must_not_write_plaintext() {
             let leaked = pool
                 .query_text_params(
                     &format!(
-                        "SELECT count(*)::text AS n FROM \"{app}\".\"people\" \
+                        "SELECT count(*)::text AS n FROM \"{alias}\".\"people\" \
                  WHERE encode(\"secret\", 'escape') = $1"
                     ),
                     &["hunter3-also-real"],
@@ -2743,17 +2742,18 @@ async fn fixture_via_the_migration_engine(
     schema: &Value,
 ) -> String {
     let app = app_id.as_str().to_owned();
-    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+    let alias = crate::tests::fixtures::harness_alias(&app);
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{alias}\" CASCADE"), &[])
         .await
         .unwrap();
-    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+    pool.execute(&format!("CREATE SCHEMA \"{alias}\""), &[])
         .await
         .unwrap();
 
     let statements =
         zeroship_migrate::schema::query::build_create_table_with_fks_for_dialect_scoped_statements(
             zeroship_migrate::shipping_vendors(),
-            &app,
+            &alias,
             collection,
             &serde_json::to_value(schema).unwrap(),
             &zeroship_migrate::schema::query::FkEmission::Inline,
@@ -2781,7 +2781,8 @@ async fn fixture_via_the_migration_engine(
     app
 }
 
-/// The `pg_description` comment on `<app>.<collection>.<column>`, or `None`.
+/// The `pg_description` comment on `<binding schema>.<collection>.<column>`, or
+/// `None`.
 ///
 /// The same catalog row `read_live_schema`'s `LEFT JOIN pg_description` reads, so
 /// what this returns is what the protection floor's introspector sees.
@@ -2791,6 +2792,7 @@ async fn column_comment(
     collection: &str,
     column: &str,
 ) -> Option<String> {
+    let alias = crate::tests::fixtures::harness_alias(app);
     let rows = pool
         .query_text_params(
             "SELECT pgd.description AS comment
@@ -2800,7 +2802,7 @@ async fn column_comment(
                LEFT JOIN pg_description pgd
                       ON pgd.objoid = c.oid AND pgd.objsubid = a.attnum
               WHERE n.nspname = $1 AND c.relname = $2 AND a.attname = $3",
-            &[app, collection, column],
+            &[alias.as_str(), collection, column],
         )
         .await
         .unwrap();
@@ -2831,6 +2833,7 @@ fn a_migration_engine_built_table_refuses_a_mask_downgrade() {
             let app =
                 fixture_via_the_migration_engine(host, &pool, &url, &app_id, "people", &masked)
                     .await;
+            let alias = crate::tests::fixtures::harness_alias(&app);
 
             // CONTROL 1, and the one that binds the two crates' codecs together: the
             // comment the ENGINE wrote must be byte-identical to what the RUNTIME's codec
@@ -2919,7 +2922,7 @@ fn a_migration_engine_built_table_refuses_a_mask_downgrade() {
             let leaked = pool
                 .query_text_params(
                     &format!(
-                        "SELECT count(*)::text AS n FROM \"{app}\".\"people\" WHERE \"ssn\" = $1"
+                        "SELECT count(*)::text AS n FROM \"{alias}\".\"people\" WHERE \"ssn\" = $1"
                     ),
                     &["987-65-4321"],
                 )
@@ -2952,6 +2955,7 @@ fn a_migration_engine_built_table_refuses_an_encryption_downgrade() {
             let app =
                 fixture_via_the_migration_engine(host, &pool, &url, &app_id, "people", &encrypted)
                     .await;
+            let alias = crate::tests::fixtures::harness_alias(&app);
 
             // The live catalog must retain an encryption marker the runtime recognizes.
             let stored = column_comment(&pool, &app, "people", "secret")
@@ -3015,7 +3019,7 @@ fn a_migration_engine_built_table_refuses_an_encryption_downgrade() {
             let leaked = pool
                 .query_text_params(
                     &format!(
-                        "SELECT count(*)::text AS n FROM \"{app}\".\"people\" \
+                        "SELECT count(*)::text AS n FROM \"{alias}\".\"people\" \
                  WHERE encode(\"secret\", 'escape') = $1"
                     ),
                     &["hunter3-also-real"],
