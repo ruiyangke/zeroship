@@ -15,6 +15,10 @@ fn manifest() -> (String, String) {
     (hash, serde_json::to_string(&manifest).unwrap())
 }
 
+/// This does not reach the `LockContention` retry in `LocalPlatform::open`. The
+/// wait here sits inside the ORM's own lock budget and inside the busy wait
+/// `initialize` sets up first, so the exclusive hold is absorbed before the
+/// connect loop runs. Deleting that retry leaves this green.
 #[test]
 fn opening_waits_for_a_host_that_still_holds_the_platform_file() {
     let root = tempfile::tempdir().unwrap();
