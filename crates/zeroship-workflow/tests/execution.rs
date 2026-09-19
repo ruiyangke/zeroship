@@ -1,11 +1,12 @@
 //! The decode and fold a runtime batch travels through on the way to a journal.
 //!
-//! A worker hands the service a `WorkflowExecution`, and the run and lease it is
-//! applied to come from the authorized task claim: `frontier::apply` reads the
-//! run off the claim's row and the lease off the task token, never off the
-//! batch. What the batch does decide is these two halves - the decoder that
-//! normalizes the runtime's outcome array, and the fold that turns that array
-//! into checkpoints and a run update - so those are what a case here binds.
+//! A worker hands the service a `WorkflowExecution`, which carries outcomes and
+//! nothing else. The task id and token travel beside it, `inspect_task` resolves
+//! the claim from those, and `frontier::apply` reads the run off that claim's
+//! row - so the batch selects neither the run nor the lease it settles. What the
+//! batch does decide is these two halves: the decoder that normalizes the
+//! runtime's outcome array, and the fold that turns that array into checkpoints
+//! and a run update. Those are what a case here binds.
 //!
 //! The floor on batch width belongs to `frontier::apply`, which refuses a
 //! completion carrying no outcome; the completion-batch cases hold it.
