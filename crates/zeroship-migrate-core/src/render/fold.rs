@@ -5084,10 +5084,7 @@ fn resolved_injected_column_matches(
         return false;
     }
     if actual.identity.is_some()
-        && matches!(
-            actual.ty,
-            ColType::SmallInt | ColType::Int | ColType::BigInt
-        )
+        && matches!(actual.ty, ColType::Int | ColType::BigInt)
     {
         return true;
     }
@@ -5233,7 +5230,6 @@ fn token_to_col_type(f: &crate::render::declarative::FieldDescriptor) -> Option<
                 _ => ColType::Text,
             },
             "int" | "integer" => ColType::Int,
-            "smallInt" => ColType::SmallInt,
             "bigInt" => ColType::BigInt,
             // `"number"` is a TWO-type token: `Double` and `Decimal { precision,
             // scale }` both spell it. The `precision` facet beside it is what tells
@@ -5247,7 +5243,6 @@ fn token_to_col_type(f: &crate::render::declarative::FieldDescriptor) -> Option<
                 },
                 (None, _) => ColType::Double,
             },
-            "real" => ColType::Real,
             "boolean" => ColType::Boolean,
             "json" | "object" | "array" => ColType::Json,
             "timestamp" => ColType::Timestamp,

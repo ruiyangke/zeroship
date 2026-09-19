@@ -796,7 +796,6 @@ pub fn mysql_base_column_type_for_def(def: &serde_json::Value) -> String {
             None => "CHAR(1)".to_string(),
         },
         Some("number") => "DOUBLE".to_string(),
-        Some("real") => "FLOAT".to_string(),
         Some("boolean") => "TINYINT(1)".to_string(),
         Some("timestamp") => "DATETIME(6)".to_string(),
         Some("calendarDate") => "DATE".to_string(),
@@ -811,7 +810,6 @@ pub fn mysql_base_column_type_for_def(def: &serde_json::Value) -> String {
         },
         Some("bigInt") | Some("bigint") | Some("int8") => "BIGINT".to_string(),
         Some("integer") | Some("int") | Some("int4") => "INT".to_string(),
-        Some("smallInt") => "SMALLINT".to_string(),
         Some("inet") => "VARCHAR(43)".to_string(),
         _ => "VARCHAR(191)".to_string(),
     }

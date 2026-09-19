@@ -103,10 +103,8 @@ export type ColType =
   | { string: { length: number } }
   | "text"
   | "int"
-  | "smallInt"
   | "bigInt"
   | "double"
-  | "real"
   | "boolean"
   | "json"
   | "timestamp"

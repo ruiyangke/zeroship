@@ -157,18 +157,12 @@ fn no_non_character_spelling_takes_a_collation() {
     let cases: Vec<(&str, serde_json::Value, &str)> = vec![
         ("integer", serde_json::json!({ "type": "integer" }), "INT"),
         ("bigInt", serde_json::json!({ "type": "bigInt" }), "BIGINT"),
-        (
-            "smallInt",
-            serde_json::json!({ "type": "smallInt" }),
-            "SMALLINT",
-        ),
         ("number", serde_json::json!({ "type": "number" }), "DOUBLE"),
         (
             "number carrying precision",
             serde_json::json!({ "type": "number", "precision": 20, "scale": 4 }),
             "DECIMAL(20, 4)",
         ),
-        ("real", serde_json::json!({ "type": "real" }), "FLOAT"),
         (
             "boolean",
             serde_json::json!({ "type": "boolean" }),

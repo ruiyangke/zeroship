@@ -569,11 +569,7 @@ fn is_id_prefix_declaration(column: &IrColumn) -> bool {
 }
 
 fn is_id_identity_replacement(column: &IrColumn) -> bool {
-    column.identity.is_some()
-        && matches!(
-            column.ty,
-            ColType::SmallInt | ColType::Int | ColType::BigInt
-        )
+    column.identity.is_some() && matches!(column.ty, ColType::Int | ColType::BigInt)
 }
 
 fn validate_folded_id_prefix(table: &str, column: &IrColumn) -> Result<(), TableShapeError> {

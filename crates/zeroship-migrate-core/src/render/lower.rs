@@ -3223,10 +3223,7 @@ impl IrAuthor {
         // This transient validation carrier retains authored integer width even
         // on engines whose physical catalog spelling collapses every width. The
         // backend policy decides whether the neutral token matters.
-        if matches!(
-            column.ty,
-            ColType::SmallInt | ColType::Int | ColType::BigInt
-        ) {
+        if matches!(column.ty, ColType::Int | ColType::BigInt) {
             let (token, _) = col_type_to_token(&column.ty);
             snapshot.type_def = Some(serde_json::json!({ "type": token }));
         }
@@ -4945,13 +4942,13 @@ impl IrAuthor {
                         }
                     }
                 }
-                // AN IDENTITY COLUMN may only become one of PostgreSQL's three
+                // AN IDENTITY COLUMN may only become one of PostgreSQL's integer
                 // identity types. Refused here, after the named-type arm, so the
                 // spelling in the message is the one the statement would have
                 // carried. See `IrLowerError::IdentityColumnTypeUnsupported` for the
-                // server's own words and for why the permitted set is exactly three.
+                // server's own words and for why the set is closed.
                 if generation.identity
-                    && !matches!(to_type, ColType::SmallInt | ColType::Int | ColType::BigInt)
+                    && !matches!(to_type, ColType::Int | ColType::BigInt)
                 {
                     return Err(IrLowerError::IdentityColumnTypeUnsupported {
                         dialect: self.dialect.clone(),
@@ -9757,10 +9754,8 @@ pub(crate) fn col_type_to_token(ty: &ColType) -> (String, Option<String>) {
         ColType::String { .. } => ("string".into(), None),
         ColType::Text => ("string".into(), None),
         ColType::Int => ("int".into(), None),
-        ColType::SmallInt => ("smallInt".into(), None),
         ColType::BigInt => ("bigInt".into(), None),
         ColType::Double => ("number".into(), None),
-        ColType::Real => ("real".into(), None),
         ColType::Boolean => ("boolean".into(), None),
         ColType::Json => ("json".into(), None),
         ColType::Timestamp => ("timestamp".into(), None),
@@ -12143,24 +12138,6 @@ mod tests {
                     generated: None,
                     identity: None,
                 },
-                TIrColumn {
-                    name: "shard".into(),
-                    ty: ColType::SmallInt,
-                    nullable: Some(false),
-                    default: Some(IrDefault::Literal {
-                        value: IrScalar::Int(0),
-                    }),
-                    unique: None,
-                    references: None,
-                    id_prefix: None,
-                    collation: None,
-                    case_sensitive: None,
-                    vector_metric: None,
-                    mask: None,
-                    encrypted: None,
-                    generated: None,
-                    identity: None,
-                },
                 // A bigint default beyond 2^53 - carried by the tagged exact-int64
                 // scalar so it never passes through a JavaScript number or `as_f64`.
                 TIrColumn {
@@ -12187,24 +12164,6 @@ mod tests {
                     nullable: Some(false),
                     default: Some(IrDefault::Literal {
                         value: IrScalar::Decimal("0.5".into()),
-                    }),
-                    unique: None,
-                    references: None,
-                    id_prefix: None,
-                    collation: None,
-                    case_sensitive: None,
-                    vector_metric: None,
-                    mask: None,
-                    encrypted: None,
-                    generated: None,
-                    identity: None,
-                },
-                TIrColumn {
-                    name: "ratio_real".into(),
-                    ty: ColType::Real,
-                    nullable: Some(false),
-                    default: Some(IrDefault::Literal {
-                        value: IrScalar::Decimal("0.25".into()),
                     }),
                     unique: None,
                     references: None,
@@ -12249,11 +12208,6 @@ mod tests {
             create.up
         );
         assert!(
-            create.up.contains("DEFAULT 0"),
-            "a smallint column's DEFAULT must render; up = {:?}",
-            create.up
-        );
-        assert!(
             create.up.contains("DEFAULT 9007199254740993"),
             "a >2^53 bigint DEFAULT (int64 carrier) must render exactly; up = {:?}",
             create.up
@@ -12261,11 +12215,6 @@ mod tests {
         assert!(
             create.up.contains("DEFAULT 0.5"),
             "a decimal column's DEFAULT (numeric-string carrier) must render; up = {:?}",
-            create.up
-        );
-        assert!(
-            create.up.contains("DEFAULT 0.25"),
-            "a real column's DEFAULT (numeric-string carrier) must render; up = {:?}",
             create.up
         );
         assert!(

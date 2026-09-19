@@ -377,7 +377,6 @@ async fn an_untouched_mysql_table_reports_clean() {
             {"op":"createTable","name":"corpus","columns":[
                 {"name":"id","type":"int","nullable":false},
                 {"name":"big","type":"bigInt","nullable":true},
-                {"name":"small","type":"smallInt","nullable":true},
                 {"name":"amount","type":{"decimal":{"precision":12,"scale":2}},"nullable":true},
                 {"name":"wide","type":{"decimal":{"precision":30,"scale":10}},"nullable":true},
                 {"name":"ratio","type":"double","nullable":true},
@@ -507,7 +506,6 @@ fn postgres_corpus_columns() -> serde_json::Value {
     serde_json::json!([
         { "name": "id", "type": "int", "nullable": false },
         { "name": "big", "type": "bigInt", "nullable": true },
-        { "name": "small", "type": "smallInt", "nullable": true },
         { "name": "amount", "type": { "decimal": { "precision": 12, "scale": 2 } },
           "nullable": true },
         { "name": "ratio", "type": "double", "nullable": true },
