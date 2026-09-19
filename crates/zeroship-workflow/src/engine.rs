@@ -1027,23 +1027,6 @@ pub fn compensation_outcomes_from_step_outcomes(
     Ok(compensation)
 }
 
-pub const WORKFLOW_STATE_CAP_ERROR_CODE: &str = "workflow_state_cap_exceeded";
-
-pub fn cap_exceeded(current: i64, delta: i64, cap: i64) -> bool {
-    i128::from(current) + i128::from(delta) > i128::from(cap)
-}
-
-pub fn state_cap_error(current: i64, delta: i64, cap: i64) -> Value {
-    serde_json::json!({
-        "type": "LimitExceededError",
-        "error_code": WORKFLOW_STATE_CAP_ERROR_CODE,
-        "message": "workflow journal state cap exceeded",
-        "current_bytes": current,
-        "delta_bytes": delta,
-        "max_bytes": cap,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
