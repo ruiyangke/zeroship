@@ -76,7 +76,7 @@ impl WorkflowRuntimeLoader for AppRuntimeLoader {
             })
             .collect();
         let descriptor = executable
-            .runtime_descriptor()
+            .primary_schema()
             .map(serde_json::to_string)
             .transpose()
             .map_err(|_| {

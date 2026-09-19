@@ -147,7 +147,7 @@ fn manifest_for(
             built_at: "2026-04-29T00:00:00Z".into(),
         },
         exports: None,
-        runtime_descriptor: None,
+        runtime_descriptor: Vec::new(),
     }
 }
 
@@ -1420,7 +1420,7 @@ async fn deploy_is_rate_limited() {
 // handler, so they measure the shipped path rather than the registry call.
 //
 // ON THE FIXTURE, AND WHY IT IS NOT `manifest_for`. Every other deploy case in
-// this file uses `manifest_for`, which hardcodes `runtime_descriptor: None`
+// this file uses `manifest_for`, which declares no database at all
 // (correctly - those are schema-less apps). A case that reused it unchanged
 // would take the "no descriptor, no applied schema" arm, which the guard
 // PERMITS, and would print exactly what a working guard prints while ruling on
@@ -1445,9 +1445,12 @@ fn descriptor_blob(marker: &str) -> Vec<u8> {
 /// [`manifest_for`] cannot construct.
 fn manifest_with_descriptor(worker_hash: &str, descriptor_hash: &str) -> Manifest {
     let mut m = manifest_for(Some(worker_hash), &[]);
-    m.runtime_descriptor = Some(zeroship_bundle::RuntimeDescriptorEntry {
+    m.runtime_descriptor = vec![zeroship_bundle::RuntimeDescriptorEntry {
+        label: "main".into(),
+        database_id: zeroship_core::DatabaseId::mint(),
+        primary: true,
         hash: descriptor_hash.to_string(),
-    });
+    }];
     m
 }
 
@@ -1663,7 +1666,7 @@ async fn deploy_matching_the_applied_descriptor_goes_live() {
 
 /// ARM 3. The bypass that costs one JSON key.
 ///
-/// `runtime_descriptor` is `skip_serializing_if = "Option::is_none"` on a
+/// `runtime_descriptor` is `skip_serializing_if = "Vec::is_empty"` on a
 /// creator-produced artifact, so a one-armed guard is defeated by deleting the
 /// field. The app would then boot with `env.db` uninstalled over a live
 /// database.

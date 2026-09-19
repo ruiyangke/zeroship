@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use zeroship_id::DatabaseId;
+
 use crate::asset::AssetEntry;
 use crate::rule::{RequiredPrincipal, ResourceEntry};
 
@@ -149,35 +151,49 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exports: Option<ManifestExports>,
 
-    /// The generated **runtime schema descriptor** carried by the `.zship`,
-    /// content-addressed like worker modules and assets (`{hash}`).
+    /// ONE ENTRY PER DATABASE the app declares, each carrying that database's
+    /// generated **runtime schema descriptor**, content-addressed like worker
+    /// modules and assets.
     ///
-    /// This is the `schema.runtime.json` artifact `gen-types` emits by folding
-    /// the migration set — a `Record<collection, Record<column, FieldDef>>` that
-    /// formalises what the runtime's `normalizeSchema` produces. In the
-    /// migration-service cutover, the runtime reads this descriptor instead of
+    /// Each descriptor is the `schema.runtime.json` artifact `gen-types` emits
+    /// by folding that database's migration set — a
+    /// `Record<collection, Record<column, FieldDef>>` that formalises what the
+    /// runtime's `normalizeSchema` produces. The runtime reads these instead of
     /// any schema declared on the user module. Migration documents are applied
     /// through the migration service and are not carried by the `.zship`.
     ///
-    /// `None` (the default; `skip_serializing_if`) is valid for schema-less apps.
+    /// Empty (the default; `skip_serializing_if`) is valid for schema-less apps.
     ///
-    /// `validate()` enforces the blob-hash format only; the descriptor's JSON
-    /// shape is the producer's (`gen-types`) and consumer's (runtime) contract,
-    /// not this struct's.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_descriptor: Option<RuntimeDescriptorEntry>,
+    /// `validate()` enforces the entry shape — one primary, distinct labels,
+    /// distinct databases, blob-hash format. Each descriptor's JSON shape is
+    /// the producer's (`gen-types`) and consumer's (runtime) contract, not this
+    /// struct's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_descriptor: Vec<RuntimeDescriptorEntry>,
 }
 
-/// The generated runtime schema descriptor carried by a `.zship`
-/// (`manifest.runtime_descriptor`).
-///
-/// `hash` is the sha256 of the `schema.runtime.json` blob body. The descriptor is
-/// a single anonymous artifact reconstructed from its blob alone; migration
-/// documents are applied through the migration service and are not represented
-/// in the manifest.
+/// One database's runtime schema descriptor carried by a `.zship`
+/// (`manifest.runtime_descriptor[]`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeDescriptorEntry {
-    /// sha256 hash (lowercase, 64 hex chars) of the `schema.runtime.json` blob.
+    /// The creator's LOCAL label for this database, and the member name it
+    /// takes on `env.databases`.
+    ///
+    /// A NAME INSIDE ONE APP'S OWN ARTIFACT, never a routing, lane or
+    /// admission key: two co-resident apps both calling a database `main`
+    /// would compare equal. Everything server-side keys on `database_id`.
+    pub label: String,
+    /// The database this descriptor belongs to. The key every server-side map
+    /// uses, and the value the CLI dereferenced the label to before packing.
+    pub database_id: DatabaseId,
+    /// Whether this database is `env.db`. Exactly one entry carries it.
+    pub primary: bool,
+    /// sha256 hash (lowercase, 64 hex chars) of this database's
+    /// `schema.runtime.json` blob.
+    ///
+    /// An ADDRESS, not a comparison key: nothing compares it against what a
+    /// database has applied. Gating a deploy on schema equality is what coupled
+    /// every app on a database to every other.
     pub hash: String,
 }
 
@@ -215,7 +231,7 @@ impl Default for Manifest {
             schedules: Vec::new(),
             workflows: None,
             exports: None,
-            runtime_descriptor: None,
+            runtime_descriptor: Vec::new(),
         }
     }
 }
@@ -464,7 +480,7 @@ impl Manifest {
             schedules: Vec::new(),
             workflows: None,
             exports: None,
-            runtime_descriptor: None,
+            runtime_descriptor: Vec::new(),
         }
     }
 
@@ -564,19 +580,63 @@ impl Manifest {
         for request in &self.net.requests {
             request.validate()?;
         }
-        // The `schema.runtime.json` blob is content-addressed like every other
-        // bundle blob. The runtime validates the descriptor and passes the
-        // resulting snapshot directly to native plugins.
-        if let Some(desc) = &self.runtime_descriptor {
-            if !is_sha256_hex(&desc.hash) {
+        // Every `schema.runtime.json` blob is content-addressed like every
+        // other bundle blob. The runtime validates each descriptor and passes
+        // the resulting snapshots to native plugins.
+        self.validate_runtime_descriptor()?;
+        if !self.resources.is_empty() {
+            self.validate_resources()?;
+        }
+        Ok(())
+    }
+
+    /// The per-database descriptor set: distinct labels, distinct databases,
+    /// well-formed blob hashes, and EXACTLY ONE primary when the set is
+    /// non-empty.
+    ///
+    /// The primary is `env.db`, and `env.db === env.databases[primary]` holds
+    /// by object identity, so a bundle carrying none or several has no `env.db`
+    /// to mint and would boot with the namespace missing or arbitrary.
+    fn validate_runtime_descriptor(&self) -> Result<(), String> {
+        if self.runtime_descriptor.is_empty() {
+            return Ok(());
+        }
+        let mut primaries = 0usize;
+        for (index, entry) in self.runtime_descriptor.iter().enumerate() {
+            if !is_sha256_hex(&entry.hash) {
                 return Err(format!(
-                    "runtime_descriptor.hash {hash:?} is not a lowercase 64-char sha256 hex",
-                    hash = desc.hash
+                    "runtime_descriptor[{index}].hash {hash:?} is not a lowercase 64-char sha256 hex",
+                    hash = entry.hash
+                ));
+            }
+            if entry.label.is_empty() {
+                return Err(format!("runtime_descriptor[{index}].label is empty"));
+            }
+            if entry.primary {
+                primaries += 1;
+            }
+            let earlier = &self.runtime_descriptor[..index];
+            if earlier.iter().any(|other| other.label == entry.label) {
+                return Err(format!(
+                    "runtime_descriptor declares label {label:?} twice",
+                    label = entry.label
+                ));
+            }
+            if earlier
+                .iter()
+                .any(|other| other.database_id == entry.database_id)
+            {
+                return Err(format!(
+                    "runtime_descriptor declares database {database} twice",
+                    database = entry.database_id.as_str()
                 ));
             }
         }
-        if !self.resources.is_empty() {
-            self.validate_resources()?;
+        if primaries != 1 {
+            return Err(format!(
+                "runtime_descriptor must declare exactly one primary database, the one \
+                 `env.db` reaches (found {primaries})"
+            ));
         }
         Ok(())
     }
@@ -918,26 +978,39 @@ mod runtime_descriptor_validation_tests {
         }
     }
 
+    fn entry(label: &str, primary: bool, hash: &str) -> RuntimeDescriptorEntry {
+        RuntimeDescriptorEntry {
+            label: label.to_string(),
+            database_id: DatabaseId::mint(),
+            primary,
+            hash: hash.to_string(),
+        }
+    }
+
     #[test]
-    fn runtime_descriptor_defaults_none_and_omitted_on_wire() {
+    fn runtime_descriptor_defaults_empty_and_omitted_on_wire() {
         let m = base();
-        assert!(m.runtime_descriptor.is_none());
+        assert!(m.runtime_descriptor.is_empty());
         let json = serde_json::to_string(&m).unwrap();
         assert!(
             !json.contains("runtime_descriptor"),
-            "absent descriptor must be omitted on the wire: {json}"
+            "an app declaring no database must be omitted on the wire: {json}"
         );
-        // A manifest without `runtime_descriptor` deserializes to None.
+        // A manifest without `runtime_descriptor` deserializes to an empty set.
         let back: Manifest = serde_json::from_str(&json).unwrap();
-        assert!(back.runtime_descriptor.is_none());
+        assert!(back.runtime_descriptor.is_empty());
+        m.validate().expect("a schema-less app is valid");
     }
 
     #[test]
     fn runtime_descriptor_round_trips_byte_identical() {
         let mut m = base();
         let hash = "a".repeat(64);
-        m.runtime_descriptor = Some(RuntimeDescriptorEntry { hash: hash.clone() });
-        m.validate().expect("valid descriptor accepted");
+        m.runtime_descriptor = vec![
+            entry("main", true, &hash),
+            entry("analytics", false, &"b".repeat(64)),
+        ];
+        m.validate().expect("valid descriptor set accepted");
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("runtime_descriptor"), "descriptor must serialize: {json}");
         let back: Manifest = serde_json::from_str(&json).unwrap();
@@ -945,20 +1018,75 @@ mod runtime_descriptor_validation_tests {
             back.runtime_descriptor, m.runtime_descriptor,
             "runtime_descriptor must round-trip byte-identical"
         );
-        assert_eq!(back.runtime_descriptor.unwrap().hash, hash);
+        assert_eq!(back.runtime_descriptor[0].hash, hash);
+        assert_eq!(back.runtime_descriptor[0].label, "main");
+        assert!(back.runtime_descriptor[0].primary);
     }
 
     #[test]
     fn rejects_bad_runtime_descriptor_hash() {
         let mut m = base();
-        m.runtime_descriptor = Some(RuntimeDescriptorEntry {
-            hash: "NOTAHASH".into(),
-        });
+        m.runtime_descriptor = vec![entry("main", true, "NOTAHASH")];
         let err = m.validate().unwrap_err();
         assert!(
-            err.contains("runtime_descriptor.hash") && err.contains("sha256"),
+            err.contains("runtime_descriptor[0].hash") && err.contains("sha256"),
             "malformed descriptor hash must be rejected, got {err}"
         );
+    }
+
+    /// `env.db` is the primary and `env.db === env.databases[primary]` holds by
+    /// object identity, so a bundle carrying none or several has no `env.db` to
+    /// mint and would boot with the namespace missing or arbitrary.
+    #[test]
+    fn a_descriptor_set_must_declare_exactly_one_primary() {
+        let hash = "a".repeat(64);
+        let other = "b".repeat(64);
+        for (labels, why) in [
+            (vec![("main", false), ("analytics", false)], "none"),
+            (vec![("main", true), ("analytics", true)], "two"),
+        ] {
+            let mut m = base();
+            m.runtime_descriptor = labels
+                .iter()
+                .enumerate()
+                .map(|(index, (label, primary))| {
+                    entry(label, *primary, if index == 0 { &hash } else { &other })
+                })
+                .collect();
+            let err = m.validate().unwrap_err();
+            assert!(
+                err.contains("exactly one primary"),
+                "{why} primaries must be rejected, got {err}"
+            );
+        }
+        // The control: the same pair with ONE primary is accepted, so the two
+        // refusals are about the primary count and not about the pair.
+        let mut m = base();
+        m.runtime_descriptor = vec![entry("main", true, &hash), entry("analytics", false, &other)];
+        m.validate().expect("one primary is valid");
+    }
+
+    /// Two entries under one label, or two naming one database, would each let
+    /// a lookup answer with an arbitrary one of them.
+    #[test]
+    fn a_descriptor_set_refuses_a_repeated_label_or_database() {
+        let hash = "a".repeat(64);
+        let other = "b".repeat(64);
+
+        let mut m = base();
+        m.runtime_descriptor = vec![entry("main", true, &hash), entry("main", false, &other)];
+        let err = m.validate().unwrap_err();
+        assert!(err.contains("label \"main\" twice"), "{err}");
+
+        let mut m = base();
+        let shared = DatabaseId::mint();
+        let mut first = entry("main", true, &hash);
+        let mut second = entry("analytics", false, &other);
+        first.database_id = shared.clone();
+        second.database_id = shared;
+        m.runtime_descriptor = vec![first, second];
+        let err = m.validate().unwrap_err();
+        assert!(err.contains("database") && err.contains("twice"), "{err}");
     }
 
     /// A `[...name]` catch-all only has a meaning as the LAST segment of a

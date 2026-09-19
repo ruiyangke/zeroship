@@ -14,7 +14,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use zeroship_id::AppId;
+use zeroship_id::{AppId, DatabaseId};
 
 use serde_json::json;
 use uuid::Uuid;
@@ -117,10 +117,14 @@ async fn descriptor_survives_pack_then_ingest_byte_identical() {
     let descriptor_bytes = br#"{"version":2,"collections":{"users":{"fields":{"id":{"type":"id","idPrefix":"usr"},"email":{"type":"string"}},"options":{"softDelete":false,"versioning":false,"strictness":"strict"},"indexes":[]}}}"#.to_vec();
     let descriptor_hash = sha256_hex(&descriptor_bytes);
 
+    let database_id = DatabaseId::mint();
     let mut manifest = base_manifest();
-    manifest.runtime_descriptor = Some(RuntimeDescriptorEntry {
+    manifest.runtime_descriptor = vec![RuntimeDescriptorEntry {
+        label: "main".into(),
+        database_id: database_id.clone(),
+        primary: true,
         hash: descriptor_hash.clone(),
-    });
+    }];
 
     let archive = pack(
         &manifest,
@@ -139,10 +143,13 @@ async fn descriptor_survives_pack_then_ingest_byte_identical() {
     let stored: Manifest = serde_json::from_str(&success.manifest_json).unwrap();
     assert_eq!(
         stored.runtime_descriptor,
-        Some(RuntimeDescriptorEntry {
-            hash: descriptor_hash.clone()
-        }),
-        "ingest must round-trip the runtime_descriptor entry"
+        vec![RuntimeDescriptorEntry {
+            label: "main".into(),
+            database_id,
+            primary: true,
+            hash: descriptor_hash.clone(),
+        }],
+        "ingest must round-trip the runtime_descriptor entry, label and database included"
     );
 
     // And the descriptor blob is retrievable byte-identical from the store.
@@ -181,11 +188,11 @@ async fn workflow_declarations_survive_pack_then_ingest() {
 }
 
 #[compio::test]
-async fn absent_descriptor_ingests_to_none() {
-    // No descriptor: pack + ingest must succeed with the slot left None (an app
-    // may ship no schema).
+async fn absent_descriptor_ingests_to_an_empty_set() {
+    // No descriptor: pack + ingest must succeed with the slot left empty (an
+    // app may declare no database).
     let manifest = base_manifest();
-    assert!(manifest.runtime_descriptor.is_none());
+    assert!(manifest.runtime_descriptor.is_empty());
 
     let archive = pack(&manifest, &[]);
 
@@ -198,8 +205,8 @@ async fn absent_descriptor_ingests_to_none() {
         .expect("ingest must succeed with no descriptor");
     let stored: Manifest = serde_json::from_str(&success.manifest_json).unwrap();
     assert!(
-        stored.runtime_descriptor.is_none(),
-        "absent descriptor must remain None after ingest"
+        stored.runtime_descriptor.is_empty(),
+        "an absent descriptor set must remain empty after ingest"
     );
 }
 
@@ -248,9 +255,12 @@ async fn descriptor_blob_missing_from_tar_is_rejected() {
     // missing-blob assertion, not silently ignored.
     let descriptor_hash = "9".repeat(64);
     let mut manifest = base_manifest();
-    manifest.runtime_descriptor = Some(RuntimeDescriptorEntry {
+    manifest.runtime_descriptor = vec![RuntimeDescriptorEntry {
+        label: "main".into(),
+        database_id: DatabaseId::mint(),
+        primary: true,
         hash: descriptor_hash.clone(),
-    });
+    }];
 
     let archive = pack(&manifest, &[]); // no blob staged
 

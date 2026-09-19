@@ -27,14 +27,27 @@ by the CLI and by the build, never by the runtime and never packed into a
   "control": "https://control.zeroship.ai",
   "runtime_date": "2026-08-14",
   "build": { "mode": "full", "dist": "dist", "output": "dist/app.zship" },
-  "migrations": { "dir": "migrations", "out": "generated/zeroship" }
+  "databases": {
+    "main": {
+      "id": "dbs_03evr3oqx1200yyd6zj2cebfw",
+      "migrations": "migrations",
+      "out": "generated/zeroship"
+    }
+  },
+  "apps": {
+    "app": { "databases": ["main"], "primary": "main" }
+  }
 }
 ```
 
-`name`, `control`, `runtime_date`, `build` and `migrations` are required at the
-root; inside `build`, `mode`, `dist` and `output` are; inside `migrations`, `dir`
-and `out` are. Optional keys are `app` (the deploy target's app id, which the
-first `deploy` may write back), `secrets` (secret NAMES only, never values),
+`name`, `control`, `runtime_date`, `build`, `databases` and `apps` are required
+at the root; inside `build`, `mode`, `dist` and `output` are; inside a database
+entry, `id`, `migrations` and `out` are; inside an app entry, `databases` is.
+The keys of `databases` and `apps` are LOCAL LABELS: they name an entry in this
+file, the CLI dereferences one to an id before any request, and a label never
+travels as an identifier. Optional keys are an app's `app` (its id, which the
+first `deploy` may write back) and `primary` (required once it uses a
+database), `secrets` (secret NAMES only, never values),
 `environments` (named targets selected with `--env=`), and `build.serverEntry`.
 Unknown keys are refused. The full contract — defaults, patterns, environments,
 the writeback and precedence — is in [`project-config.md`](project-config.md);
@@ -95,8 +108,9 @@ The artifact path, app and control plane come from `zeroship.jsonc`, and each
 command prints what it resolved and from where before it acts. Neither command
 needs a target argument.
 
-On the first deploy the file has no `app` key. `deploy` falls back to the project
-`name`, creates that app, and writes its id back into `zeroship.jsonc`:
+On the first deploy the selected `apps` entry has no `app` id. `deploy` falls
+back to the workspace `name`, creates that app, and writes its id back into
+that entry in `zeroship.jsonc`:
 
 ```
 created app my-app (app_034klb07lrb9jgma6imvmx000)
@@ -108,10 +122,10 @@ an app, `dep_` a deployment, `dcm_` a deploy command, `org_` an organization,
 `prj_` a project, `ivt_` an organization invitation, `usr_` a user. Each is an
 opaque value; pass it back unchanged.
 
-Only `deploy` takes the `name` fallback. `migrate`, `secret` and `var` require an
-app id, which is why `deploy` runs first. The writeback and its limits — an
-explicit `app`, an `--app`, or an `--env=` deploy is never written — are in
-[`project-config.md`](project-config.md).
+Only `deploy` takes the `name` fallback. `migrate`, `secret` and `var` require
+an app id, which is why `deploy` runs first. The writeback and its limits — an
+entry that already carries an id, an `--app-name`, or an `--env=` deploy is
+never written — are in [`project-config.md`](project-config.md).
 
 **Order matters for an app with a database.** `deploy` ships code and never
 touches the database; `migrate` creates the schema, its tables, and the runtime
@@ -125,15 +139,20 @@ schema, then `deploy` again goes live. The refusal and its remedy are in
 Uploads a `.zship` to the control plane.
 
 ```
-zeroship deploy [<path-to-.zship>] [--app=<id>] [--app-name=<name>]
+zeroship deploy [<path-to-.zship>] [--app=<label>] [--app-name=<name>]
                 [--control=URL] [--token=<token>] [--no-create]
                 [--command-id=<id>] [--config=PATH] [--env=NAME]
 ```
 
 - **The path** is optional. With no positional it is `build.output` from
   `zeroship.jsonc`; with no file at all, the path is required.
-- **`--app=<id>`** addresses the app by its `app_...` identity. An id that
-  resolves to nothing is an error: deploy never creates an app from an id.
+- **`--app=<label>`** names one of the `apps` entries the file declares, and
+  the id comes from the file — so a label never travels as an identifier and a
+  typo lists the labels that exist. A workspace declaring one app implies it;
+  one declaring several requires the flag. With NO file there are no labels, so
+  the same flag is an `app_...` id; which case you are in is decided by whether
+  there is a file, never by inspecting the value. An id that resolves to
+  nothing is an error: deploy never creates an app from an id.
 - **`--app-name=<name>`** addresses the app by its routing label (the hostname
   subdomain). A name that matches nothing is created on first deploy, unless
   `--no-create` is given.
@@ -143,7 +162,8 @@ zeroship deploy [<path-to-.zship>] [--app=<id>] [--app-name=<name>]
 - **`--command-id=<dcm_...>`** resumes a deploy whose outcome was not reported.
   Each invocation otherwise mints a new command id and prints it.
 - **`--env=<name>`** selects an `environments` entry, which supplies that
-  target's `app` and `control` (see [`project-config.md`](project-config.md)).
+  target's app ids, database ids and `control` (see
+  [`project-config.md`](project-config.md)).
 
 `deploy` checks the app's declared secret names (the `secrets` array in
 `zeroship.jsonc`) against what the app has configured and warns once for each
@@ -175,13 +195,18 @@ the app is restored.
 Applies the app's committed migrations to its deployed database.
 
 ```
-zeroship migrate [<path-to-migrations.ir.json>] [--app=<id>] [--app-name=<name>]
+zeroship migrate [<path-to-migrations.ir.json>] [--app=<label>] [--database=<label>]
+                 [--app-name=<name>]
                  [--control=URL] [--token=<token>] [--config=PATH] [--env=NAME] [--yes]
 ```
 
 - **The path** is optional. With no positional it is
-  `<migrations.out>/migrations.ir.json` from `zeroship.jsonc`.
-- **`--app`** takes the app's id; **`--app-name`** its routing label. Unlike
+  `<out>/migrations.ir.json` for the selected database, from `zeroship.jsonc`.
+- **`--database`** names one of the app's own database labels; with none
+  passed it is the app's primary. The migration service addresses the app, so
+  a non-primary label is refused rather than applied to the wrong schema.
+- **`--app`** names one of the file's `apps` labels (an app id when there is
+  no file); **`--app-name`** its routing label. Unlike
   deploy, migrate never creates an app: a name that matches nothing fails with
   `app <name> not found; zeroship migrate never creates an app - deploy it
   first, or pass its id with --app=`.
@@ -197,7 +222,7 @@ migration id.
 ## `zeroship secret` and `zeroship var`
 
 Both commands manage per-app configuration. `secret` values are encrypted at
-rest; `var` values are plaintext. Both require `--app=<id>` (or an `app` in
+rest; `var` values are plaintext. Both require `--app` (or a sole app entry in
 `zeroship.jsonc`); neither accepts a name. In your app, `env` is the runtime
 object exposing these values (`env.KEY`), `env.db` is its managed database, and
 `process.env` is the Node-style environment any bundled npm dependency can read.

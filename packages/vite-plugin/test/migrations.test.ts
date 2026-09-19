@@ -79,17 +79,23 @@ describe("op.* runtime schema descriptor bundling", () => {
         silent: true,
         builtAt: "2026-06-24T00:00:00Z",
         userHasDefaultFetch: false,
-        migrations: { dir: "migrations", genTypesOut: "generated/zeroship" },
+        databases: [{
+          label: "main",
+          id: "dbs_03evr3oqx1200yyd6zj2cebfw",
+          primary: true,
+          migrations: "migrations",
+          out: "generated/zeroship",
+        }],
       });
 
       assert.ok(
         res.manifest.runtime_descriptor,
         "manifest.runtime_descriptor must be set when schema.runtime.json exists"
       );
-      assert.equal(
-        res.manifest.runtime_descriptor!.hash,
-        expectHash,
-        "the descriptor entry hash must equal the sha256 of the on-disk bytes"
+      assert.deepEqual(
+        res.manifest.runtime_descriptor!.map(e => [e.label, e.database_id, e.primary, e.hash]),
+        [["main", "dbs_03evr3oqx1200yyd6zj2cebfw", true, expectHash]],
+        "the entry must name the database and carry the sha256 of the on-disk bytes"
       );
     } finally {
       await fx.cleanup();
@@ -116,7 +122,13 @@ describe("op.* runtime schema descriptor bundling", () => {
           distDir: "dist",
           silent: true,
           userHasDefaultFetch: false,
-          migrations: { dir: "migrations", genTypesOut: "generated/zeroship" },
+          databases: [{
+          label: "main",
+          id: "dbs_03evr3oqx1200yyd6zj2cebfw",
+          primary: true,
+          migrations: "migrations",
+          out: "generated/zeroship",
+        }],
         });
         if ("error" in sample) {
           await assert.rejects(pack, /runtime_descriptor collection "notes"/);
@@ -177,7 +189,13 @@ describe("op.* runtime schema descriptor bundling", () => {
           // Stated, not defaulted: the packer no longer guesses these, so a
           // test that omitted them would exercise the "caller did not ask for
           // a descriptor" arm instead of this one.
-          migrations: { dir: "migrations", genTypesOut: "generated/zeroship" },
+          databases: [{
+          label: "main",
+          id: "dbs_03evr3oqx1200yyd6zj2cebfw",
+          primary: true,
+          migrations: "migrations",
+          out: "generated/zeroship",
+        }],
         }),
         /migration source files.*schema\.runtime\.json|schema\.runtime\.json.*migration service/
       );
@@ -215,7 +233,13 @@ describe("op.* runtime schema descriptor bundling", () => {
             silent: true,
             builtAt: "2026-06-24T00:00:00Z",
             userHasDefaultFetch: false,
-            migrations: { dir: "migrations", genTypesOut: "generated/zeroship" },
+            databases: [{
+          label: "main",
+          id: "dbs_03evr3oqx1200yyd6zj2cebfw",
+          primary: true,
+          migrations: "migrations",
+          out: "generated/zeroship",
+        }],
           }),
         /runtime_descriptor.*UTF-8|schema\.runtime\.json.*UTF-8/i,
       );
@@ -241,10 +265,16 @@ describe("op.* runtime schema descriptor bundling", () => {
         silent: true,
         builtAt: "2026-06-24T00:00:00Z",
         userHasDefaultFetch: false,
-        migrations: { dir: "migrations", genTypesOut: "custom/out" },
+        databases: [{
+          label: "main",
+          id: "dbs_03evr3oqx1200yyd6zj2cebfw",
+          primary: true,
+          migrations: "migrations",
+          out: "custom/out",
+        }],
       });
       assert.ok(res.manifest.runtime_descriptor);
-      assert.equal(res.manifest.runtime_descriptor!.hash, sha256Hex(onDisk));
+      assert.equal(res.manifest.runtime_descriptor![0]!.hash, sha256Hex(onDisk));
     } finally {
       await fx.cleanup();
     }
@@ -252,6 +282,6 @@ describe("op.* runtime schema descriptor bundling", () => {
 });
 
 // `migrationsForEmit` is gone with the plugin options it forwarded. The build
-// now hands `emitZship` the two paths from the resolved project config
-// directly, and `ZshipOptions.migrations` REQUIRES both - so there is nothing
-// left to forward and no second place for either default to live.
+// now hands `emitZship` one entry per database from the resolved project
+// config, each REQUIRING both paths - so there is nothing left to forward and
+// no second place for either default to live.

@@ -649,6 +649,26 @@ async function startHarness(options: {
       resolve(root, "migrations/20240617123000_notes.ts"),
       options.migrations.migrationSource,
     );
+    // A database's migration sources and its fold have NO default: the file is
+    // their one holder, so a fixture that wants the dev tier to fold anything
+    // has to declare the database.
+    await fs.writeFile(
+      resolve(root, "zeroship.jsonc"),
+      JSON.stringify({
+        name: "dev-server-fixture",
+        control: "http://localhost:9090",
+        runtime_date: "2026-08-14",
+        build: { mode: "full", dist: "dist", output: "dist/app.zship" },
+        databases: {
+          main: {
+            id: "dbs_03evr3oqx1200yyd6zj2cebfw",
+            migrations: "migrations",
+            out: "generated/zeroship",
+          },
+        },
+        apps: { app: { databases: ["main"], primary: "main" } },
+      }),
+    );
   }
   await fs.writeFile(
     childScriptPath,
@@ -725,9 +745,10 @@ async function startHarness(options: {
     discoveredProcedures: [],
   };
   // The build shape now comes from the project config, not from plugin
-  // options. There is no zeroship.jsonc in these fixtures, so the holder
-  // serves schema defaults and the `config` escape hatch supplies the entry -
-  // which is the same path a creator with a computed value takes.
+  // options. A fixture with no migrations writes no zeroship.jsonc, so the
+  // holder serves schema defaults; the `config` escape hatch supplies the
+  // entry either way, which is the same path a creator with a computed value
+  // takes.
   const plugins = devServerPlugin(
     { devServerPort: options.devServerPort ?? 3901 },
     state,

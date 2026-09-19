@@ -28,6 +28,13 @@ pub use generated::CONFIG_FILENAME;
 
 pub const DEFAULT_CONTROL_URL: &str = "http://localhost:9090";
 
+/// Printed with every environment-shape refusal, because the rule is the point
+/// and the missing key is only how it was broken.
+const NON_INHERITABLE_NOTE: &str =
+    "`apps`, `control` and `databases` are NON-INHERITABLE, and each map must cover every \
+     label the root declares. An environment that names a control and inherits the root app \
+     targets the wrong code; one that inherits a database id lands WRITES in the wrong data.";
+
 /// Where a resolved value came from. Printed before every mutating call.
 ///
 /// A config file that silently supplies a control URL is strictly more
@@ -47,6 +54,11 @@ pub enum Source {
     /// a first push. Named separately so the provenance line says so rather
     /// than claiming the file set `app`.
     FileMember(&'static str),
+    /// One LABELLED entry of the file, already rendered with whatever origin
+    /// produced it: `zeroship.jsonc apps.storefront`, or the same under an
+    /// environment. The provenance line then names the entry a creator would
+    /// edit rather than the file it lives in.
+    FileLabel(String),
     /// The command's compiled fallback, reached only when there is no file.
     Fallback,
 }
@@ -61,6 +73,7 @@ impl Source {
                 format!("{CONFIG_FILENAME} environments.{name}")
             }
             Source::FileMember(member) => format!("{CONFIG_FILENAME} {member}"),
+            Source::FileLabel(rendered) => rendered.clone(),
             Source::Fallback => "built-in default".to_string(),
         }
     }
@@ -207,13 +220,8 @@ impl ProjectConfig {
             "build.output",
             Some("zship"),
         )?;
-        self.reject_unsafe_write_path(
-            &self.root,
-            "migrations",
-            "out",
-            "migrations.out",
-            None,
-        )?;
+        self.check_database_outputs()?;
+        self.check_app_wiring()?;
 
         if let Some(envs) = self.root.get("environments") {
             let envs = envs.as_object().ok_or_else(|| {
@@ -229,16 +237,10 @@ impl ProjectConfig {
                     generated::ENVIRONMENT_KNOWN_KEYS,
                     generated::ENVIRONMENT_REQUIRED_KEYS,
                 )
-                .map_err(|e| {
-                    self.err(format!(
-                        "{e}\n\
-                         `app` and `control` are NON-INHERITABLE: an environment that names a \
-                         control and inherits the root app is exactly the silent cross-targeting \
-                         this rule exists to prevent."
-                    ))
-                })?;
+                .map_err(|e| self.err(format!("{e}\n{NON_INHERITABLE_NOTE}")))?;
                 check_members(entry, &format!("environments.{name}"))
                     .map_err(|e| self.err(e))?;
+                self.check_environment_labels(name, entry)?;
                 self.reject_unsafe_write_path(
                     entry,
                     "build",
@@ -253,16 +255,156 @@ impl ProjectConfig {
                     &format!("environments.{name}.build.output"),
                     Some("zship"),
                 )?;
-                self.reject_unsafe_write_path(
-                    entry,
-                    "migrations",
-                    "out",
-                    &format!("environments.{name}.migrations.out"),
-                    None,
-                )?;
             }
         }
         Ok(())
+    }
+
+    /// Every database's gen-types output directory is a real write target, and
+    /// no two databases may share one: `env.db.ts`, `schema.runtime.json` and
+    /// `migrations.ir.json` have fixed names, so a shared directory is one
+    /// database's schema silently standing in for another's.
+    fn check_database_outputs(&self) -> Result<(), String> {
+        let mut claimed: Vec<(&str, &str)> = Vec::new();
+        for (label, entry) in self.labelled(&self.root, "databases") {
+            let out = entry
+                .get("out")
+                .and_then(Value::as_str)
+                .ok_or_else(|| self.err(format!("`databases.{label}.out` must be a string")))?;
+            self.reject_unsafe_path(out, &format!("databases.{label}.out"), None)?;
+            if let Some((other, _)) = claimed.iter().find(|(_, path)| *path == out) {
+                return Err(self.err(format!(
+                    "`databases.{label}.out` and `databases.{other}.out` are both `{out}`. \
+                     Two databases cannot share one gen-types directory: the filenames in it \
+                     are fixed, so one database's schema would overwrite the other's."
+                )));
+            }
+            claimed.push((label, out));
+        }
+        Ok(())
+    }
+
+    /// An app names database LABELS, so every one has to resolve here, and the
+    /// primary has to be one of them. Declaring a database does not grant
+    /// access to it: `zeroship db bind` does, and deploy verifies the binding.
+    fn check_app_wiring(&self) -> Result<(), String> {
+        let declared: Vec<&str> = self
+            .labelled(&self.root, "databases")
+            .map(|(label, _)| label)
+            .collect();
+        for (label, entry) in self.labelled(&self.root, "apps") {
+            let used: Vec<&str> = entry
+                .get("databases")
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    self.err(format!("`apps.{label}.databases` must be an array of labels"))
+                })?
+                .iter()
+                .filter_map(Value::as_str)
+                .collect();
+            for (index, name) in used.iter().enumerate() {
+                if !declared.contains(name) {
+                    return Err(self.err(format!(
+                        "`apps.{label}.databases` names `{name}`, which this file does not \
+                         declare under `databases` (declared: {})",
+                        join_or_none(&declared)
+                    )));
+                }
+                if used[..index].contains(name) {
+                    return Err(self.err(format!(
+                        "`apps.{label}.databases` names `{name}` twice"
+                    )));
+                }
+            }
+            match entry.get("primary").and_then(Value::as_str) {
+                Some(primary) if used.is_empty() => {
+                    return Err(self.err(format!(
+                        "`apps.{label}.primary` is `{primary}`, but `apps.{label}.databases` is \
+                         empty. An app with no database has no primary and no `env.db`."
+                    )));
+                }
+                Some(primary) if !used.contains(&primary) => {
+                    return Err(self.err(format!(
+                        "`apps.{label}.primary` is `{primary}`, which is not one of \
+                         `apps.{label}.databases` ({})",
+                        join_or_none(&used)
+                    )));
+                }
+                Some(_) => {}
+                None if used.is_empty() => {}
+                None => {
+                    return Err(self.err(format!(
+                        "`apps.{label}` uses {} but names no `primary`. The primary is \
+                         `env.db`, and `env.db === env.databases[primary]` by object identity, \
+                         so it cannot be inferred.",
+                        join_or_none(&used)
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// An environment's `apps` and `databases` must cover every label the root
+    /// declares, and no others.
+    ///
+    /// Partial coverage is the whole hazard: an environment that names a
+    /// production control and inherits a development database id lands WRITES
+    /// in the wrong place. Requiring the key rather than the whole entry is
+    /// what keeps the LABEL local - an environment overrides an id, never a
+    /// label, so the manifest and the generated client are the same artifact
+    /// across environments.
+    fn check_environment_labels(
+        &self,
+        name: &str,
+        entry: &Map<String, Value>,
+    ) -> Result<(), String> {
+        for section in ["apps", "databases"] {
+            let declared: Vec<&str> = self
+                .labelled(&self.root, section)
+                .map(|(label, _)| label)
+                .collect();
+            let overridden: Vec<&str> = self
+                .labelled(entry, section)
+                .map(|(label, _)| label)
+                .collect();
+            for label in &declared {
+                if !overridden.contains(label) {
+                    return Err(self.err(format!(
+                        "`environments.{name}.{section}` does not name `{label}`, which the \
+                         root declares.\n{NON_INHERITABLE_NOTE}"
+                    )));
+                }
+            }
+            for label in &overridden {
+                if !declared.contains(label) {
+                    return Err(self.err(format!(
+                        "`environments.{name}.{section}.{label}` names no root `{section}` \
+                         entry (declared: {}). An environment overrides the id under a label, \
+                         never the label itself.",
+                        join_or_none(&declared)
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The entries of one label map, in file order. A map the file omits is
+    /// empty here; its presence is `check_object`'s business, not this one's.
+    fn labelled<'a>(
+        &self,
+        map: &'a Map<String, Value>,
+        section: &str,
+    ) -> impl Iterator<Item = (&'a str, &'a Map<String, Value>)> {
+        map.get(section)
+            .and_then(Value::as_object)
+            .into_iter()
+            .flat_map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|(label, entry)| Some((label.as_str(), entry.as_object()?)))
+            })
     }
 
     fn reject_unsafe_write_path(
@@ -281,6 +423,18 @@ impl ProjectConfig {
         else {
             return Ok(());
         };
+        self.reject_unsafe_path(configured_path, field, existing_artifact_extension)
+    }
+
+    /// The path-safety rule itself: a configured write target may not resolve
+    /// to the project root, to an ancestor holding the config file, or over an
+    /// existing file that is not the artifact kind named.
+    fn reject_unsafe_path(
+        &self,
+        configured_path: &str,
+        field: &str,
+        existing_artifact_extension: Option<&str>,
+    ) -> Result<(), String> {
         let cwd = std::env::current_dir()
             .map_err(|e| self.err(format!("cannot read the working directory: {e}")))?;
         let lexical_root = self.project_root.clone();
@@ -413,8 +567,31 @@ impl ProjectConfig {
                     ))
                 })?;
             for (k, v) in entry {
-                match (out.get(k), v) {
-                    (Some(Value::Object(base)), Value::Object(over)) => {
+                match (k.as_str(), out.get(k), v) {
+                    // `apps` and `databases` are maps of labels, and an
+                    // environment overrides the ID under a label, never the
+                    // label and never the build-time paths beside it. So the
+                    // merge runs one level deeper here than anywhere else: a
+                    // whole-entry replace would drop `migrations`, `out`,
+                    // `databases` and `primary` on the floor.
+                    ("apps" | "databases", Some(Value::Object(base)), Value::Object(over)) => {
+                        let mut merged = base.clone();
+                        for (label, overridden) in over {
+                            let mut entry = merged
+                                .get(label)
+                                .and_then(Value::as_object)
+                                .cloned()
+                                .unwrap_or_default();
+                            if let Some(members) = overridden.as_object() {
+                                for (mk, mv) in members {
+                                    entry.insert(mk.clone(), mv.clone());
+                                }
+                            }
+                            merged.insert(label.clone(), Value::Object(entry));
+                        }
+                        out.insert(k.clone(), Value::Object(merged));
+                    }
+                    (_, Some(Value::Object(base)), Value::Object(over)) => {
                         let mut merged = base.clone();
                         for (mk, mv) in over {
                             merged.insert(mk.clone(), mv.clone());
@@ -444,23 +621,27 @@ impl ProjectConfig {
         })
     }
 
-    /// Write a new `app` value while preserving the creator's JSONC formatting.
+    /// Write one app label's `app` id while preserving the creator's JSONC
+    /// formatting.
     ///
     /// An existing value is replaced at its original byte span. A missing
     /// member is appended through the CST, which retains comments, key order,
     /// interior blank lines, trailing commas, newlines, and source text. The
     /// CST deliberately normalises extra blank lines touching the root braces.
-    pub fn write_app(&self, app_id: &AppId) -> Result<(), String> {
+    pub fn write_app_id(&self, label: &str, app_id: &AppId) -> Result<(), String> {
         let app_id = app_id.as_str();
-        let next = if let Some((start, end)) = jsonc::top_level_value_span(&self.text, "app") {
+        let parents = ["apps", label];
+        let next = if let Some((start, end)) =
+            jsonc::member_value_span(&self.text, &parents, "app")
+        {
             let mut next = String::with_capacity(self.text.len() + app_id.len());
             next.push_str(&self.text[..start]);
             next.push_str(&serde_json::to_string(app_id).map_err(|e| e.to_string())?);
             next.push_str(&self.text[end..]);
             next
         } else {
-            jsonc::append_top_level_string(&self.text, "app", app_id)
-                .map_err(|e| format!("failed to append `app`: {e}"))?
+            jsonc::append_member_string(&self.text, &parents, "app", app_id)
+                .map_err(|e| format!("failed to append `apps.{label}.app`: {e}"))?
         };
         // Re-parse before writing: an edit that produced an unreadable file
         // would be discovered by the NEXT command, in a working tree the
@@ -611,8 +792,73 @@ fn check_members(map: &Map<String, Value>, path: &str) -> Result<(), String> {
                     ));
                 }
             }
-            "app" | "control" => {
+            "control" => {
                 as_str(v, &at(k))?;
+            }
+            "databases" => {
+                let (known, required) = if path.is_empty() {
+                    (
+                        generated::DATABASE_KNOWN_KEYS,
+                        generated::DATABASE_REQUIRED_KEYS,
+                    )
+                } else {
+                    (
+                        generated::ENVIRONMENT_DATABASE_KNOWN_KEYS,
+                        generated::ENVIRONMENT_DATABASE_REQUIRED_KEYS,
+                    )
+                };
+                for (label, entry) in check_label_map(v, &at(k), "databases.*")? {
+                    let at_entry = format!("{}.{label}", at(k));
+                    check_object(entry, &at_entry, known, required)?;
+                    let id = as_str(&entry["id"], &format!("{at_entry}.id"))?;
+                    if !matches_database_id(id) {
+                        return Err(format!(
+                            "`{at_entry}.id` must match {} (got `{id}`). \
+                             `zeroship db create` prints it.",
+                            pattern_for("databases.*.id")
+                        ));
+                    }
+                    for m in ["migrations", "out"] {
+                        if let Some(x) = entry.get(m) {
+                            as_str(x, &format!("{at_entry}.{m}"))?;
+                        }
+                    }
+                }
+            }
+            "apps" => {
+                let (known, required) = if path.is_empty() {
+                    (generated::APP_KNOWN_KEYS, generated::APP_REQUIRED_KEYS)
+                } else {
+                    (
+                        generated::ENVIRONMENT_APP_KNOWN_KEYS,
+                        generated::ENVIRONMENT_APP_REQUIRED_KEYS,
+                    )
+                };
+                for (label, entry) in check_label_map(v, &at(k), "apps.*")? {
+                    let at_entry = format!("{}.{label}", at(k));
+                    check_object(entry, &at_entry, known, required)?;
+                    if let Some(app) = entry.get("app") {
+                        as_str(app, &format!("{at_entry}.app"))?;
+                    }
+                    if let Some(primary) = entry.get("primary") {
+                        as_str(primary, &format!("{at_entry}.primary"))?;
+                    }
+                    let Some(used) = entry.get("databases") else {
+                        continue;
+                    };
+                    let used = used.as_array().ok_or_else(|| {
+                        format!("`{at_entry}.databases` must be an array of database LABELS")
+                    })?;
+                    for item in used {
+                        let name = as_str(item, &format!("{at_entry}.databases"))?;
+                        if !matches_label(name) {
+                            return Err(format!(
+                                "`{at_entry}.databases` entry `{name}` must match {}",
+                                label_pattern_for("databases.*")
+                            ));
+                        }
+                    }
+                }
             }
             "protected" if !v.is_boolean() => {
                 return Err(format!("`{}` must be a boolean", at(k)));
@@ -660,22 +906,6 @@ fn check_members(map: &Map<String, Value>, path: &str) -> Result<(), String> {
                     }
                 }
             }
-            "migrations" => {
-                let inner = v
-                    .as_object()
-                    .ok_or_else(|| format!("`{}` must be an object", at(k)))?;
-                let required: &[&str] = if path.is_empty() {
-                    generated::MIGRATIONS_REQUIRED_KEYS
-                } else {
-                    &[]
-                };
-                check_object(inner, &at(k), generated::MIGRATIONS_KNOWN_KEYS, required)?;
-                for m in ["dir", "out"] {
-                    if let Some(x) = inner.get(m) {
-                        as_str(x, &format!("{}.{m}", at(k)))?;
-                    }
-                }
-            }
             "$schema" | "environments" => {}
             _ => {}
         }
@@ -686,6 +916,41 @@ fn check_members(map: &Map<String, Value>, path: &str) -> Result<(), String> {
 fn as_str<'a>(v: &'a Value, at: &str) -> Result<&'a str, String> {
     v.as_str()
         .ok_or_else(|| format!("`{at}` must be a string"))
+}
+
+/// Read one label map, checking every key against the rule the schema states.
+fn check_label_map<'a>(
+    value: &'a Value,
+    at: &str,
+    map_path: &str,
+) -> Result<Vec<(&'a str, &'a Map<String, Value>)>, String> {
+    let entries = value
+        .as_object()
+        .ok_or_else(|| format!("`{at}` must be an object keyed by LOCAL LABELS"))?;
+    entries
+        .iter()
+        .map(|(label, entry)| {
+            if !matches_label(label) {
+                return Err(format!(
+                    "`{at}.{label}` is not a usable label: it must match {}. A label is a \
+                     member name on `env.databases` as well as a key here.",
+                    label_pattern_for(map_path)
+                ));
+            }
+            let entry = entry
+                .as_object()
+                .ok_or_else(|| format!("`{at}.{label}` must be an object"))?;
+            Ok((label.as_str(), entry))
+        })
+        .collect()
+}
+
+fn join_or_none(names: &[&str]) -> String {
+    if names.is_empty() {
+        "none".to_string()
+    } else {
+        names.join(", ")
+    }
 }
 
 fn pattern_for(path: &str) -> &'static str {
@@ -722,6 +987,33 @@ fn matches_iso_date(s: &str) -> bool {
         && [0, 1, 2, 3, 5, 6, 8, 9]
             .iter()
             .all(|i| b[*i].is_ascii_digit())
+}
+
+fn label_pattern_for(path: &str) -> &'static str {
+    generated::LABEL_PATTERNS
+        .iter()
+        .find(|(p, _)| *p == path)
+        .map(|(_, rx)| *rx)
+        .unwrap_or("<no label pattern in schema>")
+}
+
+fn matches_label(s: &str) -> bool {
+    // ^[a-z][a-z0-9_]{0,31}$
+    let b = s.as_bytes();
+    (1..=32).contains(&b.len())
+        && b[0].is_ascii_lowercase()
+        && b.iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_')
+}
+
+fn matches_database_id(s: &str) -> bool {
+    // ^dbs_[0-9a-z]{25}$
+    let b = s.as_bytes();
+    b.len() == 29
+        && s.starts_with("dbs_")
+        && b[4..]
+            .iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
 }
 
 fn matches_secret_name(s: &str) -> bool {
@@ -786,14 +1078,60 @@ impl Resolved {
         }))
     }
 
-    /// Resolve an optional path read from the config against its directory.
-    pub fn resolve_path(&self, dotted: &str) -> Option<PathBuf> {
-        let configured = Path::new(self.str(dotted)?);
-        Some(lexical_normalize(&if configured.is_absolute() {
-            configured.to_path_buf()
-        } else {
-            self.project_root.join(configured)
-        }))
+    /// The app labels this file declares, in the order the file states them.
+    #[must_use]
+    pub fn app_labels(&self) -> Vec<&str> {
+        self.labels("apps")
+    }
+
+    /// The database labels this file declares, in the order the file states them.
+    #[must_use]
+    pub fn database_labels(&self) -> Vec<&str> {
+        self.labels("databases")
+    }
+
+    fn labels(&self, section: &str) -> Vec<&str> {
+        self.value
+            .get(section)
+            .and_then(Value::as_object)
+            .map(|entries| entries.keys().map(String::as_str).collect())
+            .unwrap_or_default()
+    }
+
+    /// Dereference a database label to its `dbs_` id.
+    ///
+    /// This is the whole reason a label is local: the CLI resolves it HERE,
+    /// before any request, so nothing on a wire ever carries a name two
+    /// workspaces could both choose.
+    pub fn database_id(&self, label: &str) -> Result<&str, String> {
+        self.str(&format!("databases.{label}.id")).ok_or_else(|| {
+            format!(
+                "{} declares no `databases.{label}` (declared: {})",
+                self.path.display(),
+                join_or_none(&self.database_labels())
+            )
+        })
+    }
+
+    /// The database labels one app uses, in declaration order.
+    #[must_use]
+    pub fn app_databases(&self, label: &str) -> Vec<&str> {
+        self.get(&format!("apps.{label}.databases"))
+            .and_then(Value::as_array)
+            .map(|items| items.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default()
+    }
+
+    /// The label of one app's primary database, which is its `env.db`.
+    #[must_use]
+    pub fn app_primary(&self, label: &str) -> Option<&str> {
+        self.str(&format!("apps.{label}.primary"))
+    }
+
+    /// Resolve one database's `migrations` or `out` path against the config's
+    /// own directory.
+    pub fn database_path(&self, label: &str, member: &str) -> Result<PathBuf, String> {
+        self.require_path(&format!("databases.{label}.{member}"))
     }
 
     pub fn is_protected(&self) -> bool {
@@ -893,6 +1231,119 @@ pub fn resolve_value(
             "{flag}=<value> is required. There is no {CONFIG_FILENAME} in this directory to \
              read it from - create one (see docs/reference/project-config.md) or pass the flag."
         )),
+    }
+}
+
+/// Which declared app a command targets, and where its id came from.
+#[derive(Debug, Clone)]
+pub struct AppSelection {
+    /// The `apps` label, when a config file declares one. `None` only when
+    /// there is no file, because labels exist nowhere else.
+    pub label: Option<String>,
+    /// The app id, when one is known. `None` on a fresh project whose entry
+    /// carries no id yet, which is what `zeroship deploy` auto-creates into.
+    pub id: Option<Sourced>,
+}
+
+/// Choose the app a command targets.
+///
+/// **With a config file present `--app` names a LABEL**, because the file is
+/// the namespace the CLI resolves in: the id comes from the file, so a label
+/// never travels as an identifier and a typo names the labels that exist. With
+/// NO file there are no labels, so `--app` is an app id exactly as before. The
+/// two cases are told apart by whether there is a file, never by inspecting
+/// the value.
+pub fn select_app(args: &[String], cfg: Option<&Resolved>) -> Result<AppSelection, String> {
+    let flag = crate::parse_flag(args, "--app");
+    let Some(cfg) = cfg else {
+        return match flag {
+            Some(value) => Ok(AppSelection {
+                label: None,
+                id: Some(Sourced {
+                    value,
+                    source: Source::Flag("--app"),
+                }),
+            }),
+            None => Err(format!(
+                "--app=<id> is required. There is no {CONFIG_FILENAME} in this directory to \
+                 read it from - create one (see docs/reference/project-config.md) or pass the \
+                 flag."
+            )),
+        };
+    };
+
+    let declared = cfg.app_labels();
+    let label = match flag {
+        Some(named) => {
+            if !declared.contains(&named.as_str()) {
+                return Err(format!(
+                    "--app={named} names no app in {} (declared: {}).\n\
+                     With a {CONFIG_FILENAME} present `--app` names one of its labels: the id \
+                     comes from the file, so a label never travels as an identifier.",
+                    cfg.path.display(),
+                    join_or_none(&declared)
+                ));
+            }
+            named
+        }
+        None => match declared.as_slice() {
+            [only] => (*only).to_string(),
+            [] => {
+                return Err(format!(
+                    "{} declares no apps. Add one under `apps`.",
+                    cfg.path.display()
+                ))
+            }
+            many => {
+                return Err(format!(
+                    "{} declares more than one app ({}). Pass --app=<label> to say which.",
+                    cfg.path.display(),
+                    many.join(", ")
+                ))
+            }
+        },
+    };
+
+    let id = cfg
+        .str(&format!("apps.{label}.app"))
+        .map(|value| Sourced {
+            value: value.to_string(),
+            source: Source::FileLabel(format!("{} apps.{label}", cfg.origin.describe())),
+        });
+    Ok(AppSelection {
+        label: Some(label),
+        id,
+    })
+}
+
+/// Choose which of an app's databases a command addresses.
+///
+/// `--database=<label>` names one of the labels the app declares; with none
+/// passed it is the app's primary, which is the database `env.db` reaches.
+pub fn select_database(
+    args: &[String],
+    cfg: &Resolved,
+    app_label: &str,
+) -> Result<String, String> {
+    let used = cfg.app_databases(app_label);
+    match crate::parse_flag(args, "--database") {
+        Some(named) => {
+            if !used.contains(&named.as_str()) {
+                return Err(format!(
+                    "--database={named} is not one of the databases `apps.{app_label}` uses \
+                     ({}) in {}.",
+                    join_or_none(&used),
+                    cfg.path.display()
+                ));
+            }
+            Ok(named)
+        }
+        None => cfg.app_primary(app_label).map(str::to_string).ok_or_else(|| {
+            format!(
+                "`apps.{app_label}` uses no database, so there is nothing to address in {}.",
+                cfg.path.display()
+            )
+        }),
     }
 }
 

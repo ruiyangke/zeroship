@@ -8,7 +8,8 @@
 //! - They do not exercise `locate` against a real `ZEROSHIP_CONFIG`, because
 //!   setting process environment in a threaded test runner races every other
 //!   test in the binary. Process-level CLI tests own that environment boundary.
-//! - `write_app` is tested on temp files, including a real disk edit after load.
+//! - `write_app_id` is tested on temp files, including a real disk edit after
+//!   load.
 
 use super::*;
 
@@ -28,7 +29,14 @@ fn committed_cross_tool_fixture_resolves_in_rust() {
         .expect("committed cross-tool fixture must parse");
     let root = config.resolve(None).expect("resolve fixture root");
     assert_eq!(root.str("name"), Some("config-fixture"));
-    assert_eq!(root.str("migrations.out"), Some("generated/zeroship"));
+    assert_eq!(root.database_labels(), vec!["main", "analytics"]);
+    assert_eq!(root.app_labels(), vec!["storefront", "admin"]);
+    assert_eq!(
+        root.database_id("main").expect("dereference main"),
+        "dbs_03evr3oqx1200yyd6zj2cebfw"
+    );
+    assert_eq!(root.app_databases("storefront"), vec!["main", "analytics"]);
+    assert_eq!(root.app_primary("storefront"), Some("main"));
 
     let staging = config
         .resolve(Some("staging"))
@@ -37,7 +45,18 @@ fn committed_cross_tool_fixture_resolves_in_rust() {
         staging.str("control"),
         Some("https://control.staging.zeroship.ai")
     );
-    assert_eq!(staging.str("migrations.out"), Some("generated/staging"));
+    // The environment overrides the ID under each label and NOTHING else: the
+    // label, the build-time paths and the app wiring are the same artifact
+    // across environments.
+    assert_eq!(
+        staging.database_id("main").expect("dereference staging main"),
+        "dbs_03evr3oqx1200uzh8k6gycpgg"
+    );
+    assert_eq!(
+        staging.str("databases.main.out"),
+        Some("generated/zeroship/main")
+    );
+    assert_eq!(staging.app_databases("storefront"), vec!["main", "analytics"]);
     assert!(staging.is_protected());
 }
 
@@ -45,61 +64,133 @@ const FULL: &str = r#"{
   // A comment, which is the whole reason the format is JSONC.
   "$schema": "https://zeroship.ai/schema/project-v1.json",
   "name": "demo-app",
-  "app": "app_034klb07lrb9jgma6imvmx000",
   "control": "https://control.zeroship.ai",
   "runtime_date": "2026-08-14",
   "build": { "mode": "full", "dist": "dist", "output": "dist/app.zship" },
-  "migrations": { "dir": "migrations", "out": "generated/zeroship" },
+  "databases": {
+    "main": { "id": "dbs_03evr3oqx1200yyd6zj2cebfw", "migrations": "migrations", "out": "generated/zeroship" }
+  },
+  "apps": {
+    "storefront": { "app": "app_034klb07lrb9jgma6imvmx000", "databases": ["main"], "primary": "main" }
+  },
   "secrets": ["STRIPE_SECRET_KEY"],
   "environments": {
     "staging": {
-      "app": "app_034klb07lrb9jgma6imvmx001",
       "control": "https://control.staging.zeroship.ai",
-      "protected": true,
-      "migrations": { "out": "generated/staging" }
+      "apps": { "storefront": { "app": "app_034klb07lrb9jgma6imvmx001" } },
+      "databases": { "main": { "id": "dbs_03evr3oqx1200uzh8k6gycpgg" } },
+      "protected": true
     }
   }
 }"#;
+
+/// The smallest file that satisfies the schema: no app, no database, no
+/// optional key. Several checks need a valid document whose shape they are not
+/// about.
+const BARE: &str = r#"{"name":"a","control":"u","runtime_date":"2026-08-14",
+  "build":{"mode":"full","dist":"d","output":"o"},"databases":{},"apps":{}}"#;
 
 /// The root resolution reads the root, and `environments` never leaks into it.
 #[test]
 fn root_resolution_drops_the_environments_block() {
     let r = cfg(FULL).resolve(None).expect("resolve root");
-    assert_eq!(r.str("app"), Some("app_034klb07lrb9jgma6imvmx000"));
+    assert_eq!(r.str("apps.storefront.app"), Some("app_034klb07lrb9jgma6imvmx000"));
     assert_eq!(r.str("control"), Some("https://control.zeroship.ai"));
-    assert_eq!(r.str("migrations.out"), Some("generated/zeroship"));
+    assert_eq!(r.str("databases.main.out"), Some("generated/zeroship"));
     assert!(r.get("environments").is_none(), "environments must not survive resolution");
     assert!(r.get("$schema").is_none(), "$schema is an editor hint, not config");
     assert_eq!(r.origin, Source::File);
 }
 
-/// An environment's `app` and `control` REPLACE the root's, and its partial
-/// `migrations` merges member by member rather than wiping the block.
+/// An environment's `control` REPLACES the root's, and its label maps merge
+/// ENTRY BY ENTRY and MEMBER BY MEMBER rather than wiping the entry: it
+/// overrides the id under a label and never the paths beside it.
 #[test]
 fn environment_overlay_replaces_target_and_merges_the_rest() {
     let r = cfg(FULL).resolve(Some("staging")).expect("resolve staging");
-    assert_eq!(r.str("app"), Some("app_034klb07lrb9jgma6imvmx001"));
+    assert_eq!(r.str("apps.storefront.app"), Some("app_034klb07lrb9jgma6imvmx001"));
     assert_eq!(r.str("control"), Some("https://control.staging.zeroship.ai"));
-    assert_eq!(r.str("migrations.out"), Some("generated/staging"));
-    // NOT stated by the environment, so inherited.
-    assert_eq!(r.str("migrations.dir"), Some("migrations"));
+    assert_eq!(r.database_id("main").unwrap(), "dbs_03evr3oqx1200uzh8k6gycpgg");
+    // NOT stated by the environment, so carried through from the root entry.
+    assert_eq!(r.str("databases.main.migrations"), Some("migrations"));
+    assert_eq!(r.str("databases.main.out"), Some("generated/zeroship"));
+    assert_eq!(r.app_databases("storefront"), vec!["main"]);
+    assert_eq!(r.app_primary("storefront"), Some("main"));
     assert!(r.is_protected());
     assert_eq!(r.origin, Source::FileEnvironment("staging".into()));
 }
 
-/// An environment that names only a `control` is REFUSED. Inheriting the root
-/// `app` there is precisely the silent cross-targeting the rule exists to
-/// prevent: staging's control plane, production's app id.
+/// An environment that omits any of `apps`, `control` or `databases` is
+/// REFUSED. Inheriting the root `app` there is the silent cross-targeting the
+/// rule exists to prevent - staging's control plane, production's app id - and
+/// inheriting a database id is the same mistake one level worse, because it
+/// lands WRITES in the wrong data rather than the wrong code.
 #[test]
-fn an_environment_without_both_app_and_control_is_refused() {
-    let text = FULL.replace(
-        "\"app\": \"app_034klb07lrb9jgma6imvmx001\",\n      ",
-        "",
+fn an_environment_missing_any_of_the_three_non_inheritable_keys_is_refused() {
+    for (removed, fragment) in [
+        (
+            "\"apps\": { \"storefront\": { \"app\": \"app_034klb07lrb9jgma6imvmx001\" } },\n      ",
+            "environments.staging.apps",
+        ),
+        (
+            "\"databases\": { \"main\": { \"id\": \"dbs_03evr3oqx1200uzh8k6gycpgg\" } },\n      ",
+            "environments.staging.databases",
+        ),
+        (
+            "\"control\": \"https://control.staging.zeroship.ai\",\n      ",
+            "environments.staging.control",
+        ),
+    ] {
+        let text = FULL.replace(removed, "");
+        assert_ne!(text, FULL, "the fixture must actually change for {fragment}");
+        let err = ProjectConfig::parse(PathBuf::from("zeroship.jsonc"), text)
+            .expect_err("a half-specified environment must not parse");
+        assert!(err.contains(fragment), "{err}");
+        assert!(err.contains("NON-INHERITABLE"), "{err}");
+    }
+    // The control: the untouched fixture parses, so the three refusals above
+    // are about the removal and not about the fixture.
+    cfg(FULL);
+}
+
+/// An environment map that covers only SOME of the root's labels is refused.
+/// Partial coverage is the same cross-target as an absent map, hiding behind a
+/// key that is present.
+#[test]
+fn an_environment_that_leaves_a_label_out_of_a_map_is_refused() {
+    let two = FULL.replace(
+        "\"main\": { \"id\": \"dbs_03evr3oqx1200yyd6zj2cebfw\", \"migrations\": \"migrations\", \"out\": \"generated/zeroship\" }",
+        "\"main\": { \"id\": \"dbs_03evr3oqx1200yyd6zj2cebfw\", \"migrations\": \"migrations\", \"out\": \"generated/zeroship\" },\n    \"events\": { \"id\": \"dbs_03evr3oqx1200qyvgmdnjrsla\", \"migrations\": \"migrations/events\", \"out\": \"generated/events\" }",
     );
-    let err = ProjectConfig::parse(PathBuf::from("zeroship.jsonc"), text)
-        .expect_err("a half-specified environment must not parse");
-    assert!(err.contains("environments.staging.app"), "{err}");
+    assert_ne!(two, FULL, "the second database must actually be added");
+    let err = ProjectConfig::parse(PathBuf::from("zeroship.jsonc"), two.clone())
+        .expect_err("an environment that names one of two databases must not parse");
+    assert!(err.contains("does not name `events`"), "{err}");
     assert!(err.contains("NON-INHERITABLE"), "{err}");
+
+    // Its control: with the environment covering BOTH labels the same file
+    // parses, so the refusal is about coverage rather than about the second
+    // database existing.
+    let covered = two.replace(
+        "\"databases\": { \"main\": { \"id\": \"dbs_03evr3oqx1200uzh8k6gycpgg\" } }",
+        "\"databases\": { \"main\": { \"id\": \"dbs_03evr3oqx1200uzh8k6gycpgg\" }, \"events\": { \"id\": \"dbs_03evr3oqx12012zcpsh30ivwy\" } }",
+    );
+    cfg(&covered);
+}
+
+/// An environment naming a label the root does not declare is refused too: an
+/// environment overrides the id under a label, never the label itself.
+#[test]
+fn an_environment_naming_an_undeclared_label_is_refused() {
+    let text = FULL.replace(
+        "\"databases\": { \"main\": { \"id\": \"dbs_03evr3oqx1200uzh8k6gycpgg\" } }",
+        "\"databases\": { \"main\": { \"id\": \"dbs_03evr3oqx1200uzh8k6gycpgg\" }, \"typo\": { \"id\": \"dbs_03evr3oqx12012zcpsh30ivwy\" } }",
+    );
+    assert_ne!(text, FULL, "the stray label must actually be added");
+    let err = ProjectConfig::parse(PathBuf::from("zeroship.jsonc"), text)
+        .expect_err("an environment label with no root entry must not parse");
+    assert!(err.contains("environments.staging.databases.typo"), "{err}");
+    assert!(err.contains("never the label itself"), "{err}");
 }
 
 /// Naming an environment that does not exist lists the ones that do, rather
@@ -119,11 +210,11 @@ fn an_unknown_environment_is_an_error_naming_the_known_ones() {
 /// value. This is the test that would fail if somebody added a fallback.
 #[test]
 fn an_absent_cross_tool_key_errors_naming_it_rather_than_defaulting() {
-    let text = FULL.replace("\"out\": \"generated/zeroship\"", "\"out\": \"x\"");
-    let text = text.replace("\"dir\": \"migrations\", ", "");
+    let text = FULL.replace("\"migrations\": \"migrations\", ", "");
+    assert_ne!(text, FULL, "the key must actually be removed");
     let c = ProjectConfig::parse(PathBuf::from("zeroship.jsonc"), text)
-        .expect_err("migrations.dir is required by the schema");
-    assert!(c.contains("migrations.dir"), "{c}");
+        .expect_err("databases.main.migrations is required by the schema");
+    assert!(c.contains("databases.main.migrations"), "{c}");
 
     // And the same shape one level down: a key the schema does not require but
     // the CLI reads.
@@ -158,10 +249,9 @@ fn unsafe_cli_read_defaults_do_not_reach_rust() {
     );
 
     // A file that omits each of them in turn. `require` must refuse.
-    let bare = r#"{"name":"a","control":"u","runtime_date":"2026-08-14","build":{"mode":"full","dist":"d","output":"o"},"migrations":{"dir":"m","out":"g"}}"#;
-    let r = cfg(bare).resolve(None).unwrap();
+    // Present in the full fixture, so each resolves...
+    let r = cfg(FULL).resolve(None).unwrap();
     for field in &stripped {
-        // Present in this fixture, so it resolves...
         assert!(r.require(field).is_ok(), "{field} should resolve here");
     }
     // ...and absent, it errors rather than producing the schema default.
@@ -201,8 +291,8 @@ fn a_foreign_schema_id_is_refused() {
 #[test]
 fn a_secret_shaped_key_is_refused_with_the_place_it_belongs() {
     for text in [
-        r#"{"name":"a","control":"u","runtime_date":"2026-08-14","password":"hunter2","build":{"mode":"full","dist":"d","output":"o"},"migrations":{"dir":"m","out":"g"}}"#,
-        r#"{"name":"a","control":"u","runtime_date":"2026-08-14","build":{"mode":"full","dist":"d","output":"o","token":"x"},"migrations":{"dir":"m","out":"g"}}"#,
+        r#"{"name":"a","control":"u","runtime_date":"2026-08-14","password":"hunter2","build":{"mode":"full","dist":"d","output":"o"},"databases":{},"apps":{}}"#,
+        r#"{"name":"a","control":"u","runtime_date":"2026-08-14","build":{"mode":"full","dist":"d","output":"o","token":"x"},"databases":{},"apps":{}}"#,
     ] {
         let err = ProjectConfig::parse(PathBuf::from("zeroship.jsonc"), text.to_string())
             .expect_err("a secret-shaped key must not parse");
@@ -296,7 +386,7 @@ fn build_output_may_replace_an_existing_generated_artifact() {
 }
 
 #[test]
-fn migrations_out_cannot_target_the_project_root_or_one_of_its_ancestors() {
+fn a_databases_out_cannot_target_the_project_root_or_one_of_its_ancestors() {
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join(CONFIG_FILENAME);
 
@@ -305,10 +395,36 @@ fn migrations_out_cannot_target_the_project_root_or_one_of_its_ancestors() {
             "\"out\": \"generated/zeroship\"",
             &format!("\"out\": {}", serde_json::to_string(out).unwrap()),
         );
+        assert_ne!(text, FULL, "the out path must actually change for {out}");
         let err = ProjectConfig::parse(config_path.clone(), text)
             .expect_err("a gen-types directory containing creator files must not parse");
-        assert!(err.contains("migrations.out"), "{err}");
+        assert!(err.contains("databases.main.out"), "{err}");
     }
+}
+
+/// Two databases may not share one gen-types directory. The three filenames in
+/// it are fixed, so a shared directory is one database's schema silently
+/// standing in for another's.
+#[test]
+fn two_databases_cannot_share_one_gen_types_directory() {
+    let text = FULL.replace(
+        "\"main\": { \"id\": \"dbs_03evr3oqx1200yyd6zj2cebfw\", \"migrations\": \"migrations\", \"out\": \"generated/zeroship\" }",
+        "\"main\": { \"id\": \"dbs_03evr3oqx1200yyd6zj2cebfw\", \"migrations\": \"migrations\", \"out\": \"generated/zeroship\" },\n    \"events\": { \"id\": \"dbs_03evr3oqx1200qyvgmdnjrsla\", \"migrations\": \"migrations/events\", \"out\": \"generated/zeroship\" }",
+    );
+    let text = text.replace(
+        "\"databases\": { \"main\": { \"id\": \"dbs_03evr3oqx1200uzh8k6gycpgg\" } }",
+        "\"databases\": { \"main\": { \"id\": \"dbs_03evr3oqx1200uzh8k6gycpgg\" }, \"events\": { \"id\": \"dbs_03evr3oqx12012zcpsh30ivwy\" } }",
+    );
+    let err = ProjectConfig::parse(PathBuf::from("zeroship.jsonc"), text.clone())
+        .expect_err("two databases sharing one out dir must not parse");
+    assert!(err.contains("gen-types directory"), "{err}");
+
+    // Its control: the same pair with distinct directories parses, so the
+    // refusal is about the collision and not about the second database.
+    cfg(&text.replace(
+        "\"migrations\": \"migrations/events\", \"out\": \"generated/zeroship\"",
+        "\"migrations\": \"migrations/events\", \"out\": \"generated/events\"",
+    ));
 }
 
 #[test]
@@ -317,7 +433,7 @@ fn an_unknown_top_level_key_names_the_known_ones() {
     let err = ProjectConfig::parse(PathBuf::from("zeroship.jsonc"), text)
         .expect_err("an unknown key must not parse");
     assert!(err.contains("rpcEndpoint"), "{err}");
-    assert!(err.contains("migrations"), "the message must list the known keys: {err}");
+    assert!(err.contains("databases"), "the message must list the known keys: {err}");
 }
 
 /// The canonical dump is sorted and compact, so the TypeScript side can be
@@ -326,9 +442,9 @@ fn an_unknown_top_level_key_names_the_known_ones() {
 fn canonical_json_is_sorted_and_compact() {
     let r = cfg(FULL).resolve(None).unwrap();
     let dump = r.canonical_json();
-    assert!(dump.starts_with("{\"app\":"), "{dump}");
+    assert!(dump.starts_with("{\"apps\":"), "{dump}");
     assert!(!dump.contains('\n'), "{dump}");
-    let keys: Vec<&str> = ["app", "build", "control", "migrations", "name", "runtime_date", "secrets"]
+    let keys: Vec<&str> = ["apps", "build", "control", "databases", "name", "runtime_date", "secrets"]
         .into_iter()
         .collect();
     let mut cursor = 0usize;
@@ -477,7 +593,8 @@ fn jsonc_comments_trailing_commas_and_string_markers_parse() {
         "dist": "dist",
         "output": "dist/app.zship",
       },
-      "migrations": { "dir": "migrations", "out": "generated/zeroship", },
+      "databases": { "main": { "id": "dbs_03evr3oqx1200yyd6zj2cebfw", "migrations": "migrations", "out": "generated/zeroship", }, },
+      "apps": { "storefront": { "databases": ["main",], "primary": "main", }, },
     }"#;
     let resolved = cfg(text).resolve(None).expect("JSONC must resolve");
     assert_eq!(resolved.str("control"), Some("https://control.zeroship.ai"));
@@ -576,8 +693,8 @@ fn loose_json_extensions_are_rejected() {
         (
             "missing comma",
             FULL.replacen(
-                "\"name\": \"demo-app\",\n  \"app\"",
-                "\"name\": \"demo-app\"\n  \"app\"",
+                "\"name\": \"demo-app\",\n  \"control\"",
+                "\"name\": \"demo-app\"\n  \"control\"",
                 1,
             ),
         ),
@@ -614,17 +731,17 @@ fn proto_key_is_rejected() {
 // Writeback
 // ---------------------------------------------------------------------------
 
-/// The splice rewrites the `app` value and NOTHING else - comments, key order
-/// and whitespace outside the value span are byte-identical.
+/// The splice rewrites the labelled `app` value and NOTHING else - comments,
+/// key order and whitespace outside the value span are byte-identical.
 #[test]
-fn write_app_splices_the_value_and_leaves_every_other_byte() {
+fn write_app_id_splices_the_value_and_leaves_every_other_byte() {
     let dir = std::env::temp_dir().join(format!("zs-pc-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("splice.jsonc");
     std::fs::write(&path, FULL).unwrap();
 
     let c = ProjectConfig::load(&path).unwrap();
-    c.write_app(&app_id("app_034klb07lrb9jgma6imvmx002"))
+    c.write_app_id("storefront", &app_id("app_034klb07lrb9jgma6imvmx002"))
         .unwrap();
 
     let after = std::fs::read_to_string(&path).unwrap();
@@ -637,11 +754,41 @@ fn write_app_splices_the_value_and_leaves_every_other_byte() {
     std::fs::remove_file(&path).ok();
 }
 
+/// The splice descends to the NAMED label, and the same key name at another
+/// depth is not the target. `environments.staging.apps.storefront.app` sits at
+/// exactly the shape a one-level finder would take for the root's.
+#[test]
+fn write_app_id_never_takes_the_environment_entry_for_the_root_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(CONFIG_FILENAME);
+    std::fs::write(&path, FULL).unwrap();
+
+    ProjectConfig::load(&path)
+        .unwrap()
+        .write_app_id("storefront", &app_id("app_034klb07lrb9jgma6imvmx007"))
+        .unwrap();
+
+    let after = std::fs::read_to_string(&path).unwrap();
+    let reread = ProjectConfig::parse(path.clone(), after.clone()).unwrap();
+    assert_eq!(
+        reread.resolve(None).unwrap().str("apps.storefront.app"),
+        Some("app_034klb07lrb9jgma6imvmx007")
+    );
+    assert_eq!(
+        reread
+            .resolve(Some("staging"))
+            .unwrap()
+            .str("apps.storefront.app"),
+        Some("app_034klb07lrb9jgma6imvmx001"),
+        "the environment's own id must be untouched"
+    );
+}
+
 /// Appending changes only the insertion site. This one exact comparison covers
 /// comments, member order, an interior blank line, trailing commas, CRLF, and
 /// multibyte text together so preserving five while losing one cannot pass.
 #[test]
-fn write_app_appends_a_missing_member_without_reformatting_the_file() {
+fn write_app_id_appends_a_missing_member_without_reformatting_the_file() {
     let multibyte = "caf\u{e9}-\u{1f600}";
     let text = format!(
         "{{\r\n\
@@ -653,13 +800,17 @@ fn write_app_appends_a_missing_member_without_reformatting_the_file() {
          \r\n\
          \x20\x20// Keep this group and its blank line.\r\n\
          \x20\x20\"build\": {{ \"mode\": \"full\", \"dist\": \"dist\", \"output\": \"dist/app.zship\" }},\r\n\
-         \x20\x20\"migrations\": {{ \"dir\": \"migrations\", \"out\": \"generated/zeroship\" }},\r\n\
+         \x20\x20\"databases\": {{}},\r\n\
+         \x20\x20\"apps\": {{ \"storefront\": {{ \"databases\": [] }} }},\r\n\
          \x20\x20\"secrets\": [],\r\n\
          }}\r\n"
     );
+    // The CST reflows the ENTRY it appends into, and nothing outside it: the
+    // comment, the blank line, the CRLF endings, the trailing comma and the
+    // multibyte text are all still there, byte for byte.
     let expected = text.replacen(
-        "\r\n}\r\n",
-        "\r\n  \"app\": \"app_034klb07lrb9jgma6imvmx003\",\r\n}\r\n",
+        "\"apps\": { \"storefront\": { \"databases\": [] } },",
+        "\"apps\": { \"storefront\": {\r\n      \"databases\": [],\r\n      \"app\": \"app_034klb07lrb9jgma6imvmx003\"\r\n    } },",
         1,
     );
     let dir = tempfile::tempdir().unwrap();
@@ -668,31 +819,48 @@ fn write_app_appends_a_missing_member_without_reformatting_the_file() {
 
     let config = ProjectConfig::load(&path).unwrap();
     config
-        .write_app(&app_id("app_034klb07lrb9jgma6imvmx003"))
+        .write_app_id("storefront", &app_id("app_034klb07lrb9jgma6imvmx003"))
         .unwrap();
 
     let after = std::fs::read_to_string(&path).unwrap();
     assert_eq!(
         after, expected,
-        "the new final member must be the only formatting change"
+        "the new member must be the only formatting change"
     );
     assert_eq!(
         ProjectConfig::load(&path)
             .unwrap()
             .resolve(None)
             .unwrap()
-            .str("app"),
+            .str("apps.storefront.app"),
         Some("app_034klb07lrb9jgma6imvmx003"),
         "the Rust reader must accept the written file"
     );
 }
 
+/// A label the file does not declare is a naming error, not a block to invent.
 #[test]
-fn write_app_refuses_to_overwrite_a_file_changed_since_load() {
-    let original = FULL.replace(
-        "  \"app\": \"app_034klb07lrb9jgma6imvmx000\",\n",
-        "",
+fn write_app_id_refuses_a_label_the_file_does_not_declare() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(CONFIG_FILENAME);
+    std::fs::write(&path, FULL).unwrap();
+
+    let error = ProjectConfig::load(&path)
+        .unwrap()
+        .write_app_id("admin", &app_id("app_034klb07lrb9jgma6imvmx009"))
+        .expect_err("an undeclared label has no entry to write into");
+    assert!(error.contains("apps.admin.app"), "{error}");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        FULL,
+        "a refused writeback must leave the file alone"
     );
+}
+
+#[test]
+fn write_app_id_refuses_to_overwrite_a_file_changed_since_load() {
+    let original = FULL.replace("\"app\": \"app_034klb07lrb9jgma6imvmx000\", ", "");
+    assert_ne!(original, FULL, "the root app id must actually be removed");
     let creator_edit = original.replace(
         "// A comment, which is the whole reason the format is JSONC.",
         "// A concurrent creator edit that must survive.",
@@ -704,7 +872,7 @@ fn write_app_refuses_to_overwrite_a_file_changed_since_load() {
     let config = ProjectConfig::load(&path).unwrap();
     std::fs::write(&path, &creator_edit).unwrap();
     let error = config
-        .write_app(&app_id("app_034klb07lrb9jgma6imvmx008"))
+        .write_app_id("storefront", &app_id("app_034klb07lrb9jgma6imvmx008"))
         .expect_err("writeback must refuse a file edited after load");
 
     assert!(error.contains("changed since it was loaded"), "{error}");
@@ -715,11 +883,13 @@ fn write_app_refuses_to_overwrite_a_file_changed_since_load() {
     );
 }
 
-/// `CstObject::append` deliberately normalises extra blank lines touching the
-/// root braces. Pin its whole output so a library upgrade may change those two
-/// sites, but may not quietly start eating the nearby comments or other trivia.
+/// `CstObject::append` reflows the object it appends into. That object is now
+/// one labelled ENTRY, so the root's own trivia - including the blank lines
+/// touching its braces, which a root-level append would have normalised - is
+/// outside the edit. Pin the whole output so a library upgrade may change how
+/// the entry is laid out but may not quietly start eating anything else.
 #[test]
-fn write_app_only_normalizes_blank_lines_touching_the_root_braces() {
+fn write_app_id_reflows_only_the_entry_it_appends_into() {
     let text = r#"{
 
   // The leading comment must survive.
@@ -729,12 +899,16 @@ fn write_app_only_normalizes_blank_lines_touching_the_root_braces() {
 
   // The interior group must survive.
   "build": { "mode": "full", "dist": "dist", "output": "dist/app.zship" },
-  "migrations": { "dir": "migrations", "out": "generated/zeroship" },
+  "databases": {},
+  "apps": {
+    "storefront": { "databases": [] }
+  },
   "secrets": []
 
 }
 "#;
     let expected = r#"{
+
   // The leading comment must survive.
   "name": "demo-app",
   "control": "https://control.zeroship.ai",
@@ -742,9 +916,15 @@ fn write_app_only_normalizes_blank_lines_touching_the_root_braces() {
 
   // The interior group must survive.
   "build": { "mode": "full", "dist": "dist", "output": "dist/app.zship" },
-  "migrations": { "dir": "migrations", "out": "generated/zeroship" },
-  "secrets": [],
-  "app": "app_034klb07lrb9jgma6imvmx005"
+  "databases": {},
+  "apps": {
+    "storefront": {
+      "databases": [],
+      "app": "app_034klb07lrb9jgma6imvmx005"
+    }
+  },
+  "secrets": []
+
 }
 "#;
     let dir = tempfile::tempdir().unwrap();
@@ -753,7 +933,7 @@ fn write_app_only_normalizes_blank_lines_touching_the_root_braces() {
 
     ProjectConfig::load(&path)
         .unwrap()
-        .write_app(&app_id("app_034klb07lrb9jgma6imvmx005"))
+        .write_app_id("storefront", &app_id("app_034klb07lrb9jgma6imvmx005"))
         .unwrap();
 
     assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
@@ -763,8 +943,8 @@ fn write_app_only_normalizes_blank_lines_touching_the_root_braces() {
 /// original path is touched. Construct an intentionally inconsistent internal
 /// value to make that otherwise defensive failure arm observable.
 #[test]
-fn write_app_reparses_before_writing() {
-    let text = "{\n  \"name\": \"demo-app\"\n}\n";
+fn write_app_id_reparses_before_writing() {
+    let text = "{\n  \"name\": \"demo-app\",\n  \"apps\": { \"storefront\": {} }\n}\n";
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("invalid-project.jsonc");
     std::fs::write(&path, text).unwrap();
@@ -776,7 +956,7 @@ fn write_app_reparses_before_writing() {
     };
 
     let error = config
-        .write_app(&app_id("app_034klb07lrb9jgma6imvmx006"))
+        .write_app_id("storefront", &app_id("app_034klb07lrb9jgma6imvmx006"))
         .expect_err("the generated text is valid JSONC but not a valid project config");
 
     assert!(error.contains("refusing to write a file that would not parse"), "{error}");
@@ -789,14 +969,14 @@ fn write_app_reparses_before_writing() {
 }
 
 #[test]
-fn write_app_uses_original_byte_span_with_crlf_unicode_and_escaped_key() {
+fn write_app_id_uses_original_byte_span_with_crlf_unicode_and_escaped_key() {
     let text = FULL
         .replacen(
             "// A comment, which is the whole reason the format is JSONC.",
             "// caf\u{e9}-\u{1f600}",
             1,
         )
-        .replacen("  \"app\":", "  \"\\u0061pp\":", 1)
+        .replacen("\"app\": \"app_034klb07", "\"\\u0061pp\": \"app_034klb07", 1)
         .replace('\n', "\r\n");
     let dir = std::env::temp_dir().join(format!("zs-pc-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -805,7 +985,7 @@ fn write_app_uses_original_byte_span_with_crlf_unicode_and_escaped_key() {
 
     let config = ProjectConfig::load(&path).unwrap();
     config
-        .write_app(&app_id("app_034klb07lrb9jgma6imvmx004"))
+        .write_app_id("storefront", &app_id("app_034klb07lrb9jgma6imvmx004"))
         .unwrap();
 
     let after = std::fs::read_to_string(&path).unwrap();
@@ -815,4 +995,170 @@ fn write_app_uses_original_byte_span_with_crlf_unicode_and_escaped_key() {
     );
     assert_eq!(after, expected, "only the original app value span may change");
     std::fs::remove_file(&path).ok();
+}
+
+// ---------------------------------------------------------------------------
+// Label selection
+// ---------------------------------------------------------------------------
+
+fn argv(flags: &[&str]) -> Vec<String> {
+    std::iter::once("zeroship".to_string())
+        .chain(std::iter::once("deploy".to_string()))
+        .chain(flags.iter().map(|f| (*f).to_string()))
+        .collect()
+}
+
+/// A workspace declaring one app implies it, and the id comes from the file.
+#[test]
+fn a_sole_declared_app_is_the_target_without_a_flag() {
+    let resolved = cfg(FULL).resolve(None).unwrap();
+    let selection = select_app(&argv(&[]), Some(&resolved)).expect("the sole app is implied");
+    assert_eq!(selection.label.as_deref(), Some("storefront"));
+    let id = selection.id.expect("the file carries an id");
+    assert_eq!(id.value, "app_034klb07lrb9jgma6imvmx000");
+    assert_eq!(
+        id.source.describe(),
+        "zeroship.jsonc apps.storefront",
+        "the provenance line must name the entry a creator would edit"
+    );
+}
+
+/// With several declared, the command must be told which - and with none
+/// declared there is nothing to imply.
+#[test]
+fn several_declared_apps_require_a_label_and_none_is_an_error() {
+    let two = FULL.replace(
+        "\"storefront\": { \"app\": \"app_034klb07lrb9jgma6imvmx000\", \"databases\": [\"main\"], \"primary\": \"main\" }",
+        "\"storefront\": { \"app\": \"app_034klb07lrb9jgma6imvmx000\", \"databases\": [\"main\"], \"primary\": \"main\" },\n    \"admin\": { \"app\": \"app_034klb07lrb9jgma6imvmx001\", \"databases\": [\"main\"], \"primary\": \"main\" }",
+    );
+    let two = two.replace(
+        "\"apps\": { \"storefront\": { \"app\": \"app_034klb07lrb9jgma6imvmx001\" } }",
+        "\"apps\": { \"storefront\": { \"app\": \"app_034klb07lrb9jgma6imvmx001\" }, \"admin\": { \"app\": \"app_034klb07lrb9jgma6imvmx002\" } }",
+    );
+    let resolved = cfg(&two).resolve(None).unwrap();
+    let err = select_app(&argv(&[]), Some(&resolved))
+        .expect_err("two declared apps cannot be implied");
+    assert!(err.contains("more than one app"), "{err}");
+    assert!(err.contains("storefront") && err.contains("admin"), "{err}");
+
+    let picked = select_app(&argv(&["--app=admin"]), Some(&resolved)).expect("named");
+    assert_eq!(picked.label.as_deref(), Some("admin"));
+    assert_eq!(
+        picked.id.expect("id").value,
+        "app_034klb07lrb9jgma6imvmx001"
+    );
+
+    let none = cfg(BARE).resolve(None).unwrap();
+    let err = select_app(&argv(&[]), Some(&none)).expect_err("no app to imply");
+    assert!(err.contains("declares no apps"), "{err}");
+}
+
+/// With a file present `--app` names a LABEL, so a raw id is a naming error
+/// that lists the labels. With NO file there are no labels and the same flag
+/// is the id.
+#[test]
+fn the_app_flag_is_a_label_with_a_file_and_an_id_without_one() {
+    let resolved = cfg(FULL).resolve(None).unwrap();
+    let err = select_app(&argv(&["--app=app_034klb07lrb9jgma6imvmx000"]), Some(&resolved))
+        .expect_err("an id is not a label");
+    assert!(err.contains("names no app"), "{err}");
+    assert!(err.contains("storefront"), "{err}");
+    assert!(err.contains("never travels as an identifier"), "{err}");
+
+    let without =
+        select_app(&argv(&["--app=app_034klb07lrb9jgma6imvmx000"]), None).expect("no file, an id");
+    assert!(without.label.is_none());
+    assert_eq!(
+        without.id.expect("id").value,
+        "app_034klb07lrb9jgma6imvmx000"
+    );
+}
+
+/// `--database` names one of the app's own labels; without it the primary is
+/// the database addressed, because that is the one `env.db` reaches.
+#[test]
+fn the_database_flag_names_one_of_the_apps_own_labels() {
+    let resolved = cfg(FULL).resolve(None).unwrap();
+    assert_eq!(
+        select_database(&argv(&[]), &resolved, "storefront").expect("primary"),
+        "main"
+    );
+    assert_eq!(
+        select_database(&argv(&["--database=main"]), &resolved, "storefront").expect("named"),
+        "main"
+    );
+    let err = select_database(&argv(&["--database=events"]), &resolved, "storefront")
+        .expect_err("a database the app does not use is not addressable");
+    assert!(err.contains("not one of the databases"), "{err}");
+    assert!(err.contains("main"), "{err}");
+}
+
+// ---------------------------------------------------------------------------
+// The app-to-database wiring
+// ---------------------------------------------------------------------------
+
+/// An app names database LABELS, and every one has to resolve in this file.
+/// Declaring a database grants nothing - deploy verifies the binding - but a
+/// label that resolves to nothing could not even be dereferenced to an id.
+#[test]
+fn an_app_naming_an_undeclared_database_is_refused() {
+    let text = FULL.replace("\"databases\": [\"main\"]", "\"databases\": [\"main\", \"ghost\"]");
+    assert_ne!(text, FULL, "the stray label must actually be added");
+    let err = ProjectConfig::parse(PathBuf::from("zeroship.jsonc"), text)
+        .expect_err("an app naming an undeclared database must not parse");
+    assert!(err.contains("apps.storefront.databases"), "{err}");
+    assert!(err.contains("ghost"), "{err}");
+    assert!(err.contains("declared: main"), "{err}");
+}
+
+/// The primary is `env.db`, and `env.db === env.databases[primary]` holds by
+/// object identity, so it cannot be inferred: an app that uses a database and
+/// names no primary is refused, and one that names a primary it does not use
+/// is refused too.
+#[test]
+fn the_primary_must_be_stated_and_must_be_one_of_the_apps_own_databases() {
+    let missing = FULL.replace(", \"primary\": \"main\" }", " }");
+    assert_ne!(missing, FULL, "the primary must actually be removed");
+    let err = ProjectConfig::parse(PathBuf::from("zeroship.jsonc"), missing)
+        .expect_err("an app that uses a database must name its primary");
+    assert!(err.contains("names no `primary`"), "{err}");
+
+    let foreign = FULL.replace("\"primary\": \"main\"", "\"primary\": \"analytics\"");
+    assert_ne!(foreign, FULL, "the primary must actually change");
+    let err = ProjectConfig::parse(PathBuf::from("zeroship.jsonc"), foreign)
+        .expect_err("a primary the app does not use must not parse");
+    assert!(err.contains("not one of"), "{err}");
+
+    // The control: an app declaring NO database needs no primary at all.
+    cfg(BARE);
+}
+
+/// A label is a member name on `env.databases` as well as a key here, so it is
+/// constrained to what reads as one. `__proto__` is the case that makes the
+/// rule load-bearing rather than cosmetic.
+#[test]
+fn a_label_that_is_not_a_usable_member_name_is_refused() {
+    for (bad, section) in [
+        ("\"__proto__\": { \"id\": \"dbs_", "databases"),
+        ("\"Main\": { \"id\": \"dbs_", "databases"),
+    ] {
+        let text = FULL.replace("\"main\": { \"id\": \"dbs_", bad);
+        assert_ne!(text, FULL, "the label must actually change for {section}");
+        let err = ProjectConfig::parse(PathBuf::from("zeroship.jsonc"), text)
+            .expect_err("an unusable label must not parse");
+        assert!(err.contains("not a usable label"), "{err}");
+    }
+}
+
+/// A database id is the identifier of real data. A value that is not one is
+/// refused here rather than sent to a server that would answer 404 for a
+/// reason the creator cannot see.
+#[test]
+fn a_malformed_database_id_is_refused_naming_the_command_that_prints_one() {
+    let text = FULL.replace("dbs_03evr3oqx1200yyd6zj2cebfw", "main");
+    assert_ne!(text, FULL, "the id must actually change");
+    let err = ProjectConfig::parse(PathBuf::from("zeroship.jsonc"), text)
+        .expect_err("a database name where an id belongs must not parse");
+    assert!(err.contains("databases.main.id"), "{err}");
+    assert!(err.contains("zeroship db create"), "{err}");
 }

@@ -12,29 +12,42 @@ pub const CONFIG_ENV_VAR: &str = "ZEROSHIP_CONFIG";
 pub const SCHEMA_ID: &str = "https://zeroship.ai/schema/project-v1.json";
 
 /// Fields the CLI reads. The Vite `config` escape hatch may not touch these.
-pub const CLI_READ_FIELDS: &[&str] = &["name", "app", "control", "runtime_date", "build.output", "migrations.dir", "migrations.out", "secrets", "protected"];
+pub const CLI_READ_FIELDS: &[&str] = &["name", "control", "runtime_date", "build.output", "databases.*.id", "databases.*.migrations", "databases.*.out", "apps.*.app", "apps.*.databases", "apps.*.primary", "secrets", "protected"];
 
 /// Key names that must never appear anywhere in the file.
 pub const FORBIDDEN_KEY_NAMES: &[&str] = &["password", "token", "secret", "key", "apiKey", "credentials"];
 
-pub const ROOT_KNOWN_KEYS: &[&str] = &["$schema", "name", "app", "control", "runtime_date", "build", "migrations", "secrets", "environments"];
-pub const ROOT_REQUIRED_KEYS: &[&str] = &["name", "control", "runtime_date", "build", "migrations"];
+pub const ROOT_KNOWN_KEYS: &[&str] = &["$schema", "name", "control", "runtime_date", "build", "databases", "apps", "secrets", "environments"];
+pub const ROOT_REQUIRED_KEYS: &[&str] = &["name", "control", "runtime_date", "build", "databases", "apps"];
 pub const BUILD_KNOWN_KEYS: &[&str] = &["mode", "serverEntry", "dist", "output"];
 pub const BUILD_REQUIRED_KEYS: &[&str] = &["mode", "dist", "output"];
-pub const MIGRATIONS_KNOWN_KEYS: &[&str] = &["dir", "out"];
-pub const MIGRATIONS_REQUIRED_KEYS: &[&str] = &["dir", "out"];
-pub const ENVIRONMENT_KNOWN_KEYS: &[&str] = &["app", "control", "protected", "build", "migrations", "secrets"];
-pub const ENVIRONMENT_REQUIRED_KEYS: &[&str] = &["app", "control"];
+pub const DATABASE_KNOWN_KEYS: &[&str] = &["id", "migrations", "out"];
+pub const DATABASE_REQUIRED_KEYS: &[&str] = &["id", "migrations", "out"];
+pub const APP_KNOWN_KEYS: &[&str] = &["app", "databases", "primary"];
+pub const APP_REQUIRED_KEYS: &[&str] = &["databases"];
+pub const ENVIRONMENT_APP_KNOWN_KEYS: &[&str] = &["app"];
+pub const ENVIRONMENT_APP_REQUIRED_KEYS: &[&str] = &["app"];
+pub const ENVIRONMENT_DATABASE_KNOWN_KEYS: &[&str] = &["id"];
+pub const ENVIRONMENT_DATABASE_REQUIRED_KEYS: &[&str] = &["id"];
+pub const ENVIRONMENT_KNOWN_KEYS: &[&str] = &["apps", "databases", "control", "protected", "build", "secrets"];
+pub const ENVIRONMENT_REQUIRED_KEYS: &[&str] = &["apps", "control", "databases"];
 
 /// `(dotted path, regex-free validator tag)` for every constrained string.
 ///
 /// The tag is matched in `super::validate`, which hand-writes each check: the
-/// CLI has no regex crate and adding one for six patterns is not proportionate.
+/// CLI links no regex crate, and a handful of fixed shapes does not justify one.
 pub const FIELD_PATTERNS: &[(&str, &str)] = &[
     ("name", "^[a-z0-9][a-z0-9-]{0,62}$"),
     ("runtime_date", "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"),
     ("build.dist", "^(?!\\.{1,2}$).+$"),
+    ("databases.*.id", "^dbs_[0-9a-z]{25}$"),
     ("secrets[]", "^[A-Z][A-Z0-9_]{0,63}$"),
+];
+
+/// `(map path, label pattern)`: the rule a creator-chosen LABEL must match.
+pub const LABEL_PATTERNS: &[(&str, &str)] = &[
+    ("databases.*", "^[a-z][a-z0-9_]{0,31}$"),
+    ("apps.*", "^[a-z][a-z0-9_]{0,31}$"),
 ];
 
 /// `(dotted path, allowed values)` for every enum-constrained string.
@@ -48,7 +61,7 @@ pub const FIELD_ENUMS: &[(&str, &[&str])] = &[
 /// complete schema `default` set -- an omission here would read as "no default
 /// exists" instead of a deliberate resolution rule.
 #[cfg(test)]
-pub const SCHEMA_DEFAULTED_FIELDS: &[&str] = &["build.mode", "build.dist", "build.output", "migrations.dir", "migrations.out", "secrets"];
+pub const SCHEMA_DEFAULTED_FIELDS: &[&str] = &["build.mode", "build.dist", "build.output", "secrets"];
 
 /// Optional defaults explicitly safe for a present file's resolved view.
 /// Values are JSON so arrays and future object defaults stay schema-generated.

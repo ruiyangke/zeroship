@@ -41,7 +41,7 @@ pub async fn load_executable(
     Ok(AppExecutable {
         modules,
         descriptor: executable
-            .runtime_descriptor()
+            .primary_schema()
             .map(serde_json::Value::to_string),
     })
 }
