@@ -1080,18 +1080,25 @@ two co-resident apps both calling a database `main` would compare equal.
 is instant. No data is destroyed, because the app owns no database, and a deleted app never
 destroys data another app can still read.
 
-**But app deletion must learn to revoke first, and today it does not.** `delete_app`
+**App deletion refuses a bound app rather than revoking for it.** `delete_app`
 (`crates/zeroship-control/src/organizations.rs`) ends an app by setting `apps.project_id = NULL`,
 which is an UPDATE to the exact key `database_bindings_app_project_fkey` references under
-`onUpdate: "restrict"`. So deleting an app that still holds a binding is refused by PostgreSQL
-with a foreign-key violation rather than by a typed refusal naming what to unbind. Unbinding
-first works; nothing tells the creator that.
+`onUpdate: "restrict"`. Left alone that surfaced as a constraint violation - a 500, measured rather
+than inferred - so the UPDATE now carries a `NOT EXISTS` over the app's bindings and
+`OrganizationError::AppHasDatabaseBindings` answers 409 naming the databases and the unbind route.
 
-Two ways to close it, and the choice belongs to app lifecycle rather than to this design: app
-deletion revokes the app's bindings as part of its own teardown, which is what the paragraph above
-describes and what makes deletion instant; or it refuses early with a typed error listing the
-bindings, which is weaker but smaller. Either way the raw constraint violation is not an
-acceptable creator-facing outcome.
+That is the smaller of the two available answers. The other is for deletion to revoke the app's
+bindings as part of its own teardown, which is what makes the paragraph above's "instant" true
+without a creator first unbinding by hand. Which one is right is app-lifecycle work rather than
+this design's, and the current behaviour is at least a refusal a creator can act on instead of a
+constraint error.
+
+**Unbind DELETEs the binding row rather than marking it `revoking`.** The role name derives from
+the binding id, so a withdrawn edge whose row survived would keep `zs_bind_<bnd>_e<E>` reserved,
+and a re-bind would either resurrect a dropped role or collide with
+`database_bindings_natural_key`. The reconciler's "converge every binding" pass drops roles no
+declaration names, which is the same sweep that must reap a role left by a create whose row rolled
+back. `revoking` and `revoked` stay in the CHECK for the reconciler's own use.
 
 **Delete a database.** Only when its binding set is empty, and the refusal names the bound apps.
 The step order in `crates/zeroship-data-orm/src/cdc/lifecycle.rs` and
