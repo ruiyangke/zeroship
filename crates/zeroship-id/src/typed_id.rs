@@ -183,14 +183,13 @@ impl std::error::Error for ParseError {}
 
 /// Parse a typed ID and assert its prefix matches `expected_prefix`.
 ///
-/// Layered safety check on top of [`parse`]. Callers that have a
-/// known entity type (e.g. `sandbox.db.insert_sandbox` knows it is
-/// receiving an `sbx_…` id) use this helper to refuse mismatched
-/// prefixes BEFORE the value reaches any downstream wire (SQL,
-/// filesystem path, HTTP header). The path-traversal hardening rule
-/// this encodes: an id-shaped parameter is never trusted as a path
-/// segment until its prefix has been checked, so a caller cannot
-/// smuggle `..` — or another entity type's id — through it.
+/// Layered safety check on top of [`parse`]. A caller that knows the
+/// entity type of the id it is about to receive uses this helper to
+/// refuse mismatched prefixes BEFORE the value reaches any downstream
+/// wire (SQL, filesystem path, HTTP header). The path-traversal
+/// hardening rule this encodes: an id-shaped parameter is never trusted
+/// as a path segment until its prefix has been checked, so a caller
+/// cannot smuggle `..` — or another entity type's id — through it.
 ///
 /// Returns the embedded UUID on success.
 pub fn parse_with_prefix(
@@ -279,12 +278,6 @@ pub const ORGANIZATION_PREFIX: &str = "org";
 /// the auth foundation's audience sum, the unit an end-user subject is scoped
 /// to.
 ///
-/// `zeroship.sandboxes.project_id` carries a `^prj_` CHECK for a DERIVED dedup
-/// key minted by the extracted `zeroship-sandbox` controller - usually an app id
-/// re-tagged - which is NOT this entity and has no foreign key to it. That
-/// column is being retired so this prefix has one meaning per schema; until it
-/// is, do not join the two.
-///
 /// Minted only by [`crate::project_id::ProjectId::mint`].
 pub const PROJECT_PREFIX: &str = "prj";
 
@@ -292,11 +285,6 @@ pub const PROJECT_PREFIX: &str = "prj";
 /// the SECRET a recipient presents is a separate high-entropy token stored only
 /// as a hash, never this value.
 pub const INVITE_PREFIX: &str = "ivt";
-/// Wake-job typed-id prefix. Three chars to preserve the common
-/// `^[a-z]{3}_[0-9a-z]{25}$` shape. The PostgreSQL
-/// `wake_jobs.wake_id` column stores the full typed-id string
-/// (`wak_<base36>`).
-pub const WAKE_PREFIX: &str = "wak";
 
 /// Per-app OAuth `client_id` prefix: the
 /// deterministic, stable-for-app-life OAuth client id is `oac_<base36-app-id>`.
@@ -448,13 +436,6 @@ pub fn new_session_id() -> String {
 /// is no in-database base36 generator.
 pub fn new_grant_id() -> String {
     generate(GRANT_PREFIX)
-}
-
-/// Generate a new wake-job ID: `wak_{base36(uuidv7)}`. Used by the
-/// C-7-LT async wake state machine to mint the polling handle handed
-/// back to the client on `POST /admin/sandboxes/{id}/wake`.
-pub fn new_wake_id() -> String {
-    generate(WAKE_PREFIX)
 }
 
 /// Generate a new pricing-plan ID: `pln_{base36(uuidv7)}`. Minted by the
@@ -675,9 +656,7 @@ pub fn new_provider_dead_letter_id() -> String {
 /// Worker-instance typed-id prefix: one row in `zeroship.worker_instances` per
 /// live worker PROCESS. Three chars to match the global
 /// `^[a-z]{3}_[0-9a-z]{25}$` shape, and disjoint from every prefix above —
-/// notably from `wak` (wake jobs), which is the only other `w`-leading
-/// three-char prefix, and from the `w`-leading workflow family
-/// (`wfd`/`wsk`/`wsb`/`wbc`/`wst`).
+/// notably the `w`-leading workflow family (`wfd`/`wsk`/`wsb`/`wbc`/`wst`).
 ///
 /// MINTED BY CONTROL AT ENROLMENT, never by the registrant. The worker presents
 /// its boot-generated Ed25519 public key and its listening port; control assigns
@@ -854,31 +833,16 @@ mod tests {
         // and so APP_PREFIX keeps a caller that proves what it spells.
         let a = crate::app_id::AppId::mint();
         let s = new_session_id();
-        let w = new_wake_id();
         let p = new_plan_id();
         assert!(u.as_str().starts_with("usr_"));
         assert!(a.as_str().starts_with("app_"));
         assert!(s.starts_with("ses_"));
-        assert!(w.starts_with("wak_"));
         assert!(p.starts_with("pln_"));
         // pln_ + 25 base36 chars = 29, and it round-trips through parse().
         assert_eq!(p.len(), 29);
         assert_eq!(PLAN_PREFIX.len(), 3, "plan prefix must be 3 chars (R16-API2)");
         let (prefix, _) = parse(&p).expect("new_plan_id must roundtrip");
         assert_eq!(prefix, "pln");
-    }
-
-    /// The wake-job prefix is 3 chars. `wak_` (not `wake_`) preserves the
-    /// `^[a-z]{3}_[0-9a-z]{25}$` shape dashboards/log filters key
-    /// on. Re-asserted as an invariant test so a future "looks like
-    /// 4 chars would be clearer" suggestion fails CI.
-    #[test]
-    fn wake_prefix_is_three_chars() {
-        assert_eq!(WAKE_PREFIX.len(), 3, "wake prefix must be 3 chars (R16-API2)");
-        let w = new_wake_id();
-        assert_eq!(w.len(), 29, "wak_ + 25 base36 = 29 chars");
-        let (prefix, _) = parse(&w).expect("new_wake_id must roundtrip");
-        assert_eq!(prefix, "wak");
     }
 
     #[test]
@@ -1102,7 +1066,6 @@ mod tests {
             ("organizations", ORGANIZATION_PREFIX),
             ("projects", PROJECT_PREFIX),
             ("organization_invites", INVITE_PREFIX),
-            ("wake_jobs", WAKE_PREFIX),
             ("app_oauth_clients", APP_OAUTH_CLIENT_PREFIX),
             ("plans", PLAN_PREFIX),
             ("invoices", INVOICE_PREFIX),
@@ -1155,7 +1118,6 @@ mod tests {
             ("organizations", ORGANIZATION_PREFIX),
             ("projects", PROJECT_PREFIX),
             ("organization_invites", INVITE_PREFIX),
-            ("wake_jobs", WAKE_PREFIX),
             ("app_oauth_clients", APP_OAUTH_CLIENT_PREFIX),
             ("plans", PLAN_PREFIX),
             ("invoices", INVOICE_PREFIX),

@@ -560,7 +560,7 @@ mod rate_limit_per_tests {
     /// accepts MUST deserialise from the wire. `user` is the one that
     /// regressed: the console emits `per: "user"` on its authenticated rules,
     /// and before the `User` variant existed `zeroship_bundle::ingest` rejected
-    /// the real `apps/zeroship-builder/dist/app.zship` outright.
+    /// a real app bundle outright.
     #[test]
     fn rate_limit_per_parses_all_four_authoring_scopes() {
         for (s, want) in [
