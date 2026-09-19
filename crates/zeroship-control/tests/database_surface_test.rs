@@ -1330,15 +1330,15 @@ async fn deleting_an_app_that_still_binds_a_database_is_refused_and_names_it() {
     );
 }
 
-/// A database being deleted takes no new binding, and the same bind against the
-/// same database one moment earlier is the control.
+/// A database outside the bindable statuses takes no new binding, and the same
+/// bind against the same database one moment earlier is the control.
 ///
 /// Without this the two calls serialize on the organization lock and BOTH
 /// succeed, leaving a binding whose schema the reconciler is already dropping.
 /// What proves the guard is the pair: remove it and the refused arm turns into
 /// a second `Ok`, not into a different error.
 #[compio::test]
-async fn binding_a_database_being_deleted_is_refused() {
+async fn binding_a_database_in_a_non_bindable_status_is_refused() {
     let fx = Fx::new().await;
     let mut world = World::new(&fx, "bind-deleting").await;
     world.datastore(&fx, &world.zone_id, "active").await;
@@ -1389,6 +1389,24 @@ async fn binding_a_database_being_deleted_is_refused() {
     // caller asked for a state the database is already in.
     let repeated = databases::delete_database(&fx.registry, &world.owner, &database_id, None).await;
 
+    // `draining` is the status nobody wrote a rule for. An allowlist refuses it
+    // by construction; the denylist that named only `deleting` admitted it.
+    fx.pg
+        .execute(
+            "UPDATE zeroship.databases SET status = 'draining' WHERE id = $1",
+            &[&database_id.as_str()],
+        )
+        .await
+        .expect("drain the database");
+    let drained = databases::bind_database(
+        &fx.registry,
+        &world.owner,
+        &database_id,
+        &bind_body(&late, CAPABILITY_READWRITE),
+        None,
+    )
+    .await;
+
     world.cleanup(&fx).await;
     drop(fx);
     common::drain_pg().await;
@@ -1400,8 +1418,13 @@ async fn binding_a_database_being_deleted_is_refused() {
         "the delete must mark the row rather than remove it"
     );
     assert!(
-        matches!(refused, Err(DatabaseError::DatabaseDeleting)),
+        matches!(&refused, Err(DatabaseError::DatabaseNotBindable { status }) if status == "deleting"),
         "a database being deleted must refuse a new binding, got {refused:?}"
+    );
+    assert!(
+        matches!(&drained, Err(DatabaseError::DatabaseNotBindable { status }) if status == "draining"),
+        "a draining database must refuse a new binding too - the allowlist is what makes a \
+         status nobody thought about non-bindable, got {drained:?}"
     );
     assert_eq!(
         late_binding, None,
