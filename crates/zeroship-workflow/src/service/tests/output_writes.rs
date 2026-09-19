@@ -277,16 +277,20 @@ async fn output_contract(store: Rc<OrmStore>) {
         ])).stage(&tasks).await.unwrap();
         assert_eq!(execution.outcomes.len(), 2);
         assert!(
-            matches!(&execution.outcomes[1], StepOutcome::RunFailed{error,..} if error["type"] == "LimitExceededError" && error["retryable"] == false)
+            matches!(&execution.outcomes[1], StepOutcome::RunFailed{ordinal:Some(1), name:Some(name), name_occurrence:0, error, max_attempts:1}
+                if name == "large"
+                    && error["type"] == "LimitExceededError"
+                    && error["retryable"] == false),
+            "revision {revision}: {:?}",
+            execution.outcomes[1]
         );
-        tasks
+        let receipt = tasks
             .complete(&task.id, &task.token, execution)
             .await
             .unwrap();
-        assert_eq!(
-            scope.status(&task.invocation.run_id).await.unwrap().state,
-            RunState::Failed
-        );
+        // The refused step owns a journal row, so the run is forward work
+        // rather than the platform's verdict on it.
+        assert_eq!(receipt.state, RunState::Queued);
         assert_eq!(
             scope
                 .read_step_output(&task.invocation.run_id, "saved", 0)
@@ -298,7 +302,70 @@ async fn output_contract(store: Rc<OrmStore>) {
             br#""prefix""#
         );
         assert_eq!(stored_rows(store.as_ref(), &task).await, 0);
+
+        // What the body is handed next names the step that busted the budget.
+        let resumed = tasks.poll().await.unwrap().unwrap();
+        assert_eq!(resumed.invocation.run_id, task.invocation.run_id);
+        let refused = resumed
+            .invocation
+            .journal
+            .iter()
+            .find(|entry| entry.ordinal == 1)
+            .unwrap_or_else(|| panic!("{:?}", resumed.invocation.journal));
+        assert_eq!(
+            (refused.name.as_str(), refused.kind.as_str(), refused.state.as_str()),
+            ("large", "run", "failed")
+        );
+        let error = refused.error.clone().unwrap();
+        assert_eq!(error["type"], "LimitExceededError");
+        // A body that does not catch it still rests the run on the same class.
+        tasks
+            .complete(
+                &resumed.id,
+                &resumed.token,
+                super::execution(json!([{"kind":"RunFailed","error":error}])),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            scope.status(&task.invocation.run_id).await.unwrap().state,
+            RunState::Failed
+        );
     }
+
+    // The control for the three cases above, differing in one thing: a
+    // `sideEffect` output over the same budget. The journal records a named
+    // failure as `kind: "run"`, so there is no row to name this step with and
+    // the refusal stays the run's verdict.
+    let task = claim(&scope, &tasks).await;
+    let execution = prepare(
+        &task,
+        json!([{"kind":"StepCompleted","ordinal":0,"name":"effect",
+                "stepKind":"sideEffect","output":"x".repeat(64)}]),
+    )
+    .stage(&tasks)
+    .await
+    .unwrap();
+    assert!(
+        matches!(
+            &execution.outcomes[..],
+            [StepOutcome::RunFailed {
+                ordinal: None,
+                name: None,
+                ..
+            }]
+        ),
+        "{:?}",
+        execution.outcomes
+    );
+    assert_eq!(
+        tasks
+            .complete(&task.id, &task.token, execution)
+            .await
+            .unwrap()
+            .state,
+        RunState::Failed
+    );
 
     let task = claim(&scope, &tasks).await;
     for outcomes in [
@@ -321,9 +388,14 @@ async fn output_contract(store: Rc<OrmStore>) {
     )
     .unwrap();
     let result = oversized.stage(&tasks).await.unwrap();
+    // No step owns a whole runtime result, so this one names none.
     assert!(matches!(
         &result.outcomes[..],
-        [StepOutcome::RunFailed { .. }]
+        [StepOutcome::RunFailed {
+            ordinal: None,
+            name: None,
+            ..
+        }]
     ));
     tasks.complete(&task.id, &task.token, result).await.unwrap();
 }
