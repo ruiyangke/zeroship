@@ -331,6 +331,13 @@ impl Transaction {
     pub(crate) async fn now(&mut self) -> Result<i64, WorkflowServiceError> {
         // This query reads only the customer's database clock, never journal
         // rows. A separate pool avoids borrowing a held transaction's lease.
+        //
+        // The ORM cannot compile this. `Expression::CurrentTimestamp` is
+        // `NOW()` on PostgreSQL, which is transaction start time rather than
+        // wall clock, and an ISO-8601 string on SQLite rather than epoch
+        // milliseconds. Deadlines computed from a transaction's start time run
+        // early by however long the transaction has been open, and nothing in
+        // the type system catches the substitution.
         let sql = match self.clock.sql_registration().family() {
             POSTGRES_FAMILY => {
                 "SELECT CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000) AS BIGINT) AS now"

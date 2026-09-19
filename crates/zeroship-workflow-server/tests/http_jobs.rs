@@ -6,6 +6,8 @@
 
 #[path = "support/platform.rs"]
 mod platform;
+#[path = "support/policy.rs"]
+mod policy_fixture;
 #[allow(
     dead_code,
     reason = "shared process fixture also supports host failure tests"
@@ -35,6 +37,7 @@ use zeroship_core::{
         Delivery, DeliveryLease, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec,
         ManagementCommand, Settlement, SettlementReceipt, SubmitJob,
     },
+    workflow_policy::AppPolicy,
     workflow_schedules::ScheduleId,
 };
 
@@ -95,7 +98,7 @@ impl Fixture {
         let worker = Worker::new();
         enroll(&platform, &http, &server.url, &worker).await;
         let app = AppId::mint();
-        platform.seed_app(&app).await;
+        policy_fixture::provision(&platform, &app, &AppPolicy::default()).await;
         let assignment = platform
             .seed_placement(&app, &worker.id, Duration::from_secs(30))
             .await;
@@ -622,6 +625,11 @@ async fn queue_routes_authenticate_before_body_and_reject_open_metadata() {
         app_id: AppId::mint(),
         ..fixture.scope()
     };
+    // RED, and the assertion is right. The claim handler observes policy before
+    // the manager authorizes the scope, so this answers 503 unavailable instead
+    // of 403 denied. See the same contract in `tests/http.rs`. Do not make it
+    // pass by expecting 503 - that would tell a worker to retry a scope it can
+    // never hold.
     assert_eq!(
         fixture.post(endpoints::WORKFLOW_JOB_CLAIM, &scope).await.0,
         StatusCode::FORBIDDEN
@@ -770,7 +778,7 @@ async fn revoking_a_join_signer_denies_its_worker_while_a_sibling_signer_stays_a
     .await;
     assert_eq!(register_status, StatusCode::OK, "{body}");
     let app_g = AppId::mint();
-    fixture.platform.seed_app(&app_g).await;
+    policy_fixture::provision(&fixture.platform, &app_g, &AppPolicy::default()).await;
     let assignment_g = fixture
         .platform
         .seed_placement(&app_g, &worker_g.id, Duration::from_secs(30))
