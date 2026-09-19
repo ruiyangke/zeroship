@@ -551,13 +551,16 @@ requires no search, catalog, masking, or change-publication implementation.
 `DriverSession` executes SQL with native parameters, returns rows or affected-row
 counts, and handles settlement, cancellation, cleanup, and discard.
 
-`executor::ScopedExecutor` resolves the app's physical SQL namespace and applies its authority
-on the connection that executes its statements. PostgreSQL uses a transaction
-with local role and timeout settings. SQLite attaches the app's database file
-and selects its transaction lane before exposing a physical connection source.
-A SQLite binding on schema `main` addresses the file the backend opened: it
-attaches no `zs-<app>.sqlite`, and its catalog, protection floor and statements
-all read that file.
+`executor::ScopedExecutor` takes the whole `DbBinding` and resolves the physical
+SQL namespace and the authority from it on the connection that executes its
+statements. PostgreSQL narrows the transaction to the binding's own role
+(`zs_bind_<bnd>_e<E>`) and applies the timeout settings. SQLite attaches the
+database file under the binding's schema and selects that database's
+transaction lane before exposing a physical connection source, so the dev tier
+is one `zs-<schema>.sqlite` per database and the ATTACH alias is the same string
+every query builder qualifies with. A SQLite binding on schema `main` addresses
+the file the backend opened: it attaches nothing, and its catalog, protection
+floor and statements all read that file.
 
 `backend::Backend` is the host registration contract above the driver:
 

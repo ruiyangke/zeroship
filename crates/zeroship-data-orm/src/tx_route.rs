@@ -59,11 +59,20 @@ pub struct TxRoute {
     connection: crate::connection::ConnectionIdentity,
 }
 
+/// Compare the ROUTE this dispatch was captured on against the binding the
+/// operation carries.
+///
+/// The comparison is the route key and the schema, never the deploy token: two
+/// deploys of one app on one database are two descriptor generations sharing a
+/// lane and a role, and a dispatch from one must not be refused because the
+/// other minted the handle. What must never differ is the tenant, the database
+/// or the schema - each of those would run a statement somewhere the capture
+/// did not decide.
 fn validate_binding_target(
     route: &DbBinding,
     binding: &DbBinding,
 ) -> Result<(), crate::error::DbError> {
-    if route != binding {
+    if route.route() != binding.route() || route.schema() != binding.schema() {
         return Err(crate::error::DbError::internal(
             "ORM binding does not match the captured database route",
         ));

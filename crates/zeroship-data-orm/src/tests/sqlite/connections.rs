@@ -18,7 +18,7 @@ use crate::tests::fixtures::DatabaseFixture;
 
 async fn pragma_value(backend: &SqliteBackend, pragma: &str) -> String {
     let client = backend
-        .fixture_session("default")
+        .fixture_session(&crate::tests::fixtures::harness_alias("default"))
         .await
         .expect("acquire client");
     let sql = format!("PRAGMA {pragma}");
@@ -185,7 +185,7 @@ fn execute_fixture_on_round_trip() {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
             let client = backend
-                .fixture_session("default")
+                .fixture_session(&crate::tests::fixtures::harness_alias("default"))
                 .await
                 .expect("fixture_session");
             // DDL via the handle — both paths route through the same
@@ -220,7 +220,7 @@ fn ensure_app_schema_attaches_file() {
             let (backend, dir) = fresh_backend(host);
             let alias = crate::tests::fixtures::harness_alias("app_demo");
             backend
-                .attach_alias_file(&alias)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
 
@@ -237,7 +237,7 @@ fn ensure_app_schema_attaches_file() {
             // succeeding is the assertion (a missing alias surfaces as
             // `no such database: <alias>`).
             let client = backend
-                .fixture_session("app_demo")
+                .fixture_session(&crate::tests::fixtures::harness_alias("app_demo"))
                 .await
                 .expect("acquire client");
             let rows = client
@@ -260,14 +260,14 @@ fn ensure_app_schema_idempotent() {
             let (backend, _dir) = fresh_backend(host);
             // First call attaches.
             backend
-                .attach_alias_file(&crate::tests::fixtures::harness_alias("app_demo"))
+                .attach_binding(&crate::tests::fixtures::harness_binding("app_demo"))
                 .await
                 .expect("first ensure_app_schema");
             // Second call must NOT surface "database <alias> is already
             // in use" — the cache (or the error-suppression fallback)
             // should short-circuit it to Ok.
             backend
-                .attach_alias_file(&crate::tests::fixtures::harness_alias("app_demo"))
+                .attach_binding(&crate::tests::fixtures::harness_binding("app_demo"))
                 .await
                 .expect("second ensure_app_schema must be idempotent");
         });
@@ -282,11 +282,11 @@ fn ensure_app_schema_isolates_per_app() {
             let alias_a = crate::tests::fixtures::harness_alias("app_a");
             let alias_b = crate::tests::fixtures::harness_alias("app_b");
             backend
-                .attach_alias_file(&alias_a)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias_a))
                 .await
                 .expect("attach app_a");
             backend
-                .attach_alias_file(&alias_b)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias_b))
                 .await
                 .expect("attach app_b");
 

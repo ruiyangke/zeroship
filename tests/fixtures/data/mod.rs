@@ -190,6 +190,24 @@ pub fn harness_alias(app_id: &str) -> String {
     harness_binding(app_id).schema().as_str().to_owned()
 }
 
+/// The binding whose schema is `alias`, for a fixture that already holds the
+/// physical name and needs the identity back.
+///
+/// # Panics
+///
+/// Panics when no binding on this thread addresses `alias`. A fixture that
+/// invented a qualifier has nothing to attach it for.
+pub fn harness_binding_for_alias(alias: &str) -> zeroship_data_orm::binding::DbBinding {
+    HARNESS_BINDINGS.with(|bindings| {
+        bindings
+            .borrow()
+            .values()
+            .find(|binding| binding.schema().as_str() == alias)
+            .cloned()
+            .unwrap_or_else(|| panic!("no harness binding on this thread addresses {alias}"))
+    })
+}
+
 /// The lane key a harness's work for `app_id` is held under.
 pub fn harness_route(app_id: &str) -> zeroship_data_orm::binding::DbRoute {
     harness_binding(app_id).route()

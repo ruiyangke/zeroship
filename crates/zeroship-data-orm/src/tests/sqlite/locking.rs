@@ -18,7 +18,7 @@ fn lock_try_acquire_blocks_second() {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
             let client = backend
-                .fixture_session("default")
+                .fixture_session(&crate::tests::fixtures::harness_alias("default"))
                 .await
                 .expect("acquire client");
             // First acquisition on a fresh registry succeeds.
@@ -52,7 +52,7 @@ fn lock_release_unblocks() {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
             let client = backend
-                .fixture_session("default")
+                .fixture_session(&crate::tests::fixtures::harness_alias("default"))
                 .await
                 .expect("acquire client");
             backend
@@ -85,7 +85,7 @@ fn lock_acquire_with_backoff_exhausts_into_contention_error() {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
             let client = backend
-                .fixture_session("default")
+                .fixture_session(&crate::tests::fixtures::harness_alias("default"))
                 .await
                 .expect("acquire client");
             let scope = LockScope::GlobalApp {

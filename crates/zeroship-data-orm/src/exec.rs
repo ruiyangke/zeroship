@@ -944,6 +944,7 @@ mod tests {
     fn sqlite_exec_helpers_use_tx_connection_when_present() {
         reset_world("app_exec");
         run(async {
+            let alias = crate::tests::fixtures::harness_alias("app_exec");
             let dir = tempfile::tempdir().expect("tempdir");
             let backend = Rc::new(
                 crate::backend_selection::new_sqlite_backend(
@@ -953,15 +954,17 @@ mod tests {
                 .expect("open sqlite backend"),
             );
             backend
-                .attach_alias_file(&crate::tests::fixtures::harness_alias("app_exec"))
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure app schema");
             backend
                 .execute_fixture(
-                    r#"CREATE TABLE "app_exec"."notes" (
+                    &format!(
+                        r#"CREATE TABLE "{alias}"."notes" (
                            id INTEGER PRIMARY KEY,
                            title TEXT NOT NULL
-                       )"#,
+                       )"#
+                    ),
                     &[],
                 )
                 .await
@@ -990,9 +993,10 @@ mod tests {
             let inserted = exec_mutation(
                 &ambient_route_for_tests(&crate::tests::fixtures::harness_binding("app_exec"), handle.clone()),
                 CompiledQuery {
-                    sql: r#"INSERT INTO "app_exec"."notes" (id, title)
+                    sql: format!(
+                        r#"INSERT INTO "{alias}"."notes" (id, title)
                         VALUES (1, 'tx-row') RETURNING *"#
-                        .to_string(),
+                    ),
                     params: vec![],
                 },
             )
@@ -1012,7 +1016,7 @@ mod tests {
             let count = exec_count(
                 &ambient_route_for_tests(&crate::tests::fixtures::harness_binding("app_exec"), handle.clone()),
                 CompiledQuery {
-                    sql: r#"SELECT COUNT(*) AS count FROM "app_exec"."notes""#.to_string(),
+                    sql: format!(r#"SELECT COUNT(*) AS count FROM "{alias}"."notes""#),
                     params: vec![],
                 },
             )
@@ -1029,7 +1033,7 @@ mod tests {
             let rows = exec_query(
                 &ambient_route_for_tests(&crate::tests::fixtures::harness_binding("app_exec"), handle.clone()),
                 CompiledQuery {
-                    sql: r#"SELECT title FROM "app_exec"."notes" WHERE id = 1"#.to_string(),
+                    sql: format!(r#"SELECT title FROM "{alias}"."notes" WHERE id = 1"#),
                     params: vec![],
                 },
             )
@@ -1149,6 +1153,7 @@ mod tests {
         let app_id = "app_usage_counts";
         reset_world(app_id);
         run(async {
+            let alias = crate::tests::fixtures::harness_alias(app_id);
             let dir = tempfile::tempdir().expect("tempdir");
             let backend = Rc::new(
                 crate::backend_selection::new_sqlite_backend(
@@ -1158,13 +1163,13 @@ mod tests {
                 .expect("open sqlite backend"),
             );
             backend
-                .attach_alias_file(&crate::tests::fixtures::harness_alias(app_id))
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure app schema");
             backend
                 .execute_fixture(
                     &format!(
-                        r#"CREATE TABLE "{app_id}"."notes" (
+                        r#"CREATE TABLE "{alias}"."notes" (
                                id INTEGER PRIMARY KEY,
                                title TEXT NOT NULL
                            )"#
@@ -1182,7 +1187,7 @@ mod tests {
                 &metered_route(app_id, handle.clone(), &sink),
                 CompiledQuery {
                     sql: format!(
-                        r#"INSERT INTO "{app_id}"."notes" (id, title) VALUES (1, 'a') RETURNING *"#
+                        r#"INSERT INTO "{alias}"."notes" (id, title) VALUES (1, 'a') RETURNING *"#
                     ),
                     params: vec![],
                 },
@@ -1194,7 +1199,7 @@ mod tests {
             exec_query(
                 &metered_route(app_id, handle.clone(), &sink),
                 CompiledQuery {
-                    sql: format!(r#"SELECT title FROM "{app_id}"."notes" WHERE id = 1"#),
+                    sql: format!(r#"SELECT title FROM "{alias}"."notes" WHERE id = 1"#),
                     params: vec![],
                 },
             )
@@ -1205,7 +1210,7 @@ mod tests {
             exec_count(
                 &metered_route(app_id, handle.clone(), &sink),
                 CompiledQuery {
-                    sql: format!(r#"SELECT COUNT(*) AS count FROM "{app_id}"."notes""#),
+                    sql: format!(r#"SELECT COUNT(*) AS count FROM "{alias}"."notes""#),
                     params: vec![],
                 },
             )
@@ -1216,7 +1221,7 @@ mod tests {
             let bad = exec_query(
                 &metered_route(app_id, handle.clone(), &sink),
                 CompiledQuery {
-                    sql: format!(r#"SELECT nope FROM "{app_id}"."no_such_table""#),
+                    sql: format!(r#"SELECT nope FROM "{alias}"."no_such_table""#),
                     params: vec![],
                 },
             )
@@ -1227,7 +1232,7 @@ mod tests {
                 let affected = exec_mutation_count_with_emit(
                     CompiledQuery {
                         sql: format!(
-                            r#"UPDATE "{app_id}"."notes" SET title = 'changed' WHERE {filter}"#
+                            r#"UPDATE "{alias}"."notes" SET title = 'changed' WHERE {filter}"#
                         ),
                         params: vec![],
                     },
@@ -1241,7 +1246,7 @@ mod tests {
             }
             assert!(exec_mutation_count_with_emit(
                 CompiledQuery {
-                    sql: format!(r#"DELETE FROM "{app_id}"."missing""#),
+                    sql: format!(r#"DELETE FROM "{alias}"."missing""#),
                     params: vec![],
                 },
                 &metered_route(app_id, handle.clone(), &sink),
@@ -1305,7 +1310,7 @@ mod tests {
             // is parked in the per-isolate slot — exactly the state a
             // creator callback leaves behind across an `await`.
             let client = backend
-                .fixture_session("app_a")
+                .fixture_session(&crate::tests::fixtures::harness_alias("app_a"))
                 .await
                 .expect("acquire tx client");
             backend
@@ -1361,6 +1366,7 @@ mod tests {
         run(async {
             use std::time::Duration;
 
+            let alias = crate::tests::fixtures::harness_alias("app_exec_cancel");
             let dir = tempfile::tempdir().expect("tempdir");
             let backend = Rc::new(
                 crate::backend_selection::new_sqlite_backend(
@@ -1370,23 +1376,27 @@ mod tests {
                 .expect("open sqlite backend"),
             );
             backend
-                .attach_alias_file(&crate::tests::fixtures::harness_alias("app_exec_cancel"))
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure app schema");
             backend
                 .execute_fixture(
-                    r#"CREATE TABLE "app_exec_cancel"."notes" (
+                    &format!(
+                        r#"CREATE TABLE "{alias}"."notes" (
                            id INTEGER PRIMARY KEY,
                            title TEXT NOT NULL
-                       )"#,
+                       )"#
+                    ),
                     &[],
                 )
                 .await
                 .expect("CREATE TABLE notes");
             backend
                 .execute_fixture(
-                    r#"INSERT INTO "app_exec_cancel"."notes" (id, title)
-                        VALUES (1, 'persisted')"#,
+                    &format!(
+                        r#"INSERT INTO "{alias}"."notes" (id, title)
+                        VALUES (1, 'persisted')"#
+                    ),
                     &[],
                 )
                 .await
@@ -1414,11 +1424,13 @@ mod tests {
             let gate = backend.arm_next_command_gate_for_tests();
             let spawned_handle = handle.clone();
             let task = crate::orm_context::spawn(async move {
+                // The spawned future is 'static, so it resolves the alias
+                // itself rather than capturing the one the test body holds.
+                let alias = crate::tests::fixtures::harness_alias("app_exec_cancel");
                 exec_query(
                     &ambient_route_for_tests(&crate::tests::fixtures::harness_binding("app_exec_cancel"), spawned_handle),
                     CompiledQuery {
-                        sql: r#"SELECT title FROM "app_exec_cancel"."notes" WHERE id = 1"#
-                            .to_string(),
+                        sql: format!(r#"SELECT title FROM "{alias}"."notes" WHERE id = 1"#),
                         params: vec![],
                     },
                 )
@@ -1445,7 +1457,7 @@ mod tests {
             let rows = exec_query(
                 &ambient_route_for_tests(&crate::tests::fixtures::harness_binding("app_exec_cancel"), handle.clone()),
                 CompiledQuery {
-                    sql: r#"SELECT title FROM "app_exec_cancel"."notes" WHERE id = 1"#.to_string(),
+                    sql: format!(r#"SELECT title FROM "{alias}"."notes" WHERE id = 1"#),
                     params: vec![],
                 },
             )

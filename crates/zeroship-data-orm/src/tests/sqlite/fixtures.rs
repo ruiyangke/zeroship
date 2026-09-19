@@ -104,7 +104,7 @@ pub(super) async fn unmask_setup_with_schema(
     );
     let alias = crate::tests::fixtures::harness_alias(app_id);
     backend
-        .attach_alias_file(&alias)
+        .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
         .await
         .expect("ensure_app_schema");
     // The audit table, APPLY-AHEAD. `crud/unmask.rs` used to create it itself

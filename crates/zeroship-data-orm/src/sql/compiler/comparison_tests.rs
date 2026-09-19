@@ -196,6 +196,7 @@ async fn exercise_json_condition(
 #[compio::test]
 async fn sqlite_conflict_conditions_compare_json_structurally() {
     use crate::driver::{Driver, LeaseKind};
+    let alias = crate::tests::fixtures::harness_alias("comparison");
     let directory = tempfile::tempdir().unwrap();
     let backend = crate::backend::sqlite::SqliteBackend::open(
         directory.path().join("control.sqlite"),
@@ -209,7 +210,7 @@ async fn sqlite_conflict_conditions_compare_json_structurally() {
         .await
         .unwrap();
     let session = driver.acquire(LeaseKind::Autocommit).await.unwrap();
-    exercise_json_condition(&SqliteCompiler, &*session, "comparison", "TEXT").await;
+    exercise_json_condition(&SqliteCompiler, &*session, &alias, "TEXT").await;
 }
 
 #[compio::test]

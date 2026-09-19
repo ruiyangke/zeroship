@@ -217,7 +217,7 @@ async fn sqlite_tx_conn(dir: &tempfile::TempDir) -> Session {
     )
     .expect("open sqlite backend");
     let client = backend
-        .fixture_session("slot_state_probe")
+        .fixture_session(&crate::tests::fixtures::harness_alias("slot_state_probe"))
         .await
         .expect("acquire sqlite client");
     Session::new(client)

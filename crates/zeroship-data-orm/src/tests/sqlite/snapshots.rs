@@ -27,7 +27,7 @@ fn snapshot_restore_round_trip_sqlite() {
             let (backend, dir) = fresh_backend(host);
             let alias = crate::tests::fixtures::harness_alias("app_demo");
             backend
-                .attach_alias_file(&alias)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
 
@@ -49,7 +49,7 @@ fn snapshot_restore_round_trip_sqlite() {
             }
             // Sanity: row count is N.
             let client = backend
-                .fixture_session("app_demo")
+                .fixture_session(&crate::tests::fixtures::harness_alias("app_demo"))
                 .await
                 .expect("acquire client");
             let rows = client
@@ -145,7 +145,7 @@ fn vacuum_into_snapshot_consistent_under_concurrent_writer() {
             let (backend, dir) = fresh_backend(host);
             let alias = crate::tests::fixtures::harness_alias("app_demo");
             backend
-                .attach_alias_file(&alias)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
             backend
@@ -257,7 +257,7 @@ fn vacuum_into_snapshot_consistent_under_concurrent_writer() {
             // (b) — live > snap (the concurrent writer's commits past the
             // snapshot's read mark are visible in live but NOT in snap).
             let client = backend
-                .fixture_session("app_demo")
+                .fixture_session(&crate::tests::fixtures::harness_alias("app_demo"))
                 .await
                 .expect("acquire client");
             let live_rows = client
@@ -300,7 +300,7 @@ fn snapshot_during_migration_returns_typed_error_sqlite() {
             // acquire. The `to_keys` derivation is identical to what the
             // snapshot impl computes.
             let client = backend
-                .fixture_session("default")
+                .fixture_session(&crate::tests::fixtures::harness_alias("default"))
                 .await
                 .expect("acquire client");
             let scope = LockScope::GlobalApp {
@@ -372,7 +372,7 @@ fn restore_hash_mismatch_rejected_sqlite() {
             let (backend, dir) = fresh_backend(host);
             let alias = crate::tests::fixtures::harness_alias("app_demo");
             backend
-                .attach_alias_file(&alias)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
             backend
@@ -440,7 +440,7 @@ fn restore_hash_mismatch_rejected_sqlite() {
             // only fires after the hash verify; an early-refuse contract
             // means the live file is bit-for-bit unchanged.)
             let client = backend
-                .fixture_session("app_demo")
+                .fixture_session(&crate::tests::fixtures::harness_alias("app_demo"))
                 .await
                 .expect("acquire client");
             let rows = client

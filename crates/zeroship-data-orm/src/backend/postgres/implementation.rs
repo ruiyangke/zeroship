@@ -180,7 +180,7 @@ impl PostgresBackend {
 impl crate::tests::fixtures::DatabaseFixture for PostgresBackend {
     type Client = compio_postgres::PoolConnection;
 
-    async fn fixture_session(&self, _app_id: &str) -> Result<Self::Client, DbError> {
+    async fn fixture_session(&self, _alias: &str) -> Result<Self::Client, DbError> {
         self.pool
             .acquire()
             .await

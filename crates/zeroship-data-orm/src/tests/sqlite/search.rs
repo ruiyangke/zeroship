@@ -67,7 +67,7 @@ fn vector_search_returns_k_nearest_sqlite() {
             let (backend, _dir) = fresh_backend(host);
             let alias = crate::tests::fixtures::harness_alias("vector_topk");
             backend
-                .attach_alias_file(&alias)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
 
@@ -177,7 +177,7 @@ fn vector_dimension_mismatch_rejected_at_insert_sqlite() {
             let (backend, _dir) = fresh_backend(host);
             let alias = crate::tests::fixtures::harness_alias("vector_dim");
             backend
-                .attach_alias_file(&alias)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
 
@@ -225,7 +225,7 @@ fn vector_search_respects_filter_sqlite() {
             let (backend, _dir) = fresh_backend(host);
             let alias = crate::tests::fixtures::harness_alias("vector_filter");
             backend
-                .attach_alias_file(&alias)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
 
@@ -339,7 +339,7 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
             let (backend, _dir) = fresh_backend(host);
             let alias = crate::tests::fixtures::harness_alias("vector_math");
             backend
-                .attach_alias_file(&alias)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
 
@@ -485,7 +485,7 @@ fn near_returns_within_radius() {
             let (backend, _dir) = fresh_backend(host);
             let alias = crate::tests::fixtures::harness_alias("near_radius");
             backend
-                .attach_alias_file(&alias)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
 
@@ -634,7 +634,7 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
             let app = "near_tx_lane";
             let alias = crate::tests::fixtures::harness_alias(app);
             backend
-                .attach_alias_file(&alias)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("attach the app database");
             backend
@@ -774,7 +774,7 @@ fn near_uses_an_unreadable_identity_without_returning_it() {
             let app = "near_hidden_identity";
             let alias = crate::tests::fixtures::harness_alias(app);
             let (backend, _dir) = fresh_backend(host);
-            backend.attach_alias_file(&alias).await.unwrap();
+            backend.attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias)).await.unwrap();
             backend
                 .execute_fixture(
                     &format!(
@@ -857,7 +857,7 @@ fn low_level_near_preserves_public_aliases_and_hides_ranking_identity() {
             let app = "near_projection_aliases";
             let db_alias = crate::tests::fixtures::harness_alias(app);
             let (backend, _dir) = fresh_backend(host);
-            backend.attach_alias_file(&db_alias).await.unwrap();
+            backend.attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&db_alias)).await.unwrap();
             backend
                 .execute_fixture(
                     &format!(

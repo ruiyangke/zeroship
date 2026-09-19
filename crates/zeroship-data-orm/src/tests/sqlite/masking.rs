@@ -65,7 +65,7 @@ fn masked_insert_persists_visible_and_raw_columns_sqlite() {
             let binding = crate::tests::fixtures::harness_binding("app_demo");
             let alias = binding.schema().as_str();
             backend
-                .attach_alias_file(alias)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
             let raw = raw_column_name("ssn");
@@ -107,7 +107,7 @@ fn masked_insert_persists_visible_and_raw_columns_sqlite() {
 
             let param_refs = &bq.params;
             let client = backend
-                .fixture_session("app_demo")
+                .fixture_session(&crate::tests::fixtures::harness_alias("app_demo"))
                 .await
                 .expect("acquire client");
             let _ = client
@@ -139,7 +139,7 @@ fn a_select_serves_the_masked_column_sqlite() {
             let binding = crate::tests::fixtures::harness_binding("app_demo");
             let alias = binding.schema().as_str();
             backend
-                .attach_alias_file(alias)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
             let raw_ssn = raw_column_name("ssn");
@@ -188,7 +188,7 @@ fn a_select_serves_the_masked_column_sqlite() {
             .expect("compile insert");
             let param_refs = &bq.params;
             let client = backend
-                .fixture_session("app_demo")
+                .fixture_session(&crate::tests::fixtures::harness_alias("app_demo"))
                 .await
                 .expect("acquire client");
             client

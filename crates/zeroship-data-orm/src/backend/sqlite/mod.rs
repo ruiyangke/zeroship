@@ -6,7 +6,7 @@
 
 use crate::binding::DbBinding;
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -266,8 +266,8 @@ impl SqliteBackend {
 impl crate::tests::fixtures::DatabaseFixture for SqliteBackend {
     type Client = SqliteSessionHandle;
 
-    async fn fixture_session(&self, app_id: &str) -> Result<Self::Client, DbError> {
-        let lease = self.session.reserve_transaction(app_id).await?;
+    async fn fixture_session(&self, alias: &str) -> Result<Self::Client, DbError> {
+        let lease = self.session.reserve_transaction(alias).await?;
         Ok(SqliteSessionHandle::with_lease(self.session.clone(), lease))
     }
 
@@ -367,12 +367,19 @@ impl SqliteBackend {
         if alias == MAIN_DATABASE {
             return Ok(());
         }
+        // The preupdate hook reports the alias and nothing else, so the tenant
+        // a change is published under has to be recorded where both are known.
+        record_alias_tenant(alias, binding.app_id());
         self.attach_alias_file(alias).await
     }
 
     /// Attach one database file under `alias`, caching successful attaches.
     /// Schema changes are owned by the migration engine.
-    pub async fn attach_alias_file(&self, app_id: &str) -> Result<(), DbError> {
+    ///
+    /// Private: reaching it without a binding would attach a database whose
+    /// tenant nothing recorded, and a change on it would then be published to
+    /// no app at all.
+    async fn attach_alias_file(&self, app_id: &str) -> Result<(), DbError> {
         // Idempotent guard. The cache must be checked before the
         // ATTACH because SQLite hard-errors on a duplicate ATTACH of
         // the same alias ("database <alias> is already in use"); the
@@ -1176,4 +1183,49 @@ impl crate::backend::Backend for SqliteBackend {
     fn admits_concurrent_transactions(&self) -> bool {
         false
     }
+}
+
+/// Every app bound to one `ATTACH` alias on this process's dev tier.
+///
+/// **The alias is a DATABASE and the broker routes on an APP, so this is the
+/// translation between them.** SQLite's preupdate hook reports the alias and
+/// nothing else; production learns the same mapping from Control's binding
+/// topology, which the relay reads. A dev process has no control plane, so the
+/// mapping is what `attach_binding` saw: every binding whose statements have
+/// addressed this alias.
+///
+/// Process-wide rather than per backend because the publisher task and the
+/// session actor run on different threads from the one that attached.
+///
+/// An alias nobody bound publishes nothing. Stamping the alias as a tenant
+/// instead would deliver to a subscription nobody holds, which reads as a lost
+/// event rather than as an unbound database.
+static ALIAS_TENANTS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, BTreeSet<String>>>> =
+    std::sync::OnceLock::new();
+
+fn alias_tenants() -> &'static std::sync::Mutex<HashMap<String, BTreeSet<String>>> {
+    ALIAS_TENANTS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// Record that `app_id` addresses `alias`.
+pub(crate) fn record_alias_tenant(alias: &str, app_id: &str) {
+    if let Ok(mut tenants) = alias_tenants().lock() {
+        tenants
+            .entry(alias.to_owned())
+            .or_default()
+            .insert(app_id.to_owned());
+    }
+}
+
+/// The apps a change on `alias` is published to, in a stable order.
+pub(crate) fn tenants_for_alias(alias: &str) -> Vec<String> {
+    alias_tenants()
+        .lock()
+        .map(|tenants| {
+            tenants
+                .get(alias)
+                .map(|set| set.iter().cloned().collect())
+                .unwrap_or_default()
+        })
+        .unwrap_or_default()
 }
