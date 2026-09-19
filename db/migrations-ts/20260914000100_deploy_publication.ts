@@ -112,8 +112,9 @@ export default {
       .index("app_lifecycle_intents_deployment_idx")
       .add({ on: ["app_id", "deploy_id"] });
 
-    // Typed-id domains and their copies compare bytewise; see
-    // 20260831000001_sortable_entity_id_collations.ts.
+    // Typed-id domains and their copies compare bytewise; these columns are
+    // collated here rather than in the core sweep, which covers only columns
+    // the creating migration does not already collate.
     raw({
       sql:
         'ALTER TABLE "zeroship"."app_deploy_commands" ALTER COLUMN "id" TYPE text COLLATE "C", '

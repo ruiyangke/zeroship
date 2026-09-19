@@ -131,8 +131,6 @@ class ZsWorkflowCompensationReplayReady extends Error {
     }
 }
 
-const ZS_MAX_START_MANY_BATCH = 1000;
-
 // Misuse of the step API. Deterministic by construction: the same body raises
 // it again, so re-executing the step cannot clear it.
 //
@@ -326,6 +324,19 @@ function wfNormalizeOutputRef(value) {
     };
 }
 
+// The envelope a consumed signal wait resolves to, with `createdAt` as the
+// `Date` the SDK declares. The journal carries the instant as an RFC 3339
+// string, and rebuilding it here is the same move `wfTrigger` makes for the
+// trigger's own `startedAt`: a creator reads one date surface, not two that
+// differ by which journal row they came from. The record is copied rather than
+// patched, because replay hands the same row to every dispatch.
+function wfSignalEnvelope(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+    const created = value.createdAt;
+    if (typeof created !== "string" && typeof created !== "number") return value;
+    return { ...value, createdAt: new Date(created) };
+}
+
 function wfOutputReader(envelope) {
     const workflows = globalThis.__zs_env?.()?.workflows;
     const run = workflows?.[envelope.workflowName]?.get(String(envelope.runId ?? ""));
@@ -492,6 +503,14 @@ class ZsJournalBackedStep {
     #phase = "running";
     #trigger = {};
     #compensatorRegistry = new Map();
+    // Whether this dispatch has entered a compensator. A compensator reaches the
+    // step surface the same way a step body does, and the journal is closed to
+    // both: past the rebuilt prefix there is no record to issue against, so an
+    // issue from here would raise the bridge's own replay signal into creator
+    // code and record its name as the rollback's failure. Set once and never
+    // cleared, because a compensating dispatch replays its prefix first and
+    // runs compensators afterwards, so nothing legitimate issues a step again.
+    #inCompensator = false;
     #workflowNames;
     #generation = 0;
 
@@ -639,7 +658,9 @@ class ZsJournalBackedStep {
         const issued = this.#issue(name, "wait_signal");
         if (issued.record) {
             if (issued.record.state === "completed") {
-                if (issued.record.output !== undefined) return brandStepPromise(Promise.resolve(issued.record.output));
+                if (issued.record.output !== undefined) {
+                    return brandStepPromise(Promise.resolve(wfSignalEnvelope(issued.record.output)));
+                }
                 return brandStepPromise(Promise.resolve(issued.record.consumedSignal ?? null));
             }
             if (issued.record.state === "failed") return this.#recordPromise(issued.record);
@@ -694,14 +715,13 @@ class ZsJournalBackedStep {
         });
     }
 
+    // Every item joins the single frontier this dispatch submits, so the batch
+    // shares one budget with every other step issued in the same turn. The app
+    // plan holds that budget, it reaches no isolate, and creator code could drop
+    // any copy kept here, so the platform is where it is decided.
     startMany(WorkflowClass, items, options) {
         this.#assertNotNested();
         const materialized = Array.from(items);
-        if (materialized.length > ZS_MAX_START_MANY_BATCH) {
-            return brandStepPromise(Promise.reject(new ZsLimitExceededError(
-                `startMany batch exceeds maxStartManyBatch (${materialized.length} > ${ZS_MAX_START_MANY_BATCH})`,
-            )));
-        }
         return brandStepPromise(Promise.all(materialized.map((raw) => {
             const item = raw || {};
             const itemOptions = item.options && typeof item.options === "object" ? item.options : {};
@@ -875,6 +895,7 @@ class ZsJournalBackedStep {
             ),
             trigger: this.#trigger,
         };
+        this.#inCompensator = true;
         try {
             await zsWorkflowDispatchAls.run(
                 { mode: "step" },
@@ -952,11 +973,12 @@ class ZsJournalBackedStep {
 
     #assertNotNested() {
         if (
-            this.#activeStepCallbacks > 0 &&
-            (this.#callbackSyncDepth > 0 || !this.#parallelIssueWindow)
+            this.#inCompensator ||
+            (this.#activeStepCallbacks > 0 &&
+                (this.#callbackSyncDepth > 0 || !this.#parallelIssueWindow))
         ) {
             throw wfErr(
-                "workflow step methods cannot be called from inside a step body",
+                "workflow step methods cannot be called from inside a step body or compensator",
                 500,
                 "WORKFLOW_DEFINITION_ERROR",
                 "NestedStepError",
@@ -1268,16 +1290,15 @@ export async function dispatch(userNamespace, envelope, _ctx) {
                     { mode: "body" },
                     () => Promise.resolve(workflow.run(trigger, step)),
                 );
-            } catch (e) {
-                if (
-                    !(e instanceof ZsWorkflowCompensationReplayReady) &&
-                    !(e instanceof ZsWorkflowSuspendSignal) &&
-                    !(e instanceof ZsWorkflowContinueAsNewSignal)
-                ) {
-                    // Terminal forward errors are expected while rebuilding the registry.
-                    // Corrupt prefixes still fail closed if no pending compensator
-                    // reconstructs from the replayed journal.
-                }
+            } catch {
+                // The rebuild's only product is the registry each `step.*` call fills
+                // as the body reaches it, so every way out of the body is equivalent
+                // here and none is inspected: the forward failure being rolled back,
+                // the signal that ends the replay at the journal frontier, and a fault
+                // in the body alike. A prefix that registered nothing fails closed,
+                // because `runNextCompensator` then has no pending entry to run, and a
+                // prefix that registered the wrong one is refused by the engine, which
+                // matches the reported obligation against its own journal.
             }
             return workflowTerminalResult(envelope, await step.runNextCompensator());
         }

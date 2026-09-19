@@ -7,7 +7,8 @@ zeroship defines two flat-config ESLint packages for app code:
   sequential scan.
 - `@zeroship/eslint-plugin-workflow` — correctness rules for durable workflows:
   `no-nested-step`, `no-nondeterministic-between-steps`,
-  `no-nondeterministic-step-name`, and `no-parallel-steps`.
+  `no-nondeterministic-step-name`, `no-parallel-steps`, and
+  `no-step-catch-without-rethrow`.
 
 Both packages export a `recommended` preset for ESLint's flat config, plus the
 individual rules so you can select or re-weight them. ESLint itself is not
@@ -84,6 +85,7 @@ The rule keys and the severity each preset assigns:
 | `@zeroship/workflow/no-nondeterministic-between-steps` | `error` | A clock, random, UUID, or `env.workflows` call in the workflow body outside a step. |
 | `@zeroship/workflow/no-nested-step` | `error` | A step call made from inside a step body. |
 | `@zeroship/workflow/no-parallel-steps` | `warn` | A `Promise` combinator over step calls, supported or not. |
+| `@zeroship/workflow/no-step-catch-without-rethrow` | `error` | A catch around a step call that can finish without rethrowing what it caught. |
 
 ## `no-unindexed-query`
 
@@ -150,15 +152,18 @@ covers `.get` and it can scan.
 
 ## Workflow rules
 
-The four workflow rules follow the determinism contract in
+Four of the workflow rules follow the determinism contract in
 [workflows.md](workflows.md#determinism): the workflow body may observe the
 outside world only through journaled step output, and a replayed run must take
-the same path it took the first time. Each rule below states what it catches and
-what to do instead. Where a rule guards a runtime condition, the error the
-platform records is named: bare body I/O, journal mismatch, and unsupported
-step-promise control flow fail closed with `NondeterministicError`, and a
-`step.*` call from inside a step body raises `NestedStepError`
-([workflows.md](workflows.md#errors)). The plugin also matches a `step.do` call
+the same path it took the first time. The fifth,
+[`no-step-catch-without-rethrow`](#no-step-catch-without-rethrow), guards the
+other half of that bargain: the platform stops a body by throwing through it, so
+a catch that swallows the throw runs the body on past the point it was meant to
+stop. Each rule below states what it catches and what to do instead. Where a
+rule guards a runtime condition, the error the platform records is named: bare
+body I/O, journal mismatch, and unsupported step-promise control flow fail
+closed with `NondeterministicError`, and a `step.*` call from inside a step body
+raises `NestedStepError` ([workflows.md](workflows.md#errors)). The plugin also matches a `step.do` call
 the way it matches `step.run`; `step.do` is not declared on the documented
 `WorkflowStep` surface.
 
@@ -292,3 +297,79 @@ it to fail a build.
 The rule reads the first argument of a `Promise` combinator and recognizes the
 step methods `run`, `do`, `sleep`, `sleepUntil`, `waitForSignal`, and `call`. It
 does not match `sideEffect`, `startMany`, or `continueAsNew`.
+
+### `no-step-catch-without-rethrow`
+
+The platform stops a workflow body mid-flight by throwing through it: a
+suspension at the step the run is waiting on, a `step.continueAsNew`, and the
+end of the replay a rollback does to find its compensators all arrive that way.
+None of them carries a class `@zeroship/workflows` exports, so a catch that
+discards what it did not match discards those too, and the body runs on past the
+point it was meant to stop. In a forward dispatch the step calls it makes after
+that execute for real and are then thrown away unrecorded, so their effects land
+again on the dispatch that replaces them. This rule reports a `try` whose block
+holds a step call when the `catch` can finish without rethrowing what it caught,
+and the same shape written as `.catch()` on a step promise. See
+[Matching an error](workflows.md#matching-an-error).
+
+```ts
+// Reported: the catch swallows the stop along with the failure.
+try {
+  total = await step.run("charge", chargeCard);
+} catch {
+  total = null;
+}
+
+// Reported: only the matched class is rethrown; everything else is kept.
+try {
+  await step.run("charge", chargeCard);
+} catch (e) {
+  if (e instanceof PermanentError) throw e;
+  total = null;
+}
+
+// Reported: a new error replaces the one that carried the stop.
+try {
+  await step.call(Fulfill, order);
+} catch (e) {
+  throw new Error(`fulfillment failed: ${e.message}`);
+}
+
+// Reported: .catch() on a step promise swallows the same throw.
+const total = await step.run("charge", chargeCard).catch(() => null);
+
+// Fine: the matched class is handled and the rest is rethrown.
+try {
+  await step.run("charge", chargeCard);
+} catch (e) {
+  if (e instanceof StepTimeoutError) return retryLater();
+  throw e;
+}
+```
+
+To fix a report, rethrow the caught value itself on the path you do not handle.
+Claim the classes you mean to handle by name and end the handler with
+`throw e`, or write the handling in the branch and the `throw e` in its `else`.
+
+The rule follows the path an unclaimed error takes through the handler. At an
+`if` that is the `else` of a positive test, the `then` branch of a negated one
+(`!x`, `x !== y`, `x === false`, and `&&`/`||` over those), and otherwise the
+code after the `if`. A handler is reported when that path runs off the end of
+the block, returns, or throws a value other than the one it caught. The
+platform recognizes its own stop by identity, so a wrapped error loses it. What
+the other branches do is yours to decide and is not read.
+
+The rule does not model a loop, a `switch`, a label or a nested `try` inside a
+handler: a handler built from one of those is left alone rather than guessed at.
+It reads only the handler's own statements, so a call to a helper that always
+rethrows is still reported: write the `throw` where the rule can see it. A
+`finally` is not a rescue: it cannot name the caught binding, so a `throw` there
+replaces the value that carried the stop rather than passing it on. A `.catch()`
+argument that is not a function literal is not read, and
+`.then(onFulfilled, onRejected)` is not matched at all.
+
+The rule recognizes the step methods `run`, `do`, `sleep`, `sleepUntil`,
+`waitForSignal`, and `call`, in the `try` block and in the expression a
+`.catch()` hangs off. It does not match `sideEffect`, `startMany`, or
+`continueAsNew`, so a `try` whose block holds only `step.continueAsNew`, one of
+the three stops named above, is not reported.

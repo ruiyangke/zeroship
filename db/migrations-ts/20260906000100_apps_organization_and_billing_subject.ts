@@ -1,216 +1,61 @@
-import { createFunction, grant, now, raw, t, table, uuidV4 } from "@zeroship/migrate";
+import { grant, now, raw, t, table, uuidV4 } from "@zeroship/migrate";
 
-// Two halves of one statement: an app names the organization that owns it, and
-// the party the platform bills IS that organization rather than a person.
+// The organization-rooted billing domain. `organization_billing` is the subject
+// root -- one row per organization the platform bills -- and every other table
+// here either extends it (`organization_billing_status`, its append-only
+// history), records a connected payout account (`organization_accounts`, its
+// history) or a fee schedule (`organization_fee_policy`), or points at the root
+// as a child (`billing_customer_refs`, `billing_notifications`, and the carrier
+// tables declared elsewhere: `credit_ledger`, `invoices`, `payouts`,
+// `payout_failures`, `connect_checkout_failures`).
 //
-// ---- apps.organization_id is an FK-CONSUMED COPY, not a denormalization ----
+// THE SUBJECT IS `organizations.id`, WHICH IS TEXT. The `organization_billing`
+// children reach the root through `organization_billing.organization_id`; the
+// provider-account children (`payouts`, `payout_failures`,
+// `connect_checkout_failures`) reach it through
+// `organization_accounts.organization_id`; and `organization_fee_policy` points
+// straight at `organizations`. Deleting a user
+// therefore deletes no billing record: no edge here names `users`.
 //
-// `apps` reached its organization only through `projects` until now, so every
-// app-scoped read that needed the tenant root paid a hop the planner could not
-// remove. The copy is safe here for one structural reason and only that reason:
-// `projects` already carries `projects_organization_identity_key` over
-// `(id, organization_id)`, so the pair on `apps` can be CONSUMED by a composite
-// foreign key. No app row satisfies that key unless its organization matches the
-// organization its project belongs to, which means the copy cannot disagree with
-// the parent -- PostgreSQL re-checks it on every write to either side. A loose
-// copy would be the opposite: a second answer to "which organization owns this
-// app", which is the ambiguity this whole effort exists to remove.
+// DELETE SEMANTICS ARE PART OF THE SHAPE. A child that merely annotates the root
+// cascades with it; `organization_accounts` carries no referential action, so an
+// organization with a connected Stripe account is not deletable out from under
+// it; and `payouts` RESTRICTs against `organization_accounts`, because a payout
+// is money that moved and the account it moved to does not disappear beneath it.
+// `organization_account_history` and `app_audit.organization_id` keep NO foreign
+// key on purpose: both record a link that must outlive the row it names.
 //
-// THE KEY ITSELF IS THE NEXT FILE, AND THE BOUNDARY IS FORCED RATHER THAN
-// CHOSEN. `projects.organization_id` carries a non-default catalog collation,
-// applied -- as every collation in this corpus is -- by a raw island. The
-// snapshot the engine lowers a foreign key against is taken BEFORE the
-// migration runs and cannot see a raw island inside it, so a key added here
-// would compare a freshly authored `text` against a live `text COLLATE "C"` and
-// be refused for exactly the mismatch this corpus exists to prevent. Adding the
-// column and collating it in this migration, and consuming it in
-// db/migrations-ts/20260906000200_apps_project_ownership_key.ts, is what makes
-// the key expressible in the structured surface instead of as an opaque raw
-// island the model could never see.
+// ---- apps.organization_id is an FK-consumed copy, collated here ----
 //
-// THE APP-SCOPED LONG TAIL DELIBERATELY GETS NOTHING. `app_secrets`, `app_vars`,
-// `usage_aggregates` and the spend tables are one indexed hop from `apps` now
-// that `apps` carries the organization. There is no unique key for a copy on
-// those tables to consume, so a copy there would be a loose one -- another place
-// to be wrong, with nothing to make it right.
-//
-// ---- the billing subject stops being a human ----
-//
-// `creator_id` was a `users.id` value: the billing and Connect roots pointed at
-// it directly and every child reached it through one of them. The subject is
-// now `organizations.id`, which is TEXT, so this is a retarget, a rename AND a
-// type change all at once. What it buys immediately:
-// deleting a USER no longer deletes any billing record, because no billing edge
-// points at `users` any more.
-//
-// THE LINE IS DRAWN AT THE PRIMARY KEY. A table that merely CARRIES the subject
-// has its column swapped in place. A table that KEYS on it is re-declared whole,
-// because a key is not a column: its constraint changes name, columns and type
-// at once, so every index and constraint on that table has to be dropped and
-// re-added regardless, and what a rename would carry across is the appearance of
-// continuity plus rows in the old type, which pre-launch is not a thing that
-// exists. Re-declaring states the end shape in one place, lets PostgreSQL derive
-// each constraint name from the table that now owns it, and leaves nothing
-// misnamed behind. It also states the key INTRINSICALLY, which a drop-then-add
-// pair cannot: the engine refuses to fold a re-added primary key it cannot prove
-// is backed by a candidate key, and it is right to.
-//
-// Re-declaring costs exactly one thing a rename would have given free -- the
-// ACL -- so the grants are re-issued at the bottom of this file, privilege by
-// privilege, matching what each old name held. NOTHING STANDING RE-CHECKS THAT
-// MATCH. It was measured once, with `has_table_privilege` as `zeroship_control`
-// against the new names on a freshly applied database; a grant that drifts from
-// its predecessor after this commit will not announce itself, and the arm that
-// would announce it is not written yet.
-//
-// DELETE SEMANTICS ARE PRESERVED EXACTLY, NOT REDESIGNED. Each edge keeps the
-// referential action its predecessor had -- cascade where the old edge cascaded,
-// none where `creator_accounts` had none, restrict where `payouts` had restrict.
-// Whether an organization holding a billing subject should be deletable AT ALL
-// is a real question, and answering it means deciding what happens to invoices;
-// that decision belongs with the endpoint that deletes organizations, not
-// smuggled in beside a re-rooting.
-//
-// THE CARRIERS THAT KEEP NO KEY AT ALL ARE NAMED HERE, AS BEFORE.
-// `app_audit.organization_id` must outlive the organization it names, and
-// `organization_account_history` records links that outlive the account row.
-// Neither had a foreign key and neither gains one here; naming them is how a
-// reader knows they are unconstrained on purpose rather than by oversight.
-//
-// ---- the trap this migration exists to defuse ----
-//
-// `invoices_immutable` compares `NEW.creator_id = OLD.creator_id` INSIDE ITS
-// plpgsql BODY, which PostgreSQL stores as a string. Changing the column does
-// not rewrite a function body, so afterwards every invoice UPDATE -- the
-// finalize-to-void transition included -- would raise on a column that no longer
-// exists, and the guard would look like it was doing its job. The function is
-// therefore re-issued here, in the same migration that moves the column.
-//
-// READING THE SOURCE PROVES NOTHING; THE STORED BODY IS WHAT RUNS. It was proved
-// by driving a real finalize-then-void UPDATE (which succeeds), real forbidden
-// UPDATEs and a DELETE (which raise), and then by putting the pre-migration body
-// back and watching the permitted transition fail with `record "new" has no
-// field "creator_id"`. That was a measurement, not a standing check: no gate
-// re-drives it on every run, and until one does, a future change to this body is
-// only as safe as the reader.
-//
-// The same sweep found no other function body, no view, no row-level policy, no
-// CHECK expression and no column default naming the old subject -- only index
-// and constraint NAMES, which are re-declared under their organization spelling
-// rather than left describing a column that is gone.
+// `apps.organization_id` and its shape check are declared with the `apps` table
+// in db/migrations-ts/20260702000200_control_tables.ts. This migration owns its
+// bytewise collation, and
+// db/migrations-ts/20260906000200_apps_project_ownership_key.ts owns the
+// composite foreign key that consumes `(project_id, organization_id)` against
+// `projects(id, organization_id)`. The split is engine-forced: the engine lowers
+// a foreign key against a catalog snapshot taken before the migration runs, and
+// a collation is applied by a `raw` island that no snapshot can see, so the
+// collation and the key must live in separate, consecutive migrations. A raw
+// `ADD CONSTRAINT` would have fit in one file and hidden the most load-bearing
+// constraint in this change from the model.
 //
 // ---- what the collation block is for ----
 //
 // Every column here whose domain is a canonical typed id, and every foreign-key
 // copy of one, is registered for bytewise ordering in this same migration. A
 // copy that misses it cannot serve a join against the collated id from its own
-// index, and NOTHING ERRORS -- the join simply degrades. That includes
-// columns that are not the subject at all: `organization_billing_status
-// .failed_invoice_id` and `organization_billing_status_history.id` carried the
-// collation on their old tables, and a re-declared table starts without it.
+// index, and NOTHING ERRORS -- the join simply degrades. That includes columns
+// that are not the subject at all: `organization_billing_status.failed_invoice_id`
+// and `organization_billing_status_history.id` are typed ids in their own right.
 //
-// NOTHING IS BACKFILLED, AND A NON-EMPTY TABLE FAILS LOUDLY. Pre-launch there is
-// no deployed database holding these rows, and a development database with them
-// is recreated rather than migrated -- the same discipline `apps.project_id` was
-// added under. A `NOT NULL` column with no default refuses a populated table
-// outright; it does not invent a subject.
+// NOTHING IS BACKFILLED. Pre-launch there is no deployed database holding these
+// rows, and a development database with them is recreated rather than migrated.
+// The tables are declared with their final subject column, so no row is ever
+// read across a change.
 export default {
   name: "apps_organization_and_billing_subject",
   schema() {
-    // ---- apps: the FK-consumed organization copy ---------------------------
-    table("apps", { schema: "zeroship" })
-      .column("organization_id")
-      .add({ type: t.text().required() });
-    table("apps", { schema: "zeroship" })
-      .check("apps_organization_id_shape")
-      .add({ expr: (col) => col("organization_id").regex("^org_[0-9a-z]{25}$") });
-    // Two scans, two leading columns. `(project_id, organization_id)` answers
-    // "the apps of this project" and backs the parent key the next file adds;
-    // `(organization_id)` answers "the apps of this organization", which is the
-    // shape the route projection and the billing sweep want and which no
-    // project-leading index can serve. `apps_project_id_idx` is retired between
-    // them: it is a strict prefix of the first.
-    //
-    // THE COMPOSITE INDEX IS DECLARED RATHER THAN LEFT TO THE ENGINE, and the
-    // difference is not cosmetic. The engine emits an index for a composite
-    // foreign key only when the live catalog does not already have one, so an
-    // undeclared index makes the LENGTH of the next migration's plan depend on
-    // the database it is lowered against -- and the step identities are
-    // positional, so a first apply and a re-apply then journal different sets
-    // and `status` reports drift on a tree nobody touched. Declared here, the
-    // emitter finds it on every run and the plan is the same length every time.
-    table("apps", { schema: "zeroship" })
-      .index("apps_project_organization_idx")
-      .add({ on: ["project_id", "organization_id"] });
-    table("apps", { schema: "zeroship" })
-      .index("apps_organization_id_idx")
-      .add({ on: ["organization_id"] });
-    table("apps", { schema: "zeroship" }).index("apps_project_id_idx").drop();
-
-    // ---- release every edge that names the old subject ----------------------
-    // Only the tables whose column is SWAPPED need their constraints dropped by
-    // hand; the re-declared ones take theirs with them.
-    table("connect_checkout_failures", { schema: "zeroship" })
-      .constraint("connect_checkout_failures_creator_id_fkey")
-      .drop();
-    table("credit_ledger", { schema: "zeroship" })
-      .constraint("credit_ledger_creator_id_fkey")
-      .drop();
-    table("invoices", { schema: "zeroship" }).constraint("invoices_creator_id_fkey").drop();
-    table("payout_failures", { schema: "zeroship" })
-      .constraint("payout_failures_creator_id_fkey")
-      .drop();
-    table("payouts", { schema: "zeroship" }).constraint("payouts_creator_id_fkey").drop();
-
-    // Indexes over the old subject column. `invoices_active_period_claim` is in
-    // this list for its COLUMNS rather than its name: it is the one-live-invoice
-    // -per-period claim, and the period is claimed per subject.
-    table("app_audit", { schema: "zeroship" }).index("idx_app_audit_creator_at").drop();
-    table("connect_checkout_failures", { schema: "zeroship" })
-      .index("connect_checkout_failures_creator_idx")
-      .drop();
-    table("credit_ledger", { schema: "zeroship" }).index("credit_ledger_creator_created_idx").drop();
-    table("invoices", { schema: "zeroship" }).index("invoices_active_period_claim").drop();
-    table("payout_failures", { schema: "zeroship" }).index("payout_failures_creator_idx").drop();
-    table("payouts", { schema: "zeroship" }).index("idx_payouts_creator_time").drop();
-
-    // ---- swap the column on every carrier that is keyed elsewhere ----------
-    const carriers: readonly string[] = [
-      "invoices",
-      "credit_ledger",
-      "payouts",
-      "payout_failures",
-      "connect_checkout_failures",
-    ];
-    for (const name of carriers) {
-      table(name, { schema: "zeroship" }).column("creator_id").drop();
-      table(name, { schema: "zeroship" })
-        .column("organization_id")
-        .add({ type: t.text().required() });
-    }
-    // The one nullable carrier: an audit row records what happened, and it must
-    // stay readable after the organization it names is gone.
-    table("app_audit", { schema: "zeroship" }).column("creator_id").drop();
-    table("app_audit", { schema: "zeroship" }).column("organization_id").add({ type: t.text() });
-
-    // ---- retire every table that KEYS on the old subject -------------------
-    // A primary key is not a column swap. These are re-declared below
-    // rather than altered, which is also what lets the key be stated once,
-    // intrinsically, instead of assembled out of a drop and an add the engine
-    // cannot prove adds up to a candidate key.
-    //
-    // Dependents first: a table cannot be dropped while a foreign key points at
-    // it, and the children below point at the roots.
-    table("billing_customer_refs", { schema: "zeroship" }).drop();
-    table("billing_notifications", { schema: "zeroship" }).drop();
-    table("creator_billing_status", { schema: "zeroship" }).drop();
-    table("creator_billing_status_history", { schema: "zeroship" }).drop();
-    table("creator_billing", { schema: "zeroship" }).drop();
-    table("creator_accounts", { schema: "zeroship" }).drop();
-    table("creator_account_history", { schema: "zeroship" }).drop();
-    table("creator_fee_policy", { schema: "zeroship" }).drop();
-
-    // ---- and declare them against the new subject --------------------------
+    // ---- the billing root and its children ---------------------------------
     table("organization_billing", { schema: "zeroship" }).create({
       columns: {
         id: t.bigInt().required().identity(),
@@ -320,7 +165,7 @@ export default {
                 ),
             ),
       });
-    // The children that key on the subject rather than merely carrying it.
+    // The provider-keyed children of the billing root.
     table("billing_customer_refs", { schema: "zeroship" }).create({
       columns: {
         id: t.bigInt().required().identity(),
@@ -384,7 +229,7 @@ export default {
       });
     }
 
-    // ---- the roots now point at the organization ---------------------------
+    // ---- the roots point at the organization -------------------------------
     table("organization_billing", { schema: "zeroship" })
       .foreignKey("organization_billing_organization_id_fkey")
       .add({
@@ -392,9 +237,8 @@ export default {
         references: { table: "organizations", columns: ["id"], schema: "zeroship" },
         onDelete: "cascade",
       });
-    // No referential action, exactly as `creator_accounts` had none: an
-    // organization with a connected Stripe account is not deletable out from
-    // under it.
+    // No referential action: an organization with a connected Stripe account is
+    // not deletable out from under it.
     table("organization_accounts", { schema: "zeroship" })
       .foreignKey("organization_accounts_organization_id_fkey")
       .add({
@@ -456,8 +300,8 @@ export default {
         },
         onDelete: "cascade",
       });
-    // RESTRICT, as before: a payout is money that moved, and the account it
-    // moved to does not disappear from under it.
+    // RESTRICT: a payout is money that moved, and the account it moved to does
+    // not disappear from under it.
     table("payouts", { schema: "zeroship" })
       .foreignKey("payouts_organization_id_fkey")
       .add({
@@ -470,7 +314,7 @@ export default {
         onDelete: "restrict",
       });
 
-    // ---- the indexes, under the subject's name ------------------------------
+    // ---- the indexes, under the subject's name -----------------------------
     table("app_audit", { schema: "zeroship" })
       .index("idx_app_audit_organization_at")
       .add({ on: ["organization_id", { column: "occurred_at", order: "desc" }] });
@@ -480,9 +324,7 @@ export default {
     table("credit_ledger", { schema: "zeroship" })
       .index("credit_ledger_organization_created_idx")
       .add({ on: ["organization_id", "created_at"] });
-    // Renamed as well as re-columned: the claim is now one live invoice per
-    // ORGANIZATION per period, and the old name would collide with the live
-    // index the engine still sees while it lowers this migration.
+    // One live invoice per ORGANIZATION per period.
     table("invoices", { schema: "zeroship" })
       .index("invoices_organization_active_period_claim")
       .add({
@@ -522,11 +364,10 @@ export default {
         where: (col) => col("status").cast({ to: "text" }).eq("pending"),
       });
 
-    // ---- the ACLs the old names held ---------------------------------------
-    // Privilege by privilege, these are what `zeroship_control` held on each old
-    // table -- including the asymmetries a uniform grant would have quietly
-    // widened: only the billing root is deletable, and the status HISTORY is
-    // append-only to the control plane.
+    // ---- the ACLs the control plane holds ----------------------------------
+    // Privilege by privilege, including the asymmetries a uniform grant would
+    // widen: only the billing root and the provider refs are deletable, and the
+    // status history is append-only to the control plane.
     grant({
       privileges: ["select", "insert", "update", "delete"],
       on: {
@@ -559,21 +400,6 @@ export default {
         names: ["organization_billing_status_history"],
       },
       to: ["zeroship_control"],
-    });
-
-    // ---- re-issue the trigger body that names the column -------------------
-    // A stored plpgsql body is a string PostgreSQL never rewrites when a column
-    // moves. Without this, the finalize-to-void transition -- the ONE update an
-    // invoice is allowed -- raises `column "creator_id" does not exist` on every
-    // attempt.
-    createFunction({
-      schema: "zeroship",
-      name: "invoices_immutable",
-      returns: "trigger",
-      language: "procedural",
-      replace: true,
-      body:
-        "BEGIN\n    IF TG_OP = 'DELETE' THEN\n        RAISE EXCEPTION 'invoices are append-only (no DELETE)';\n    END IF;\n    IF OLD.status = 'finalized' THEN\n        IF NEW.status = 'void'\n           AND NEW.id = OLD.id AND NEW.organization_id = OLD.organization_id\n           AND NEW.period = OLD.period\n           AND NEW.subtotal_cents = OLD.subtotal_cents\n           AND NEW.credit_cents = OLD.credit_cents\n           AND NEW.tax_cents = OLD.tax_cents\n           AND NEW.total_cents = OLD.total_cents THEN\n            RETURN NEW;\n        END IF;\n        RAISE EXCEPTION 'invoice % is finalized - only the void transition is permitted', OLD.id;\n    END IF;\n    RETURN NEW;\nEND;",
     });
   },
 };

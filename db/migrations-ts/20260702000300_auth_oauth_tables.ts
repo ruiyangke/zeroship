@@ -23,7 +23,6 @@ const userIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
   oauth_authorization_codes: ["user_id"],
   oauth_clients: ["created_by"],
   oauth_grants: ["user_id"],
-  oauth_refresh_tokens: ["user_id"],
   oidc_session_clients: ["user_id"],
   principal_grants: ["principal_id"],
   totp_backup_codes: ["user_id"],
@@ -84,7 +83,6 @@ export default {
         id: t.uuid().required().default(uuidV4()),
         occurred_at: t.timestamp().required().default(now()),
         actor_user_id: t.text(),
-        token_id: t.uuid(),
         action: t.text().required(),
         resource_type: t.text().required(),
         resource_id: t.text(),
@@ -221,16 +219,6 @@ export default {
       },
       primaryKey: ["id"],
     });
-    table("jwk_key_state", { schema: "zeroship" }).create({
-      columns: {
-        id: t.bigInt().required().identity(),
-        set_name: t.text().required(),
-        kid: t.text().required(),
-        created_at: t.timestamp().required().default(now()),
-      },
-      primaryKey: ["id"],
-    });
-    table("jwk_key_state", { schema: "zeroship" }).unique("jwk_key_state_natural_key").add({ columns: ["set_name", "kid"] });
     table("magic_completions", { schema: "zeroship" }).create({
       columns: {
         id: t.bigInt().required().identity(),
@@ -323,32 +311,6 @@ export default {
       primaryKey: ["id"],
     });
     table("oauth_grants", { schema: "zeroship" }).unique("oauth_grants_natural_key").add({ columns: ["user_id", "client_id"] });
-    table("oauth_refresh_tokens", { schema: "zeroship" }).create({
-      columns: {
-        id: t.bigInt().required().identity(),
-        token_hash: t.bytes().required(),
-        hash_key_version: t.int().required(),
-        refresh_family_id: t.text().required(),
-        replaced_by_token_hash: t.bytes(),
-        client_id: t.text().required(),
-        user_id: t.text().required(),
-        sub: t.text().required(),
-        granted_scopes: t.array(t.text(), { storage: "native" }).required(),
-        family_granted_scopes: t.array(t.text(), { storage: "native" }).required(),
-        issued_at: t.timestamp().required().default(now()),
-        expires_at: t.timestamp().required(),
-        family_absolute_expires_at: t.timestamp().required(),
-        consumed_at: t.timestamp(),
-        rotated_at: t.timestamp(),
-        revoked_at: t.timestamp(),
-        last_used_at: t.timestamp(),
-        idem_response_enc: t.bytes(),
-        idem_expires_at: t.timestamp(),
-      },
-      primaryKey: ["id"],
-    });
-    table("oauth_refresh_tokens", { schema: "zeroship" }).unique("oauth_refresh_tokens_natural_key").add({ columns: ["token_hash"] });
-    table("oauth_refresh_tokens", { schema: "zeroship" }).check("oauth_refresh_tokens_idle_le_ceiling").add({ expr: (col) => col("expires_at").le(col("family_absolute_expires_at")) });
     table("oidc_session_clients", { schema: "zeroship" }).create({
       columns: {
         id: t.bigInt().required().identity(),
@@ -393,12 +355,13 @@ export default {
         activated_at: t.timestamp(),
         retiring_at: t.timestamp(),
         retired_at: t.timestamp(),
+        max_issued_expires_at: t.timestamp(),
       },
       primaryKey: ["id"],
     });
     table("signing_keys", { schema: "zeroship" }).unique("signing_keys_natural_key").add({ columns: ["kid"] });
     table("signing_keys", { schema: "zeroship" }).check("signing_keys_alg_check").add({ expr: (col) => col("alg").eq("EdDSA") });
-    table("signing_keys", { schema: "zeroship" }).check("signing_keys_status_check").add({ expr: (col) => col("status").in(["active", "next", "retiring"]) });
+    table("signing_keys", { schema: "zeroship" }).check("signing_keys_status_check").add({ expr: (col) => col("status").in(["active", "next", "retiring", "retired"]) });
     table("token_revocations", { schema: "zeroship" }).create({
       columns: {
         id: t.bigInt().required().identity(),
