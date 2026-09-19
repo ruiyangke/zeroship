@@ -1493,6 +1493,12 @@ fn main() -> std::io::Result<()> {
             // every route in it authorizes against the same closed rank ladder
             // and every mutation shares one lock discipline.
             .configure(zeroship_control::organizations::configure)
+            // Project-owned databases and the app-to-database bindings that
+            // reach them. Mounted beside organizations because it authorizes
+            // against the same project seat ladder and shares its lock
+            // discipline; kept a separate module because a database is a
+            // resource with its own Cedar entity type, not a membership fact.
+            .configure(zeroship_control::databases::configure)
             // --- Auth (resource server) ---
             // No console OIDC RP and no console back-channel-logout endpoint:
             // the console is now a gateway-fronted regular app authenticated

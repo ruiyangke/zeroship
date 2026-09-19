@@ -3211,7 +3211,7 @@ pub async fn remove_project_member(
 /// In practice a dissolved organization owns no projects at all - dissolve
 /// refuses while any remains - so this arm is the one that stays true if that
 /// ever stops being so.
-async fn lock_project_organization<C: GenericClient + Sync>(
+pub(crate) async fn lock_project_organization<C: GenericClient + Sync>(
     tx: &C,
     project_id: &str,
 ) -> Result<String, OrganizationError> {
