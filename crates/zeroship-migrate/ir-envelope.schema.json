@@ -3007,11 +3007,6 @@
           "const": "int"
         },
         {
-          "description": "16-bit signed integer.",
-          "type": "string",
-          "const": "smallInt"
-        },
-        {
           "description": "64-bit signed integer.",
           "type": "string",
           "const": "bigInt"
@@ -3020,11 +3015,6 @@
           "description": "Double-precision float (`float8` / `DOUBLE PRECISION`).",
           "type": "string",
           "const": "double"
-        },
-        {
-          "description": "Single-precision float.",
-          "type": "string",
-          "const": "real"
         },
         {
           "description": "Boolean.",

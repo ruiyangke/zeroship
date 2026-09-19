@@ -76,7 +76,7 @@ const TS = {
   // domain — are not `const` and are checked structurally by the round-trip, not here).
   // `string` is now a struct variant (`{ string: { length } }`), not a bare token.
   ColTypeStrings: [
-    "text", "int", "smallInt", "bigInt", "double", "real", "boolean",
+    "text", "int", "bigInt", "double", "boolean",
     "json", "timestamp", "date", "uuid", "inet", "textArray", "bytes", "geoPoint",
   ].sort(),
   // IrConstraintKind tags.

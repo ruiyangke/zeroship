@@ -726,10 +726,8 @@ fn field_type_token_is_supported(f: &FieldDescriptor) -> bool {
         "string"
             | "char"
             | "number"
-            | "real"
             | "int"
             | "integer"
-            | "smallInt"
             | "bigInt"
             | "boolean"
             | "timestamp"
@@ -942,7 +940,7 @@ fn field_default_expr(
             // `t.numeric()`) share one precision-preserving renderer - without the
             // `int` arm an integer column's DEFAULT silently dropped, and a
             // decimal/bigint carried as a numeric string dropped from BOTH.
-            "int" | "smallInt" | "bigInt" | "number" | "real" => numeric_default_literal(default),
+            "int" | "bigInt" | "number" => numeric_default_literal(default),
             "boolean" => default.as_bool().map(|b| b.to_string()),
             "bytes" => match default.as_str() {
                 Some(encoded) => {
@@ -4401,7 +4399,7 @@ impl DeclarativeAuthor {
                     let mask = crate::schema::diff::mask_meta_from_schema_def(definition)?;
                     let raw = crate::schema::query::raw_column_name(field);
                     let wraps = match definition.get("type").and_then(|value| value.as_str()) {
-                        Some("number" | "int" | "smallInt" | "bigInt" | "real") => {
+                        Some("number" | "int" | "bigInt") => {
                             crate::schema::diff::WrappedType::Number
                         }
                         Some("bytes") => crate::schema::diff::WrappedType::Bytes,

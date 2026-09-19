@@ -131,7 +131,7 @@ change; no aliases, no deprecation shims (pre-launch rule).
 | Unbounded text | `t.string()` | `t.text()` | TS-honest: creators are TS developers, and the generated dialect already emits `t.string()`. |
 | Bounded varchar | `t.string({ length: N })` | `t.string(opts)` default-length form | One factory, optional bound. `length` is **required** in the options bag — the silent default length in today's migrate lexicon dies. |
 | 32-bit integer | `t.int()` | `t.integer()` | Matches the `bigInt` family rhythm; migrate already made this call. |
-| Integer widths | `t.int()` / `t.bigInt()` only | `t.smallInt()` | The runtime lexicon (int4/int8/float8/numeric) is the arbiter — `smallInt` never crossed the V8 boundary, so keeping it would *widen the runtime*, not unify spelling. The engine keeps the `ColType` token for introspection/drift only. Full rationale in [Numbers: the semantic family](#numbers--the-semantic-family). |
+| Integer widths | `t.int()` / `t.bigInt()` only | `t.smallInt()` | The runtime lexicon (int4/int8/float8/numeric) is the arbiter — `smallInt` never crossed the V8 boundary, so keeping it would *widen the runtime*, not unify spelling. The `ColType::SmallInt` token is **deleted** with the factory, not retained for introspection: pre-launch nothing on the supported path can produce int2, so the token guards a shape that cannot exist. Full rationale in [Numbers: the semantic family](#numbers--the-semantic-family). |
 | Approximate real | `t.double()` | `t.number()`, `t.real()` | Precision-honest naming: `t.double()` makes the approximation visible at the call site, while `t.number()` read as "the default number" — which is how money ends up in floats. `t.real()` (float4) dies with `smallInt`. |
 | Calendar date | `t.calendarDate()` | `t.date()` | `t.date()` in a TS ecosystem reads as "JS Date", i.e. a timestamp. |
 | Nullability | `.required()` | `.notNull()` | Optional-by-default stays the default; the generated dialect already spells it `.required()`. |
@@ -292,10 +292,16 @@ benefit is irrelevant at platform scale and whose risks are live — a
 `smallInt` counter overflows at 32767, an entirely plausible agent-authored
 mistake. The engine already curated the vendor zoo (no `tinyint`,
 `mediumint`, `unsigned`, or display widths); this finishes the cut at the
-line the runtime drew. The engine keeps the `smallInt`/`real` `ColType`
-tokens for introspection and drift detection on pre-existing schemas,
-steering declarations to `t.int()` / `t.double()`; the authoring factories
-die.
+line the runtime drew. The `smallInt`/`real` `ColType` tokens are **deleted**
+outright rather than retained for introspection and drift detection. This is a
+deliberate reversal of the position this section first took: that posture
+assumed pre-existing schemas carrying int2/float4 columns that introspection
+had to steer to `t.int()` / `t.double()`. Pre-launch there are no production
+tables and no backfills, and nothing on the supported authoring path can
+produce int2/float4 — the authoring factories are gone and the migration
+service applies pure DDL with no raw-SQL escape — so the tokens would guard a
+shape nothing can produce, which is the "legacy mode" the pre-launch rule
+forbids. The authoring factories die, and the tokens die with them.
 
 The unified number family:
 

@@ -2051,8 +2051,7 @@ fn def_to_constraints_for_dialect(
             // or float column are listed - no PG type NAME (`int4`, `int8`,
             // `bigint`) is accepted here either, for the same typo-rejection reason
             // `def_to_pg_type` gives.
-            Some("number") | Some("int") | Some("integer") | Some("smallInt") | Some("bigInt")
-            | Some("real") => {
+            Some("number") | Some("int") | Some("integer") | Some("bigInt") => {
                 if let Some(rendered) = crate::render::declarative::numeric_default_literal(default)
                 {
                     parts.push(format!("DEFAULT {rendered}"));
@@ -2108,7 +2107,7 @@ fn def_to_constraints_for_dialect(
     let col = backend.quote_ident(field);
     let ranged = matches!(
         def.get("type").and_then(|t| t.as_str()),
-        Some("number" | "int" | "integer" | "smallInt" | "bigInt" | "real")
+        Some("number" | "int" | "integer" | "bigInt")
     );
     // Bounds share the DEFAULT's precision-preserving renderer, so a bound past
     // 2^53 is not silently rounded on its way into the predicate.
@@ -2213,7 +2212,7 @@ mod tests {
 
     #[test]
     fn an_encrypted_field_token_the_runtime_cannot_decode_is_refused() {
-        for ty in ["smallInt", "real", "timestamp", "boolean"] {
+        for ty in ["timestamp", "boolean"] {
             let def = json!({ "type": ty, "encrypted": true });
             validate_encryption_sentinel_for_field(&def)
                 .expect_err("a token the runtime codec cannot decode must be refused");

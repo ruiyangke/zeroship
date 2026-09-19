@@ -1007,11 +1007,10 @@ fn render_sequence_optional_bound(
 
 fn render_sequence_as_type(as_type: &ColType) -> Result<&'static str, IrLowerError> {
     match as_type {
-        ColType::SmallInt => Ok("smallint"),
         ColType::Int => Ok("integer"),
         ColType::BigInt => Ok("bigint"),
         _ => Err(IrLowerError::UnsupportedOp(
-            "sequence AS type must be smallInt, int, or bigInt",
+            "sequence AS type must be int or bigInt",
         )),
     }
 }

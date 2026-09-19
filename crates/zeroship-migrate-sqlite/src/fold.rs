@@ -195,7 +195,7 @@ impl CatalogFoldPolicy for SqliteCatalogFoldPolicy {
             .as_ref()
             .and_then(|def| def.get("type"))
             .and_then(serde_json::Value::as_str)
-            .filter(|ty| matches!(*ty, "smallInt" | "int" | "integer" | "bigInt"))
+            .filter(|ty| matches!(*ty, "int" | "integer" | "bigInt"))
         {
             return integer_token;
         }

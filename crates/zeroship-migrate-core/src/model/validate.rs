@@ -2135,7 +2135,6 @@ fn integer_width(ty: &crate::model::ir::ColType) -> Option<u8> {
     use crate::model::ir::ColType;
 
     match ty {
-        ColType::SmallInt => Some(16),
         ColType::Int => Some(32),
         ColType::BigInt => Some(64),
         _ => None,
@@ -8788,7 +8787,7 @@ fn validate_default_for_type(
                 suggested_fix: Some(refusal.suggested_fix),
             });
         }
-        if matches!(ty, ColType::Int | ColType::BigInt | ColType::SmallInt) {
+        if matches!(ty, ColType::Int | ColType::BigInt) {
             return Ok(());
         }
         return Err(AuthoringError {
@@ -8801,7 +8800,7 @@ fn validate_default_for_type(
                  nextval defaults require an integer column"
             ),
             suggested_fix: Some(
-                "use nextval only on int, bigInt, or smallInt columns, or remove `.default(nextval(...))`"
+                "use nextval only on int or bigInt columns, or remove `.default(nextval(...))`"
                     .to_string(),
             ),
         });
@@ -9202,16 +9201,14 @@ fn validate_column_facets(
     if col.identity.is_some()
         && !matches!(
             col.ty,
-            crate::model::ir::ColType::SmallInt
-                | crate::model::ir::ColType::Int
-                | crate::model::ir::ColType::BigInt
+            crate::model::ir::ColType::Int | crate::model::ir::ColType::BigInt
         )
     {
         return Err(unsupported(
             UnsupportedKind::Identity,
             format!(
                 "column {:?} declares identity on a non-integer type; identity is only \
-                 supported on smallInt/int/bigInt columns",
+                 supported on int/bigInt columns",
                 col.name
             ),
             "declare the column as `t.int().identity(...)`, \

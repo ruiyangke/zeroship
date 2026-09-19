@@ -553,14 +553,10 @@ pub enum ColType {
     Text,
     /// 32-bit signed integer.
     Int,
-    /// 16-bit signed integer.
-    SmallInt,
     /// 64-bit signed integer.
     BigInt,
     /// Double-precision float (`float8` / `DOUBLE PRECISION`).
     Double,
-    /// Single-precision float.
-    Real,
     /// Boolean.
     Boolean,
     /// JSON document (`JSONB` on PG).
