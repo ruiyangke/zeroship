@@ -116,10 +116,28 @@ creator-facing surface, `crates/zeroship-workflow/src/engine.rs` is "Pure durabl
 and DTO contracts" with no storage in it, and the V8 binding is already built to take a backend
 rather than a database.
 
-**The journal becomes ordinary service schema.** It is installed into `workflow_manager` at
-service boot, by the same mechanism any service installs its own schema, with one stamp row for
-the whole installation. That is what `STAMP_ROW_ID` already describes, now over a set of apps
-scoped by the service rather than by a creator database.
+**The journal becomes ordinary service schema.** It is installed into `workflow_manager` by a
+platform migration, with one stamp row for the whole installation. That is what `STAMP_ROW_ID`
+already describes, now over a set of apps scoped by the service rather than by a creator
+database.
+
+Not at service boot. The service has no installer - `run` in
+`crates/zeroship-workflow-server/src/server.rs` connects, verifies and serves - and its login is
+forbidden the DDL it would need: `Coordinator::verify` in
+`crates/zeroship-workflow-server/src/coordinator.rs` refuses to start when
+`has_schema_privilege(current_user,'workflow_manager','CREATE')` is true, and
+`crates/zeroship-workflow-server/tests/platform_schema.rs` asserts that granting CREATE makes
+`verify` fail. Installing at boot would mean deleting a shipped security contract. A platform
+migration is also the route `workflow_manager` itself arrives by, in
+`db/migrations-ts/20260911000000_workflow_coordination.ts`; the journal joins it there.
+
+The other installer this workspace owns cannot target this schema either. `apply_schema_bundle`
+in `crates/zeroship-migrate-server/src/bundle.rs` calls `provision_database` unconditionally,
+and `provision_migrator` reassigns schema ownership before `provision_runtime_app_role` mints a
+login holding DML on every table in the schema. Pointed at `workflow_manager` that would take
+the schema from `zeroship_workflow_migrator` and give a runtime login full reach over the
+manager's queue. It stays the installer for a journal in a creator schema, which is a different
+target with different owners.
 
 **The worker holds no journal credential**, which is the property that makes the whole thing
 safe without building anything. See Why it is this way.
@@ -132,10 +150,18 @@ safe without building anything. See Why it is this way.
   JournalManager, JournalError          crates/zeroship-control/src/publication/journal.rs
   the journal ensure at app registration control's deploy path
   the worker's journal repair path      crates/zeroship-worker/src/workflow_creator.rs
-  SCHEMA_PLACEHOLDER substitution        one fixed schema needs no placeholder,
-                                         except on the dev tier - see SQLite
   zeroship-data-orm from the engine      crates/zeroship-workflow/Cargo.toml
 ```
+
+`SCHEMA_PLACEHOLDER` stays. A fixed target schema does not remove the need for it: the generated
+PostgreSQL artifact carries the placeholder quoted, and the platform migration substitutes
+`"workflow_manager"` into it exactly as a creator bundle substitutes a creator schema. The
+quoting matters, because substituting the bare word would also rewrite the stamp table's name.
+
+The first four entries are not available yet. Step 1 left `ensure_journal` and
+`Journal`/`bundle_for`/`journal_bundle` byte-identical on purpose, and they stay until a reader
+exists in `workflow_manager` to replace what they serve. Read this list as the end state, not as
+work unlocked by the installation.
 
 That last one is a dependency-boundary improvement the AGENTS.md invariant already gestures at:
 `zeroship-workflow-schema` is a leaf so a service can install the journal without depending on
@@ -379,6 +405,24 @@ stall the defect fixes that motivate the move.
    engine and can therefore observe and advance any run it is executing. Server-side, the
    service decides what a worker is told. That is a stronger boundary and probably a better
    one, but it is a change in authority that should be described rather than arrived at.
+
+7. **BLOCKS STEP 2. Does creator payload belong in the platform schema?**
+   `metadata_schema_has_no_customer_authority_and_ids_are_bytewise` in
+   `crates/zeroship-workflow-server/tests/coordinator.rs` asserts that no column in
+   `workflow_manager` is json, jsonb or bytea, or named `input`, `output`, `history`,
+   `payload_url`, `database_url` or `task_token`. It reads `information_schema.columns` and
+   requires the result empty. The journal installed by step 1 declares `input` and `output` on
+   `__zeroship_workflow_generations`.
+
+   It passes today only because that fixture builds `workflow_manager` from the manager's own
+   generated artifact rather than from the migration corpus, and because step 1 writes nothing.
+   Step 2 is where a reader appears and the columns stop being empty.
+
+   This is a tenancy statement, not a naming rule, so re-scoping the assertion to the manager's
+   own tables is a decision about where creator payload may live rather than a fixture repair.
+   Settle it before a reader is built: either the platform-schema journal is structurally
+   payload-free and `input`/`output` live only in creator schemas, or the assertion is narrowed
+   deliberately and the reason recorded here.
 
 ---
 
