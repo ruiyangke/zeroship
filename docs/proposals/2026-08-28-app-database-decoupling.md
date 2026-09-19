@@ -1505,8 +1505,22 @@ app's requests and cannot protect a shared cluster from an app under its limit. 
     `schema/project-v1.json` declares `app` as a single string, and the environments block requires
     `app` and `control` and makes them explicitly non-inheritable, because an environment that names
     a control and inherits the root app is exactly the silent cross-targeting that rule prevents.
-    With N apps and N databases an environment must name a deploy target per app and a database id
-    per label, and that property has to survive.
+    The creator surface above replaces that single key with a workspace-level `databases` map and an
+    `apps` map, so the schema has to follow.
+
+    **The rule that has to survive is the non-inheritance, and it extends to the database ids rather
+    than being satisfied by them.** A `dbs_` in the workspace `databases` map is an identifier of a
+    real database on a real cluster, exactly as an `app_` is. An environment that names a production
+    control and inherits a development database id is the same cross-target the existing rule
+    catches, one level worse: it lands writes in the wrong data rather than the wrong code. So the
+    environments block must require `databases` alongside `apps` and `control`, all three
+    non-inheritable, with everything else still inheriting per member.
+
+    Two things this does NOT change. The label stays local: an environment overrides the `id` under
+    a label, never the label itself, so the manifest and the generated client are the same artifact
+    across environments and no code path branches on the environment name. And declaring a database
+    here still grants nothing - deploy verifies an active binding exists, which is the arm named in
+    the regression set.
 
 10. **Does the CONFINED ceiling need a grant-authority key?** NEEDS-DECISION, blocking nothing now.
     Nothing in the ceiling vocabulary describes ACL authorship, so a creator draft cannot widen an
