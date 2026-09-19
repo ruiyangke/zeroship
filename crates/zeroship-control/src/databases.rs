@@ -95,6 +95,19 @@ pub const CAPABILITY_READONLY: &str = "readonly";
 /// writes any other value.
 const STATUS_PROVISIONING: &str = "provisioning";
 
+/// The status a database reaches once the reconciler has made its cluster
+/// match: the schema exists, the three roles exist, the grants are applied.
+const STATUS_ACTIVE: &str = "active";
+
+/// The statuses a database may take a NEW BINDING in, as an allowlist.
+///
+/// Stated as what is admitted rather than what is refused, so a value added to
+/// `databases_status_check` later is non-bindable until someone decides it
+/// should be. The refusing spelling has the opposite default: it named
+/// `deleting` and let `draining` through, which is the gap dbd-reconciler
+/// measured against a real cluster.
+const BINDABLE_STATUSES: [&str; 2] = [STATUS_PROVISIONING, STATUS_ACTIVE];
+
 /// The status a database stops at when a caller deletes it.
 ///
 /// The ROW SURVIVES the delete, because the schema and its data survive it. No
@@ -233,13 +246,17 @@ pub enum DatabaseError {
     /// this is not a policy layered over a permissive schema; it is the same
     /// rule stated where the caller can read it, with the remedy named.
     DatabaseHasBindings(Vec<BoundApp>),
-    /// The database is being deleted, so a new binding must not be admitted.
+    /// The database is not in a status that takes a new binding, and the
+    /// refusal carries which status it is in.
     ///
     /// Bind and delete serialize on the same organization lock, so without this
-    /// a bind arriving just after the mark would hand an app a binding to a
+    /// a bind arriving just after a delete would hand an app a binding to a
     /// schema the reconciler is about to drop - and the binding would outlive
-    /// the schema it names.
-    DatabaseDeleting,
+    /// the schema it names. Carrying the status rather than naming one case
+    /// keeps the refusal honest as `databases_status_check` grows.
+    DatabaseNotBindable {
+        status: String,
+    },
     /// This app already binds this database
     /// (`database_bindings_natural_key`). Carries the capability the live
     /// binding holds, because that is the fact a caller re-binding is usually
@@ -306,11 +323,17 @@ impl DatabaseError {
                     "execution_zone_id": execution_zone_id,
                 }))
             }
-            Self::DatabaseDeleting => web::HttpResponse::Conflict().json(&json!({
-                "error": "database is being deleted",
-                "detail": "this database is being deleted and its schema is being dropped, so \
-                           it cannot take a new binding. Create a database and bind that one",
-            })),
+            Self::DatabaseNotBindable { status } => {
+                web::HttpResponse::Conflict().json(&json!({
+                    "error": "database not bindable",
+                    "detail": format!(
+                        "this database is {status:?}, so it cannot take a new binding; only a \
+                         provisioning or active database can. A database being deleted is \
+                         having its schema dropped, so bind a database you create instead"
+                    ),
+                    "status": status,
+                }))
+            }
             Self::DatabaseHasBindings(bound) => {
                 let apps = bound
                     .iter()
@@ -1040,7 +1063,7 @@ pub async fn bind_database(
            JOIN zeroship.projects p ON p.id = d.project_id \
            JOIN zeroship.apps a ON a.id = $2 AND a.project_id = d.project_id \
            {joins} \
-          WHERE d.id = $3 AND d.status <> $7 AND {rank} >= {developer} \
+          WHERE d.id = $3 AND d.status = ANY($7) AND {rank} >= {developer} \
             AND NOT EXISTS (SELECT 1 FROM zeroship.database_bindings existing \
                              WHERE existing.app_id = a.id AND existing.database_id = d.id) \
          RETURNING id, app_id, \
@@ -1061,7 +1084,7 @@ pub async fn bind_database(
                 &capability,
                 &BINDING_STATUS_PENDING,
                 &principal.as_str(),
-                &STATUS_DELETING,
+                &BINDABLE_STATUSES.to_vec(),
             ],
         )
         .await
@@ -1150,15 +1173,21 @@ async fn classify_bind_refusal<C: GenericClient + Sync>(
         Err(err) => return db_error(&err, "classify bind: read existing binding"),
     }
 
-    let deleting = tx
+    let unbindable = tx
         .query(
-            "SELECT 1 FROM zeroship.databases WHERE id = $1 AND status = $2",
-            &[&database_id.as_str(), &STATUS_DELETING],
+            "SELECT status FROM zeroship.databases \
+              WHERE id = $1 AND status <> ALL($2)",
+            &[&database_id.as_str(), &BINDABLE_STATUSES.to_vec()],
         )
         .await;
-    match deleting {
-        Ok(rows) if rows.is_empty() => {}
-        Ok(_) => return DatabaseError::DatabaseDeleting,
+    match unbindable {
+        Ok(rows) => {
+            if let Some(row) = rows.first() {
+                return DatabaseError::DatabaseNotBindable {
+                    status: row.get("status"),
+                };
+            }
+        }
         Err(err) => return db_error(&err, "classify bind: read database status"),
     }
 
