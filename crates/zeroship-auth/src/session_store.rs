@@ -325,7 +325,7 @@ impl SessionSecretKeys {
     /// group- or world-accessible, or yields no usable key.
     pub fn from_files(hash_file: &Path, idem_file: &Path) -> std::result::Result<Self, String> {
         let mut verify = load_hash_keyring(hash_file)?;
-        verify.sort_by(|a, b| b.version.cmp(&a.version));
+        verify.sort_by_key(|key| std::cmp::Reverse(key.version));
         let Some(active) = verify.first().cloned() else {
             return Err(format!(
                 "REFRESH_HASH_KEY_FILE {} yielded no keys",
