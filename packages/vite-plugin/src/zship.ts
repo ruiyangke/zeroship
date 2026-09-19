@@ -102,16 +102,19 @@ interface Manifest {
   /** Build-time workflow declarations. */
   workflows?: unknown;
   /**
-   * The generated runtime schema descriptor (`schema.runtime.json`) carried by
-   * the bundle. `{ hash }` is the sha256 of the `gen-types`-emitted descriptor
-   * bytes, staged as a blob. Migration documents are applied through the
-   * migration service and are not carried by the `.zship`. Mirrors the Rust
+   * ONE ENTRY PER DATABASE the app declares, each carrying that database's
+   * generated schema descriptor (`schema.runtime.json`) as a staged blob.
+   * Migration documents are applied through the migration service and are not
+   * carried by the `.zship`. Mirrors the Rust
    * `bundle::manifest::RuntimeDescriptorEntry`.
    *
-   * The runtime/worker path reads and validates this descriptor, then passes
-   * the snapshot directly to native plugins and the DB facade installer.
+   * The runtime/worker path reads and validates each descriptor, then passes
+   * the snapshots to native plugins and the DB facade installer. Exactly one
+   * entry is `primary`, and that one is `env.db`.
+   *
+   * Omitted entirely for an app that declares no database.
    */
-  runtime_descriptor?: RuntimeDescriptorEntry;
+  runtime_descriptor?: RuntimeDescriptorEntry[];
 }
 
 interface NetConfig {
@@ -133,11 +136,28 @@ interface WireScheduleRegistration {
   catchUp: { mode: "skip" } | { mode: "backfill"; max: number };
 }
 
-/** The runtime schema descriptor carried by the `.zship`
- *  (`manifest.runtime_descriptor`). Mirrors the Rust
+/** One database's runtime schema descriptor carried by the `.zship`
+ *  (`manifest.runtime_descriptor[]`). Mirrors the Rust
  *  `bundle::manifest::RuntimeDescriptorEntry`. */
 interface RuntimeDescriptorEntry {
-  /** sha256 (lowercase, 64 hex) of the `schema.runtime.json` blob. */
+  /**
+   * The creator's LOCAL label for this database, the member name it takes on
+   * `env.databases`. It is a name inside one app's own artifact and never a
+   * routing, lane or admission key: two co-resident apps both calling a
+   * database `main` would compare equal.
+   */
+  label: string;
+  /** The database's typed id. The key every server-side map uses. */
+  database_id: string;
+  /** Whether this database is `env.db`. Exactly one entry carries it. */
+  primary: boolean;
+  /**
+   * sha256 (lowercase, 64 hex) of this database's `schema.runtime.json` blob.
+   *
+   * An ADDRESS, not a comparison key: nothing compares it against what a
+   * database has applied. Gating a deploy on schema equality is what coupled
+   * every app on a database to every other.
+   */
   hash: Sha256Hex;
 }
 
@@ -224,24 +244,31 @@ export interface ZshipOptions {
    * `false` OR ABSENT disables descriptor packing. There is no default pair of
    * paths here: they come from the caller's `zeroship.jsonc`.
    */
-  migrations?:
-    | false
-    | {
-        /**
-         * Migrations dir relative to root. REQUIRED, no fallback: it comes from
-         * `migrations.dir` in the caller's zeroship.jsonc (or that schema's
-         * default), and a second copy here would be a second holder of the same
-         * value - which is the whole shape this file's config work removed.
-         */
-        dir: string;
-        /**
-         * The `gen-types` output dir relative to `root`. REQUIRED for the same
-         * reason as `dir`. The packer reads
-         * `<genTypesOut>/schema.runtime.json` (when present) and carries it as
-         * the manifest's content-addressed `runtime_descriptor` blob (P4a).
-         */
-        genTypesOut: string;
-      };
+  databases?: PackedDatabase[];
+}
+
+/** One database this app declares, as the packer needs it. */
+export interface PackedDatabase {
+  /** The creator's LOCAL label, which reaches the runtime through the manifest. */
+  label: string;
+  /** The typed id the CLI dereferenced from that label before packing. */
+  id: string;
+  /** Whether this is the app's `env.db`. Exactly one must be. */
+  primary: boolean;
+  /**
+   * This database's migrations dir relative to root. REQUIRED, no fallback: it
+   * comes from `databases.<label>.migrations` in the caller's zeroship.jsonc,
+   * and a second copy here would be a second holder of the same value - which
+   * is the whole shape this file's config work removed.
+   */
+  migrations: string;
+  /**
+   * This database's `gen-types` output dir relative to `root`. REQUIRED for
+   * the same reason. The packer reads `<out>/schema.runtime.json` (when
+   * present) and carries it as one content-addressed `runtime_descriptor`
+   * entry.
+   */
+  out: string;
 }
 
 export interface ZshipResult {
@@ -501,31 +528,37 @@ export async function emitZship(
   // guess this replaces was a SECOND holder of `migrations.out`'s default,
   // living in TypeScript beside the schema's - which is the four-derivations
   // shape one layer down.
-  if (options.migrations != null && options.migrations !== false) {
-    const descriptorPath = resolve(
-      root,
-      options.migrations.genTypesOut,
-      RUNTIME_DESCRIPTOR_FILE,
-    );
-    let descriptorBytes: Buffer | undefined;
-    try {
-      descriptorBytes = await fs.readFile(descriptorPath);
-    } catch {
-      if (await hasMigrationSources(root, options.migrations.dir)) {
-        throw new Error(
-          `zship: found migration source files but missing runtime schema descriptor at ` +
-            `${descriptorPath}; run gen-types before packing and apply migrations through the migration service`
-        );
+  const packedDatabases = options.databases ?? [];
+  if (packedDatabases.length > 0) {
+    const entries: RuntimeDescriptorEntry[] = [];
+    for (const database of packedDatabases) {
+      const descriptorPath = resolve(root, database.out, RUNTIME_DESCRIPTOR_FILE);
+      let descriptorBytes: Buffer | undefined;
+      try {
+        descriptorBytes = await fs.readFile(descriptorPath);
+      } catch {
+        if (await hasMigrationSources(root, database.migrations)) {
+          throw new Error(
+            `zship: database ${JSON.stringify(database.label)} has migration source files but ` +
+              `no runtime schema descriptor at ${descriptorPath}; run gen-types before packing ` +
+              `and apply migrations through the migration service`
+          );
+        }
+        descriptorBytes = undefined;
       }
-      descriptorBytes = undefined;
-    }
-    if (descriptorBytes != null) {
+      if (descriptorBytes == null) continue;
       validateRuntimeDescriptorBytes(descriptorBytes);
       const hash = sha256Hex(descriptorBytes);
-      manifest.runtime_descriptor = { hash };
+      entries.push({
+        label: database.label,
+        database_id: database.id,
+        primary: database.primary,
+        hash,
+      });
       if (!blobsByHash.has(hash)) blobsByHash.set(hash, descriptorBytes);
-      log(`bundled runtime schema descriptor (${RUNTIME_DESCRIPTOR_FILE})`);
+      log(`bundled runtime schema descriptor for ${database.label}`);
     }
+    if (entries.length > 0) manifest.runtime_descriptor = entries;
   }
 
   // 9. Validate cross-references. Catches bugs where a manifest hash
@@ -894,18 +927,43 @@ function validateManifest(
   // a staged blob. Mirrors the Rust
   // `crates/bundle/src/{manifest,unpack}.rs` descriptor checks.
   if (m.runtime_descriptor != null) {
-    const h = m.runtime_descriptor.hash;
-    if (!isSha256Hex(h)) {
+    const seenLabels = new Set<string>();
+    const seenIds = new Set<string>();
+    let primaries = 0;
+    for (const entry of m.runtime_descriptor) {
+      if (seenLabels.has(entry.label)) {
+        throw new Error(`zship: runtime_descriptor declares label ${entry.label} twice`);
+      }
+      seenLabels.add(entry.label);
+      if (seenIds.has(entry.database_id)) {
+        throw new Error(
+          `zship: runtime_descriptor declares database ${entry.database_id} twice`
+        );
+      }
+      seenIds.add(entry.database_id);
+      if (entry.primary) primaries += 1;
+      const h = entry.hash;
+      if (!isSha256Hex(h)) {
+        throw new Error(
+          `zship: runtime_descriptor hash ${h} is not lowercase 64-char sha256 hex`
+        );
+      }
+      if (!blobsByHash.has(h)) {
+        throw new Error(
+          `zship: runtime_descriptor hash ${h} has no corresponding blob`
+        );
+      }
+      validateRuntimeDescriptorBytes(blobsByHash.get(h)!);
+    }
+    // `env.db` is the primary and `env.db === env.databases[primary]` by
+    // object identity, so a bundle with none or several has no `env.db` to
+    // mint and would boot with the namespace missing or arbitrary.
+    if (primaries !== 1) {
       throw new Error(
-        `zship: runtime_descriptor hash ${h} is not lowercase 64-char sha256 hex`
+        `zship: runtime_descriptor must declare exactly one primary database, the one ` +
+          `\`env.db\` reaches`
       );
     }
-    if (!blobsByHash.has(h)) {
-      throw new Error(
-        `zship: runtime_descriptor hash ${h} has no corresponding blob`
-      );
-    }
-    validateRuntimeDescriptorBytes(blobsByHash.get(h)!);
   }
 }
 

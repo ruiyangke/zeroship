@@ -348,20 +348,36 @@ pub(crate) fn setup_js_promise<'s>(
 // Native result conversion and masked-value wrappers belong to this adapter.
 
 /// Materialize the first native row and rehydrate masked fields when present.
-pub(crate) fn first_row_or_null_masked(rows: Vec<Value>, has_masked: bool) -> ResolveValue {
+pub(crate) fn first_row_or_null_masked(
+    rows: Vec<Value>,
+    has_masked: bool,
+    binding: zeroship_data_orm::binding::DbBinding,
+) -> ResolveValue {
     let value = rows.into_iter().next().unwrap_or(Value::Null);
-    maybe_rehydrate(value, has_masked)
+    maybe_rehydrate(value, has_masked, binding)
 }
 
 /// Materialize native rows and rehydrate masked fields when present.
-pub(crate) fn rows_as_array_masked(rows: Vec<Value>, has_masked: bool) -> ResolveValue {
+pub(crate) fn rows_as_array_masked(
+    rows: Vec<Value>,
+    has_masked: bool,
+    binding: zeroship_data_orm::binding::DbBinding,
+) -> ResolveValue {
     let value = Value::Array(rows);
-    maybe_rehydrate(value, has_masked)
+    maybe_rehydrate(value, has_masked, binding)
 }
 
 /// Schedule direct V8 materialization of a protected result.
-pub(crate) fn maybe_rehydrate(value: Value, has_masked: bool) -> ResolveValue {
-    crate::v8_values::resolve(value, has_masked)
+pub(crate) fn maybe_rehydrate(
+    value: Value,
+    has_masked: bool,
+    binding: zeroship_data_orm::binding::DbBinding,
+) -> ResolveValue {
+    if has_masked {
+        crate::v8_values::resolve_masked(value, binding)
+    } else {
+        crate::v8_values::resolve(value)
+    }
 }
 
 #[cfg(test)]

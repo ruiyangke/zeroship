@@ -1,0 +1,36 @@
+// zeroship.jsonc - tooling configuration for examples/metering-probe. COMMITTED.
+//
+// Read by the `zeroship` CLI and by the build; never by the runtime, never
+// packed into the .zship. No secrets: names only, values in .env or
+// `zeroship secret set`.
+
+{
+  "$schema": "https://zeroship.ai/schema/project-v1.json",
+
+  "name": "metering-probe",
+  "control": "http://localhost:9090",
+  "runtime_date": "2026-08-14",
+
+  "build": {
+    "mode": "full",
+    "dist": "dist",
+    "output": "dist/app.zship"
+  },
+
+  // One database, by LOCAL LABEL. The id is what the CLI sends; the label is
+  // what this file, the manifest and `env.databases` use.
+  "databases": {
+    "main": {
+      "id": "dbs_03evr3oqx1200ferfd49xd8a8",
+      "migrations": "migrations",
+      "out": "generated/zeroship"
+    }
+  },
+
+  // `primary` is this app's `env.db`.
+  "apps": {
+    "metering_probe": { "databases": ["main"], "primary": "main" }
+  },
+
+  "secrets": []
+}

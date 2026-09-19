@@ -1574,7 +1574,12 @@ mod tests {
                     }
                     let manifest = Manifest {
                         worker: Some(WorkerCode { entry: "app/z-entry.js".into(), modules }),
-                        runtime_descriptor: Some(RuntimeDescriptorEntry { hash: descriptor_hash.clone() }),
+                        runtime_descriptor: vec![RuntimeDescriptorEntry {
+                            label: "main".into(),
+                            database_id: zeroship_core::DatabaseId::mint(),
+                            primary: true,
+                            hash: descriptor_hash.clone(),
+                        }],
                         ..Manifest::default()
                     };
                     let executable = crate::executable::load_executable(&manifest, &blobs).await.unwrap();

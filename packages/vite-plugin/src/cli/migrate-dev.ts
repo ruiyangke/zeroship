@@ -33,7 +33,7 @@ import {
   parseDotenvVars,
   resolveDatabaseUrl,
 } from "../dev-database-url.js";
-import { readProjectConfig } from "../project-config/index.js";
+import { readProjectConfig, selectDatabase } from "../project-config/index.js";
 
 interface Argv {
   root: string;
@@ -47,6 +47,8 @@ function parseArgv(argv: string[]): Argv {
   let root = process.cwd();
   let dir: string | undefined;
   let out: string | undefined;
+  let app: string | undefined;
+  let database: string | undefined;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -64,13 +66,20 @@ function parseArgv(argv: string[]): Argv {
       case "--out":
         out = value();
         break;
+      case "--app":
+        app = value();
+        break;
+      case "--database":
+        database = value();
+        break;
       case "-h":
       case "--help":
         console.log(
           "zeroship-dev-migrate - apply committed migrations to the dev database\n\n" +
-            "Usage: zeroship-dev-migrate [--root <dir>] [--migrations <dir>] [--out <dir>]\n\n" +
-            "The paths default to migrations.dir / migrations.out from the app's\n" +
-            "zeroship.jsonc; the flags are overrides.\n\n" +
+            "Usage: zeroship-dev-migrate [--root <dir>] [--app <label>] [--database <label>]\n" +
+            "                            [--migrations <dir>] [--out <dir>]\n\n" +
+            "The paths default to the selected database in the app's zeroship.jsonc -\n" +
+            "its primary unless --database names another; the dir flags are overrides.\n\n" +
             "Run this BEFORE `pnpm dev`. The dev server reports schema state but never applies it."
         );
         process.exit(0);
@@ -83,10 +92,21 @@ function parseArgv(argv: string[]): Argv {
   // the Rust CLI had one, and this had a fourth pair hand-typed into
   // `parseArgv`. The flags survive as overrides; only the fallback moved.
   const { config, path: configPath } = readProjectConfig(root);
+  const selected = selectDatabase(config, { app, database });
+  const resolveMember = (override: string | undefined, member: "migrations" | "out") => {
+    const configured = override ?? selected?.[member];
+    if (configured == null) {
+      throw new Error(
+        `[zeroship] no database to migrate: pass --${member === "migrations" ? "dir" : "out"}=, ` +
+          `or declare one under \`databases\` and name it in the app's \`databases\``,
+      );
+    }
+    return resolve(root, configured);
+  };
   return {
     root,
-    migrationsDir: resolve(root, dir ?? config.migrations.dir),
-    outDir: resolve(root, out ?? config.migrations.out),
+    migrationsDir: resolveMember(dir, "migrations"),
+    outDir: resolveMember(out, "out"),
     configPath,
   };
 }

@@ -94,6 +94,12 @@ impl NativePlugin for DbPlugin {
         }]
     }
 
+    /// Install every declared database's collections onto its own handle.
+    ///
+    /// One `installSchema` call per database, each against the handle that
+    /// database's operations route through. The PRIMARY's handle is
+    /// `namespace` itself - the same object `env.db` names - so the app's own
+    /// collections land where a single-database app has always found them.
     fn prepare_runtime<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
@@ -103,21 +109,34 @@ impl NativePlugin for DbPlugin {
         let Some(descriptor) = descriptor else {
             return Ok(None);
         };
-        // Rust is the single schema authority: decode and normalize once here,
-        // then hand the JS adapter an already-decoded projection so it builds
-        // collections with no re-validation or re-decode.
-        let schema = descriptor_schemas(Some(descriptor))?;
-        let projection = schema_projection::project_schema(&schema, descriptor)?;
-        let json = serde_json::to_string(&projection).map_err(|error| error.to_string())?;
-        let json = v8::String::new(scope, &json).ok_or("could not allocate DB descriptor")?;
-        let descriptor = v8::json::parse(scope, json).ok_or("could not parse DB descriptor")?;
-        zeroship_runtime::modules::invoke_module_export(
-            scope,
-            "zeroship:db/adapter",
-            "installSchema",
-            &[namespace.into(), descriptor],
-        )
-        .map(Some)
+        let databases = zeroship_runtime::databases::databases_of(descriptor);
+        let mut settled = None;
+        for database in databases {
+            let handle = if database.primary {
+                namespace
+            } else {
+                let Some(handle) = companion_handle(scope, namespace, &database.label)? else {
+                    continue;
+                };
+                handle
+            };
+            // Rust is the single schema authority: decode and normalize once
+            // here, then hand the JS adapter an already-decoded projection so
+            // it builds collections with no re-validation or re-decode.
+            let schema = descriptor_schemas(Some(&database.schema))?;
+            let projection = schema_projection::project_schema(&schema, &database.schema)?;
+            let json = serde_json::to_string(&projection).map_err(|error| error.to_string())?;
+            let json = v8::String::new(scope, &json).ok_or("could not allocate DB descriptor")?;
+            let projected = v8::json::parse(scope, json).ok_or("could not parse DB descriptor")?;
+            settled = zeroship_runtime::modules::invoke_module_export(
+                scope,
+                "zeroship:db/adapter",
+                "installSchema",
+                &[handle.into(), projected],
+            )
+            .map(Some)?;
+        }
+        Ok(settled)
     }
 
     /// Mint a `Db` v8_class instance as the namespace value for
@@ -134,6 +153,12 @@ impl NativePlugin for DbPlugin {
         v8_classes::db::mint_db(scope, app_id)
     }
 
+    /// Publish each declared database's collections under the binding the
+    /// host resolved FOR THAT DATABASE.
+    ///
+    /// The isolate composes no part of a binding: the database id, the edge id
+    /// and the schema epoch are control-plane facts, so this READS what the
+    /// trusted host resolved and refuses a database it resolved nothing for.
     fn bind_runtime_descriptor<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
@@ -141,20 +166,98 @@ impl NativePlugin for DbPlugin {
         _namespace: v8::Local<'s, v8::Object>,
         descriptor: Option<&serde_json::Value>,
     ) -> Result<(), String> {
-        // The runtime validates the complete descriptor before invoking this
-        // hook. Collect every field map before mutating the shared thread
-        // context anyway, so a future validator change cannot publish a
-        // partial schema on error.
-        let schemas = descriptor_schemas(descriptor)?;
-        // Same refusal as `mint_db`: an app the host resolved no binding for has
-        // nothing to key the descriptor under, so publish nothing rather than key
-        // it under a schema no reconciler converged.
-        let binding = v8_classes::db::binding_for_isolate(scope, app_id)
-            .ok_or_else(|| format!("app id {app_id:?} has no resolved database binding"))?;
-        startup_policy::initialize(scope, binding.clone());
-        zeroship_data_orm::descriptor::install_collections(&binding, schemas)
-            .map_err(|error| error.to_string())?;
+        // The startup mask policy is declared on `env.db`, so the PRIMARY's
+        // binding is what seals it - including for a schema-less deployment,
+        // which still has an `env.db` to declare against.
+        if let Some(primary) = v8_classes::db::primary_binding_for_isolate(scope, app_id) {
+            startup_policy::initialize(scope, primary);
+        }
+        let databases = descriptor
+            .map(zeroship_runtime::databases::databases_of)
+            .unwrap_or_default();
+        if databases.is_empty() {
+            // A schema-less deployment REPLACES whatever an earlier one
+            // installed, on every binding the host resolved. Returning early
+            // would leave a retired deploy's collections serveable under the
+            // new one.
+            for binding in v8_classes::db::bindings_for_isolate(scope, app_id) {
+                zeroship_data_orm::descriptor::install_collections(
+                    &binding,
+                    zeroship_data_orm::schema::Schema::default(),
+                )
+                .map_err(|error| error.to_string())?;
+            }
+            return Ok(());
+        }
+        // The runtime validates the complete document before invoking this
+        // hook. Resolve every database's schema AND binding before mutating
+        // the shared thread context, so a failure on the second cannot leave
+        // the first published.
+        let mut installs = Vec::with_capacity(databases.len());
+        for database in &databases {
+            let schemas = descriptor_schemas(Some(&database.schema))?;
+            let id = zeroship_core::DatabaseId::parse(&database.database_id).map_err(|error| {
+                format!("database {:?} has an unusable id: {error}", database.label)
+            })?;
+            let binding = v8_classes::db::binding_for_isolate(scope, app_id, &id)
+                .ok_or_else(|| {
+                    format!(
+                        "app id {app_id:?} has no resolved binding for database {}",
+                        database.database_id
+                    )
+                })?;
+            installs.push((database.primary, binding, schemas));
+        }
+        for (_primary, binding, schemas) in installs {
+            zeroship_data_orm::descriptor::install_collections(&binding, schemas)
+                .map_err(|error| error.to_string())?;
+        }
         Ok(())
+    }
+
+    /// `env.databases` - one handle per database the deployment declares.
+    ///
+    /// The primary's entry is the SAME object as `env.db`, by identity, so
+    /// `env.db === env.databases[primary]` holds and there is one concept and
+    /// one code path. A deployment declaring no database publishes nothing.
+    fn companion_namespaces<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        app_id: &str,
+        namespace: v8::Local<'s, v8::Object>,
+        descriptor: Option<&serde_json::Value>,
+    ) -> Result<Vec<(&'static str, v8::Local<'s, v8::Value>)>, String> {
+        let Some(descriptor) = descriptor else {
+            return Ok(Vec::new());
+        };
+        let databases = zeroship_runtime::databases::databases_of(descriptor);
+        if databases.is_empty() {
+            return Ok(Vec::new());
+        }
+        let map = v8::Object::new(scope);
+        for database in databases {
+            let handle = if database.primary {
+                namespace
+            } else {
+                let id = zeroship_core::DatabaseId::parse(&database.database_id).map_err(
+                    |error| format!("database {:?} has an unusable id: {error}", database.label),
+                )?;
+                let binding =
+                    v8_classes::db::binding_for_isolate(scope, app_id, &id).ok_or_else(|| {
+                        format!(
+                            "app id {app_id:?} has no resolved binding for database {}",
+                            database.database_id
+                        )
+                    })?;
+                v8_classes::db::mint_db_for_binding(scope, binding)
+                    .ok_or_else(|| format!("could not mint a handle for {:?}", database.label))?
+            };
+            let key = v8::String::new(scope, &database.label)
+                .ok_or_else(|| format!("could not allocate label {:?}", database.label))?;
+            map.set(scope, key.into(), handle.into())
+                .ok_or_else(|| format!("could not publish database {:?}", database.label))?;
+        }
+        Ok(vec![("databases", map.into())])
     }
 
     fn finalize_runtime<'s>(
@@ -175,6 +278,31 @@ impl NativePlugin for DbPlugin {
             context.set_meter(self.meter.clone());
         });
     }
+}
+
+/// The `env.databases` handle already published for one label.
+///
+/// `companion_namespaces` runs before `prepare_runtime`, so the map is on
+/// `env` by the time the adapter installs collections. `None` when the map is
+/// absent, which is the schema-less case.
+fn companion_handle<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    namespace: v8::Local<'s, v8::Object>,
+    label: &str,
+) -> Result<Option<v8::Local<'s, v8::Object>>, String> {
+    let _ = namespace;
+    let Ok(map) = zeroship_runtime::plugin::runtime_env_member(scope, "databases") else {
+        return Ok(None);
+    };
+    let key = v8::String::new(scope, label)
+        .ok_or_else(|| format!("could not allocate label {label:?}"))?;
+    let value = map
+        .get(scope, key.into())
+        .ok_or_else(|| format!("env.databases is missing {label:?}"))?;
+    value
+        .try_into()
+        .map(Some)
+        .map_err(|_| format!("env.databases.{label} is not an object"))
 }
 
 fn descriptor_schemas(
@@ -291,7 +419,10 @@ export default { fetch() { return new Response("ok"); } };
             .modules(modules)
             .env_vars(HashMap::from([("APP_ID".to_string(), APP.to_string())]))
             .plugins(vec![plugin() as std::sync::Arc<dyn NativePlugin>])
-            .runtime_descriptor(Some(runtime_descriptor("__zeroship_workflow_app_state")))
+            .runtime_descriptor(Some(crate::tests::fixtures::harness_descriptor_document(
+                APP,
+                &runtime_descriptor("__zeroship_workflow_app_state"),
+            )))
             .build();
 
         runtime
@@ -344,12 +475,15 @@ export default { fetch() { return new Response("ok"); } };
             .modules(modules)
             .env_vars(HashMap::from([("APP_ID".to_string(), APP.to_string())]))
             .plugins(vec![plugin() as std::sync::Arc<dyn NativePlugin>])
-            .runtime_descriptor(Some(runtime_descriptor_for(&[
-                "transaction",
-                "constructor",
-                "__platform",
-                "declareMaskPolicy",
-            ])))
+            .runtime_descriptor(Some(crate::tests::fixtures::harness_descriptor_document(
+                APP,
+                &runtime_descriptor_for(&[
+                    "transaction",
+                    "constructor",
+                    "__platform",
+                    "declareMaskPolicy",
+                ]),
+            )))
             .build();
 
         runtime
@@ -415,7 +549,10 @@ export default { fetch() { return new Response("ok"); } };
                 scope,
                 APP,
                 namespace,
-                Some(&serde_json::to_value(&runtime_descriptor).unwrap()),
+                Some(&crate::tests::fixtures::harness_descriptor_value(
+                    APP,
+                    &serde_json::to_value(&runtime_descriptor).unwrap(),
+                )),
             )
             .expect("bind descriptor");
 
@@ -443,7 +580,10 @@ export default { fetch() { return new Response("ok"); } };
                 scope,
                 APP,
                 replacement_namespace,
-                Some(&serde_json::to_value(&invalid).unwrap()),
+                Some(&crate::tests::fixtures::harness_descriptor_value(
+                    APP,
+                    &serde_json::to_value(&invalid).unwrap(),
+                )),
             )
             .expect_err("renamed identity must fail at native installation");
         assert!(error.contains("id"), "{error}");
@@ -461,7 +601,10 @@ export default { fetch() { return new Response("ok"); } };
                 scope,
                 APP,
                 replacement_namespace,
-                Some(&serde_json::to_value(&invalid_reference).unwrap()),
+                Some(&crate::tests::fixtures::harness_descriptor_value(
+                    APP,
+                    &serde_json::to_value(&invalid_reference).unwrap(),
+                )),
             )
             .expect_err("missing relation targets must fail before creator evaluation");
         assert!(
@@ -471,6 +614,140 @@ export default { fetch() { return new Response("ok"); } };
         assert_eq!(
             descriptor::collection_schema(&binding, "users").unwrap(),
             schema
+        );
+    }
+
+    /// An app that declares TWO databases gets a handle for each, and the
+    /// PRIMARY's handle is the SAME OBJECT as `env.db`.
+    ///
+    /// Object identity is the contract, not equality: `env.db` and
+    /// `env.databases[primary]` are one handle, so there is one concept, one
+    /// code path, and a single-database app sees no difference. The second
+    /// database's handle carries its OWN binding, which is what makes its
+    /// statements narrow to its own role rather than the primary's.
+    #[test]
+    fn a_two_database_app_gets_a_handle_per_database_and_the_primary_is_env_db() {
+        crate::tests::fixtures::reset_context();
+        init_v8();
+        let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+        v8::scope!(let handle_scope, &mut isolate);
+        let context = v8::Context::new(handle_scope, Default::default());
+        let scope = &mut v8::ContextScope::new(handle_scope, context);
+        install_runtime_state(scope);
+
+        // Two databases, both resolved by the host, exactly as Control serves
+        // them: one set per app, each member keyed on its own database.
+        let primary = crate::tests::fixtures::harness_binding(APP);
+        let secondary = zeroship_data_orm::binding::DbBinding::to_database(
+            APP,
+            zeroship_data_orm::binding::COLD_START_DEPLOY_TOKEN,
+            zeroship_core::DatabaseId::mint(),
+            zeroship_core::BindingId::mint(),
+            7,
+        )
+        .expect("a minted database and edge compose a legal role name");
+        assert_ne!(primary.database(), secondary.database());
+        let store = std::sync::Arc::new(
+            zeroship_data_orm::resolved_bindings::SuppliedAppBindings::new(),
+        );
+        for binding in [&primary, &secondary] {
+            store
+                .supply(
+                    APP,
+                    zeroship_data_orm::resolved_bindings::ResolvedBinding::from(
+                        binding.edge().expect("a harness binding addresses a database"),
+                    ),
+                )
+                .expect("the store accepts each database's binding");
+        }
+        crate::context::with_mut(|c| c.set_app_bindings(Some(store)));
+
+        let schema_of = |collection: &str| {
+            serde_json::json!({
+                "version": 2,
+                "collections": {
+                    collection: {
+                        "fields": {
+                            "id": { "type": "id", "required": true, "primaryKey": true }
+                        },
+                        "options": { "softDelete": false, "versioning": false },
+                        "indexes": []
+                    }
+                }
+            })
+        };
+        let document = serde_json::json!({
+            "version": 1,
+            "databases": [
+                {
+                    "label": "main",
+                    "database_id": primary.database().unwrap().as_str(),
+                    "primary": true,
+                    "schema": schema_of("users"),
+                },
+                {
+                    "label": "analytics",
+                    "database_id": secondary.database().unwrap().as_str(),
+                    "primary": false,
+                    "schema": schema_of("events"),
+                },
+            ]
+        });
+
+        // The document is what names the primary, so the host installs it the
+        // way a real runtime does before any namespace is built.
+        crate::v8_bridge::runtime_state(scope)
+            .borrow_mut()
+            .runtime_descriptor = Some(document.to_string());
+
+        let plugin = plugin();
+        let namespace = plugin
+            .build_instance(scope, APP)
+            .expect("native db namespace");
+        plugin
+            .bind_runtime_descriptor(scope, APP, namespace, Some(&document))
+            .expect("bind the two-database document");
+
+        // Each database's collections are installed under ITS OWN binding.
+        let at_deploy = |binding: &zeroship_data_orm::binding::DbBinding| {
+            crate::tests::fixtures::harness_binding_at_deploy_for(binding, DEPLOY)
+        };
+        descriptor::collection_schema(&at_deploy(&primary), "users")
+            .expect("the primary's own collection resolves under the primary's binding");
+        descriptor::collection_schema(&at_deploy(&secondary), "events")
+            .expect("the second database's collection resolves under its own binding");
+        assert!(
+            descriptor::collection_schema(&at_deploy(&primary), "events").is_err(),
+            "one database's collections must not resolve under the other's binding"
+        );
+
+        // `env.databases` carries both labels, and the primary's entry is the
+        // same object `env.db` names.
+        let companions = plugin
+            .companion_namespaces(scope, APP, namespace, Some(&document))
+            .expect("companions build");
+        assert_eq!(companions.len(), 1);
+        assert_eq!(companions[0].0, "databases");
+        let map: v8::Local<v8::Object> = companions[0].1.try_into().expect("databases is an object");
+        let main_key = v8::String::new(scope, "main").unwrap();
+        let main_handle = map.get(scope, main_key.into()).expect("main handle");
+        let analytics_key = v8::String::new(scope, "analytics").unwrap();
+        let analytics_handle = map
+            .get(scope, analytics_key.into())
+            .expect("analytics handle");
+        assert!(
+            main_handle.strict_equals(namespace.into()),
+            "env.databases[primary] must be env.db BY IDENTITY"
+        );
+        assert!(
+            !analytics_handle.strict_equals(namespace.into()),
+            "a second database is a second handle"
+        );
+        let analytics: v8::Local<v8::Object> =
+            analytics_handle.try_into().expect("a Db handle is an object");
+        assert!(
+            v8_classes::db::Db::is_instance(scope, analytics.into()),
+            "every member of env.databases is a Db"
         );
     }
 
@@ -503,7 +780,10 @@ export default { fetch() { return new Response("ok"); } };
                 scope,
                 APP,
                 namespace,
-                Some(&serde_json::to_value(&runtime_descriptor).unwrap()),
+                Some(&crate::tests::fixtures::harness_descriptor_value(
+                    APP,
+                    &serde_json::to_value(&runtime_descriptor).unwrap(),
+                )),
             )
             .expect("bind descriptor");
         plugin

@@ -48,14 +48,17 @@ per developer machine, plus the three levers that point at the file.
 | --- | --- | --- |
 | `devServerPort` | `3001` | Port for the zeroship dev runtime. |
 | `devAuth` | `true` in dev | Dev-tier auth. See below. |
+| `app` | the sole declared app | Which of the workspace's `apps` this build is, by LOCAL LABEL. The app decides which databases are folded, packed and served, so a workspace declaring several must say which; one declaring one implies it. |
 | `configPath` | auto-discovery | Path to `zeroship.jsonc`, absolute or relative to the Vite root. An explicit path takes precedence over `ZEROSHIP_CONFIG` and app-root auto-discovery. A path that does not exist throws. |
 | `env` | none | Selects a named entry from the file's `environments` block - the plugin's equivalent of the CLI's `--env=`. There is no implicit environment and no `ZEROSHIP_ENV`. |
-| `config` | none | Escape hatch: a partial config object, or `(resolved) => partial` applied after the file loads and after environment selection. It may not change `name`, `app`, `control`, `runtime_date`, `build.output`, `migrations.dir`, `migrations.out`, `secrets` or an environment's `protected`; attempting to fails the build naming the field. |
+| `config` | none | Escape hatch: a partial config object, or `(resolved) => partial` applied after the file loads and after environment selection. It may not change `name`, `control`, `runtime_date`, `build.output`, any member of a `databases` or `apps` entry, `secrets` or an environment's `protected`; attempting to fails the build naming the field. |
 
 With no `zeroship.jsonc` anywhere, the plugin runs on the schema defaults
-(`build.mode: "full"`, `build.dist: "dist"`, `build.output: "dist/app.zship"`,
-`migrations.dir: "migrations"`, `migrations.out: "generated/zeroship"`), which
-is what keeps `zeroship()` working in a scratch directory.
+(`build.mode: "full"`, `build.dist: "dist"`, `build.output: "dist/app.zship"`),
+which is what keeps `zeroship()` working in a scratch directory. A database's
+migration sources and its fold have NO default: two databases sharing one
+directory would be one schema standing in for another, so the file is their one
+holder and a scratch directory simply declares no database.
 
 `devServerPort` takes precedence over the `ZEROSHIP_DEV_PORT` environment
 variable, which in turn takes precedence over the `3001` default. The runtime
@@ -93,8 +96,8 @@ The dev auth provider is dev-only: it is not part of any production `.zship`.
 
 ## Migration-first type generation (`gen-types`)
 
-Your committed migrations are the schema source of truth. The build folds them
-into generated artifacts under `migrations.out` (default `generated/zeroship`):
+Your committed migrations are the schema source of truth. The build folds each
+database's migrations into generated artifacts under that database's own `out`:
 
 - `env.db.ts` - the typed `env.db` surface, as a generated `@zeroship/db`
   schema module.
@@ -142,8 +145,8 @@ it in `tsconfig.json`:
 }
 ```
 
-That path is `<migrations.out>/env.db.ts`; if the project moves `migrations.out`,
-the `include` moves with it.
+That path is `<out>/env.db.ts` for the database that declared it; if the entry
+moves its `out`, the `include` moves with it.
 
 Do not also add a `@zeroship/db/env` or a `zeroship-schema` path alias. The
 generated file is the single source of strong `env.db` typing.

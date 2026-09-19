@@ -1553,8 +1553,8 @@ fn main() -> std::io::Result<()> {
                     .route(web::get().to(internal::get_app_data_key)),
             )
             .service(
-                web::resource("/internal/apps/{app_id}/binding")
-                    .route(web::get().to(internal::get_app_binding)),
+                web::resource("/internal/apps/{app_id}/bindings")
+                    .route(web::get().to(internal::get_app_bindings)),
             )
             .service(
                 web::resource("/internal/routes")

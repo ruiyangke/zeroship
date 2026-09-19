@@ -40,8 +40,28 @@ pub async fn load_executable(
         .collect();
     Ok(AppExecutable {
         modules,
-        descriptor: executable
-            .runtime_descriptor()
-            .map(serde_json::Value::to_string),
+        descriptor: descriptor_document(&executable),
     })
 }
+
+/// The runtime descriptor document for a loaded deployment: one entry per
+/// database it declares, each carrying that database's schema.
+///
+/// `None` for a deployment that declares no database, which is the
+/// schema-less case the runtime treats as "install nothing".
+#[must_use]
+pub fn descriptor_document(executable: &zeroship_bundle::LoadedWorker) -> Option<String> {
+    let databases: Vec<_> = executable
+        .databases()
+        .iter()
+        .map(|database| zeroship_runtime::databases::RuntimeDatabase {
+            label: database.label.clone(),
+            database_id: database.database_id.as_str().to_owned(),
+            primary: database.primary,
+            schema: database.schema.clone(),
+        })
+        .collect();
+    (!databases.is_empty())
+        .then(|| zeroship_runtime::databases::RuntimeDatabases::document(databases))
+}
+

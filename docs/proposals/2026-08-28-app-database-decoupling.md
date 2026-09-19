@@ -2,9 +2,10 @@
 
 **Status.** PARTLY BUILT, on `feat/app-database-decoupling`. What exists is the identity, the
 entities, the control-plane surface that declares them, the cluster reconciler that makes a
-cluster match, and the data path that narrows to what the reconciler granted. What remains is the
-creator surface, the manifest reshape, the migration service's own re-key, the CDC routing key and
-the encryption salt.
+cluster match, the data path that narrows to what the reconciler granted, and the creator config
+and manifest made plural. What remains is `env.databases` in the V8 surface, the deploy-time
+binding verification, the migration service's own re-key, the CDC routing key and the encryption
+salt.
 
 Built:
 
@@ -50,9 +51,50 @@ Built:
   (`crates/zeroship-data-orm/src/resolved_bindings.rs`); an isolate composes no part of a binding
   and an app with none has no `env.db`.
 
-Not built: the creator surface and `env.databases`, the `Manifest.runtime_descriptor` reshape,
-`schema/project-v1.json`, the migration service's own app-id-to-database re-key, the encryption
-salt and AAD, and capacity-aware placement. No apply advances an epoch.
+- the plural creator config and the manifest reshape. `schema/project-v1.json` carries a
+  workspace-level `databases` map (label -> `{ id, migrations, out }`) and an `apps` map
+  (label -> `{ app, databases, primary }`), and the generator behind both readers
+  (`schema/codegen.mjs`) understands a map: its entries take a `*` path segment, its key rule
+  is stated as `propertyNames`, and its entry shape gets its own generated key set. Open 9 is
+  DECIDED and built: an environment must declare `apps`, `control` AND `databases`, all three
+  non-inheritable, and each map must cover every label the root declares - partial coverage is
+  the same cross-target hiding behind a key that is present. An environment overrides the `id`
+  under a label, never the label itself, so the manifest and the generated client are the same
+  artifact across environments. `Manifest.runtime_descriptor`
+  (`crates/zeroship-bundle/src/manifest.rs`) is a SET of
+  `{ label, database_id, primary, hash }`, validated for exactly one primary and for distinct
+  labels and databases; `LoadedWorker` resolves every entry's blob. The CLI dereferences a label
+  to a `dbs_` locally before any request and prints both, and with a file present `--app` names
+  a label rather than an id.
+
+- `env.databases`. The host hands the runtime ONE descriptor document
+  (`crates/zeroship-runtime/src/core/databases.rs`) carrying an entry per database, which the
+  runtime validates for exactly one primary and distinct labels and ids before any plugin sees
+  it. `SuppliedAppBindings` holds a SET per app, keyed on the DATABASE id, and Control serves it
+  at `GET /internal/apps/{app_id}/bindings`. `DbPlugin` installs each database's collections
+  under the binding the host resolved for THAT database and publishes `env.databases` through
+  the new `NativePlugin::companion_namespaces` hook, with the primary's handle being the SAME
+  OBJECT as `env.db` - identity, not equality, so there is one concept and one code path. A
+  masked value rehydrates against the binding its rows were read through rather than against
+  whatever `env.db` names.
+
+- the deploy-time binding verification, and the deletion of the schema-equality gate in the same
+  change. `catalog::admit_bindings` refuses a deployment naming a database the app holds no LIVE
+  binding to - `active` with `observed_generation` caught up, the same predicate the worker's own
+  resolution uses - and `api::database_binding_response` carries the call that grants one,
+  `POST /api/databases/{database_id}/bindings`, one per unbound database.
+  `catalog::admit_schema` and its applied-row read are gone with
+  `CatalogError::SchemaNotApplied`, `RegistryError::SchemaNotApplied` and
+  `schema_precondition_response`: equality coupled every app on a shared database to every other,
+  because one app migrating changed the newest applied row and broke every other bound app's next
+  deploy. The artifact-self-consistency arm survives where it needs no knowledge of any database -
+  `Manifest::validate` refuses a malformed descriptor hash and `collect_expected_hashes` refuses
+  an entry whose blob the archive does not carry.
+
+Not built: the migration service's own app-id-to-database re-key, the encryption salt and AAD, and
+capacity-aware placement. No apply advances an epoch. Open 11's subset test at isolate build does
+not exist, so a build reaching a column the database lacks fails at query time with
+`42703 undefined_column`.
 
 Three things are narrower than "built" and are recorded here rather than discovered later. The CDC
 relay DOES filter on the bound database's schema
@@ -1604,11 +1646,18 @@ app's requests and cannot protect a shared cluster from an app under its limit. 
     transaction on each at once, which is the lane key measured as behaviour; a key without the
     database half turns the second into `nested_top_level_transaction`.
 
-    BUILDABLE: (e) two databases each declaring `users`, which needs the CDC routing key. (f) a
-    deploy naming a database the app holds no active binding to. (g) a migration applied to a
-    shared database not failing any bound app's deploy.
+    BUILT: (f) `deploy_naming_an_unbound_database_is_refused_and_names_the_binding_call`
+    (`crates/zeroship-control/tests/deploy_http_test.rs`) asserts the 409, the database named in
+    the body, the binding CALL in the remedy, and that nothing became live - with
+    `deploy_declaring_no_database_needs_no_binding_and_goes_live` as its control, differing in one
+    variable.
 
-9. **Make the project config plural without losing cross-target protection.** NEEDS-DECISION.
+    BUILDABLE: (e) two databases each declaring `users`, which needs the CDC routing key. (g) a
+    migration applied to a shared database not failing any bound app's deploy. (g) is now free of
+    a mechanism rather than guarded by one: deploy compares no schema at all, so the test asserts
+    a property nothing can break from the control plane.
+
+9. **Make the project config plural without losing cross-target protection.** DECIDED AND BUILT.
     `schema/project-v1.json` declares `app` as a single string, and the environments block requires
     `app` and `control` and makes them explicitly non-inheritable, because an environment that names
     a control and inherits the root app is exactly the silent cross-targeting that rule prevents.

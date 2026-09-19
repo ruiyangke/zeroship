@@ -110,9 +110,12 @@ fn overlapping_queries_keep_reads_from_before_and_after_await() {
                 source: source.into(),
             }])
             .plugins(plugins)
-            .runtime_descriptor(Some(parity::runtime_descriptor(
-                "notes",
-                &value!({"title":{"type":"string","required":true}}),
+            .runtime_descriptor(Some(crate::tests::fixtures::harness_descriptor_document(
+                LOCAL_DEV_APP_ID,
+                &parity::runtime_descriptor(
+                    "notes",
+                    &value!({"title":{"type":"string","required":true}}),
+                ),
             )))
             .build();
         runtime.initialize(&EnvSnapshot::empty()).await.unwrap();

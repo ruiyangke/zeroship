@@ -208,13 +208,13 @@ async fn run(cli: Cli) -> Result<zeroship_core::types::AppRecord, DevProvisionEr
         blobs_deduped: success.blobs_deduped,
     };
     registry.deploy(command).await.map_err(|e| match e {
-        // The schema precondition, restated for a tool whose caller is a
+        // The binding precondition, restated for a tool whose caller is a
         // shell script rather than the deploy CLI. Without the second
         // sentence this reads as a bug in the artifact.
-        CatalogError::SchemaNotApplied { .. } => err(format!(
+        CatalogError::DatabaseNotBound { .. } => err(format!(
             "deploy commit refused: {e}\n\
-             app {0} exists and its blobs are ingested. Create its database with POST \
-             /v1/databases/{0}, apply its migrations through zeroship-migrate-server, then \
+             app {0} exists and its blobs are ingested. Create a database for its project, \
+             bind this app to it with POST /api/databases/<database_id>/bindings, then \
              re-run this command. To create the app WITHOUT this failure, pass \
              --defer-deploy on the first call.",
             app.id.as_str(),

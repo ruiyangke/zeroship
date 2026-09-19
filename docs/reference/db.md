@@ -10,6 +10,34 @@ Every table a migration creates gets a fixed set of system columns, including
 the `id` primary key. **You do not declare them** — see
 [System columns](#system-columns).
 
+## More than one database
+
+An app may use several databases. Declare each under `databases` in
+`zeroship.jsonc`, list the ones this app uses under its `apps` entry, and name
+one of them `primary` (see [`project-config.md`](project-config.md)).
+
+```ts
+await env.db.users.find({ where: { active: true } });            // unchanged
+await env.db.transaction(async (tx) => { /* ... */ });          // unchanged
+await env.databases.analytics.events.insert({ /* ... */ });     // only if declared
+await env.databases.analytics.transaction(async (tx) => { /* ... */ });
+```
+
+`env.db` **is** the primary: `env.db === env.databases[primary]` holds by
+object identity, so there is one concept and one code path, and an app with one
+database sees no difference at all.
+
+Each handle carries its own database. A collection routes by the handle it came
+from, so collection names cannot collide across databases, and a read whose
+source belongs to another database is refused rather than silently run against
+the wrong one. A transaction covers exactly ONE database: there is no two-phase
+commit, and a statement against a second database inside a transaction on the
+first is refused.
+
+Declaring a database in `zeroship.jsonc` grants nothing. `zeroship db bind`
+grants access, and `zeroship deploy` refuses an app whose manifest names a
+database it holds no active binding to.
+
 ```ts
 // migrations/20260628000000_initial_schema.ts
 import { table, t } from "@zeroship/migrate";
@@ -55,59 +83,51 @@ export const listAdmins = query(async () => {
 ## Migrate before you deploy
 
 `zeroship deploy` ships code; it does not touch the database. `zeroship migrate`
-applies the migration set. **For an app with migrations, the migrate has to come
-first**, and the platform enforces it: a deploy whose generated schema descriptor
-is not the one the app's newest applied migration produced is refused with
-`409 schema_not_applied`, and nothing goes live.
+applies the migration set. **For an app with migrations, run the migrate first** —
+but nothing checks that you did, and that is deliberate.
 
 ```
-$ zeroship deploy ./dist/app.zship --app=<id> --control=<url>
+$ zeroship deploy
 
 This app has committed migrations. Deploy does NOT apply them:
-  zeroship migrate --app=<id> --control=<url>
-Until you do, this deploy is REFUSED with 409 schema_not_applied.
+  zeroship migrate --app=<label> --database=main --control=<url>
+Deploy does not check this: an unmigrated column fails at query time.
 ```
 
-`--app=<id>` names the app by its `app_...` identity and `--control=<url>` is
-the control-plane origin. Both `deploy` and `migrate` accept both flags. With a
-committed `zeroship.jsonc`, the first deploy writes the app id into `app` and
-the file already carries `control`, so the flags can be omitted and `zeroship
-migrate` alone is complete when run from the project directory. The 409 body
-below prints its remedy as `--app` only because the file supplies the control
-plane; pass `--control=<url>` when running from anywhere else.
+**Why deploy does not compare schemas.** A database can be shared by several
+apps. If deploy refused any artifact whose schema differed from the newest
+applied migration, then one app migrating would break every OTHER bound app's
+next deploy, although each of their builds was fine. That coupling is what
+per-database identity exists to remove, so the comparison is gone.
 
-The response body names the fix:
+What you get instead is a failure that names itself: a build reaching a column
+the database does not have fails at query time with `42703 undefined_column`,
+naming the column. The check that will move this earlier is a SUBSET test —
+refuse when the database lacks something the app requires, say nothing when it
+has grown things the app does not use — and it belongs where both the schema
+and a connection are in hand, which is the worker, not the control plane.
+
+## Deploy verifies your bindings
+
+What deploy DOES refuse is an app that declares a database it holds no live
+binding to. Declaring a database in `zeroship.jsonc` grants nothing; a grant is
+an explicit act, and a deploy that created bindings from your config would
+silently restore access somebody had revoked.
 
 ```json
 {
-  "error": "schema_not_applied",
-  "deploy_descriptor_sha256": "a588c564…",
-  "applied_descriptor_sha256": null,
-  "remedy": "zeroship migrate --app=<id>"
+  "error": "database_not_bound",
+  "databases": ["dbs_03evr3oqx1200qyvgmdnjrsla"],
+  "remedy": [
+    "POST /api/databases/dbs_03evr3oqx1200qyvgmdnjrsla/bindings {\"app_id\":\"app_…\",\"capability\":\"readwrite\"}"
+  ]
 }
 ```
 
-There is no override. The check exists because the generated schema descriptor is
-the only thing the platform consults about your schema — including which columns
-are masked. If it could go live ahead of the schema it describes, a column the
-descriptor calls masked would be served as the plain value it still holds, and
-nothing downstream would notice.
-
-Three consequences worth knowing before you meet them:
-
-- **A brand-new database app takes two commands.** `zeroship migrate` will not
-  create an app that does not exist and `zeroship deploy` is what creates it, so
-  the first run is deploy (409) -> migrate -> deploy. Every run after that is
-  migrate -> deploy.
-- **An artifact built WITHOUT its migrations is refused too**, with
-  `409 schema_descriptor_missing`, once the app has any applied schema. Shipping
-  it would boot the app with `env.db` uninstalled over a live database.
-- **You cannot deploy an older build across a migration boundary.** The
-  comparison is against the NEWEST applied migration, not "any migration ever
-  applied". Schema migrations have their reverse synthesized by the platform,
-  while data migrations carry either a recorded `inverse()` or an explicit
-  `irreversible` reason; deployment still requires the descriptor for the newest
-  applied state.
+"Live" means the same thing the worker means: the binding is `active` and the
+cluster reconciler has caught up with it. A binding that has been declared but
+not yet converged would let the app deploy and then fail every statement at
+session setup, so deploy waits for the same signal the runtime does.
 
 ### Schema and data migrations are separate
 
