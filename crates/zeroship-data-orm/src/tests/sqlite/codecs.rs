@@ -23,7 +23,7 @@ fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
             let alias = binding.schema().as_str();
             let (backend, _dir) = fresh_backend(host);
             backend
-                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(alias))
                 .await
                 .expect("attach app file");
 

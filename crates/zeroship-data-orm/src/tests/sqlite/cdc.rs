@@ -135,7 +135,7 @@ fn attached_creator_databases_with_the_same_table_name_are_isolated() {
             let alias_b = crate::tests::fixtures::harness_alias("cdc_app_b");
             for alias in [&alias_a, &alias_b] {
                 backend
-                    .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
+                    .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(alias))
                     .await
                     .expect("attach creator database");
                 backend

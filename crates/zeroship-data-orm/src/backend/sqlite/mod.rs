@@ -350,7 +350,7 @@ impl SqliteBackend {
     /// app id, which is what a database identity makes it.
     ///
     /// A binding on schema `main` addresses the file this backend opened.
-    pub(crate) fn database_alias<'a>(binding: &'a DbBinding) -> &'a str {
+    pub(crate) fn database_alias(binding: &DbBinding) -> &str {
         if binding.schema().as_str() == MAIN_DATABASE {
             MAIN_DATABASE
         } else {
