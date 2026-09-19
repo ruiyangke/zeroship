@@ -17,6 +17,7 @@ pub mod billing_read;
 pub mod bootstrap_builder;
 pub mod config;
 pub mod credit;
+pub mod databases;
 pub mod cron;
 pub mod deploy;
 pub mod deploy_inflight;
