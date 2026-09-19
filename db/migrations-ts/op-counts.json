@@ -2,7 +2,7 @@
   {
     "file": "20260702000100_schema_roles_extensions.ts",
     "name": "schema_roles_extensions",
-    "opCount": 26
+    "opCount": 22
   },
   {
     "file": "20260702000200_control_tables.ts",
@@ -20,14 +20,9 @@
     "opCount": 113
   },
   {
-    "file": "20260702000500_sandbox_tables.ts",
-    "name": "sandbox_tables",
-    "opCount": 42
-  },
-  {
     "file": "20260702000600_constraints_indexes_fks.ts",
     "name": "constraints_indexes_fks",
-    "opCount": 197
+    "opCount": 173
   },
   {
     "file": "20260702000700_functions_triggers_comments.ts",
@@ -42,7 +37,7 @@
   {
     "file": "20260702000900_grants.ts",
     "name": "grants",
-    "opCount": 34
+    "opCount": 25
   },
   {
     "file": "20260705000000_durable_workflows_journal.ts",
@@ -172,7 +167,7 @@
   {
     "file": "20260831000001_sortable_entity_id_collations.ts",
     "name": "sortable_entity_id_collations",
-    "opCount": 66
+    "opCount": 60
   },
   {
     "file": "20260905000000_drop_jwk_key_state.ts",

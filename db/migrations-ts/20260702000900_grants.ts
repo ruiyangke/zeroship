@@ -4,10 +4,6 @@ export default {
   name: "grants",
   schema() {
     grant({ privileges: ["usage"], on: { kind: "schema", names: ["zeroship"] }, to: ["zeroship_auth", "zeroship_control", "zeroship_gateway", "zeroship_worker", "zeroship_app"] });
-    grant({ privileges: ["create", "usage"], on: { kind: "schema", names: ["zeroship"] }, to: ["sandbox_admin"] });
-    grant({ privileges: ["usage"], on: { kind: "schema", names: ["zeroship"] }, to: ["sandbox_app"] });
-    grant({ privileges: ["usage"], on: { kind: "schema", names: ["zeroship"] }, to: ["sandbox_audit"] });
-    grant({ privileges: ["usage"], on: { kind: "schema", names: ["zeroship"] }, to: ["sandbox_gdpr"] });
     grant({ privileges: ["usage"], on: { kind: "sequence", in: "zeroship" }, to: ["zeroship_auth", "zeroship_gateway"] });
     grant({ privileges: ["select", "insert", "update", "delete"], on: { kind: "table", schema: "zeroship", names: ["users", "idp_sessions", "magic_links", "magic_completions", "email_verifications", "totp_credentials", "totp_backup_codes", "oauth_refresh_tokens", "oauth_authorization_codes", "device_grants", "signing_keys", "oidc_session_clients"] }, to: ["zeroship_auth"] });
     grant({ privileges: ["select", "insert", "delete"], on: { kind: "table", schema: "zeroship", names: ["federated_identities", "jwk_key_state", "rate_limits", "audit_events"] }, to: ["zeroship_auth"] });
@@ -29,11 +25,6 @@ export default {
     grant({ privileges: ["select", "delete"], on: { kind: "table", schema: "zeroship", names: ["rate_limits"] }, to: ["zeroship_control"] });
     grant({ privileges: ["insert"], on: { kind: "table", schema: "zeroship", names: ["app_audit"] }, to: ["zeroship_control"] });
     grant({ privileges: ["select", "update"], on: { kind: "table", schema: "zeroship", names: ["app_user_identities"] }, to: ["zeroship_control"] });
-    grant({ privileges: ["select", "insert", "update", "delete"], on: { kind: "table", schema: "zeroship", names: ["sandboxes", "shares", "hosts", "deleted_sandboxes", "wake_jobs"] }, to: ["sandbox_app"] });
-    grant({ privileges: ["select", "insert"], on: { kind: "table", schema: "zeroship", names: ["sandbox_events"] }, to: ["sandbox_app"] });
-    grant({ privileges: ["insert"], on: { kind: "table", schema: "zeroship", names: ["sandbox_events"] }, to: ["sandbox_audit"] });
-    grant({ privileges: ["select", "delete"], on: { kind: "table", schema: "zeroship", names: ["sandboxes", "shares"] }, to: ["sandbox_gdpr"] });
-    grant({ privileges: ["select", "insert", "delete"], on: { kind: "table", schema: "zeroship", names: ["sandbox_events", "deleted_sandboxes"] }, to: ["sandbox_gdpr"] });
     revoke({ privileges: ["update", "delete", "truncate"], on: { kind: "table", schema: "zeroship", names: ["audit_events"] }, from: ["public"] });
     revoke({ privileges: ["update", "delete", "truncate"], on: { kind: "table", schema: "zeroship", names: ["app_audit"] }, from: ["public"] });
     revoke({ privileges: ["update", "delete", "truncate"], on: { kind: "table", schema: "zeroship", names: ["authz_decisions"] }, from: ["public"] });
