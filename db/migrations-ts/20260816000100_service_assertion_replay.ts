@@ -20,8 +20,10 @@ import { table, t, grant, revoke, schema } from "@zeroship/migrate";
 // This table records replay claims,
 // conferring nothing (see the grant note below on why a `jti` is not a
 // credential), and its writer set is different in kind: `zeroship` is written by
-// the control plane, while every service that VERIFIES an assertion writes here,
-// worker included. Putting it in `zeroship` made one schema carry two trust
+// the control plane, while the services that settle assertions against the
+// shared store write here, worker included. (The CDC relay verifies worker
+// assertions over a per-process in-memory store rather than this table.) Putting
+// it in `zeroship` made one schema carry two trust
 // zones under one grant policy, and the worker's write grant collided with the
 // invariant head-on. Splitting the zones is the fix; narrowing the invariant to
 // "the worker writes nothing except the things it writes" would not be one.
@@ -33,11 +35,14 @@ import { table, t, grant, revoke, schema } from "@zeroship/migrate";
 // statement against it is schema-qualified, which is deliberate.
 //
 // The schema is on the platform charter's namespace allowlist
-// (crates/zeroship-migrate-server/policies/platform.policy.toml) because
+// (policies/platform.policy.toml) because
 // lowering refuses a table outside it. That widening is bounded from the other
 // side: this schema holds EXACTLY this table and the worker holds no CREATE on
-// it, so the second zone cannot grow into the collision the first one hit. No
-// test asserts that bound today; it rests on review alone.
+// it, so the second zone cannot grow into the collision the first one hit. The
+// CREATE refusal is asserted by
+// `platform_service_roles_can_claim_reclaim_and_sweep_but_cannot_create_tables`
+// in crates/zeroship-authn/tests/replay.rs; the "exactly this table" set
+// property rests on review alone.
 //
 // The replay key and expiry determine whether a claim is still live. The
 // claim statement reports its verdict through the affected row count.
@@ -80,8 +85,8 @@ export default {
     // INSERT and UPDATE are both needed by the single claim statement: it is
     // `INSERT ... ON CONFLICT DO UPDATE ... WHERE`, and PostgreSQL requires
     // UPDATE privilege to PLAN that arm even when it never fires. This is the
-    // same class as 20260812000000 and 20260812000200, where insert-only grants
-    // made production upserts fail at plan time. DELETE is for the sweep.
+    // same class as the insert-only grants that made production upserts fail at
+    // plan time. DELETE is for the sweep.
     //
     // SELECT IS ALSO REQUIRED. PostgreSQL's rule is about COLUMN READS, not about
     // RETURNING: UPDATE and DELETE need SELECT on every column read in an
@@ -98,8 +103,11 @@ export default {
     // signed, single use, and bound to its own audience -- and every grantee is
     // itself one of the services whose keys are in the table.
     //
-    // Granted to every role that runs a service which VERIFIES assertions. There
-    // is no `zeroship_migrated` role in db/migrations-ts/20260702000100_schema_
+    // Granted here to every role that settles assertions against this shared
+    // store: control, gateway, worker and auth. `zeroship_workflow` also
+    // verifies them and receives the same grant in
+    // db/migrations-ts/20260911000000_workflow_coordination.ts. There is no
+    // `zeroship_migrated` role in db/migrations-ts/20260702000100_schema_
     // roles_extensions.ts, so migrated is absent here; it will need a grant when
     // it gets a role, and that is called out rather than pre-granted to a role
     // that does not exist.

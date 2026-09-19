@@ -1,25 +1,9 @@
 import { table, t, now, grant } from "@zeroship/migrate";
 
-// `zeroship.app_net_grants` is replaced, not altered. Its `(app_id, host,
-// port)` shape no longer fits twice over: a rule's destination is now a DNS
-// name OR an address range, and every rule now carries a verdict. Pre-launch,
-// there are no rows to carry across, so the old table is dropped rather than
-// backfilled.
-//
-// CORRECTING AN APPLIED FILE'S COMMENT, WHICH IS WHY THE NOTE IS HERE.
-// `20260817000500_drop_net_policy_catalog.ts` says the frontable-wildcard-suffix
-// catalog "moves to the config overlay (`[control] frontable_wildcard_suffixes`)".
-// That was true when written and is false as of this file: the key is deleted
-// along with the rest of the wildcard mechanism, because a wildcard destination
-// is not representable in the egress grammar at all (`*.example.com` does not
-// parse), so there is nothing left for the catalog to answer. That file has been
-// applied to a deployed database and its source bytes are hashed in the journal,
-// so it cannot be edited to say so.
-//
-// `destination` is TEXT, not `inet`/`cidr`. The native types would need
-// compio-postgres's `with-cidr-0_3` feature, which no workspace crate enables,
-// and all they buy is SQL containment operators - no query here does
-// containment (the registry projection reads every row and projects it). The
+// `destination` is TEXT, not `inet`/`cidr`. A destination is a DNS NAME or a
+// range, and no address type holds a name; all the native types would add is
+// SQL containment operators, and no query here does containment (the registry
+// projection reads every row and projects it). The
 // cost is that the database will accept a spelling only Rust rejects, and that
 // duplicate spellings of one range are distinct primary keys. Both are paid at
 // the authoring boundary: the control plane is the sole writer and it
@@ -63,6 +47,5 @@ export default {
     table("app_egress_rules", { schema: "zeroship" }).index("app_egress_rules_app_id_idx").add({ on: ["app_id"] });
     table("app_egress_rules", { schema: "zeroship" }).foreignKey("app_egress_rules_app_id_fkey").add({ columns: ["app_id"], references: { table: "apps", columns: ["id"] }, onDelete: "cascade" });
     grant({ privileges: ["select", "insert", "update", "delete"], on: { kind: "table", schema: "zeroship", names: ["app_egress_rules"] }, to: ["zeroship_control"] });
-    table("app_net_grants", { schema: "zeroship" }).drop({ ifExists: true, cascade: true });
   },
 };

@@ -36,9 +36,8 @@ const userIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
 // deploying.
 //
 // THE GRANT HAS NO `revoked_at`. Revocation is DELETE and sessions cascade off
-// it. `zeroship.app_user_identities.revoked_at` is the counter-example being
-// replaced: a column with more clearers than setters, every clearer a login,
-// and readers that disagree about what it means.
+// it. A revocation column invites the failure mode this avoids: clearers and
+// setters drift apart, and readers disagree about what a set value means.
 //
 // NO ROW-LEVEL SECURITY, AND THAT IS AN ARGUMENT RATHER THAN AN OMISSION. The
 // live RLS fences in db/migrations-ts/20260702000800_policies_rls.ts bind
@@ -141,8 +140,8 @@ export default {
         onUpdate: "restrict",
       });
     // Keyed to the client registry, cascading, exactly as
-    // `app_user_identities_app_client_id_fkey`, `oauth_grants_client_id_fkey`
-    // and `oauth_refresh_tokens_client_id_fkey` are. A grant naming a client
+    // `app_user_identities_app_client_id_fkey` and
+    // `oauth_grants_client_id_fkey` are. A grant naming a client
     // that does not exist is a subject nobody can present. The key goes when
     // the audience moves to the project; until then the referent is the same
     // one every other audience-scoped table uses.
@@ -215,9 +214,7 @@ export default {
     table("sessions", { schema: "zeroship" })
       .check("sessions_kind_check")
       .add({ expr: (col) => col("kind").in(["browser", "cli", "device_pending"]) });
-    // The sliding idle window may never outlive the absolute ceiling. This is
-    // the invariant `oauth_refresh_tokens_idle_le_ceiling` carried for the
-    // refresh family, restated on the row that replaces it.
+    // The sliding idle window may never outlive the absolute ceiling.
     table("sessions", { schema: "zeroship" })
       .check("sessions_idle_le_ceiling")
       .add({ expr: (col) => col("idle_expires_at").le(col("absolute_expires_at")) });

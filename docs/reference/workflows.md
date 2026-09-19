@@ -406,10 +406,9 @@ interface SignalEnvelope<P = unknown> {
   readonly type: string;
   readonly payload: P;
   readonly createdAt: Date;
-  readonly origin?: "app" | "ingress" | "system";
+  readonly origin?: "app" | "ingress";
   readonly delivery?: "direct" | "topic";
   readonly topic?: string;
-  readonly provider?: string;
 }
 ```
 
@@ -478,8 +477,15 @@ const outputs = await step.startMany(SendReceipt, [
 });
 ```
 
-Results are returned in issue order. The shipped batch cap is 1,000 items; over
-the cap throws `LimitExceededError`.
+Results are returned in issue order. Every item joins the single frontier that
+dispatch submits, so one batch shares a budget with every other step issued in
+the same turn. The app plan sets that budget as `maxFrontier`, and the platform
+is what holds it: the value reaches no isolate, so the SDK cannot measure a
+batch against it before issuing one. A dispatch whose frontier exceeds the
+plan's budget is refused rather than journaled, so no step is recorded, the run
+does not advance, and the body has nothing to catch. Size a fan-out against the
+plan the app runs under, and split a wider one across successive batches,
+awaiting each before issuing the next.
 
 ### `step.continueAsNew`
 
@@ -789,7 +795,6 @@ function, reconstructed from the deploy-pinned workflow code during rollback:
 interface CompensationContext {
   readonly idempotencyKey: string;
   readonly trigger: WorkflowTrigger<unknown>;
-  readonly cause?: unknown;
 }
 
 type Compensator<T> = (
@@ -878,23 +883,45 @@ The SDK exports these workflow error classes:
 | `StalledError` | The platform reclaimed 4 consecutive dispatches of one frontier without the run reporting an outcome. | Not raised in your body: it is the platform's verdict. On a forward frontier it is recorded on the run, which rests `stalled`. On a rollback frontier it is recorded as `compensation.reason` and the run rests `failed` with the rollback abandoned. Terminal either way. No rollback. |
 | `ChildCancelledError` | A `step.call` child is cancelled before the parent join completes. | Yes around `step.call`; if uncaught, normal failure handling applies. |
 | `ChildTimeoutError` | A `step.call` child exceeds `ChildWorkflowOptions.timeout`. | Yes around `step.call`; if uncaught, normal failure handling applies. |
-| `LimitExceededError` | A platform cap is exceeded, such as `step.startMany` over the batch cap or output over the blob cap. | Once recorded, yes. The `step.startMany` cap cannot be caught in the dispatch that raises it: the catch resumes the body outside the replay boundary and the run fails `NondeterministicError` instead. |
+| `LimitExceededError` | A platform cap is exceeded, such as an output over the blob cap. | Not raised in the body of the run that exceeded the cap: it is the platform's verdict, recorded on that run, which rests `failed`. The step whose output exceeded it is never journalled, so that body has no row to resume at. A cap the platform applies to a dispatch rather than to a step, such as `maxFrontier`, refuses the dispatch without recording anything and raises no class here. |
 | `NestedStepError` | A `step.*` method is called from inside a step body or compensator. | Treat as terminal misuse. Fix the body rather than handling it. |
 | `CompensableCarryError` | `step.continueAsNew` is requested while the current generation still has pending compensators. | No. It is the platform's verdict: the transition is refused, no successor generation is created, the pending compensators run, and the generation rests `failed` carrying this name. |
 | `InvalidScheduleError` | A schedule registration is invalid — a malformed or unsupported cron expression, an unknown IANA timezone, or a non-positive interval count or backfill. Thrown when the schedule is compiled at build/deploy time, never at fire time or on a run. Exported from `@zeroship/workflows/schedule`. | Yes, at registration time; catch it beside the `schedule(...)` call that raised it. |
 
 Except `InvalidScheduleError`, which is thrown at build time, every class above
-names a condition the platform records on a run or on a step. The control
-operations an app handler calls on a `WorkflowRun` — `signal`, `pause`,
-`resume`, `cancel`, `restart`, `readStepOutput` — never enter the journal, so
-they never carry one of those names. They reject through a different path with a
-stable failure shape: a plain `Error` whose `code` is one of
-`workflow_not_found`, `workflow_conflict`, `workflow_unavailable`,
-`workflow_timeout`, `workflow_resource_exhausted`, `workflow_payload_too_large`,
-`workflow_permission_denied`, or `workflow_unauthenticated`. An argument that
-does not parse rejects as a built-in `TypeError` carrying the engine's own
-message and no `code`. The SDK exports no class for either shape; branch on
-`error.code` and on the operation you called, not on the identity of what threw.
+names a condition the platform records on a run or on a step. A class recorded
+on a run is that run's terminal verdict, not something its own body is resumed
+to catch; read it off `run.status()`. That verdict still reaches a body one way:
+a parent that joined the run with `step.call` is handed the run's recorded error
+at that join, so the parent's next dispatch throws it out of `await
+step.call(...)`, and a `catch` there matches whatever class the recorded `type`
+names. The control operations an app handler calls, `start` on a workflow and
+`status`, `signal`, `pause`, `resume`, `cancel`, `restart` and `readStepOutput`
+on a `WorkflowRun`, never enter the journal, so they never carry one of those
+names. They reject through a different path with a stable failure shape: every
+refusal the engine returns is a plain `Error` whose `code` is one of
+`workflow_invalid_request`, `workflow_not_found`,
+`workflow_conflict`, `workflow_unavailable`,
+`workflow_timeout`, `workflow_resource_exhausted`,
+`workflow_payload_too_large`, `workflow_permission_denied`,
+`workflow_unauthenticated`, `workflow_ingress_fenced` or
+`workflow_internal_error`. The message is the engine's own, except under
+`workflow_unavailable` and `workflow_internal_error`, which describe a host
+condition you cannot act on and say only that.
+
+`workflow_invalid_request` means the engine refused the arguments themselves
+and the call did nothing: an argument past a platform limit, such as an
+oversized `key` or signal `type`, or one that does not resolve against the run
+it names, such as a `restart` target no step in that run's journal matches.
+Correct the call rather than retrying it. `workflow_conflict` instead names a
+run state that rejects the operation, so the same call can succeed later.
+
+An argument whose *type* is wrong never reaches the engine. The binding rejects
+it before the call with a built-in `TypeError` and no `code`. So
+`instanceof TypeError` means you passed the wrong kind of value, and an
+`error.code` means the engine refused the call. The SDK exports no class for
+either shape; branch on `error.code` and on the operation you called, not on
+the identity of what threw.
 
 ### Matching an error
 
@@ -918,6 +945,23 @@ The same holds for an error a body throws itself: `throw new PermanentError(...)
 is caught as `e instanceof PermanentError` after the round trip. Because the
 match is on the recorded name, any error carrying that name matches, including
 one the runtime rebuilt as a plain `Error`.
+
+A terminal error read off `run.status()` is the recorded JSON itself, not an
+`Error`, so no class matches it however it is named. Branch on `error.type`
+there.
+
+The trailing `throw e` is required, not a stylistic flourish. The platform stops
+a body mid-flight by throwing through it: a suspension at the step the run is
+waiting on, a `step.continueAsNew`, and the end of the replay a rollback does to
+find its compensators all arrive that way. None of them carries a class this
+package exports, so nothing you can name will match them. A catch that discards
+what it did not match discards those too, and the body runs on past the point it
+was meant to stop, holding values no step produced. In a forward dispatch the
+step calls it makes after that execute for real and are then thrown away
+unrecorded, so their effects land again on the dispatch that replaces them.
+Write catches that claim what they handle and rethrow the rest;
+`catch (e) { fallback(); }` around a step call, with no throw on the unmatched
+path, is the shape to avoid.
 
 A recorded failure carries `type`, `message`, an optional `stack`, and
 `retryable` when the thrown error declared one. An error that declares nothing
@@ -952,6 +996,7 @@ Dont:
 - Do not use `Promise.race`, `Promise.any`, or `Promise.allSettled` over step
   promises.
 - Do not catch `NondeterministicError` to keep going. Fix the workflow body.
+- Do not let a catch swallow what it did not match. Rethrow the rest.
 
 ## Gotchas
 

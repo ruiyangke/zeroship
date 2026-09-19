@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::engine::{JournalStep, StepOutcome, StepRequest, StepResult};
+use crate::engine::{JournalStep, StepOutcome, StepResult};
 use crate::WorkflowServiceError;
 
 /// Replay input without journal mutation authority.
@@ -37,28 +37,6 @@ pub struct WorkflowTrigger {
     pub started_at: DateTime<Utc>,
     pub run_id: String,
     pub workflow_name: String,
-}
-
-impl From<&StepRequest> for WorkflowInvocation {
-    fn from(request: &StepRequest) -> Self {
-        Self {
-            app_id: request.app_id.as_str().to_owned(),
-            deploy_id: request.deploy_id.clone(),
-            deploy_hash: request.deploy_hash.clone(),
-            run_id: request.run_id.clone(),
-            generation: request.generation,
-            workflow_name: request.workflow_name.clone(),
-            phase: request.phase.clone(),
-            trigger: WorkflowTrigger {
-                input: request.input.clone(),
-                input_ref: None,
-                started_at: request.started_at,
-                run_id: request.run_id.clone(),
-                workflow_name: request.workflow_name.clone(),
-            },
-            journal: request.journal.clone(),
-        }
-    }
 }
 
 /// The executor reports work, without choosing the run or lease to mutate.

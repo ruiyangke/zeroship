@@ -16,12 +16,12 @@ import { grant, now, raw, t, table } from "@zeroship/migrate";
 // import, and crates/zeroship-core/src/worker_join.rs for the token and the
 // documents.
 //
-// THE ZONES TABLE IS SHARED WITH DECISION 2 (placement eligibility and
-// capacity), which is NOT built yet. An execution zone is an operator-declared
-// set of worker deployment units that share creator-side connectivity;
-// decision 2 adds `apps.execution_zone_id` against this same table so placement
-// can match an app's zone to a worker's. A single-VPS deployment has exactly
-// one zone, seeded by the next migration.
+// THE ZONES TABLE IS SHARED WITH PLACEMENT. An execution zone is an
+// operator-declared set of worker deployment units that share creator-side
+// connectivity; 20260914000600_placement_eligibility.ts pins
+// `apps.execution_zone_id` to this table and freezes the column, so placement
+// matches an app's zone to a worker's. A single-VPS deployment has exactly one
+// zone, seeded by the next migration.
 export default {
   name: "execution_zones_and_join_signers",
   schema() {
@@ -40,9 +40,9 @@ export default {
     table("execution_zones", { schema: "zeroship" })
       .unique("execution_zones_name_uq")
       .add({ columns: ["name"] });
-    // Decision 2 has not defined a lifecycle beyond "active" yet. The set is
-    // closed and singleton-valued on purpose: widening it is that decision's
-    // call to make, not an accident of this migration leaving it open.
+    // The status set is closed and singleton-valued on purpose: no lifecycle
+    // beyond "active" is defined yet, and widening the set is a deliberate
+    // decision rather than an accident of leaving it open.
     table("execution_zones", { schema: "zeroship" })
       .check("execution_zones_status_check")
       .add({ expr: (col) => col("status").in(["active"]) });

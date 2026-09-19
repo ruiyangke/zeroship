@@ -298,6 +298,50 @@ async fn ready_binding_reaches_only_the_published_backend_of_its_runtime_identit
     );
 }
 
+#[compio::test]
+async fn engine_refusals_carry_a_code_and_shape_faults_stay_type_errors() {
+    let fixture = Fixture::new().await;
+    // Both calls are `restart` on the same live run, so the operation, the
+    // handle and the run state are held fixed and only the `from` argument
+    // differs. One names a step this journal does not hold, which the engine
+    // refuses; the other is not a target object at all, which the binding
+    // refuses before the engine is reached.
+    let observed = fetch(fixture.runtime(
+        &fixture.app,
+        Some(fixture.app.app_id().clone()),
+        r"
+        const caught = async (call) => {
+            try { await call(); return {outcome:'resolved'}; }
+            catch (error) {
+                return {outcome:'threw', name:error.name, code:error.code ?? null,
+                    message:error.message, isTypeError:error instanceof TypeError};
+            }
+        };
+        export default { async fetch(_request, env) {
+            const run = await env.workflows.Example.start({});
+            return Response.json({
+                unresolvable: await caught(() => run.restart({from:{name:'absent'}})),
+                malformed: await caught(() => run.restart({from:5})),
+            });
+        }};
+    ",
+    ))
+    .await;
+    // The engine refused a well-formed argument, so it is catchable by code
+    // like every other refusal a control operation can produce.
+    assert_eq!(
+        observed["unresolvable"],
+        json!({"outcome":"threw", "name":"Error", "code":"workflow_invalid_request",
+            "message":"restart target is missing or ambiguous", "isTypeError":false}),
+    );
+    // The binding refused a wrongly typed argument, which is what
+    // `instanceof TypeError` is for, and it carries no code.
+    assert_eq!(observed["malformed"]["outcome"], "threw");
+    assert_eq!(observed["malformed"]["name"], "TypeError");
+    assert_eq!(observed["malformed"]["code"], Value::Null);
+    assert_eq!(observed["malformed"]["isTypeError"], true);
+}
+
 #[path = "support/orm.rs"]
 mod orm_fixture;
 

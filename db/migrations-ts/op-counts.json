@@ -2,32 +2,32 @@
   {
     "file": "20260702000100_schema_roles_extensions.ts",
     "name": "schema_roles_extensions",
-    "opCount": 22
+    "opCount": 25
   },
   {
     "file": "20260702000200_control_tables.ts",
     "name": "control_tables",
-    "opCount": 58
+    "opCount": 34
   },
   {
     "file": "20260702000300_auth_oauth_tables.ts",
     "name": "auth_oauth_tables",
-    "opCount": 79
+    "opCount": 73
   },
   {
     "file": "20260702000400_billing_metering_invoice_tables.ts",
     "name": "billing_metering_invoice_tables",
-    "opCount": 113
+    "opCount": 83
   },
   {
     "file": "20260702000600_constraints_indexes_fks.ts",
     "name": "constraints_indexes_fks",
-    "opCount": 173
+    "opCount": 134
   },
   {
     "file": "20260702000700_functions_triggers_comments.ts",
     "name": "functions_triggers_comments",
-    "opCount": 39
+    "opCount": 38
   },
   {
     "file": "20260702000800_policies_rls.ts",
@@ -37,7 +37,7 @@
   {
     "file": "20260702000900_grants.ts",
     "name": "grants",
-    "opCount": 25
+    "opCount": 29
   },
   {
     "file": "20260705000000_durable_workflows_journal.ts",
@@ -45,169 +45,34 @@
     "opCount": 13
   },
   {
-    "file": "20260708000100_billing_provider_corrections.ts",
-    "name": "billing_provider_corrections",
-    "opCount": 2
-  },
-  {
-    "file": "20260709000100_drop_metering_exports.ts",
-    "name": "drop_metering_exports",
-    "opCount": 1
-  },
-  {
-    "file": "20260811000000_auth_token_revocations_delete.ts",
-    "name": "auth_token_revocations_delete",
-    "opCount": 1
-  },
-  {
-    "file": "20260811000200_control_audit_grants.ts",
-    "name": "control_audit_grants",
-    "opCount": 2
-  },
-  {
-    "file": "20260811000300_control_connect_failures_grant.ts",
-    "name": "control_connect_failures_grant",
-    "opCount": 1
-  },
-  {
-    "file": "20260811000400_rate_limits_write_grants.ts",
-    "name": "rate_limits_write_grants",
-    "opCount": 2
-  },
-  {
-    "file": "20260812000000_gateway_token_revocations_update.ts",
-    "name": "gateway_token_revocations_update",
-    "opCount": 1
-  },
-  {
-    "file": "20260812000100_control_app_oauth_clients_update.ts",
-    "name": "control_app_oauth_clients_update",
-    "opCount": 1
-  },
-  {
-    "file": "20260812000200_control_upsert_update_grants.ts",
-    "name": "control_upsert_update_grants",
-    "opCount": 1
-  },
-  {
-    "file": "20260812000300_auth_email_suppressions_update.ts",
-    "name": "auth_email_suppressions_update",
-    "opCount": 1
-  },
-  {
-    "file": "20260816000000_auth_app_oauth_clients_select.ts",
-    "name": "auth_app_oauth_clients_select",
-    "opCount": 1
-  },
-  {
     "file": "20260816000100_service_assertion_replay.ts",
     "name": "service_assertion_replay",
     "opCount": 7
   },
   {
-    "file": "20260817000000_drop_permission_tokens.ts",
-    "name": "drop_permission_tokens",
-    "opCount": 1
-  },
-  {
-    "file": "20260817000100_drop_audit_token_columns.ts",
-    "name": "drop_audit_token_columns",
-    "opCount": 2
-  },
-  {
-    "file": "20260817000200_drop_app_freeze_flags.ts",
-    "name": "drop_app_freeze_flags",
-    "opCount": 2
-  },
-  {
-    "file": "20260817000300_drop_platform_policies.ts",
-    "name": "drop_platform_policies",
-    "opCount": 1
-  },
-  {
-    "file": "20260817000400_drop_platform_admin_roles.ts",
-    "name": "drop_platform_admin_roles",
-    "opCount": 1
-  },
-  {
-    "file": "20260817000500_drop_net_policy_catalog.ts",
-    "name": "drop_net_policy_catalog",
-    "opCount": 1
-  },
-  {
-    "file": "20260818000000_auth_principal_grants_select.ts",
-    "name": "auth_principal_grants_select",
-    "opCount": 1
-  },
-  {
-    "file": "20260818000100_signing_key_retirement.ts",
-    "name": "signing_key_retirement",
-    "opCount": 3
-  },
-  {
-    "file": "20260818000200_worker_database_authority.ts",
-    "name": "worker_database_authority",
-    "opCount": 6
-  },
-  {
-    "file": "20260818000300_credential_lifecycle.ts",
-    "name": "credential_lifecycle",
-    "opCount": 3
-  },
-  {
     "file": "20260820000100_app_egress_rules.ts",
     "name": "app_egress_rules",
-    "opCount": 10
-  },
-  {
-    "file": "20260831000000_archive_apps.ts",
-    "name": "archive_apps",
-    "opCount": 2
+    "opCount": 9
   },
   {
     "file": "20260831000001_sortable_entity_id_collations.ts",
     "name": "sortable_entity_id_collations",
-    "opCount": 60
-  },
-  {
-    "file": "20260905000000_drop_jwk_key_state.ts",
-    "name": "drop_jwk_key_state",
-    "opCount": 1
-  },
-  {
-    "file": "20260905000100_drop_app_api_key_hash.ts",
-    "name": "drop_app_api_key_hash",
-    "opCount": 1
-  },
-  {
-    "file": "20260905000200_drop_app_api_key.ts",
-    "name": "drop_app_api_key",
-    "opCount": 1
+    "opCount": 49
   },
   {
     "file": "20260906000000_organization_entity_model.ts",
     "name": "organization_entity_model",
-    "opCount": 70
+    "opCount": 67
   },
   {
     "file": "20260906000100_apps_organization_and_billing_subject.ts",
     "name": "apps_organization_and_billing_subject",
-    "opCount": 98
+    "opCount": 61
   },
   {
     "file": "20260906000200_apps_project_ownership_key.ts",
     "name": "apps_project_ownership_key",
-    "opCount": 2
-  },
-  {
-    "file": "20260906000300_organization_dissolution.ts",
-    "name": "organization_dissolution",
-    "opCount": 5
-  },
-  {
-    "file": "20260907000000_user_erasure_edges.ts",
-    "name": "user_erasure_edges",
-    "opCount": 11
+    "opCount": 1
   },
   {
     "file": "20260907000100_session_object.ts",
@@ -215,29 +80,9 @@
     "opCount": 34
   },
   {
-    "file": "20260907000200_drop_oauth_refresh_tokens.ts",
-    "name": "drop_oauth_refresh_tokens",
-    "opCount": 1
-  },
-  {
     "file": "20260907000300_worker_instances.ts",
     "name": "worker_instances",
     "opCount": 10
-  },
-  {
-    "file": "20260908000000_auth_organization_ownership_fence.ts",
-    "name": "auth_organization_ownership_fence",
-    "opCount": 2
-  },
-  {
-    "file": "20260908000100_delete_apps.ts",
-    "name": "delete_apps",
-    "opCount": 4
-  },
-  {
-    "file": "20260910000100_cdc_relay_authority.ts",
-    "name": "cdc_relay_authority",
-    "opCount": 5
   },
   {
     "file": "20260911000000_workflow_coordination.ts",
@@ -250,11 +95,6 @@
     "opCount": 5
   },
   {
-    "file": "20260914000000_app_lifecycle_revision.ts",
-    "name": "app_lifecycle_revision",
-    "opCount": 2
-  },
-  {
     "file": "20260914000100_deploy_publication.ts",
     "name": "deploy_publication",
     "opCount": 22
@@ -263,11 +103,6 @@
     "file": "20260914000200_deploy_publication_references.ts",
     "name": "deploy_publication_references",
     "opCount": 2
-  },
-  {
-    "file": "20260914000300_workflow_app_deletion.ts",
-    "name": "workflow_app_deletion",
-    "opCount": 1
   },
   {
     "file": "20260914000400_execution_zones_and_join_signers.ts",
@@ -282,11 +117,11 @@
   {
     "file": "20260914000500_worker_join_bindings.ts",
     "name": "worker_join_bindings",
-    "opCount": 33
+    "opCount": 29
   },
   {
     "file": "20260914000600_placement_eligibility.ts",
     "name": "placement_eligibility",
-    "opCount": 6
+    "opCount": 5
   }
 ]
