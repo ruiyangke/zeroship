@@ -355,8 +355,8 @@ pub(crate) fn binding_for_isolate(
     app_id: &str,
 ) -> Option<DbBinding> {
     // The worker injects `deploy_hash` as `ZEROSHIP_DEPLOY_ID`; pinned workflow
-    // runtimes carry the hash they were started on. Absent in dev/raw-JS
-    // harnesses means the historical `cold_start` token.
+    // runtimes carry the hash they were started on. A dev or raw-JS harness
+    // sets neither, and stands on `COLD_START_DEPLOY_TOKEN`.
     let state = crate::v8_bridge::runtime_state(scope);
     let deploy_token = state
         .borrow()

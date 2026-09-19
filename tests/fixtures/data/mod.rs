@@ -193,10 +193,14 @@ pub fn harness_alias(app_id: &str) -> String {
 /// The binding whose schema is `alias`, for a fixture that already holds the
 /// physical name and needs the identity back.
 ///
+/// Only the ORM's own SQLite fixtures hold a bare alias, so this is unused in
+/// the V8 adapter's test build of this shared module.
+///
 /// # Panics
 ///
 /// Panics when no binding on this thread addresses `alias`. A fixture that
 /// invented a qualifier has nothing to attach it for.
+#[allow(dead_code)]
 pub fn harness_binding_for_alias(alias: &str) -> zeroship_data_orm::binding::DbBinding {
     HARNESS_BINDINGS.with(|bindings| {
         bindings
