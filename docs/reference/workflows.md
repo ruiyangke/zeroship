@@ -406,10 +406,9 @@ interface SignalEnvelope<P = unknown> {
   readonly type: string;
   readonly payload: P;
   readonly createdAt: Date;
-  readonly origin?: "app" | "ingress" | "system";
+  readonly origin?: "app" | "ingress";
   readonly delivery?: "direct" | "topic";
   readonly topic?: string;
-  readonly provider?: string;
 }
 ```
 
@@ -789,7 +788,6 @@ function, reconstructed from the deploy-pinned workflow code during rollback:
 interface CompensationContext {
   readonly idempotencyKey: string;
   readonly trigger: WorkflowTrigger<unknown>;
-  readonly cause?: unknown;
 }
 
 type Compensator<T> = (

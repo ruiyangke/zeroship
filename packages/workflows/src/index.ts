@@ -40,7 +40,6 @@ export interface StepOutputRef {
 export interface CompensationContext {
   readonly idempotencyKey: string;
   readonly trigger: WorkflowTrigger<unknown>;
-  readonly cause?: unknown;
 }
 
 export type Compensator<T> = (
@@ -89,10 +88,9 @@ export interface SignalEnvelope<P = unknown> {
   readonly type: string;
   readonly payload: P;
   readonly createdAt: Date;
-  readonly origin?: "app" | "ingress" | "system";
+  readonly origin?: "app" | "ingress";
   readonly delivery?: "direct" | "topic";
   readonly topic?: string;
-  readonly provider?: string;
 }
 
 export interface WaitForSignalOptions {
@@ -322,7 +320,7 @@ export class NestedStepError extends Error {
     return hasWorkflowErrorName(value, "NestedStepError");
   }
 
-  constructor(message = "workflow step methods cannot be called from inside a step body") {
+  constructor(message = "workflow step methods cannot be called from inside a step body or compensator") {
     super(message);
     this.name = "NestedStepError";
   }
