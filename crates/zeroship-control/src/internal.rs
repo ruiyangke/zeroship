@@ -545,6 +545,86 @@ pub async fn get_app_data_key(
     }
 }
 
+/// Host-only database-binding delivery.
+///
+/// **The worker composes no part of a binding.** The database id names the
+/// physical schema, the edge id and the schema epoch together name the role a
+/// session narrows to, and all three are Control facts. A worker that derived
+/// any of them would address a schema and assume a role no reconciler created.
+///
+/// Only a LIVE binding is served, and both halves of "live" are predicates
+/// here rather than judgement at the caller:
+///
+/// - `database_bindings.status = 'active'` and `observed_generation` caught up
+///   to `generation`. Control declares and a per-cluster reconciler converges;
+///   nothing spans the control database and a tenant cluster, so a declared
+///   binding whose roles are not there yet must not be handed out.
+/// - `databases.status = 'active'`. A database still provisioning has a schema
+///   epoch that no cluster has minted roles for.
+///
+/// A stale epoch is not a failure of this read: the cluster's own epoch row is
+/// the authority, so composing a retired one makes `SET LOCAL ROLE` fail and
+/// the caller re-resolve. That is the fail-closed direction and it is why this
+/// serves a projection rather than reading the cluster.
+pub async fn get_app_binding(
+    req: web::HttpRequest,
+    state: State<Arc<AppState>>,
+    app_id: Path<String>,
+) -> web::HttpResponse {
+    let id = match zone_scoped_app_read(
+        &req,
+        &state,
+        endpoints::CONTROL_APP_BINDING,
+        &app_id,
+        || web::HttpResponse::BadRequest().json(&serde_json::json!({"error":"bad app_id"})),
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
+    let rows = match state
+        .control_pg
+        .query(
+            "SELECT b.id AS binding_id, b.database_id, d.schema_epoch \
+               FROM zeroship.database_bindings b \
+               JOIN zeroship.databases d ON d.id = b.database_id \
+              WHERE b.app_id = $1 \
+                AND b.status = 'active' \
+                AND b.observed_generation >= b.generation \
+                AND d.status = 'active' \
+              ORDER BY b.id \
+              LIMIT 1",
+            &[&id.as_str()],
+        )
+        .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::error!(app_id = %id.as_str(), %error, "control-internal: binding read failed");
+            return web::HttpResponse::InternalServerError()
+                .json(&serde_json::json!({"error":"internal error"}));
+        }
+    };
+    let Some(row) = rows.first() else {
+        return web::HttpResponse::NotFound()
+            .json(&serde_json::json!({"error":"no live database binding"}));
+    };
+    let epoch: i32 = row.get("schema_epoch");
+    let Ok(epoch) = u32::try_from(epoch) else {
+        tracing::error!(app_id = %id.as_str(), "control-internal: negative schema epoch");
+        return web::HttpResponse::InternalServerError()
+            .json(&serde_json::json!({"error":"internal error"}));
+    };
+    web::HttpResponse::Ok()
+        .header("cache-control", "no-store")
+        .json(&serde_json::json!({
+            "binding_id": row.get::<_, &str>("binding_id"),
+            "database_id": row.get::<_, &str>("database_id"),
+            "schema_epoch": epoch,
+        }))
+}
+
 /// POST /internal/workers/join - a worker registers ONE live process.
 ///
 /// NOT guarded by the service-assertion allowlist, and that is not an omission.

@@ -106,14 +106,14 @@ mod tests {
         // populated and then dropped -- `build_verbose_error_body` never
         // emits it.
         let err = DbError::config_hinted(
-            SCHEMA_NOT_PROVISIONED,
-            MISSING_ROLE_MESSAGE,
-            MISSING_ROLE_HINT,
+            SCHEMA_EPOCH_STALE,
+            STALE_EPOCH_MESSAGE,
+            STALE_EPOCH_HINT,
         );
         let op = err.to_op_error();
         match &op.kind {
             zeroship_runtime::state::OpErrorKind::CodedError { code, hint, .. } => {
-                assert_eq!(code, SCHEMA_NOT_PROVISIONED);
+                assert_eq!(code, SCHEMA_EPOCH_STALE);
                 assert!(hint.is_some(), "hint is set for direct env.db callers");
             }
             other => panic!("expected CodedError, got {other:?}"),
@@ -145,12 +145,12 @@ mod tests {
         // creator-facing string stays clean. If that skip is ever removed,
         // operator-only setup context would leak through a public code.
         let mut err = DbError::config_hinted(
-            SCHEMA_NOT_PROVISIONED,
-            MISSING_ROLE_MESSAGE,
-            MISSING_ROLE_HINT,
+            SCHEMA_EPOCH_STALE,
+            STALE_EPOCH_MESSAGE,
+            STALE_EPOCH_HINT,
         );
         prefix_message(&mut err, "db: per-app session setup: ");
-        assert_eq!(err.message_str(), MISSING_ROLE_MESSAGE);
+        assert_eq!(err.message_str(), STALE_EPOCH_MESSAGE);
     }
 
     #[test]

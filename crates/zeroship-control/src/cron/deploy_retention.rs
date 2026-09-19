@@ -122,7 +122,7 @@ impl Collector {
         let database = compio::time::timeout(
             config.attempt_timeout,
             Database::connect(
-                DbBinding::new(
+                DbBinding::platform(
                     "platform",
                     "control-deployment-collector",
                     SchemaName::new("zeroship").map_err(|_| invalid_storage())?,

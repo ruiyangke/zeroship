@@ -73,6 +73,7 @@ fn overlapping_queries_keep_reads_from_before_and_after_await() {
             &format!("CREATE TABLE \"{LOCAL_DEV_APP_ID}\".notes ({SYSTEM_COLUMNS_SQLITE}, title TEXT NOT NULL);"),
         );
         let db = crate::service::DbService::new(crate::service::DbServiceConfig {
+            app_bindings: Default::default(),
             project_keys: Default::default(),
             connection: crate::tests::fixtures::recording::connection(&parity::sqlite_url(
                 &directory,

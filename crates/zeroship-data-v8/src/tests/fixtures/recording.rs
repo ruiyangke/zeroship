@@ -2,7 +2,8 @@
 use async_trait::async_trait;
 use futures::future::LocalBoxFuture;
 use std::{cell::RefCell, rc::Rc};
-use zeroship_data_orm::sql::{catalog::LiveSchema, SchemaName};
+use zeroship_data_orm::binding::DbBinding;
+use zeroship_data_orm::sql::catalog::LiveSchema;
 use zeroship_data_orm::value::Value;
 use zeroship_data_orm::{
     backend::{Backend, BackendHandle},
@@ -97,46 +98,43 @@ impl Backend for RecordingBackend {
 }
 #[async_trait(?Send)]
 impl ScopedExecutor for RecordingBackend {
-    fn namespace<'a>(&self, app_id: &'a str, schema: &'a SchemaName) -> &'a str {
-        self.0.namespace(app_id, schema)
+    fn namespace<'a>(&self, binding: &'a DbBinding) -> &'a str {
+        self.0.namespace(binding)
     }
     fn pool_counts(&self) -> Option<(usize, usize, usize)> {
         self.0.pool_counts()
     }
-    async fn prepare_for_app(&self, app_id: &str, schema: &SchemaName) -> Result<(), DbError> {
-        self.0.prepare_for_app(app_id, schema).await
+    async fn prepare_for_app(&self, binding: &DbBinding) -> Result<(), DbError> {
+        self.0.prepare_for_app(binding).await
     }
     async fn query(
         &self,
-        app_id: &str,
-        schema: &SchemaName,
+        binding: &DbBinding,
         sql: &str,
         params: &[Value],
     ) -> Result<Vec<Value>, DbError> {
         record(sql, params);
-        self.0.query(app_id, schema, sql, params).await
+        self.0.query(binding, sql, params).await
     }
     async fn exec(
         &self,
-        app_id: &str,
-        schema: &SchemaName,
+        binding: &DbBinding,
         sql: &str,
         params: &[Value],
     ) -> Result<u64, DbError> {
         record(sql, params);
-        self.0.exec(app_id, schema, sql, params).await
+        self.0.exec(binding, sql, params).await
     }
     async fn check_connection(&self) -> Result<(), DbError> {
         self.0.check_connection().await
     }
     async fn open_tx_session(
         &self,
-        app_id: &str,
-        schema: &SchemaName,
+        binding: &DbBinding,
         begin: BeginIntent,
     ) -> Result<Session, OpenSessionError> {
         Ok(Session::new(RecordingSession(
-            self.0.open_tx_session(app_id, schema, begin).await?,
+            self.0.open_tx_session(binding, begin).await?,
         )))
     }
 }
@@ -144,12 +142,11 @@ impl ScopedExecutor for RecordingBackend {
 impl Catalog for RecordingBackend {
     async fn introspect_schema(
         &self,
-        app_id: &str,
-        schema: &SchemaName,
+        binding: &DbBinding,
         session: Option<&Session>,
     ) -> Result<LiveSchema, DbError> {
         self.0
-            .introspect_schema(app_id, schema, unwrap_session(session))
+            .introspect_schema(binding, unwrap_session(session))
             .await
     }
 }

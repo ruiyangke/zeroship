@@ -29,7 +29,7 @@ async fn startup_preserves_archived_plans_and_complete_workflow_policy() {
     let catalog = PlanCatalog::new(registry.clone());
     catalog.archive(&free_plan_id()).await.unwrap();
     let database = Database::connect(
-        DbBinding::new(
+        DbBinding::platform(
             "platform",
             "workflow-policy",
             SchemaName::new("zeroship").unwrap(),

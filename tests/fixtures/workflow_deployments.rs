@@ -86,7 +86,7 @@ impl Deployments {
             .unwrap();
         let ledger = platform.deployments().clone();
         let database = Database::connect(
-            DbBinding::new(
+            DbBinding::platform(
                 "platform",
                 "fixture-catalog",
                 SchemaName::new("main").unwrap(),

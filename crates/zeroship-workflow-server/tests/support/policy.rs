@@ -25,7 +25,7 @@ pub async fn operator(platform: &platform::Platform) -> ControlPolicyStore {
         .runtime_url
         .replacen("zeroship_workflow@", "zeroship_control@", 1);
     let database = Database::connect(
-        DbBinding::new(
+        DbBinding::platform(
             "platform",
             "workflow-policy",
             SchemaName::new("zeroship").unwrap(),

@@ -149,7 +149,7 @@ impl OrmStore {
         compio::time::timeout(
             CLOCK_CEILING,
             self.clock
-                .prepare_for_app(self.binding.app_id(), self.binding.schema()),
+                .prepare_for_app(&self.binding),
         )
         .await
         .map_err(|_| clock_unavailable())??;
@@ -351,7 +351,7 @@ impl Transaction {
         let rows = compio::time::timeout(
             CLOCK_CEILING,
             self.clock
-                .query(self.binding.app_id(), self.binding.schema(), sql, &[]),
+                .query(&self.binding, sql, &[]),
         )
         .await
         .map_err(|_| clock_unavailable())??;

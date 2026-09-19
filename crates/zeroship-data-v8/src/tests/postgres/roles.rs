@@ -132,8 +132,11 @@ async fn drain_pg() {
 /// hand the resulting server error to the classifier.
 async fn classify_missing_role(app_id: &str) -> DbError {
     let (postgres, client) = connect_test_client().await;
-    let role = zeroship_core::database_role::per_app_role_name(app_id)
-        .expect("missing-role fixture app id must produce a valid PostgreSQL role name");
+    let binding = crate::tests::fixtures::harness_binding(app_id);
+    let role = binding
+        .session_role()
+        .expect("a harness binding narrows")
+        .to_owned();
 
     // Same shape as `exec::query_postgres_pool_with_autocommit_role`: the
     // SET LOCAL runs inside an explicit transaction, so the failure is the
@@ -157,11 +160,7 @@ async fn classify_missing_role(app_id: &str) -> DbError {
     .await
     .expect("open production backend");
     let classified = match backend
-        .open_tx_session(
-            app_id,
-            &zeroship_data_orm::sql::SchemaName::new(app_id).expect("fixture schema name"),
-            zeroship_data_orm::error::BeginIntent::Default,
-        )
+        .open_tx_session(&binding, zeroship_data_orm::error::BeginIntent::Default)
         .await
         .expect_err("missing role must refuse session setup")
     {
@@ -190,7 +189,7 @@ async fn missing_per_app_role_is_creator_facing_not_internal() {
     };
 
     assert_eq!(
-        code, "schema_not_provisioned",
+        code, "schema_epoch_stale",
         "a missing per-app role is a creator CONFIGURATION state with a documented \
          one-command fix, not an internal fault. Got {code:?} with message {:?}",
         op.message
@@ -209,7 +208,7 @@ async fn missing_per_app_role_is_creator_facing_not_internal() {
     // absence list can only rule out the leaks someone thought of.
     assert_eq!(
         op.message,
-        zeroship_data_orm::error::MISSING_ROLE_MESSAGE,
+        zeroship_data_orm::error::STALE_EPOCH_MESSAGE,
         "the wire message must be the fixed platform constant"
     );
 
@@ -243,7 +242,7 @@ async fn a_real_internal_pg_failure_is_still_internal() {
     // SAME classifier: a statement that fails for a reason the creator
     // cannot fix with `zeroship migrate`. If the new arm had widened into
     // "any configuration-shaped SQLSTATE is creator-facing", this would
-    // come back `schema_not_provisioned` too.
+    // come back `schema_epoch_stale` too.
     //
     // 22023 deliberately -- the SAME SQLSTATE the missing-role case
     // reports. The only thing separating the two is the server's primary

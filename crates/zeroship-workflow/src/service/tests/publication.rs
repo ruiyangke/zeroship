@@ -355,7 +355,7 @@ impl Manager {
     }
     async fn open_with_options(path: &Path, options: Options) -> Queue {
         Queue::connect(
-            DbBinding::new(
+            DbBinding::platform(
                 "workflow_manager",
                 "publication-test",
                 SchemaName::new("main").unwrap(),

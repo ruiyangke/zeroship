@@ -217,10 +217,11 @@ struct TxFinalizer {
     /// established. Carrying the name here is how a depth-derived scheme sends
     /// a rollback to the wrong scope.
     frame: Option<reducer::frames::FrameId>,
-    /// Owning app. The settle path (COMMIT / ROLLBACK / RELEASE /
-    /// ROLLBACK TO + pending-emit drain) operates strictly on this app's
-    /// slot, so one app's transaction can never settle another's.
-    app_id: String,
+    /// Owning route: the tenant AND the database. The settle path (COMMIT /
+    /// ROLLBACK / RELEASE / ROLLBACK TO + pending-emit drain) operates strictly
+    /// on this route's lane, so neither a co-resident app nor the same app on
+    /// another database can settle it.
+    route: zeroship_data_orm::binding::DbRoute,
     /// One-shot guard. Set the first time either handler fires.
     settled: Cell<bool>,
 }
@@ -239,10 +240,9 @@ pub fn transaction_dispatch<'s>(
     isolation_level: Option<IsolationLevel>,
     binding: DbBinding,
 ) -> v8::Local<'s, v8::Promise> {
-    let app_id = binding.app_id().to_string();
-    // SCHEMA: the PostgreSQL session this BEGIN opens narrows to the role
-    // derived from it. `app_id` above stays the admission key.
-    let schema = binding.schema().clone();
+    // The lane key: the tenant and the database together, so one app's two
+    // databases take two claims and two co-tenants never share one.
+    let route = binding.route();
     let state = runtime_state(scope);
 
     // Outer promise — returned to JS now; settled by the commit/rollback
@@ -271,10 +271,10 @@ pub fn transaction_dispatch<'s>(
     // `current_tx_app` is true only inside the enclosing callback's own
     // continuation chain — see `crate::tx_scope`. Cross-tenant isolation is
     // therefore structural rather than incidental: a co-resident app's callback
-    // plants ITS app_id, so the comparison below fails and this app opens its
+    // plants ITS route, so the comparison below fails and this app opens its
     // own top-level BEGIN.
     let parent_scope =
-        crate::tx_scope::current_tx_scope(scope).filter(|parent| parent.app_id() == app_id);
+        crate::tx_scope::current_tx_scope(scope).filter(|parent| parent.route() == &route);
     let nested = parent_scope.is_some();
     if let Some(parent) = &parent_scope {
         if let Err(error) = parent.check() {
@@ -320,7 +320,7 @@ pub fn transaction_dispatch<'s>(
         let admission = if nested {
             None
         } else {
-            match TxAdmission::acquire(app_id.clone()).await {
+            match TxAdmission::acquire(route.clone()).await {
                 Ok(admission) => Some(admission),
                 Err(error) => {
                     return OpResult::JsValue {
@@ -347,7 +347,7 @@ pub fn transaction_dispatch<'s>(
                     .map_or(Ok(()), |parent| parent.check())
                 {
                     Ok(()) => {
-                        exec_begin_or_savepoint(nested, isolation_level, &app_id, schema, backend)
+                        exec_begin_or_savepoint(nested, isolation_level, &binding, backend)
                             .await
                     }
                     Err(error) => Err(error),
@@ -372,7 +372,7 @@ pub fn transaction_dispatch<'s>(
                     outer: outer_global,
                     request_id,
                     frame,
-                    app_id: app_id.clone(),
+                    route: route.clone(),
                     settled: Cell::new(false),
                 };
                 OpResult::JsValue {
@@ -429,9 +429,9 @@ fn run_begin_continuation(
     finalizer: TxFinalizer,
     binding: DbBinding,
 ) {
-    let app_id = binding.app_id();
+    let route = binding.route();
     let callback_scope =
-        match zeroship_data_orm::transaction::scope::TransactionScope::current(app_id) {
+        match zeroship_data_orm::transaction::scope::TransactionScope::current(&route) {
             Ok(callback_scope) => callback_scope,
             Err(error) => {
                 settle_failed_before_body(scope, state, finalizer, error.to_op_error());
@@ -460,7 +460,7 @@ fn run_begin_continuation(
     //    *synchronous* throw (e.g. a non-async callback that throws, or
     //    an async callback that throws before its first await).
     //    The call is wrapped in the async-scope marker: every continuation
-    //    that branches off inside the callback inherits `app_id` in V8's
+    //    that branches off inside the callback inherits its route in V8's
     //    continuation-preserved slot, so a `db.transaction()` reached from
     //    in there reads as NESTED while a concurrent dispatch's does not.
     //    See `crate::tx_scope`. Restored on both exit paths below —
@@ -637,7 +637,7 @@ fn settle_after_body(
         outer,
         request_id,
         frame,
-        app_id,
+        route,
         ..
     } = *finalizer;
 
@@ -645,7 +645,7 @@ fn settle_after_body(
     let body = if success { body_ok } else { body_err };
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let settle_result = exec_settle(&app_id, success, frame).await;
+        let settle_result = exec_settle(&route, success, frame).await;
         let value = build_settle_resolve_value(settle_result, success, body);
         OpResult::JsValue {
             resolver: outer,
@@ -670,7 +670,7 @@ fn settle_failed_before_body(
         outer,
         request_id,
         frame,
-        app_id,
+        route,
         ..
     } = finalizer;
     let err_global = {
@@ -680,7 +680,7 @@ fn settle_failed_before_body(
         v8::Global::new(scope, exc)
     };
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let settle_result = exec_settle(&app_id, false, frame).await;
+        let settle_result = exec_settle(&route, false, frame).await;
         OpResult::JsValue {
             resolver: outer,
             value: build_settle_resolve_value(settle_result, false, Some(err_global)),

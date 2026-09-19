@@ -419,7 +419,7 @@ async fn policy_route_establishes_an_epoch_above_the_named_one() {
     use zeroship_core::{schema_name::SchemaName, workflow_jobs::DeploymentId};
     let fixture = Box::pin(Fixture::new(AppPolicy::default(), true)).await;
     let queue = zeroship_workflow_manager::Queue::connect(
-        zeroship_data_orm::binding::DbBinding::new(
+        zeroship_data_orm::binding::DbBinding::platform(
             "workflow_manager",
             "workflow_manager",
             SchemaName::new("workflow_manager").unwrap(),

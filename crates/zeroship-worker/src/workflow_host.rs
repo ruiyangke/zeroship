@@ -383,6 +383,7 @@ impl WorkflowResourceProvider for ProductionResources {
                 &self.service_auth,
                 app,
                 Some(self.db.project_keys()),
+                Some(self.db.app_bindings()),
             )
             .await
             .map_err(|error| {
@@ -409,7 +410,7 @@ impl WorkflowResourceProvider for ProductionResources {
             storage: HostStorage {
                 connection: self.db.connection().clone(),
                 keys: ProjectKeySource::supplied(self.db.project_keys().clone()),
-                binding: DbBinding::new(app.as_str(), COLD_START_DEPLOY_TOKEN, schema),
+                binding: DbBinding::platform(app.as_str(), COLD_START_DEPLOY_TOKEN, schema),
                 objects: self.objects.clone(),
             },
             deployments,

@@ -56,6 +56,7 @@ pub(crate) mod tx_scope;
 pub struct DbPlugin {
     connection: ConnectionFactory,
     project_keys: std::sync::Arc<zeroship_data_orm::encryption::SuppliedProjectKeys>,
+    app_bindings: std::sync::Arc<zeroship_data_orm::resolved_bindings::SuppliedAppBindings>,
     cdc_relay: Option<zeroship_data_orm::cdc::relay::RelayConfig>,
     meter: Option<std::sync::Arc<zeroship_metering::Meter>>,
 }
@@ -65,12 +66,14 @@ impl DbPlugin {
         cdc_relay: Option<zeroship_data_orm::cdc::relay::RelayConfig>,
         meter: Option<std::sync::Arc<zeroship_metering::Meter>>,
         project_keys: std::sync::Arc<zeroship_data_orm::encryption::SuppliedProjectKeys>,
+        app_bindings: std::sync::Arc<zeroship_data_orm::resolved_bindings::SuppliedAppBindings>,
     ) -> Self {
         Self {
             connection,
             cdc_relay,
             meter,
             project_keys,
+            app_bindings,
         }
     }
 }
@@ -166,6 +169,7 @@ impl NativePlugin for DbPlugin {
     fn register(&self, _: &mut NativeRegistrar) {
         ctx_mut(|context| {
             context.set_supplied_project_keys(Some(self.project_keys.clone()));
+            context.set_app_bindings(Some(self.app_bindings.clone()));
             context.install_connection(self.connection.clone());
             context.set_cdc_relay(self.cdc_relay.clone());
             context.set_meter(self.meter.clone());
@@ -211,6 +215,7 @@ mod runtime_descriptor_binding_tests {
 
     fn plugin() -> std::sync::Arc<DbPlugin> {
         service::DbService::new(service::DbServiceConfig {
+            app_bindings: Default::default(),
             project_keys: crate::tests::fixtures::project_keys(),
             connection: zeroship_data_orm::connection::ConnectionFactory::for_url(
                 "sqlite:descriptor-test.sqlite",
@@ -410,11 +415,7 @@ export default { fetch() { return new Response("ok"); } };
             )
             .expect("bind descriptor");
 
-        let binding = zeroship_data_orm::binding::DbBinding::new(
-            APP,
-            DEPLOY,
-            zeroship_data_orm::sql::SchemaName::new(APP).unwrap(),
-        );
+        let binding = crate::tests::fixtures::harness_binding_at_deploy(APP, DEPLOY);
         let schema = descriptor::collection_schema(&binding, "users")
             .expect("declared collection must resolve before any read");
         assert_eq!(
@@ -505,11 +506,7 @@ export default { fetch() { return new Response("ok"); } };
             .bind_runtime_descriptor(scope, APP, namespace, None)
             .expect("bind schema-less runtime");
 
-        let binding = zeroship_data_orm::binding::DbBinding::new(
-            APP,
-            DEPLOY,
-            zeroship_data_orm::sql::SchemaName::new(APP).unwrap(),
-        );
+        let binding = crate::tests::fixtures::harness_binding_at_deploy(APP, DEPLOY);
         let error = descriptor::collection_schema(&binding, "stale")
             .expect_err("schema-less binding must declare no collection");
         assert!(
