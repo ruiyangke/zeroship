@@ -406,7 +406,20 @@ stall the defect fixes that motivate the move.
    service decides what a worker is told. That is a stronger boundary and probably a better
    one, but it is a change in authority that should be described rather than arrived at.
 
-7. **BLOCKS STEP 2. Does creator payload belong in the platform schema?**
+7. **ANSWERED - no. The platform-schema journal is structurally payload-free.** Creator payload
+   does not live in the platform's coordination schema; payloads reach the journal only by
+   reference into object storage, and the assertion below stays unnarrowed. The two rejected
+   answers were narrowing the assertion to the manager's own tables, and moving the journal to a
+   schema of its own so the assertion never applies to it.
+
+   What that costs, established by reading the code rather than assumed: this is a build, not a
+   threshold. `promote` in `crates/zeroship-workflow/src/service/payloads.rs` attaches a
+   `WorkflowOutputRef` that already exists; it does not move an inline payload into storage, and
+   the reference path is creator-initiated. Making the journal payload-free means building
+   service-side promotion, and the SQLite dev tier shares the one generated artifact, so whether
+   the end state is one journal shape or two is settled in the slice that implements this.
+
+   The assertion it protects:
    `metadata_schema_has_no_customer_authority_and_ids_are_bytewise` in
    `crates/zeroship-workflow-server/tests/coordinator.rs` asserts that no column in
    `workflow_manager` is json, jsonb or bytea, or named `input`, `output`, `history`,
