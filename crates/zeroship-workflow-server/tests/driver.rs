@@ -8,6 +8,8 @@
 mod holds;
 #[path = "support/platform.rs"]
 mod platform;
+#[path = "support/policy.rs"]
+mod policy_fixture;
 #[allow(
     dead_code,
     reason = "the shared process fixture also exposes explicit connection-failure probes"

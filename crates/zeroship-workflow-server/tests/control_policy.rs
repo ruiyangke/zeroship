@@ -10,6 +10,7 @@ mod platform;
 #[path = "support/policy.rs"]
 mod policy_fixture;
 
+use policy_fixture::rollout;
 use std::{
     num::NonZeroUsize,
     time::{Duration, Instant},
@@ -41,12 +42,7 @@ impl Fixture {
             let app = AppId::mint();
             let plan = policy_fixture::seed_app(&platform, &app).await;
             let source = connect_store(&platform.runtime_url).await;
-            let operator = connect_store(&platform.runtime_url.replacen(
-                "zeroship_workflow@",
-                "zeroship_control@",
-                1,
-            ))
-            .await;
+            let operator = policy_fixture::operator(&platform).await;
             Self {
                 platform,
                 app,
@@ -63,7 +59,7 @@ impl Fixture {
             .set_plan_policy(&self.plan, policy)
             .await
             .unwrap();
-        self.operator.set_rollout(settings()).await.unwrap();
+        self.operator.set_rollout(rollout()).await.unwrap();
     }
 
     async fn execute(&self, sql: &str) {
@@ -88,14 +84,6 @@ async fn connect_store(url: &str) -> ControlPolicyStore {
     .await
     .unwrap();
     ControlPolicyStore::new(database).unwrap()
-}
-
-const fn settings() -> RolloutPolicy {
-    RolloutPolicy {
-        dispatch_paused: false,
-        ingress_disabled: false,
-        source_validity_ms: 30_000,
-    }
 }
 
 #[compio::test]
@@ -160,7 +148,7 @@ async fn authoritative_policy_requires_complete_inputs_and_preserves_publication
         fixture.source.observe(&fixture.app).await,
         Err(Error::Unavailable)
     ));
-    fixture.operator.set_rollout(settings()).await.unwrap();
+    fixture.operator.set_rollout(rollout()).await.unwrap();
     let original = fixture.source.observe(&fixture.app).await.unwrap();
     assert_eq!(original.policy(), &policy);
     let unchanged = connect_store(&fixture.platform.runtime_url)
@@ -221,7 +209,7 @@ async fn authoritative_policy_requires_complete_inputs_and_preserves_publication
     }
     let paused = RolloutPolicy {
         dispatch_paused: true,
-        ..settings()
+        ..rollout()
     };
     fixture.operator.set_rollout(paused).await.unwrap();
     let next = fixture.source.observe(&fixture.app).await.unwrap();
@@ -319,7 +307,7 @@ async fn invalid_inputs_do_not_publish(fixture: &Fixture) {
             .operator
             .set_rollout(RolloutPolicy {
                 source_validity_ms: 0,
-                ..settings()
+                ..rollout()
             })
             .await,
         Err(Error::Invalid)
@@ -353,7 +341,7 @@ async fn source_role_cannot_write_inputs_or_read_customer_storage(fixture: &Fixt
             .await
             .is_err()
     );
-    assert!(fixture.source.set_rollout(settings()).await.is_err());
+    assert!(fixture.source.set_rollout(rollout()).await.is_err());
     fixture.platform.admin.batch_execute("CREATE SCHEMA customer; CREATE TABLE customer.__zeroship_workflow_history(id text PRIMARY KEY, payload text);").await.unwrap();
     let runtime = platform::connect(&fixture.platform.runtime_url).await;
     for sql in [
@@ -401,7 +389,7 @@ async fn publication_reads_after_lock_wait_and_charges_that_wait_to_source_valid
     assert!(
         observed.expires_at()
             <= blocked_at
-                + Duration::from_millis(settings().source_validity_ms.try_into().unwrap())
+                + Duration::from_millis(rollout().source_validity_ms.try_into().unwrap())
     );
     let peer = connect_store(&fixture.platform.runtime_url).await;
     let (left, right) = futures::join!(
@@ -414,7 +402,7 @@ async fn publication_reads_after_lock_wait_and_charges_that_wait_to_source_valid
         .operator
         .set_rollout(RolloutPolicy {
             source_validity_ms: 100,
-            ..settings()
+            ..rollout()
         })
         .await
         .unwrap();
@@ -488,7 +476,7 @@ async fn cached_authority_cannot_be_renewed_from_its_own_ledger() {
         source.observe(&fixture.app).await,
         Err(Error::Unavailable)
     ));
-    fixture.operator.set_rollout(settings()).await.unwrap();
+    fixture.operator.set_rollout(rollout()).await.unwrap();
     let restored = source.observe(&fixture.app).await.unwrap();
     assert_eq!(restored.revision(), original.revision());
     assert!(!restored.same_observation(&original));

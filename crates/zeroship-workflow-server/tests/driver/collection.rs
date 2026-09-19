@@ -1,6 +1,6 @@
 //! Collection duty survives process loss without creator access or executable holds.
 
-use super::{no_workers, platform, private_schema, ready, server_process, until};
+use super::{no_workers, platform, policy_fixture, private_schema, ready, server_process, until};
 use ntex::{client::Client, http::StatusCode};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -17,6 +17,7 @@ use zeroship_core::{
         Delivery, DeliveryLease, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec,
         Settlement, SettlementReceipt,
     },
+    workflow_policy::AppPolicy,
 };
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_workflow_manager::{
@@ -122,7 +123,7 @@ async fn enroll(
          VALUES($1,$2,$3,'127.0.0.1',8080,'active',$4,'tok_testfixturedefault','ezn_default000000000000000000',now() + interval '1 hour')",
         &[&worker.as_str(), &vec![1_u8], &actor.key.verifying_key_bytes().to_vec(), &platform.default_join_signer_id],
     ).await.unwrap();
-    platform.seed_app(app).await;
+    policy_fixture::provision(platform, app, &AppPolicy::default()).await;
     post(
         http,
         url,
