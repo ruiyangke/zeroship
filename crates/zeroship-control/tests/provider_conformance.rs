@@ -987,10 +987,7 @@ struct RecordedRequest {
 async fn serve_http_conn(mut stream: TcpStream, state: Arc<Mutex<MockHttpState>>) {
     let mut acc = Vec::new();
     loop {
-        loop {
-            let Some((req, consumed)) = try_parse_request(&acc) else {
-                break;
-            };
+        while let Some((req, consumed)) = try_parse_request(&acc) {
             acc.drain(0..consumed);
             let response = handle_mock_request(&req, &state);
             if stream.write_all(response).await.0.is_err() {
