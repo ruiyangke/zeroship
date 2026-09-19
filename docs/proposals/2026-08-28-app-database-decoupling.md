@@ -1474,6 +1474,16 @@ app's requests and cannot protect a shared cluster from an app under its limit. 
    assuming one answer is wrong on half of it. Blocks publishing a revocation-lag guarantee, not the
    mechanism.
 
+   **The fact that would settle it per cluster is now read and thrown away.**
+   `read_cluster_identity` (`crates/zeroship-migrate-server/src/datastore/identity.rs`) takes
+   `server_version_num` alongside the system identifier on every pass, and uses it only to refuse a
+   cluster below 16. `zeroship.datastores` has no column for it
+   (`db/migrations-ts/20260919000200_database_entities.ts` declares `system_identifier`,
+   `execution_zone_id`, `status`, `last_error` and the timestamps), so control cannot tell which of
+   its clusters would honour `transaction_timeout` and which would ignore it. Persisting what the
+   reconciler already reads is the cheap prerequisite to any per-cluster answer here, and it is a
+   prerequisite rather than the answer: deciding what the bound SHOULD be is still open.
+
 4. **Capacity-aware placement.** DEFERRED, named. Placement counts rows control already owns and the
    operator flips `draining`. Byte, connection and slot awareness needs a probe holding a privileged
    read connection - the cluster reconciler is the natural home, since it already holds one per
