@@ -933,6 +933,19 @@ is caught as `e instanceof PermanentError` after the round trip. Because the
 match is on the recorded name, any error carrying that name matches, including
 one the runtime rebuilt as a plain `Error`.
 
+The trailing `throw e` is required, not a stylistic flourish. The platform stops
+a body mid-flight by throwing through it: a suspension at the step the run is
+waiting on, a `step.continueAsNew`, and the end of the replay a rollback does to
+find its compensators all arrive that way. None of them carries a class this
+package exports, so nothing you can name will match them. A catch that discards
+what it did not match discards those too, and the body runs on past the point it
+was meant to stop, holding values no step produced. In a forward dispatch the
+step calls it makes after that execute for real and are then thrown away
+unrecorded, so their effects land again on the dispatch that replaces them.
+Write catches that claim what they handle and rethrow the rest;
+`catch (e) { fallback(); }` around a step call, with no throw on the unmatched
+path, is the shape to avoid.
+
 A recorded failure carries `type`, `message`, an optional `stack`, and
 `retryable` when the thrown error declared one. An error that declares nothing
 records no `retryable` at all, which is a different answer from a declared
@@ -966,6 +979,7 @@ Dont:
 - Do not use `Promise.race`, `Promise.any`, or `Promise.allSettled` over step
   promises.
 - Do not catch `NondeterministicError` to keep going. Fix the workflow body.
+- Do not let a catch swallow what it did not match. Rethrow the rest.
 
 ## Gotchas
 
