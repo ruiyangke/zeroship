@@ -22,6 +22,10 @@
 //! - A member below admin holds authority only where a `project_members` row
 //!   exists, and their effective rank there is
 //!   `min(organization rank, project rank)`.
+//! - A database carries no rank of its own. Its authority IS its project's, so
+//!   there is no per-database role to grant, and an app's binding to a database
+//!   confers nothing on the app's own members: a binding is data access for
+//!   running code, not authority over the database.
 //! - `billing_rank` is organization-level entirely. There is no per-project
 //!   invoice, so there is no per-project money authority, and `project_members`
 //!   carries no billing dimension.
@@ -36,27 +40,29 @@
 //! # One rendering per id
 //!
 //! Every id this module binds is `text`, and every one of them is parsed before
-//! it gets here: the app id by [`AppId`] on the [`Resource`] itself, the project
-//! and organization ids by `Resource::validate_ids`. Nothing in this file
-//! chooses between two spellings of the same id, and there is nothing left to
-//! refuse - which is why the app arm of [`resolve`] is a single call rather than
-//! a parse followed by one.
+//! it gets here: the app id by [`AppId`] and the database id by [`DatabaseId`]
+//! on the [`Resource`] itself, the project and organization ids by
+//! `Resource::validate_ids`. Nothing in this file chooses between two spellings
+//! of the same id, and there is nothing left to refuse - which is why the app
+//! and database arms of [`resolve`] are single calls rather than a parse
+//! followed by one.
 //!
 //! That matters more here than it reads. A mis-rendered id does not fail this
-//! query: `zeroship.apps` is reached by a LEFT JOIN, so an id in a rendering the
-//! column does not hold contributes NO ROW, every rank comes back NULL, and the
-//! caller is told they hold no seat on an app they own. The type is what makes
-//! that unreachable.
+//! query: `zeroship.apps` and `zeroship.databases` are each reached by a LEFT
+//! JOIN, so an id in a rendering the column does not hold contributes NO ROW,
+//! every rank comes back NULL, and the caller is told they hold no seat on a
+//! resource they own. The types are what make that unreachable.
 //!
-//! **This binds `zeroship.apps.id` as `text`, and that is a REQUIREMENT ON THE
-//! COLUMN, not a description of one.** `AppId` exposes no route to a uuid -
-//! there is no `uuid()` to call - so text against text is the only comparison
-//! this join can make, and a database whose `apps.id` is not `text` fails it
-//! outright with a type error rather than resolving anything. Loud, and on the
-//! first query.
+//! **This binds `zeroship.apps.id` and `zeroship.databases.id` as `text`, and
+//! that is a REQUIREMENT ON THOSE COLUMNS, not a description of them.** Neither
+//! [`AppId`] nor [`DatabaseId`] exposes a route to a uuid - there is no
+//! `uuid()` to call - so text against text is the only comparison these joins
+//! can make, and a platform database whose `apps.id` or `databases.id` is not
+//! `text` fails outright with a type error rather than resolving anything.
+//! Loud, and on the first query.
 
 use compio_postgres::Client;
-use zeroship_id::{AppId, UserId};
+use zeroship_id::{AppId, DatabaseId, UserId};
 
 use crate::{AuthzError, Resource};
 
@@ -135,9 +141,12 @@ pub async fn resolve(
         Resource::Any => resolve_unranked(pg, principal_id).await,
         Resource::Organization { id } => resolve_organization(pg, principal_id, id).await,
         Resource::Project { id } => {
-            resolve_narrowed(pg, principal_id, Some(id.as_str()), None).await
+            resolve_narrowed(pg, principal_id, Some(id.as_str()), None, None).await
         }
-        Resource::App { id } => resolve_narrowed(pg, principal_id, None, Some(id)).await,
+        Resource::App { id } => resolve_narrowed(pg, principal_id, None, Some(id), None).await,
+        Resource::Database { id } => {
+            resolve_narrowed(pg, principal_id, None, None, Some(id)).await
+        }
     }
 }
 
@@ -190,25 +199,33 @@ async fn resolve_organization(
     })
 }
 
-/// The project- and app-scoped resolve. ONE query serves both, because an app
-/// reaches its organization only through its project: exactly one of
-/// `project_id` / `app_id` is supplied, and the other arm's join contributes
-/// nothing.
+/// The project-, app- and database-scoped resolve. ONE query serves all three,
+/// because an app and a database each reach an organization only through their
+/// project: exactly one of `project_id` / `app_id` / `database_id` is supplied,
+/// and the other arms' joins contribute nothing.
 ///
-/// Duplicating this as two nearly identical statements is what would let the
-/// narrowing drift between the two paths, so it is written once.
+/// Duplicating this as three nearly identical statements is what would let the
+/// narrowing drift between the paths, so it is written once.
 ///
-/// Both bound ids are `text`, and both arrive already parsed - the app id as an
-/// [`AppId`], the project id as a validated [`Resource::Project`] id. There is
-/// no cast to get wrong and no second rendering to pick between, which is what
-/// the deleted `app_uuid_or_refuse` existed to arbitrate.
+/// **A database is project-owned, so there is no app in its chain.** It is
+/// reached by `zeroship.databases.project_id` directly, not by walking a
+/// binding: a binding is an app's access to a database, and an app holding one
+/// confers no authority over the database on the app's own members.
+///
+/// Every bound id is `text` and every one arrives already parsed - the app id
+/// as an [`AppId`], the database id as a [`DatabaseId`], the project id as a
+/// validated [`Resource::Project`] id. There is no cast to get wrong and no
+/// second rendering to pick between, which is what the deleted
+/// `app_uuid_or_refuse` existed to arbitrate.
 async fn resolve_narrowed(
     pg: &Client,
     principal_id: &UserId,
     project_id: Option<&str>,
     app_id: Option<&AppId>,
+    database_id: Option<&DatabaseId>,
 ) -> Result<Authority, AuthzError> {
     let app_id = app_id.map(AppId::as_str);
+    let database_id = database_id.map(DatabaseId::as_str);
     let sql = format!(
         "SELECT {USER_ATTRS}, \
                 organization_role.rank         AS organization_rank, \
@@ -217,7 +234,9 @@ async fn resolve_narrowed(
                 (SELECT rank FROM zeroship.organization_roles WHERE role = $4) AS admin_rank \
            FROM zeroship.users u \
            LEFT JOIN zeroship.apps a ON a.id = $3::text \
-           LEFT JOIN zeroship.projects p ON p.id = COALESCE($2::text, a.project_id) \
+           LEFT JOIN zeroship.databases d ON d.id = $5::text \
+           LEFT JOIN zeroship.projects p \
+                  ON p.id = COALESCE($2::text, a.project_id, d.project_id) \
            LEFT JOIN zeroship.organization_members m \
                   ON m.organization_id = p.organization_id AND m.user_id = u.id \
            LEFT JOIN zeroship.organization_roles organization_role \
@@ -236,6 +255,7 @@ async fn resolve_narrowed(
                 &project_id,
                 &app_id,
                 &PROJECT_WIDE_ROLE,
+                &database_id,
             ],
         )
         .await
