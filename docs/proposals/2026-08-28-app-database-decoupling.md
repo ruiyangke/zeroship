@@ -1,10 +1,27 @@
 # Decoupling app identity from database identity
 
-**Status.** PROPOSED. No entity in this design exists in the tree. `Resource`
-(`crates/zeroship-authz/src/resource.rs`) carries `App`, `Project`, `Organization` and `Any`
-and no database variant; `zeroship_core::app_derivation::schema_name`
+**Status.** PARTLY BUILT, on `feat/app-database-decoupling`. What exists is the identity and
+the entities; nothing on the data path has moved yet, so no app can reach a second database and
+no fence is enforced at runtime.
+
+Built:
+
+- the typed ids `dst_`, `dbs_` and `bnd_` (`crates/zeroship-id/`), with prefix disjointness bound
+  by a test rather than asserted in a comment
+- the physical-name derivations (`crates/zeroship-core/src/database_derivation.rs`), refusing a
+  role name they would have truncated rather than shortening it
+- `Resource::Database` and its policy bands (`crates/zeroship-authz/`,
+  `deploy/policies/zeroship.cedarschema`)
+- the three tables and the project's zone
+  (`db/migrations-ts/20260919000100_database_entities.ts`)
+- the tenant fence measurement target
+  (`crates/zeroship-data-orm/tests/postgres_tenant_fence.rs`) - see Open 5
+
+Not built, and this is the whole data path: `zeroship_core::app_derivation::schema_name`
 (`crates/zeroship-core/src/app_derivation.rs`) still returns the app id itself; `DbBinding`
-(`crates/zeroship-data-orm/src/binding.rs`) still carries `{ app_id, deploy_token, schema }`.
+(`crates/zeroship-data-orm/src/binding.rs`) still carries `{ app_id, deploy_token, schema }`;
+no role chain is provisioned, no epoch is produced, and nothing constructs a
+`Resource::Database`, so a database row is inert.
 
 Four things this design depends on HAVE landed and are relied on below: the organization and
 project ladder with its composite ownership keys
