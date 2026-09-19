@@ -7,6 +7,152 @@ mod platform;
 use std::rc::Rc;
 use zeroship_workflow_server::coordinator::{connect_eligibility, Coordinator, Options};
 
+/// The reserved prefix every generated journal object carries. It is what keeps
+/// the journal and the manager's own coordination tables apart inside one
+/// schema, and what a creator-declared collection is refused from.
+const JOURNAL_PREFIX: &str = "__zeroship_workflow_";
+
+/// The journal tables this build's generated descriptor declares, sorted.
+///
+/// Derived rather than listed: a hand-copied list here would stop describing
+/// the artifact the moment the schema is regenerated, and would still pass.
+fn journal_tables() -> Vec<String> {
+    let descriptor: serde_json::Value =
+        serde_json::from_str(zeroship_workflow_schema::RUNTIME_DESCRIPTOR_JSON)
+            .expect("the generated workflow journal descriptor is JSON");
+    let mut names = descriptor["collections"]
+        .as_object()
+        .expect("the journal descriptor declares collections")
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        !names.is_empty(),
+        "the journal descriptor declares no tables"
+    );
+    for name in &names {
+        assert!(
+            name.starts_with(JOURNAL_PREFIX),
+            "journal collection {name} is outside the reserved prefix"
+        );
+    }
+    names.sort();
+    names
+}
+
+/// The journal lives in the SERVICE's own schema, is stamped once for the whole
+/// installation, and is read by nobody.
+///
+/// Installing it is the whole of this step. No role receives a privilege on it,
+/// so an installation that also handed the runtime login - or any other - reach
+/// over every app's workflow state fails here rather than passing as a step
+/// that "works". The stamp is compared against the same constants the creator
+/// bundle declares (`journal_bundle` in
+/// `crates/zeroship-workflow-server/src/journal.rs`), so the two installation
+/// sites cannot describe different journals.
+async fn journal_is_installed_and_unread(fixture: &platform::Platform) {
+    let stamp = fixture
+        .admin
+        .query(
+            &format!(
+                "SELECT id, version, fingerprint FROM workflow_manager.{}",
+                zeroship_workflow_schema::STAMP_TABLE
+            ),
+            &[],
+        )
+        .await
+        .unwrap();
+    // ONE row per installation and not one per app: every app whose workflows
+    // live in this schema is described by this single row, and the `app_id`
+    // columns inside the journal are the tenant discriminator.
+    assert_eq!(stamp.len(), 1, "the journal stamp is not a single row");
+    assert_eq!(
+        stamp[0].get::<_, String>("id"),
+        zeroship_workflow_schema::STAMP_ROW_ID
+    );
+    assert_eq!(
+        u32::try_from(stamp[0].get::<_, i64>("version")).unwrap(),
+        zeroship_workflow_schema::VERSION
+    );
+    assert_eq!(
+        stamp[0].get::<_, String>("fingerprint"),
+        zeroship_workflow_schema::fingerprint(zeroship_workflow_schema::POSTGRES).unwrap()
+    );
+
+    let tables = journal_tables();
+    for table in &tables {
+        let qualified = format!("workflow_manager.{table}");
+        for role in [
+            "zeroship_workflow",
+            "zeroship_control",
+            "zeroship_worker",
+            "zeroship_gateway",
+            "zeroship_app",
+        ] {
+            for privilege in [
+                "SELECT",
+                "INSERT",
+                "UPDATE",
+                "DELETE",
+                "TRUNCATE",
+                "REFERENCES",
+                "TRIGGER",
+            ] {
+                let granted = fixture
+                    .admin
+                    .query_one(
+                        "SELECT has_table_privilege($1, $2, $3)",
+                        &[&role, &qualified, &privilege],
+                    )
+                    .await
+                    .unwrap();
+                assert!(
+                    !granted.get::<_, bool>(0),
+                    "{role} has {privilege} on {qualified}"
+                );
+            }
+        }
+    }
+
+    // The journal the worker reads today lives in a CREATOR schema, installed
+    // by the migration service's bundle path. This installation adds a second
+    // site; it must not have moved the first, and it must not have scattered
+    // journal tables through the platform's other schemas.
+    let elsewhere = fixture
+        .admin
+        .query(
+            "SELECT n.nspname, c.relname FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE c.relkind = 'r' AND starts_with(c.relname::text, $1) \
+             AND n.nspname IN ('zeroship', 'public', 'service_authn', 'zeroship_migrations')",
+            &[&JOURNAL_PREFIX],
+        )
+        .await
+        .unwrap();
+    assert!(
+        elsewhere.is_empty(),
+        "journal tables were installed outside the workflow service's schema: {:?}",
+        elsewhere
+            .iter()
+            .map(|row| (row.get::<_, String>(0), row.get::<_, String>(1)))
+            .collect::<Vec<_>>()
+    );
+    let creator = fixture
+        .admin
+        .query_one(
+            "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE c.relkind = 'r' AND n.nspname = 'customer' AND c.relname = $1",
+            &[&format!("{JOURNAL_PREFIX}runs")],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        creator.get::<_, i64>(0),
+        1,
+        "the creator-schema journal table this test seeded is gone"
+    );
+}
+
 #[ntex::test]
 async fn platform_role_can_coordinate_without_customer_or_journal_privileges() {
     let fixture = platform::Platform::new().await;
@@ -76,6 +222,7 @@ async fn platform_role_can_coordinate_without_customer_or_journal_privileges() {
         );
     }
     manager_queue_authority(&fixture, &runtime).await;
+    journal_is_installed_and_unread(&fixture).await;
     manager_recovery_authority(&fixture).await;
     manager_scheduling_authority(&fixture).await;
     let schema = fixture
@@ -438,11 +585,20 @@ async fn manager_queue_authority(fixture: &platform::Platform, runtime: &compio_
         "SELECT c.relname, pg_get_userbyid(c.relowner) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='workflow_manager' AND c.relkind='r' ORDER BY c.relname",
         &[],
     ).await.unwrap();
+    // The schema holds two platform artifacts with different authors: the
+    // manager's own coordination tables, declared in the op DSL, and the
+    // workflow journal, which is generated SQL behind the reserved
+    // `__zeroship_` prefix. Partition rather than merge, so neither list can
+    // absorb a stray table belonging to the other.
+    let (mut journal, mut manager): (Vec<String>, Vec<String>) = tables
+        .iter()
+        .map(|row| row.get::<_, String>(0))
+        .partition(|name| name.starts_with(JOURNAL_PREFIX));
+    journal.sort();
+    manager.sort();
+    assert_eq!(journal, journal_tables());
     assert_eq!(
-        tables
-            .iter()
-            .map(|row| row.get::<_, String>(0))
-            .collect::<Vec<_>>(),
+        manager,
         [
             "assignments",
             "capacity_demands",

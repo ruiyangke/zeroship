@@ -22,8 +22,10 @@
 # The cross-schema peers have distinct authorities. `public` holds extensions.
 # `service_authn` holds assertion replay state shared by verifying services.
 # `workflow_manager` holds registry, placement, management and durable queue
-# metadata under a migration owner. `zeroship` holds platform records; the manager reads
-# only enrolled worker identity columns. Customer journals are worker-owned.
+# metadata under a migration owner, and the workflow journal's generated tables
+# beside them under the reserved `__zeroship_workflow_` prefix. `zeroship` holds
+# platform records; the manager reads only enrolled worker identity columns. The
+# journal a worker reaches is the one in the app's own creator schema.
 #
 # Widening this list widens what a platform migration may create. THE COUNTERWEIGHT
 # THAT SAT BESIDE IT IS GONE: `crates/zeroship-migrate-adapter/tests/platform_migrate.rs`

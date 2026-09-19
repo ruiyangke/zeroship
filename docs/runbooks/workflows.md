@@ -140,11 +140,13 @@ creator journal and resumes after the switch is cleared.
 
 ## Inspecting a run, restarting one, and reading GC state
 
-There is no platform-side journal to query. Each app's runs, steps, signals,
+Run state is not in the platform database. Each app's runs, steps, signals,
 subscriptions and staged payload references live in that app's own creator
 schema, reached only by the worker hosting it; the durable job queue, delivery
 attempts and deadlines live in the manager's `workflow_manager` schema in the
-platform database. Neither is an operator SQL surface.
+platform database. That schema also carries journal tables under a
+`__zeroship_workflow_` prefix which nothing writes and nothing reads: an empty
+one there says nothing about an app. Neither is an operator SQL surface.
 
 - Run state, outputs and restart go through the creator-authorized handle:
   `env.workflows` in app code, and the manager's management commands
