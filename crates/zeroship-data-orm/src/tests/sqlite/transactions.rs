@@ -632,18 +632,20 @@ fn two_apps_hold_transactions_at_the_same_time() {
     Host::test(|host| {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
+            let alias_a = crate::tests::fixtures::harness_alias("app_a");
+            let alias_b = crate::tests::fixtures::harness_alias("app_b");
             backend
-                .attach_app_file("app_a")
+                .attach_alias_file(&alias_a)
                 .await
                 .expect("attach app_a");
             backend
-                .attach_app_file("app_b")
+                .attach_alias_file(&alias_b)
                 .await
                 .expect("attach app_b");
-            for app in ["app_a", "app_b"] {
+            for alias in [&alias_a, &alias_b] {
                 backend
                     .execute_fixture(
-                        &format!("CREATE TABLE \"{app}\".\"t\" (id INTEGER PRIMARY KEY, v TEXT)"),
+                        &format!("CREATE TABLE \"{alias}\".\"t\" (id INTEGER PRIMARY KEY, v TEXT)"),
                         &[],
                     )
                     .await
@@ -659,7 +661,11 @@ fn two_apps_hold_transactions_at_the_same_time() {
                 .await
                 .expect("BEGIN a");
             backend
-                .execute_fixture_on(&a, "INSERT INTO \"app_a\".\"t\" (v) VALUES ('a')", &[])
+                .execute_fixture_on(
+                    &a,
+                    &format!("INSERT INTO \"{alias_a}\".\"t\" (v) VALUES ('a')"),
+                    &[],
+                )
                 .await
                 .expect("app_a writes inside its transaction");
 
@@ -672,7 +678,11 @@ fn two_apps_hold_transactions_at_the_same_time() {
                 .await
                 .expect("BEGIN b");
             backend
-                .execute_fixture_on(&b, "INSERT INTO \"app_b\".\"t\" (v) VALUES ('b')", &[])
+                .execute_fixture_on(
+                    &b,
+                    &format!("INSERT INTO \"{alias_b}\".\"t\" (v) VALUES ('b')"),
+                    &[],
+                )
                 .await
                 .expect("app_b writes inside its transaction");
 
@@ -693,9 +703,9 @@ fn two_apps_hold_transactions_at_the_same_time() {
                 TerminalOutcome::Committed
             );
             let probe = backend.autocommit_client();
-            for (app, want) in [("app_a", "a"), ("app_b", "b")] {
+            for (app, alias, want) in [("app_a", &alias_a, "a"), ("app_b", &alias_b, "b")] {
                 let rows = probe
-                    .query(&format!("SELECT v FROM \"{app}\".\"t\""), &[])
+                    .query(&format!("SELECT v FROM \"{alias}\".\"t\""), &[])
                     .await
                     .expect("read back");
                 assert_eq!(rows.len(), 1, "{app} must hold exactly its own row");
@@ -715,24 +725,26 @@ fn a_transaction_lane_cannot_address_another_apps_tables() {
     Host::test(|host| {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
+            let alias_a = crate::tests::fixtures::harness_alias("app_a");
+            let alias_b = crate::tests::fixtures::harness_alias("app_b");
             backend
-                .attach_app_file("app_a")
+                .attach_alias_file(&alias_a)
                 .await
                 .expect("attach app_a");
             backend
-                .attach_app_file("app_b")
+                .attach_alias_file(&alias_b)
                 .await
                 .expect("attach app_b");
             backend
                 .execute_fixture(
-                    "CREATE TABLE \"app_a\".\"secret\" (id INTEGER PRIMARY KEY, v TEXT)",
+                    &format!("CREATE TABLE \"{alias_a}\".\"secret\" (id INTEGER PRIMARY KEY, v TEXT)"),
                     &[],
                 )
                 .await
                 .expect("create app_a.secret");
             backend
                 .execute_fixture(
-                    "INSERT INTO \"app_a\".\"secret\" (v) VALUES ('tenant-a')",
+                    &format!("INSERT INTO \"{alias_a}\".\"secret\" (v) VALUES ('tenant-a')"),
                     &[],
                 )
                 .await
@@ -747,7 +759,7 @@ fn a_transaction_lane_cannot_address_another_apps_tables() {
                 .await
                 .expect("BEGIN b");
             let leaked = backend
-                .execute_fixture_on(&b, "DELETE FROM \"app_a\".\"secret\"", &[])
+                .execute_fixture_on(&b, &format!("DELETE FROM \"{alias_a}\".\"secret\""), &[])
                 .await
                 .expect_err("app_b's transaction must not reach app_a's tables");
             assert!(
@@ -760,7 +772,7 @@ fn a_transaction_lane_cannot_address_another_apps_tables() {
             // reported an error afterwards would be worse than no check.
             let rows = backend
                 .autocommit_client()
-                .query("SELECT v FROM \"app_a\".\"secret\"", &[])
+                .query(&format!("SELECT v FROM \"{alias_a}\".\"secret\""), &[])
                 .await
                 .expect("read app_a.secret back");
             assert_eq!(rows.len(), 1);
@@ -781,7 +793,7 @@ fn a_second_transaction_for_the_same_app_is_still_refused_and_names_it() {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
             backend
-                .attach_app_file("app_a")
+                .attach_alias_file(&crate::tests::fixtures::harness_alias("app_a"))
                 .await
                 .expect("attach app_a");
             let first = backend
@@ -844,7 +856,7 @@ fn transaction_lanes_are_capped_and_the_refusal_has_its_own_code() {
             // next app evicts one and is admitted.
             for i in 0..cap {
                 let app = format!("cap_a{i}");
-                backend.attach_app_file(&app).await.expect("attach");
+                backend.attach_alias_file(&crate::tests::fixtures::harness_alias(&app)).await.expect("attach");
                 let client = backend
                     .fixture_session(&app)
                     .await
@@ -852,7 +864,7 @@ fn transaction_lanes_are_capped_and_the_refusal_has_its_own_code() {
                 drop(client);
             }
             let app = format!("cap_a{cap}");
-            backend.attach_app_file(&app).await.expect("attach");
+            backend.attach_alias_file(&crate::tests::fixtures::harness_alias(&app)).await.expect("attach");
             backend
                 .fixture_session(&app)
                 .await
@@ -864,7 +876,7 @@ fn transaction_lanes_are_capped_and_the_refusal_has_its_own_code() {
             let mut held = Vec::new();
             for i in 0..cap {
                 let app = format!("cap_b{i}");
-                backend.attach_app_file(&app).await.expect("attach");
+                backend.attach_alias_file(&crate::tests::fixtures::harness_alias(&app)).await.expect("attach");
                 let client = backend
                     .fixture_session(&app)
                     .await
@@ -876,7 +888,7 @@ fn transaction_lanes_are_capped_and_the_refusal_has_its_own_code() {
                 held.push(client);
             }
             let app = format!("cap_b{cap}");
-            backend.attach_app_file(&app).await.expect("attach");
+            backend.attach_alias_file(&crate::tests::fixtures::harness_alias(&app)).await.expect("attach");
             let err = backend
                 .fixture_session(&app)
                 .await
@@ -1008,11 +1020,12 @@ fn an_app_files_write_upgrade_is_plain_busy_because_it_is_not_in_wal() {
     Host::test(|host| {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
-            backend.attach_app_file("jm_app").await.expect("attach");
+            let alias = crate::tests::fixtures::harness_alias("jm_app");
+            backend.attach_alias_file(&alias).await.expect("attach");
 
             let mode = backend
                 .autocommit_client()
-                .query("PRAGMA \"jm_app\".journal_mode", &[])
+                .query(&format!("PRAGMA \"{alias}\".journal_mode"), &[])
                 .await
                 .expect("read the attached file's journal mode");
             assert_eq!(
@@ -1229,7 +1242,7 @@ fn two_apps_on_one_backend_serialize_their_transactions_through_main() {
             let (backend, dir) = fresh_backend(host);
             let app_binding = crate::tests::fixtures::harness_binding("tenant_a");
             backend
-                .attach_app_file("tenant_a")
+                .attach_alias_file(&crate::tests::fixtures::harness_alias("tenant_a"))
                 .await
                 .expect("attach the app file");
 

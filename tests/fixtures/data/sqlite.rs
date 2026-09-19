@@ -47,25 +47,28 @@
 use rusqlite::Connection;
 use std::path::Path;
 
-/// Execute `ddl` against `<db_dir>/zs-<app_id>.sqlite`.
+/// Execute `ddl` against `<db_dir>/zs-<alias>.sqlite`.
 ///
-/// `ddl` is raw SQL owned by the calling test. It runs with the app file
-/// ATTACHed under `app_id`, which is the alias the data plane addresses, so the
-/// statements should qualify their targets the way the runtime sees them
-/// (`"<app_id>"."<table>"`).
+/// `alias` is the physical qualifier the data plane addresses, which on this
+/// tier is the binding's schema and the ATTACH alias and the file stem at once:
+/// `crate::tests::fixtures::harness_alias` composes it.
 ///
-/// Call this BEFORE the data-plane backend touches `app_id` - constructing the
-/// backend is fine, the constraint is that no operation for this `app_id` has run
-/// yet, because that is what triggers the ATTACH (see the module doc).
+/// `ddl` is raw SQL owned by the calling test. It runs with the database file
+/// ATTACHed under `alias`, so the statements should qualify their targets the
+/// way the runtime sees them (`"<alias>"."<table>"`).
+///
+/// Call this BEFORE the data-plane backend touches that database - constructing
+/// the backend is fine, the constraint is that no operation for it has run yet,
+/// because that is what triggers the ATTACH (see the module doc).
 ///
 /// Panics on failure: a fixture that cannot build its table has nothing left to
 /// assert, and a silent skip here would read as a passing test.
-pub fn create_sqlite_table(db_dir: &Path, app_id: &str, ddl: &str) {
+pub fn create_sqlite_table(db_dir: &Path, alias: &str, ddl: &str) {
     assert!(
-        !app_id.contains('"'),
-        "app_id is interpolated into an ATTACH statement: {app_id}"
+        !alias.contains('"'),
+        "the alias is interpolated into an ATTACH statement: {alias}"
     );
-    let file = db_dir.join(format!("zs-{app_id}.sqlite"));
+    let file = db_dir.join(format!("zs-{alias}.sqlite"));
     let path = file
         .to_str()
         .expect("the fixture db_dir path is UTF-8")
@@ -74,7 +77,7 @@ pub fn create_sqlite_table(db_dir: &Path, app_id: &str, ddl: &str) {
     let conn_file = tempfile::NamedTempFile::new().unwrap();
 
     let conn = Connection::open(conn_file.path()).expect("open the fixture connection");
-    conn.execute_batch(&format!("ATTACH DATABASE '{path}' AS \"{app_id}\";"))
+    conn.execute_batch(&format!("ATTACH DATABASE '{path}' AS \"{alias}\";"))
         .expect("attach the app file under the alias the data plane addresses");
     conn.execute_batch(ddl)
         .unwrap_or_else(|e| panic!("fixture DDL failed: {e}\n{ddl}"));

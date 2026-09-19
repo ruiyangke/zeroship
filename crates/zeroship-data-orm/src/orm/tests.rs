@@ -681,7 +681,7 @@ async fn database_with_binding(
     let migration_backend = zeroship_migrate_sqlite::SqliteBackend::open(
         &directory
             .path()
-            .join(format!("zs-{}.sqlite", binding.app_id())),
+            .join(format!("zs-{}.sqlite", binding.schema().as_str())),
         &directory.path().join("migrations.sqlite"),
     )
     .unwrap();

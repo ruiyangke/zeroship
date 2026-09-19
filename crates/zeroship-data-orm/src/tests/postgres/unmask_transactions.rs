@@ -60,40 +60,37 @@ fn masked_schema() -> Value {
     })
 }
 
-/// Build the app schema from the PLATFORM's own DDL emitter, provision the
-/// audit table and the per-app role the unmask path runs under, and install
+/// Build the binding's schema from the PLATFORM's own DDL emitter, provision
+/// the audit table and the role ladder the unmask path runs under, and install
 /// the descriptor entry a deploy would have installed.
 async fn fixture(host: &Host, pool: &Rc<Pool>, url: &str, app: &str) {
     fixture_with_schema(host, pool, url, app, masked_schema()).await;
 }
 
 async fn fixture_with_schema(host: &Host, pool: &Rc<Pool>, url: &str, app: &str, schema: Value) {
-    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+    let binding = crate::tests::fixtures::harness_binding(app);
+    let alias = crate::tests::fixtures::harness_alias(app);
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{alias}\" CASCADE"), &[])
         .await
         .unwrap();
-    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+    pool.execute(&format!("CREATE SCHEMA \"{alias}\""), &[])
         .await
         .unwrap();
-    let ddl = fixture_table_sql(
-        &crate::sql::SchemaName::new(app).expect("fixture schema name"),
-        "people",
-        &schema,
-        &FkEmission::Inline,
-    )
-    .expect("the platform's own CREATE TABLE emitter");
+    let ddl = fixture_table_sql(binding.schema(), "people", &schema, &FkEmission::Inline)
+        .expect("the platform's own CREATE TABLE emitter");
     pool.batch_execute(&ddl)
         .await
         .unwrap_or_else(|e| panic!("emitted DDL must apply: {e}\n{ddl}"));
 
-    // Provision both tables before the role so the fixture exercises the same
+    // Provision both tables before the roles so the fixture exercises the same
     // schema-wide data grants as production provisioning.
-    pool.batch_execute(&zeroship_migrate_server::provisioning::audit_unmask_table_sql(app))
+    pool.batch_execute(&zeroship_migrate_server::provisioning::audit_unmask_table_sql(&alias))
         .await
         .expect("the audit table the deploy provisions");
-    crate::tests::fixtures::roles::ensure_binding_ladder(pool, &crate::tests::fixtures::harness_binding(app))
+    crate::tests::fixtures::roles::ensure_binding_ladder(pool, &binding)
         .await
-        .expect("per-app role, as the deploy would provision it");
-    fixtures::grant_all_runtime_table_columns(pool, &crate::tests::fixtures::harness_binding(app), "people").await;
+        .expect("the binding ladder, as the deploy would provision it");
+    fixtures::grant_all_runtime_table_columns(pool, &binding, "people").await;
 
     host.install_postgres_pool(Rc::clone(pool), url);
     crate::tests::fixtures::cache_schema(app, "people", schema);
@@ -351,7 +348,10 @@ fn a_denied_unmask_audit_row_survives_the_rollback_of_its_transaction() {
             // ---- CONTROL: the ordinary write inside that transaction is gone.
             let surviving = pool
                 .query_text_params(
-                    &format!("SELECT id FROM \"{app}\".\"people\" ORDER BY id"),
+                    &format!(
+                        "SELECT id FROM \"{}\".\"people\" ORDER BY id",
+                        crate::tests::fixtures::harness_alias(app)
+                    ),
                     &[],
                 )
                 .await
@@ -489,13 +489,14 @@ fn encrypted_schema() -> Value {
     })
 }
 
-/// Every audit row in the app's schema, oldest first.
+/// Every audit row in the binding's schema, oldest first.
 async fn audit_rows(pool: &Rc<Pool>, app: &str) -> Vec<Value> {
+    let alias = crate::tests::fixtures::harness_alias(app);
     let rows = pool
         .query_text_params(
             &format!(
                 "SELECT outcome, actor_id, actor_role, claimed_actor, \"column\", row_pk, reason \
-                 FROM \"{app}\".\"__zeroship_audit_unmask\" ORDER BY id"
+                 FROM \"{alias}\".\"__zeroship_audit_unmask\" ORDER BY id"
             ),
             &[],
         )

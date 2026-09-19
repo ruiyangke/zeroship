@@ -53,18 +53,21 @@ fn insert_publishes_via_preupdate_hook() {
     Host::test(|host| {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
+            let alias = crate::tests::fixtures::harness_alias("cdc_insert");
             backend
-                .attach_app_file("cdc_insert")
+                .attach_alias_file(&alias)
                 .await
                 .expect("ensure_app_schema");
 
             // Create a user table the CDC hook will fire against.
             backend
                 .execute_fixture(
-                    "CREATE TABLE \"cdc_insert\".\"items\" (\
+                    &format!(
+                        "CREATE TABLE \"{alias}\".\"items\" (\
                      id INTEGER PRIMARY KEY, \
                      name TEXT NOT NULL\
-                 )",
+                 )"
+                    ),
                     &[],
                 )
                 .await
@@ -79,7 +82,7 @@ fn insert_publishes_via_preupdate_hook() {
             // the packet, publisher resolves column names + publishes.
             backend
                 .execute_fixture(
-                    "INSERT INTO \"cdc_insert\".\"items\" (name) VALUES ('alice')",
+                    &format!("INSERT INTO \"{alias}\".\"items\" (name) VALUES ('alice')"),
                     &[],
                 )
                 .await
@@ -128,15 +131,17 @@ fn attached_creator_databases_with_the_same_table_name_are_isolated() {
     Host::test(|host| {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
-            for app in ["cdc_app_a", "cdc_app_b"] {
+            let alias_a = crate::tests::fixtures::harness_alias("cdc_app_a");
+            let alias_b = crate::tests::fixtures::harness_alias("cdc_app_b");
+            for alias in [&alias_a, &alias_b] {
                 backend
-                    .attach_app_file(app)
+                    .attach_alias_file(alias)
                     .await
                     .expect("attach creator database");
                 backend
                     .execute_fixture(
                         &format!(
-                            "CREATE TABLE \"{app}\".\"items\" (id INTEGER PRIMARY KEY, name TEXT)"
+                            "CREATE TABLE \"{alias}\".\"items\" (id INTEGER PRIMARY KEY, name TEXT)"
                         ),
                         &[],
                     )
@@ -148,7 +153,7 @@ fn attached_creator_databases_with_the_same_table_name_are_isolated() {
             let app_b = subscribe_local("cdc_app_b", "items");
             backend
                 .execute_fixture(
-                    "INSERT INTO \"cdc_app_a\".\"items\" (name) VALUES ('only-a')",
+                    &format!("INSERT INTO \"{alias_a}\".\"items\" (name) VALUES ('only-a')"),
                     &[],
                 )
                 .await
@@ -171,16 +176,19 @@ fn publisher_observes_columns_added_after_first_event() {
     Host::test(|host| {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
+            let alias = crate::tests::fixtures::harness_alias("cdc_schema_refresh");
             backend
-                .attach_app_file("cdc_schema_refresh")
+                .attach_alias_file(&alias)
                 .await
                 .expect("attach app file");
             backend
                 .execute_fixture(
-                    "CREATE TABLE \"cdc_schema_refresh\".\"items\" (\
+                    &format!(
+                        "CREATE TABLE \"{alias}\".\"items\" (\
                      id INTEGER PRIMARY KEY, \
                      name TEXT NOT NULL\
-                 )",
+                 )"
+                    ),
                     &[],
                 )
                 .await
@@ -189,7 +197,7 @@ fn publisher_observes_columns_added_after_first_event() {
             let sub = subscribe_local("cdc_schema_refresh", "items");
             backend
                 .execute_fixture(
-                    "INSERT INTO \"cdc_schema_refresh\".\"items\" (id, name) VALUES (1, 'before')",
+                    &format!("INSERT INTO \"{alias}\".\"items\" (id, name) VALUES (1, 'before')"),
                     &[],
                 )
                 .await
@@ -199,15 +207,17 @@ fn publisher_observes_columns_added_after_first_event() {
 
             backend
                 .execute_fixture(
-                    "ALTER TABLE \"cdc_schema_refresh\".\"items\" ADD COLUMN note TEXT",
+                    &format!("ALTER TABLE \"{alias}\".\"items\" ADD COLUMN note TEXT"),
                     &[],
                 )
                 .await
                 .expect("add column");
             backend
                 .execute_fixture(
-                    "INSERT INTO \"cdc_schema_refresh\".\"items\" (id, name, note) \
-                     VALUES (2, 'after', 'visible')",
+                    &format!(
+                        "INSERT INTO \"{alias}\".\"items\" (id, name, note) \
+                     VALUES (2, 'after', 'visible')"
+                    ),
                     &[],
                 )
                 .await
@@ -232,17 +242,20 @@ fn insert_publishes_logical_typed_id_not_sqlite_rowid() {
     Host::test(|host| {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
+            let alias = crate::tests::fixtures::harness_alias("cdc_typed_id");
             backend
-                .attach_app_file("cdc_typed_id")
+                .attach_alias_file(&alias)
                 .await
                 .expect("ensure_app_schema");
 
             backend
                 .execute_fixture(
-                    "CREATE TABLE \"cdc_typed_id\".\"typed_items\" (\
+                    &format!(
+                        "CREATE TABLE \"{alias}\".\"typed_items\" (\
                      id TEXT PRIMARY KEY, \
                      name TEXT NOT NULL\
-                 )",
+                 )"
+                    ),
                     &[],
                 )
                 .await
@@ -254,7 +267,7 @@ fn insert_publishes_logical_typed_id_not_sqlite_rowid() {
             backend
                 .execute_fixture(
                     &format!(
-                        "INSERT INTO \"cdc_typed_id\".\"typed_items\" (id, name) \
+                        "INSERT INTO \"{alias}\".\"typed_items\" (id, name) \
                      VALUES ('{typed_id}', 'alice')"
                     ),
                     &[],
@@ -283,16 +296,19 @@ fn update_publishes_change_event_with_pre_image() {
     Host::test(|host| {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
+            let alias = crate::tests::fixtures::harness_alias("cdc_update");
             backend
-                .attach_app_file("cdc_update")
+                .attach_alias_file(&alias)
                 .await
                 .expect("ensure_app_schema");
             backend
                 .execute_fixture(
-                    "CREATE TABLE \"cdc_update\".\"items\" (\
+                    &format!(
+                        "CREATE TABLE \"{alias}\".\"items\" (\
                      id INTEGER PRIMARY KEY, \
                      name TEXT NOT NULL\
-                 )",
+                 )"
+                    ),
                     &[],
                 )
                 .await
@@ -302,7 +318,7 @@ fn update_publishes_change_event_with_pre_image() {
             // event is not part of what `drain` sees.
             backend
                 .execute_fixture(
-                    "INSERT INTO \"cdc_update\".\"items\" (id, name) VALUES (1, 'alice')",
+                    &format!("INSERT INTO \"{alias}\".\"items\" (id, name) VALUES (1, 'alice')"),
                     &[],
                 )
                 .await
@@ -320,7 +336,7 @@ fn update_publishes_change_event_with_pre_image() {
             // OLD ('alice') and NEW ('bob') tuples.
             backend
                 .execute_fixture(
-                    "UPDATE \"cdc_update\".\"items\" SET name = 'bob' WHERE id = 1",
+                    &format!("UPDATE \"{alias}\".\"items\" SET name = 'bob' WHERE id = 1"),
                     &[],
                 )
                 .await
@@ -369,16 +385,19 @@ fn rollback_does_not_publish() {
     Host::test(|host| {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
+            let alias = crate::tests::fixtures::harness_alias("cdc_rollback");
             backend
-                .attach_app_file("cdc_rollback")
+                .attach_alias_file(&alias)
                 .await
                 .expect("ensure_app_schema");
             backend
                 .execute_fixture(
-                    "CREATE TABLE \"cdc_rollback\".\"items\" (\
+                    &format!(
+                        "CREATE TABLE \"{alias}\".\"items\" (\
                      id INTEGER PRIMARY KEY, \
                      name TEXT NOT NULL\
-                 )",
+                 )"
+                    ),
                     &[],
                 )
                 .await
@@ -393,7 +412,7 @@ fn rollback_does_not_publish() {
             backend.execute_fixture("BEGIN", &[]).await.expect("BEGIN");
             backend
                 .execute_fixture(
-                    "INSERT INTO \"cdc_rollback\".\"items\" (name) VALUES ('alice')",
+                    &format!("INSERT INTO \"{alias}\".\"items\" (name) VALUES ('alice')"),
                     &[],
                 )
                 .await
@@ -419,16 +438,17 @@ fn mixed_ops_in_one_tx_ordered_by_buffer_index() {
     Host::test(|host| {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
+            let alias = crate::tests::fixtures::harness_alias("cdc_mixed");
             backend
-                .attach_app_file("cdc_mixed")
+                .attach_alias_file(&alias)
                 .await
                 .expect("ensure_app_schema");
             backend
                 .execute_fixture(
-                    "CREATE TABLE \"cdc_mixed\".\"items\" (\
+                    &format!("CREATE TABLE \"{alias}\".\"items\" (\
                      id INTEGER PRIMARY KEY, \
                      name TEXT NOT NULL\
-                 )",
+                 )"),
                     &[],
                 )
                 .await
@@ -438,7 +458,7 @@ fn mixed_ops_in_one_tx_ordered_by_buffer_index() {
             // pollute the assertions.
             backend
             .execute_fixture(
-                "INSERT INTO \"cdc_mixed\".\"items\" (id, name) VALUES (10, 'b_pre'), (20, 'c_pre')",
+                &format!("INSERT INTO \"{alias}\".\"items\" (id, name) VALUES (10, 'b_pre'), (20, 'c_pre')"),
                 &[],
             )
             .await
@@ -454,25 +474,25 @@ fn mixed_ops_in_one_tx_ordered_by_buffer_index() {
             backend.execute_fixture("BEGIN", &[]).await.expect("BEGIN");
             backend
                 .execute_fixture(
-                    "INSERT INTO \"cdc_mixed\".\"items\" (id, name) VALUES (1, 'a')",
+                    &format!("INSERT INTO \"{alias}\".\"items\" (id, name) VALUES (1, 'a')"),
                     &[],
                 )
                 .await
                 .expect("INSERT a");
             backend
                 .execute_fixture(
-                    "UPDATE \"cdc_mixed\".\"items\" SET name = 'b_post' WHERE id = 10",
+                    &format!("UPDATE \"{alias}\".\"items\" SET name = 'b_post' WHERE id = 10"),
                     &[],
                 )
                 .await
                 .expect("UPDATE b");
             backend
-                .execute_fixture("DELETE FROM \"cdc_mixed\".\"items\" WHERE id = 20", &[])
+                .execute_fixture(&format!("DELETE FROM \"{alias}\".\"items\" WHERE id = 20"), &[])
                 .await
                 .expect("DELETE c");
             backend
                 .execute_fixture(
-                    "INSERT INTO \"cdc_mixed\".\"items\" (id, name) VALUES (2, 'd')",
+                    &format!("INSERT INTO \"{alias}\".\"items\" (id, name) VALUES (2, 'd')"),
                     &[],
                 )
                 .await
@@ -519,16 +539,19 @@ fn subscription_fanout_under_load() {
         // crossing the overflow-to-resync path exercised elsewhere.
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
+            let alias = crate::tests::fixtures::harness_alias("app_fanout");
             backend
-                .attach_app_file("app_fanout")
+                .attach_alias_file(&alias)
                 .await
                 .expect("ensure_app_schema");
             backend
                 .execute_fixture(
-                    "CREATE TABLE \"app_fanout\".\"items\" (\
+                    &format!(
+                        "CREATE TABLE \"{alias}\".\"items\" (\
                      id INTEGER PRIMARY KEY, \
                      name TEXT NOT NULL\
-                 )",
+                 )"
+                    ),
                     &[],
                 )
                 .await
@@ -548,7 +571,7 @@ fn subscription_fanout_under_load() {
             backend.execute_fixture("BEGIN", &[]).await.expect("BEGIN");
             for i in 0..100 {
                 let sql =
-                    format!("INSERT INTO \"app_fanout\".\"items\" (id, name) VALUES ({i}, 'r{i}')");
+                    format!("INSERT INTO \"{alias}\".\"items\" (id, name) VALUES ({i}, 'r{i}')");
                 backend
                     .execute_fixture(&sql, &[])
                     .await
@@ -614,16 +637,19 @@ fn prefixed_shadow_table_emits_change_events() {
     Host::test(|host| {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
+            let alias = crate::tests::fixtures::harness_alias("app_mv");
             backend
-                .attach_app_file("app_mv")
+                .attach_alias_file(&alias)
                 .await
                 .expect("ensure_app_schema");
             backend
                 .execute_fixture(
-                    "CREATE TABLE \"app_mv\".\"__zeroship_mv_demo\" (\
+                    &format!(
+                        "CREATE TABLE \"{alias}\".\"__zeroship_mv_demo\" (\
                      id INTEGER PRIMARY KEY, \
                      v TEXT NOT NULL\
-                 )",
+                 )"
+                    ),
                     &[],
                 )
                 .await
@@ -633,7 +659,9 @@ fn prefixed_shadow_table_emits_change_events() {
 
             backend
                 .execute_fixture(
-                    "INSERT INTO \"app_mv\".\"__zeroship_mv_demo\" (id, v) VALUES (1, 'a')",
+                    &format!(
+                        "INSERT INTO \"{alias}\".\"__zeroship_mv_demo\" (id, v) VALUES (1, 'a')"
+                    ),
                     &[],
                 )
                 .await
@@ -657,26 +685,31 @@ fn mixed_transaction_emits_events_for_ordinary_and_prefixed_tables() {
     Host::test(|host| {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
+            let alias = crate::tests::fixtures::harness_alias("app_mv_mixed");
             backend
-                .attach_app_file("app_mv_mixed")
+                .attach_alias_file(&alias)
                 .await
                 .expect("ensure_app_schema");
             backend
                 .execute_fixture(
-                    "CREATE TABLE \"app_mv_mixed\".\"items\" (\
+                    &format!(
+                        "CREATE TABLE \"{alias}\".\"items\" (\
                      id INTEGER PRIMARY KEY, \
                      name TEXT NOT NULL\
-                 )",
+                 )"
+                    ),
                     &[],
                 )
                 .await
                 .expect("CREATE TABLE items");
             backend
                 .execute_fixture(
-                    "CREATE TABLE \"app_mv_mixed\".\"__zeroship_mv_items\" (\
+                    &format!(
+                        "CREATE TABLE \"{alias}\".\"__zeroship_mv_items\" (\
                      id INTEGER PRIMARY KEY, \
                      v TEXT NOT NULL\
-                 )",
+                 )"
+                    ),
                     &[],
                 )
                 .await
@@ -688,14 +721,16 @@ fn mixed_transaction_emits_events_for_ordinary_and_prefixed_tables() {
             backend.execute_fixture("BEGIN", &[]).await.expect("BEGIN");
             backend
                 .execute_fixture(
-                    "INSERT INTO \"app_mv_mixed\".\"items\" (id, name) VALUES (1, 'alice')",
+                    &format!("INSERT INTO \"{alias}\".\"items\" (id, name) VALUES (1, 'alice')"),
                     &[],
                 )
                 .await
                 .expect("INSERT items");
             backend
                 .execute_fixture(
-                    "INSERT INTO \"app_mv_mixed\".\"__zeroship_mv_items\" (id, v) VALUES (1, 'a')",
+                    &format!(
+                        "INSERT INTO \"{alias}\".\"__zeroship_mv_items\" (id, v) VALUES (1, 'a')"
+                    ),
                     &[],
                 )
                 .await
@@ -747,16 +782,19 @@ fn audit_table_writes_emit_events() {
     Host::test(|host| {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
+            let alias = crate::tests::fixtures::harness_alias("app_audit");
             backend
-                .attach_app_file("app_audit")
+                .attach_alias_file(&alias)
                 .await
                 .expect("ensure_app_schema");
             backend
                 .execute_fixture(
-                    "CREATE TABLE \"app_audit\".\"__zeroship_audit_users\" (\
+                    &format!(
+                        "CREATE TABLE \"{alias}\".\"__zeroship_audit_users\" (\
                      id INTEGER PRIMARY KEY, \
                      event TEXT NOT NULL\
-                 )",
+                 )"
+                    ),
                     &[],
                 )
                 .await
@@ -766,8 +804,10 @@ fn audit_table_writes_emit_events() {
 
             backend
                 .execute_fixture(
-                    "INSERT INTO \"app_audit\".\"__zeroship_audit_users\" \
-                 (id, event) VALUES (1, 'delete')",
+                    &format!(
+                        "INSERT INTO \"{alias}\".\"__zeroship_audit_users\" \
+                 (id, event) VALUES (1, 'delete')"
+                    ),
                     &[],
                 )
                 .await
@@ -798,16 +838,19 @@ fn backfill_run_pauses_broker_and_emits_one_resync() {
         // committed inside the pause window remain suppressed.
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
+            let alias = crate::tests::fixtures::harness_alias("app_backfill");
             backend
-                .attach_app_file("app_backfill")
+                .attach_alias_file(&alias)
                 .await
                 .expect("ensure_app_schema");
             backend
                 .execute_fixture(
-                    "CREATE TABLE \"app_backfill\".\"items\" (\
+                    &format!(
+                        "CREATE TABLE \"{alias}\".\"items\" (\
                      id INTEGER PRIMARY KEY, \
                      name TEXT NOT NULL\
-                 )",
+                 )"
+                    ),
                     &[],
                 )
                 .await
@@ -821,9 +864,8 @@ fn backfill_run_pauses_broker_and_emits_one_resync() {
 
             // Queue writes inside the suppression window.
             for i in 0..100 {
-                let sql = format!(
-                    "INSERT INTO \"app_backfill\".\"items\" (id, name) VALUES ({i}, 'r{i}')"
-                );
+                let sql =
+                    format!("INSERT INTO \"{alias}\".\"items\" (id, name) VALUES ({i}, 'r{i}')");
                 backend
                     .execute_fixture(&sql, &[])
                     .await
@@ -837,7 +879,7 @@ fn backfill_run_pauses_broker_and_emits_one_resync() {
             // A later sentinel proves the publisher drained the earlier queue.
             backend
                 .execute_fixture(
-                    "INSERT INTO \"app_backfill\".\"items\" (id, name) VALUES (1000, 'after')",
+                    &format!("INSERT INTO \"{alias}\".\"items\" (id, name) VALUES (1000, 'after')"),
                     &[],
                 )
                 .await
@@ -893,16 +935,17 @@ fn schema_pending_decoder_drops_then_resyncs() {
         // and resyncs existing subscribers when the schema becomes available.
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
+            let alias = crate::tests::fixtures::harness_alias("app_pending");
             backend
-                .attach_app_file("app_pending")
+                .attach_alias_file(&alias)
                 .await
                 .expect("ensure_app_schema");
             backend
                 .execute_fixture(
-                    "CREATE TABLE \"app_pending\".\"items\" (\
+                    &format!("CREATE TABLE \"{alias}\".\"items\" (\
                      id INTEGER PRIMARY KEY, \
                      name TEXT NOT NULL\
-                 )",
+                 )"),
                     &[],
                 )
                 .await
@@ -917,7 +960,7 @@ fn schema_pending_decoder_drops_then_resyncs() {
             // Queue writes inside the schema-pending window.
             for i in 0..50 {
                 let sql = format!(
-                    "INSERT INTO \"app_pending\".\"items\" (id, name) VALUES ({i}, 'r{i}')"
+                    "INSERT INTO \"{alias}\".\"items\" (id, name) VALUES ({i}, 'r{i}')"
                 );
                 backend
                     .execute_fixture(&sql, &[])
@@ -945,7 +988,7 @@ fn schema_pending_decoder_drops_then_resyncs() {
             // Post-disengage: a fresh INSERT must publish normally.
             backend
                 .execute_fixture(
-                    "INSERT INTO \"app_pending\".\"items\" (id, name) VALUES (999, 'after')",
+                    &format!("INSERT INTO \"{alias}\".\"items\" (id, name) VALUES (999, 'after')"),
                     &[],
                 )
                 .await
@@ -1015,16 +1058,19 @@ fn backfill_pauses_broker_for_a_type_erased_backend_and_resyncs() {
     Host::test(|host| {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
+            let alias = crate::tests::fixtures::harness_alias("app_orch");
             backend
-                .attach_app_file("app_orch")
+                .attach_alias_file(&alias)
                 .await
                 .expect("ensure_app_schema");
             backend
                 .execute_fixture(
-                    "CREATE TABLE \"app_orch\".\"items\" (\
+                    &format!(
+                        "CREATE TABLE \"{alias}\".\"items\" (\
                      id INTEGER PRIMARY KEY, \
                      name TEXT NOT NULL\
-                 )",
+                 )"
+                    ),
                     &[],
                 )
                 .await
@@ -1049,7 +1095,7 @@ fn backfill_pauses_broker_for_a_type_erased_backend_and_resyncs() {
             // `app_orch` until the guard's Drop runs.
             for i in 0..100 {
                 let sql =
-                    format!("INSERT INTO \"app_orch\".\"items\" (id, name) VALUES ({i}, 'r{i}')");
+                    format!("INSERT INTO \"{alias}\".\"items\" (id, name) VALUES ({i}, 'r{i}')");
                 backend_ref
                     .execute_fixture(&sql, &[])
                     .await
@@ -1067,7 +1113,7 @@ fn backfill_pauses_broker_for_a_type_erased_backend_and_resyncs() {
             // the 100 queued packets rather than never waking.
             backend_ref
                 .execute_fixture(
-                    "INSERT INTO \"app_orch\".\"items\" (id, name) VALUES (1000, 'after')",
+                    &format!("INSERT INTO \"{alias}\".\"items\" (id, name) VALUES (1000, 'after')"),
                     &[],
                 )
                 .await
@@ -1113,16 +1159,19 @@ fn writes_on_both_connections_reach_the_broker() {
     Host::test(|host| {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
+            let alias = crate::tests::fixtures::harness_alias("cdc_connections");
             backend
-                .attach_app_file("cdc_connections")
+                .attach_alias_file(&alias)
                 .await
                 .expect("ensure_app_schema");
             backend
                 .execute_fixture(
-                    "CREATE TABLE \"cdc_connections\".\"items\" (\
+                    &format!(
+                        "CREATE TABLE \"{alias}\".\"items\" (\
                      id INTEGER PRIMARY KEY, \
                      name TEXT NOT NULL\
-                 )",
+                 )"
+                    ),
                     &[],
                 )
                 .await
@@ -1133,7 +1182,7 @@ fn writes_on_both_connections_reach_the_broker() {
             // op_conn: an ordinary autocommit write.
             backend
                 .execute_fixture(
-                    "INSERT INTO \"cdc_connections\".\"items\" (name) VALUES ('from_op_conn')",
+                    &format!("INSERT INTO \"{alias}\".\"items\" (name) VALUES ('from_op_conn')"),
                     &[],
                 )
                 .await
@@ -1151,7 +1200,7 @@ fn writes_on_both_connections_reach_the_broker() {
             backend
                 .execute_fixture_on(
                     &tx,
-                    "INSERT INTO \"cdc_connections\".\"items\" (name) VALUES ('from_tx_conn')",
+                    &format!("INSERT INTO \"{alias}\".\"items\" (name) VALUES ('from_tx_conn')"),
                     &[],
                 )
                 .await

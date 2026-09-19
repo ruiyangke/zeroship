@@ -15,7 +15,7 @@ impl Search for SqliteBackend {
         session: Option<&Session>,
         r: VectorSearch<'_>,
     ) -> Result<Vec<Value>, DbError> {
-        self.attach_binding(r.binding.app_id(), r.binding.schema())
+        self.attach_binding(r.binding)
             .await?;
         let auto = self.autocommit_client();
         let session: &dyn DriverSession = session.map_or(&auto as &dyn DriverSession, |s| &**s);
@@ -26,7 +26,7 @@ impl Search for SqliteBackend {
         session: Option<&Session>,
         r: SpatialSearch<'_>,
     ) -> Result<Vec<Value>, DbError> {
-        self.attach_binding(r.binding.app_id(), r.binding.schema())
+        self.attach_binding(r.binding)
             .await?;
         let auto = self.autocommit_client();
         let session: &dyn DriverSession = session.map_or(&auto as &dyn DriverSession, |s| &**s);

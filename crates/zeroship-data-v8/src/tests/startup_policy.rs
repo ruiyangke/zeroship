@@ -23,7 +23,7 @@ fn binding() -> DbBinding {
 
 fn runtime(source: &str, binding: &DbBinding, url: &str) -> Runtime {
     let plugin = DbService::new(DbServiceConfig {
-        app_bindings: Default::default(),
+        app_bindings: crate::tests::fixtures::harness_app_bindings([binding.app_id()]),
         project_keys: Default::default(),
         connection: ConnectionFactory::for_url(url).unwrap(),
         cdc_relay: None,

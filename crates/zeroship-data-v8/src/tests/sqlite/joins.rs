@@ -6,10 +6,11 @@ use zeroship_data_orm::value::Value;
 fn sdk_join_executes_through_v8_and_preserves_transaction_scope() {
     run(async {
         let dir = tempfile::tempdir().unwrap();
+        let alias = crate::tests::fixtures::harness_alias(LOCAL_DEV_APP_ID);
         apply_schema_ahead_of_runtime(
             &dir,
             &format!(
-                "CREATE TABLE \"{LOCAL_DEV_APP_ID}\".posts ({SYSTEM_COLUMNS_SQLITE}, title TEXT NOT NULL, payload BLOB, counter INTEGER DEFAULT 7, nickname TEXT, score REAL);"
+                "CREATE TABLE \"{alias}\".posts ({SYSTEM_COLUMNS_SQLITE}, title TEXT NOT NULL, payload BLOB, counter INTEGER DEFAULT 7, nickname TEXT, score REAL);"
             ),
         );
         let descriptor: Value = serde_json::from_str(include_str!(concat!(

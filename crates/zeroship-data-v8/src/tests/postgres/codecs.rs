@@ -41,7 +41,8 @@ async fn bytes_column_stores_raw_bytes_on_postgres() {
 
     let sql = format!(
         "SELECT payload_bytes FROM \"{}\".\"{}\" WHERE title = $1",
-        app, pg.collection
+        crate::tests::fixtures::harness_alias(&app),
+        pg.collection
     );
     let rows = client
         .query(&sql, &[&"typed-roundtrip"])

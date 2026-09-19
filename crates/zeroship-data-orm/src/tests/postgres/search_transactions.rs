@@ -62,9 +62,9 @@ async fn require_extension(pool: &Rc<Pool>, extension: &str) {
         });
 }
 
-/// Build the app schema from the PLATFORM's own DDL emitter, provision the
-/// per-app role the data plane runs under, and install the descriptor entry a
-/// deploy would have installed.
+/// Build the binding's schema from the PLATFORM's own DDL emitter, provision
+/// the role ladder the data plane runs under, and install the descriptor entry
+/// a deploy would have installed.
 async fn fixture(
     host: &Host,
     pool: &Rc<Pool>,
@@ -73,27 +73,23 @@ async fn fixture(
     collection: &str,
     schema: Value,
 ) {
-    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+    let binding = crate::tests::fixtures::harness_binding(app);
+    let alias = crate::tests::fixtures::harness_alias(app);
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{alias}\" CASCADE"), &[])
         .await
         .unwrap();
-    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+    // The ladder creates the schema this binding addresses, so the emitted DDL
+    // has a namespace to land in.
+    crate::tests::fixtures::roles::ensure_binding_ladder(pool, &binding)
         .await
-        .unwrap();
-    let ddl = fixture_table_sql(
-        &crate::sql::SchemaName::new(app).expect("fixture schema name"),
-        collection,
-        &schema,
-        &FkEmission::Inline,
-    )
-    .expect("the platform's own CREATE TABLE emitter");
+        .expect("the binding ladder, as the deploy would provision it");
+    let ddl = fixture_table_sql(binding.schema(), collection, &schema, &FkEmission::Inline)
+        .expect("the platform's own CREATE TABLE emitter");
     pool.batch_execute(&ddl)
         .await
         .unwrap_or_else(|e| panic!("emitted DDL must apply: {e}\n{ddl}"));
 
-    crate::tests::fixtures::roles::ensure_binding_ladder(pool, &crate::tests::fixtures::harness_binding(app))
-        .await
-        .expect("per-app role, as the deploy would provision it");
-    fixtures::grant_all_runtime_table_columns(pool, &crate::tests::fixtures::harness_binding(app), collection).await;
+    fixtures::grant_all_runtime_table_columns(pool, &binding, collection).await;
 
     host.install_postgres_pool(Rc::clone(pool), url);
     crate::tests::fixtures::cache_schema(app, collection, schema);

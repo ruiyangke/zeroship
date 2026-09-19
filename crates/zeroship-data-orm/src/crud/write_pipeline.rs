@@ -1199,7 +1199,7 @@ mod tests {
                     .expect("open sqlite backend"),
             );
             backend
-                .attach_app_file(app_id)
+                .attach_alias_file(&crate::tests::fixtures::harness_alias(app_id))
                 .await
                 .expect("ensure schema");
             let handle = crate::backend::BackendHandle::new(Rc::clone(&backend));
@@ -1213,7 +1213,7 @@ mod tests {
             let schema = crate::tests::fixtures::native_fields(schema);
 
             let ddl = sqlite_fixture_sql(
-                &crate::sql::SchemaName::new(app_id).expect("fixture schema name"),
+                crate::tests::fixtures::harness_binding(app_id).schema(),
                 collection,
                 &ddl_schema,
                 &FkEmission::Inline,
@@ -1443,14 +1443,14 @@ mod tests {
                 )
                 .expect("open sqlite backend"),
             );
-            backend.attach_app_file(app_id).await.expect("attach app");
+            backend.attach_alias_file(&crate::tests::fixtures::harness_alias(app_id)).await.expect("attach app");
             let handle = crate::backend::BackendHandle::new(Rc::clone(&backend));
             let route = crate::exec::ambient_route_for_tests(&crate::tests::fixtures::harness_binding(app_id), handle);
 
             // Build the file-backed fixture from its schema so the raw storage
             // column and masking sentinel match the reader contract.
             let ddl = sqlite_fixture_sql(
-                &crate::sql::SchemaName::new(app_id).expect("fixture schema name"),
+                crate::tests::fixtures::harness_binding(app_id).schema(),
                 collection,
                 &masked,
                 &FkEmission::Inline,

@@ -38,12 +38,16 @@ pub(super) fn users_encrypted_ssn_schema() -> zeroship_data_orm::value::Value {
 }
 
 /// The three system indexes every confined table carries.
+///
+/// The index names are qualified with the binding's schema, which on SQLite is
+/// the `ATTACH` alias the data plane addresses.
 pub(super) fn system_indexes_sqlite(app_id: &str, collection: &str) -> String {
+    let alias = crate::tests::fixtures::harness_alias(app_id);
     format!(
         r#"
-CREATE INDEX IF NOT EXISTS "{app_id}"."{collection}_deleted_at_idx" ON "{collection}" ("deleted_at");
-CREATE INDEX IF NOT EXISTS "{app_id}"."{collection}_updated_at_idx" ON "{collection}" ("updated_at");
-CREATE INDEX IF NOT EXISTS "{app_id}"."{collection}_created_by_idx" ON "{collection}" ("created_by");
+CREATE INDEX IF NOT EXISTS "{alias}"."{collection}_deleted_at_idx" ON "{collection}" ("deleted_at");
+CREATE INDEX IF NOT EXISTS "{alias}"."{collection}_updated_at_idx" ON "{collection}" ("updated_at");
+CREATE INDEX IF NOT EXISTS "{alias}"."{collection}_created_by_idx" ON "{collection}" ("created_by");
 "#
     )
 }
@@ -56,26 +60,32 @@ CREATE INDEX IF NOT EXISTS "{app_id}"."{collection}_created_by_idx" ON "{collect
 /// the encryption sentinel, and any constraints.
 pub(super) fn users_encrypted_ssn_ddl() -> String {
     let raw_ssn = raw_column_name("ssn");
+    let alias = crate::tests::fixtures::harness_alias(LOCAL_DEV_APP_ID);
     format!(
-        r#"CREATE TABLE IF NOT EXISTS "{LOCAL_DEV_APP_ID}"."users" ({SYSTEM_COLUMNS_SQLITE},
+        r#"CREATE TABLE IF NOT EXISTS "{alias}"."users" ({SYSTEM_COLUMNS_SQLITE},
   "email" TEXT NOT NULL,
   "name" TEXT NOT NULL,
   "{raw_ssn}" BLOB /* zero-migrate:enc:string */,
   "ssn" TEXT /* zero-migrate:mask:kind=last4,classification=spi */
 );
 {}
-CREATE UNIQUE INDEX IF NOT EXISTS "{LOCAL_DEV_APP_ID}"."users_email_key" ON "users" ("email");
+CREATE UNIQUE INDEX IF NOT EXISTS "{alias}"."users_email_key" ON "users" ("email");
 "#,
         system_indexes_sqlite(LOCAL_DEV_APP_ID, "users")
     )
 }
 
-/// Create the `users` table in the dev app file BEFORE the runtime boots.
+/// Create the `users` table in the dev database file BEFORE the runtime boots.
 ///
 /// `dir` is the same directory `parity::sqlite_url` points the runtime at, so the
-/// fixture writes the exact app file the data plane will attach.
+/// fixture writes the exact file the data plane will attach: one file per
+/// database, named for the binding's schema.
 pub(super) fn apply_schema_ahead_of_runtime(dir: &tempfile::TempDir, ddl: &str) {
-    crate::tests::fixtures::tables::create_sqlite_table(dir.path(), LOCAL_DEV_APP_ID, ddl);
+    crate::tests::fixtures::tables::create_sqlite_table(
+        dir.path(),
+        &crate::tests::fixtures::harness_alias(LOCAL_DEV_APP_ID),
+        ddl,
+    );
 }
 
 pub(super) struct SqliteRuntimeSource {

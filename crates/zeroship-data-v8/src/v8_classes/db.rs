@@ -347,10 +347,9 @@ pub fn mint_db<'s>(
 /// Returns `None` when the host resolved no binding for this app, and that
 /// refusal is the point: `env.db` is absent rather than present and doomed.
 ///
-/// The SQLite ATTACH alias is still minted from the TENANT
-/// (`attach_app_file(binding.app_id())`) while every query builder qualifies
-/// with the SCHEMA, which is what keeps the dev tier addressing one file per
-/// app while PostgreSQL addresses one schema per database.
+/// The SQLite ATTACH alias is the binding's SCHEMA, the same value every query
+/// builder qualifies with, so the dev tier addresses one file per database and
+/// PostgreSQL addresses one schema per database.
 pub(crate) fn binding_for_isolate(
     scope: &mut v8::PinScope<'_, '_>,
     app_id: &str,

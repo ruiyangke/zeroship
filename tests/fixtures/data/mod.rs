@@ -149,6 +149,47 @@ pub fn harness_binding_at_deploy(
     .expect("a harness binding's ids compose a legal role name")
 }
 
+/// The binding store a harness hands the database service.
+///
+/// Only the V8 adapter builds a `DbServiceConfig`, so this is unused in the
+/// ORM's own test build of this shared module.
+///
+/// A worker installs what Control resolved; a harness installs what
+/// [`harness_binding`] composed, so an isolate minted for one of these apps
+/// reads the same binding the fixture provisioned the cluster for. An app that
+/// is not listed gets no `env.db`, which is the production refusal.
+#[allow(dead_code)]
+pub fn harness_app_bindings<'a>(
+    app_ids: impl IntoIterator<Item = &'a str>,
+) -> std::sync::Arc<zeroship_data_orm::resolved_bindings::SuppliedAppBindings> {
+    let store = std::sync::Arc::new(
+        zeroship_data_orm::resolved_bindings::SuppliedAppBindings::new(),
+    );
+    for app_id in app_ids {
+        let binding = harness_binding(app_id);
+        let edge = binding
+            .edge()
+            .expect("a harness binding addresses a database");
+        store
+            .supply(
+                app_id,
+                zeroship_data_orm::resolved_bindings::ResolvedBinding::from(edge),
+            )
+            .expect("a fresh store accepts its first binding");
+    }
+    store
+}
+
+/// The physical schema a harness's work for `app_id` is qualified with.
+///
+/// On PostgreSQL it is the namespace; on SQLite it is the `ATTACH` alias, which
+/// occupies the same position in a qualified table name. A fixture that
+/// created its tables under any other name would put them where the ORM does
+/// not look.
+pub fn harness_alias(app_id: &str) -> String {
+    harness_binding(app_id).schema().as_str().to_owned()
+}
+
 /// The lane key a harness's work for `app_id` is held under.
 pub fn harness_route(app_id: &str) -> zeroship_data_orm::binding::DbRoute {
     harness_binding(app_id).route()

@@ -210,7 +210,15 @@ mod tests {
         assert!(setup.contains("SET LOCAL lock_timeout ="), "{setup}");
     }
 
-    /// A connection that narrows per binding refuses a binding with no role.
+    /// A connection that narrows per binding refuses a binding with no role,
+    /// BEFORE any statement is sent.
+    ///
+    /// **This is the third arm of the taxonomy, and it lives here rather than in
+    /// the classifier.** A role name exists only because a binding carries a
+    /// database edge, and the classifier is only reached after a role name was
+    /// sent - so "no live binding" cannot be a SQLSTATE outcome. The condition
+    /// is decided here instead, with its own code, and it is terminal: no
+    /// amount of retrying gives an app a database nobody bound it to.
     ///
     /// The control is the same binding under `Connection` authority, which must
     /// compose: the refusal is about the PAIRING, not about the binding.

@@ -96,7 +96,10 @@ fn platform_round_trip(directory: &std::path::Path) -> Result<Vec<Value>, DbErro
 fn a_creator_meter_on_the_thread_leaves_platform_bindings_unmetered() {
     crate::tests::fixtures::reset_context();
     let creator_dir = tempfile::tempdir().unwrap();
-    apply_schema_ahead_of_runtime(&creator_dir, &notes_ddl(LOCAL_DEV_APP_ID));
+    apply_schema_ahead_of_runtime(
+        &creator_dir,
+        &notes_ddl(&crate::tests::fixtures::harness_alias(LOCAL_DEV_APP_ID)),
+    );
     let meter = Arc::new(zeroship_metering::Meter::new());
     let source = notes_source();
 
@@ -149,11 +152,8 @@ fn a_metered_creator_binding_without_a_valid_app_id_is_refused() {
     );
     crate::tests::fixtures::reset_context();
     let dir = tempfile::tempdir().unwrap();
-    crate::tests::fixtures::tables::create_sqlite_table(
-        dir.path(),
-        UNATTRIBUTABLE,
-        &notes_ddl(UNATTRIBUTABLE),
-    );
+    let alias = crate::tests::fixtures::harness_alias(UNATTRIBUTABLE);
+    crate::tests::fixtures::tables::create_sqlite_table(dir.path(), &alias, &notes_ddl(&alias));
     let meter = Arc::new(zeroship_metering::Meter::new());
     let source = notes_source();
 

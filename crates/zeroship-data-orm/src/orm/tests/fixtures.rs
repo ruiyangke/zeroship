@@ -63,12 +63,14 @@ impl CollectionFixture {
 
     pub async fn wait_for_upsert_conflict(&self) {
         let backend = &self.postgres.as_ref().expect("PostgreSQL fixture").0;
-        let app = self.database.binding.app_id();
+        // The waiting statement is qualified with the binding's schema, so the
+        // schema is what picks this fixture's upsert out of pg_stat_activity.
+        let schema = self.database.binding.schema().as_str().to_owned();
         compio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
                 let rows = backend.pool().query(
                     "SELECT EXISTS(SELECT FROM pg_stat_activity WHERE wait_event = 'transactionid' AND query LIKE '%ON CONFLICT%' AND query LIKE '%' || $1 || '%')",
-                    &[&app],
+                    &[&schema],
                 ).await.unwrap();
                 if rows[0].get::<_, bool>(0) { break; }
                 compio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -188,20 +190,21 @@ impl CollectionFixture {
             .unwrap(),
         );
         let app = format!("zsorm_{}", uuid::Uuid::new_v4().simple());
-        let schema = crate::sql::mapping::quote_ident(&app);
+        let binding = crate::tests::fixtures::harness_binding(&app);
+        // The ladder creates the schema this binding addresses; the table and
+        // its grants are what an apply adds over it.
+        crate::tests::fixtures::roles::ensure_binding_ladder(backend.pool(), &binding)
+            .await
+            .unwrap();
+        let schema = crate::sql::mapping::quote_ident(binding.schema().as_str());
         let table = crate::sql::mapping::quote_ident(collection);
         backend
             .pool()
-            .batch_execute(&format!(
-                "CREATE SCHEMA {schema}; CREATE TABLE {schema}.{table} ({columns})"
-            ))
-            .await
-            .unwrap();
-        crate::tests::fixtures::roles::ensure_binding_ladder(backend.pool(), &crate::tests::fixtures::harness_binding(&app))
+            .batch_execute(&format!("CREATE TABLE {schema}.{table} ({columns})"))
             .await
             .unwrap();
         let role = crate::sql::mapping::quote_ident(
-            &zeroship_core::database_role::per_app_role_name(&app).unwrap(),
+            &crate::tests::fixtures::harness_capability_role(&binding),
         );
         backend
             .pool()
@@ -211,7 +214,7 @@ impl CollectionFixture {
             .await
             .unwrap();
         let database = Database::from_schema(
-            crate::tests::fixtures::harness_binding(&app),
+            binding,
             crate::backend_handle::BackendHandle::new(backend.clone()),
             Schema::from_collections(vec![(collection.into(), fields)]).unwrap(),
         )
@@ -238,15 +241,16 @@ impl CollectionFixture {
                 .unwrap(),
         );
         let app = format!("zsorm_{}", uuid::Uuid::new_v4().simple());
-        let schema = crate::sql::mapping::quote_ident(&app);
-        backend
-            .execute_fixture(&format!("CREATE SCHEMA {schema}"), &[])
+        let binding = crate::tests::fixtures::harness_binding(&app);
+        crate::tests::fixtures::roles::ensure_binding_ladder(backend.pool(), &binding)
             .await
             .unwrap();
+        let physical = binding.schema().as_str().to_owned();
+        let schema = crate::sql::mapping::quote_ident(&physical);
         backend
             .pool()
             .batch_execute(&table_sql(
-                &app,
+                &physical,
                 collection,
                 &fields,
                 &zeroship_migrate_postgres::DIALECT,
@@ -255,14 +259,13 @@ impl CollectionFixture {
             .unwrap();
         backend
             .pool()
-            .batch_execute(&zeroship_migrate_server::provisioning::audit_unmask_table_sql(&app))
-            .await
-            .unwrap();
-        crate::tests::fixtures::roles::ensure_binding_ladder(backend.pool(), &crate::tests::fixtures::harness_binding(&app))
+            .batch_execute(&zeroship_migrate_server::provisioning::audit_unmask_table_sql(
+                &physical,
+            ))
             .await
             .unwrap();
         let role = crate::sql::mapping::quote_ident(
-            &zeroship_core::database_role::per_app_role_name(&app).unwrap(),
+            &crate::tests::fixtures::harness_capability_role(&binding),
         );
         backend
             .execute_fixture(
@@ -275,7 +278,7 @@ impl CollectionFixture {
             .await
             .unwrap();
         let database = Database::from_schema(
-            crate::tests::fixtures::harness_binding(&app),
+            binding,
             crate::backend_handle::BackendHandle::new(backend.clone()),
             Schema::from_collections(vec![(
                 collection.into(),

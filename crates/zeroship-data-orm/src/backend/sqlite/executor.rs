@@ -43,11 +43,11 @@ const BEGIN_TRANSACTION: &str = "BEGIN IMMEDIATE";
 #[async_trait(?Send)]
 impl ScopedExecutor for SqliteBackend {
     fn namespace<'a>(&self, binding: &'a DbBinding) -> &'a str {
-        Self::database_alias(binding.app_id(), binding.schema())
+        Self::database_alias(binding)
     }
 
     async fn prepare_for_app(&self, binding: &DbBinding) -> Result<(), DbError> {
-        self.attach_binding(binding.app_id(), binding.schema()).await
+        self.attach_binding(binding).await
     }
     async fn query(
         &self,
@@ -113,10 +113,16 @@ impl SqliteBackend {
         &self,
         binding: &DbBinding,
     ) -> Result<super::driver::SqliteDriver, DbError> {
-        self.attach_binding(binding.app_id(), binding.schema()).await?;
+        self.attach_binding(binding).await?;
+        // THE ALIAS, not the tenant. The actor uses this one string for the
+        // transaction lane key, the lane's own ATTACH and the lookup that finds
+        // which file to attach, and every one of those is about the DATABASE.
+        // An attachment is registered under the alias, so a lane keyed on the
+        // tenant would find no file and every qualified statement on a
+        // transaction connection would report no such table.
         Ok(super::driver::SqliteDriver::new(
             self.session.clone(),
-            binding.app_id().to_owned(),
+            Self::database_alias(binding).to_owned(),
         ))
     }
 }

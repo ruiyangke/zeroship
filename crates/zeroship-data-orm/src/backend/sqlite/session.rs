@@ -638,11 +638,11 @@ impl SqliteSession {
                 return Err(DbError::validation_hinted(
                     "transaction_connection_busy",
                     format!(
-                        "db: app '{app_id}' already holds an open transaction on its SQLite \
-                         transaction connection; one explicit transaction at a time"
+                        "db: database '{app_id}' already holds an open transaction on its \
+                         SQLite transaction connection; one explicit transaction at a time"
                     ),
                     "Commit or roll back the open db.transaction(...) before starting another \
-                     one for this app.",
+                     one on this database.",
                 ));
             }
             // Drop slots whose lease is gone before minting a new id, so a
@@ -1549,12 +1549,12 @@ impl Actor {
                     return Err(DbError::validation_hinted(
                         TX_LANES_EXHAUSTED,
                         format!(
-                            "db: this SQLite session already holds {MAX_TX_LANES} apps' \
+                            "db: this SQLite session already holds {MAX_TX_LANES} databases' \
                              transaction connections and all of them are mid-transaction, so \
-                             app '{app_id}' cannot open one"
+                             database '{app_id}' cannot open one"
                         ),
-                        "This is contention with OTHER apps sharing this dev process, not a \
-                         fault in your code - retry.",
+                        "This is contention with OTHER databases sharing this dev process, not \
+                         a fault in your code - retry.",
                     ));
                 }
             }

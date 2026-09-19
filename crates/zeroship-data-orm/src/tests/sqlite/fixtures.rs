@@ -102,8 +102,9 @@ pub(super) async fn unmask_setup_with_schema(
         new_sqlite_backend(std::path::PathBuf::from(dir.path()), host.key_source())
             .expect("SqliteBackend::new"),
     );
+    let alias = crate::tests::fixtures::harness_alias(app_id);
     backend
-        .attach_app_file(app_id)
+        .attach_alias_file(&alias)
         .await
         .expect("ensure_app_schema");
     // The audit table, APPLY-AHEAD. `crud/unmask.rs` used to create it itself
@@ -117,13 +118,13 @@ pub(super) async fn unmask_setup_with_schema(
     // of them: `audit_unmask_ddl` is the same function the host calls. The
     // qualifier differs because the CONNECTION differs - the host opened the
     // app file as `main`, the worker's backend reaches it through the
-    // `<app_id>` ATTACH alias - and that parameter is the only thing that
-    // varies between the two callers.
+    // binding's schema as an ATTACH alias - and that parameter is the only
+    // thing that varies between the two callers.
     //
     // WHAT THIS FIXTURE CANNOT PROVE: that the host actually calls it. It pins
     // the shape and the writer against each other, nothing more. The call in
     // `bridge.rs::apply_ir_sqlite` is covered by no test in this file.
-    for stmt in zeroship_migrate_sqlite::backend::audit_unmask_ddl(app_id) {
+    for stmt in zeroship_migrate_sqlite::backend::audit_unmask_ddl(&alias) {
         backend
             .execute_fixture(&stmt, &[])
             .await

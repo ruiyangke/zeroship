@@ -218,29 +218,30 @@ fn ensure_app_schema_attaches_file() {
     Host::test(|host| {
         host.run(async {
             let (backend, dir) = fresh_backend(host);
+            let alias = crate::tests::fixtures::harness_alias("app_demo");
             backend
-                .attach_app_file("app_demo")
+                .attach_alias_file(&alias)
                 .await
                 .expect("ensure_app_schema");
 
             // The per-app file should now exist on disk.
-            let expected = dir.path().join("zs-app_demo.sqlite");
+            let expected = dir.path().join(format!("zs-{alias}.sqlite"));
             assert!(
                 expected.exists(),
                 "per-app sqlite file should exist: {expected:?}"
             );
 
             // The alias should be queryable. `SELECT name FROM
-            // "app_demo".sqlite_master` returns the (empty) catalog of
+            // "<alias>".sqlite_master` returns the (empty) catalog of
             // the freshly-attached database — the SELECT itself
             // succeeding is the assertion (a missing alias surfaces as
-            // `no such database: app_demo`).
+            // `no such database: <alias>`).
             let client = backend
                 .fixture_session("app_demo")
                 .await
                 .expect("acquire client");
             let rows = client
-                .query("SELECT name FROM \"app_demo\".sqlite_master", &[])
+                .query(&format!("SELECT name FROM \"{alias}\".sqlite_master"), &[])
                 .await
                 .expect("query attached sqlite_master");
             // Freshly attached database has no user tables yet.
@@ -259,14 +260,14 @@ fn ensure_app_schema_idempotent() {
             let (backend, _dir) = fresh_backend(host);
             // First call attaches.
             backend
-                .attach_app_file("app_demo")
+                .attach_alias_file(&crate::tests::fixtures::harness_alias("app_demo"))
                 .await
                 .expect("first ensure_app_schema");
-            // Second call must NOT surface "database app_demo is already
+            // Second call must NOT surface "database <alias> is already
             // in use" — the cache (or the error-suppression fallback)
             // should short-circuit it to Ok.
             backend
-                .attach_app_file("app_demo")
+                .attach_alias_file(&crate::tests::fixtures::harness_alias("app_demo"))
                 .await
                 .expect("second ensure_app_schema must be idempotent");
         });
@@ -278,18 +279,23 @@ fn ensure_app_schema_isolates_per_app() {
     Host::test(|host| {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
+            let alias_a = crate::tests::fixtures::harness_alias("app_a");
+            let alias_b = crate::tests::fixtures::harness_alias("app_b");
             backend
-                .attach_app_file("app_a")
+                .attach_alias_file(&alias_a)
                 .await
                 .expect("attach app_a");
             backend
-                .attach_app_file("app_b")
+                .attach_alias_file(&alias_b)
                 .await
                 .expect("attach app_b");
 
             // Create a table inside the `app_a` namespace.
             backend
-                .execute_fixture("CREATE TABLE \"app_a\".\"t\" (x INTEGER)", &[])
+                .execute_fixture(
+                    &format!("CREATE TABLE \"{alias_a}\".\"t\" (x INTEGER)"),
+                    &[],
+                )
                 .await
                 .expect("CREATE TABLE in app_a");
 
@@ -304,7 +310,7 @@ fn ensure_app_schema_isolates_per_app() {
             let client = backend.autocommit_client();
             let rows_a = client
                 .query(
-                    "SELECT name FROM \"app_a\".sqlite_master WHERE type = 'table'",
+                    &format!("SELECT name FROM \"{alias_a}\".sqlite_master WHERE type = 'table'"),
                     &[],
                 )
                 .await
@@ -317,7 +323,7 @@ fn ensure_app_schema_isolates_per_app() {
             // layout. Each app's `sqlite_master` is its own namespace.
             let rows_b = client
                 .query(
-                    "SELECT name FROM \"app_b\".sqlite_master WHERE type = 'table'",
+                    &format!("SELECT name FROM \"{alias_b}\".sqlite_master WHERE type = 'table'"),
                     &[],
                 )
                 .await
@@ -332,11 +338,12 @@ fn ensure_app_schema_isolates_per_app() {
 
 /// The three system indexes every confined table carries.
 fn system_indexes_sqlite(app_id: &str, collection: &str) -> String {
+    let alias = crate::tests::fixtures::harness_alias(app_id);
     format!(
         r#"
-CREATE INDEX IF NOT EXISTS "{app_id}"."{collection}_deleted_at_idx" ON "{collection}" ("deleted_at");
-CREATE INDEX IF NOT EXISTS "{app_id}"."{collection}_updated_at_idx" ON "{collection}" ("updated_at");
-CREATE INDEX IF NOT EXISTS "{app_id}"."{collection}_created_by_idx" ON "{collection}" ("created_by");
+CREATE INDEX IF NOT EXISTS "{alias}"."{collection}_deleted_at_idx" ON "{collection}" ("deleted_at");
+CREATE INDEX IF NOT EXISTS "{alias}"."{collection}_updated_at_idx" ON "{collection}" ("updated_at");
+CREATE INDEX IF NOT EXISTS "{alias}"."{collection}_created_by_idx" ON "{collection}" ("created_by");
 "#
     )
 }
@@ -348,12 +355,13 @@ fn p6c_data_plane_reaches_the_app_file_on_demand() {
             let dir = tempfile::tempdir().expect("create tempdir");
             let app = "p6c_no_register";
             let collection = "notes";
+            let alias = crate::tests::fixtures::harness_alias(app);
 
             crate::tests::fixtures::tables::create_sqlite_table(
                 dir.path(),
-                app,
+                &alias,
                 &format!(
-                    r#"CREATE TABLE IF NOT EXISTS "{app}"."{collection}" ({SYSTEM_COLUMNS_SQLITE},
+                    r#"CREATE TABLE IF NOT EXISTS "{alias}"."{collection}" ({SYSTEM_COLUMNS_SQLITE},
   "body" TEXT NOT NULL
 );
 {}"#,
@@ -383,7 +391,7 @@ fn p6c_data_plane_reaches_the_app_file_on_demand() {
             host.exec_mutation_with_emit(
                 crate::sql::compiler::CompiledQuery {
                     sql: format!(
-                        r#"INSERT INTO "{app}"."{collection}" (id, body)
+                        r#"INSERT INTO "{alias}"."{collection}" (id, body)
                        VALUES ('note_1', 'hello')"#
                     ),
                     params: Vec::new(),
@@ -400,7 +408,7 @@ fn p6c_data_plane_reaches_the_app_file_on_demand() {
                     app,
                     crate::sql::compiler::CompiledQuery {
                         sql: format!(
-                            r#"SELECT body FROM "{app}"."{collection}" WHERE id = 'note_1'"#
+                            r#"SELECT body FROM "{alias}"."{collection}" WHERE id = 'note_1'"#
                         ),
                         params: Vec::new(),
                     },

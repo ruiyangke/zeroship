@@ -87,7 +87,7 @@ pub(crate) fn classify_pg_binding_session_setup(
             "binding role missing; the schema epoch this build was resolved at is retired"
         );
         return SessionSetupError::new(
-            SessionSetupDisposition::Preserve,
+            SessionSetupDisposition::ReResolve,
             DbError::config_hinted(SCHEMA_EPOCH_STALE, STALE_EPOCH_MESSAGE, STALE_EPOCH_HINT),
         );
     }
@@ -374,6 +374,36 @@ mod tests {
 
     /// A binding that narrows to nothing composes no role, so it can recognise
     /// none. Its control is a creator binding on the same message shape.
+    /// The taxonomy has three outcomes and they are pairwise distinct.
+    ///
+    /// Two are SQLSTATE classifications at the setup boundary; the third is
+    /// decided before a statement is sent, because a role name exists only
+    /// because a binding carries a database edge. Collapsing any pair would
+    /// make an unbound app indistinguishable from a rotation, or a revoked
+    /// binding indistinguishable from a retired epoch.
+    #[test]
+    fn the_three_setup_outcomes_are_pairwise_distinct() {
+        use zeroship_data_orm::error::{GRANT_REVOKED, SCHEMA_EPOCH_STALE};
+
+        let unbound = crate::backend::postgres::pg_session_sql::tx_session_setup_sql(
+            &DbBinding::platform(
+                "platform",
+                "fixture",
+                crate::sql::SchemaName::new("zeroship").expect("fixture schema"),
+            ),
+            crate::connection::SessionAuthority::PerBindingRole,
+        )
+        .expect_err("a narrowing connection needs a role to narrow to");
+
+        let codes = [GRANT_REVOKED, SCHEMA_EPOCH_STALE, unbound.code()];
+        for (first, second) in [(0, 1), (0, 2), (1, 2)] {
+            assert_ne!(
+                codes[first], codes[second],
+                "the setup taxonomy must not collapse two conditions onto one code"
+            );
+        }
+    }
+
     #[test]
     fn a_platform_binding_recognises_no_missing_role() {
         use compio_postgres::error::SqlState;

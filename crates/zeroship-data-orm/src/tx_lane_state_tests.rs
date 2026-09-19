@@ -292,8 +292,8 @@ fn sec1_pending_emits_drain_is_scoped_per_app() {
     ev_a.app_id = "app_a".to_string();
     let mut ev_b = dummy_event("messages");
     ev_b.app_id = "app_b".to_string();
-    lanes.push_pending_emit(&crate::tests::fixtures::harness_route("app_t"), ev_a);
-    lanes.push_pending_emit(&crate::tests::fixtures::harness_route("app_t"), ev_b);
+    lanes.push_pending_emit(&crate::tests::fixtures::harness_route("app_a"), ev_a);
+    lanes.push_pending_emit(&crate::tests::fixtures::harness_route("app_b"), ev_b);
 
     let drained_b = lanes.drain_pending_emits_for(&crate::tests::fixtures::harness_route("app_b"));
     assert_eq!(

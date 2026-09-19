@@ -293,7 +293,7 @@ mod routed_read_tests {
                 .expect("open sqlite backend"),
             );
             backend
-                .attach_app_file(app)
+                .attach_alias_file(&crate::tests::fixtures::harness_alias(app))
                 .await
                 .expect("attach the app file");
             backend

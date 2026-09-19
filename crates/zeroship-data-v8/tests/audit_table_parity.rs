@@ -42,9 +42,9 @@ fn every_declaration_of_the_audit_table_name_is_the_one_this_file_states() {
 #[test]
 fn the_sqlite_apply_host_creates_the_relation_the_writer_targets() {
     // `main` is the qualifier the dev-tier apply host passes: it opens the
-    // tenant's app file directly. The worker reaches the SAME physical table
-    // under the `<app_id>` ATTACH alias, which is why the generator takes the
-    // qualifier rather than baking one in.
+    // database file directly. The worker reaches the SAME physical table under
+    // an ATTACH alias that is the binding's schema, which is why the generator
+    // takes the qualifier rather than baking one in.
     let ddl = zeroship_migrate_sqlite::backend::audit_unmask_ddl("main");
     let create = ddl
         .first()

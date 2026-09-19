@@ -333,31 +333,73 @@ async fn a_revoked_binding_is_reported_as_a_terminal_grant_refusal() {
     drain().await;
 }
 
-/// An isolate built against a retired epoch is told its shape moved.
+/// An isolate left behind by a REAL epoch rotation is told its shape moved.
 ///
-/// The epoch is the last component of the role name, so a binding at an epoch
-/// the cluster never minted names a role that does not exist - `22023`, which
-/// is retryable and re-resolvable, not the terminal `42501` above. Its control
-/// is the same edge at the live epoch.
+/// The rotation is the production one: the reconciler mints `E+1` for the live
+/// binding and the previous epoch's role is reaped. An isolate still holding
+/// `E` then names a role that does not exist - `22023`, re-resolvable - rather
+/// than the terminal `42501` a revoke produces.
+///
+/// Three controls, because this arm could otherwise pass for three wrong
+/// reasons: the epoch reads before the rotation, the NEW epoch reads after it,
+/// and the retired role is gone from the catalog rather than merely unreachable.
 #[compio::test]
-async fn a_binding_at_an_epoch_the_cluster_never_minted_is_reported_as_stale() {
+async fn an_isolate_left_behind_by_an_epoch_rotation_is_reported_as_stale() {
     let postgres = postgres_fixture::Postgres::start();
     let fence = Fence::build(postgres.url()).await;
+    let retired = fence.mine();
 
-    // CONTROL: the live epoch reads.
+    // CONTROL 1: the live epoch reads before anything rotates.
     assert_eq!(
-        read_total(&fence.url, fence.mine())
+        read_total(&fence.url, retired.clone())
             .await
             .expect("the live epoch reaches the database"),
         42
     );
 
-    let stale = read_total(
-        &fence.url,
-        fence.binding_at(&fence.mine, &fence.my_edge, LIVE_EPOCH as u32 + 1),
+    // THE ROTATION. The reconciler mints the next epoch's role and grants the
+    // same two edges; the previous epoch's role is then reaped, which is what
+    // an apply does once every live binding has moved.
+    let next = LIVE_EPOCH + 1;
+    cluster::grant_binding(
+        &fence.admin,
+        &fence.my_edge,
+        &fence.mine,
+        DatabaseCapability::ReadWrite,
+        next,
     )
     .await
-    .expect_err("an epoch the cluster never minted must be refused");
+    .expect("the reconciler mints the next epoch's role");
+    let retired_role = database_derivation::binding_role_name(&fence.my_edge, LIVE_EPOCH as u32)
+        .expect("the fixture role name fits");
+    cluster::drop_binding_role(&fence.admin, &retired_role)
+        .await
+        .expect("the reconciler reaps the previous epoch's role");
+
+    // CONTROL 2: the role really is gone, so the refusal below is about the
+    // catalog rather than about a membership that merely changed.
+    let rows = fence
+        .admin
+        .query("SELECT 1 FROM pg_roles WHERE rolname = $1", &[&retired_role])
+        .await
+        .expect("read the role catalog");
+    assert!(rows.is_empty(), "the reap must remove the retired role");
+
+    // CONTROL 3: a binding resolved at the NEW epoch reads, so the refusal is
+    // about the isolate being behind rather than about the database being gone.
+    assert_eq!(
+        read_total(
+            &fence.url,
+            fence.binding_at(&fence.mine, &fence.my_edge, next as u32),
+        )
+        .await
+        .expect("a binding resolved at the new epoch reaches the database"),
+        42
+    );
+
+    let stale = read_total(&fence.url, retired)
+        .await
+        .expect_err("an isolate at the retired epoch must be refused");
     assert_eq!(
         stale.code(),
         SCHEMA_EPOCH_STALE,

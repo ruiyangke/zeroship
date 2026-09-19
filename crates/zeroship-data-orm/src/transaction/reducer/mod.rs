@@ -347,6 +347,12 @@ pub enum BeginOutcome {
     /// `BEGIN` and session setup both succeeded.
     Opened(BackendGeneration),
     /// Setup produced a creator-facing error that should survive unchanged.
+    ///
+    /// No driver path selects this: every classification the PostgreSQL setup
+    /// boundary makes is a re-resolution or a denial
+    /// (`crates/zeroship-data-orm/src/backend/postgres/pg_error.rs`). It is
+    /// reducer vocabulary with its own contract test, kept for a classifier
+    /// that needs an error carried through unchanged rather than acted on.
     SetupFailed,
     /// Setup says this attempt must re-resolve its authority.
     ReResolve,

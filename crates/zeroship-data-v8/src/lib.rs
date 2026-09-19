@@ -215,7 +215,7 @@ mod runtime_descriptor_binding_tests {
 
     fn plugin() -> std::sync::Arc<DbPlugin> {
         service::DbService::new(service::DbServiceConfig {
-            app_bindings: Default::default(),
+            app_bindings: crate::tests::fixtures::harness_app_bindings([APP]),
             project_keys: crate::tests::fixtures::project_keys(),
             connection: zeroship_data_orm::connection::ConnectionFactory::for_url(
                 "sqlite:descriptor-test.sqlite",
