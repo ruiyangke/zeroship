@@ -883,19 +883,25 @@ The SDK exports these workflow error classes:
 | `StalledError` | The platform reclaimed 4 consecutive dispatches of one frontier without the run reporting an outcome. | Not raised in your body: it is the platform's verdict. On a forward frontier it is recorded on the run, which rests `stalled`. On a rollback frontier it is recorded as `compensation.reason` and the run rests `failed` with the rollback abandoned. Terminal either way. No rollback. |
 | `ChildCancelledError` | A `step.call` child is cancelled before the parent join completes. | Yes around `step.call`; if uncaught, normal failure handling applies. |
 | `ChildTimeoutError` | A `step.call` child exceeds `ChildWorkflowOptions.timeout`. | Yes around `step.call`; if uncaught, normal failure handling applies. |
-| `LimitExceededError` | A platform cap is exceeded, such as an output over the blob cap. | Once recorded, yes. A cap the platform applies to a dispatch rather than to a step, such as `maxFrontier`, refuses the dispatch without recording anything and raises no class here. |
+| `LimitExceededError` | A platform cap is exceeded, such as an output over the blob cap. | Not raised in the body of the run that exceeded the cap: it is the platform's verdict, recorded on that run, which rests `failed`. The step whose output exceeded it is never journalled, so that body has no row to resume at. A cap the platform applies to a dispatch rather than to a step, such as `maxFrontier`, refuses the dispatch without recording anything and raises no class here. |
 | `NestedStepError` | A `step.*` method is called from inside a step body or compensator. | Treat as terminal misuse. Fix the body rather than handling it. |
 | `CompensableCarryError` | `step.continueAsNew` is requested while the current generation still has pending compensators. | No. It is the platform's verdict: the transition is refused, no successor generation is created, the pending compensators run, and the generation rests `failed` carrying this name. |
 | `InvalidScheduleError` | A schedule registration is invalid — a malformed or unsupported cron expression, an unknown IANA timezone, or a non-positive interval count or backfill. Thrown when the schedule is compiled at build/deploy time, never at fire time or on a run. Exported from `@zeroship/workflows/schedule`. | Yes, at registration time; catch it beside the `schedule(...)` call that raised it. |
 
 Except `InvalidScheduleError`, which is thrown at build time, every class above
-names a condition the platform records on a run or on a step. The control
-operations an app handler calls, `start` on a workflow and `status`, `signal`,
-`pause`, `resume`, `cancel`, `restart` and `readStepOutput` on a `WorkflowRun`,
-never enter the journal, so they never carry one of those names. They reject
-through a different path with a stable failure shape: every refusal the engine
-returns is a plain `Error` whose `code` is one of `workflow_invalid_request`,
-`workflow_not_found`, `workflow_conflict`, `workflow_unavailable`,
+names a condition the platform records on a run or on a step. A class recorded
+on a run is that run's terminal verdict, not something its own body is resumed
+to catch; read it off `run.status()`. That verdict still reaches a body one way:
+a parent that joined the run with `step.call` is handed the run's recorded error
+at that join, so the parent's next dispatch throws it out of `await
+step.call(...)`, and a `catch` there matches whatever class the recorded `type`
+names. The control operations an app handler calls, `start` on a workflow and
+`status`, `signal`, `pause`, `resume`, `cancel`, `restart` and `readStepOutput`
+on a `WorkflowRun`, never enter the journal, so they never carry one of those
+names. They reject through a different path with a stable failure shape: every
+refusal the engine returns is a plain `Error` whose `code` is one of
+`workflow_invalid_request`, `workflow_not_found`,
+`workflow_conflict`, `workflow_unavailable`,
 `workflow_timeout`, `workflow_resource_exhausted`,
 `workflow_payload_too_large`, `workflow_permission_denied`,
 `workflow_unauthenticated`, `workflow_ingress_fenced` or
@@ -939,6 +945,10 @@ The same holds for an error a body throws itself: `throw new PermanentError(...)
 is caught as `e instanceof PermanentError` after the round trip. Because the
 match is on the recorded name, any error carrying that name matches, including
 one the runtime rebuilt as a plain `Error`.
+
+A terminal error read off `run.status()` is the recorded JSON itself, not an
+`Error`, so no class matches it however it is named. Branch on `error.type`
+there.
 
 The trailing `throw e` is required, not a stylistic flourish. The platform stops
 a body mid-flight by throwing through it: a suspension at the step the run is
