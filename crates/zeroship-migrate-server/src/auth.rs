@@ -176,11 +176,10 @@ struct VerifiedSeed {
 ///
 /// # It reads the ladder rather than the word "owner"
 ///
-/// `zeroship.app_members` had exactly one privileged role and this asked for it
-/// by name. Organization authority is two integers on a closed ladder, so the
-/// question is now "does the caller's rank reach the owner rank" - which stays
-/// true if a migration ever moves `owner` up or down, and which a hardcoded
-/// number would not.
+/// Organization authority is two integers on a closed ladder, so the question
+/// is "does the caller's rank reach the owner rank" - which stays true if a
+/// migration ever moves `owner` up or down, and which a hardcoded number would
+/// not.
 ///
 /// # There is no per-project narrowing here, and that is deliberate
 ///

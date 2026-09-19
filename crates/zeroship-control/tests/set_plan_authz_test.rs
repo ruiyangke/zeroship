@@ -140,13 +140,10 @@ impl Caller {
     }
 }
 
-/// Issue a platform OAuth bearer for `user_id` carrying `scope`. Optionally
-/// grant a `platform_admin_roles` role (for the operator path).
 /// Issue a platform OAuth bearer for `user_id` carrying `scope`.
 ///
-/// It used to take an optional platform role and seed a `platform_admin_roles`
-/// row for the operator paths. That table and those roles are deleted, so every
-/// principal this mints is an ordinary creator.
+/// Every principal this mints is an ordinary creator: there is no platform
+/// role to grant.
 async fn issue_bearer(state: &AppState, user_id: &UserId, scope: &str) -> Caller {
     let _ = state;
     Caller {
@@ -157,13 +154,11 @@ async fn issue_bearer(state: &AppState, user_id: &UserId, scope: &str) -> Caller
 
 // The scope vocabulary is resource-blind: a scope always lowers to
 // `Resource::Any`, so a per-app and a fleet-wide BillingWrite check carry the
-// SAME scope string, "billing:write". The app_owner-vs-operator distinction
-// below is carried entirely by the static Cedar policy: the app_owner path is
-// allowed because
-// the creator's real `app_members` ownership row grants BillingWrite on their
-// OWN app (`set_plan`'s per-app gate), while the operator path additionally
-// needs a `platform_admin_roles` row (role "billing") for the fleet-wide
-// `Resource::Any` grant.
+// SAME scope string, "billing:write". The distinction below is carried
+// entirely by the static Cedar policy and the caller's live seats: the
+// creator's organization seat, narrowed by the app's project, grants
+// BillingWrite on their OWN app (`set_plan`'s per-app gate), while a caller
+// seated nowhere near it is refused whatever scope their token carries.
 
 /// Seed a plan with a given `assignable_by_creator` flag. Mints a fresh id.
 async fn seed_plan(catalog: &PlanCatalog, name: &str, assignable: bool) -> Plan {
@@ -229,7 +224,8 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
     // landed there legitimately).
     let start = seed_plan(&catalog, "start-tier", true).await;
 
-    // The creator owns an app (create_app writes the owner app_members row).
+    // The creator owns an app (create_app seats them as owner of its
+    // organization).
     let owner = make_user(&pg, "creator").await;
     let app = fx
         .state

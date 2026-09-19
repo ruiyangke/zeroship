@@ -340,13 +340,13 @@ impl Registry {
     /// Create a new application inside `project_id`. Returns the created
     /// `AppRecord`.
     ///
-    /// # No membership row is written here any more
+    /// # No membership row is written here
     ///
-    /// `zeroship.app_members` is deleted. An app carries no membership of its
-    /// own: authority over it is the caller's ORGANIZATION seat, narrowed by
-    /// the project the app sits in, and `apps.project_id -> projects.
-    /// organization_id` is the only path between the two. Writing an app-level
-    /// row would be writing a second answer to a question that now has one.
+    /// An app carries no membership of its own: authority over it is the
+    /// caller's ORGANIZATION seat, narrowed by the project the app sits in, and
+    /// `apps.project_id -> projects.organization_id` is the only path between
+    /// the two. An app-level row would be a second answer to a question that
+    /// has one.
     ///
     /// # The rank predicate is in the INSERT
     ///

@@ -541,7 +541,7 @@ table("orders").constraint("orders_fk").validate();   // PG-only: validate a NOT
 Select with `.index(name)`; `.add({...})` takes target elements plus modifiers. `IndexRef.add` accepts the full PG-first surface: `on`/`unique`/`ifNotExists`/`schema`, `using`, `where`, `include`, `with`, `only`, `nullsNotDistinct`, and per-element `order`/`opclass`/`collation`/`nulls`. Vendor options stay fail-closed at validate/render time on targets without a native realization.
 
 ```ts
-table("app_members").index("app_members_user_idx").add({ on: ["user_id"] });
+table("organization_members").index("organization_members_user_idx").add({ on: ["user_id"] });
 table("users").index("users_email_uq").add({ on: ["email"], unique: true });
 table("posts").index("posts_created_desc").add({ on: [{ column: "created_at", order: "desc" }] });  // only "desc" serialized
 table("users").index("users_lower_email").add({ on: [{ expr: (col) => col("email").lower() }] });
@@ -1603,10 +1603,10 @@ SQL/Flyway/Liquibase, no committed `.ir.json`):
 
 | File | default-exported `name` | Contents |
 | --- | --- | --- |
-| `20260702000100_schema_roles_extensions.ts` | `schema_roles_extensions` | `zeroship` schema, `citext` ext, 5 roles, 13 domains, 1 sequence |
-| `20260702000200_control_tables.ts` | `control_tables` | 19 control-plane tables (`apps`, `app_members`, `app_secrets`, `app_schema_applies`, …) |
-| `20260702000300_auth_oauth_tables.ts` | `auth_oauth_tables` | 28 auth/OIDC tables (`users`, `oauth_clients`, `gateway_sessions`, `signing_keys`, …) |
-| `20260702000400_billing_metering_invoice_tables.ts` | `billing_metering_invoice_tables` | 31 billing tables (`invoices`, `invoice_lines`, `credit_ledger`, `plans`, …) |
+| `20260702000100_schema_roles_extensions.ts` | `schema_roles_extensions` | `zeroship` schema, `citext` ext, 6 roles, 14 domains, 1 sequence |
+| `20260702000200_control_tables.ts` | `control_tables` | 11 control-plane tables (`apps`, `app_secrets`, `app_schema_applies`, `payouts`, …) |
+| `20260702000300_auth_oauth_tables.ts` | `auth_oauth_tables` | 26 auth/OIDC tables (`users`, `oauth_clients`, `gateway_sessions`, `signing_keys`, …) |
+| `20260702000400_billing_metering_invoice_tables.ts` | `billing_metering_invoice_tables` | 24 billing tables (`invoices`, `invoice_lines`, `credit_ledger`, `plans`, …) |
 | `20260702000600_constraints_indexes_fks.ts` | `constraints_indexes_fks` | uniques, plain + partial indexes, FKs across all tables |
 | `20260702000700_functions_triggers_comments.ts` | `functions_triggers_comments` | 15 `createFunction` plpgsql triggers, trigger wiring, comments |
 | `20260702000800_policies_rls.ts` | `policies_rls` | `setRls` + tenant-isolation `policy()` on 9 tables |
@@ -1626,7 +1626,7 @@ grant({ privileges: ["usage"], on: { kind: "schema", names: ["zeroship"] }, to: 
 
 A confined creator writes `table("posts").create({…})` with **no** `{schema}` — their unqualified ops resolve against a default project schema at apply time (and `gen-types` folds them under the neutral literal `"public"`, [§5.3](#5-authoring-declarative-desired-state--the-fold)). The Platform corpus spans the shared `zeroship` schema and must name it explicitly on every op. The Platform profile is the only profile that permits `cross_schema` references and schema/extension/role/grant DDL at all ([§10.5](#10-security-first-design)).
 
-The bootstrap file `schema_roles_extensions.ts` is the infrastructure floor: the `zeroship` schema, `citext`, 5 roles (service roles `zeroship_{auth,control,gateway,worker,app}` — the first two `bypassRls: true`), 13 `domain`s acting as platform-wide enums (`spend_state ∈ {allow,warn,degrade,block}`, `invoice_status`, `billing_period`), and the `audit_events_id_seq` sequence. The corpus uses one `table(...)` handle for portable and PG-vendor table operations alike: partial indexes, RLS, regex CHECKs, and constraint validation all stay capability/dialect-gated by the engine. Where the DSL cannot express a construct, the corpus uses the gated `raw({ sql, reason })` escape — e.g. a `CREATE TRIGGER … BEFORE UPDATE OF sector_identifier …` the trigger DSL cannot express (`functions_triggers_comments.ts:27`). `raw`/`raw_view_body` are capabilities *only Platform enables*. The trigger-heavy file encodes financial-integrity invariants in plpgsql (append-only audit tables, immutable ledgers, controlled state machines); RLS tenant isolation keys off `current_setting('zeroship.tenant_app', true)::uuid`.
+The bootstrap file `schema_roles_extensions.ts` is the infrastructure floor: the `zeroship` schema, `citext`, 6 roles (service roles `zeroship_{auth,control,gateway,worker,app,cdc}` — the first two `bypassRls: true`), 14 `domain`s acting as platform-wide enums (`spend_state ∈ {allow,warn,degrade,block}`, `invoice_status`, `billing_period`), and the `audit_events_id_seq` sequence. The corpus uses one `table(...)` handle for portable and PG-vendor table operations alike: partial indexes, RLS, regex CHECKs, and constraint validation all stay capability/dialect-gated by the engine. Where the DSL cannot express a construct, the corpus uses the gated `raw({ sql, reason })` escape — e.g. the `app_oauth_clients_sector_identifier_immutable` trigger (`CREATE TRIGGER … BEFORE UPDATE OF sector_identifier …`, `functions_triggers_comments.ts`) the trigger DSL cannot express. `raw`/`raw_view_body` are capabilities *only Platform enables*. The trigger-heavy file encodes financial-integrity invariants in plpgsql (append-only audit tables, immutable ledgers, controlled state machines); RLS tenant isolation keys off `current_setting('zeroship.tenant_app', true)::uuid`.
 
 ### 11.3 Policy-defined table shape
 
