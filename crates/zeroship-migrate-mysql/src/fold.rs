@@ -12,7 +12,7 @@ use zeroship_migrate_backend::snapshot::{
     ColumnSnapshot, PartitionSnapshot, SequenceSnapshot, TableSnapshot, ViewSnapshot,
 };
 use zeroship_migrate_ir::expr::{Expr, SynthFn};
-use zeroship_migrate_ir::ir::{ColType, ValueFormat};
+use zeroship_migrate_ir::ir::ColType;
 use zeroship_migrate_ir::precondition::PreconditionCheck;
 
 #[derive(Debug)]
@@ -355,16 +355,6 @@ impl CatalogFoldPolicy for MysqlCatalogFoldPolicy {
     ) -> Option<FoldDatabaseFeature> {
         (!is_reference && matches!(ty, ColType::Uuid))
             .then_some(FoldDatabaseFeature::UuidValidation)
-    }
-
-    fn database_requirement_for_value_format(
-        &self,
-        value_format: &ValueFormat,
-    ) -> Option<FoldDatabaseFeature> {
-        Some(match value_format {
-            ValueFormat::TypeId { .. } => FoldDatabaseFeature::TypeIdValidation,
-            ValueFormat::Ulid => FoldDatabaseFeature::UlidValidation,
-        })
     }
 
     fn database_requirement_for_expr(&self, expr: &Expr) -> Option<FoldDatabaseFeature> {

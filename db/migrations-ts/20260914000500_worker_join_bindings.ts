@@ -22,9 +22,9 @@ export default {
     // not exist is refused by the database rather than by whoever reads it.
     table("worker_join_signer_zones", { schema: "zeroship" }).create({
       columns: {
-        id: t.bigInt().notNull().identity(),
-        signer_id: t.text().notNull(),
-        execution_zone_id: t.text().notNull(),
+        id: t.bigInt().required().identity(),
+        signer_id: t.text().required(),
+        execution_zone_id: t.text().required(),
       },
       primaryKey: ["id"],
     });
@@ -73,15 +73,15 @@ export default {
     // before they reach here.
     table("worker_join_tokens", { schema: "zeroship" }).create({
       columns: {
-        id: t.bigInt().notNull().identity(),
-        token_key: t.text().notNull(),
-        uses_allowed: t.int().notNull(),
-        uses_consumed: t.int().notNull(),
+        id: t.bigInt().required().identity(),
+        token_key: t.text().required(),
+        uses_allowed: t.int().required(),
+        uses_consumed: t.int().required(),
         // `exp` plus the verifier's skew tolerance: the instant after which no
         // presentation of this token can be accepted, and therefore the instant
         // its accounting may be reclaimed. Deleting a row before then would make
         // a spent token spendable again while it is still valid.
-        expires_at: t.timestamp().notNull(),
+        expires_at: t.timestamp().required(),
       },
       primaryKey: ["id"],
     });
@@ -99,13 +99,13 @@ export default {
 
     table("worker_join_token_claims", { schema: "zeroship" }).create({
       columns: {
-        id: t.bigInt().notNull().identity(),
-        token_key: t.text().notNull(),
+        id: t.bigInt().required().identity(),
+        token_key: t.text().required(),
         // The RFC 7638 thumbprint of the joining public key, not the key
         // itself: the claim exists to recognise a retry, and a thumbprint is
         // bounded, printable and already computed by the verifier.
-        joining_key: t.text().notNull(),
-        expires_at: t.timestamp().notNull(),
+        joining_key: t.text().required(),
+        expires_at: t.timestamp().required(),
       },
       primaryKey: ["id"],
     });

@@ -62,7 +62,7 @@ function creates(index: number): NamedMigration {
     default: {
       schema() {
         table(`t${index}`).create({
-          columns: { id: t.int().notNull() },
+          columns: { id: t.int().required() },
           primaryKey: ["id"],
         });
       },

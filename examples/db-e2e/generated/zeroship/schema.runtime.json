@@ -22,7 +22,7 @@
           "writable": false
         },
         "created_at": {
-          "type": "date",
+          "type": "timestamp",
           "required": true,
           "readable": true,
           "filterable": true,
@@ -38,7 +38,7 @@
           "writable": false
         },
         "updated_at": {
-          "type": "date",
+          "type": "timestamp",
           "required": true,
           "readable": true,
           "filterable": true,
@@ -103,7 +103,7 @@
           "writable": false
         },
         "deleted_at": {
-          "type": "date",
+          "type": "timestamp",
           "readable": true,
           "filterable": true,
           "sortable": true,
@@ -254,7 +254,7 @@
           "writable": false
         },
         "created_at": {
-          "type": "date",
+          "type": "timestamp",
           "required": true,
           "readable": true,
           "filterable": true,
@@ -270,7 +270,7 @@
           "writable": false
         },
         "updated_at": {
-          "type": "date",
+          "type": "timestamp",
           "required": true,
           "readable": true,
           "filterable": true,
@@ -332,10 +332,11 @@
             "by": "increment(1)",
             "on": "write"
           },
-          "writable": false
+          "writable": false,
+          "concurrency": true
         },
         "deleted_at": {
-          "type": "date",
+          "type": "timestamp",
           "readable": true,
           "filterable": true,
           "sortable": true,
@@ -347,7 +348,8 @@
             "by": "now",
             "on": "delete"
           },
-          "writable": false
+          "writable": false,
+          "softDelete": true
         },
         "workspaceId": {
           "type": "string",
@@ -456,8 +458,8 @@
         }
       },
       "options": {
-        "softDelete": false,
-        "versioning": false,
+        "softDelete": true,
+        "versioning": true,
         "strictness": "strict"
       },
       "indexes": [
@@ -516,7 +518,7 @@
           "writable": false
         },
         "created_at": {
-          "type": "date",
+          "type": "timestamp",
           "required": true,
           "readable": true,
           "filterable": true,
@@ -532,7 +534,7 @@
           "writable": false
         },
         "updated_at": {
-          "type": "date",
+          "type": "timestamp",
           "required": true,
           "readable": true,
           "filterable": true,
@@ -597,7 +599,7 @@
           "writable": false
         },
         "deleted_at": {
-          "type": "date",
+          "type": "timestamp",
           "readable": true,
           "filterable": true,
           "sortable": true,
@@ -777,7 +779,7 @@
           "writable": false
         },
         "created_at": {
-          "type": "date",
+          "type": "timestamp",
           "required": true,
           "readable": true,
           "filterable": true,
@@ -793,7 +795,7 @@
           "writable": false
         },
         "updated_at": {
-          "type": "date",
+          "type": "timestamp",
           "required": true,
           "readable": true,
           "filterable": true,
@@ -858,7 +860,7 @@
           "writable": false
         },
         "deleted_at": {
-          "type": "date",
+          "type": "timestamp",
           "readable": true,
           "filterable": true,
           "sortable": true,

@@ -94,7 +94,7 @@ export const name = "a";
 export default {
   schema() {
     table("${TABLE}").create({
-      columns: { id: t.bigInt().notNull(), n: t.int().notNull() },
+      columns: { id: t.bigInt().required(), n: t.int().required() },
       primaryKey: ["id"],
     });
   },

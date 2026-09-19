@@ -12,7 +12,7 @@ use zeroship_migrate_backend::snapshot::{
 };
 use zeroship_migrate_backend::stored_ddl::StoredDdl;
 use zeroship_migrate_ir::expr::Expr;
-use zeroship_migrate_ir::ir::{ColType, ValueFormat};
+use zeroship_migrate_ir::ir::ColType;
 use zeroship_migrate_ir::precondition::PreconditionCheck;
 
 #[derive(Debug)]
@@ -195,7 +195,7 @@ impl CatalogFoldPolicy for SqliteCatalogFoldPolicy {
             .as_ref()
             .and_then(|def| def.get("type"))
             .and_then(serde_json::Value::as_str)
-            .filter(|ty| matches!(*ty, "smallInt" | "int" | "integer" | "bigInt"))
+            .filter(|ty| matches!(*ty, "int" | "integer" | "bigInt"))
         {
             return integer_token;
         }
@@ -307,13 +307,6 @@ impl CatalogFoldPolicy for SqliteCatalogFoldPolicy {
         &self,
         _ty: &ColType,
         _is_reference: bool,
-    ) -> Option<FoldDatabaseFeature> {
-        None
-    }
-
-    fn database_requirement_for_value_format(
-        &self,
-        _value_format: &ValueFormat,
     ) -> Option<FoldDatabaseFeature> {
         None
     }

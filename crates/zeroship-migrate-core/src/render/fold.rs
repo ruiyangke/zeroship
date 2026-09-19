@@ -104,13 +104,12 @@ use crate::render::lower::{
     ir_column_to_field, ir_column_to_field_resolved_create, render_container_default_for_data_type,
     render_domain_check, render_exclusion_constraint_body, render_ir_default,
     render_ir_default_for_type, render_json_default_for_data_type, resolve_domain_base_type,
-    resolve_encrypted_inner_domain, resolve_encrypted_inner_domain_in_column, IrLowerError,
-    NamedTypeRegistry,
+    resolve_encrypted_inner_domain_in_column, IrLowerError, NamedTypeRegistry,
 };
 use crate::render::renderer::Capability;
 use crate::render::value_format::{
     authored_id_default, authored_text_id_default, authored_uuid_id_default, catalog_id_default,
-    catalog_uuid_id_default, column_metadata as value_format_column_metadata, uuid_column_metadata,
+    catalog_uuid_id_default, uuid_column_metadata,
 };
 #[cfg(test)]
 use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
@@ -1144,8 +1143,7 @@ fn apply_fold_alter_primary_key(
             .find(|candidate| candidate.name == *column)
         {
             folded.identity = None;
-            if folded.value_format.is_none()
-                && !folded.data_type.eq_ignore_ascii_case("uuid")
+            if !folded.data_type.eq_ignore_ascii_case("uuid")
                 && !matches!(
                     folded.id_default,
                     Some(crate::model::snapshot::IdDefaultSnapshot::Nextval(_))
@@ -1515,13 +1513,6 @@ impl<'a> CatalogFold<'a> {
                 )?;
                 apply_fold_uuid_metadata(vendors, columns, &mut snap, dialect, effective_schema)?;
                 apply_fold_collation_metadata(vendors, columns, &mut snap, dialect)?;
-                apply_fold_value_format_metadata(
-                    vendors,
-                    columns,
-                    &mut snap,
-                    dialect,
-                    effective_schema,
-                )?;
                 apply_fold_id_default_metadata(
                     vendors,
                     columns,
@@ -1915,10 +1906,10 @@ impl<'a> CatalogFold<'a> {
                 ty,
                 nullable,
                 default,
-                value_format,
                 vector_metric,
                 case_sensitive,
                 mask,
+                encrypted,
                 generated,
                 identity,
                 ..
@@ -1931,13 +1922,29 @@ impl<'a> CatalogFold<'a> {
                     });
                 }
                 // Include any protected raw column emitted for the added field.
-                let resolved_ty = resolve_encrypted_inner_domain(ty, named_types);
-                let ty = resolved_ty.as_ref().unwrap_or(ty);
+                let mut source_col = IrColumn {
+                    encrypted: *encrypted,
+                    name: column.clone(),
+                    ty: ty.clone(),
+                    nullable: *nullable,
+                    default: default.clone(),
+                    unique: None,
+                    references: None,
+                    id_prefix: None,
+                    collation: None,
+                    vector_metric: *vector_metric,
+                    case_sensitive: *case_sensitive,
+                    mask: *mask,
+                    generated: generated.clone(),
+                    identity: *identity,
+                };
+                source_col = resolve_encrypted_inner_domain_in_column(&source_col, named_types);
                 let (col, masked_sibling) = add_column_snapshot(
                     vendors,
                     table,
                     column,
-                    ty,
+                    &source_col.ty,
+                    source_col.encrypted,
                     *nullable,
                     default.as_ref(),
                     *vector_metric,
@@ -1949,22 +1956,6 @@ impl<'a> CatalogFold<'a> {
                     dialect,
                     effective,
                 )?;
-                let source_col = IrColumn {
-                    name: column.clone(),
-                    ty: ty.clone(),
-                    nullable: *nullable,
-                    default: default.clone(),
-                    unique: None,
-                    value_format: value_format.clone(),
-                    references: None,
-                    id_prefix: None,
-                    collation: None,
-                    vector_metric: *vector_metric,
-                    case_sensitive: *case_sensitive,
-                    mask: *mask,
-                    generated: generated.clone(),
-                    identity: *identity,
-                };
                 let mut col = col;
                 apply_fold_named_type_column_metadata(
                     vendors,
@@ -1977,13 +1968,6 @@ impl<'a> CatalogFold<'a> {
                     effective,
                 )?;
                 apply_fold_uuid_column_metadata(
-                    vendors,
-                    &source_col,
-                    &mut col,
-                    dialect,
-                    project_schema,
-                )?;
-                apply_fold_value_format_column_metadata(
                     vendors,
                     &source_col,
                     &mut col,
@@ -2400,6 +2384,7 @@ impl<'a> CatalogFold<'a> {
                     None,
                     None,
                     None,
+                    None,
                     project_schema,
                     dialect,
                     effective,
@@ -2426,12 +2411,12 @@ impl<'a> CatalogFold<'a> {
                         }
                         _ => {
                             let source_col = IrColumn {
+                                encrypted: None,
                                 name: column.clone(),
                                 ty: to_type.clone(),
                                 nullable: None,
                                 default: None,
                                 unique: None,
-                                value_format: None,
                                 references: None,
                                 id_prefix: None,
                                 collation: None,
@@ -2474,46 +2459,6 @@ impl<'a> CatalogFold<'a> {
                          fail-closed rather than fold a stale encryption contract)",
                     ));
                 }
-                // FAIL-CLOSED on a VALUE-FORMAT column, for the same reason and by the
-                // same test as the sentinel refusal directly above: the apply path
-                // emits ONLY `ALTER COLUMN ... TYPE`, never the `DROP CONSTRAINT` a
-                // TypeID/ULID format contract would need, so the LIVE DB keeps a
-                // contract this side can no longer describe either way.
-                //
-                // Neither outcome of the retype is foldable:
-                //
-                //   * To any NON-text target PostgreSQL REFUSES THE ALTER. It re-parses
-                //     the format CHECK against the new type and dies (`integer`, `bigint`
-                //     and `uuid` all fail); `bytea` fails because collations are not
-                //     supported by it. The plan clears validate AND preview and then dies
-                //     mid-deploy.
-                //
-                //   * To a TEXT-family target (`varchar(N)`, `char(N)`, `text`) the
-                //     ALTER SUCCEEDS and the CHECK SURVIVES - but PostgreSQL re-parses
-                //     it with casts injected (`octet_length((v)::text)`), a spelling
-                //     `render::value_format::recover_format_check` does not recognise.
-                //     So introspection never projects it back onto `value_format`, and
-                //     structural drift reports differences that do not exist on a schema
-                //     that was exactly what had been deployed. CLEARING `value_format`
-                //     does not fix that: the engine-owned CHECK is still in the database
-                //     and still unaccounted for.
-                //
-                // So neither keeping nor clearing is truthful. Until the apply path can
-                // drop the format CHECK alongside the type change, refuse. Detection is
-                // SOURCE-ONLY, unlike the sentinel test: `Op::SetColumnType` carries no
-                // `valueFormat` slot, so a target can never acquire one - the assertion
-                // is `new_col.value_format.is_none()`, checked here rather than assumed.
-                debug_assert!(new_col.value_format.is_none());
-                if col.value_format.is_some() {
-                    return Err(FoldError::Unsupported(
-                        "setColumnType on a column carrying a value format \
-                         (the apply path cannot drop the TypeID/ULID format CHECK; \
-                         a target catalog either refuses the ALTER outright for a non-text \
-                         target or keeps an unrecognisable rewritten CHECK for a text \
-                         one; \
-                         fail-closed rather than fold a stale format contract)",
-                    ));
-                }
                 let source_was_native_uuid =
                     fold_policy(vendors, dialect).is_native_uuid_type(&col.data_type);
                 col.data_type = new_col.data_type;
@@ -2542,18 +2487,13 @@ impl<'a> CatalogFold<'a> {
                 //     the shape that makes a SQLite rename undeployable.
                 //   * `collation` - DRIFT-COMPARED, and PostgreSQL RESETS it: a
                 //     `text COLLATE "C" -> character varying(40)` retype leaves the
-                //     catalog reporting the DEFAULT collation, never `C`. BELT-AND-BRACES
-                //     rather than the fix, and said plainly: there are TWO
-                //     fold-side writers of this field - `value_format`'s
-                //     `bytewise_column_metadata` and the `IrColumn::collation`
-                //     facet's `apply_fold_collation_metadata`, which calls the same
-                //     function (SQLite's `NOCASE` rides on `case_sensitive`). Both
-                //     write the SAME bytewise identity, so re-deriving the field from
-                //     the TARGET type still clears whichever of them put it there, and
-                //     the refusal above still closes the only route a stale collation
-                //     had. A retype AWAY from a collated column therefore drops the
-                //     collation, which is what PostgreSQL itself does; the column must
-                //     re-declare it, and drift says so rather than staying silent.
+                //     catalog reporting the DEFAULT collation, never `C`. Re-deriving
+                //     the field from the TARGET type clears whatever put it there (the
+                //     `IrColumn::collation` facet's `apply_fold_collation_metadata`,
+                //     which calls `bytewise_column_metadata`), so a retype AWAY from a
+                //     collated column drops the collation, which is what PostgreSQL
+                //     itself does; the column must re-declare it, and drift says so
+                //     rather than staying silent.
                 //   * `case_sensitive` - DRIFT-COMPARED. On PostgreSQL
                 //     case-insensitivity IS the `citext` type, so the retype destroys
                 //     it: a `citext -> character varying(40)` retype reports
@@ -2658,11 +2598,8 @@ impl<'a> CatalogFold<'a> {
                     // `varchar_len_from_data_type` strips exactly that prefix). That
                     // asymmetry is deliberate and load-bearing on the fact that a
                     // BOUNDED string column never reaches here: `tracks_id_default`
-                    // needs `id_default` set, which only the value-format path does,
-                    // and both value-format builders declare base type `text`
-                    // (`ids.typeId` and `ids.ulid` in the authoring DSL). `valueFormat`
-                    // has no public setter, so it cannot be attached to a `t.string()`.
-                    // The other route in, `identity`/`nextval`, is integer-typed.
+                    // needs `id_default` set, which only the identity/nextval path
+                    // does, and that path is integer-typed.
                     //
                     // Widening the list would therefore add an arm nothing can select.
                     // If a bounded string ever DOES gain an ID default, this dispatch
@@ -3591,6 +3528,7 @@ fn add_column_snapshot(
     table: &str,
     column: &str,
     ty: &ColType,
+    encrypted: Option<bool>,
     nullable: Option<bool>,
     default: Option<&IrDefault>,
     vector_metric: Option<crate::model::ir::VectorMetric>,
@@ -3608,14 +3546,15 @@ fn add_column_snapshot(
         ));
     }
     let field = ir_column_to_field(&IrColumn {
+        encrypted,
         name: column.to_string(),
         ty: ty.clone(),
         nullable,
         default: default.cloned(),
         // `id_prefix` stays `None` (an added column is never the system PK);
-        // the vector metric + standalone mask ARE threaded so the snapshot renders them.
+        // the vector metric, standalone mask and encrypted facet ARE threaded so
+        // the snapshot renders them.
         unique: None,
-        value_format: None,
         references: None,
         id_prefix: None,
         collation: None,
@@ -3809,6 +3748,9 @@ fn apply_fold_named_type_metadata(
         if !matches!(source.ty, ColType::Enum { .. } | ColType::Domain { .. }) {
             continue;
         }
+        if source.encrypted == Some(true) && matches!(source.ty, ColType::Domain { .. }) {
+            continue;
+        }
         let col = snap
             .columns
             .iter_mut()
@@ -3862,27 +3804,6 @@ fn apply_fold_collation_metadata(
             crate::render::value_format::bytewise_column_metadata(vendors, &rendered, dialect);
         col.ddl_type_override = Some(ddl_type);
         col.collation = collation;
-    }
-    Ok(())
-}
-
-fn apply_fold_value_format_metadata(
-    vendors: VendorSet,
-    columns: &[IrColumn],
-    snap: &mut TableSnapshot,
-    dialect: &DialectId,
-    project_schema: &str,
-) -> Result<(), FoldError> {
-    for source in columns {
-        if source.value_format.is_none() {
-            continue;
-        }
-        let col = snap
-            .columns
-            .iter_mut()
-            .find(|col| col.name == source.name)
-            .ok_or(FoldError::Unsupported("value-format column folded away"))?;
-        apply_fold_value_format_column_metadata(vendors, source, col, dialect, project_schema)?;
     }
     Ok(())
 }
@@ -3972,34 +3893,6 @@ fn apply_fold_uuid_column_metadata(
     Ok(())
 }
 
-fn apply_fold_value_format_column_metadata(
-    vendors: VendorSet,
-    source: &IrColumn,
-    col: &mut ColumnSnapshot,
-    dialect: &DialectId,
-    project_schema: &str,
-) -> Result<(), FoldError> {
-    let Some(value_format) = &source.value_format else {
-        return Ok(());
-    };
-    let metadata = value_format_column_metadata(vendors, &source.name, value_format, dialect)
-        .map_err(|error| FoldError::Shape(DeclarativeError::Invalid(error)))?;
-    col.collation = metadata.collation;
-    col.ddl_type_override = Some(metadata.ddl_type);
-    col.id_default = Some(authored_text_id_default(
-        vendors,
-        source.default.as_ref(),
-        col.default.as_deref(),
-        dialect,
-        Some(project_schema),
-    ));
-    if source.references.is_none() {
-        col.value_format = Some(value_format.clone());
-        col.inline_checks.push(metadata.inline_check);
-    }
-    Ok(())
-}
-
 #[allow(clippy::too_many_arguments)]
 fn apply_fold_named_type_column_metadata(
     vendors: VendorSet,
@@ -4068,6 +3961,7 @@ fn apply_fold_named_type_column_metadata(
                 table,
                 &source.name,
                 &def.as_type,
+                source.encrypted,
                 source.nullable,
                 source.default.as_ref(),
                 source.vector_metric,
@@ -5014,12 +4908,13 @@ fn recover_fk_policy(
 /// SQLite and MySQL INLINE the value list into the column's storage, so their folds
 /// already fail closed before reaching here.
 ///
-/// # Not through `ColType::Encrypted`
+/// # Not for an encrypted column
 ///
-/// Deliberately no recursion into the wrapped type. An encrypted column stores
-/// ciphertext; a membership over the plaintext domain is not a contract its stored
-/// bytes satisfy, and `field_check_constraints` would turn it into a CHECK no row
-/// could pass. `ColType::Domain` is excluded for its own reason: a domain's
+/// No recursion into the plaintext type. An encrypted column stores ciphertext; a
+/// membership over the plaintext domain is not a contract its stored bytes satisfy, and
+/// `field_check_constraints` would turn it into a CHECK no row could pass. Encryption is
+/// a column facet rather than a type, so [`lift_named_type_facets`] skips this lift for
+/// an encrypted field. `ColType::Domain` is excluded for its own reason: a domain's
 /// constraint is an arbitrary predicate, not a closed value set, and `enum_values`
 /// asserts a closed set - and the domain's own defect is the TYPE TOKEN, which
 /// [`lift_named_domain_base_type`] fixes separately.
@@ -5095,13 +4990,13 @@ fn lift_named_enum_membership(
 /// than the contract, and `field_check_constraints` renders `enum_values` as a hard
 /// `CHECK (<col> IN (...))`.
 ///
-/// # Not through `ColType::Encrypted`
+/// # Not for an encrypted column
 ///
-/// No recursion into the wrapped type HERE: an encrypted column's inner domain is
-/// resolved UPSTREAM of the descriptor, on the `ColType` itself, by
-/// [`crate::render::lower::resolve_encrypted_inner_domain`] - so by the time a column
-/// reaches this lift its `Encrypted { of }` already names a base type and there is
-/// nothing left to lift. The catalog sentinel and runtime codec both derive from the
+/// No recursion into the plaintext type HERE: an encrypted column's domain is
+/// resolved UPSTREAM of the descriptor by
+/// [`crate::render::lower::resolve_encrypted_inner_domain_in_column`] - so by the time
+/// a column reaches this lift its `ty` already names a base type and there is nothing
+/// left to lift. The catalog sentinel and runtime codec both derive from the
 /// descriptor's logical type.
 fn lift_named_domain_base_type(
     field: &mut crate::render::declarative::FieldDescriptor,
@@ -5127,11 +5022,18 @@ fn lift_named_domain_base_type(
 /// The `id` token a policy-owned primary key carries is never at risk here: an injected
 /// column's type comes from `inject_column_to_ir`'s three-token lexicon
 /// (`text`/`timestamptz`/`integer`), which cannot spell a named type at all.
+///
+/// An ENCRYPTED field is skipped: its named type describes the CIPHERTEXT's plaintext,
+/// and neither a value-set membership nor a domain base rewrite applies to the stored
+/// bytes.
 fn lift_named_type_facets(
     field: &mut crate::render::declarative::FieldDescriptor,
     ty: &ColType,
     named_types: &NamedTypeRegistry,
 ) {
+    if field.encrypted == Some(true) {
+        return;
+    }
     lift_named_enum_membership(field, ty, named_types);
     lift_named_domain_base_type(field, ty, named_types);
 }
@@ -5182,10 +5084,7 @@ fn resolved_injected_column_matches(
         return false;
     }
     if actual.identity.is_some()
-        && matches!(
-            actual.ty,
-            ColType::SmallInt | ColType::Int | ColType::BigInt
-        )
+        && matches!(actual.ty, ColType::Int | ColType::BigInt)
     {
         return true;
     }
@@ -5331,7 +5230,6 @@ fn token_to_col_type(f: &crate::render::declarative::FieldDescriptor) -> Option<
                 _ => ColType::Text,
             },
             "int" | "integer" => ColType::Int,
-            "smallInt" => ColType::SmallInt,
             "bigInt" => ColType::BigInt,
             // `"number"` is a TWO-type token: `Double` and `Decimal { precision,
             // scale }` both spell it. The `precision` facet beside it is what tells
@@ -5345,10 +5243,9 @@ fn token_to_col_type(f: &crate::render::declarative::FieldDescriptor) -> Option<
                 },
                 (None, _) => ColType::Double,
             },
-            "real" => ColType::Real,
             "boolean" => ColType::Boolean,
             "json" | "object" | "array" => ColType::Json,
-            "date" | "timestamp" => ColType::Timestamp,
+            "timestamp" => ColType::Timestamp,
             "bytes" => ColType::Bytes,
             "inet" => ColType::Inet,
             "textArray" => ColType::TextArray,
@@ -5360,9 +5257,9 @@ fn token_to_col_type(f: &crate::render::declarative::FieldDescriptor) -> Option<
         })
     };
     match f.ty.as_str() {
-        // A legacy internal platform-ID descriptor represents the policy-owned
-        // `id` slot as a UUID carrier with an `id_prefix`.
-        "id" => Some(ColType::Uuid),
+        // A typed-id descriptor carries `id_prefix`; its storage is the bounded
+        // `string(36)` the `<prefix>_<26 base32>` value fits.
+        "id" => Some(ColType::String { length: 36 }),
         // A `ref` column carries the FK target on `references`.
         "ref" => f
             .references
@@ -5370,17 +5267,7 @@ fn token_to_col_type(f: &crate::render::declarative::FieldDescriptor) -> Option<
             .map(|references| ColType::Ref { references }),
         // A `vector(N)` column carries dims on `vector_dims`.
         "vector" => f.vector_dims.map(|d| ColType::Vector { vector: d as u32 }),
-        other => {
-            let base = inner(other)?;
-            // An encrypted column carries the `encrypted` facet PLUS the inner token
-            // as `ty`; wrap the inner ColType (the inverse of `col_type_to_token`'s
-            // `Encrypted{of}` -> inner token).
-            if f.encrypted == Some(true) {
-                Some(ColType::Encrypted { of: Box::new(base) })
-            } else {
-                Some(base)
-            }
-        }
+        other => inner(other),
     }
 }
 
@@ -5518,9 +5405,9 @@ fn facet_check_constraints(
 /// `createTable` ops a `Vec<CollectionDescriptor>` (the declarative authoring shape)
 /// generates, threading EVERY facet the SDK type inference consumes:
 ///
-/// - **type / ref / vector dims / encrypted** - onto the [`IrColumn`]'s [`ColType`]
+/// - **type / ref / vector dims** - onto the [`IrColumn`]'s [`ColType`]
 ///   (the inverse of [`col_type_to_token`](crate::render::lower));
-/// - **idPrefix / vectorMetric** - onto the carried [`IrColumn`] fields;
+/// - **idPrefix / vectorMetric / encrypted** - onto the carried [`IrColumn`] fields;
 /// - **required / unique** - onto `nullable` / `unique`;
 /// - **default** - onto `default` (a typed literal);
 /// - **enum / min / max** - as CHECK constraints in the closed-AST shapes
@@ -5573,7 +5460,7 @@ pub fn descriptors_to_create_ops(
             // Carry a STANDALONE mask onto the produced IrColumn so the
             // round-trip (descriptors -> ops -> fold) keeps it. The encrypted
             // auto-mask `{ full, pii }` is NOT carried - it is re-implied by the
-            // `ColType::Encrypted` carrier in `ir_column_to_field` (carrying it would
+            // `encrypted` facet in `ir_column_to_field` (carrying it would
             // double-emit). A descriptor whose mask IS the encrypted auto-mask on an
             // encrypted column is therefore dropped here (recovered downstream); a
             // standalone/non-default mask is carried.
@@ -5584,12 +5471,12 @@ pub fn descriptors_to_create_ops(
                 .map(|target| column_reference_for_field(&d.name, f, target))
                 .transpose()?;
             columns.push(IrColumn {
+                encrypted: f.encrypted,
                 name: f.name.clone(),
                 ty,
                 nullable,
                 default,
                 unique: if f.unique { Some(true) } else { None },
-                value_format: None,
                 references,
                 id_prefix: f.id_prefix.clone(),
                 collation: None,
@@ -5738,9 +5625,9 @@ fn parse_vector_metric_token(token: &str) -> Option<crate::model::ir::VectorMetr
 ///
 /// Returns `None` when the field carries no mask, OR when the mask is exactly the
 /// ENCRYPTED auto-mask (`{ full, pii }`) ON AN ENCRYPTED column - that mask is RE-IMPLIED
-/// by the `ColType::Encrypted` carrier in [`crate::render::lower::ir_column_to_field`], so
+/// by the `encrypted` facet in [`crate::render::lower::ir_column_to_field`], so
 /// carrying it here would double-source it and perturb the round-trip (the encrypted
-/// auto-mask must come from the carrier, not the mask facet). A standalone mask on a
+/// auto-mask must come from the facet, not the mask facet). A standalone mask on a
 /// plaintext column, or a NON-default mask on an encrypted column (an explicit override),
 /// IS carried. An unparseable kind/classification token yields `None` (fail-soft - the
 /// closed-enum producer never panics; the round-trip's own gate catches a genuine drop).
@@ -5900,7 +5787,7 @@ columns = [
     use crate::model::expr::Expr;
     use crate::model::ir::{
         IndexElement, IrScalar, MigrationIr, TableRuntimeOptions, TableRuntimeOptionsPatch,
-        TableStrictness, ValueFormat, CURRENT_IR_VERSION,
+        TableStrictness, CURRENT_IR_VERSION,
     };
     use crate::model::policy::SchemaScope;
     use crate::model::snapshot::IdDefaultSnapshot;
@@ -5975,13 +5862,13 @@ columns = [
             nullable: Some(nullable),
             default: None,
             unique: None,
-            value_format: None,
             references: None,
             id_prefix: None,
             collation: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,
+            encrypted: None,
             generated: None,
             identity: None,
         }
@@ -6107,10 +5994,10 @@ columns = [
             ty: ColType::Uuid,
             nullable: Some(true),
             default: None,
-            value_format: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,
+            encrypted: None,
             generated: None,
             identity: None,
             schema: None,
@@ -6152,7 +6039,7 @@ columns = [
 "#,
         )
         .expect("schema-scoped inject policy composes");
-        let mut id = col("id", ColType::Uuid, true);
+        let mut id = col("id", ColType::String { length: 36 }, true);
         id.id_prefix = Some("event".to_string());
         let raw = MigrationIr {
             inverse_ops: None,
@@ -6292,10 +6179,8 @@ columns = [
             assert_eq!(member_key.id_default.as_ref(), Some(&expected));
         }
 
-        let mut type_id = col("type_key", ColType::Text, false);
-        type_id.value_format = Some(ValueFormat::TypeId {
-            prefix: String::new(),
-        });
+        let mut type_id = col("type_key", ColType::String { length: 36 }, false);
+        type_id.id_prefix = Some(String::new());
         let decimal = "12345678901234567890123456";
         let mysql = fold_ops(
             crate::test_fixtures::VENDORS,
@@ -6321,10 +6206,9 @@ columns = [
             .iter()
             .find(|column| column.name == "type_key")
             .expect("TypeID column survives");
-        assert_eq!(
-            type_key.id_default.as_ref(),
-            Some(&IdDefaultSnapshot::Literal(format!("\"{decimal}\"")))
-        );
+        // A typed id is a plain bounded string: its literal default is not an
+        // ID-format marker, and the live catalog carries no prefix to recover.
+        assert_eq!(type_key.id_default.as_ref(), None);
     }
 
     #[test]
@@ -6476,10 +6360,10 @@ columns = [
             ty,
             nullable: Some(nullable),
             default: None,
-            value_format: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,
+            encrypted: None,
             generated: None,
             identity: None,
             schema: None,
@@ -7172,10 +7056,10 @@ columns = [
                 ty: ColType::Text,
                 nullable: Some(true),
                 default: None,
-                value_format: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
                 schema: None,
@@ -7378,7 +7262,6 @@ columns = [
             nullable: Some(true),
             default: None,
             unique: None,
-            value_format: None,
             references: Some(ColumnReference {
                 relation: None,
                 table: "accounts".into(),
@@ -7392,6 +7275,7 @@ columns = [
             case_sensitive: None,
             vector_metric: None,
             mask: None,
+            encrypted: None,
             generated: None,
             identity: None,
         };
@@ -8552,9 +8436,10 @@ columns = [
     // (the apply path cannot re-stamp the zero-migrate:enc sentinel today).
     // -----------------------------------------------------------------------
 
-    fn encrypted_text() -> ColType {
-        ColType::Encrypted {
-            of: Box::new(ColType::Text),
+    fn encrypted_col(name: &str, ty: ColType, nullable: bool) -> IrColumn {
+        IrColumn {
+            encrypted: Some(true),
+            ..col(name, ty, nullable)
         }
     }
 
@@ -8569,12 +8454,12 @@ columns = [
         }
     }
 
-    /// A FRESH `t.encrypted(text)` column folds WITH an encryption sentinel (the
+    /// A FRESH `.encrypted()` text column folds WITH an encryption sentinel (the
     /// shared builder stamps the `zero-migrate:enc:` contract gen-types reads). This is the
     /// baseline the alter path must preserve, so assert the sentinel is present.
     #[test]
     fn fresh_encrypted_column_carries_sentinel() {
-        let snap = fold(&[create("v", vec![col("secret", encrypted_text(), true)])]).unwrap();
+        let snap = fold(&[create("v", vec![encrypted_col("secret", ColType::Text, true)])]).unwrap();
         let c = snap.tables["v"]
             .columns
             .iter()
@@ -8586,25 +8471,6 @@ columns = [
         );
     }
 
-    /// Plain->encrypted via `setColumnType` is FAIL-CLOSED.
-    /// The fold must not transplant ONLY `data_type` (bytea) while keeping the OLD
-    /// `encryption_sentinel=None`: the folded encrypted column would carry NO
-    /// sentinel (a silently-wrong snapshot, since the oracle excludes the sentinel
-    /// from Eq). The apply path likewise never emits the `COMMENT ... zero-migrate:enc`, so live
-    /// lacks it too. Until apply can re-stamp it, the fold refuses the change.
-    #[test]
-    fn alter_column_type_to_encrypted_is_unsupported() {
-        let err = fold(&[
-            create("v", vec![col("secret", ColType::Text, true)]),
-            alter_type("v", "secret", encrypted_text()),
-        ])
-        .unwrap_err();
-        assert!(
-            matches!(err, FoldError::Unsupported(m) if m.contains("encrypted")),
-            "plain→encrypted setColumnType must fail closed, got {err:?}"
-        );
-    }
-
     /// The symmetric case of the fail-closed rule: encrypted->plain via
     /// `setColumnType` is also FAIL-CLOSED. The SOURCE column carries the sentinel;
     /// transplanting only `data_type` would leave the stale `zero-migrate:enc`
@@ -8612,7 +8478,7 @@ columns = [
     #[test]
     fn alter_column_type_from_encrypted_is_unsupported() {
         let err = fold(&[
-            create("v", vec![col("secret", encrypted_text(), true)]),
+            create("v", vec![encrypted_col("secret", ColType::Text, true)]),
             alter_type("v", "secret", ColType::Text),
         ])
         .unwrap_err();
@@ -8784,6 +8650,7 @@ columns = [
         column: &str,
         ty: ColType,
         nullable: bool,
+        encrypted: bool,
         default: Option<IrDefault>,
     ) -> ColumnSnapshot {
         let field = ir_column_to_field(&IrColumn {
@@ -8792,13 +8659,13 @@ columns = [
             nullable: Some(nullable),
             default,
             unique: None,
-            value_format: None,
             references: None,
             id_prefix: None,
             collation: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,
+            encrypted: encrypted.then_some(true),
             generated: None,
             identity: None,
         });
@@ -8831,7 +8698,7 @@ columns = [
         let snap = fold(&[create(
             "g",
             vec![
-                col("secret", encrypted_text(), true),
+                encrypted_col("secret", ColType::Text, true),
                 // A `string` column with a literal default - the shared builder DOES
                 // render a quoted `DEFAULT 'beta'` clause for the `string` token, so
                 // the non-triviality assertion below is real.
@@ -8843,13 +8710,13 @@ columns = [
                         value: IrScalar::Str("beta".to_string()),
                     }),
                     unique: None,
-                    value_format: None,
                     references: None,
                     id_prefix: None,
                     collation: None,
                     case_sensitive: None,
                     vector_metric: None,
                     mask: None,
+                    encrypted: None,
                     generated: None,
                     identity: None,
                 },
@@ -8865,13 +8732,13 @@ columns = [
                         value: IrScalar::Int(7),
                     }),
                     unique: None,
-                    value_format: None,
                     references: None,
                     id_prefix: None,
                     collation: None,
                     case_sensitive: None,
                     vector_metric: None,
                     mask: None,
+                    encrypted: None,
                     generated: None,
                     identity: None,
                 },
@@ -8884,7 +8751,7 @@ columns = [
         let t = &snap.tables["g"];
 
         let secret = t.columns.iter().find(|c| c.name == "secret").unwrap();
-        let want_secret = builder_column("g", "secret", encrypted_text(), true, None);
+        let want_secret = builder_column("g", "secret", ColType::Text, true, true, None);
         assert_eq!(
             secret.encryption_sentinel, want_secret.encryption_sentinel,
             "fold's encryption_sentinel matches the shared builder"
@@ -8905,6 +8772,7 @@ columns = [
             "tier",
             ColType::Text,
             false,
+            false,
             Some(IrDefault::Literal {
                 value: IrScalar::Str("beta".to_string()),
             }),
@@ -8924,6 +8792,7 @@ columns = [
             "rank",
             ColType::Int,
             false,
+            false,
             Some(IrDefault::Literal {
                 value: IrScalar::Int(7),
             }),
@@ -8939,7 +8808,7 @@ columns = [
         );
 
         let meta = t.columns.iter().find(|c| c.name == "meta").unwrap();
-        let want_meta = builder_column("g", "meta", ColType::Json, true, None);
+        let want_meta = builder_column("g", "meta", ColType::Json, true, false, None);
         assert_eq!(
             meta.default, want_meta.default,
             "fold's emitted json default matches the shared builder"
@@ -8960,13 +8829,13 @@ columns = [
                 attributes: zeroship_migrate_ir::attribute::AddColumnAttributes::new(),
                 table: "g".to_string(),
                 column: "secret".to_string(),
-                ty: encrypted_text(),
+                ty: ColType::Text,
                 nullable: Some(true),
                 default: None,
-                value_format: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: Some(true),
                 generated: None,
                 identity: None,
                 schema: None,
@@ -8979,7 +8848,7 @@ columns = [
             .iter()
             .find(|c| c.name == "secret")
             .unwrap();
-        let want = builder_column("g", "secret", encrypted_text(), true, None);
+        let want = builder_column("g", "secret", ColType::Text, true, true, None);
         assert_eq!(
             secret.encryption_sentinel, want.encryption_sentinel,
             "addColumn encryption_sentinel parity"
@@ -9087,17 +8956,17 @@ columns = [
         // surface as `idPrefix` on the rebuilt FieldDef.
         let id = IrColumn {
             name: "id".into(),
-            ty: ColType::Uuid,
+            ty: ColType::String { length: 36 },
             nullable: Some(false),
             default: None,
             unique: None,
-            value_format: None,
             references: None,
             id_prefix: Some("post".into()),
             collation: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,
+            encrypted: None,
             generated: None,
             identity: None,
         };
@@ -9120,13 +8989,13 @@ columns = [
             nullable: Some(true),
             default: None,
             unique: None,
-            value_format: None,
             references: None,
             id_prefix: None,
             collation: None,
             case_sensitive: None,
             vector_metric: Some(crate::model::ir::VectorMetric::InnerProduct),
             mask: None,
+            encrypted: None,
             generated: None,
             identity: None,
         };
@@ -9155,7 +9024,6 @@ columns = [
             nullable: Some(true),
             default: None,
             unique: None,
-            value_format: None,
             references: None,
             id_prefix: None,
             collation: None,
@@ -9165,6 +9033,7 @@ columns = [
                 kind: crate::model::ir::IrMaskKind::Last4,
                 classification: crate::model::ir::IrClassification::Spi,
             }),
+            encrypted: None,
             generated: None,
             identity: None,
         };
@@ -9181,20 +9050,17 @@ columns = [
     }
 
     /// Precedence - an EXPLICIT `.mask()` on an ENCRYPTED column OVERRIDES the
-    /// fail-safe auto-mask `{ full, pii }` the `ColType::Encrypted` carrier implies.
+    /// fail-safe auto-mask `{ full, pii }` the `encrypted` facet implies.
     /// Without the override arm, an encrypted column would ALWAYS recover
     /// `{ full, pii }` and an explicit override would be impossible.
     #[test]
     fn explicit_mask_overrides_encrypted_auto_mask() {
         let secret = IrColumn {
             name: "secret".into(),
-            ty: ColType::Encrypted {
-                of: Box::new(ColType::Text),
-            },
+            ty: ColType::Text,
             nullable: Some(true),
             default: None,
             unique: None,
-            value_format: None,
             references: None,
             id_prefix: None,
             collation: None,
@@ -9204,6 +9070,7 @@ columns = [
                 kind: crate::model::ir::IrMaskKind::Last4,
                 classification: crate::model::ir::IrClassification::Pci,
             }),
+            encrypted: Some(true),
             generated: None,
             identity: None,
         };
@@ -9236,13 +9103,13 @@ columns = [
                 ty: ColType::Text,
                 nullable: Some(true),
                 default: None,
-                value_format: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: Some(crate::model::ir::IrMask {
                     kind: crate::model::ir::IrMaskKind::First4,
                     classification: crate::model::ir::IrClassification::Pci,
                 }),
+                encrypted: None,
                 generated: None,
                 identity: None,
                 schema: None,
@@ -9272,7 +9139,6 @@ columns = [
             nullable: Some(false),
             default: None,
             unique: None,
-            value_format: None,
             references: Some(ColumnReference {
                 relation: None,
                 table: "orgs".into(),
@@ -9286,6 +9152,7 @@ columns = [
             case_sensitive: None,
             vector_metric: None,
             mask: None,
+            encrypted: None,
             generated: None,
             identity: None,
         };
@@ -9302,7 +9169,7 @@ columns = [
     #[test]
     fn recover_encrypted_facet() {
         // Recover encryption metadata from the structural encrypted column type.
-        let secret = col("secret", encrypted_text(), true);
+        let secret = encrypted_col("secret", ColType::Text, true);
         let m = defs(&[create("vaults", vec![secret])]);
         let def = field_def(&m, "vaults", "secret");
         assert!(
@@ -9435,21 +9302,20 @@ columns = [
     }
 
     #[test]
-    fn encrypted_migration_recovers_wrapped_type_and_default_mask() {
-        let enc = encrypted_text();
+    fn encrypted_facet_recovers_plaintext_type_and_default_mask() {
         let field = ir_column_to_field(&IrColumn {
             name: "secret".into(),
-            ty: enc,
+            ty: ColType::Text,
             nullable: Some(true),
             default: None,
             unique: None,
-            value_format: None,
             references: None,
             id_prefix: None,
             collation: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,
+            encrypted: Some(true),
             generated: None,
             identity: None,
         });
@@ -9461,7 +9327,7 @@ columns = [
         assert_eq!(
             field.mask,
             Some(serde_json::json!({ "kind": "full", "classification": "pii" })),
-            "a default t.encrypted() carries the fail-safe auto-mask, recovered byte-exact"
+            "a default .encrypted() carries the fail-safe auto-mask, recovered byte-exact"
         );
     }
 
@@ -9795,6 +9661,38 @@ indexes = [
             descriptors_to_create_ops(&[d], "app", &crate::test_fixtures::confined_charter())
                 .expect_err("a reference needs a target column");
         assert!(error.to_string().contains("refColumn"), "{error}");
+    }
+
+    #[test]
+    fn producer_carries_the_encrypted_facet_with_the_plaintext_type() {
+        let d = descriptor(
+            "vaults",
+            vec![FieldDescriptor {
+                name: "secret".into(),
+                ty: "string".into(),
+                encrypted: Some(true),
+                ..Default::default()
+            }],
+        );
+        let ops = descriptors_to_create_ops(&[d], "app", &crate::test_fixtures::confined_charter())
+            .unwrap();
+        let Op::CreateTable { columns, .. } = &ops[0] else {
+            panic!("expected a createTable")
+        };
+        let secret = columns
+            .iter()
+            .find(|column| column.name == "secret")
+            .expect("the encrypted column is produced");
+        assert_eq!(
+            secret.encrypted,
+            Some(true),
+            "the encrypted facet is carried onto the produced column"
+        );
+        assert_eq!(
+            secret.ty,
+            ColType::Text,
+            "the column type stays the PLAINTEXT type, not an encryption wrapper"
+        );
     }
 
     #[test]

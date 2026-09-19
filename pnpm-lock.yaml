@@ -409,6 +409,9 @@ importers:
       '@zeroship/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@zeroship/server':
+        specifier: workspace:*
+        version: link:../../packages/server
       '@zeroship/vite-plugin':
         specifier: workspace:*
         version: link:../../packages/vite-plugin
@@ -1348,6 +1351,9 @@ importers:
       '@types/node':
         specifier: 'catalog:'
         version: 22.19.17
+      '@zeroship/schema':
+        specifier: workspace:*
+        version: link:../schema
       fflate:
         specifier: 0.8.2
         version: 0.8.2
@@ -1514,6 +1520,18 @@ importers:
         specifier: ^2.2.6
         version: 2.2.6
 
+  packages/schema:
+    devDependencies:
+      tsup:
+        specifier: ^8.5.1
+        version: 8.5.1(@swc/core@1.15.40)(jiti@2.6.1)(postcss@8.5.13)(supports-color@8.1.1)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.4)
+      tsx:
+        specifier: 'catalog:'
+        version: 4.21.0
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+
   packages/server:
     dependencies:
       '@zeroship/types':
@@ -1658,6 +1676,9 @@ importers:
       '@types/node':
         specifier: ^22.0.0
         version: 22.19.17
+      '@zeroship/schema':
+        specifier: workspace:*
+        version: link:../schema
       json-schema-to-typescript:
         specifier: ^15.0.4
         version: 15.0.4
@@ -6872,6 +6893,7 @@ packages:
   tsx@4.21.0:
     resolution: {integrity: sha512-5C1sg4USs1lfG0GFb2RLXsdpXqBSEhAaA/0kPL01wxzpMqLILNxIxIOKiILz+cdg/pLnOUxFYOR5yhHU666wbw==}
     engines: {node: '>=18.0.0'}
+    hasBin: true
 
   tsyringe@4.10.0:
     resolution: {integrity: sha512-axr3IdNuVIxnaK5XGEUFTu3YmAQ6lllgrvqfEoR16g/HGnYY/6We4oWENtAnzK6/LpJ2ur9PAb80RBt7/U4ugw==}

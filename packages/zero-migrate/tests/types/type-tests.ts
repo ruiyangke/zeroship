@@ -27,7 +27,6 @@ import { createRaw as removedPublishedCreateRaw } from "@zeroship/migrate";
 import type {
   BackfillSetValue as PublishedBackfillSetValue,
   ColumnDef as PublishedColumnDef,
-  IdFormats as PublishedIdFormats,
   PerRowGenerator as PublishedPerRowGenerator,
   PerRowGeneratorValue as PublishedPerRowGeneratorValue,
   PerRowGenerators as PublishedPerRowGenerators,
@@ -35,7 +34,6 @@ import type {
   TableHandle as PublishedTableHandle,
   TypeIdOptions as PublishedTypeIdOptions,
   TypeLexicon as PublishedTypeLexicon,
-  ValueFormat as PublishedValueFormat,
 } from "@zeroship/migrate";
 
 import * as migrate from "../../src/index.js";
@@ -43,7 +41,6 @@ import {
   colTypeFromDbField,
   dbType as dbT,
   fromDb,
-  ids,
   perRow,
   t,
   table,
@@ -69,7 +66,6 @@ import {
   type Migration,
   type OrderedColumns,
   type BackfillSetValue,
-  type IdFormats,
   type PerRowGenerator,
   type PerRowGeneratorValue,
   type PerRowGenerators,
@@ -77,7 +73,6 @@ import {
   type TypeLexicon,
   type TypeIdOptions,
   type TableForeignKey,
-  type ValueFormat,
   type DecimalValue,
   type BytesValue,
 } from "../../src/index.js";
@@ -132,8 +127,8 @@ const readonlyCompositeForeignKeys = [compositeForeignKey] as const satisfies re
 
 table("children").create({
   columns: {
-    tenant_id: t.uuid().notNull(),
-    parent_id: t.uuid().notNull(),
+    tenant_id: t.uuid().required(),
+    parent_id: t.uuid().required(),
   },
   primaryKey: ["tenant_id", "parent_id"] as const,
   foreignKeys: readonlyCompositeForeignKeys,
@@ -556,7 +551,7 @@ export function badColTypes(): void {
   // until the recorder twin removes the alias too.
   t.int();
 
-  // @ts-expect-error — `.notNull()` takes no argument.
+  // @ts-expect-error — `.required()` takes no argument.
   t.text().notNull("yes");
 
   // @ts-expect-error — the old untyped migration reference factory is removed.
@@ -586,33 +581,11 @@ export function badColTypes(): void {
   t.vector({ dimensions: 8, metric: "cosine" });
 
   const typeIdOptions: TypeIdOptions = { prefix: "account" };
-  const idFormats: IdFormats = ids;
-  const valueFormat: ValueFormat = { typeId: typeIdOptions };
-  const ulidValueFormat: ValueFormat = "ulid";
-  const typedId: ColumnDef = idFormats.typeId(typeIdOptions).notNull().unique().primaryKey();
-  const ulid: ColumnDef = idFormats.ulid().notNull().unique().primaryKey();
+  const typedId: ColumnDef = t.typedId(typeIdOptions.prefix).required().unique().primaryKey();
   table("accounts").create({ columns: { id: typedId } });
-  void valueFormat;
-  void ulidValueFormat;
-  void ulid;
-
-  // @ts-expect-error — TypeID options are required.
-  ids.typeId();
-
-  // @ts-expect-error — TypeID requires an explicit prefix (the empty string is valid).
-  ids.typeId({});
 
   // @ts-expect-error — a TypeID prefix is text.
-  ids.typeId({ prefix: 42 });
-
-  ids.ulid();
-
-  // @ts-expect-error — ULID takes no options.
-  ids.ulid({});
-
-  // @ts-expect-error — the ULID ValueFormat wire tag is canonical lowercase.
-  const invalidUlidValueFormat: ValueFormat = "ULID";
-  void invalidUlidValueFormat;
+  t.typedId(42 );
 
   // @ts-expect-error — `t.numeric` now takes a named options bag.
   t.numeric(12, 2);
@@ -689,15 +662,15 @@ export function checkExpressionSurfaceTypechecks(): void {
   const pkceCheck: CheckDef = check("pkce_method_check", (col) => col("pkce_method").eq("S256"));
   table("oauth_authorization_codes").create({
     columns: {
-      pkce_method: t.text().notNull(),
-      user_id: t.text().notNull(),
-      kind: t.text().notNull(),
-      data: t.json().notNull(),
+      pkce_method: t.text().required(),
+      user_id: t.text().required(),
+      kind: t.text().required(),
+      data: t.json().required(),
       floor_cents: t.int(),
-      created_at: t.timestamp().notNull(),
-      expires_at: t.timestamp().notNull(),
-      active: t.boolean().notNull(),
-      visible: t.boolean().notNull(),
+      created_at: t.timestamp().required(),
+      expires_at: t.timestamp().required(),
+      active: t.boolean().required(),
+      visible: t.boolean().required(),
     },
     checks: [
       pkceCheck,
@@ -769,7 +742,7 @@ export function domainValueCheckSurfaceTypechecks(): void {
     check: (v) => v.in(["active", "past_due"]).and(v.isNotNull()),
   });
   domain("billing_period").create({
-    as: t.date(),
+    as: t.calendarDate(),
     check: (v) => v.extract("day").eq(1),
   });
   domain("email_domain").create({
@@ -871,7 +844,6 @@ export function perRowGeneratorShapes(): void {
       uuid_v4: generators.uuidV4(),
       uuid_v7: intent,
       type_id: generators.typeId({ prefix: "order" }),
-      ulid: generators.ulid(),
       database_uuid: uuidV4(),
     },
     cursorColumns: ["id"],
@@ -896,8 +868,6 @@ export function perRowGeneratorShapes(): void {
   const generatedUuid: string = generators.uuidV4();
   void generatedUuid;
 
-  // @ts-expect-error — TypeID options are required.
-  generators.typeId();
 
   // @ts-expect-error — a TypeID prefix is text.
   generators.typeId({ prefix: 42 });
@@ -1022,7 +992,7 @@ export function existenceGuardsTypecheck(): void {
 // ───────────────────────────────────────────────────────────────────────────
 
 export function immutableChainTypechecks(): void {
-  const base: ColumnDef = t.text().notNull();
+  const base: ColumnDef = t.text().required();
   const a: ColumnDef = base.unique();
   const b: ColumnDef = base.default("x");
   table("u").create({ columns: { a, b, base } });
@@ -1037,7 +1007,6 @@ export function dbFieldTypeExhaustiveness(token: DbFieldType): void {
     case "string":
     case "number":
     case "boolean":
-    case "date":
     case "json":
     case "bytes":
     case "geoPoint":
@@ -1048,8 +1017,18 @@ export function dbFieldTypeExhaustiveness(token: DbFieldType): void {
     case "union":
     case "literal":
     case "array":
-    case "actor":
     case "calendarDate":
+    case "int":
+    case "integer":
+    case "bigInt":
+    case "float":
+    case "timestamp":
+    case "char":
+    case "double":
+    case "uuid":
+    case "inet":
+    case "enum":
+    case "domain":
       return;
     default: {
       const _exhaustive: never = token;
@@ -1105,13 +1084,11 @@ type UpdateOp = Extract<Op, { op: "update" }>;
 
 export function handwrittenIrTypeShapes(): void {
   expectExactType<Int64Carrier, { int64: string }>(true);
-  expectExactType<ValueFormat, { typeId: { prefix: string } } | "ulid">(true);
-  expectExactType<IrColumn["valueFormat"], ValueFormat | null | undefined>(true);
-  expectExactType<AddColumnOp["valueFormat"], ValueFormat | null | undefined>(true);
+  expectExactType<IrColumn["idPrefix"], string | null | undefined>(true);
   expectExactType<CreateTableOp["primaryKey"], string[] | null>(true);
   expectExactType<
     PerRowGenerator,
-    "uuidV4" | "uuidV7" | { typeId: { prefix: string } } | "ulid"
+    "uuidV4" | "uuidV7" | { typeId: { prefix: string } }
   >(true);
   expectExactType<BackfillOp["set"][string], IrBackfillSetValue>(true);
   expectExactType<UpdateOp["set"][string], IrValue>(true);
@@ -1136,12 +1113,10 @@ export function publishedDeclarationSurface(): void {
 
   const exportedTypes = null as unknown as readonly [
     PublishedBackfillSetValue,
-    PublishedIdFormats,
     PublishedPerRowGenerator,
     PublishedPerRowGeneratorValue,
     PublishedPerRowGenerators,
     PublishedTypeIdOptions,
-    PublishedValueFormat,
   ];
   void exportedTypes;
 }

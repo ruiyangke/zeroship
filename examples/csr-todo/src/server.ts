@@ -46,13 +46,13 @@ export const listTodos = query(
     // a non-number `limit`) return 400 INVALID_ARGUMENT with the Zod
     // issues array in the body.
     input: z.object({
-      limit: z.number().int().min(1).max(100).optional(),
+      limit: z.double().int().min(1).max(100).optional(),
     }),
     // Output validation runs in dev only (NODE_ENV !== "production").
     // Cheap correctness check; the production hot path skips it.
     output: z.array(
       z.object({
-        id: z.number(),
+        id: z.double(),
         text: z.string(),
         done: z.boolean(),
       }),
@@ -92,7 +92,7 @@ export const searchTodos = stream(
     // Per-yield schema. The synthetic entry skips output validation for
     // streams (see rpc-registry.ts) — we still declare it for typing.
     output: z.object({
-      id: z.number(),
+      id: z.double(),
       text: z.string(),
       done: z.boolean(),
     }),

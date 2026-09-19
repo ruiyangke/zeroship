@@ -91,7 +91,7 @@ function uniqueNamespace(prefix: string): string {
 }
 
 const SEED_DDL = `table("items").create({
-      columns: { id: t.int().notNull(), grp: t.text(), val: t.int() },
+      columns: { id: t.int().required(), grp: t.text(), val: t.int() },
       primaryKey: ["id"],
     });`;
 

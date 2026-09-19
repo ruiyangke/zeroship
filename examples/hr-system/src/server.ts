@@ -30,18 +30,18 @@ export const dbSchema = {
   departments: {
     name:               t.string().required(),
     code:               t.string().required(),
-    managerId:          t.number(),
-    budget:             t.number().default(0),
-    headcount:          t.number().default(0),
-    parentDepartmentId: t.number(),
+    managerId:          t.double(),
+    budget:             t.double().default(0),
+    headcount:          t.double().default(0),
+    parentDepartmentId: t.double(),
   },
 
   positions: {
     title:        t.string().required(),
-    departmentId: t.number().required(),
+    departmentId: t.double().required(),
     level:        t.string().enum("junior", "mid", "senior", "lead", "director", "vp", "c-level"),
-    salaryMin:    t.number(),
-    salaryMax:    t.number(),
+    salaryMin:    t.double(),
+    salaryMax:    t.double(),
     isOpen:       t.boolean().default(true),
     description:  t.string(),
   },
@@ -51,73 +51,73 @@ export const dbSchema = {
     lastName:              t.string().required(),
     email:                 t.string().required(),
     phone:                 t.string(),
-    departmentId:          t.number(),
-    positionId:            t.number(),
-    managerId:             t.number(),
-    hireDate:              t.number(),
-    salary:                t.number(),
+    departmentId:          t.double(),
+    positionId:            t.double(),
+    managerId:             t.double(),
+    hireDate:              t.double(),
+    salary:                t.double(),
     status:                t.string().enum("active", "on_leave", "terminated").default("active"),
     skills:                t.array(t.string()),
     avatarUrl:             t.string(),
     emergencyContactName:  t.string(),
     emergencyContactPhone: t.string(),
     address:               t.string(),
-    dateOfBirth:           t.number(),
+    dateOfBirth:           t.double(),
   }).softDelete(),
 
   // ---------------------------------------------------------------------------
   // Recruitment
   // ---------------------------------------------------------------------------
   jobPostings: {
-    positionId:  t.number().required(),
+    positionId:  t.double().required(),
     title:       t.string().required(),
     description: t.string(),
     requirements:t.string(),
     status:      t.string().enum("draft", "open", "closed").default("draft"),
-    postedDate:  t.number(),
-    closingDate: t.number(),
+    postedDate:  t.double(),
+    closingDate: t.double(),
   },
 
   applicants: {
-    jobPostingId: t.number().required(),
+    jobPostingId: t.double().required(),
     name:         t.string().required(),
     email:        t.string().required(),
     phone:        t.string(),
     resumeUrl:    t.string(),
     stage:        t.string().enum("applied", "screening", "interview", "offer", "hired", "rejected").default("applied"),
-    rating:       t.number(),
+    rating:       t.double(),
     notes:        t.string(),
-    appliedDate:  t.number(),
+    appliedDate:  t.double(),
   },
 
   interviews: {
-    applicantId:     t.number().required(),
-    interviewerId:   t.number().required(),
-    scheduledAt:     t.number().required(),
-    durationMinutes: t.number().default(60),
+    applicantId:     t.double().required(),
+    interviewerId:   t.double().required(),
+    scheduledAt:     t.double().required(),
+    durationMinutes: t.double().default(60),
     type:            t.string().enum("phone", "video", "onsite").default("video"),
     status:          t.string().enum("scheduled", "completed", "cancelled").default("scheduled"),
     feedback:        t.string(),
-    rating:          t.number(),
+    rating:          t.double(),
   },
 
   // ---------------------------------------------------------------------------
   // Time & Attendance
   // ---------------------------------------------------------------------------
   timesheets: {
-    employeeId:    t.number().required(),
-    date:          t.number().required(),
-    clockIn:       t.number(),
-    clockOut:      t.number(),
-    hoursWorked:   t.number().default(0),
-    overtimeHours: t.number().default(0),
+    employeeId:    t.double().required(),
+    date:          t.double().required(),
+    clockIn:       t.double(),
+    clockOut:      t.double(),
+    hoursWorked:   t.double().default(0),
+    overtimeHours: t.double().default(0),
     status:        t.string().enum("draft", "submitted", "approved").default("draft"),
     notes:         t.string(),
   },
 
   workSchedules: {
-    employeeId: t.number().required(),
-    dayOfWeek:  t.number().required(), // 0=Sun, 6=Sat
+    employeeId: t.double().required(),
+    dayOfWeek:  t.double().required(), // 0=Sun, 6=Sat
     startTime:  t.string().required(),
     endTime:    t.string().required(),
     isRemote:   t.boolean().default(false),
@@ -127,31 +127,31 @@ export const dbSchema = {
   // Leave
   // ---------------------------------------------------------------------------
   leaveRequests: {
-    employeeId: t.number().required(),
+    employeeId: t.double().required(),
     type:       t.string().required().enum("vacation", "sick", "personal", "parental", "bereavement"),
-    startDate:  t.number().required(),
-    endDate:    t.number().required(),
-    days:       t.number().required(),
+    startDate:  t.double().required(),
+    endDate:    t.double().required(),
+    days:       t.double().required(),
     reason:     t.string(),
     status:     t.string().enum("pending", "approved", "denied", "cancelled").default("pending"),
-    approvedBy: t.number(),
-    approvedAt: t.number(),
+    approvedBy: t.double(),
+    approvedAt: t.double(),
   },
 
   leaveBalances: {
-    employeeId:    t.number().required(),
-    year:          t.number().required(),
-    vacationTotal: t.number().default(20),
-    vacationUsed:  t.number().default(0),
-    sickTotal:     t.number().default(10),
-    sickUsed:      t.number().default(0),
-    personalTotal: t.number().default(5),
-    personalUsed:  t.number().default(0),
+    employeeId:    t.double().required(),
+    year:          t.double().required(),
+    vacationTotal: t.double().default(20),
+    vacationUsed:  t.double().default(0),
+    sickTotal:     t.double().default(10),
+    sickUsed:      t.double().default(0),
+    personalTotal: t.double().default(5),
+    personalUsed:  t.double().default(0),
   },
 
   holidays: {
     name:        t.string().required(),
-    date:        t.number().required(),
+    date:        t.double().required(),
     isRecurring: t.boolean().default(false),
   },
 
@@ -160,24 +160,24 @@ export const dbSchema = {
   // ---------------------------------------------------------------------------
   payrollRuns: {
     period:          t.string().required(),
-    runDate:         t.number(),
+    runDate:         t.double(),
     status:          t.string().enum("draft", "processing", "completed").default("draft"),
-    totalGross:      t.number().default(0),
-    totalNet:        t.number().default(0),
-    totalDeductions: t.number().default(0),
-    processedBy:     t.number(),
+    totalGross:      t.double().default(0),
+    totalNet:        t.double().default(0),
+    totalDeductions: t.double().default(0),
+    processedBy:     t.double(),
   },
 
   payslips: {
-    payrollRunId:       t.number().required(),
-    employeeId:         t.number().required(),
-    baseSalary:         t.number().required(),
-    overtimePay:        t.number().default(0),
-    bonus:              t.number().default(0),
-    deductionsTax:      t.number().default(0),
-    deductionsBenefits: t.number().default(0),
-    deductionsOther:    t.number().default(0),
-    netPay:             t.number().required(),
+    payrollRunId:       t.double().required(),
+    employeeId:         t.double().required(),
+    baseSalary:         t.double().required(),
+    overtimePay:        t.double().default(0),
+    bonus:              t.double().default(0),
+    deductionsTax:      t.double().default(0),
+    deductionsBenefits: t.double().default(0),
+    deductionsOther:    t.double().default(0),
+    netPay:             t.double().required(),
     status:             t.string().enum("pending", "paid").default("pending"),
   },
 
@@ -185,11 +185,11 @@ export const dbSchema = {
   // Performance
   // ---------------------------------------------------------------------------
   reviews: {
-    employeeId:  t.number().required(),
-    reviewerId:  t.number().required(),
+    employeeId:  t.double().required(),
+    reviewerId:  t.double().required(),
     period:      t.string().required(),
     cycle:       t.string().enum("quarterly", "annual").default("annual"),
-    rating:      t.number().min(1).max(5),
+    rating:      t.double().min(1).max(5),
     strengths:   t.string(),
     improvements:t.string(),
     goals:       t.string(),
@@ -197,18 +197,18 @@ export const dbSchema = {
   },
 
   goals: {
-    employeeId:  t.number().required(),
+    employeeId:  t.double().required(),
     title:       t.string().required(),
     description: t.string(),
-    targetDate:  t.number(),
+    targetDate:  t.double(),
     status:      t.string().enum("active", "completed", "cancelled").default("active"),
-    progress:    t.number().default(0).min(0).max(100),
+    progress:    t.double().default(0).min(0).max(100),
     category:    t.string().enum("performance", "development", "project").default("performance"),
   },
 
   feedback: {
-    fromEmployeeId: t.number().required(),
-    toEmployeeId:   t.number().required(),
+    fromEmployeeId: t.double().required(),
+    toEmployeeId:   t.double().required(),
     type:           t.string().enum("praise", "constructive").required(),
     message:        t.string().required(),
     isAnonymous:    t.boolean().default(false),
@@ -221,26 +221,26 @@ export const dbSchema = {
     title:           t.string().required(),
     description:     t.string(),
     category:        t.string(),
-    durationHours:   t.number(),
+    durationHours:   t.double(),
     isMandatory:     t.boolean().default(false),
-    maxParticipants: t.number(),
+    maxParticipants: t.double(),
   },
 
   enrollments: {
-    courseId:     t.number().required(),
-    employeeId:  t.number().required(),
+    courseId:     t.double().required(),
+    employeeId:  t.double().required(),
     status:      t.string().enum("enrolled", "in_progress", "completed", "dropped").default("enrolled"),
-    enrolledAt:  t.number(),
-    completedAt: t.number(),
-    score:       t.number(),
+    enrolledAt:  t.double(),
+    completedAt: t.double(),
+    score:       t.double(),
   },
 
   certifications: {
-    employeeId:    t.number().required(),
+    employeeId:    t.double().required(),
     name:          t.string().required(),
     issuer:        t.string(),
-    issueDate:     t.number(),
-    expiryDate:    t.number(),
+    issueDate:     t.double(),
+    expiryDate:    t.double(),
     credentialUrl: t.string(),
   },
 
@@ -248,60 +248,60 @@ export const dbSchema = {
   // Compensation & Benefits
   // ---------------------------------------------------------------------------
   compensationHistory: {
-    employeeId:    t.number().required(),
-    effectiveDate: t.number().required(),
-    salary:        t.number().required(),
+    employeeId:    t.double().required(),
+    effectiveDate: t.double().required(),
+    salary:        t.double().required(),
     changeType:    t.string().enum("hire", "promotion", "adjustment", "annual").required(),
     changeReason:  t.string(),
-    approvedBy:    t.number(),
+    approvedBy:    t.double(),
   },
 
   benefitsPlans: {
     name:                  t.string().required(),
     type:                  t.string().enum("health", "dental", "vision", "life", "retirement").required(),
     provider:              t.string(),
-    monthlyCostEmployee:   t.number().default(0),
-    monthlyCostEmployer:   t.number().default(0),
+    monthlyCostEmployee:   t.double().default(0),
+    monthlyCostEmployer:   t.double().default(0),
   },
 
   benefitsEnrollments: {
-    employeeId: t.number().required(),
-    planId:     t.number().required(),
-    startDate:  t.number().required(),
-    endDate:    t.number(),
+    employeeId: t.double().required(),
+    planId:     t.double().required(),
+    startDate:  t.double().required(),
+    endDate:    t.double(),
     status:     t.string().enum("active", "cancelled").default("active"),
   },
 
   expenseClaims: {
-    employeeId:  t.number().required(),
+    employeeId:  t.double().required(),
     description: t.string().required(),
-    amount:      t.number().required(),
+    amount:      t.double().required(),
     category:    t.string().enum("travel", "meals", "equipment", "other").required(),
     receiptUrl:  t.string(),
     status:      t.string().enum("submitted", "approved", "rejected", "reimbursed").default("submitted"),
-    submittedAt: t.number(),
-    approvedBy:  t.number(),
+    submittedAt: t.double(),
+    approvedBy:  t.double(),
   },
 
   // ---------------------------------------------------------------------------
   // Documents & Compliance
   // ---------------------------------------------------------------------------
   documents: {
-    employeeId: t.number().required(),
+    employeeId: t.double().required(),
     type:       t.string().enum("contract", "id", "certification", "policy", "other").required(),
     name:       t.string().required(),
     fileUrl:    t.string().required(),
-    uploadedAt: t.number(),
-    expiresAt:  t.number(),
+    uploadedAt: t.double(),
+    expiresAt:  t.double(),
   },
 
   auditLog: {
-    actorId:    t.number().required(),
+    actorId:    t.double().required(),
     action:     t.string().enum("create", "update", "delete").required(),
     entityType: t.string().required(),
-    entityId:   t.number().required(),
+    entityId:   t.double().required(),
     changesJson:t.string(),
-    timestamp:  t.number(),
+    timestamp:  t.double(),
   },
 
   policies: {
@@ -312,7 +312,7 @@ export const dbSchema = {
     // column of that name is refused at gen-types: `createTable "policies"
     // declares column "version", which collides with an injected system column`.
     policyVersion: t.string(),
-    effectiveDate: t.number(),
+    effectiveDate: t.double(),
     category:      t.string().enum("handbook", "conduct", "safety", "privacy").required(),
   },
 
@@ -320,7 +320,7 @@ export const dbSchema = {
   // Notifications
   // ---------------------------------------------------------------------------
   notifications: {
-    employeeId: t.number().required(),
+    employeeId: t.double().required(),
     type:       t.string().enum("leave_approved", "review_due", "payroll_ready", "course_reminder", "general").required(),
     title:      t.string().required(),
     message:    t.string(),

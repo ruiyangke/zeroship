@@ -88,7 +88,7 @@ test("an exact int64 survives the whole stack, and an unsafe JS number is refuse
         default: {
           schema() {
             table("items").create({
-              columns: { id: t.int().notNull(), ...(columns as never) },
+              columns: { id: t.int().required(), ...(columns as never) },
               primaryKey: ["id"],
             });
           },

@@ -45,8 +45,7 @@ use zeroship_migrate_ir::migration::Migration;
 // out of the registry, which is the round trip a vendor cannot participate in; the
 // contract crate's copies take the renderers directly, so a vendor passes its own.
 use zeroship_migrate_backend::value_format::{
-    catalog_expression_fingerprint, catalog_id_default, catalog_uuid_id_default,
-    recover_format_check, RecoveredFormatCheck, VendorRules,
+    catalog_expression_fingerprint, catalog_id_default, catalog_uuid_id_default, VendorRules,
 };
 
 /// Compare the journal's NET-applied checksums against the supplied migration
@@ -1576,46 +1575,6 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
             let catalog_definition: String = r.try_get("definition")?;
             let local_columns: Vec<String> = r.try_get("local_columns").unwrap_or_default();
             let convalidated: bool = r.try_get("convalidated")?;
-            let has_user_semantic_dependency: bool = r.try_get("has_user_semantic_dependency")?;
-
-            if kind == "CHECK"
-                && convalidated
-                && !has_user_semantic_dependency
-                && local_columns.len() == 1
-            {
-                let column_name = &local_columns[0];
-                if let Some(RecoveredFormatCheck::Value(value_format)) = recover_format_check(
-                    column_name,
-                    &catalog_definition,
-                    &crate::value_format::RENDERER,
-                    &crate::dml::RENDERER,
-                ) {
-                    if let Some(column) = t
-                        .columns
-                        .iter_mut()
-                        .find(|column| column.name == *column_name)
-                    {
-                        // A second engine-shaped check on the same column is not
-                        // silently consumed: it remains a generic unexpected
-                        // constraint below. That makes an out-of-band duplicate or
-                        // conflicting format contract visible.
-                        if column.value_format.is_none() {
-                            column.value_format = Some(value_format);
-                            column.id_default = recover_pg_id_default(
-                                &column.data_type,
-                                column.identity,
-                                column.default.as_deref(),
-                                true,
-                                default_has_user_semantic_dependency
-                                    .get(&(table.clone(), column.name.clone()))
-                                    .copied()
-                                    .unwrap_or(false),
-                            );
-                            continue;
-                        }
-                    }
-                }
-            }
 
             if kind == "FOREIGN KEY" {
                 // Typed references intentionally omit a child format CHECK and

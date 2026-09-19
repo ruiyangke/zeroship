@@ -19,5 +19,5 @@ export function schema() {
   const accounts = table("accounts");
 
   // `.unique()` on an added column ⇒ a follow-on ADD CONSTRAINT(unique).
-  accounts.column("email").add({ type: t.text().notNull().unique() });
+  accounts.column("email").add({ type: t.text().required().unique() });
 }

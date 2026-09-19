@@ -47,7 +47,7 @@ describe("validateDoc", () => {
   });
 
   test("type check: rejects wrong type (number expected)", () => {
-    const schema = fieldsOf({ age: t.number() });
+    const schema = fieldsOf({ age: t.double() });
     assert.throws(() => validateDoc({ age: "old" }, schema), ValidationError);
   });
 
@@ -86,17 +86,17 @@ describe("validateDoc", () => {
   });
 
   test("min/max on number: value < min throws", () => {
-    const schema = fieldsOf({ age: t.number().min(0) });
+    const schema = fieldsOf({ age: t.double().min(0) });
     assert.throws(() => validateDoc({ age: -1 }, schema), ValidationError);
   });
 
   test("min/max on number: value > max throws", () => {
-    const schema = fieldsOf({ age: t.number().max(120) });
+    const schema = fieldsOf({ age: t.double().max(120) });
     assert.throws(() => validateDoc({ age: 200 }, schema), ValidationError);
   });
 
   test("min/max on number: valid value passes", () => {
-    const schema = fieldsOf({ age: t.number().min(0).max(120) });
+    const schema = fieldsOf({ age: t.double().min(0).max(120) });
     assert.doesNotThrow(() => validateDoc({ age: 25 }, schema));
   });
 
@@ -113,12 +113,12 @@ describe("validateDoc", () => {
   // A `min`/`max` bound does not close this: bounds are optional, and `Infinity > max`
   // only catches a column that declared a max. The unbounded column is the common case.
   test("number: rejects Infinity, which JSON encodes as null", () => {
-    const schema = fieldsOf({ score: t.number() });
+    const schema = fieldsOf({ score: t.double() });
     assert.throws(() => validateDoc({ score: Infinity }, schema), ValidationError);
   });
 
   test("number: rejects -Infinity", () => {
-    const schema = fieldsOf({ score: t.number() });
+    const schema = fieldsOf({ score: t.double() });
     assert.throws(() => validateDoc({ score: -Infinity }, schema), ValidationError);
   });
 
@@ -126,7 +126,7 @@ describe("validateDoc", () => {
   // rejects every number, so pin that finite values - including the boundary the
   // guard is most likely to get wrong - still pass.
   test("number: finite values still pass, including MAX_VALUE", () => {
-    const schema = fieldsOf({ score: t.number() });
+    const schema = fieldsOf({ score: t.double() });
     assert.doesNotThrow(() => validateDoc({ score: 0 }, schema));
     assert.doesNotThrow(() => validateDoc({ score: -1.5 }, schema));
     assert.doesNotThrow(() => validateDoc({ score: Number.MAX_VALUE }, schema));
@@ -169,7 +169,7 @@ describe("validateDoc", () => {
   test("multiple errors collected together", () => {
     const schema = fieldsOf({
       name: t.string().required(),
-      age: t.number().required(),
+      age: t.double().required(),
     });
     try {
       validateDoc({}, schema);
@@ -209,7 +209,7 @@ describe("validateDoc — array and enum edge cases", () => {
   });
 
   test("array item validation: accepts all correct items", () => {
-    const schema = fieldsOf({ scores: t.array(t.number()) });
+    const schema = fieldsOf({ scores: t.array(t.double()) });
     assert.doesNotThrow(() => validateDoc({ scores: [1, 2, 3] }, schema));
   });
 
@@ -219,7 +219,7 @@ describe("validateDoc — array and enum edge cases", () => {
   });
 
   test("array item validation: rejects boolean item in number array", () => {
-    const schema = fieldsOf({ scores: t.array(t.number()) });
+    const schema = fieldsOf({ scores: t.array(t.double()) });
     assert.throws(
       () => validateDoc({ scores: [1, true] }, schema),
       ValidationError
@@ -234,7 +234,7 @@ describe("checkPartial", () => {
   });
 
   test("validates provided fields", () => {
-    const schema = fieldsOf({ age: t.number() });
+    const schema = fieldsOf({ age: t.double() });
     assert.throws(
       () => checkPartial({ age: "not-a-number" }, schema),
       ValidationError
@@ -244,7 +244,7 @@ describe("checkPartial", () => {
   test("passes valid partial doc", () => {
     const schema = fieldsOf({
       name: t.string().required(),
-      age: t.number().required(),
+      age: t.double().required(),
     });
     assert.doesNotThrow(() => checkPartial({ age: 25 }, schema));
   });

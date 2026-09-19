@@ -27,7 +27,7 @@
 // The value-format contracts are load-bearing rather than decorative: the engine
 // REFUSES `perRow.typeId({prefix})` into a generic `t.text()` column, because
 // generic text carries no value-format contract to validate against. The columns
-// here use `ids.typeId(...)` and `ids.ulid()` for that reason.
+// here use `perRow.typeId(...)` and `ids.ulid()` for that reason.
 //
 // GATE: `ZERO_MIGRATE_TEST_PG_URL`.
 
@@ -96,11 +96,11 @@ export default {
   schema() {
     table("${TABLE}").create({
       columns: {
-        id: t.int().notNull(),
+        id: t.int().required(),
         u4: t.uuid(),
         u7: t.uuid(),
         u7b: t.uuid(),
-        tid: ids.typeId({ prefix: "order" }),
+        tid: t.typedId("order" ),
         ul: ids.ulid(),
       },
       primaryKey: ["id"],

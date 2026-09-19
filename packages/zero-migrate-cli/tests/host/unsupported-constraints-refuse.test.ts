@@ -71,7 +71,7 @@ scope = ${scope}
 /** `items(id, sku)` with a table-level UNIQUE on `sku`. */
 const uniqueShape = (): void => {
   table("items").create({
-    columns: { id: t.int().notNull(), sku: t.string({ length: 32 }).notNull() },
+    columns: { id: t.int().required(), sku: t.string({ length: 32 }).required() },
     primaryKey: ["id"],
     uniques: [{ name: "items_sku_key", columns: ["sku"] }],
   });
@@ -80,7 +80,7 @@ const uniqueShape = (): void => {
 /** `parts(id, qty)` with a table-level CHECK that `qty >= 0`. */
 const checkShape = (): void => {
   table("parts").create({
-    columns: { id: t.int().notNull(), qty: t.int().notNull() },
+    columns: { id: t.int().required(), qty: t.int().required() },
     primaryKey: ["id"],
     checks: [{ name: "parts_qty_check", expr: (col) => col("qty").ge(0) }],
   });

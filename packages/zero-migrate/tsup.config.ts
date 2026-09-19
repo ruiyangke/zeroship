@@ -2,12 +2,20 @@ import { defineConfig, type Options } from "tsup";
 
 const shared = {
   format: ["esm"],
-  dts: true,
+  // `resolve: true` inlines the leaf's declarations. Without it dist/index.d.ts
+  // imports `@zeroship/schema`, a dev dependency: the published tarball would
+  // ship types that resolve nowhere, and publish-packages.sh's dependency check
+  // cannot see a types-only reference.
+  dts: { resolve: true },
   target: "es2022",
   outDir: "dist",
   sourcemap: true,
   treeshake: true,
   splitting: true,
+  // The schema lexicon is a DEV dependency that must be INLINED: it is the one
+  // lexicon both packages share, and bundling it is what keeps the published
+  // migration package's zero-runtime-dependency promise intact.
+  noExternal: [/^@zeroship\/schema$/],
 } satisfies Options;
 
 export default defineConfig([
@@ -30,8 +38,8 @@ export default defineConfig([
   // `cCase` helper, the internal `__pgDomain`/`__pgSequence` handles, AND the whole
   // public vendor surface — in one module. The SDK's recorder-internal tests import
   // it (`tests/{ops,sequences-exclusion,column-facets-lockstep}.test.ts`). No
-  // code-splitting (single file), no `.d.ts` (build artifact only). The inlined db
-  // type-builder (`./db-types.ts`) is bundled in — there is no external db dep.
+  // code-splitting (single file), no `.d.ts` (build artifact only). The db
+  // type-builder (`@zeroship/schema`) is bundled in — there is no external db dep.
   {
     ...shared,
     entry: { "embedded-recorder": "src/embedded-recorder.ts" },

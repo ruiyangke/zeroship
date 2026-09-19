@@ -126,7 +126,7 @@ export const name = "a";
 export default {
   schema() {
     table("${TABLE}").create({
-      columns: { id: t.int().notNull(), ts: t.timestamp(), note: t.text() },
+      columns: { id: t.int().required(), ts: t.timestamp(), note: t.text() },
       primaryKey: ["id"],
     });
   },

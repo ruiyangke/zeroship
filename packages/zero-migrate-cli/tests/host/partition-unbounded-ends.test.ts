@@ -99,7 +99,7 @@ export const name = "a";
 export default {
   schema() {
     table("${TABLE}").create({
-      columns: { id: t.int().notNull(), bucket: t.int().notNull() },
+      columns: { id: t.int().required(), bucket: t.int().required() },
       primaryKey: ["id", "bucket"],
       partitionBy: { range: ["bucket"] },
     });

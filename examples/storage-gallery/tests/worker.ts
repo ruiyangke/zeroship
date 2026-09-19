@@ -4,16 +4,6 @@ import { text } from "node:stream/consumers";
 import { inject } from "vitest";
 import type { Row } from "./rpc";
 
-function appPath(uuid: string): string {
-  const alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-  let value = BigInt(`0x${uuid.replaceAll("-", "")}`);
-  let encoded = "";
-  while (value) {
-    encoded = alphabet[Number(value % 62n)] + encoded;
-    value /= 62n;
-  }
-  return `app_${encoded.padStart(22, "0")}`;
-}
 
 // Match the gateway's service assertion and dispatch-frame wire contracts.
 // Long transfers use the worker directly; browser and multipart cases use the gateway.
@@ -41,7 +31,7 @@ export async function workerRpc(operation: string, input: Row, timeout: number):
   const body = Buffer.concat([length, metadata, Buffer.from(JSON.stringify({ json: input }))]);
   // Use the test's deadline for the entire operation, including response headers.
   const response = await new Promise<{ status: number | undefined; body: string }>((resolve, reject) => {
-    const req = request(`${worker.url}/dispatch/${appPath(worker.appId)}`, {
+    const req = request(`${worker.url}/dispatch/${worker.appId}`, {
       method: "POST", headers: {
         authorization: `Bearer ${assertion}`, "content-type": "application/octet-stream", "content-length": body.length,
       },

@@ -81,9 +81,9 @@ export default {
   schema() {
     table("${TABLE}").create({
       columns: {
-        id: t.int().notNull(),
-        email: t.string({ length: 100 }).notNull(),
-        status: t.string({ length: 20 }).notNull().default("new"),
+        id: t.int().required(),
+        email: t.string({ length: 100 }).required(),
+        status: t.string({ length: 20 }).required().default("new"),
         doomed: t.int(),
       },
       primaryKey: ["id"],
@@ -257,11 +257,11 @@ scope = "all"
 export const name = "base";
 export default {
   schema() {
-    table("fk_parent").create({ columns: { id: t.int().notNull(), spare: t.int() }, primaryKey: ["id"] });
+    table("fk_parent").create({ columns: { id: t.int().required(), spare: t.int() }, primaryKey: ["id"] });
     table("fk_child").create({
       columns: {
-        id: t.int().notNull(),
-        parent_id: t.int().notNull().references("fk_parent", "id"),
+        id: t.int().required(),
+        parent_id: t.int().required().references("fk_parent", "id"),
         spare: t.int(),
       },
       primaryKey: ["id"],
@@ -397,8 +397,8 @@ export default {
   schema() {
     table("partial_rows").create({
       columns: {
-        id: t.int().notNull(),
-        status: t.string({ length: 20 }).notNull(),
+        id: t.int().required(),
+        status: t.string({ length: 20 }).required(),
         spare: t.int(),
       },
       primaryKey: ["id"],

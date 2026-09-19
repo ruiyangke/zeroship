@@ -86,13 +86,13 @@ const FK = {
   initiallyDeferred: true,
 };
 const EX = { using: "btree", elements: [{ target: "room", operator: "=" }] };
-const fkCols = { id: t.int().notNull(), pid: t.int() };
-const uqCols = { id: t.int().notNull(), a: t.int().notNull(), b: t.int().notNull() };
-const exCols = { id: t.int().notNull(), room: t.int().notNull() };
+const fkCols = { id: t.int().required(), pid: t.int() };
+const uqCols = { id: t.int().required(), a: t.int().required(), b: t.int().required() };
+const exCols = { id: t.int().required(), room: t.int().required() };
 export default {
   schema() {
     table("cr_parent").create({
-      columns: { id: t.int().notNull() },
+      columns: { id: t.int().required() },
       primaryKey: ["id"],
     });
 

@@ -60,10 +60,10 @@ const migration = {
     domain("short_code").create({ as: t.string({ length: 40 }) });
     table("amounts").create({
       columns: {
-        amount: t.domain("positive_number").notNull(),
-        code: t.domain("short_code").notNull(),
-        weight: t.int().notNull(),
-        note: t.text().notNull(),
+        amount: t.domain("positive_number").required(),
+        code: t.domain("short_code").required(),
+        weight: t.int().required(),
+        note: t.text().required(),
       },
     });
   },

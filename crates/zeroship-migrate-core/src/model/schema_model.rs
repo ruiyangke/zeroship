@@ -94,7 +94,7 @@ use zeroship_migrate_backend::dialectal::{Dialectal, VendorColumnFacts};
 use zeroship_migrate_ir::attribute::Attributes;
 
 use crate::model::ir::{
-    IdentityCol, IndexSortOrder, PartitionSpec, TableRuntimeOptions, ValueFormat,
+    IdentityCol, IndexSortOrder, PartitionSpec, TableRuntimeOptions,
 };
 use crate::model::snapshot::{
     canonical_index_sort_order, index_predicates_canonically_eq, ColumnCollationSnapshot,
@@ -429,8 +429,6 @@ pub struct Column {
     pub generated_kind: Option<GeneratedKindSnapshot>,
     /// SQL identity / portable auto-increment facet.
     pub identity: Option<IdentityCol>,
-    /// A locally enforced TypeID/ULID format CHECK recovered from the catalog.
-    pub value_format: Option<ValueFormat>,
     /// Semantic drift key for a default on an ID-bearing column.
     pub id_default: Option<IdDefaultSnapshot>,
     /// `Some(false)` means this logical text column is case-insensitive.
@@ -576,7 +574,6 @@ impl Column {
             generated: snapshot.generated.clone(),
             generated_kind: snapshot.generated_kind,
             identity: snapshot.identity,
-            value_format: snapshot.value_format.clone(),
             id_default: snapshot.id_default.clone(),
             case_sensitive: snapshot.case_sensitive,
             unbounded_text: snapshot.unbounded_text,
@@ -606,7 +603,6 @@ impl Column {
             generated_kind: self.generated_kind,
             identity: self.identity,
             rowid_alias: vendor.rowid_alias.get(&key).copied().unwrap_or(false),
-            value_format: self.value_format.clone(),
             catalog_uuid_format_check: vendor
                 .catalog_uuid_format_check
                 .get(&key)
@@ -968,8 +964,7 @@ impl SchemaModel {
 /// * `type_def` - emission-only descriptor token retained so a backend can recover
 ///   its physical spelling. The introspectable `data_type` is compared instead.
 /// * `inline_checks` - emission-only. Live introspection tracks table constraints
-///   separately; only recognised ID-format CHECKs project into `value_format`, which IS
-///   compared.
+///   separately.
 /// * `generated` - the RENDERED expression. Live introspection does not carry it into
 ///   the structural snapshot. The comparable half is `generated_kind`, which THIS
 ///   comparator also ignores but [`drift_identity`] does not - see there.
@@ -1005,7 +1000,6 @@ pub fn column_shape_identity(left: &Column, right: &Column) -> bool {
         generated: _ignored_generated,
         generated_kind: _ignored_generated_kind,
         identity,
-        value_format,
         id_default,
         case_sensitive,
         unbounded_text: _ignored_unbounded_text_emission_only,
@@ -1021,7 +1015,6 @@ pub fn column_shape_identity(left: &Column, right: &Column) -> bool {
         && *data_type == right.data_type
         && *nullable == right.nullable
         && *identity == right.identity
-        && *value_format == right.value_format
         && *id_default == right.id_default
         && *case_sensitive == right.case_sensitive
         && *collation == right.collation
@@ -1067,7 +1060,6 @@ pub fn drift_identity(left: &Column, right: &Column) -> bool {
         generated: _ignored_generated_rendered,
         generated_kind,
         identity: _routed_by_shape_identity_4,
-        value_format: _routed_by_shape_identity_5,
         id_default: _routed_by_shape_identity_6,
         case_sensitive: _routed_by_shape_identity_7,
         unbounded_text: _ignored_unbounded_text_emission_only,

@@ -108,7 +108,7 @@ function assertCliOk(result: CliResult, action: string): void {
 
 function createTableBody(): string {
   return `table(${JSON.stringify(TABLE)}).create({
-    columns: { id: t.int().notNull(), title: t.text() },
+    columns: { id: t.int().required(), title: t.text() },
     primaryKey: ["id"],
   });`;
 }
@@ -208,7 +208,7 @@ test("F654 b: a stored reverse is replayed, and says nothing about reconstructin
       schema,
       "create_f654_replay",
       `table(${JSON.stringify(TABLE)}).create({
-         columns: { id: t.int().notNull() },
+         columns: { id: t.int().required() },
          primaryKey: ["id"],
        });`,
     );

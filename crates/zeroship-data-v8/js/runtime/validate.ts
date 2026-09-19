@@ -35,7 +35,6 @@ const KNOWN_FIELD_TYPES: ReadonlySet<string> = new Set<TypeName>([
   "float",
   "timestamp",
   "boolean",
-  "date",
   "json",
   "calendarDate",
   "array",
@@ -148,7 +147,7 @@ const ARRAY_ITEM_VALIDATORS: Record<PrimitiveTypeName, (value: unknown) => boole
   string: value => typeof value === "string",
   number: value => typeof value === "number",
   boolean: value => typeof value === "boolean",
-  date: isTimestampValue,
+  timestamp: isTimestampValue,
   calendarDate: value => typeof value === "string" && isValidCalendarDate(value),
   json: isJsonSerializable,
 };
@@ -286,7 +285,7 @@ function checkField(
     // The integral column tokens. The runtime descriptor emits `int`,
     // `integer`, `bigInt` and `float` — the generator keeps the column's real
     // type even though the TypeScript renderer collapses all five to
-    // `t.number()` — so they arrive here and are numbers, not a separate kind.
+    // `t.double()` — so they arrive here and are numbers, not a separate kind.
     //
     // Enforcing integrality is the point. Without it `create({ points: 1.5 })`
     // reaches an INTEGER column and Postgres assignment-casts it to 2, so the
@@ -326,11 +325,7 @@ function checkField(
       errors[key] = { path: key, message: `${key} must be a boolean` };
       return;
     }
-    // `timestamp` alongside `date` for the same reason the integral tokens sit
-    // with `number`: the descriptor carries the column's own token, and the
-    // generator's renderer treats `date` and `timestamp` as one case. Leaving it
-    // out would send every timestamp column into the unknown-type guard below.
-  } else if (type === "date" || type === "timestamp") {
+  } else if (type === "timestamp") {
     if (!isTimestampValue(value)) {
       errors[key] = {
         path: key,
@@ -382,7 +377,7 @@ function checkField(
           childVal === null ||
           (childDef.type === "string" && childDef.required === true && childVal === "");
         if (missing) {
-          if (childDef.required === true && childDef.default === undefined) {
+          if (childDef.required === true && childDef.default === undefined && childDef.clientDefault === undefined) {
             errors[childPath] = { path: childPath, message: `${childPath} is required` };
           }
           continue;
@@ -442,7 +437,7 @@ function checkField(
         childVal === null ||
         (childDef.type === "string" && childDef.required === true && childVal === "");
       if (missing) {
-        if (childDef.required === true && childDef.default === undefined) {
+        if (childDef.required === true && childDef.default === undefined && childDef.clientDefault === undefined) {
           errors[childPath] = { path: childPath, message: `${childPath} is required` };
         }
         continue;
@@ -578,7 +573,9 @@ export function validateDoc(doc: Doc, schema: NormalizedSchema): Doc {
         delete result[key];
         continue;
       }
-      if (def.default !== undefined) {
+      if (def.clientDefault !== undefined) {
+        result[key] = def.clientDefault();
+      } else if (def.default !== undefined) {
         result[key] =
           typeof def.default === "function" ? def.default() : def.default;
       } else if (def.required) {
@@ -645,7 +642,9 @@ function validateUnionDoc(
       value === null ||
       (def.type === "string" && def.required === true && value === "");
     if (missing) {
-      if (def.default !== undefined) {
+      if (def.clientDefault !== undefined) {
+        result[key] = def.clientDefault();
+      } else if (def.default !== undefined) {
         result[key] =
           typeof def.default === "function" ? def.default() : def.default;
       } else if (def.required === true) {
@@ -707,7 +706,7 @@ export function checkPartial(doc: Doc, schema: NormalizedSchema): void {
         for (const [vKey, vDef] of Object.entries(matched)) {
           if (vDef.type === "literal") continue;
           if (vDef.required !== true) continue;
-          if (vDef.default !== undefined) continue;
+          if (vDef.default !== undefined || vDef.clientDefault !== undefined) continue;
           const patchVal = doc[vKey];
           if (patchVal === undefined || patchVal === null) {
             missing.push(vKey);

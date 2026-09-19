@@ -65,6 +65,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@zeroship/schema": "workspace:*",
     "json-schema-to-typescript": "^15.0.4",
     "tsup": "^8.5.1",
     "tsx": "catalog:",

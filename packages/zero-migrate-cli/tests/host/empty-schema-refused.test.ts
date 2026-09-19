@@ -82,7 +82,7 @@ scope = "all"
 export const name = "base";
 export default {
   schema() {
-    table("${TABLE}").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+    table("${TABLE}").create({ columns: { id: t.int().required() }, primaryKey: ["id"] });
   },
 };
 `,

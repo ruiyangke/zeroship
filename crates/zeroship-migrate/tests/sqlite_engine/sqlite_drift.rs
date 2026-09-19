@@ -11,7 +11,7 @@ use tempfile::TempDir;
 use zeroship_migrate::apply::backend::MigrationBackend;
 use zeroship_migrate::apply::drift::{diff_snapshots, StructuralDrift};
 use zeroship_migrate::conn::ExecutorConfig;
-use zeroship_migrate::model::ir::{MigrationIr, ValueFormat, CURRENT_IR_VERSION};
+use zeroship_migrate::model::ir::{MigrationIr, CURRENT_IR_VERSION};
 use zeroship_migrate::model::migration::{
     Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
 };
@@ -74,7 +74,7 @@ fn cfg() -> ExecutorConfig {
 fn lower_id_table_sql(
     table: &str,
     ty: &str,
-    value_format: Option<Value>,
+    id_prefix: Option<&str>,
     uuid_v4_default: bool,
 ) -> String {
     let mut column = json!({
@@ -83,8 +83,9 @@ fn lower_id_table_sql(
         "nullable": false,
     });
     let object = column.as_object_mut().expect("column fixture is an object");
-    if let Some(value_format) = value_format {
-        object.insert("valueFormat".to_string(), value_format);
+    if let Some(id_prefix) = id_prefix {
+        object.insert("type".to_string(), json!({ "string": { "length": 36 } }));
+        object.insert("idPrefix".to_string(), json!(id_prefix));
     }
     if uuid_v4_default {
         object.insert(
@@ -531,159 +532,6 @@ async fn uuid_id_defaults_detect_add_remove_and_swap_without_cosmetic_drift() {
 }
 
 // ---------------------------------------------------------------------------
-// TypeID/ULID format contracts live in inline SQLite CHECKs. Exact contracts
-// recover as ValueFormat; drops, partial edits, and TypeID prefix changes drift.
-// ---------------------------------------------------------------------------
-#[compio::test]
-async fn type_id_and_ulid_format_checks_are_introspected_and_drift_compared() {
-    let type_id_account = lower_id_table_sql(
-        "formatted_ids",
-        "text",
-        Some(json!({ "typeId": { "prefix": "account" } })),
-        false,
-    );
-    let type_id_user = lower_id_table_sql(
-        "formatted_ids",
-        "text",
-        Some(json!({ "typeId": { "prefix": "user" } })),
-        false,
-    );
-    let ulid = lower_id_table_sql("formatted_ids", "text", Some(json!("ulid")), false);
-    let plain = lower_id_table_sql("formatted_ids", "text", None, false);
-    let altered_ulid = ulid.replacen("length(\"id\") = 26", "length(\"id\") = 25", 1);
-    assert_ne!(altered_ulid, ulid, "ULID length guard must be present");
-    let regrouped_ulid = ulid.replacen(
-        "\"id\" IS NULL OR (typeof(\"id\") = 'text' AND length",
-        "(\"id\" IS NULL OR typeof(\"id\") = 'text') AND (length",
-        1,
-    );
-    assert_ne!(
-        regrouped_ulid, ulid,
-        "ULID boolean grouping fixture must alter the CHECK"
-    );
-
-    for (tag, expected_sql, changed_sql, expected, actual) in [
-        (
-            "type_id_prefix_drift",
-            type_id_account.as_str(),
-            type_id_user.as_str(),
-            "typeId(account)",
-            "typeId(user)",
-        ),
-        (
-            "type_id_check_drop",
-            type_id_account.as_str(),
-            plain.as_str(),
-            "typeId(account)",
-            "",
-        ),
-        (
-            "ulid_check_alter",
-            ulid.as_str(),
-            altered_ulid.as_str(),
-            "ulid",
-            "",
-        ),
-        (
-            "ulid_check_regroup",
-            ulid.as_str(),
-            regrouped_ulid.as_str(),
-            "ulid",
-            "",
-        ),
-        ("ulid_check_drop", ulid.as_str(), plain.as_str(), "ulid", ""),
-    ] {
-        let p = paths(tag);
-        let be = backend(&p);
-        be.apply_one_additive(&mig(tag, expected_sql), "d")
-            .await
-            .expect("apply expected format contract");
-        let expected_snapshot = be
-            .snapshot_schema_sqlite()
-            .await
-            .expect("expected snapshot");
-        let id = expected_snapshot.tables["formatted_ids"]
-            .columns
-            .iter()
-            .find(|column| column.name == "id")
-            .expect("formatted id column");
-        match expected {
-            "typeId(account)" => assert_eq!(
-                id.value_format,
-                Some(ValueFormat::TypeId {
-                    prefix: "account".to_string()
-                })
-            ),
-            "ulid" => assert_eq!(id.value_format, Some(ValueFormat::Ulid)),
-            _ => unreachable!("test fixture expected format"),
-        }
-        let clean = be.snapshot_schema_sqlite().await.expect("clean snapshot");
-        assert!(
-            diff_snapshots(zeroship_migrate::shipping_vendors(), &expected_snapshot, &clean).is_clean(),
-            "unchanged format CHECK must stay clean"
-        );
-        drop(be);
-
-        replace_table(&p, "formatted_ids", changed_sql);
-        let actual_snapshot = backend(&p)
-            .snapshot_schema_sqlite()
-            .await
-            .expect("actual snapshot");
-        let drift = diff_snapshots(
-            zeroship_migrate::shipping_vendors(),
-            &expected_snapshot,
-            &actual_snapshot,
-        );
-        assert_column_drift(&drift, "id", "format", expected, actual);
-    }
-}
-
-#[compio::test]
-async fn mixed_uuid_and_value_format_checks_are_rejected() {
-    let uuid = lower_id_table_sql("mixed_ids", "uuid", None, false);
-    for (tag, value_format_sql) in [
-        (
-            "mixed_uuid_type_id",
-            lower_id_table_sql(
-                "mixed_ids",
-                "text",
-                Some(json!({ "typeId": { "prefix": "account" } })),
-                false,
-            ),
-        ),
-        (
-            "mixed_uuid_ulid",
-            lower_id_table_sql("mixed_ids", "text", Some(json!("ulid")), false),
-        ),
-    ] {
-        let check_start = value_format_sql
-            .find("CHECK ")
-            .expect("value-format fixture has a CHECK");
-        let value_format_check = &value_format_sql[check_start..value_format_sql.len() - 1];
-        let mixed = format!(
-            "{} {value_format_check})",
-            uuid.strip_suffix(')').expect("CREATE TABLE closes")
-        );
-
-        let p = paths(tag);
-        let be = backend(&p);
-        be.apply_one_additive(&mig(tag, &mixed), "d")
-            .await
-            .expect("SQLite accepts the deliberately mixed catalog fixture");
-        let error = be
-            .snapshot_schema_sqlite()
-            .await
-            .expect_err("ambiguous mixed ID-format surfaces must fail closed");
-        assert!(
-            error
-                .to_string()
-                .contains("mixed UUID and TypeID/ULID format CHECKs"),
-            "mixed format diagnostic must be explicit: {error}"
-        );
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Portable clean oracle: compare the authored SQLite fold—not another live
 // snapshot—to the catalog. This guards the exact boundary most likely to
 // phantom-drift: bigint identity folds to physical INTEGER rowid storage, while
@@ -715,15 +563,9 @@ async fn authored_identity_default_and_format_snapshot_matches_live_sqlite() {
                     { "name": "supplied_uuid", "type": "uuid", "nullable": false },
                     {
                         "name": "type_id",
-                        "type": "text",
+                        "type": { "string": { "length": 36 } },
                         "nullable": false,
-                        "valueFormat": { "typeId": { "prefix": "account" } }
-                    },
-                    {
-                        "name": "ulid",
-                        "type": "text",
-                        "nullable": false,
-                        "valueFormat": "ulid"
+                        "idPrefix": "acct"
                     },
                     { "name": "ordinary", "type": "text", "nullable": true }
                 ],
@@ -862,9 +704,8 @@ async fn typed_reference_literal_defaults_use_expected_driven_catalog_comparison
                 "name": "parents",
                 "columns": [{
                     "name": "id",
-                    "type": "text",
-                    "nullable": false,
-                    "valueFormat": { "typeId": { "prefix": "account" } },
+                    "type":{"string":{"length":36}},"nullable": false,
+                    "idPrefix":"acct",
                     "default": { "literal": { "value": LITERAL } }
                 }],
                 "primaryKey": ["id"],
@@ -876,9 +717,8 @@ async fn typed_reference_literal_defaults_use_expected_driven_catalog_comparison
                 "name": "children",
                 "columns": [{
                     "name": "parent_id",
-                    "type": "text",
-                    "nullable": true,
-                    "valueFormat": { "typeId": { "prefix": "account" } },
+                    "type":{"string":{"length":36}},"nullable": true,
+                    "idPrefix":"acct",
                     "default": { "literal": { "value": LITERAL } },
                     "references": {
                         "table": "parents",
@@ -942,11 +782,8 @@ async fn typed_reference_literal_defaults_use_expected_driven_catalog_comparison
         .find(|column| column.name == "id")
         .expect("local TypeID column");
     assert_eq!(
-        parent.id_default,
-        Some(IdDefaultSnapshot::Literal(
-            serde_json::to_string(LITERAL).expect("literal serializes")
-        )),
-        "a locally checked TypeID literal is classified directly"
+        parent.id_default, None,
+        "a typed-id column is a plain bounded string; its literal default is not an ID-format marker"
     );
     let child_create = actual.tables["children"]
         .stored_create_sql
@@ -1363,13 +1200,13 @@ async fn single_and_composite_reference_drop_repoint_reorder_and_actions_drift()
     let type_id_parent = lower_id_table_sql(
         "parent",
         "text",
-        Some(json!({ "typeId": { "prefix": "account" } })),
+        Some("acct"),
         false,
     );
     let type_id_alternate = lower_id_table_sql(
         "alternate_parent",
         "text",
-        Some(json!({ "typeId": { "prefix": "account" } })),
+        Some("acct"),
         false,
     );
     let single_parents = format!("{type_id_parent}; {type_id_alternate};");
@@ -1422,15 +1259,6 @@ async fn single_and_composite_reference_drop_repoint_reorder_and_actions_drift()
             .await
             .expect("expected snapshot");
         let child = &expected.tables["child"];
-        let child_id = child
-            .columns
-            .iter()
-            .find(|column| column.name == "parent_id")
-            .expect("typed child column");
-        assert_eq!(
-            child_id.value_format, None,
-            "typed child inherits format safety through its FK"
-        );
         assert!(
             child
                 .constraints

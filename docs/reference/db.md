@@ -271,7 +271,7 @@ There are two `t.*` surfaces, and they are not interchangeable:
 - **`@zeroship/migrate`** — what you write in `migrations/*.ts` to define
   tables. It is a DDL lexicon: `t.text()`, `t.string({ length })`,
   `t.int()`, `t.timestamp()`, `.notNull()`, `t.text().references(...)`,
-  `ids.typeId(...)`.
+  `t.typedId(...)`.
 - **`@zeroship/db`** — the runtime schema the generated `env.db` typing is
   built from, and the surface for shared packages and tests. It is a
   validation/typing lexicon: `t.string()`, `t.number()`, `.required()`,
@@ -305,11 +305,11 @@ column definition, so a hoisted builder is safe to reuse.
 | `t.char({ length })` | `CHAR(N)` | Fixed-length. |
 | `t.vector({ dimensions, metric? })` | `vector` (pgvector) | See [Vector search](#vector-search). |
 | `t.geoPoint()` | `geography(POINT, 4326)` on PG | See [Geo](#geo-point--radius). |
-| `t.encrypted({ of })` | ciphertext | Wraps another column type. |
 
 Chainable modifiers: `.notNull()`, `.default(value)`, `.unique()`,
 `.primaryKey()`, `.references(table, column, opts?)`, `.mask({ kind, ... })`,
-`.generated(expr)`, `.identity()`, `.autoIncrement()`, `.collation(intent)`.
+`.encrypted()`, `.generated(expr)`, `.identity()`, `.autoIncrement()`,
+`.collation(intent)`.
 
 `.references(table, column, opts?)` declares a foreign key. `column` is the
 target column and is required here; `opts` accepts `onDelete`, `onUpdate`,
@@ -356,7 +356,7 @@ select are always present.
 
 If you build a manual runtime schema with `@zeroship/db` (for a shared package
 or a test), that surface does expose them: `.assigned({ by, on })` attaches an
-assignment and `t.id(prefix)` pins a typed-id prefix. See
+assignment and `t.typedId(prefix)` pins a typed-id prefix. See
 [Runtime schema builders](#runtime-schema-builders).
 
 ### Migrations: refinements
@@ -401,14 +401,13 @@ modifiers differ from the migration lexicon:
 | `t.bytes()` | `Uint8Array` | |
 | `t.vector(dims, opts?)` | `number[]` | |
 | `t.geoPoint()` | `{ lat, lng }` | |
-| `t.encrypted({ of })` | ciphertext | |
-| `t.id(prefix?)` | `string` | Typed-id base, optionally pinning a prefix. |
+| `t.typedId(prefix?)` | `string` | Typed-id base, optionally pinning a prefix. |
 
 Chainable modifiers: `.required()` (the runtime-side counterpart of
 `.notNull()`), `.nullable()`, `.default(value)`, `.unique()`, `.index()`,
 `.min(n)`, `.max(n)`, `.enum(...values)`, `.pattern(/regex/)`, `.primaryKey()`,
 `.assigned({ by, on })`, `.references(table, opts?)`, `.mask(opts)`,
-`.auto_now()`, `.auto_now_on_update()`.
+`.encrypted()`, `.auto_now()`, `.auto_now_on_update()`.
 
 A nullable field's write input is `T | undefined`, not `T | null`: passing
 `null` on insert or update is a compile error. `null` is a filter shape
@@ -427,7 +426,7 @@ built from a migration:
 import { t, schema } from "@zeroship/db";
 
 const users = schema({
-  id: t.id("user").required().primaryKey().assigned({ by: "typedId", on: "insert" }),
+  id: t.typedId("user").required().primaryKey().assigned({ by: "typedId", on: "insert" }),
   created_at: t.timestamp().required().assigned({ by: "now", on: "insert" }),
   updated_at: t.timestamp().required().assigned({ by: "now", on: "write" }),
   version: t.integer().required().default(1).assigned({ by: "increment(1)", on: "write" }),
@@ -436,7 +435,7 @@ const users = schema({
 });
 ```
 
-`t.id(prefix)` pins the typed-id prefix; without it the prefix is derived from
+`t.typedId(prefix)` pins the typed-id prefix; without it the prefix is derived from
 the collection name. A `data()` migration cannot declare any of this — see
 [System columns](#system-columns).
 
@@ -1460,7 +1459,7 @@ excluded from write inputs, and `id` never changes.
 ## Masking
 
 **Encryption hides at rest. Masking hides at read time.** They are
-sibling concerns and compose: an `t.encrypted(...)` column without
+sibling concerns and compose: an `.encrypted()` column without
 an explicit `.mask(...)` declaration is treated as `.mask({ kind:
 "full", classification: "pii" })` by default.
 
@@ -1510,11 +1509,11 @@ export default {
     table("users").create({
       columns: {
         name: t.text().notNull(),
-        email: t.encrypted({ of: t.text() })
+        email: t.text().encrypted()
           .mask({ kind: "email", classification: "pii" }),
-        ssn: t.encrypted({ of: t.text() })
+        ssn: t.text().encrypted()
           .mask({ kind: "last4", classification: "spi" }),
-        dob: t.encrypted({ of: t.text() })
+        dob: t.text().encrypted()
           .mask({ kind: "dateYear", classification: "phi" }),
       },
     });
@@ -1522,8 +1521,8 @@ export default {
 };
 ```
 
-`t.encrypted({ of })` without `.mask({...})` is shorthand for
-`.mask({ kind: "full", classification: "pii" })`. `t.text().mask({
+An `.encrypted()` field without `.mask({...})` gets the default
+`.mask({ kind: "full", classification: "pii" })` at seal time. `t.text().mask({
 kind: "full", classification: "public" })` (mask without encryption)
 is also valid — masking is the read-side; encryption is the
 storage-side; they're independent. `.mask({ kind: "none" })` opts into
@@ -1583,7 +1582,7 @@ column it is attached to.
 | Classification | Scope                                          |
 |----------------|------------------------------------------------|
 | `public`       | Display names, public profile data — visible to all. |
-| `pii`          | Email, address, phone, DOB. Default for `t.encrypted()`. |
+| `pii`          | Email, address, phone, DOB. Default for `.encrypted()`. |
 | `spi`          | CPRA "sensitive PI": SSN, biometric, driver's licence. |
 | `phi`          | HIPAA scope: medical records, diagnosis.              |
 | `pci`          | PCI-DSS scope: card numbers, CVV.                     |
@@ -1713,3 +1712,4 @@ names; it stores their ids as text and holds no foreign key into them.
 Like every table in the creator schema, it is addressable through a
 declared collection and has ordinary data privileges. Its name does
 not make it hidden or append-only.
+

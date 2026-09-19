@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createWriteStream, type WriteStream } from "node:fs";
-import { generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
+import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { appendFile, cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { connect, createServer } from "node:net";
 import { join, resolve } from "node:path";
@@ -13,6 +13,7 @@ import { generate } from "selfsigned";
 import { stringify } from "smol-toml";
 import { Parser } from "tar";
 import { GenericContainer, Wait, type StartedTestContainer } from "testcontainers";
+import { typedIdFromStableSeed } from "@zeroship/server/typed-id";
 import { issuer } from "./issuer";
 import { Processes } from "./processes";
 
@@ -199,7 +200,7 @@ export class Platform {
     const identity = issuer();
     const jwks = await this.container(identity.container);
     const issuerUrl = `http://${jwks.getHost()}:${jwks.getMappedPort(80)}`;
-    const owner = randomUUID();
+    const owner = typedIdFromStableSeed("usr", "db-hitcounter-fixture-owner");
     const seeded = await postgres.exec(["psql", "-U", "postgres", "-d", "db_fixture", "-v", "ON_ERROR_STOP=1", "-c",
       `INSERT INTO zeroship.users (id, email, name, email_verified_at) VALUES ('${owner}', 'db-${owner}@zeroship.test', 'DB fixture owner', NOW())`]);
     assert.equal(seeded.exitCode, 0, `Seed authenticated fixture owner: ${seeded.output}`);

@@ -10,14 +10,14 @@ export default {
   schema() {
     table("app_audit", { schema: "zeroship" }).create({
       columns: {
-        id: t.uuid().notNull().default(uuidV4()),
+        id: t.uuid().required().default(uuidV4()),
         app_id: t.text(),
         actor_user_id: t.text(),
-        action: t.text().notNull(),
+        action: t.text().required(),
         resource: t.text(),
         source_ip: t.inet(),
         detail: t.json(),
-        occurred_at: t.timestamp().notNull().default(now()),
+        occurred_at: t.timestamp().required().default(now()),
         // An audit row records what happened, and it must stay readable after
         // the organization it names is gone; it carries no foreign key on purpose.
         organization_id: t.text(),
@@ -26,22 +26,22 @@ export default {
     });
     table("app_env_expose", { schema: "zeroship" }).create({
       columns: {
-        id: t.bigInt().notNull().identity(),
-        app_id: t.text().notNull(),
-        key_name: t.text().notNull(),
-        updated_at: t.timestamp().notNull().default(now()),
+        id: t.bigInt().required().identity(),
+        app_id: t.text().required(),
+        key_name: t.text().required(),
+        updated_at: t.timestamp().required().default(now()),
       },
       primaryKey: ["id"],
     });
     table("app_env_expose", { schema: "zeroship" }).unique("app_env_expose_natural_key").add({ columns: ["app_id", "key_name"] });
     table("app_oauth_clients", { schema: "zeroship" }).create({
       columns: {
-        id: t.bigInt().notNull().identity(),
-        app_id: t.text().notNull(),
-        client_id: t.text().notNull(),
-        sector_identifier: t.text().notNull(),
-        created_at: t.timestamp().notNull().default(now()),
-        updated_at: t.timestamp().notNull().default(now()),
+        id: t.bigInt().required().identity(),
+        app_id: t.text().required(),
+        client_id: t.text().required(),
+        sector_identifier: t.text().required(),
+        created_at: t.timestamp().required().default(now()),
+        updated_at: t.timestamp().required().default(now()),
       },
       primaryKey: ["id"],
     });
@@ -68,22 +68,22 @@ export default {
     // that advanced the schema.
     table("app_schema_applies", { schema: "zeroship" }).create({
       columns: {
-        id: t.bigInt().notNull().identity(),
-        app_id: t.text().notNull(),
-        migration_id: t.uuid().notNull(),
-        status: t.text().notNull(),
-        request_body: t.json().notNull(),
-        effective_profile: t.json().notNull(),
-        ceiling_id: t.text().notNull(),
-        ceiling_version: t.bigInt().notNull(),
+        id: t.bigInt().required().identity(),
+        app_id: t.text().required(),
+        migration_id: t.uuid().required(),
+        status: t.text().required(),
+        request_body: t.json().required(),
+        effective_profile: t.json().required(),
+        ceiling_id: t.text().required(),
+        ceiling_version: t.bigInt().required(),
         // The runtime descriptor this document set folds to, lowercase sha256 hex.
         // Validated at the migration service's door, so the spelling recorded here
         // is the one a manifest hash can be compared to with a plain `=`.
-        descriptor_sha256: t.text().notNull(),
+        descriptor_sha256: t.text().required(),
         // The engine's own `outcome.applied` for this request.
-        applied_versions: t.json().notNull().default([]),
+        applied_versions: t.json().required().default([]),
         submitted_by: t.text(),
-        submitted_at: t.timestamp().notNull().default(now()),
+        submitted_at: t.timestamp().required().default(now()),
         applied_at: t.timestamp(),
         last_error: t.text(),
       },
@@ -94,10 +94,10 @@ export default {
     table("app_schema_applies", { schema: "zeroship" }).check("app_schema_applies_status_check").add({ expr: (col) => col("status").in(["submitted", "applied", "failed"]) });
     table("app_scope_defs", { schema: "zeroship" }).create({
       columns: {
-        id: t.bigInt().notNull().identity(),
-        app_id: t.text().notNull(),
-        scope_id: t.text().notNull(),
-        label: t.text().notNull(),
+        id: t.bigInt().required().identity(),
+        app_id: t.text().required(),
+        scope_id: t.text().required(),
+        label: t.text().required(),
         description: t.text(),
       },
       primaryKey: ["id"],
@@ -105,42 +105,42 @@ export default {
     table("app_scope_defs", { schema: "zeroship" }).unique("app_scope_defs_natural_key").add({ columns: ["app_id", "scope_id"] });
     table("app_secrets", { schema: "zeroship" }).create({
       columns: {
-        id: t.bigInt().notNull().identity(),
-        app_id: t.text().notNull(),
-        key_name: t.text().notNull(),
-        ciphertext: t.bytes().notNull(),
-        updated_at: t.timestamp().notNull().default(now()),
+        id: t.bigInt().required().identity(),
+        app_id: t.text().required(),
+        key_name: t.text().required(),
+        ciphertext: t.bytes().required(),
+        updated_at: t.timestamp().required().default(now()),
       },
       primaryKey: ["id"],
     });
     table("app_secrets", { schema: "zeroship" }).unique("app_secrets_natural_key").add({ columns: ["app_id", "key_name"] });
     table("app_usage", { schema: "zeroship" }).create({
       columns: {
-        id: t.bigInt().notNull().identity(),
-        app_id: t.text().notNull(),
-        resource: t.text().notNull(),
-        value: t.bigInt().notNull().default(0),
+        id: t.bigInt().required().identity(),
+        app_id: t.text().required(),
+        resource: t.text().required(),
+        value: t.bigInt().required().default(0),
       },
       primaryKey: ["id"],
     });
     table("app_usage", { schema: "zeroship" }).unique("app_usage_natural_key").add({ columns: ["app_id", "resource"] });
     table("app_usage_history", { schema: "zeroship" }).create({
       columns: {
-        id: t.bigInt().notNull().identity(),
-        app_id: t.text().notNull(),
-        period: t.text().notNull(),
-        counters: t.json().notNull(),
-        created_at: t.timestamp().notNull().default(now()),
+        id: t.bigInt().required().identity(),
+        app_id: t.text().required(),
+        period: t.text().required(),
+        counters: t.json().required(),
+        created_at: t.timestamp().required().default(now()),
       },
       primaryKey: ["id"],
     });
     table("app_vars", { schema: "zeroship" }).create({
       columns: {
-        id: t.bigInt().notNull().identity(),
-        app_id: t.text().notNull(),
-        key_name: t.text().notNull(),
-        value: t.text().notNull(),
-        updated_at: t.timestamp().notNull().default(now()),
+        id: t.bigInt().required().identity(),
+        app_id: t.text().required(),
+        key_name: t.text().required(),
+        value: t.text().required(),
+        updated_at: t.timestamp().required().default(now()),
       },
       primaryKey: ["id"],
     });
@@ -151,25 +151,25 @@ export default {
         // generator for `app_<base36>` would be a second minter beside
         // `AppId::mint`, and one producer per identifier is what makes a
         // derived name answerable. Every insert supplies the id.
-        id: t.text().notNull(),
-        name: t.text().notNull(),
-        plan_id: t.text().notNull().default("free"),
+        id: t.text().required(),
+        name: t.text().required(),
+        plan_id: t.text().required().default("free"),
         deploy_hash: t.text(),
-        env_version: t.bigInt().notNull().default(0),
-        workflows_enabled: t.boolean().notNull().default(false),
+        env_version: t.bigInt().required().default(0),
+        workflows_enabled: t.boolean().required().default(false),
         manifest_json: t.text(),
-        created_at: t.timestamp().notNull().default(now()),
-        updated_at: t.timestamp().notNull().default(now()),
-        system: t.boolean().notNull().default(false),
+        created_at: t.timestamp().required().default(now()),
+        updated_at: t.timestamp().required().default(now()),
+        system: t.boolean().required().default(false),
         archived_at: t.timestamp(),
         // `project_id` is NULL only for a deleted app: deletion detaches the app
         // from its project while keeping `organization_id`, the column billing
         // attribution reads. `apps_live_app_has_project` holds that direction.
         project_id: t.text(),
-        organization_id: t.text().notNull(),
+        organization_id: t.text().required(),
         deleted_at: t.timestamp(),
-        lifecycle_revision: t.bigInt().notNull().default(0),
-        execution_zone_id: t.text().notNull().default("ezn_default000000000000000000"),
+        lifecycle_revision: t.bigInt().required().default(0),
+        execution_zone_id: t.text().required().default("ezn_default000000000000000000"),
       },
       primaryKey: ["id"],
     });
@@ -206,17 +206,17 @@ export default {
       .add({ expr: (col) => col("lifecycle_revision").ge(0) });
     table("payouts", { schema: "zeroship" }).create({
       columns: {
-        id: t.uuid().notNull().default(uuidV4()),
-        organization_id: t.text().notNull(),
-        event_id: t.text().notNull(),
-        event_type: t.text().notNull(),
-        gross_amount: t.bigInt().notNull(),
-        platform_fee: t.bigInt().notNull(),
-        net_amount: t.bigInt().notNull(),
-        currency: t.text().notNull(),
-        occurred_at: t.timestamp().notNull(),
+        id: t.uuid().required().default(uuidV4()),
+        organization_id: t.text().required(),
+        event_id: t.text().required(),
+        event_type: t.text().required(),
+        gross_amount: t.bigInt().required(),
+        platform_fee: t.bigInt().required(),
+        net_amount: t.bigInt().required(),
+        currency: t.text().required(),
+        occurred_at: t.timestamp().required(),
         payload_hash: t.bytes(),
-        created_at: t.timestamp().notNull().default(now()),
+        created_at: t.timestamp().required().default(now()),
       },
       primaryKey: ["id"],
     });

@@ -81,7 +81,7 @@ function triggerMigration(facet: string, args: TriggerArgs): MigrationModule {
     default: {
       schema() {
         table("events").create({
-          columns: { id: t.int().notNull(), note: t.string({ length: 32 }) },
+          columns: { id: t.int().required(), note: t.string({ length: 32 }) },
           primaryKey: ["id"],
         });
         table("events").trigger(`events_${facet}_trg`).create(args);
@@ -238,11 +238,11 @@ function mysqlTriggerMigration(facet: string, args: TriggerArgs): MigrationModul
     default: {
       schema() {
         table("audit").create({
-          columns: { id: t.int().notNull(), seen: t.int().notNull() },
+          columns: { id: t.int().required(), seen: t.int().required() },
           primaryKey: ["id"],
         });
         table("events").create({
-          columns: { id: t.int().notNull(), note: t.string({ length: 32 }) },
+          columns: { id: t.int().required(), note: t.string({ length: 32 }) },
           primaryKey: ["id"],
         });
         table("events").trigger(`events_${facet}_trg`).create(args);

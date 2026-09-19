@@ -1,0 +1,38 @@
+{
+  "name": "@zeroship/schema",
+  "version": "0.1.0",
+  "description": "The shared schema builder: TypeBuilder, FieldDef and the t.* lexicon, consumed by both @zeroship/db and @zeroship/migrate. Zero runtime dependencies by construction.",
+  "type": "module",
+  "license": "MIT",
+  "publishConfig": {
+    "registry": "http://localhost:4873"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zeroship-dev/zeroship.git",
+    "directory": "packages/schema"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.1",
+    "tsx": "catalog:",
+    "typescript": "catalog:"
+  }
+}

@@ -413,7 +413,7 @@ export default defaultExport;
 
     // The bundled descriptor: a DIFFERENT collection (`posts`) than the
     // declared `todos`, carrying platform system fields the fold materialised.
-    let descriptor = r#"{"version":2,"collections":{"posts":{"fields":{"id":{"type":"id","idPrefix":"post"},"title":{"type":"string","required":true},"created_at":{"type":"date"}},"options":{"softDelete":false,"versioning":false,"strictness":"strict"},"indexes":[]}}}"#;
+    let descriptor = r#"{"version":2,"collections":{"posts":{"fields":{"id":{"type":"id","idPrefix":"post"},"title":{"type":"string","required":true},"created_at":{"type":"timestamp"}},"options":{"softDelete":false,"versioning":false,"strictness":"strict"},"indexes":[]}}}"#;
 
     let runtime = Runtime::builder()
         .modules(modules)

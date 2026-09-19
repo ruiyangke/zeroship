@@ -69,7 +69,7 @@ const declared = {
   default: {
     schema() {
       table("items").create({
-        columns: { id: t.int().notNull(), name: t.string({ length: 255 }).notNull() },
+        columns: { id: t.int().required(), name: t.string({ length: 255 }).required() },
         primaryKey: ["id"],
         uniques: [{ name: "items_name_key", columns: ["name"] }],
         ifNotExists: true,

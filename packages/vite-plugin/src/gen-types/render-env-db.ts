@@ -163,7 +163,11 @@ function renderBuilderChain(def: RuntimeFieldDef): string {
 
   let chain: string;
   if (hasEncrypted) {
-    chain = renderEncryptedBase(def);
+    chain = `${renderEncryptedPlaintextBase(def)}.encrypted()`;
+  } else if (typeof def.idPrefix === "string") {
+    // A typed-id column round-trips as `t.typedId(prefix)`; its bounded
+    // `string(36)` storage is implied by the factory.
+    chain = renderIdBase(def);
   } else if (typeof def.refTarget === "string" && def.refTarget.length > 0) {
     // Reference metadata is independent of the storage type.
     chain = renderRefBase(def);
@@ -179,13 +183,13 @@ function renderBuilderChain(def: RuntimeFieldDef): string {
         break;
       case "int":
       case "integer":
-        chain = "t.integer()";
+        chain = "t.int()";
         break;
       case "number":
         chain = renderNumberBase(def);
         break;
       case "float":
-        chain = "t.number()";
+        chain = "t.double()";
         break;
       case "boolean":
         chain = "t.boolean()";
@@ -195,7 +199,6 @@ function renderBuilderChain(def: RuntimeFieldDef): string {
       case "array":
         chain = "t.json()";
         break;
-      case "date":
       case "timestamp":
         chain = "t.timestamp()";
         break;
@@ -241,7 +244,7 @@ function renderBuilderChain(def: RuntimeFieldDef): string {
     const kind = typeof def.mask.kind === "string" ? def.mask.kind : "full";
     const classification =
       typeof def.mask.classification === "string" ? def.mask.classification : "pii";
-    // `t.encrypted()` stamps the fail-safe `{ full, pii }` auto-mask at builder
+    // `.encrypted()` applies the fail-safe `{ full, pii }` auto-mask at seal
     // time, so re-emitting exactly that on an encrypted column is redundant
     // noise. An OVERRIDING mask on an encrypted column is still rendered.
     const isEncryptedAutoMask = hasEncrypted && kind === "full" && classification === "pii";
@@ -256,25 +259,38 @@ function renderBuilderChain(def: RuntimeFieldDef): string {
   return chain;
 }
 
-/** Render the logical plaintext type; the host owns project-key selection. */
-function renderEncryptedBase(def: RuntimeFieldDef): string {
+/** The plaintext builder an `.encrypted()` column chains off; the caller appends
+ *  the `.encrypted()` suffix. Refuses a token the builder cannot encrypt. */
+function renderEncryptedPlaintextBase(def: RuntimeFieldDef): string {
   switch (def.type) {
-    case "string": return "t.encrypted()";
-    case "number": return `t.encrypted({ of: ${renderNumberBase(def)} })`;
-    case "bytes": return "t.encrypted({ of: t.bytes() })";
-    default: throw new Error(`Unsupported encrypted field type: ${def.type}`);
+    case "string":
+    case "text":
+      return "t.string()";
+    case "int":
+    case "integer":
+      return "t.int()";
+    case "bigInt":
+    case "bigint":
+      return "t.bigInt()";
+    case "number":
+    case "float":
+      return renderNumberBase(def);
+    case "bytes":
+      return "t.bytes()";
+    default:
+      throw new Error(`Unsupported encrypted field type: ${def.type}`);
   }
 }
 
 function renderNumberBase(def: RuntimeFieldDef): string {
-  if (typeof def.precision !== "number") return "t.number()";
+  if (typeof def.precision !== "number") return "t.double()";
   const scale = typeof def.scale === "number" ? def.scale : 0;
   return `t.numeric({ precision: ${renderNumber(def.precision)}, scale: ${renderNumber(scale)} })`;
 }
 
-/** `t.id(prefix?)` - the typed-id base, threading the recovered `idPrefix`. */
+/** `t.typedId(prefix?)` - the typed-id base, threading the recovered `idPrefix`. */
 function renderIdBase(def: RuntimeFieldDef): string {
-  return typeof def.idPrefix === "string" ? `t.id(${jsStr(def.idPrefix)})` : "t.id()";
+  return typeof def.idPrefix === "string" ? `t.typedId(${jsStr(def.idPrefix)})` : "t.typedId()";
 }
 
 /** Preserve the reference target and its constraint options. */
@@ -287,7 +303,7 @@ function renderRefBase(def: RuntimeFieldDef): string {
   if (typeof def.onUpdate === "string") opts.push(`onUpdate: ${jsStr(def.onUpdate)}`);
   if (typeof def.deferrable === "boolean") opts.push(`deferrable: ${def.deferrable}`);
   const args = jsStr(target) + (opts.length === 0 ? "" : `, { ${opts.join(", ")} }`);
-  if (def.type === "int" || def.type === "integer") return `t.integer().references(${args})`;
+  if (def.type === "int" || def.type === "integer") return `t.int().references(${args})`;
   if (def.type === "bigInt" || def.type === "bigint") return `t.bigInt().references(${args})`;
   if (def.type === "string" || def.type === "text" || def.type === "ref" || def.type === "id") return `t.ref(${args})`;
   throw new Error(`Unsupported reference storage: ${def.type}`);

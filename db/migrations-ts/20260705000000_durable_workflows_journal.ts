@@ -24,11 +24,11 @@ export default {
 
     zs("workflow_rollout_config").create({
       columns: {
-        id: t.text().notNull().default("global"),
-        dispatch_paused: t.boolean().notNull().default(false),
-        ingress_disabled: t.boolean().notNull().default(false),
-        source_validity_ms: t.bigInt().notNull(),
-        updated_at: t.timestamp().notNull().default(now()),
+        id: t.text().required().default("global"),
+        dispatch_paused: t.boolean().required().default(false),
+        ingress_disabled: t.boolean().required().default(false),
+        source_validity_ms: t.bigInt().required(),
+        updated_at: t.timestamp().required().default(now()),
         updated_by: t.text(),
       },
       primaryKey: ["id"],
@@ -38,8 +38,8 @@ export default {
 
     zs("workflow_policy_ledger").create({
       columns: {
-        id: t.text().notNull(),
-        revision: t.bigInt().notNull().default(0),
+        id: t.text().required(),
+        revision: t.bigInt().required().default(0),
         policy_json: t.json(),
         source_validity_ms: t.bigInt(),
       },

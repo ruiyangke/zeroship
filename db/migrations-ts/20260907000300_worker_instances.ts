@@ -97,28 +97,28 @@ export default {
   schema() {
     table("worker_instances", { schema: "zeroship" }).create({
       columns: {
-        id: t.text().notNull(),
-        ring_key: t.bytes().notNull(),
-        public_key: t.bytes().notNull(),
-        advertise_host: t.inet().notNull(),
-        advertise_port: t.int().notNull(),
-        registered_at: t.timestamp().notNull().default(now()),
-        status: t.text().notNull(),
+        id: t.text().required(),
+        ring_key: t.bytes().required(),
+        public_key: t.bytes().required(),
+        advertise_host: t.inet().required(),
+        advertise_port: t.int().required(),
+        registered_at: t.timestamp().required().default(now()),
+        status: t.text().required(),
         // The signer and the token that admitted this instance. Recorded so
         // "who vouched for this worker" is a stored fact rather than an
         // inference, and so purging a leaked signer can enumerate exactly what
         // it admitted. Both are frozen for the row's life.
-        join_signer_id: t.text().notNull(),
-        join_token_id: t.text().notNull(),
+        join_signer_id: t.text().required(),
+        join_token_id: t.text().required(),
         // The token's `zone` claim, resolved to an id by Control. Nothing a
         // worker sends reaches it.
-        execution_zone_id: t.text().notNull(),
+        execution_zone_id: t.text().required(),
         // THE LEASE. An instance identity expires and the worker renews it, so
         // revocation stops being the only way a credential ever stops working:
         // a crashed or abandoned worker's row stops satisfying Control's
         // instance read on its own, with nothing observing liveness to make it
         // happen.
-        expires_at: t.timestamp().notNull(),
+        expires_at: t.timestamp().required(),
       },
       primaryKey: ["id"],
     });

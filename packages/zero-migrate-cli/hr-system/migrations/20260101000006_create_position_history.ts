@@ -10,14 +10,14 @@ export default {
       columns: {
         employee_id: ids
           .typeId({ prefix: "emp" })
-          .notNull()
+          .required()
           .references("employees", "id", { onDelete: "cascade" }),
         position_id: ids
           .ulid()
-          .notNull()
+          .required()
           .references("positions", "id", { onDelete: "restrict" }),
-        effective_from: t.date().notNull(),
-        effective_to: t.date(),
+        effective_from: t.calendarDate().required(),
+        effective_to: t.calendarDate(),
       },
       primaryKey: ["employee_id", "effective_from"],
     });

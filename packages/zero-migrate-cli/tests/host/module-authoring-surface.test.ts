@@ -55,7 +55,7 @@ function overreachingModule(): MigrationModule {
       dependsOn: ["mig_CCCC"],
       repeatable: true,
       schema() {
-        table("x").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+        table("x").create({ columns: { id: t.int().required() }, primaryKey: ["id"] });
       },
     },
   } as unknown as MigrationModule;
@@ -104,7 +104,7 @@ test("control: the fields a module CAN declare do reach the engine", () => {
       default: {
         schema() {
           table("widgets").create({
-            columns: { id: t.int().notNull() },
+            columns: { id: t.int().required() },
             primaryKey: ["id"],
           });
         },

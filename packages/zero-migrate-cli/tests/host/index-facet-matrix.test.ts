@@ -97,9 +97,9 @@ function facetMigration(facet: string, options: IndexOptions): MigrationModule {
       schema() {
         table("accounts").create({
           columns: {
-            id: t.int().notNull(),
-            email: t.string({ length: 64 }).notNull(),
-            rank: t.int().notNull(),
+            id: t.int().required(),
+            email: t.string({ length: 64 }).required(),
+            rank: t.int().required(),
           },
           primaryKey: ["id"],
         });

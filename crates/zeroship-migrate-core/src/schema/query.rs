@@ -425,7 +425,12 @@ pub fn validate_field_name_for_declaration(
 pub const RESERVED_ID_PREFIXES: &[&str] = &["usr"];
 
 /// Validate the prefix syntax and platform reservation used by typed-ID generators.
+///
+/// The empty prefix is valid and means the stored value is the bare suffix.
 pub fn validate_id_prefix(prefix: &str) -> Result<(), QueryError> {
+    if prefix.is_empty() {
+        return Ok(());
+    }
     let valid = prefix
         .chars()
         .next()
@@ -620,7 +625,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
 
             // Masked-column emission. When the field carries a `.mask({...})`
             // declaration (or the auto-default mask attached to
-            // `t.encrypted(...)` columns) AND the mask kind is NOT `"none"`,
+            // `.encrypted()` columns) AND the mask kind is NOT `"none"`,
             // the column with the field's OWN name holds the pre-computed
             // masked representation (e.g. `"***-**-6789"`) that
             // `protection::mask_pass` derives at INSERT/UPDATE time, and the real
@@ -902,7 +907,7 @@ fn injected_column_type(
         ColType::String { length } => {
             serde_json::json!({ "type": "string", "maxLength": length })
         }
-        ColType::Timestamp => serde_json::json!({ "type": "date" }),
+        ColType::Timestamp => serde_json::json!({ "type": "timestamp" }),
         ColType::Int => serde_json::json!({ "type": "int" }),
         _ => {
             return Err(QueryError::InvalidFilter(format!(
@@ -1682,7 +1687,7 @@ fn short_hash_base32(input: &str) -> String {
 }
 
 /// Render the inline `/* zero-migrate:enc:{wraps} */`
-/// encryption sentinel for a field's `t.encrypted({...})` declaration, IFF the
+/// encryption sentinel for a field's `.encrypted()` declaration, IFF the
 /// field carries an `encrypted` sub-object. Returns `None` for a plain column.
 ///
 /// This is the SINGLE source of truth for the `zero-migrate:enc` wire shape - both
@@ -1725,10 +1730,10 @@ pub(crate) fn validate_encryption_sentinel_for_field(
     }
     if !matches!(
         def.get("type").and_then(serde_json::Value::as_str),
-        Some("string" | "number" | "bytes")
+        Some("string" | "number" | "int" | "bigInt" | "bytes")
     ) {
         return Err(QueryError::InvalidFilter(
-            "encrypted field type must be string, number, or bytes".to_string(),
+            "encrypted field type must be string, number, int, bigInt, or bytes".to_string(),
         ));
     }
     Ok(())
@@ -1767,7 +1772,7 @@ fn field_to_column_for_dialect(
         }
         None => field.to_string(),
     };
-    // `t.encrypted(...)`-declared columns always store the
+    // `.encrypted()`-declared columns always store the
     // ciphertext wire blob (`[version_flag | nonce | ct+tag]`) as BYTEA
     // regardless of `wraps`. The encryption pass swaps the plaintext
     // out before the INSERT/UPDATE, and the SQL builder casts the
@@ -2046,8 +2051,7 @@ fn def_to_constraints_for_dialect(
             // or float column are listed - no PG type NAME (`int4`, `int8`,
             // `bigint`) is accepted here either, for the same typo-rejection reason
             // `def_to_pg_type` gives.
-            Some("number") | Some("int") | Some("integer") | Some("smallInt") | Some("bigInt")
-            | Some("real") => {
+            Some("number") | Some("int") | Some("integer") | Some("bigInt") => {
                 if let Some(rendered) = crate::render::declarative::numeric_default_literal(default)
                 {
                     parts.push(format!("DEFAULT {rendered}"));
@@ -2103,7 +2107,7 @@ fn def_to_constraints_for_dialect(
     let col = backend.quote_ident(field);
     let ranged = matches!(
         def.get("type").and_then(|t| t.as_str()),
-        Some("number" | "int" | "integer" | "smallInt" | "bigInt" | "real")
+        Some("number" | "int" | "integer" | "bigInt")
     );
     // Bounds share the DEFAULT's precision-preserving renderer, so a bound past
     // 2^53 is not silently rounded on its way into the predicate.
@@ -2205,6 +2209,20 @@ mod tests {
     use super::*;
     use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
     use serde_json::json;
+
+    #[test]
+    fn an_encrypted_field_token_the_runtime_cannot_decode_is_refused() {
+        for ty in ["timestamp", "boolean"] {
+            let def = json!({ "type": ty, "encrypted": true });
+            validate_encryption_sentinel_for_field(&def)
+                .expect_err("a token the runtime codec cannot decode must be refused");
+        }
+        for ty in ["string", "number", "int", "bigInt", "bytes"] {
+            let def = json!({ "type": ty, "encrypted": true });
+            validate_encryption_sentinel_for_field(&def)
+                .expect("a token the runtime codec decodes must be admitted");
+        }
+    }
 
     fn build_add_foreign_key(
         vendors: VendorSet,
@@ -3319,10 +3337,10 @@ columns = [
 
     #[test]
     fn d3_calendar_date_distinct_from_date() {
-        // Verify t.date() still emits TIMESTAMPTZ alongside DATE for the
+        // Verify t.timestamp() emits TIMESTAMPTZ alongside DATE for the
         // calendar variant - no overlap.
         let schema = json!({
-            "createdAt": { "type": "date" },
+            "createdAt": { "type": "timestamp" },
             "birthday": { "type": "calendarDate" },
         });
         let sql =
@@ -4933,12 +4951,12 @@ columns = [
         assert!(!sql.contains("COMMENT ON COLUMN"), "no comment: {sql}");
     }
 
-    /// **DDL shape** - `t.encrypted(...)` (default-mask path) gets a RAW column
+    /// **DDL shape** - `.encrypted()` (default-mask path) gets a RAW column
     /// because the SDK auto-populates `mask: {kind: "full", ...}`: the ciphertext
     /// moves to the raw column and the field's own column holds the mask.
     #[test]
     fn build_create_table_emits_raw_column_for_encrypted_with_default_mask() {
-        // Mirror the SDK's auto-fill: `t.encrypted(...)` -> mask = full.
+        // Mirror the SDK's auto-fill: `.encrypted()` -> mask = full.
         let schema = serde_json::json!({
             "ssn": {
                 "type": "string",

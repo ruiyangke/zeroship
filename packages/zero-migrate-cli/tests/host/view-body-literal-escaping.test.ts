@@ -95,9 +95,9 @@ scope = "all"
 export const name = "a";
 export default {
   schema() {
-    table("${BYSTANDER}").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+    table("${BYSTANDER}").create({ columns: { id: t.int().required() }, primaryKey: ["id"] });
     table("${TABLE}").create({
-      columns: { id: t.int().notNull(), name: t.text() },
+      columns: { id: t.int().required(), name: t.text() },
       primaryKey: ["id"],
     });
     view("${VIEW}").create({

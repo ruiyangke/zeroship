@@ -10,11 +10,11 @@ export default {
   schema() {
     table("departments").create({
       columns: {
-        id: ids.typeId({ prefix: "dept" }).primaryKey(),
-        code: t.char({ length: 8 }).notNull(),
-        name: t.string({ length: 255 }).notNull(),
-        is_active: t.boolean().notNull().default(true),
-        created_at: t.timestamp().notNull().default(now()),
+        id: t.typedId("dept" ).primaryKey(),
+        code: t.char({ length: 8 }).required(),
+        name: t.string({ length: 255 }).required(),
+        is_active: t.boolean().required().default(true),
+        created_at: t.timestamp().required().default(now()),
       },
     });
   },

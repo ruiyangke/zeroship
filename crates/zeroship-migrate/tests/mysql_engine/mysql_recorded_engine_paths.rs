@@ -32,7 +32,7 @@ use zeroship_migrate::driver::{Row, Value};
 use zeroship_migrate::model::expr::Expr;
 use zeroship_migrate::model::ir::{
     ColType, IdentityCol, IrColumn, IrConstraint, IrConstraintKind, IrDefault, MigrationIr, Op,
-    ValueFormat, CURRENT_IR_VERSION,
+    CURRENT_IR_VERSION,
 };
 use zeroship_migrate::model::snapshot::{IdDefaultSnapshot, SchemaSnapshot};
 use zeroship_migrate::render::plan::DatabaseFeature;
@@ -585,24 +585,6 @@ async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks()
     .expect("UUID metadata")
     .expect("MySQL UUID CHECK")
     .inline_check;
-    let type_id_check = zeroship_migrate_backend::value_format::column_metadata(
-        "type_id",
-        &ValueFormat::TypeId {
-            prefix: "user".to_string(),
-        },
-        MYSQL_VALUE_FORMAT,
-        MYSQL_DML,
-    )
-    .expect("TypeID metadata")
-    .inline_check;
-    let ulid_check = zeroship_migrate_backend::value_format::column_metadata(
-        "ulid",
-        &ValueFormat::Ulid,
-        MYSQL_VALUE_FORMAT,
-        MYSQL_DML,
-    )
-    .expect("ULID metadata")
-    .inline_check;
     let table_rows = || {
         vec![Row::new(
             vec!["table_name".into()],
@@ -625,8 +607,6 @@ async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks()
         vec![
             catalog_check("ids", "ids_chk_1", true, &uuid_generated_check),
             catalog_check("ids", "ids_chk_2", true, &uuid_supplied_check),
-            catalog_check("ids", "ids_chk_3", true, &type_id_check),
-            catalog_check("ids", "ids_chk_4", true, &ulid_check),
         ]
     };
     let id_column = |name: &str, ty: ColType| IrColumn {
@@ -635,13 +615,13 @@ async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks()
         nullable: Some(false),
         default: None,
         unique: None,
-        value_format: None,
         references: None,
         id_prefix: None,
         collation: None,
         case_sensitive: None,
         vector_metric: None,
         mask: None,
+        encrypted: None,
         generated: None,
         identity: None,
     };
@@ -650,26 +630,13 @@ async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks()
     let mut generated_uuid = id_column("generated_uuid", ColType::Uuid);
     generated_uuid.default = Some(IrDefault::Expr { expr: Expr::UuidV4 });
     let supplied_uuid = id_column("supplied_uuid", ColType::Uuid);
-    let mut type_id = id_column("type_id", ColType::Text);
-    type_id.value_format = Some(ValueFormat::TypeId {
-        prefix: "user".to_string(),
-    });
-    let mut ulid = id_column("ulid", ColType::Text);
-    ulid.value_format = Some(ValueFormat::Ulid);
     let ordinary = id_column("ordinary", ColType::Text);
     let expected = zeroship_migrate::render::fold::fold_ops(
         zeroship_migrate::shipping_vendors(),
         &[Op::CreateTable {
             attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "ids".to_string(),
-            columns: vec![
-                auto_id,
-                generated_uuid,
-                supplied_uuid,
-                type_id,
-                ulid,
-                ordinary,
-            ],
+            columns: vec![auto_id, generated_uuid, supplied_uuid, ordinary],
             primary_key: Some(vec!["auto_id".to_string()]),
             constraints: Vec::new(),
             indexes: Vec::new(),
@@ -686,7 +653,7 @@ async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks()
 
     let rec = RecordingSession::with_catalog_checks(
         table_rows(),
-        id_catalog_columns(Some(MYSQL_CATALOG_UUID_V4_DEFAULT), None, None, None),
+        id_catalog_columns(Some(MYSQL_CATALOG_UUID_V4_DEFAULT), None),
         primary_index(),
         Vec::new(),
         checks(),
@@ -723,18 +690,6 @@ async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks()
         column("supplied_uuid").id_default,
         Some(IdDefaultSnapshot::Absent)
     );
-    assert_eq!(
-        column("type_id").value_format,
-        Some(ValueFormat::TypeId {
-            prefix: "user".to_string()
-        })
-    );
-    assert_eq!(
-        column("type_id").id_default,
-        Some(IdDefaultSnapshot::Absent)
-    );
-    assert_eq!(column("ulid").value_format, Some(ValueFormat::Ulid));
-    assert_eq!(column("ulid").id_default, Some(IdDefaultSnapshot::Absent));
     assert_eq!(column("ordinary").id_default, None);
     let clean_drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &snapshot);
     assert!(
@@ -750,67 +705,9 @@ async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks()
         "MySQL 8.0.16+ must introspect enforced CHECK clauses"
     );
 
-    let account_type_id_check = zeroship_migrate_backend::value_format::column_metadata(
-        "type_id",
-        &ValueFormat::TypeId {
-            prefix: "account".to_string(),
-        },
-        MYSQL_VALUE_FORMAT,
-        MYSQL_DML,
-    )
-    .expect("altered TypeID metadata")
-    .inline_check;
-    let altered_formats = RecordingSession::with_catalog_checks(
-        table_rows(),
-        id_catalog_columns(Some(MYSQL_CATALOG_UUID_V4_DEFAULT), None, None, None),
-        primary_index(),
-        Vec::new(),
-        vec![
-            catalog_check("ids", "ids_chk_1", true, &uuid_generated_check),
-            catalog_check("ids", "ids_chk_2", true, &uuid_supplied_check),
-            catalog_check("ids", "ids_chk_3", true, &account_type_id_check),
-            // The ULID CHECK was dropped out of band. A disabled CHECK is
-            // likewise not an enforced format contract.
-            catalog_check("ids", "ids_chk_4", false, &ulid_check),
-        ],
-    );
-    let altered_formats = MysqlBackend::new_generic(&altered_formats)
-        .snapshot_schema(&ExecutorConfig::new(
-            "prj_x",
-            "proj_x",
-            support::no_inject("proj_x"),
-        ))
-        .await
-        .expect("altered format snapshot");
-    let format_drift = diff_snapshots(
-        zeroship_migrate::shipping_vendors(),
-        &snapshot,
-        &altered_formats,
-    );
-    assert!(
-        format_drift.altered_objects.iter().any(|altered| {
-            altered.object == "column type_id"
-                && altered.field == "format"
-                && altered.actual == "typeId(account)"
-        }),
-        "a TypeID prefix mismatch must drift: {format_drift:?}"
-    );
-    assert!(
-        format_drift
-            .altered_objects
-            .iter()
-            .any(|altered| { altered.object == "column ulid" && altered.field == "format" }),
-        "a dropped or unenforced ULID CHECK must drift: {format_drift:?}"
-    );
-
     let altered_defaults = RecordingSession::with_catalog_checks(
         table_rows(),
-        id_catalog_columns(
-            None,
-            Some(MYSQL_CATALOG_UUID_V4_DEFAULT),
-            Some("make_typeid()"),
-            Some("make_ulid()"),
-        ),
+        id_catalog_columns(None, Some(MYSQL_CATALOG_UUID_V4_DEFAULT)),
         primary_index(),
         Vec::new(),
         checks(),
@@ -828,7 +725,7 @@ async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks()
         &snapshot,
         &altered_defaults,
     );
-    for name in ["generated_uuid", "supplied_uuid", "type_id", "ulid"] {
+    for name in ["generated_uuid", "supplied_uuid"] {
         assert!(
             default_drift.altered_objects.iter().any(|altered| {
                 altered.object == format!("column {name}") && altered.field == "default"
@@ -838,7 +735,7 @@ async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks()
     }
     let swapped_default = RecordingSession::with_catalog_checks(
         table_rows(),
-        id_catalog_columns(Some("uuid()"), None, None, None),
+        id_catalog_columns(Some("uuid()"), None),
         primary_index(),
         Vec::new(),
         checks(),
@@ -872,17 +769,11 @@ async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks()
         id_catalog_columns_with_generated_uuid_extra(
             Some(MYSQL_CATALOG_UUID_V4_DEFAULT),
             None,
-            None,
-            None,
             "",
         ),
         primary_index(),
         Vec::new(),
-        vec![
-            catalog_check("ids", "ids_chk_2", true, &uuid_supplied_check),
-            catalog_check("ids", "ids_chk_3", true, &type_id_check),
-            catalog_check("ids", "ids_chk_4", true, &ulid_check),
-        ],
+        vec![catalog_check("ids", "ids_chk_2", true, &uuid_supplied_check)],
     );
     let literal_generator_without_check =
         MysqlBackend::new_generic(&literal_generator_without_check)
@@ -911,7 +802,7 @@ async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks()
     let literal_uuid_snapshot = |value: &'static str| async move {
         let session = RecordingSession::with_catalog_checks(
             table_rows(),
-            id_catalog_columns_with_generated_uuid_extra(Some(value), None, None, None, ""),
+            id_catalog_columns_with_generated_uuid_extra(Some(value), None, ""),
             primary_index(),
             Vec::new(),
             checks(),
@@ -996,13 +887,13 @@ async fn mysql_auto_increment_add_and_drop_are_recovered_from_catalog_extra() {
         nullable: Some(false),
         default: None,
         unique: None,
-        value_format: None,
         references: None,
         id_prefix: None,
         collation: None,
         case_sensitive: None,
         vector_metric: None,
         mask: None,
+        encrypted: None,
         generated: None,
         identity,
     };
@@ -1110,9 +1001,8 @@ async fn snapshot_schema_compares_mysql_literal_defaults_on_format_typed_referen
                 "name": "parents",
                 "columns": [{
                     "name": "id",
-                    "type": "text",
-                    "nullable": false,
-                    "valueFormat": { "typeId": { "prefix": "account" } },
+                    "type":{"string":{"length":36}},"nullable": false,
+                    "idPrefix":"acct",
                     "default": { "literal": { "value": LITERAL } }
                 }],
                 "primaryKey": null,
@@ -1124,9 +1014,8 @@ async fn snapshot_schema_compares_mysql_literal_defaults_on_format_typed_referen
                 "name": "children",
                 "columns": [{
                     "name": "parent_id",
-                    "type": "text",
-                    "nullable": true,
-                    "valueFormat": { "typeId": { "prefix": "account" } },
+                    "type":{"string":{"length":36}},"nullable": true,
+                    "idPrefix":"acct",
                     "default": { "literal": { "value": LITERAL } },
                     "references": {
                         "table": "parents",
@@ -1157,16 +1046,6 @@ async fn snapshot_schema_compares_mysql_literal_defaults_on_format_typed_referen
         .expect("typed reference folds to a foreign key")
         .name
         .clone();
-    let type_id_check = zeroship_migrate_backend::value_format::column_metadata(
-        "id",
-        &ValueFormat::TypeId {
-            prefix: "account".to_string(),
-        },
-        MYSQL_VALUE_FORMAT,
-        MYSQL_DML,
-    )
-    .expect("TypeID metadata")
-    .inline_check;
     let table_rows = || {
         ["children", "parents"]
             .into_iter()
@@ -1183,7 +1062,7 @@ async fn snapshot_schema_compares_mysql_literal_defaults_on_format_typed_referen
             catalog_column_with_generation(
                 "children",
                 "parent_id",
-                "varchar(191)",
+                "varchar(36)",
                 Some("ascii"),
                 Some("ascii_bin"),
                 true,
@@ -1194,7 +1073,7 @@ async fn snapshot_schema_compares_mysql_literal_defaults_on_format_typed_referen
             catalog_column_with_generation(
                 "parents",
                 "id",
-                "varchar(191)",
+                "varchar(36)",
                 Some("ascii"),
                 Some("ascii_bin"),
                 false,
@@ -1218,14 +1097,7 @@ async fn snapshot_schema_compares_mysql_literal_defaults_on_format_typed_referen
             "CASCADE",
         )]
     };
-    let checks = || {
-        vec![catalog_check(
-            "parents",
-            "parents_chk_1",
-            true,
-            &type_id_check,
-        )]
-    };
+    let checks = || Vec::new();
 
     let clean_session = RecordingSession::with_catalog_checks(
         table_rows(),
@@ -1255,12 +1127,15 @@ async fn snapshot_schema_compares_mysql_literal_defaults_on_format_typed_referen
         "the child inherits its ID-default comparison surface through the foreign key"
     );
     assert_eq!(child.default.as_deref(), Some(LITERAL));
+    // A typed-id column is a bounded `string(36)` with NO format CHECK, so a
+    // referenced parent carries no catalog evidence that classifies its literal
+    // as an ID default. Only the FK local column inherits the ID-default
+    // comparison surface (asserted above), and the drift check below proves the
+    // parent's ordinary literal still compares cleanly.
     assert_eq!(
         clean.tables["parents"].columns[0].id_default,
-        Some(IdDefaultSnapshot::Literal(
-            serde_json::to_string(LITERAL).expect("literal serializes")
-        )),
-        "a non-expression MySQL COLUMN_DEFAULT must recover as a string literal"
+        None,
+        "a typed-id parent carries no format CHECK, so its literal stays an ordinary default"
     );
     let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &clean);
     assert!(
@@ -1391,289 +1266,6 @@ async fn snapshot_schema_preserves_mysql_expression_markers_on_fk_columns() {
     );
 }
 
-#[compio::test]
-async fn mysql_key_format_checks_drop_prefix_and_clause_changes_drift_from_catalog() {
-    let ir: MigrationIr = serde_json::from_value(json!({
-        "ir_version": CURRENT_IR_VERSION,
-        "name": "mysql_key_formats",
-        "owner_app": "app_mysql_drift",
-        "ops": [
-            {
-                "op": "createTable",
-                "name": "type_keys",
-                "columns": [{
-                    "name": "id",
-                    "type": "text",
-                    "nullable": false,
-                    "valueFormat": { "typeId": { "prefix": "account" } }
-                }],
-                "primaryKey": ["id"],
-                "constraints": [],
-                "indexes": []
-            },
-            {
-                "op": "createTable",
-                "name": "ulid_keys",
-                "columns": [{
-                    "name": "id",
-                    "type": "text",
-                    "nullable": false,
-                    "valueFormat": "ulid"
-                }],
-                "primaryKey": ["id"],
-                "constraints": [],
-                "indexes": []
-            }
-        ]
-    }))
-    .expect("MySQL key-format fixture must deserialize");
-    let expected = zeroship_migrate::render::fold::fold_ops(
-        zeroship_migrate::shipping_vendors(),
-        &ir.ops,
-        &DIALECT,
-        "proj_x",
-        &support::no_inject("app"),
-    )
-    .expect("MySQL key-format fixture must fold");
-    let type_check = zeroship_migrate_backend::value_format::column_metadata(
-        "id",
-        &ValueFormat::TypeId {
-            prefix: "account".to_string(),
-        },
-        MYSQL_VALUE_FORMAT,
-        MYSQL_DML,
-    )
-    .expect("TypeID key metadata")
-    .inline_check;
-    let team_check = zeroship_migrate_backend::value_format::column_metadata(
-        "id",
-        &ValueFormat::TypeId {
-            prefix: "team".to_string(),
-        },
-        MYSQL_VALUE_FORMAT,
-        MYSQL_DML,
-    )
-    .expect("altered TypeID key metadata")
-    .inline_check;
-    let ulid_check = zeroship_migrate_backend::value_format::column_metadata(
-        "id",
-        &ValueFormat::Ulid,
-        MYSQL_VALUE_FORMAT,
-        MYSQL_DML,
-    )
-    .expect("ULID key metadata")
-    .inline_check;
-    let altered_ulid_check =
-        ulid_check.replacen("CHAR_LENGTH(`id`) = 26", "CHAR_LENGTH(`id`) = 25", 1);
-    assert_ne!(
-        altered_ulid_check, ulid_check,
-        "ULID clause fixture must change"
-    );
-
-    let snapshot = |checks: Vec<Row>| async move {
-        let session = RecordingSession::with_catalog_checks(
-            ["type_keys", "ulid_keys"]
-                .into_iter()
-                .map(|table| {
-                    Row::new(
-                        vec!["table_name".into()],
-                        vec![Value::Text(table.to_string())],
-                    )
-                })
-                .collect(),
-            ["type_keys", "ulid_keys"]
-                .into_iter()
-                .map(|table| {
-                    catalog_column(
-                        table,
-                        "id",
-                        "varchar(191)",
-                        Some("ascii"),
-                        Some("ascii_bin"),
-                        false,
-                        1,
-                    )
-                })
-                .collect(),
-            ["type_keys", "ulid_keys"]
-                .into_iter()
-                .map(|table| {
-                    catalog_index_part(table, "PRIMARY", 0, 1, Some("id"), None, Some("A"), None)
-                })
-                .collect(),
-            Vec::new(),
-            checks,
-        );
-        MysqlBackend::new_generic(&session)
-            .snapshot_schema(&ExecutorConfig::new(
-                "prj_x",
-                "proj_x",
-                support::no_inject("proj_x"),
-            ))
-            .await
-            .expect("MySQL key-format catalog snapshot")
-    };
-    let check =
-        |table: &str, clause: &str| catalog_check(table, &format!("{table}_chk_1"), true, clause);
-    let clean = snapshot(vec![
-        check("type_keys", &type_check),
-        check("ulid_keys", &ulid_check),
-    ])
-    .await;
-    let clean_drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &clean);
-    assert!(
-        clean_drift.is_clean(),
-        "authored key formats must match MySQL catalog CHECKs: {clean_drift:#?}"
-    );
-
-    for (label, checks, table, actual) in [
-        (
-            "TypeID drop",
-            vec![check("ulid_keys", &ulid_check)],
-            "type_keys",
-            "",
-        ),
-        (
-            "TypeID prefix change",
-            vec![
-                check("type_keys", &team_check),
-                check("ulid_keys", &ulid_check),
-            ],
-            "type_keys",
-            "typeId(team)",
-        ),
-        (
-            "ULID drop",
-            vec![check("type_keys", &type_check)],
-            "ulid_keys",
-            "",
-        ),
-        (
-            "ULID clause change",
-            vec![
-                check("type_keys", &type_check),
-                check("ulid_keys", &altered_ulid_check),
-            ],
-            "ulid_keys",
-            "",
-        ),
-    ] {
-        let actual_snapshot = snapshot(checks).await;
-        let drift = diff_snapshots(
-            zeroship_migrate::shipping_vendors(),
-            &expected,
-            &actual_snapshot,
-        );
-        assert!(
-            drift.altered_objects.iter().any(|altered| {
-                altered.table == table
-                    && altered.object == "column id"
-                    && altered.field == "format"
-                    && altered.actual == actual
-            }),
-            "{label} must drift through catalog introspection: {drift:#?}"
-        );
-    }
-}
-
-#[compio::test]
-async fn snapshot_schema_rejects_semantically_regrouped_mysql_format_check() {
-    let value_format = ValueFormat::TypeId {
-        prefix: "account".to_string(),
-    };
-    let ir: MigrationIr = serde_json::from_value(json!({
-        "ir_version": CURRENT_IR_VERSION,
-        "name": "mysql_regrouped_type_id_check",
-        "owner_app": "app_mysql_drift",
-        "ops": [{
-            "op": "createTable",
-            "name": "ids",
-            "columns": [{
-                "name": "id",
-                "type": "text",
-                "nullable": false,
-                "valueFormat": { "typeId": { "prefix": "account" } }
-            }],
-            "primaryKey": null,
-            "constraints": [],
-            "indexes": []
-        }]
-    }))
-    .expect("regrouped TypeID fixture must deserialize");
-    let expected = zeroship_migrate::render::fold::fold_ops(
-        zeroship_migrate::shipping_vendors(),
-        &ir.ops,
-        &DIALECT,
-        "proj_x",
-        &support::no_inject("app"),
-    )
-    .expect("regrouped TypeID fixture must fold");
-    let canonical = zeroship_migrate_backend::value_format::column_metadata(
-        "id",
-        &value_format,
-        MYSQL_VALUE_FORMAT,
-        MYSQL_DML,
-    )
-    .expect("TypeID metadata")
-    .inline_check;
-    let regrouped = canonical.replacen("CHECK (", "CHECK (((", 1).replacen(
-        "OR (CHAR_LENGTH(`id`) = 34 AND ",
-        "OR CHAR_LENGTH(`id`) = 34) AND ",
-        1,
-    );
-    assert_ne!(regrouped, canonical, "the CHECK mutation must take effect");
-    let erase_grouping = |sql: &str| {
-        sql.chars()
-            .filter(|character| !character.is_whitespace() && !matches!(character, '(' | ')'))
-            .collect::<String>()
-    };
-    assert_eq!(
-        erase_grouping(&regrouped),
-        erase_grouping(&canonical),
-        "the regression must keep token order and differ only in semantic grouping"
-    );
-
-    let session = RecordingSession::with_catalog_checks(
-        vec![Row::new(
-            vec!["table_name".into()],
-            vec![Value::Text("ids".into())],
-        )],
-        vec![catalog_column_with_generation(
-            "ids",
-            "id",
-            "varchar(191)",
-            Some("ascii"),
-            Some("ascii_bin"),
-            false,
-            1,
-            None,
-            "",
-        )],
-        Vec::new(),
-        Vec::new(),
-        vec![catalog_check("ids", "ids_chk_1", true, &regrouped)],
-    );
-    let actual = MysqlBackend::new_generic(&session)
-        .snapshot_schema(&ExecutorConfig::new(
-            "prj_x",
-            "proj_x",
-            support::no_inject("proj_x"),
-        ))
-        .await
-        .expect("regrouped TypeID snapshot");
-    assert_eq!(
-        actual.tables["ids"].columns[0].value_format, None,
-        "a regrouped nullable guard is not the canonical TypeID contract"
-    );
-    let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual);
-    assert!(
-        drift
-            .altered_objects
-            .iter()
-            .any(|altered| { altered.object == "column id" && altered.field == "format" }),
-        "semantic CHECK regrouping must surface as format drift: {drift:#?}"
-    );
-}
 
 #[compio::test]
 async fn named_table_unique_candidate_and_composite_fk_have_clean_mysql_drift() {
@@ -1684,13 +1276,13 @@ async fn named_table_unique_candidate_and_composite_fk_have_clean_mysql_drift() 
             nullable: Some(nullable),
             default: None,
             unique: None,
-            value_format: None,
             references: None,
             id_prefix: None,
             collation: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,
+            encrypted: None,
             generated: None,
             identity: None,
         }

@@ -104,7 +104,7 @@ export default {
   schema() {
     table("${TABLE}").create({
       columns: {
-        id: t.int().notNull(),
+        id: t.int().required(),
         payload: t.bytes(),
         stamped: t.bytes().default(byteValue(new Uint8Array([${STAMPED.join(", ")}]))),
       },

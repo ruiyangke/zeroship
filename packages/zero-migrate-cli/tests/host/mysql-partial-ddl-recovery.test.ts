@@ -91,11 +91,11 @@ test("a half-applied MySQL migration refuses to replay, and the printed repair w
     default: {
       schema() {
         table("alpha").create({
-          columns: { id: t.int().notNull() },
+          columns: { id: t.int().required() },
           primaryKey: ["id"],
         });
         table("beta").create({
-          columns: { id: t.int().notNull() },
+          columns: { id: t.int().required() },
           primaryKey: ["id"],
         });
       },

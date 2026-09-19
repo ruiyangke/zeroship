@@ -76,7 +76,7 @@ function pgIdent(value: string): string {
 function createTableOnly(): NamedMigration {
   return authoredMigration("view_guard_priors", () => {
     table(TABLE).create({
-      columns: { id: t.int().notNull(), label: t.string().notNull() },
+      columns: { id: t.int().required(), label: t.string().required() },
       primaryKey: ["id"],
     });
   });
@@ -87,7 +87,7 @@ function createTableOnly(): NamedMigration {
 function createTableAndView(): NamedMigration {
   return authoredMigration("view_drop_create", () => {
     table(TABLE).create({
-      columns: { id: t.int().notNull(), label: t.string().notNull() },
+      columns: { id: t.int().required(), label: t.string().required() },
       primaryKey: ["id"],
     });
     view(VIEW).create({
@@ -195,7 +195,7 @@ test("MySQL: creating and dropping a view within ONE migration succeeds, which i
     // insists on a completed first deploy.
     const both = authoredMigration("view_drop_same_migration", () => {
       table(TABLE).create({
-        columns: { id: t.int().notNull(), label: t.string().notNull() },
+        columns: { id: t.int().required(), label: t.string().required() },
         primaryKey: ["id"],
       });
       view(VIEW).create({ as: (q) => q.from(TABLE).select(["id", "label"]) });

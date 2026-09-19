@@ -243,7 +243,7 @@ mod tests {
 
     /// The floor records the two protections independently.
     ///
-    /// A column can be encrypted without being masked (`t.encrypted(...)` with
+    /// A column can be encrypted without being masked (`.encrypted()` with
     /// no `.mask()` at the wire level), and the fence has to refuse a descriptor
     /// that dropped EITHER. Collapsing them to one "protected" bit would let a
     /// descriptor keep the mask, drop the encryption, and pass.

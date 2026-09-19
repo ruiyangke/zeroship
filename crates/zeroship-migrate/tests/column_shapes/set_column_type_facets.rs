@@ -156,8 +156,6 @@ const STRING_24: &str = r#"{"name":"v","type":{"string":{"length":24}}}"#;
 const CHAR_8: &str = r#"{"name":"v","type":{"char":{"length":8}}}"#;
 const VECTOR_3: &str = r#"{"name":"v","type":{"vector":{"vector":3}},"vectorMetric":"cosine"}"#;
 const PLAIN_INT: &str = r#"{"name":"v","type":"int"}"#;
-const TYPE_ID: &str = r#"{"name":"v","type":"text","valueFormat":{"typeId":{"prefix":"usr"}}}"#;
-const ULID: &str = r#"{"name":"v","type":"text","valueFormat":"ulid"}"#;
 
 const NUMERIC_20_4: &str = r#"{"name":"v","type":{"decimal":{"precision":20,"scale":4}}}"#;
 
@@ -368,22 +366,7 @@ fn a_retype_clears_case_insensitivity_in_all_three_replays() {
 }
 
 #[test]
-fn the_only_fold_side_producer_of_a_collation_is_the_facet_the_retype_refuses() {
-    // `collation` is DRIFT-COMPARED and PostgreSQL RESETS it on ALTER TYPE
-    // (measured: `text COLLATE "C" -> character varying(40)` leaves the catalog
-    // reporting the DEFAULT collation, never `C`). It is reachable through
-    // exactly one path - a value-format column: `render::value_format`'s
-    // `bytewise_column_metadata` is the ONE fold-side writer, and it runs only
-    // for TypeID/ULID. SQLite's `NOCASE` rides on `case_sensitive`, not here.
-    //
-    // So the refusal above closes the only route, and `fold_ops`'s
-    // `col.collation = new_col.collation` is belt-and-braces.
-    // This test states that rather than asserting `None == None` on a column that
-    // never had a collation, which would pass against ANY implementation.
-    assert!(pg_snapshot(TYPE_ID, r#""text""#)
-        .expect_err("the one route to a collation is refused")
-        .contains("value format"));
-    // And a column that carries no collation to begin with still carries none.
+fn a_column_that_carries_no_collation_to_begin_with_still_carries_none() {
     assert_eq!(pg_snapshot(CI_TEXT, TO_INT).expect("fold").collation, None);
 }
 
@@ -523,63 +506,13 @@ fn a_retype_keeps_a_user_comment_the_alter_does_not_touch() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// REFUSED. Neither keeping nor clearing is truthful, so the fold fails closed -
-// the treatment `setColumnType` already gives an encrypted column.
-// ---------------------------------------------------------------------------
-
 #[test]
-fn a_retype_off_a_value_format_column_is_refused_rather_than_folded() {
-    for source in [TYPE_ID, ULID] {
-        for target in [TO_INT, TO_STRING_40, r#""text""#] {
-            let error =
-                pg_snapshot(source, target).expect_err("a value-format retype must fail closed");
-            assert!(
-                error.contains("value format"),
-                "the refusal must name the facet it is refusing, got: {error}"
-            );
-        }
-    }
-}
-
-#[test]
-fn the_value_format_refusal_reaches_both_artifact_replays() {
-    // the fold runs the catalog replay FIRST as its fail-closed structural
-    // oracle, so one refusal covers `schema.runtime.json` and `env.db.ts` too.
-    let ir = envelope(TYPE_ID, TO_INT);
-    let effective = support::operator_charter(SCHEMA);
-    let error = single_fold::fold(
-        zeroship_migrate::shipping_vendors(),
-        &ir.ops,
-        &zeroship_migrate_postgres::DIALECT,
-        SCHEMA,
-        &effective,
-    )
-    .map(|folded| folded.project_field_defs(zeroship_migrate::shipping_vendors()))
-    .expect_err("the descriptor fold inherits the refusal");
-    assert!(error.to_string().contains("value format"), "{error}");
-
-    let error = zeroship_migrate::render::gen_types::render_artifacts(
-        zeroship_migrate::shipping_vendors(),
-        &ir.ops,
-        &zeroship_migrate_postgres::DIALECT,
-        SCHEMA,
-        &effective,
-    )
-    .expect_err("artifact rendering inherits the refusal");
-    assert!(error.to_string().contains("value format"), "{error}");
-}
-
-#[test]
-fn a_retype_that_touches_no_value_format_column_is_untouched_by_the_refusal() {
-    // The refusal keys on THE COLUMN BEING RETYPED, not on the table carrying a
-    // value-format column somewhere. Without this, one typed-id column would
-    // freeze every other column in its table.
+fn a_retype_of_a_plain_sibling_leaves_a_typed_id_column_untouched() {
     let ir: MigrationIr = serde_json::from_str(
         r#"{"ir_version":1,"name":"n","ops":[
             {"op":"createTable","name":"a","columns":[
                 {"name":"c0","type":"int","nullable":false},
-                {"name":"tid","type":"text","valueFormat":{"typeId":{"prefix":"usr"}}},
+                {"name":"tid","type":{"string":{"length":36}},"idPrefix":"ent"},
                 {"name":"v","type":{"string":{"length":24}}}
             ],"primaryKey":["c0"]},
             {"op":"setColumnType","table":"a","column":"v","toType":"int"}
@@ -594,7 +527,7 @@ fn a_retype_that_touches_no_value_format_column_is_untouched_by_the_refusal() {
         SCHEMA,
         &effective,
     )
-    .expect("retyping a plain sibling is not refused");
+    .expect("retyping a plain sibling succeeds");
     let table = folded.tables.get("a").expect("table a");
     assert_eq!(
         table
@@ -609,10 +542,8 @@ fn a_retype_that_touches_no_value_format_column_is_untouched_by_the_refusal() {
             .columns
             .iter()
             .find(|c| c.name == "tid")
-            .and_then(|c| c.value_format.clone()),
-        Some(zeroship_migrate::model::ir::ValueFormat::TypeId {
-            prefix: "usr".to_string()
-        }),
-        "the untouched typed-id column keeps its format"
+            .map(|c| c.data_type.as_str()),
+        Some("character varying(36)"),
+        "the untouched typed-id column keeps its bounded-string storage"
     );
 }

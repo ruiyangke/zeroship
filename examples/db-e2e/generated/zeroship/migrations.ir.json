@@ -1,6 +1,6 @@
 {
   "kind": "ir",
-  "descriptor_sha256": "2ced32e27d46726c1839fb6700ef4d926a83386520c037e0e41f6b2ea39cc287",
+  "descriptor_sha256": "aec444816ccc9fc79ed2c496a7d95b42bfbad2e5999413af9e8c73e88c8fe09b",
   "documents": [
     {
       "filename": "20260101000000_create_db_e2e.ir.json",
@@ -84,27 +84,21 @@
               },
               {
                 "name": "contactEmail",
-                "type": {
-                  "encrypted": {
-                    "of": "text"
-                  }
-                },
+                "type": "text",
                 "mask": {
                   "kind": "email",
                   "classification": "pii"
-                }
+                },
+                "encrypted": true
               },
               {
                 "name": "ssn",
-                "type": {
-                  "encrypted": {
-                    "of": "text"
-                  }
-                },
+                "type": "text",
                 "mask": {
                   "kind": "last4",
                   "classification": "spi"
-                }
+                },
+                "encrypted": true
               },
               {
                 "name": "city",
@@ -215,7 +209,12 @@
                   }
                 ]
               }
-            ]
+            ],
+            "runtimeOptions": {
+              "softDelete": true,
+              "versioning": true,
+              "strictness": "strict"
+            }
           },
           {
             "op": "createTable",

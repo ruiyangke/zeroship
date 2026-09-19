@@ -56,7 +56,7 @@ function migrationNaming(column: string): MigrationModule {
     default: {
       schema() {
         table("items").create({
-          columns: { id: t.int().notNull(), [column]: t.int() },
+          columns: { id: t.int().required(), [column]: t.int() },
           primaryKey: ["id"],
         });
       },

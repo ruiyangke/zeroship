@@ -155,7 +155,7 @@ describe("C2 — validation dispatch on discriminator", () => {
       t.union(
         t.object({
           kind: t.literal("login"),
-          userId: t.number().required(),
+          userId: t.double().required(),
           ip: t.string().required(),
         }),
         t.object({
@@ -166,7 +166,7 @@ describe("C2 — validation dispatch on discriminator", () => {
         t.object({
           kind: t.literal("metric"),
           name: t.string().required(),
-          value: t.number().required(),
+          value: t.double().required(),
         }),
       ),
     );
@@ -271,7 +271,7 @@ describe("C2 — partial update against a flat-expanded union", () => {
       ...flatUnionSchema(t.union(
         t.object({
           kind: t.literal("login"),
-          userId: t.number().required(),
+          userId: t.double().required(),
           ip: t.string().required(),
         }),
         t.object({
@@ -302,7 +302,7 @@ describe("C2 — partial update against a flat-expanded union", () => {
       t.union(
         t.object({
           kind: t.literal("login"),
-          userId: t.number().required(),
+          userId: t.double().required(),
         }),
         t.object({
           kind: t.literal("signup"),
@@ -326,7 +326,7 @@ describe("C2 — partial update against a flat-expanded union", () => {
       t.union(
         t.object({
           kind: t.literal("login"),
-          userId: t.number().required(),
+          userId: t.double().required(),
         }),
         t.object({
           kind: t.literal("signup"),
@@ -346,7 +346,7 @@ describe("C2 — partial update against a flat-expanded union", () => {
       t.union(
         t.object({
           kind: t.literal("login"),
-          userId: t.number().required(),
+          userId: t.double().required(),
         }),
         t.object({
           kind: t.literal("signup"),
@@ -364,7 +364,7 @@ describe("C2 — partial update against a flat-expanded union", () => {
         t.object({
           kind: t.literal("b"),
           y: t.string().required(),
-          z: t.number().required(),
+          z: t.double().required(),
         }),
       ),
     );
@@ -389,7 +389,7 @@ describe("C2 — nested t.union() inside t.object()", () => {
     const s = fieldsOf({
       payload: t.union(
         t.object({ kind: t.literal("a"), x: t.string().required() }),
-        t.object({ kind: t.literal("b"), y: t.number().required() }),
+        t.object({ kind: t.literal("b"), y: t.double().required() }),
       ),
     });
     assert.equal(s.payload.type, "union");

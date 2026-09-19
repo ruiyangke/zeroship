@@ -26,7 +26,7 @@ use zeroship_migrate_mysql::physical_type::MysqlPhysicalType;
 use zeroship_migrate::{
     ColumnCollationSnapshot, ColumnSnapshot, ConstraintSnapshot, GeneratedColumnSnapshot,
     GeneratedKindSnapshot, IdDefaultSnapshot, IdentityCol, IndexElementSnapshot, IndexSnapshot,
-    TableSnapshot, TextStorageSnapshot, ValueFormat,
+    TableSnapshot, TextStorageSnapshot,
 };
 
 /// One field, and a mutation that changes ONLY that field.
@@ -130,7 +130,6 @@ pub fn column_snapshot_probes() -> ProbeSet<ColumnSnapshot> {
         generated_kind,
         identity,
         rowid_alias,
-        value_format,
         catalog_uuid_format_check,
         id_default,
         expression_default,
@@ -179,9 +178,6 @@ pub fn column_snapshot_probes() -> ProbeSet<ColumnSnapshot> {
     });
     set.probe("ColumnSnapshot::rowid_alias", rowid_alias, |c| {
         c.rowid_alias = true;
-    });
-    set.probe("ColumnSnapshot::value_format", value_format, |c| {
-        c.value_format = Some(ValueFormat::Ulid);
     });
     set.probe(
         "ColumnSnapshot::catalog_uuid_format_check",

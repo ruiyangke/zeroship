@@ -72,7 +72,7 @@ test("the journal refuses UPDATE, DELETE and TRUNCATE from plain SQL", async (ct
     name: "create_notes",
     default: {
       schema() {
-        table("notes").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+        table("notes").create({ columns: { id: t.int().required() }, primaryKey: ["id"] });
       },
     },
   } as MigrationModule & { name: string };

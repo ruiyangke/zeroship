@@ -82,19 +82,19 @@ scope = "all"
 
 const SHAPES = {
   comment: () => {
-    table("items").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+    table("items").create({ columns: { id: t.int().required() }, primaryKey: ["id"] });
     table("items").comment("a table comment");
   },
   standalone_sequence: () => {
     sequence("item_ids").create({ as: t.bigInt() });
   },
   materialized_view: () => {
-    table("items").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+    table("items").create({ columns: { id: t.int().required() }, primaryKey: ["id"] });
     view("items_mv").create({ as: (q) => q.from("items").select(["id"]), materialized: true });
   },
   /** The control shape: a plain structured view, declared supported everywhere. */
   plain_view: () => {
-    table("items").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+    table("items").create({ columns: { id: t.int().required() }, primaryKey: ["id"] });
     view("items_v").create({ as: (q) => q.from("items").select(["id"]) });
   },
 } as const;

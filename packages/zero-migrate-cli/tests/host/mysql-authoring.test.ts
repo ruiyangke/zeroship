@@ -231,9 +231,9 @@ test("Live MySQL TypeID CHECK enforces the official fixtures and empty-prefix fo
       schema() {
         table("type_id_samples").create({
           columns: {
-            bare: ids.typeId({ prefix: "" }),
-            prefixed: ids.typeId({ prefix: "prefix" }),
-            split: ids.typeId({ prefix: "pre_fix" }),
+            bare: t.typedId("" ),
+            prefixed: t.typedId("prefix" ),
+            split: t.typedId("pre_fix" ),
           },
         });
       },
@@ -367,7 +367,7 @@ test("Live MySQL UUIDv4 default generates canonical RFC 9562 version and variant
       schema() {
         table("uuid_samples").create({
           columns: {
-            id: t.uuid().notNull().default(uuidV4()),
+            id: t.uuid().required().default(uuidV4()),
           },
         });
       },
@@ -444,11 +444,11 @@ test("Live MySQL onConflict updates only the authored target and journals only c
         items.create({
           columns: {
             id: t.int().primaryKey(),
-            code: t.char({ length: 32 }).notNull().unique(),
+            code: t.char({ length: 32 }).required().unique(),
             nullable_key: t.char({ length: 32 }).unique(),
-            label: t.text().notNull(),
-            amount: t.numeric({ precision: 30, scale: 10 }).notNull(),
-            payload: t.bytes().notNull(),
+            label: t.text().required(),
+            amount: t.numeric({ precision: 30, scale: 10 }).required(),
+            payload: t.bytes().required(),
           },
         });
       },
@@ -602,8 +602,8 @@ test("Live MySQL onConflict rejects a non-unique authored target before mutation
         items.create({
           columns: {
             id: t.int().primaryKey(),
-            group_id: t.int().notNull(),
-            label: t.text().notNull(),
+            group_id: t.int().required(),
+            label: t.text().required(),
           },
         });
       },
@@ -718,7 +718,7 @@ test("Live MySQL applies an expression column default, with a literal default as
       schema() {
         table("literal_labels").create({
           columns: {
-            label: t.string({ length: 64 }).notNull().default("plain"),
+            label: t.string({ length: 64 }).required().default("plain"),
           },
         });
       },
@@ -732,7 +732,7 @@ test("Live MySQL applies an expression column default, with a literal default as
           columns: {
             label: t
               .string({ length: 64 })
-              .notNull()
+              .required()
               .default(lit("X").lower()),
           },
         });

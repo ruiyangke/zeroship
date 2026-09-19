@@ -25,8 +25,8 @@ export function schema() {
 
   table("users").create({
     columns: {
-      email: t.text().notNull(),
-      active: t.boolean().notNull().default(true),
+      email: t.text().required(),
+      active: t.boolean().required().default(true),
       status: t.enum(userStatus),
     },
     uniques: [{ name: "users_email_uq", columns: ["email"] }],

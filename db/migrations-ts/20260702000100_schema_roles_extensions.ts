@@ -31,7 +31,7 @@ export default {
     });
     domain("account_state").create({ schema: "zeroship", as: t.text(), check: (v) => v.in(["active", "past_due", "suspended"]) });
     domain("billing_notification_kind").create({ schema: "zeroship", as: t.text(), check: (v) => v.in(["payment_failed", "past_due", "suspended", "recovered", "invoice_finalized", "refunded", "disputed", "payout_failed", "checkout_failed", "spend_warn", "spend_degrade", "spend_block"]) });
-    domain("billing_period").create({ schema: "zeroship", as: t.date(), check: (v) => v.extract("day").eq(1) });
+    domain("billing_period").create({ schema: "zeroship", as: t.calendarDate(), check: (v) => v.extract("day").eq(1) });
     domain("credit_entry_kind").create({ schema: "zeroship", as: t.text(), check: (v) => v.in(["grant", "promo", "goodwill", "refund_to_credit", "consumed", "void_reversal", "refund_clawback"]) });
     domain("dispute_status").create({ schema: "zeroship", as: t.text(), check: (v) => v.in(["open", "won", "lost"]) });
     domain("invoice_payment_kind").create({ schema: "zeroship", as: t.text(), check: (v) => v.in(["charge", "dispute_debit", "dispute_reversal"]) });

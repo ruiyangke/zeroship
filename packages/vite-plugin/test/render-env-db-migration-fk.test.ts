@@ -105,7 +105,7 @@ test("manual descriptor mapping carries relation names into the schema engine", 
   assert.equal(dto.references, "users");
   assert.equal(dto.referenceColumn, "account_key");
   assert.equal(dto.relation, "user");
-  for (const [builder, type] of [[sdk.t.integer(), "integer"], [sdk.t.bigInt(), "bigInt"]] as const) {
+  for (const [builder, type] of [[sdk.t.int(), "integer"], [sdk.t.bigInt(), "bigInt"]] as const) {
     const field = builder.references("users", { column: "account_key", relation: "user" }).toFieldDef();
     const numeric = fieldDefToDto("todos", "userId", field);
     assert.equal(numeric.type, type);

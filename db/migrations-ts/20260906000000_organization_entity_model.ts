@@ -104,11 +104,11 @@ export default {
     // ---- the closed authority ladder -------------------------------------
     table("organization_roles", { schema: "zeroship" }).create({
       columns: {
-        id: t.bigInt().notNull().identity(),
-        role: t.text().notNull(),
-        rank: t.int().notNull(),
-        billing_rank: t.int().notNull(),
-        label: t.text().notNull(),
+        id: t.bigInt().required().identity(),
+        role: t.text().required(),
+        rank: t.int().required(),
+        billing_rank: t.int().required(),
+        label: t.text().required(),
       },
       primaryKey: ["id"],
     });
@@ -140,17 +140,17 @@ export default {
     // ---- organizations ----------------------------------------------------
     table("organizations", { schema: "zeroship" }).create({
       columns: {
-        id: t.text().notNull(),
-        slug: t.text({ caseSensitive: false }).notNull(),
-        name: t.text().notNull(),
+        id: t.text().required(),
+        slug: t.text({ caseSensitive: false }).required(),
+        name: t.text().required(),
         // Seeded from the minting user's address and independent thereafter.
         // The billed party and the notified party separate here for the first
         // time.
-        billing_email: t.text({ caseSensitive: false }).notNull(),
+        billing_email: t.text({ caseSensitive: false }).required(),
         personal_owner_id: t.text(),
         created_by: t.text(),
-        created_at: t.timestamp().notNull().default(now()),
-        updated_at: t.timestamp().notNull().default(now()),
+        created_at: t.timestamp().required().default(now()),
+        updated_at: t.timestamp().required().default(now()),
         // The close, rather than a DELETE: the organization is the billing
         // subject and every invoice names it, while `projects.organization_id`
         // is RESTRICT. Setting the timestamp releases the slug and the personal
@@ -206,13 +206,13 @@ export default {
     // ---- projects ---------------------------------------------------------
     table("projects", { schema: "zeroship" }).create({
       columns: {
-        id: t.text().notNull(),
-        organization_id: t.text().notNull(),
-        slug: t.text({ caseSensitive: false }).notNull(),
-        name: t.text().notNull(),
+        id: t.text().required(),
+        organization_id: t.text().required(),
+        slug: t.text({ caseSensitive: false }).required(),
+        name: t.text().required(),
         created_by: t.text(),
-        created_at: t.timestamp().notNull().default(now()),
-        updated_at: t.timestamp().notNull().default(now()),
+        created_at: t.timestamp().required().default(now()),
+        updated_at: t.timestamp().required().default(now()),
       },
       primaryKey: ["id"],
     });
@@ -257,13 +257,13 @@ export default {
     // filter.
     table("organization_members", { schema: "zeroship" }).create({
       columns: {
-        id: t.bigInt().notNull().identity(),
-        organization_id: t.text().notNull(),
-        user_id: t.text().notNull(),
-        role: t.text().notNull(),
-        added_at: t.timestamp().notNull().default(now()),
+        id: t.bigInt().required().identity(),
+        organization_id: t.text().required(),
+        user_id: t.text().required(),
+        role: t.text().required(),
+        added_at: t.timestamp().required().default(now()),
         added_by: t.text(),
-        changed_at: t.timestamp().notNull().default(now()),
+        changed_at: t.timestamp().required().default(now()),
         changed_by: t.text(),
       },
       primaryKey: ["id"],
@@ -327,14 +327,14 @@ export default {
     // organization at all. Both are unspellable rather than checked.
     table("project_members", { schema: "zeroship" }).create({
       columns: {
-        id: t.bigInt().notNull().identity(),
-        project_id: t.text().notNull(),
-        organization_id: t.text().notNull(),
-        user_id: t.text().notNull(),
-        role: t.text().notNull(),
-        added_at: t.timestamp().notNull().default(now()),
+        id: t.bigInt().required().identity(),
+        project_id: t.text().required(),
+        organization_id: t.text().required(),
+        user_id: t.text().required(),
+        role: t.text().required(),
+        added_at: t.timestamp().required().default(now()),
         added_by: t.text(),
-        changed_at: t.timestamp().notNull().default(now()),
+        changed_at: t.timestamp().required().default(now()),
         changed_by: t.text(),
       },
       primaryKey: ["id"],
@@ -412,19 +412,19 @@ export default {
     // organization_members and refuse if the comparison no longer holds.
     table("organization_invites", { schema: "zeroship" }).create({
       columns: {
-        id: t.text().notNull(),
-        token_hash: t.bytes().notNull(),
-        organization_id: t.text().notNull(),
-        email: t.text({ caseSensitive: false }).notNull(),
-        role: t.text().notNull(),
-        role_rank: t.int().notNull(),
-        role_billing_rank: t.int().notNull(),
+        id: t.text().required(),
+        token_hash: t.bytes().required(),
+        organization_id: t.text().required(),
+        email: t.text({ caseSensitive: false }).required(),
+        role: t.text().required(),
+        role_rank: t.int().required(),
+        role_billing_rank: t.int().required(),
         invited_by: t.text(),
-        invited_by_rank: t.int().notNull(),
-        invited_by_billing_rank: t.int().notNull(),
-        purpose: t.text().notNull(),
-        issued_at: t.timestamp().notNull().default(now()),
-        expires_at: t.timestamp().notNull(),
+        invited_by_rank: t.int().required(),
+        invited_by_billing_rank: t.int().required(),
+        purpose: t.text().required(),
+        issued_at: t.timestamp().required().default(now()),
+        expires_at: t.timestamp().required(),
         consumed_at: t.timestamp(),
         consumed_by: t.text(),
         // NULL until a delivery attempt resolves. The row is written BEFORE the

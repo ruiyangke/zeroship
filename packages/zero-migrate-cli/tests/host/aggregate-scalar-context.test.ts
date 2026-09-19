@@ -57,7 +57,7 @@ const FORBIDDEN: ReadonlyArray<
   [
     "default",
     `import { table, t, countStar } from "@zeroship/migrate";`,
-    `table("agg_x").create({ columns: { id: t.int().notNull(), n: t.int().default(countStar()) }, primaryKey: ["id"] });`,
+    `table("agg_x").create({ columns: { id: t.int().required(), n: t.int().default(countStar()) }, primaryKey: ["id"] });`,
     "schema",
   ],
   [
@@ -69,7 +69,7 @@ const FORBIDDEN: ReadonlyArray<
   [
     "generated column",
     `import { table, t, countStar } from "@zeroship/migrate";`,
-    `table("agg_y").create({ columns: { id: t.int().notNull(), g: t.int().generated(() => countStar()) }, primaryKey: ["id"] });`,
+    `table("agg_y").create({ columns: { id: t.int().required(), g: t.int().generated(() => countStar()) }, primaryKey: ["id"] });`,
     "schema",
   ],
   [
@@ -126,7 +126,7 @@ export const name = "a";
 export default {
   schema() {
     table("agg_t").create({
-      columns: { id: t.int().notNull(), n: t.int() },
+      columns: { id: t.int().required(), n: t.int() },
       primaryKey: ["id"],
     });
   },
@@ -190,7 +190,7 @@ test("CONTROL: the same generated-column shape without an aggregate lints clean"
   // Proves the refusal above is about the aggregate and not about the syntax.
   const work = project(
     `import { table, t } from "@zeroship/migrate";`,
-    `table("agg_y").create({ columns: { id: t.int().notNull(), a: t.int().notNull(), g: t.int().generated((col) => col("a").add(1)) }, primaryKey: ["id"] });`,
+    `table("agg_y").create({ columns: { id: t.int().required(), a: t.int().required(), g: t.int().generated((col) => col("a").add(1)) }, primaryKey: ["id"] });`,
   );
   try {
     const linted = lint(work);

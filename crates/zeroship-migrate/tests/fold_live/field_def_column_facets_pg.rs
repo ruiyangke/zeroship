@@ -82,9 +82,7 @@ fn field_defs() -> serde_json::Value {
     json!({
         "int_col":      { "type": "int",      "default": 7 },
         "integer_col":  { "type": "integer",  "default": 11 },
-        "small_col":    { "type": "smallInt", "default": 3 },
         "bigint_col":   { "type": "bigInt",   "default": 9_007_199_254_740_993_i64 },
-        "real_col":     { "type": "real",     "default": 1.5 },
         "char_col":     { "type": "char",     "default": "ab", "charLen": 2 },
         "inet_col":     { "type": "inet",     "default": "10.0.0.1" },
         "ranged_int":   { "type": "int",      "min": 1, "max": 9 },
@@ -218,20 +216,10 @@ fn a_declared_default_and_range_reach_the_postgres_catalog() {
             "and the `integer` spelling of the same token"
         );
         assert_eq!(
-            defaults.get("small_col").map(String::as_str),
-            Some("3"),
-            "and a `smallInt` default"
-        );
-        assert_eq!(
             defaults.get("bigint_col").map(String::as_str),
             Some("'9007199254740993'::bigint"),
             "and a `bigInt` default BEYOND f64's exact range, digit for digit - \
              a renderer that goes through a double writes ...992 here"
-        );
-        assert_eq!(
-            defaults.get("real_col").map(String::as_str),
-            Some("1.5"),
-            "and a `real` default"
         );
         assert_eq!(
             defaults.get("char_col").map(String::as_str),
@@ -264,7 +252,7 @@ fn a_declared_default_and_range_reach_the_postgres_catalog() {
         ))?;
         let row = client.query_one(
             &format!(
-                "SELECT int_col, integer_col, small_col, bigint_col, real_col, \
+                "SELECT int_col, integer_col, bigint_col, \
                  char_col, inet_col::text, text_col, number_col \
                  FROM \"{schema}\".facets"
             ),
@@ -276,23 +264,18 @@ fn a_declared_default_and_range_reach_the_postgres_catalog() {
             "the row PostgreSQL defaulted `int`"
         );
         assert_eq!(row.get::<_, i32>(1), 11, "and `integer`");
-        assert_eq!(row.get::<_, i16>(2), 3, "and `smallInt`");
         assert_eq!(
-            row.get::<_, i64>(3),
+            row.get::<_, i64>(2),
             9_007_199_254_740_993_i64,
             "and the exact 64-bit `bigInt`"
         );
-        assert!(
-            (row.get::<_, f32>(4) - 1.5_f32).abs() < f32::EPSILON,
-            "and `real`"
-        );
-        assert_eq!(row.get::<_, String>(5), "ab", "and `char`");
+        assert_eq!(row.get::<_, String>(3), "ab", "and `char`");
         // `10.0.0.1/32`, not `10.0.0.1`: PostgreSQL 18's canonical text form for an
         // `inet` carries the prefix length. The stored value is the declared one.
-        assert_eq!(row.get::<_, String>(6), "10.0.0.1/32", "and `inet`");
-        assert_eq!(row.get::<_, String>(7), "dark", "and the string control");
+        assert_eq!(row.get::<_, String>(4), "10.0.0.1/32", "and `inet`");
+        assert_eq!(row.get::<_, String>(5), "dark", "and the string control");
         assert!(
-            (row.get::<_, f64>(8) - 2.5_f64).abs() < f64::EPSILON,
+            (row.get::<_, f64>(6) - 2.5_f64).abs() < f64::EPSILON,
             "and the number control"
         );
 

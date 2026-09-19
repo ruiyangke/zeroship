@@ -3,13 +3,13 @@ import type { Collection, SortableField, SortInput } from "../src/index.js";
 
 const fields = {
   title: t.string(),
-  score: t.number(),
+  score: t.double(),
   enabled: t.boolean(),
   payload: t.bytes(),
   document: t.json(),
   embedding: t.vector(3),
   location: t.geoPoint(),
-  secret: t.encrypted(),
+  secret: t.string().encrypted(),
 };
 
 declare const records: Collection<typeof fields>;

@@ -68,14 +68,15 @@ fn type_token(logical: LogicalType) -> &'static str {
 /// The SDK `PrimitiveTypeName` an array's `items` projects to.
 ///
 /// Distinct from [`type_token`]: the SDK array-element validator only knows the
-/// primitive vocabulary, so a timestamp element projects as `"date"` (its
-/// generator token) rather than the top-level `"timestamp"` spelling.
+/// primitive vocabulary, so a non-primitive element projects as `"json"` while
+/// a timestamp element keeps the `"timestamp"` spelling the top-level token
+/// uses.
 fn item_token(logical: LogicalType) -> &'static str {
     match logical {
         LogicalType::Text | LogicalType::Enum => "string",
         LogicalType::Integer | LogicalType::BigInt | LogicalType::Number => "number",
         LogicalType::Boolean => "boolean",
-        LogicalType::Timestamp => "date",
+        LogicalType::Timestamp => "timestamp",
         LogicalType::CalendarDate => "calendarDate",
         LogicalType::Json
         | LogicalType::Object
@@ -289,7 +290,7 @@ mod tests {
                         },
                         "title": { "type": "string", "default": "untitled" },
                         "weight": { "type": "number", "default": 1 },
-                        "instants": { "type": "array", "items": "date" }
+                        "instants": { "type": "array", "items": "timestamp" }
                     },
                     "options": { "softDelete": false, "versioning": false },
                     "indexes": [
@@ -327,9 +328,9 @@ mod tests {
         assert_eq!(posts["fields"]["weight"]["default"], json!(1));
 
         // An array's `items` uses the primitive vocabulary the SDK array-element
-        // validator knows, so a timestamp element stays `date`.
+        // validator knows, so a timestamp element stays `timestamp`.
         assert_eq!(posts["fields"]["instants"]["type"], json!("array"));
-        assert_eq!(posts["fields"]["instants"]["items"], json!("date"));
+        assert_eq!(posts["fields"]["instants"]["items"], json!("timestamp"));
 
         // `indexes` are absent from the decoded schema and come from the raw
         // descriptor, so their preservation is asserted explicitly.

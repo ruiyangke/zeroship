@@ -96,7 +96,7 @@ pub enum ChangeKind {
     /// column - the declared SDK type maps to a different SQL type than
     /// the live column carries. The motivating (and only currently
     /// detected) case is the **encryption toggle**: a `t.string()`
-    /// column becoming `t.encrypted(...)` (TEXT -> BYTEA) or the reverse
+    /// column becoming `.encrypted()` (TEXT -> BYTEA) or the reverse
     /// (BYTEA -> TEXT). Both directions require rewriting every stored
     /// value - encrypt-backfill or decrypt-backfill - because the data
     /// plane writes `decode($N,'base64')::bytea` into the column the
@@ -760,7 +760,7 @@ pub fn compute_diff(
     // that already exists on the live side, no matter how its declared
     // type has changed. That silently dropped the
     // `bytes-encrypted-transition-silent-noop` case - a `t.string()`
-    // column flipped to `t.encrypted(...)` (or back) keeps the same
+    // column flipped to `.encrypted()` (or back) keeps the same
     // NAME, so AddColumn never fires and DropColumn never fires, yet the
     // physical type must change (TEXT to BYTEA, or back). Worse, the data plane
     // starts writing `decode($N,'base64')::bytea` into a still-TEXT
@@ -1129,7 +1129,7 @@ mod tests {
     #[test]
     fn string_to_encrypted_transition_emits_rewrite_op() {
         // Live column is a plaintext TEXT `ssn`; the redeployed schema
-        // declares it `t.encrypted(...)` (BYTEA). The diff MUST surface a
+        // declares it `.encrypted()` (BYTEA). The diff MUST surface a
         // type rewrite - emitting ZERO ops here is the corruption bug,
         // because the data plane would start writing
         // `decode($N,'base64')::bytea` into a still-TEXT column.

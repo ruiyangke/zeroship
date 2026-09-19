@@ -73,7 +73,7 @@ const created = {
   default: {
     schema() {
       table("items").create({
-        columns: { id: t.int().notNull(), doomed: t.int() },
+        columns: { id: t.int().required(), doomed: t.int() },
         primaryKey: ["id"],
       });
     },

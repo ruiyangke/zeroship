@@ -38,7 +38,7 @@ test("CHAIN: terminals return the handle, so calls chain", () => {
 test("VAR-ASSIGN: a var-held handle is reusable across statements ({ schema } set once)", () => {
   const ops = record(() => {
     const users = table("users", { schema: "app" });
-    users.column("email").add({ type: t.text().notNull() });
+    users.column("email").add({ type: t.text().required() });
     users.unique("uq_email").add({ columns: ["email"] });
     users.insert({ rows: [{ id: "u1", email: "a@b.co" }] });
   });
@@ -61,7 +61,7 @@ test("B7 (L10): rename() rebinds the handle — chained ops target the NEW name"
 
 test("IMMUTABLE: a hoisted t.* type var does not alias across columns", () => {
   const ops = record(() => {
-    const base = t.text().notNull();
+    const base = t.text().required();
     table("u")
       .column("a").add({ type: base.unique() }) // a is unique
       .column("b").add({ type: base }); // b is NOT unique (base untouched)
@@ -80,7 +80,7 @@ test("IMMUTABLE: a hoisted t.* type var does not alias across columns", () => {
 test("IMMUTABLE: each modifier returns a fresh ColumnDef (no receiver mutation)", () => {
   const ops = record(() => {
     const c1 = t.int();
-    const c2 = c1.notNull();
+    const c2 = c1.required();
     const c3 = c2.default(0);
     table("u").create({ columns: { a: c1, b: c2, c: c3 } });
   });
@@ -94,7 +94,7 @@ test("IMMUTABLE: each modifier returns a fresh ColumnDef (no receiver mutation)"
 
 test("IMMUTABLE: references() returns a fresh def and leaves the explicit base type unchanged", () => {
   const ops = record(() => {
-    const base = t.uuid().notNull();
+    const base = t.uuid().required();
     const referenced = base.references("accounts", "id", { onDelete: "cascade" });
     table("orders").create({ columns: { base, account_id: referenced } });
   });

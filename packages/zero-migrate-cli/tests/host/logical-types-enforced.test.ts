@@ -58,7 +58,7 @@ export default {
   schema() {
     const state = enumType("logical_state").create({ values: ["invited", "active"] });
     table("${TABLE}").create({
-      columns: { id: t.int().notNull(), state: t.enum(state).notNull() },
+      columns: { id: t.int().required(), state: t.enum(state).required() },
       primaryKey: ["id"],
     });
   },
@@ -71,7 +71,7 @@ export default {
   schema() {
     domain("logical_cents").create({ as: t.bigInt(), check: (value) => value.ge(0), notNull: true });
     table("${TABLE}").create({
-      columns: { id: t.int().notNull(), bal: t.domain("logical_cents") },
+      columns: { id: t.int().required(), bal: t.domain("logical_cents") },
       primaryKey: ["id"],
     });
   },

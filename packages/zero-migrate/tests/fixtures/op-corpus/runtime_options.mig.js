@@ -8,9 +8,9 @@ export const name = "runtime_options";
 export function schema() {
   table("posts").create({
     columns: {
-      title: t.text().notNull(),
-      author_id: t.uuid().notNull(),
-      status: t.text().notNull().default("draft"),
+      title: t.text().required(),
+      author_id: t.uuid().required(),
+      status: t.text().required().default("draft"),
     },
     options: {
       softDelete: true,

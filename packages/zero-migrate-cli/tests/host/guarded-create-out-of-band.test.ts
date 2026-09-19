@@ -73,14 +73,14 @@ scope = { include = [${JSON.stringify(namespace)}] }
     join(work, "m", "20260101000000_a.ts"),
     `import { table, t } from "@zeroship/migrate";
 export const name = "anchor";
-export default { schema() { table("anchor").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] }); } };
+export default { schema() { table("anchor").create({ columns: { id: t.int().required() }, primaryKey: ["id"] }); } };
 `,
   );
   writeFileSync(
     join(work, "m", "20260102000000_b.ts"),
     `import { table, t } from "@zeroship/migrate";
 export const name = "guarded_oob";
-export default { schema() { table("oob").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"], ifNotExists: true }); } };
+export default { schema() { table("oob").create({ columns: { id: t.int().required() }, primaryKey: ["id"], ifNotExists: true }); } };
 `,
   );
   return work;

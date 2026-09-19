@@ -1,13 +1,13 @@
 import { generatedSchema } from "./_install-helper.js";
 /**
  * **P5.5 PR 1** — masking foundation: `t.string().mask(...)` /
- * `t.encrypted().mask(...)` DSL modifier + default-mask rule for
+ * `t.string().encrypted().mask(...)` DSL modifier + default-mask rule for
  * encrypted columns + TypeScript `Row<S>` inference wrapping masked
  * fields.
  *
  * These tests pin behaviour the runtime side cannot enforce:
  *
- *   1. `t.encrypted()` without explicit `.mask(...)` auto-populates
+ *   1. `.encrypted()` without explicit `.mask(...)` auto-populates
  *      the default mask `{ kind: "full", classification: "pii" }`.
  *   2. `t.string().mask({ kind: "email" })` records the mask
  *      metadata on the FieldDef.
@@ -41,33 +41,33 @@ import { t } from "../src/index.js";
 // `p9-pr2-masked-value-v8-class` suite.
 import type { Row, MaskedValueRepr, MaskedValue } from "../src/index.js";
 
-describe("P5.5 PR 1 — t.encrypted() default-mask rule", () => {
-  test("bare t.encrypted() auto-populates mask = { kind: 'full', classification: 'pii' }", () => {
-    const b = t.encrypted();
+describe("P5.5 PR 1 — .encrypted() default-mask rule", () => {
+  test("bare .encrypted() auto-populates mask = { kind: 'full', classification: 'pii' }", () => {
+    const b = t.string().encrypted();
     const def = b.toFieldDef();
-    assert.ok(def.mask, "expected default mask metadata on bare t.encrypted()");
+    assert.ok(def.mask, "expected default mask metadata on a bare .encrypted() field");
     assert.equal(def.mask!.kind, "full");
     assert.equal(def.mask!.classification, "pii");
   });
 
-  test("t.encrypted({  }) also gets the default mask", () => {
-    const b = t.encrypted({  });
+  test("a non-string plaintext also gets the default mask", () => {
+    const b = t.double().encrypted();
     const def = b.toFieldDef();
     assert.ok(def.mask);
     assert.equal(def.mask!.kind, "full");
     assert.equal(def.mask!.classification, "pii");
   });
 
-  test("t.encrypted().mask({ kind: 'last4' }) overrides the default", () => {
-    const b = t.encrypted().mask({ kind: "last4" });
+  test(".encrypted().mask({ kind: 'last4' }) overrides the default", () => {
+    const b = t.string().encrypted().mask({ kind: "last4" });
     const def = b.toFieldDef();
     assert.equal(def.mask!.kind, "last4");
     // classification defaults to "pii" when omitted
     assert.equal(def.mask!.classification, "pii");
   });
 
-  test("t.encrypted().mask({ kind: 'none' }) records the explicit opt-out", () => {
-    const b = t.encrypted().mask({ kind: "none" });
+  test(".encrypted().mask({ kind: 'none' }) records the explicit opt-out", () => {
+    const b = t.string().encrypted().mask({ kind: "none" });
     const def = b.toFieldDef();
     assert.equal(def.mask!.kind, "none");
   });
@@ -90,8 +90,8 @@ describe("P5.5 PR 1 — t.string().mask(...) DSL modifier", () => {
     assert.equal(def.mask!.classification, "internal");
   });
 
-  test("t.number().mask({ kind: 'full' }) is permitted (number wrap)", () => {
-    const b = t.number().mask({ kind: "full" });
+  test("t.double().mask({ kind: 'full' }) is permitted (number wrap)", () => {
+    const b = t.double().mask({ kind: "full" });
     const def = b.toFieldDef();
     assert.equal(def.type, "number");
     assert.equal(def.mask!.kind, "full");
@@ -164,7 +164,7 @@ describe("P5.5 PR 1 — Row<S> type inference (compile-time)", () => {
 
   test("masked encrypted field is wrapped in MaskedValue<string>", () => {
     const fields = {
-      ssn: t.encrypted({  }).required(),
+      ssn: t.string().encrypted().required(),
       name: t.string(),
     };
     type R = Row<typeof fields & typeof generatedSchema>;

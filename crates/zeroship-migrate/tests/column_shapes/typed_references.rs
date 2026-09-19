@@ -49,7 +49,16 @@ fn column(
         .as_object_mut()
         .expect("column fixture is always an object");
     if let Some(value_format) = value_format {
-        object.insert("valueFormat".to_string(), value_format);
+        let prefix = value_format
+            .get("typeId")
+            .and_then(|type_id| type_id.get("prefix"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| (value_format.as_str() == Some("ulid")).then(|| "ulid".to_string()));
+        if let Some(prefix) = prefix {
+            object.insert("type".to_string(), json!({ "string": { "length": 36 } }));
+            object.insert("idPrefix".to_string(), json!(prefix));
+        }
     }
     if let Some(case_sensitive) = case_sensitive {
         object.insert("caseSensitive".to_string(), json!(case_sensitive));
@@ -120,7 +129,7 @@ fn typed_reference_matrix_ir() -> MigrationIr {
                     "id",
                     "text",
                     false,
-                    Some(type_id("account")),
+                    Some(type_id("acct")),
                     None,
                     None,
                 )],
@@ -154,7 +163,7 @@ fn typed_reference_matrix_ir() -> MigrationIr {
                         "type_id_parent_id",
                         "text",
                         true,
-                        Some(type_id("account")),
+                        Some(type_id("acct")),
                         None,
                         Some(reference(
                             "type_id_parents",
@@ -261,22 +270,22 @@ fn typed_integer_uuid_type_id_and_ulid_references_lower_on_every_dialect() {
             [
                 "\"int_parent_id\" integer",
                 "\"uuid_parent_id\" uuid",
-                "\"type_id_parent_id\" text COLLATE \"C\"",
-                "\"ulid_parent_id\" text COLLATE \"C\"",
+                "\"type_id_parent_id\" character varying(36)",
+                "\"ulid_parent_id\" character varying(36)",
             ]
         } else if dialect == &zeroship_migrate_mysql::DIALECT {
             [
                 "`int_parent_id` INT",
                 "`uuid_parent_id` VARCHAR(36) CHARACTER SET ascii COLLATE ascii_bin",
-                "`type_id_parent_id` VARCHAR(191) CHARACTER SET ascii COLLATE ascii_bin",
-                "`ulid_parent_id` VARCHAR(191) CHARACTER SET ascii COLLATE ascii_bin",
+                "`type_id_parent_id` VARCHAR(36)",
+                "`ulid_parent_id` VARCHAR(36)",
             ]
         } else if dialect == &zeroship_migrate_sqlite::DIALECT {
             [
                 "\"int_parent_id\" INTEGER",
                 "\"uuid_parent_id\" TEXT",
-                "\"type_id_parent_id\" TEXT COLLATE BINARY",
-                "\"ulid_parent_id\" TEXT COLLATE BINARY",
+                "\"type_id_parent_id\" TEXT",
+                "\"ulid_parent_id\" TEXT",
             ]
         } else {
             panic!("unregistered test dialect {dialect}")
@@ -304,16 +313,14 @@ fn typed_integer_uuid_type_id_and_ulid_references_lower_on_every_dialect() {
                 "the authoritative UUID key must enforce canonical lowercase syntax on {dialect:?}: {uuid_parent}"
             );
         }
-        let type_id_parent = create_sql(&migrations, dialect, "type_id_parents");
-        assert!(
-            type_id_parent.contains("CHECK (") && type_id_parent.contains("account_"),
-            "the authoritative TypeID key must retain its format CHECK on {dialect:?}: {type_id_parent}"
-        );
-        let ulid_parent = create_sql(&migrations, dialect, "ulid_parents");
-        assert!(
-            ulid_parent.contains("CHECK ("),
-            "the authoritative ULID key must retain its format CHECK on {dialect:?}: {ulid_parent}"
-        );
+        // A typed-id key is a plain bounded string: no format CHECK survives.
+        for table in ["type_id_parents", "ulid_parents"] {
+            let parent = create_sql(&migrations, dialect, table);
+            assert!(
+                !parent.contains("CHECK ("),
+                "a typed-id key carries no format CHECK on {dialect:?}: {parent}"
+            );
+        }
     }
 }
 
@@ -679,29 +686,17 @@ fn declared_reference_graph_rejects_logical_width_format_prefix_and_collation_mi
         &declared_reference_ir(
             "type_id_prefix",
             "text",
-            Some(type_id("account")),
+            Some(type_id("acct")),
             None,
             "text",
-            Some(type_id("acct")),
+            Some(type_id("inv")),
             None,
         ),
         &[
-            "value formats differ",
-            "TypeID(prefix=\"account\")",
-            "TypeID(prefix=\"acct\")",
+            "typed-id prefixes differ",
+            "\"acct\"",
+            "\"inv\"",
         ],
-    );
-    assert_declared_mismatch(
-        &declared_reference_ir(
-            "ulid_format",
-            "text",
-            Some(json!("ulid")),
-            None,
-            "text",
-            Some(type_id("")),
-            None,
-        ),
-        &["value formats differ", "ULID", "TypeID(prefix=\"\")"],
     );
     assert_declared_mismatch(
         &declared_reference_ir("collation", "text", None, None, "text", None, Some(false)),
@@ -779,7 +774,7 @@ fn live_pg_token() -> String {
 
 #[test]
 fn postgres_live_catalog_compares_formatted_reference_base_storage_separately_from_collation() {
-    for (label, value_format) in [("type_id", type_id("account")), ("ulid", json!("ulid"))] {
+    for (label, value_format) in [("type_id", type_id("acct")), ("ulid", json!("ulid"))] {
         let parent = format!("{label}_parents");
         let target = ir(
             &format!("create_{parent}"),
@@ -813,17 +808,16 @@ fn postgres_live_catalog_compares_formatted_reference_base_storage_separately_fr
         );
 
         // This is the exact relevant shape recovered by PostgreSQL
-        // introspection: data_type and format_type are both the base `text`;
-        // the authored TypeID/ULID metadata separately supplies COLLATE "C".
+        // introspection for a typed-id key: the bounded `character varying(36)`.
         let mut snapshot = SchemaSnapshot::default();
         snapshot.tables.insert(
             parent.clone(),
             TableSnapshot {
                 columns: vec![ColumnSnapshot {
                     name: "id".to_string(),
-                    data_type: "text".to_string(),
+                    data_type: "character varying(36)".to_string(),
                     nullable: false,
-                    ddl_type_override: Some("text".to_string()),
+                    ddl_type_override: Some("character varying(36)".to_string()),
                     ..Default::default()
                 }],
                 indexes: Vec::new(),
@@ -865,8 +859,8 @@ fn postgres_live_catalog_compares_formatted_reference_base_storage_separately_fr
             });
         let child = create_sql(&migrations, &zeroship_migrate_postgres::DIALECT, "children");
         assert!(
-            child.contains(r#""parent_id" text COLLATE "C""#),
-            "the explicit formatted reference storage was not preserved: {child}"
+            child.contains(r#""parent_id" character varying(36)"#),
+            "the explicit typed-id reference storage was not preserved: {child}"
         );
         assert!(
             !child.contains("CHECK"),
@@ -898,7 +892,7 @@ async fn live_postgres_introspection_validates_type_id_and_ulid_reference_storag
                         "id",
                         "text",
                         false,
-                        Some(type_id("account")),
+                        Some(type_id("acct")),
                         None,
                         None,
                     )],
@@ -942,9 +936,11 @@ async fn live_postgres_introspection_validates_type_id_and_ulid_reference_storag
                 .get(table)
                 .and_then(|snapshot| snapshot.columns.iter().find(|column| column.name == "id"))
                 .ok_or_else(|| format!("live snapshot omitted {table}.id"))?;
-            if column.data_type != "text" || column.ddl_type_override.as_deref() != Some("text") {
+            if column.data_type != "character varying(36)"
+                || column.ddl_type_override.as_deref() != Some("character varying(36)")
+            {
                 return Err(format!(
-                    "PostgreSQL must introspect {table}.id as base text, got data_type={:?} ddl_type_override={:?}",
+                    "PostgreSQL must introspect {table}.id as bounded character varying(36), got data_type={:?} ddl_type_override={:?}",
                     column.data_type, column.ddl_type_override
                 ));
             }
@@ -962,7 +958,7 @@ async fn live_postgres_introspection_validates_type_id_and_ulid_reference_storag
                         "type_id_parent_id",
                         "text",
                         true,
-                        Some(type_id("account")),
+                        Some(type_id("acct")),
                         None,
                         Some(reference("type_id_parents", Some("cascade"), None)),
                     ),
@@ -1025,9 +1021,9 @@ async fn live_postgres_introspection_validates_type_id_and_ulid_reference_storag
     };
 
     assert_eq!(
-        child_sql.matches("text COLLATE \"C\"").count(),
+        child_sql.matches("character varying(36)").count(),
         2,
-        "both formatted references must retain bytewise collation: {child_sql}"
+        "both typed-id references must retain their bounded string storage: {child_sql}"
     );
     assert!(
         !child_sql.contains("CHECK"),
@@ -1045,8 +1041,8 @@ fn format_bearing_reference_to_unmanaged_target_without_authored_metadata_is_rej
         (
             "unmanaged_type_id_reference",
             "text",
-            Some(type_id("account")),
-            "TypeID(prefix=\"account\")",
+            Some(type_id("acct")),
+            "typed-id(prefix=\"acct\")",
         ),
         ("unmanaged_uuid_reference", "uuid", None, "canonical UUID"),
     ] {
@@ -1427,12 +1423,12 @@ fn applied_parent_snapshot(
     snapshot
 }
 
-fn text_column(name: &str) -> ColumnSnapshot {
+fn typed_id_column(name: &str) -> ColumnSnapshot {
     ColumnSnapshot {
         name: name.to_string(),
-        data_type: "text".to_string(),
+        data_type: "character varying(36)".to_string(),
         nullable: false,
-        ddl_type_override: Some("text".to_string()),
+        ddl_type_override: Some("character varying(36)".to_string()),
         ..Default::default()
     }
 }
@@ -1462,7 +1458,7 @@ fn absorb_logical_columns_carries_an_applied_file_contract_into_a_later_foreign_
                 "id",
                 "text",
                 false,
-                Some(type_id("account")),
+                Some(type_id("acct")),
                 None,
                 None,
             )],
@@ -1477,7 +1473,7 @@ fn absorb_logical_columns_carries_an_applied_file_contract_into_a_later_foreign_
                 "account_id",
                 "text",
                 true,
-                Some(type_id("account")),
+                Some(type_id("acct")),
                 None,
                 Some(reference("accounts", None, None)),
             )],
@@ -1486,7 +1482,7 @@ fn absorb_logical_columns_carries_an_applied_file_contract_into_a_later_foreign_
     );
     let snapshot = applied_parent_snapshot(
         "accounts",
-        vec![text_column("id")],
+        vec![typed_id_column("id")],
         vec![ConstraintSnapshot {
             name: "accounts_pkey".to_string(),
             kind: "PRIMARY KEY".to_string(),
@@ -1585,7 +1581,7 @@ fn absorb_logical_columns_replays_the_candidate_key_lifecycle_of_an_applied_file
                 nullable: false,
                 ..Default::default()
             },
-            text_column("public_id"),
+            typed_id_column("public_id"),
         ],
         vec![ConstraintSnapshot {
             name: "orgs_pkey".to_string(),
@@ -1638,12 +1634,12 @@ fn absorb_logical_columns_accumulates_what_strict_advance_rejects() {
         vec![create_table(
             "invoices",
             vec![
-                column("id", "text", false, Some(type_id("invoice")), None, None),
+                column("id", "text", false, Some(type_id("inv")), None, None),
                 column(
                     "customer_id",
                     "text",
                     true,
-                    Some(type_id("customer")),
+                    Some(type_id("cust")),
                     None,
                     Some(reference("customers", None, None)),
                 ),
@@ -1684,7 +1680,7 @@ fn absorb_logical_columns_accumulates_what_strict_advance_rejects() {
     );
     assert!(
         contract_for(&lenient, "invoices", "customer_id")
-            .value_format
+            .id_prefix
             .is_some(),
         "the absorbed reference column contract did not land"
     );

@@ -50,7 +50,7 @@ use zeroship_migrate_ir::backend::{
 };
 use zeroship_migrate_ir::dialect::DialectId;
 use zeroship_migrate_ir::expr::{AggFunc, CastTarget, Duration, Expr, ExtractField, ScalarFn};
-use zeroship_migrate_ir::ir::{ColType, IrScalar, IrValue, Op, TableRef, ValueFormat};
+use zeroship_migrate_ir::ir::{ColType, IrScalar, IrValue, Op, TableRef};
 use zeroship_migrate_ir::precondition::PreconditionCheck;
 use zeroship_migrate_ir::validate::{
     validate_expr, ExprDialectFeature, ExprDialectRejection, ExprDialectValidator,
@@ -372,13 +372,6 @@ impl CatalogFoldPolicy for DuckDbCatalogFoldPolicy {
         &self,
         _ty: &ColType,
         _is_reference: bool,
-    ) -> Option<FoldDatabaseFeature> {
-        None
-    }
-
-    fn database_requirement_for_value_format(
-        &self,
-        _value_format: &ValueFormat,
     ) -> Option<FoldDatabaseFeature> {
         None
     }
@@ -1186,47 +1179,8 @@ impl ValueFormatRenderer for DuckDbValueFormatRenderer {
         vec![rendered.to_string()]
     }
 
-    fn recovery_candidates(
-        &self,
-        _literals: &[String],
-        _type_id_alphabet: &str,
-        _ulid_alphabet: &str,
-    ) -> Vec<ValueFormat> {
-        Vec::new()
-    }
-
     fn uuid_column_metadata(&self, _quoted: &str) -> Option<ValueFormatColumnMetadata> {
         None
-    }
-
-    fn ulid_column_metadata(
-        &self,
-        _quoted: &str,
-        _regex: &str,
-        _len: usize,
-    ) -> ValueFormatColumnMetadata {
-        ValueFormatColumnMetadata {
-            ddl_type: "VARCHAR".to_string(),
-            collation: None,
-            inline_check: String::new(),
-        }
-    }
-
-    fn type_id_column_metadata(
-        &self,
-        _quoted: &str,
-        _stored_prefix: &str,
-        _suffix_start: usize,
-        _total_len: usize,
-        _suffix_len: usize,
-        _alphabet: &str,
-        _regex: &str,
-    ) -> ValueFormatColumnMetadata {
-        ValueFormatColumnMetadata {
-            ddl_type: "VARCHAR".to_string(),
-            collation: None,
-            inline_check: String::new(),
-        }
     }
 
     fn bytewise_column_metadata(

@@ -189,7 +189,7 @@ impl SchemaRenderer for PostgresSchemaRenderer {
     /// MEASURED, and the server's own words are carried because they are what an
     /// operator will find in the log if the refusal is bypassed.
     fn identity_column_type_confinement(&self) -> &'static str {
-        "smallInt, int or bigInt (`identity column type must be smallint, integer, or bigint`)"
+        "int or bigInt (`identity column type must be smallint, integer, or bigint`)"
     }
 
     /// PostgreSQL's desired and catalog spellings are already compared in their
@@ -522,7 +522,6 @@ pub fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
         // `t.bigInt()` exists for callers who need exact 64-bit
         // ints.
         Some("number") => "DOUBLE PRECISION",
-        Some("real") => "REAL",
         // `int`/`integer` are first-class integer tokens (the SQLite arm of
         // `def_to_column_type_for_dialect` already maps them to `INTEGER`; the dev
         // descriptor JSON declares `{ type: "int" }`). Before this arm the PG
@@ -537,12 +536,11 @@ pub fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
         // (`bigint`/`int4`/`int8`) are deliberately NOT accepted - they are not DSL
         // tokens and stay on the TEXT fallback so they remain typo-rejected.
         Some("int") | Some("integer") => "INTEGER",
-        Some("smallInt") => "SMALLINT",
         Some("bigInt") => "BIGINT",
         Some("boolean") => "BOOLEAN",
-        Some("date") => "TIMESTAMPTZ",
+        Some("timestamp") => "TIMESTAMPTZ",
         // `t.calendarDate()` is a `YYYY-MM-DD` value with no time
-        // and no timezone, distinct from `t.date()` (TIMESTAMPTZ stored
+        // and no timezone, distinct from `t.timestamp()` (TIMESTAMPTZ stored
         // as Unix-ms numbers at the SDK layer).
         Some("calendarDate") => "DATE",
         Some("json") => "JSONB",

@@ -25,14 +25,14 @@ export default {
   schema() {
     table("app_egress_rules", { schema: "zeroship" }).create({
       columns: {
-        id: t.bigInt().notNull().identity(),
-        app_id: t.text().notNull(),
-        verdict: t.text().notNull(),
-        kind: t.text().notNull(),
-        destination: t.text().notNull(),
-        port: t.int().notNull(),
-        created_by: t.text().notNull(),
-        created_at: t.timestamp().notNull().default(now()),
+        id: t.bigInt().required().identity(),
+        app_id: t.text().required(),
+        verdict: t.text().required(),
+        kind: t.text().required(),
+        destination: t.text().required(),
+        port: t.int().required(),
+        created_by: t.text().required(),
+        created_at: t.timestamp().required().default(now()),
         note: t.text(),
       },
       primaryKey: ["id"],

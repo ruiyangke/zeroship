@@ -78,13 +78,12 @@ const OLD_COLUMN: &str = "qty_on_hand";
 /// The post-rename column name.
 const NEW_COLUMN: &str = "amount_on_hand";
 
-/// The SECOND renamed column, and the reason there is one. `inline_checks` is populated
-/// only by the enum / domain / UUID / value-format writers, and every one of them
-/// attaches its predicate to the column it describes - so no rename of the INT column
-/// above can ever exercise it. `sku_code` is a TypeID-formatted TEXT column, which is
-/// the shape that makes the PostgreSQL fold emit an inline format CHECK naming its own
-/// column. Renaming it is what puts `TableSnapshot::columns[].inline_checks` on the
-/// swept list rather than the excused one.
+/// The SECOND renamed column. PostgreSQL emits no inline column CHECK for any
+/// shape - its native `uuid` type is itself the format contract, and enums and
+/// domains materialize as named types - so `TableSnapshot::columns[].inline_checks`
+/// is unreachable on this dialect (see [`PG_UNREACHABLE_CARRIER_FIELDS`]). This
+/// column stays as a second, non-integer rename: a typed-id bounded string whose
+/// prefix declaration must survive the rename.
 const OLD_FORMAT_COLUMN: &str = "sku_code";
 
 /// The post-rename name of [`OLD_FORMAT_COLUMN`].
@@ -97,6 +96,16 @@ const RENAMES: &[(&str, &str)] = &[
     (OLD_COLUMN, NEW_COLUMN),
     (OLD_FORMAT_COLUMN, NEW_FORMAT_COLUMN),
 ];
+
+/// The carriers this leg CANNOT reach, each with the reason. The list is short
+/// because PostgreSQL holds every other carrier as an attribute NUMBER and deparses
+/// it on read. `inline_checks` is the exception: PostgreSQL emits no inline column
+/// CHECK at all - `uuid` is a native type, and enums and domains materialize as
+/// named types - so no column shape populates it here. The SQLite leg still sweeps
+/// it with a UUID column. Asserted in both directions below, so a carrier that
+/// becomes reachable fails until it is swept and the list cannot silently shrink
+/// the sweep.
+const PG_UNREACHABLE_CARRIER_FIELDS: &[&str] = &["TableSnapshot::columns[].inline_checks"];
 
 /// The table that carries every non-partition carrier.
 const MAIN_TABLE: &str = "carrier_sweep_main";
@@ -152,8 +161,7 @@ const CREATE_IR: &str = r#"{
        "generated":{"expr":{"node":"binOp","op":"add",
          "lhs":{"node":"colRef","name":"qty_on_hand"},
          "rhs":{"node":"literal","value":1}},"stored":true}},
-      {"name":"sku_code","type":"text","nullable":true,
-       "valueFormat":{"typeId":{"prefix":"sku"}}}
+      {"name":"sku_code","type":{"string":{"length":36}},"nullable":true,"idPrefix":"sku"}
     ],"primaryKey":["id","qty_on_hand"],"constraints":[
       {"name":"carrier_sweep_main_uq","kind":{"kind":"unique",
         "columns":["qty_on_hand","note"]}},
@@ -213,8 +221,7 @@ const FOLDED_IR: &str = r#"{
        "generated":{"expr":{"node":"binOp","op":"add",
          "lhs":{"node":"colRef","name":"qty_on_hand"},
          "rhs":{"node":"literal","value":1}},"stored":true}},
-      {"name":"sku_code","type":"text","nullable":true,
-       "valueFormat":{"typeId":{"prefix":"sku"}}}
+      {"name":"sku_code","type":{"string":{"length":36}},"nullable":true,"idPrefix":"sku"}
     ],"primaryKey":["id","qty_on_hand"],"constraints":[
       {"name":"carrier_sweep_main_uq","kind":{"kind":"unique",
         "columns":["qty_on_hand","note"]}},
@@ -485,6 +492,7 @@ async fn does_the_fixture_populate_every_carrier_the_inventory_declares() {
 
     let declared: BTreeSet<&str> = spellings.keys().copied().collect();
     let required: BTreeSet<&str> = REQUIRED_CARRIER_FIELDS.iter().copied().collect();
+    let unreachable: BTreeSet<&str> = PG_UNREACHABLE_CARRIER_FIELDS.iter().copied().collect();
 
     let undeclared: Vec<&&str> = required.difference(&declared).collect();
     assert!(
@@ -492,6 +500,12 @@ async fn does_the_fixture_populate_every_carrier_the_inventory_declares() {
         "`REQUIRED_CARRIER_FIELDS` names carrier fields the inventory never declared: \
          {undeclared:?}. Either the field path was renamed in `support::carriers` and \
          not here, or the fixture built no object of that shape at all"
+    );
+
+    let stray: Vec<&&str> = unreachable.difference(&required).collect();
+    assert!(
+        stray.is_empty(),
+        "`PG_UNREACHABLE_CARRIER_FIELDS` names paths that are not carriers at all: {stray:?}"
     );
 
     // Coverage is measured on the NEVER-RENAMED baseline, and demands that each carrier
@@ -510,13 +524,25 @@ async fn does_the_fixture_populate_every_carrier_the_inventory_declares() {
         })
         .map(|carrier| carrier.field)
         .collect();
-    let unexercised: Vec<&&str> = required.difference(&held).collect();
+    let expected: BTreeSet<&str> = required.difference(&unreachable).copied().collect();
+    let unexercised: Vec<&&str> = expected.difference(&held).collect();
     assert!(
         unexercised.is_empty(),
         "before any rename, these carriers do not hold a to-be-renamed column, so the \
          sweep below proves nothing about them: {unexercised:?}. Extend `CREATE_IR` / \
          `FOLDED_IR` so each one names {RENAMES:?} - a carrier nobody exercises is \
          exactly the hole this sweep exists to close"
+    );
+
+    let newly_reachable: Vec<&&str> = unreachable
+        .iter()
+        .filter(|field| held.contains(**field))
+        .collect();
+    assert!(
+        newly_reachable.is_empty(),
+        "these carriers are listed as UNREACHABLE on PostgreSQL but the fold populated \
+         them with a renamed column: {newly_reachable:?}. The refusal that excused them \
+         no longer holds, so they need sweeping rather than excusing"
     );
 
     // The two classes the inventory deliberately does NOT sweep, asserted rather than

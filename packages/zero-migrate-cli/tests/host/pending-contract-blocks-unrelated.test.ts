@@ -71,7 +71,7 @@ export const name = "create_people";
 export default {
   schema() {
     table("people").create({
-      columns: { id: t.int().notNull(), email: t.text() },
+      columns: { id: t.int().required(), email: t.text() },
       primaryKey: ["id"],
     });
   },
@@ -90,7 +90,7 @@ export default {
 const UNRELATED = `import { table, t } from "@zeroship/migrate";
 export const name = "create_widgets";
 export default {
-  schema() { table("widgets").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] }); },
+  schema() { table("widgets").create({ columns: { id: t.int().required() }, primaryKey: ["id"] }); },
 };
 `;
 

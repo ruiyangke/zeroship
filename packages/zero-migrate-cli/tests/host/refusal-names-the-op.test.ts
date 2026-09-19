@@ -68,7 +68,7 @@ export const name = "indexed";
 export default {
   schema() {
     table("users").create({
-      columns: { id: t.int().notNull(), email: t.text(), rank: t.int() },
+      columns: { id: t.int().required(), email: t.text(), rank: t.int() },
       primaryKey: ["id"],
     });
     table("users").index("ix_users").add({ on: [{ column: "email" }], using: "gin" });

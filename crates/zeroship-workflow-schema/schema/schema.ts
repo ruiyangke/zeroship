@@ -41,8 +41,8 @@ export function workflowSchema(namespace) {
   const columnsInSchema = new Set();
   const bytewisePending = new Set(Object.keys(bytewiseColumns));
   const owned = name => { identifiers.add(name); return name; };
-  const text = () => t.text().notNull();
-  const integer = () => t.bigInt().notNull();
+  const text = () => t.text().required();
+  const integer = () => t.bigInt().required();
   const identity = () => ({ app_id: text() });
   const runIdentity = () => ({ ...identity(), run_id: text() });
   const generation = () => ({ ...runIdentity(), generation: integer() });

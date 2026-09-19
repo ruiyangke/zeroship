@@ -1,13 +1,12 @@
 //! PostgreSQL value-format spelling and catalog normalization.
 
-use zeroship_migrate_backend::dml::sql_string_literal;
 use zeroship_migrate_backend::snapshot::{ColumnCollationSnapshot, IdDefaultSnapshot};
 use zeroship_migrate_backend::value_format::{
     CatalogSqlContext, LiteralCastKind, ValueFormatColumnMetadata, ValueFormatRenderer,
 };
 use zeroship_migrate_ir::dialect::DialectId;
 use zeroship_migrate_ir::expr::{BinaryOp, CastTarget, Expr, ScalarFn, SynthFn};
-use zeroship_migrate_ir::ir::{IrScalar, ValueFormat};
+use zeroship_migrate_ir::ir::IrScalar;
 
 use crate::DIALECT;
 
@@ -425,61 +424,8 @@ impl ValueFormatRenderer for PostgresValueFormatRenderer {
         vec![rendered.to_string(), format!("pg_catalog.{rendered}")]
     }
 
-    fn recovery_candidates(
-        &self,
-        _literals: &[String],
-        _type_id_alphabet: &str,
-        _ulid_alphabet: &str,
-    ) -> Vec<ValueFormat> {
-        Vec::new()
-    }
-
     fn uuid_column_metadata(&self, _quoted: &str) -> Option<ValueFormatColumnMetadata> {
         None
-    }
-
-    fn ulid_column_metadata(
-        &self,
-        quoted: &str,
-        regex: &str,
-        len: usize,
-    ) -> ValueFormatColumnMetadata {
-        let regex = sql_string_literal(regex);
-        ValueFormatColumnMetadata {
-            ddl_type: "text COLLATE \"C\"".to_string(),
-            collation: Some(ColumnCollationSnapshot {
-                schema: Some("pg_catalog".to_string()),
-                name: "C".to_string(),
-            }),
-            inline_check: format!(
-                "CHECK ({quoted} IS NULL OR (octet_length({quoted}) = {len} AND \
-                 ({quoted} COLLATE \"C\") ~ {regex}))"
-            ),
-        }
-    }
-
-    fn type_id_column_metadata(
-        &self,
-        quoted: &str,
-        _stored_prefix: &str,
-        _suffix_start: usize,
-        total_len: usize,
-        _suffix_len: usize,
-        _alphabet: &str,
-        regex: &str,
-    ) -> ValueFormatColumnMetadata {
-        let regex = sql_string_literal(regex);
-        ValueFormatColumnMetadata {
-            ddl_type: "text COLLATE \"C\"".to_string(),
-            collation: Some(ColumnCollationSnapshot {
-                schema: Some("pg_catalog".to_string()),
-                name: "C".to_string(),
-            }),
-            inline_check: format!(
-                "CHECK ({quoted} IS NULL OR (octet_length({quoted}) = {total_len} AND \
-                 ({quoted} COLLATE \"C\") ~ {regex}))"
-            ),
-        }
     }
 
     fn bytewise_column_metadata(

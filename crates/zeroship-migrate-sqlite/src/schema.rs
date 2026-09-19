@@ -421,9 +421,8 @@ fn column_type_for_def(def: &serde_json::Value) -> String {
         Some("string") => "TEXT".to_string(),
         Some("char") => "TEXT".to_string(),
         Some("number") => "REAL".to_string(),
-        Some("real") => "REAL".to_string(),
         Some("boolean") => "INTEGER".to_string(),
-        Some("date") => "TEXT".to_string(),
+        Some("timestamp") => "TEXT".to_string(),
         Some("calendarDate") => "TEXT".to_string(),
         Some("json") | Some("object") | Some("array") | Some("union") => "TEXT".to_string(),
         Some("textArray") => "TEXT".to_string(),
@@ -435,7 +434,6 @@ fn column_type_for_def(def: &serde_json::Value) -> String {
         },
         Some("bigInt") | Some("bigint") | Some("int8") | Some("integer") | Some("int")
         | Some("int4") => "INTEGER".to_string(),
-        Some("smallInt") => "INTEGER".to_string(),
         Some("bytes") => "BLOB".to_string(),
         Some("inet") => "TEXT".to_string(),
         _ => "TEXT".to_string(),

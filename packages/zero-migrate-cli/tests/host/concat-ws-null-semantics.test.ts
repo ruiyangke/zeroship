@@ -103,7 +103,7 @@ export default {
   schema() {
     table("${TABLE}").create({
       columns: {
-        id: t.int().notNull(), p: t.text(), q: t.text(), r: t.text(), out: t.text(),
+        id: t.int().required(), p: t.text(), q: t.text(), r: t.text(), out: t.text(),
       },
       primaryKey: ["id"],
     });

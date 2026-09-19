@@ -16,7 +16,6 @@ import {
 } from "@zeroship/migrate/internal/recorder";
 
 import {
-  ids,
   perRow,
   t,
   table,
@@ -176,13 +175,13 @@ test("SA-6: sequence({ as }) rejects a type outside { int, bigInt }", () => {
   assert.equal(ops[0].as, "bigInt");
 });
 
-test("t.text() is nullable-by-default; .notNull() opts in", () => {
+test("t.text() is nullable-by-default; .required() opts in", () => {
   const ops = record(() => {
-    table("u").create({ columns: { a: t.text(), b: t.text().notNull() } });
+    table("u").create({ columns: { a: t.text(), b: t.text().required() } });
   });
   const cols = ops[0].columns;
   assert.equal(cols[0].nullable, undefined, "t.text() omits nullable (nullable-by-default)");
-  assert.equal(cols[1].nullable, false, "t.text().notNull() records nullable:false");
+  assert.equal(cols[1].nullable, false, "t.text().required() records nullable:false");
 });
 
 test("t.text({ caseSensitive:false }) records the caseSensitive facet", () => {
@@ -209,7 +208,7 @@ test(".collation('bytewise') records the collation facet on a create-table colum
       columns: {
         plain: t.text(),
         ordered: t.text().collation("bytewise"),
-        bounded: t.string({ length: 32 }).collation("bytewise").notNull(),
+        bounded: t.string({ length: 32 }).collation("bytewise").required(),
       },
     });
   });
@@ -223,7 +222,7 @@ test(".collation('bytewise') records the collation facet on a create-table colum
 
 test(".collation() returns a fresh def and leaves the receiver uncollated", () => {
   const ops = record(() => {
-    const base = t.text().notNull();
+    const base = t.text().required();
     table("u").create({ columns: { a: base, b: base.collation("bytewise") } });
   });
   const cols = ops[0].columns;
@@ -250,20 +249,19 @@ test(".collation() refuses an out-of-set token and every type that cannot carry 
     t.bytes(),
     t.boolean(),
     t.json(),
-    t.textArray(),
+    t.array(t.text(), { storage: "native" }),
     t.char({ length: 3 }),
     t.numeric(),
     t.inet(),
     t.enum("mood"),
-    t.encrypted({ of: t.text() }),
+    t.text().encrypted(),
   ]) {
     refusal(() => def.collation("bytewise"));
   }
   // The two facets that already decide the column's comparison order.
   refusal(() => t.text({ caseSensitive: false }).collation("bytewise"));
   refusal(() => t.string({ caseSensitive: false }).collation("bytewise"));
-  refusal(() => ids.typeId({ prefix: "doc" }).collation("bytewise"));
-  refusal(() => ids.ulid().collation("bytewise"));
+  refusal(() => t.typedId("doc" ).collation("bytewise"));
 });
 
 test(".collation() is create-table-only and is refused, not dropped, elsewhere", () => {
@@ -279,7 +277,7 @@ test(".collation() is create-table-only and is refused, not dropped, elsewhere",
     refusal(() => table("u").column("c").add({ type: collated }));
     refusal(() => table("u").column("c").setType({ to: collated }));
     refusal(() => table("u").column("c").rename({ to: "d", type: collated }));
-    refusal(() => t.encrypted({ of: collated }));
+    refusal(() => collated.encrypted());
     // ...and the create-table position still accepts it, so the refusals above
     // are about the POSITION and not about the def.
     table("u").create({ columns: { c: collated } });
@@ -299,8 +297,7 @@ test("typed references preserve explicit local types and record only the referen
           onDelete: "cascade",
           onUpdate: "noAction",
         }),
-        typed_id: ids.typeId({ prefix: "account" }).references("typed_accounts", "id"),
-        event_id: ids.ulid().references("events", "id"),
+        typed_id: t.typedId("acct" ).references("typed_accounts", "id"),
       },
     });
   });
@@ -327,15 +324,9 @@ test("typed references preserve explicit local types and record only the referen
         },
         {
           name: "typed_id",
-          type: "text",
+          type: { string: { length: 36 } },
           references: { table: "typed_accounts", column: "id" },
-          valueFormat: { typeId: { prefix: "account" } },
-        },
-        {
-          name: "event_id",
-          type: "text",
-          references: { table: "events", column: "id" },
-          valueFormat: "ulid",
+          idPrefix: "acct",
         },
       ],
     },
@@ -403,7 +394,7 @@ test("references() fails closed outside create-table column positions", () => {
     () => record(() => table("children").column("parent_id").setType({ to: reference() })),
     () => record(() => domain("parent_id_domain").create({ as: reference() })),
     () => record(() => sequence("parent_ids").create({ as: reference() })),
-    () => t.encrypted({ of: reference() }),
+    () => reference().encrypted(),
   ];
 
   for (const call of unsupported) {
@@ -415,17 +406,14 @@ test("references() fails closed outside create-table column positions", () => {
   }
 });
 
-test("ids.typeId records exact text + valueFormat IR and remains constraint-neutral by default", () => {
+test("t.typedId records bounded string storage with its declared prefix", () => {
   const ops = record(() => {
     table("public_examples").create({
       columns: {
-        typed_id: ids.typeId({ prefix: "example" }),
-        bare_id: ids.typeId({ prefix: "" }).notNull(),
-        key_id: ids.typeId({ prefix: "key" }).primaryKey(),
+        typed_id: t.typedId("exampl" ),
+        bare_id: t.typedId("" ).required(),
+        key_id: t.typedId("key" ).primaryKey(),
       },
-    });
-    table("public_examples").column("candidate_id").add({
-      type: ids.typeId({ prefix: "candidate" }).notNull().unique(),
     });
   });
 
@@ -436,125 +424,44 @@ test("ids.typeId records exact text + valueFormat IR and remains constraint-neut
       columns: [
         {
           name: "typed_id",
-          type: "text",
-          valueFormat: { typeId: { prefix: "example" } },
+          type: { string: { length: 36 } },
+          idPrefix: "exampl",
         },
         {
           name: "bare_id",
-          type: "text",
+          type: { string: { length: 36 } },
           nullable: false,
-          valueFormat: { typeId: { prefix: "" } },
+          idPrefix: "",
         },
         {
           name: "key_id",
-          type: "text",
+          type: { string: { length: 36 } },
           nullable: false,
-          valueFormat: { typeId: { prefix: "key" } },
+          idPrefix: "key",
         },
       ],
       primaryKey: ["key_id"],
     },
-    {
-      op: "addColumn",
-      table: "public_examples",
-      column: "candidate_id",
-      type: "text",
-      nullable: false,
-      valueFormat: { typeId: { prefix: "candidate" } },
-    },
-    {
-      op: "addConstraint",
-      table: "public_examples",
-      constraint: { kind: { kind: "unique", columns: ["candidate_id"] } },
-    },
   ]);
 });
 
-test("ids.typeId validates TypeID 0.3 prefixes at authoring time", () => {
-  for (const prefix of ["", "a", "user", "user_account", "a__b", "a".repeat(63)]) {
-    assert.doesNotThrow(() => ids.typeId({ prefix }), JSON.stringify(prefix));
+test("t.typedId validates typed-id prefixes at authoring time", () => {
+  for (const prefix of ["", "a", "my_t", "abcdef"]) {
+    assert.doesNotThrow(() => t.typedId(prefix), JSON.stringify(prefix));
   }
 
-  for (const prefix of [
-    "_user",
-    "user_",
-    "User",
-    "user1",
-    "user-id",
-    "usér",
-    "a".repeat(64),
-  ]) {
+  for (const prefix of ["_user", "User", "user-id", "usér", "a".repeat(7)]) {
     assert.throws(
-      () => ids.typeId({ prefix }),
-      (error: any) => error.code === "OP_INVALID" && /lowercase ASCII/.test(error.message),
+      () => t.typedId(prefix),
+      (error: any) => error.code === "OP_INVALID",
       JSON.stringify(prefix),
     );
   }
 
   assert.throws(
-    () => (ids.typeId as any)(),
+    () => t.typedId(42 as any ),
     (error: any) => error.code === "OP_INVALID",
   );
-  assert.throws(
-    () => ids.typeId({ prefix: 42 as any }),
-    (error: any) => error.code === "OP_INVALID" && /must be a string/.test(error.message),
-  );
-});
-
-test("ids.ulid records exact text + valueFormat IR and remains constraint-neutral by default", () => {
-  const ops = record(() => {
-    table("events").create({
-      columns: {
-        event_id: ids.ulid(),
-        candidate_id: ids.ulid().notNull().unique(),
-        key_id: ids.ulid().primaryKey(),
-      },
-    });
-    table("events").column("external_id").add({
-      type: ids.ulid().notNull().unique(),
-    });
-  });
-
-  assert.deepEqual(ops, [
-    {
-      op: "createTable",
-      name: "events",
-      columns: [
-        {
-          name: "event_id",
-          type: "text",
-          valueFormat: "ulid",
-        },
-        {
-          name: "candidate_id",
-          type: "text",
-          nullable: false,
-          unique: true,
-          valueFormat: "ulid",
-        },
-        {
-          name: "key_id",
-          type: "text",
-          nullable: false,
-          valueFormat: "ulid",
-        },
-      ],
-      primaryKey: ["key_id"],
-    },
-    {
-      op: "addColumn",
-      table: "events",
-      column: "external_id",
-      type: "text",
-      nullable: false,
-      valueFormat: "ulid",
-    },
-    {
-      op: "addConstraint",
-      table: "events",
-      constraint: { kind: { kind: "unique", columns: ["external_id"] } },
-    },
-  ]);
 });
 
 test("raw DML strings are never rewritten as TypeID values by the recorder", () => {
@@ -583,9 +490,9 @@ test("public and engine recorders match for t.text({ caseSensitive:false })", ()
   assert.equal(publicOps[1].caseSensitive, false);
 });
 
-test("t.textArray() records the textArray column type", () => {
+test("t.array records the textArray column type", () => {
   const ops = record(() => {
-    table("u").create({ columns: { scopes: t.textArray().notNull() } });
+    table("u").create({ columns: { scopes: t.array(t.text(), { storage: "native" }).required() } });
   });
   const col = ops[0].columns[0];
   assert.equal(col.type, "textArray");
@@ -637,7 +544,7 @@ test("default expression callbacks record IrDefault::Expr", () => {
   const ops = record(() => {
     table("u").create({
       columns: {
-        created_at: t.timestamp().notNull().default(now()),
+        created_at: t.timestamp().required().default(now()),
       },
     });
     table("u").column("updated_at").setDefault(now());
@@ -656,7 +563,7 @@ test("create() without primaryKey leaves the top-level field absent", () => {
 test("create() with a composite primaryKey records the top-level primaryKey", () => {
   const ops = record(() =>
     table("m").create({
-      columns: { a: t.uuid().notNull(), b: t.text().notNull() },
+      columns: { a: t.uuid().required(), b: t.text().required() },
       primaryKey: ["a", "b"],
     }),
   );
@@ -910,7 +817,7 @@ test("t.int().autoIncrement() records identity always:false and matches engine r
 
 test(".column().add() carries a fluent ColumnDef's modifiers", () => {
   const ops = record(() =>
-    table("u").column("status").add({ type: t.text().notNull().default("new") }),
+    table("u").column("status").add({ type: t.text().required().default("new") }),
   );
   assert.deepEqual(ops[0], {
     op: "addColumn",
@@ -926,7 +833,7 @@ test(".default(nextval(name,{schema})) emits IrDefault::Nextval", () => {
   const createOps = record(() => {
     table("audit_events").create({
       columns: {
-        id: t.bigInt().notNull().default(nextval("audit_events_id_seq", { schema: "zero_migrate" })),
+        id: t.bigInt().required().default(nextval("audit_events_id_seq", { schema: "zero_migrate" })),
       },
     });
   });
@@ -948,7 +855,7 @@ test("public and engine recorders match for nextval defaults", () => {
   const publicOps = record(() => {
     table("audit_events").create({
       columns: {
-        id: t.bigInt().notNull().default(nextval("audit_events_id_seq", { schema: "zero_migrate" })),
+        id: t.bigInt().required().default(nextval("audit_events_id_seq", { schema: "zero_migrate" })),
       },
     });
     table("audit_events").column("id").add({
@@ -958,7 +865,7 @@ test("public and engine recorders match for nextval defaults", () => {
   const engineOps = recordEngine(({ table, t, nextval }) => {
     table("audit_events").create({
       columns: {
-        id: t.bigInt().notNull().default(nextval("audit_events_id_seq", { schema: "zero_migrate" })),
+        id: t.bigInt().required().default(nextval("audit_events_id_seq", { schema: "zero_migrate" })),
       },
     });
     table("audit_events").column("id").add({
@@ -969,7 +876,7 @@ test("public and engine recorders match for nextval defaults", () => {
 });
 
 test("C2 — .column().add({ type: t.text().unique() }) emits the column + a follow-on unique", () => {
-  const ops = record(() => table("u").column("email").add({ type: t.text().notNull().unique() }));
+  const ops = record(() => table("u").column("email").add({ type: t.text().required().unique() }));
   assert.equal(ops.length, 2, "an addColumn + a follow-on addConstraint(unique)");
   assert.equal(ops[0].op, "addColumn");
   assert.equal(ops[0].column, "email");
@@ -1091,9 +998,9 @@ test("create({ foreignKeys }) preserves composite tuple order and referential op
   const ops = record(() =>
     table("order_lines").create({
       columns: {
-        tenant_id: t.uuid().notNull(),
-        order_id: t.uuid().notNull(),
-        line_no: t.int().notNull(),
+        tenant_id: t.uuid().required(),
+        order_id: t.uuid().required(),
+        line_no: t.int().required(),
       },
       foreignKeys: [
         {
@@ -1795,7 +1702,7 @@ test("empty object and array defaults record as container defaults", () => {
       columns: {
         settings: t.json().default({}),
         events: t.json().default([]),
-        scopes: t.textArray().default([]),
+        scopes: t.array(t.text(), { storage: "native" }).default([]),
       },
     }),
   );
@@ -1894,7 +1801,7 @@ test("empty container defaults record byte-identically to engine recorder", () =
       columns: {
         settings: t.json().default({}),
         events: t.json().default([]),
-        scopes: t.textArray().default([]),
+        scopes: t.array(t.text(), { storage: "native" }).default([]),
       },
     }),
   );
@@ -1903,7 +1810,7 @@ test("empty container defaults record byte-identically to engine recorder", () =
       columns: {
         settings: t.json().default({}),
         events: t.json().default([]),
-        scopes: t.textArray().default([]),
+        scopes: t.array(t.text(), { storage: "native" }).default([]),
       },
     }),
   );
@@ -1993,7 +1900,6 @@ test("perRow generators record backfill-only intent and stay distinct from datab
         uuid_v7_again: reused,
         type_id: perRowApi.typeId({ prefix: "order" }),
         bare_type_id: perRowApi.typeId({ prefix: "" }),
-        ulid: perRowApi.ulid(),
         database_uuid_v4: databaseUuidV4(),
       },
       cursorColumns: ["id"],
@@ -2012,7 +1918,6 @@ test("perRow generators record backfill-only intent and stay distinct from datab
     uuid_v7_again: { perRow: "uuidV7" },
     type_id: { perRow: { typeId: { prefix: "order" } } },
     bare_type_id: { perRow: { typeId: { prefix: "" } } },
-    ulid: { perRow: "ulid" },
     database_uuid_v4: { node: "uuidV4" },
   });
   assert.doesNotMatch(
@@ -2111,10 +2016,10 @@ test("perRow values are rejected from defaults and ordinary DML at record time",
 });
 
 test("perRow.typeId validates the TypeID prefix without generating a value", () => {
-  for (const prefix of ["", "a", "order_item", "a".repeat(63)]) {
+  for (const prefix of ["", "a", "order", "abcdef"]) {
     assert.doesNotThrow(() => perRow.typeId({ prefix }), JSON.stringify(prefix));
   }
-  for (const prefix of ["Order", "order-", "a".repeat(64)]) {
+  for (const prefix of ["Order", "order-", "a".repeat(7)]) {
     assert.throws(
       () => perRow.typeId({ prefix }),
       (error: any) => error.code === "OP_INVALID" && /perRow\.typeId/.test(error.message),
@@ -2342,9 +2247,9 @@ test("PG-first chain methods and root RLS scalar constructors record PG-only nod
   const ops = record(() => {
     table("t").create({
       columns: {
-        status: t.text().notNull(),
-        name: t.text().notNull(),
-        data: t.json().notNull(),
+        status: t.text().required(),
+        name: t.text().required(),
+        data: t.json().required(),
       },
       checks: [
         { name: "name_shape", expr: (col) => col("name").regex("^[a-z]+$") },
@@ -2704,18 +2609,18 @@ test("check helper and expression helpers build the frozen Expr IR nodes", () =>
   const ops = record(() => {
     table("expr_checks").create({
       columns: {
-        pkce_method: t.text().notNull(),
-        user_id: t.text().notNull(),
-        kind: t.text().notNull(),
-        data: t.json().notNull(),
-        subtotal_cents: t.int().notNull(),
-        credit_cents: t.int().notNull(),
-        total_cents: t.int().notNull(),
+        pkce_method: t.text().required(),
+        user_id: t.text().required(),
+        kind: t.text().required(),
+        data: t.json().required(),
+        subtotal_cents: t.int().required(),
+        credit_cents: t.int().required(),
+        total_cents: t.int().required(),
         floor_cents: t.int(),
-        created_at: t.timestamp().notNull(),
-        expires_at: t.timestamp().notNull(),
-        enabled: t.boolean().notNull(),
-        visible: t.boolean().notNull(),
+        created_at: t.timestamp().required(),
+        expires_at: t.timestamp().required(),
+        enabled: t.boolean().required(),
+        visible: t.boolean().required(),
       },
       checks: [
         check("pkce_method_check", (col) => col("pkce_method").eq("S256")),
@@ -3032,7 +2937,7 @@ test("domain check validation rejects smuggled volatile functions and records ag
 test("chain extract and root interval build extract and interval nodes", () => {
   const ops = record(() => {
     domain("billing_period").create({
-      as: t.date(),
+      as: t.calendarDate(),
       check: (v) => v.extract("day").eq(1),
     });
     table("events").update({
@@ -3045,8 +2950,8 @@ test("chain extract and root interval build extract and interval nodes", () => {
     });
     table("oauth_device_codes").create({
       columns: {
-        issued_at: t.timestamp().notNull(),
-        expires_at: t.timestamp().notNull(),
+        issued_at: t.timestamp().required(),
+        expires_at: t.timestamp().required(),
       },
       checks: [
         {
@@ -3702,4 +3607,86 @@ test("determinism lint is a coarse whole-source scan (over-flags, never under-fl
     inHelper.some((f) => f.accessor.includes("Date.now")),
     "the coarse scan flags a clock accessor in a non-op helper (fail-safe over-flag)",
   );
+});
+
+// `.encrypted()` accepts only the plaintext types the runtime codec supports;
+// every other builder is refused at the call site rather than lowering to an
+// unsupported-encrypted-type surprise at render time.
+test(".encrypted() refuses a plaintext type the runtime codec cannot encode", () => {
+  const refusal = (fn: () => unknown) =>
+    assert.throws(fn, (e: any) => e.code === "OP_INVALID");
+  for (const def of [
+    t.json(),
+    t.boolean(),
+    t.timestamp(),
+    t.calendarDate(),
+    t.uuid(),
+    t.domain("mood"),
+    t.numeric(),
+    t.array(t.text(), { storage: "native" }),
+  ]) {
+    refusal(() => def.encrypted());
+  }
+  // The accepted set still records the facet.
+  for (const def of [t.text(), t.string(), t.int(), t.bigInt(), t.double(), t.bytes()]) {
+    const ops = record(() => table("secrets").create({ columns: { s: def.encrypted() } }));
+    assert.equal(ops[0].columns[0].encrypted, true);
+  }
+});
+
+// `.unique()` on an encrypted column is refused at the call site, mirroring the
+// schema builder; the engine would catch it later, but a randomized ciphertext
+// can never satisfy a unique index, so the author should be told immediately.
+test(".unique() refuses an encrypted column before it reaches the engine", () => {
+  assert.throws(
+    () => t.text().encrypted().unique(),
+    (e: any) => e.code === "OP_INVALID",
+  );
+});
+
+// `.mask(...).encrypted()` and `.encrypted().mask(...)` declare the same two
+// facets: declaration order carries no semantics.
+test("mask and encryption compose from either chain position", () => {
+  const ops = record(() =>
+    table("secrets").create({
+      columns: {
+        a: t.text().mask({ kind: "last4" }).encrypted(),
+        b: t.text().encrypted().mask({ kind: "last4" }),
+      },
+    }),
+  );
+  for (const column of ops[0].columns) {
+    assert.equal(column.encrypted, true);
+    assert.deepEqual(column.mask, { kind: "last4", classification: "pii" });
+  }
+});
+
+// An encrypted ColumnDef has no slot in a lifecycle or nested type position;
+// `colTypeOf` refuses it rather than silently dropping the facet.
+test("an encrypted ColumnDef is refused in a nested or lifecycle type position", () => {
+  const refusal = (fn: () => unknown) =>
+    assert.throws(fn, (e: any) => e.code === "OP_INVALID");
+  refusal(() => record(() => table("u").column("c").setType({ to: t.text().encrypted() })));
+  refusal(() =>
+    record(() => table("u").column("c").rename({ to: "d", type: t.text().encrypted() })),
+  );
+});
+
+// The positive control for the refusal above: addColumn has an `encrypted`
+// slot, so the facet survives into the recorded op.
+test("addColumn carries the encrypted facet", () => {
+  const ops = record(() => table("u").column("c").add({ type: t.text().encrypted() }));
+  assert.equal(ops[0].op, "addColumn");
+  assert.equal(ops[0].encrypted, true);
+});
+
+// `t.array(t.text().encrypted())` must not silently drop the encryption facet:
+// the array column is a plain textArray, so an encrypted element is refused.
+test("t.array refuses an encrypted element instead of dropping the facet", () => {
+  assert.throws(
+    () => t.array(t.text().encrypted()),
+    (e: any) => e.code === "OP_INVALID",
+  );
+  // The control: a plaintext text element still builds the array.
+  assert.ok(t.array(t.text()));
 });

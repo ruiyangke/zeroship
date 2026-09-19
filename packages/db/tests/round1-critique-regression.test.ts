@@ -253,7 +253,7 @@ describe("CRITICAL #3 — unindexed-query warning is strict for multi-key filter
         // Compound filter `{ userId, done }` should WARN because no
         // compound index covers it, even though `done` is marked.
         todos: schema({
-          userId: t.number().required(),
+          userId: t.double().required(),
           done: t.boolean().default(false).index(),
           title: t.string().required(),
         }),
@@ -291,7 +291,7 @@ describe("CRITICAL #3 — unindexed-query warning is strict for multi-key filter
         users: schema({
           // Both columns marked → compound filter is covered.
           email: t.string().required().unique(),
-          tenantId: t.number().required().index(),
+          tenantId: t.double().required().index(),
         }),
       },
       { native },

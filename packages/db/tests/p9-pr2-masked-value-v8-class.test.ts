@@ -117,7 +117,7 @@ describe("P9 PR 2 — Collection.bulkUnmask → native Collection.bulkUnmask", (
     return installSchemaForTest(
       {
         users: schemaWrap({
-          ssn: t.encrypted({ of: t.string() }).mask({ kind: "last4", classification: "spi" }),
+          ssn: t.string().encrypted().mask({ kind: "last4", classification: "spi" }),
           email: t.string().mask({ kind: "email" }),
         }),
       },
@@ -202,7 +202,7 @@ describe("P9 PR 2 — MaskedValue declare-class type surface (compile-time)", ()
 
   test("Row<S>['ssn'] is MaskedValue<string>", () => {
     const fields = {
-      ssn: t.encrypted({ of: t.string() }).mask({ kind: "last4", classification: "spi" }).required(),
+      ssn: t.string().encrypted().mask({ kind: "last4", classification: "spi" }).required(),
       name: t.string().required(),
     };
     type R = Row<typeof fields & typeof generatedSchema>;

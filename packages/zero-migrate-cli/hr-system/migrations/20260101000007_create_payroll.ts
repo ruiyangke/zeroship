@@ -10,9 +10,9 @@ export default {
     table("payroll_runs").create({
       columns: {
         id: ids.ulid().primaryKey(),
-        period_label: t.char({ length: 7 }).notNull(),
-        run_date: t.date().notNull(),
-        status: t.string({ length: 32 }).notNull().default("draft"),
+        period_label: t.char({ length: 7 }).required(),
+        run_date: t.calendarDate().required(),
+        status: t.string({ length: 32 }).required().default("draft"),
       },
     });
 
@@ -20,14 +20,14 @@ export default {
       columns: {
         run_id: ids
           .ulid()
-          .notNull()
+          .required()
           .references("payroll_runs", "id", { onDelete: "cascade" }),
         employee_id: ids
           .typeId({ prefix: "emp" })
-          .notNull()
+          .required()
           .references("employees", "id", { onDelete: "restrict" }),
-        gross_pay: t.numeric({ precision: 14, scale: 2 }).notNull(),
-        tax: t.numeric({ precision: 14, scale: 2 }).notNull(),
+        gross_pay: t.numeric({ precision: 14, scale: 2 }).required(),
+        tax: t.numeric({ precision: 14, scale: 2 }).required(),
         net_pay: t
           .numeric({ precision: 14, scale: 2 })
           .generated((col) => col("gross_pay").sub(col("tax"))),

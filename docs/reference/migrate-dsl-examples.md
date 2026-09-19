@@ -117,11 +117,11 @@ The same bag is available at create time as `create({ columns, options: { … } 
 ## 3. The column-type lexicon (`t.*`)
 
 ```ts
-import { ids, t } from "@zeroship/migrate";
+import { t } from "@zeroship/migrate";
 
-// Identity / keys
-ids.typeId({ prefix: "usr" }).primaryKey()
-ids.ulid().notNull().unique()
+// Identity / keys. A typed id remains nullable and constraint-neutral until
+// ordinary modifiers opt in; it carries no database-level format check.
+t.typedId("user").primaryKey()
 t.uuid()
 
 // Text
@@ -157,8 +157,8 @@ t.domain("billing_period")        // references a domain (see §10)
 t.vector({ dimensions: 1536, metric: "cosine" }) // cosine | l2 | innerProduct
 t.geoPoint()
 
-// Encryption wrapper (auto-masks the field unless .mask() overrides it)
-t.encrypted({ of: t.text() })
+// Encryption facet (chains off the plaintext builder)
+t.text().encrypted()
 ```
 
 ### Bridging from the runtime schema
@@ -248,8 +248,8 @@ t.text().generated((col) => col("a").add(col("b")), { virtual: true })
 t.text().mask({ kind: "email" })
 t.text().mask({ kind: "last4", classification: "pci" })
 
-// Encryption wrapper
-t.encrypted({ of: t.text() }).notNull()
+// Encryption facet (chains off the plaintext builder)
+t.text().encrypted().notNull()
 ```
 
 ---

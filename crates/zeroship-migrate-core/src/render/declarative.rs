@@ -166,7 +166,7 @@ pub(crate) fn single_stmt(mig: Migration) -> LoweredUnit {
 pub struct FieldDescriptor {
     /// The field (column) name.
     pub name: String,
-    /// The DSL type token (`string`, `number`, `boolean`, `date`,
+    /// The DSL type token (`string`, `number`, `boolean`, `timestamp`,
     /// `calendarDate`, `json`, `object`, `array`, `union`, `ref`, `bytes`,
     /// `actor`, `id`). The descriptor-aware type resolver maps this token and its
     /// sibling facets to the selected backend's physical type.
@@ -502,7 +502,7 @@ fn field_to_sdk_def(f: &FieldDescriptor) -> serde_json::Value {
     if let Some(mask) = &f.mask {
         def.insert("mask".into(), mask.clone());
     } else if f.encrypted == Some(true) {
-        // Mirror the SDK's `t.encrypted()` builder: encrypted columns get the
+        // Mirror the SDK's `.encrypted()` verb: encrypted columns get the
         // fail-safe full/pii mask unless the author explicitly overrides or opts
         // out with `.mask({ kind: "none" })`.
         def.insert(
@@ -655,7 +655,7 @@ pub fn descriptor_to_sdk_schema(d: &CollectionDescriptor) -> serde_json::Value {
 }
 
 /// build the shared [`crate::schema::diff::EncryptionMeta`] for
-/// a field's `t.encrypted({...})` declaration, or `None` for a plaintext field.
+/// a field's `.encrypted()` declaration, or `None` for a plaintext field.
 /// Used to render the PG `COMMENT ON COLUMN` `zero-migrate:enc:` sentinel (via the shared
 /// codec's `build_encryption_sentinel`) so the engine's emitted comment is
 /// byte-identical to what the runtime parser expects. The plaintext type comes
@@ -668,7 +668,7 @@ fn encryption_meta_for_field(
         return None;
     }
     let wraps = match def.get("type").and_then(|v| v.as_str()) {
-        Some("number") => WrappedType::Number,
+        Some("number" | "int" | "bigInt") => WrappedType::Number,
         Some("bytes") => WrappedType::Bytes,
         Some("string") => WrappedType::String,
         _ => return None,
@@ -726,13 +726,11 @@ fn field_type_token_is_supported(f: &FieldDescriptor) -> bool {
         "string"
             | "char"
             | "number"
-            | "real"
             | "int"
             | "integer"
-            | "smallInt"
             | "bigInt"
             | "boolean"
-            | "date"
+            | "timestamp"
             | "calendarDate"
             | "json"
             | "object"
@@ -942,7 +940,7 @@ fn field_default_expr(
             // `t.numeric()`) share one precision-preserving renderer - without the
             // `int` arm an integer column's DEFAULT silently dropped, and a
             // decimal/bigint carried as a numeric string dropped from BOTH.
-            "int" | "smallInt" | "bigInt" | "number" | "real" => numeric_default_literal(default),
+            "int" | "bigInt" | "number" => numeric_default_literal(default),
             "boolean" => default.as_bool().map(|b| b.to_string()),
             "bytes" => match default.as_str() {
                 Some(encoded) => {
@@ -4401,7 +4399,9 @@ impl DeclarativeAuthor {
                     let mask = crate::schema::diff::mask_meta_from_schema_def(definition)?;
                     let raw = crate::schema::query::raw_column_name(field);
                     let wraps = match definition.get("type").and_then(|value| value.as_str()) {
-                        Some("number") => crate::schema::diff::WrappedType::Number,
+                        Some("number" | "int" | "bigInt") => {
+                            crate::schema::diff::WrappedType::Number
+                        }
                         Some("bytes") => crate::schema::diff::WrappedType::Bytes,
                         _ => crate::schema::diff::WrappedType::String,
                     };
@@ -8264,7 +8264,7 @@ mod mysql_storage_agreement_tests {
             (field("n", "int"), None, None),
             (field("big", "bigInt"), None, None),
             (field("flag", "boolean"), None, None),
-            (field("at", "date"), None, None),
+            (field("at", "timestamp"), None, None),
             (field("host", "inet"), None, None),
         ];
 
@@ -8346,13 +8346,13 @@ mod mysql_storage_agreement_tests {
             nullable: None,
             default: None,
             unique: None,
-            value_format: None,
             references: None,
             id_prefix: None,
             collation: None,
             case_sensitive: Some(false),
             vector_metric: None,
             mask: None,
+            encrypted: None,
             generated: None,
             identity: None,
         };

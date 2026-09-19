@@ -5,7 +5,7 @@ export default {
   schema() {
     table("hits").create({
       columns: {
-        path: t.text().notNull(),
+        path: t.text().required(),
       },
     });
   },

@@ -95,7 +95,7 @@ pub async fn encrypt_row_on_write_with_sidechannel(
     Ok(())
 }
 
-/// Decrypt every `t.encrypted(...)`-declared column on `row` in place.
+/// Decrypt every `.encrypted()`-declared column on `row` in place.
 ///
 /// `row_pk` is read from `row["id"]` and authenticated on every decrypt.
 ///

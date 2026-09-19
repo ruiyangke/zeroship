@@ -6,19 +6,19 @@ export default {
   schema() {
     table("users").create({
       columns: {
-        email: t.text().notNull().unique(),
-        name: t.text().notNull(),
-        handle: t.text().notNull().unique(),
+        email: t.text().required().unique(),
+        name: t.text().required(),
+        handle: t.text().required().unique(),
       },
     });
     table("todos").create({
       columns: {
-        userId: t.text().notNull().references("users", "id", { relation: "user" }),
-        title: t.text().notNull(),
-        priority: t.text().notNull().default("medium"),
+        userId: t.text().required().references("users", "id", { relation: "user" }),
+        title: t.text().required(),
+        priority: t.text().required().default("medium"),
         tags: t.json(),
-        done: t.boolean().notNull().default(false),
-        archived: t.boolean().notNull().default(false),
+        done: t.boolean().required().default(false),
+        archived: t.boolean().required().default(false),
       },
       indexes: [{ name: "todos_user_idx", on: ["userId"] }],
     });

@@ -8,10 +8,10 @@ export default {
   schema() {
     table("job_grades").create({
       columns: {
-        id: t.bigInt().notNull(),
-        grade_code: t.char({ length: 4 }).notNull(),
-        min_salary: t.numeric({ precision: 12, scale: 2 }).notNull(),
-        max_salary: t.numeric({ precision: 12, scale: 2 }).notNull(),
+        id: t.bigInt().required(),
+        grade_code: t.char({ length: 4 }).required(),
+        min_salary: t.numeric({ precision: 12, scale: 2 }).required(),
+        max_salary: t.numeric({ precision: 12, scale: 2 }).required(),
       },
       primaryKey: ["id"],
     });
