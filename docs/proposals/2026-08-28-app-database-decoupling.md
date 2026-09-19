@@ -1725,6 +1725,16 @@ Each records something that was tried or specified and broke.
   apps both calling a database `main` would compare equal. Labels live in the manifest; keys use the
   database id.
 
+- **Do not read `database_bindings_database_project_fkey` as a guard over the DATA.** It guards the
+  ROW. `dbd-reconciler` measured this against a cluster: with the reconciler's teardown precondition
+  mutated out, the pass runs `DROP SCHEMA db_<dbs> CASCADE` and the key then refuses the row removal
+  with `23503` - over data that is already gone. The refusal arrives after the loss and reads in a
+  diff exactly like protection. What protects the data is an in-process precondition re-read
+  immediately before the DDL, plus the allowlist on `bind_database` that keeps a binding from
+  arriving inside that window. `BINDABLE_STATUSES` is stated as what is ADMITTED rather than what is
+  refused, so a value added to `databases_status_check` later is non-bindable until someone decides
+  it should be; the refusing spelling named `deleting` and let `draining` through.
+
 ---
 
 ## History
