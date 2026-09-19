@@ -95,9 +95,8 @@ Six proposals accumulated since round 1; all triaged against code + git:
 - server-config-inventory.md — spent companion audit — **archived**.
 - rpc-client-inferred-contracts.md — shipped subset, self-declared design history — **archived**.
 - authorization.md — PARTIALLY SHIPPED: P9 platform RBAC live (crates/zeroship-authz/, control integration); P12 end-user authz unbuilt — **kept** as the forward P12 spec.
-- zeroship-builder-roadmap.md — LIVING — **kept** (broken specs/ paths fixed).
 
-Standing residents of docs/proposals/: feature-roadmap.md (living), zeroship-builder-roadmap.md (living), rpc.md (active), plugins-workers-distributed.md (active; kv leg shipped 5b17dc39), authorization.md (P12 active), TRIAGE.md (this worklist).
+Standing residents of docs/proposals/: feature-roadmap.md (living), rpc.md (active), plugins-workers-distributed.md (active; kv leg shipped 5b17dc39), authorization.md (P12 active), TRIAGE.md (this worklist).
 
 Same pass also: archived docs/perf/ + docs/benchmarks/ → archive/, retired docs/briefs/ (74 merged UI work orders deleted, 7 strategy briefs archived), archived 18 completed superpowers specs/plans, archived 10 resolved review reports (reviews/ keeps only the live audit ledger + freshest review).
 
