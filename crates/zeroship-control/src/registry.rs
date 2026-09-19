@@ -47,22 +47,15 @@ pub enum RegistryError {
     /// surfaced as a distinct variant so the sweep can fail closed instead of
     /// logging-and-continuing past a revenue leak.
     FxUnresolved,
-    /// The deploy was refused because its runtime schema descriptor does not
-    /// name the schema the app's database actually holds.
+    /// The deploy was refused because the app holds no LIVE binding to a
+    /// database the artifact declares.
     ///
-    /// Typed separately from [`Self::Conflict`] because the remedy is a command
-    /// the creator runs, and the response body carries it. Both fields are
-    /// `Option` because the two refusals are different mistakes:
-    ///
-    /// - `descriptor = Some`, `applied = Some(other)` / `None` — the code was
-    ///   built against a schema this app has not migrated to. Run the migration.
-    /// - `descriptor = None`, `applied = Some(_)` — the artifact declares NO
-    ///   schema at all while the app has one. Deploying it would boot the app
-    ///   with `env.db` uninstalled over a live database.
-    SchemaNotApplied {
-        descriptor_sha256: Option<String>,
-        applied_sha256: Option<String>,
-    },
+    /// Typed separately from [`Self::Conflict`] because the remedy is a call
+    /// the creator makes, and the response body carries it. Declaring a
+    /// database in `zeroship.jsonc` grants nothing: a grant is an explicit act,
+    /// and a deploy that reconciled bindings from the artifact would silently
+    /// restore access somebody revoked.
+    DatabaseNotBound { databases: Vec<String> },
 }
 
 impl std::fmt::Display for RegistryError {
@@ -79,23 +72,13 @@ impl std::fmt::Display for RegistryError {
                 "global default FX missing — platform cannot price; aborting billing sweep \
                  rather than billing $0"
             ),
-            Self::SchemaNotApplied {
-                descriptor_sha256,
-                applied_sha256,
-            } => match descriptor_sha256 {
-                Some(descriptor) => write!(
-                    f,
-                    "schema not applied: this build's runtime descriptor is {descriptor}, but \
-                     the app's newest applied migration recorded {}",
-                    applied_sha256.as_deref().unwrap_or("no descriptor at all")
-                ),
-                None => write!(
-                    f,
-                    "schema descriptor missing: this artifact declares no runtime schema, but \
-                     the app has applied migrations (newest descriptor {})",
-                    applied_sha256.as_deref().unwrap_or("unrecorded")
-                ),
-            },
+            Self::DatabaseNotBound { databases } => write!(
+                f,
+                "database not bound: this app declares {} but holds no live binding to {}. \
+                 Grant one with POST /api/databases/{{database_id}}/bindings, then deploy again",
+                databases.join(", "),
+                if databases.len() == 1 { "it" } else { "them" }
+            ),
         }
     }
 }
@@ -121,13 +104,9 @@ impl From<compio_postgres::Error> for RegistryError {
 fn catalog_registry_error(app: &AppId, error: CatalogError) -> RegistryError {
     match error {
         CatalogError::AppAbsent => RegistryError::NotFound("app not found".into()),
-        CatalogError::SchemaNotApplied {
-            descriptor_sha256,
-            applied_sha256,
-        } => RegistryError::SchemaNotApplied {
-            descriptor_sha256,
-            applied_sha256,
-        },
+        CatalogError::DatabaseNotBound { databases } => {
+            RegistryError::DatabaseNotBound { databases }
+        }
         CatalogError::ApplyInProgress => RegistryError::Conflict(format!(
             "app {} has a schema apply in progress; retry restore after it finishes",
             app.as_str()
