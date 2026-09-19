@@ -72,9 +72,10 @@ use crate::{AuthzError, Resource};
 pub struct Authority {
     pub email_verified: bool,
     pub account_locked: bool,
-    /// Authority over apps and the organization at the REQUESTED resource,
-    /// already narrowed for a project- or app-scoped request. `0` means no live
-    /// authority, which every band denies at its comparison.
+    /// Authority over apps, databases and the organization at the REQUESTED
+    /// resource, already narrowed for a project-, app- or database-scoped
+    /// request. `0` means no live authority, which every band denies at its
+    /// comparison.
     pub effective_rank: i32,
     /// Authority over money. Organization-level always; a project-scoped
     /// request carries the organization's value unchanged.
@@ -141,9 +142,7 @@ pub async fn resolve(
     match resource {
         Resource::Any => resolve_unranked(pg, principal_id).await,
         Resource::Organization { id } => resolve_organization(pg, principal_id, id).await,
-        Resource::Project { id } => {
-            resolve_narrowed(pg, principal_id, Narrowed::Project(id)).await
-        }
+        Resource::Project { id } => resolve_narrowed(pg, principal_id, Narrowed::Project(id)).await,
         Resource::App { id } => resolve_narrowed(pg, principal_id, Narrowed::App(id)).await,
         Resource::Database { id } => {
             resolve_narrowed(pg, principal_id, Narrowed::Database(id)).await
@@ -296,11 +295,7 @@ async fn resolve_narrowed(
     let rows = pg
         .query(
             &sql,
-            &[
-                &principal_id.as_str(),
-                &resource_id,
-                &PROJECT_WIDE_ROLE,
-            ],
+            &[&principal_id.as_str(), &resource_id, &PROJECT_WIDE_ROLE],
         )
         .await
         .map_err(|err| AuthzError::Db(format!("resolve project authority: {err}")))?;
