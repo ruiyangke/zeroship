@@ -407,7 +407,7 @@ async fn archived_app_can_stage_a_deploy_without_becoming_routable() {
 }
 
 #[compio::test]
-async fn restore_requires_a_staged_deploy_matching_the_latest_applied_schema() {
+async fn restore_admits_a_staged_deploy_on_its_bindings_not_on_an_applied_schema() {
     let url = db_url();
     let client = pg(&url).await;
     let registry = Registry::new(&url).await.expect("registry");
@@ -468,10 +468,17 @@ async fn restore_requires_a_staged_deploy_matching_the_latest_applied_schema() {
         "an archived app is out of the routing projection until it is restored"
     );
 
+    // The staged artifact declares a database, so restore admits it on that
+    // BINDING rather than on any schema comparison. Seed the binding the way a
+    // converged cluster would leave it, or `admit_bindings` refuses the stage
+    // and the archive behaviour under test is never reached.
+    let database = zeroship_core::DatabaseId::mint();
+    seed_live_binding(&client, &app.id, &database).await;
+
     let mut staged_manifest = Manifest::passthrough();
     staged_manifest.runtime_descriptor = vec![zeroship_bundle::RuntimeDescriptorEntry {
         label: "main".into(),
-        database_id: zeroship_core::DatabaseId::mint(),
+        database_id: database.clone(),
         primary: true,
         hash: descriptor_hash.clone(),
     }];
@@ -533,4 +540,74 @@ fn first_of_this_month() -> chrono::NaiveDate {
     use chrono::Datelike;
     let now = chrono::Utc::now().date_naive();
     chrono::NaiveDate::from_ymd_opt(now.year(), now.month(), 1).unwrap()
+}
+
+/// Seed the datastore, database and binding a converged cluster would leave
+/// behind, so a staged artifact naming `database` passes `admit_bindings`.
+///
+/// `status = 'active'` with `observed_generation >= generation` is the same
+/// predicate the worker resolves on: a binding Control declared but no cluster
+/// converged must not admit a deploy, because every statement would then fail
+/// at session setup.
+async fn seed_live_binding(
+    client: &compio_postgres::Client,
+    app_id: &zeroship_core::AppId,
+    database: &zeroship_core::DatabaseId,
+) {
+    let project_id: String = client
+        .query(
+            "SELECT project_id FROM zeroship.apps WHERE id = $1",
+            &[&app_id.as_str()],
+        )
+        .await
+        .expect("read the app's project")
+        .first()
+        .expect("the app has a project")
+        .get(0);
+    let zone_id: String = client
+        .query(
+            "SELECT execution_zone_id FROM zeroship.projects WHERE id = $1",
+            &[&project_id],
+        )
+        .await
+        .expect("read the project's zone")
+        .first()
+        .expect("the project has a zone")
+        .get(0);
+    let datastore_id =
+        zeroship_core::typed_id::from_uuid_string("dst", &Uuid::new_v4().to_string())
+            .expect("mint a datastore id");
+    let system_identifier: i64 = i64::from(std::process::id()) + 1_000_000;
+    client
+        .execute(
+            "INSERT INTO zeroship.datastores (id, system_identifier, execution_zone_id, status) \
+             VALUES ($1, $2, $3, 'active')",
+            &[&datastore_id, &system_identifier, &zone_id],
+        )
+        .await
+        .expect("seed the datastore");
+    client
+        .execute(
+            "INSERT INTO zeroship.databases \
+                (id, project_id, execution_zone_id, datastore_id, name, status) \
+             VALUES ($1, $2, $3, $4, 'main', 'active')",
+            &[&database.as_str(), &project_id, &zone_id, &datastore_id],
+        )
+        .await
+        .expect("seed the database");
+    client
+        .execute(
+            "INSERT INTO zeroship.database_bindings \
+                (id, app_id, database_id, project_id, capability, status, \
+                 generation, observed_generation) \
+             VALUES ($1, $2, $3, $4, 'readwrite', 'active', 1, 1)",
+            &[
+                &zeroship_core::BindingId::mint().as_str(),
+                &app_id.as_str(),
+                &database.as_str(),
+                &project_id,
+            ],
+        )
+        .await
+        .expect("seed the binding");
 }
