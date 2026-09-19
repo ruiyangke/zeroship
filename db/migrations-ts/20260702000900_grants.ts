@@ -1,39 +1,65 @@
-import { grant, revoke } from "@zeroship/migrate";
+import { grant, raw, revoke } from "@zeroship/migrate";
 
+// The grant state for the core `zeroship` tables. Domain migrations grant the
+// tables they create, and a column-scoped grant lives with the domain that
+// consumes the column. This file is the authority for the core table-level set
+// and for the worker's deny boundary, whose raw islands carry the class-wide
+// revokes the grant DSL cannot express.
 export default {
   name: "grants",
   schema() {
-    grant({ privileges: ["usage"], on: { kind: "schema", names: ["zeroship"] }, to: ["zeroship_auth", "zeroship_control", "zeroship_gateway", "zeroship_worker", "zeroship_app"] });
+    // ---- schema reach ------------------------------------------------------
+    grant({ privileges: ["usage"], on: { kind: "schema", names: ["zeroship"] }, to: ["zeroship_auth", "zeroship_control", "zeroship_gateway", "zeroship_app", "zeroship_cdc"] });
     grant({ privileges: ["usage"], on: { kind: "sequence", in: "zeroship" }, to: ["zeroship_auth", "zeroship_gateway"] });
-    grant({ privileges: ["select", "insert", "update", "delete"], on: { kind: "table", schema: "zeroship", names: ["users", "idp_sessions", "magic_links", "magic_completions", "email_verifications", "totp_credentials", "totp_backup_codes", "oauth_refresh_tokens", "oauth_authorization_codes", "device_grants", "signing_keys", "oidc_session_clients"] }, to: ["zeroship_auth"] });
-    grant({ privileges: ["select", "insert", "delete"], on: { kind: "table", schema: "zeroship", names: ["federated_identities", "jwk_key_state", "rate_limits", "audit_events"] }, to: ["zeroship_auth"] });
-    grant({ privileges: ["select", "insert", "update"], on: { kind: "table", schema: "zeroship", names: ["oauth_grants", "oauth_clients", "token_revocations"] }, to: ["zeroship_auth"] });
-    grant({ privileges: ["select"], on: { kind: "table", schema: "zeroship", names: ["app_scope_defs"] }, to: ["zeroship_auth"] });
-    grant({ privileges: ["select", "insert"], on: { kind: "table", schema: "zeroship", names: ["email_suppressions", "cron_state"] }, to: ["zeroship_auth"] });
-    grant({ privileges: ["select", "update"], on: { kind: "table", schema: "zeroship", names: ["app_user_identities", "app_session_anchors"] }, to: ["zeroship_auth"] });
+
+    // ---- zeroship_auth -----------------------------------------------------
+    grant({ privileges: ["select", "insert", "update", "delete"], on: { kind: "table", schema: "zeroship", names: ["users", "idp_sessions", "magic_links", "magic_completions", "email_verifications", "totp_credentials", "totp_backup_codes", "oauth_authorization_codes", "device_grants", "signing_keys", "oidc_session_clients"] }, to: ["zeroship_auth"] });
+    grant({ privileges: ["select", "insert", "update", "delete"], on: { kind: "table", schema: "zeroship", names: ["rate_limits", "token_revocations"] }, to: ["zeroship_auth"] });
+    grant({ privileges: ["select", "insert", "delete"], on: { kind: "table", schema: "zeroship", names: ["federated_identities", "audit_events"] }, to: ["zeroship_auth"] });
+    grant({ privileges: ["select", "insert", "update"], on: { kind: "table", schema: "zeroship", names: ["oauth_grants", "oauth_clients", "email_suppressions", "app_user_identities"] }, to: ["zeroship_auth"] });
+    grant({ privileges: ["select"], on: { kind: "table", schema: "zeroship", names: ["app_scope_defs", "app_oauth_clients", "principal_grants"] }, to: ["zeroship_auth"] });
+    grant({ privileges: ["select", "insert"], on: { kind: "table", schema: "zeroship", names: ["cron_state"] }, to: ["zeroship_auth"] });
+    grant({ privileges: ["select", "update"], on: { kind: "table", schema: "zeroship", names: ["app_session_anchors"] }, to: ["zeroship_auth"] });
     grant({ privileges: ["select", "delete"], on: { kind: "table", schema: "zeroship", names: ["gateway_sessions"] }, to: ["zeroship_auth"] });
+
+    // ---- zeroship_gateway --------------------------------------------------
     grant({ privileges: ["select", "insert", "update"], on: { kind: "table", schema: "zeroship", names: ["gateway_sessions", "app_user_identities"] }, to: ["zeroship_gateway"] });
-    grant({ privileges: ["select", "insert", "update", "delete"], on: { kind: "table", schema: "zeroship", names: ["app_session_anchors"] }, to: ["zeroship_gateway"] });
-    grant({ privileges: ["select", "insert", "delete"], on: { kind: "table", schema: "zeroship", names: ["token_revocations"] }, to: ["zeroship_gateway"] });
+    grant({ privileges: ["select", "insert", "update", "delete"], on: { kind: "table", schema: "zeroship", names: ["app_session_anchors", "token_revocations"] }, to: ["zeroship_gateway"] });
     grant({ privileges: ["insert"], on: { kind: "table", schema: "zeroship", names: ["audit_events"] }, to: ["zeroship_gateway"] });
     grant({ privileges: ["select"], on: { kind: "table", schema: "zeroship", names: ["signing_keys"] }, to: ["zeroship_gateway"] });
-    grant({ privileges: ["select", "insert", "update", "delete"], on: { kind: "table", schema: "zeroship", names: ["apps", "oauth_clients", "app_members", "app_secrets", "billing_metrics", "usage_aggregates", "creator_billing", "billing_customer_refs", "platform_policies", "platform_admin_roles", "invoice_lines", "app_net_grants", "identity_links", "principal_grants", "device_grants"] }, to: ["zeroship_control"] });
-    grant({ privileges: ["select", "insert", "update"], on: { kind: "table", schema: "zeroship", names: ["creator_accounts", "creator_account_history", "permission_tokens", "metering_exports", "metric_weights", "pricing_config", "plans", "app_spend_limit", "app_spend_state", "invoices", "creator_fee_policy", "creator_billing_status", "refunds", "billing_notifications", "billing_disputes", "billing_reconciliation_findings", "provider_dead_letter", "net_policy_catalog", "app_schema_applies"] }, to: ["zeroship_control"] });
-    grant({ privileges: ["select", "insert", "delete"], on: { kind: "table", schema: "zeroship", names: ["app_vars", "app_env_expose", "oauth_grants", "app_scope_defs", "token_revocations", "spend_state_history", "pending_disputes", "billing_line_provider_refs"] }, to: ["zeroship_control"] });
-    grant({ privileges: ["select", "insert"], on: { kind: "table", schema: "zeroship", names: ["app_usage", "app_usage_history", "app_oauth_clients", "payouts", "invoice_payments", "creator_billing_status_history", "stripe_events_seen", "credit_ledger", "refund_provider_refs", "plan_change_events", "payout_failures", "billing_provider_refs"] }, to: ["zeroship_control"] });
+
+    // ---- zeroship_control --------------------------------------------------
+    grant({ privileges: ["select", "insert", "update", "delete"], on: { kind: "table", schema: "zeroship", names: ["oauth_clients", "app_secrets", "billing_metrics", "usage_aggregates", "invoice_lines", "identity_links", "principal_grants", "device_grants", "app_vars", "token_revocations", "rate_limits"] }, to: ["zeroship_control"] });
+    grant({ privileges: ["select", "insert", "update"], on: { kind: "table", schema: "zeroship", names: ["apps", "metric_weights", "pricing_config", "plans", "app_spend_limit", "app_spend_state", "invoices", "refunds", "billing_disputes", "billing_reconciliation_findings", "provider_dead_letter", "app_schema_applies", "app_oauth_clients"] }, to: ["zeroship_control"] });
+    grant({ privileges: ["select", "insert", "delete"], on: { kind: "table", schema: "zeroship", names: ["app_env_expose", "oauth_grants", "app_scope_defs", "spend_state_history", "pending_disputes", "billing_line_provider_refs", "app_audit", "authz_decisions"] }, to: ["zeroship_control"] });
+    grant({ privileges: ["select", "insert"], on: { kind: "table", schema: "zeroship", names: ["app_usage", "app_usage_history", "payouts", "invoice_payments", "stripe_events_seen", "credit_ledger", "refund_provider_refs", "plan_change_events", "payout_failures", "billing_provider_refs", "connect_checkout_failures"] }, to: ["zeroship_control"] });
     grant({ privileges: ["select"], on: { kind: "table", schema: "zeroship", names: ["users"] }, to: ["zeroship_control"] });
-    grant({ privileges: ["select", "delete"], on: { kind: "table", schema: "zeroship", names: ["rate_limits"] }, to: ["zeroship_control"] });
-    grant({ privileges: ["insert"], on: { kind: "table", schema: "zeroship", names: ["app_audit"] }, to: ["zeroship_control"] });
     grant({ privileges: ["select", "update"], on: { kind: "table", schema: "zeroship", names: ["app_user_identities"] }, to: ["zeroship_control"] });
+
+    // The append-only audit trail refuses UPDATE/DELETE/TRUNCATE to every path
+    // the tamper trigger does not admit; this revoke is the floor beneath it.
     revoke({ privileges: ["update", "delete", "truncate"], on: { kind: "table", schema: "zeroship", names: ["audit_events"] }, from: ["public"] });
     revoke({ privileges: ["update", "delete", "truncate"], on: { kind: "table", schema: "zeroship", names: ["app_audit"] }, from: ["public"] });
     revoke({ privileges: ["update", "delete", "truncate"], on: { kind: "table", schema: "zeroship", names: ["authz_decisions"] }, from: ["public"] });
-    // NOTE: the SQL baseline dropped `zeroship_migrations.schema_migrations_immutable()`
-    // here (an artifact of the retired in-tree engine's journal bootstrap). The
-    // published zero-migrate engine OWNS `<meta>_schema_migrations_immutable()` as its
-    // LIVE journal tamper-guard (meta schema `zeroship_migrations`), with a dependent
-    // BEFORE UPDATE/DELETE trigger. Dropping it would (a) fail without CASCADE and
-    // (b) if forced, disarm the append-only journal protection — so this stale
-    // cleanup line is removed; the engine manages its own journal function.
+
+    // ---- the worker's boundary ---------------------------------------------
+    raw({
+      sql: "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA zeroship FROM zeroship_worker",
+      reason: "the grant DSL has no ALL TABLES IN SCHEMA target",
+    });
+    raw({
+      sql: "REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA zeroship FROM zeroship_worker",
+      reason: "the worker must not advance platform-owned sequences",
+    });
+    raw({
+      sql: "ALTER DEFAULT PRIVILEGES IN SCHEMA zeroship REVOKE ALL PRIVILEGES ON TABLES FROM zeroship_worker",
+      reason: "explicit intent only - no default table grant exists to revoke today, so this stores nothing",
+    });
+    raw({
+      sql: "ALTER DEFAULT PRIVILEGES IN SCHEMA zeroship REVOKE ALL PRIVILEGES ON SEQUENCES FROM zeroship_worker",
+      reason: "explicit intent only - no default sequence grant exists to revoke today, so this stores nothing",
+    });
+    revoke({ privileges: ["create"], on: { kind: "schema", names: ["zeroship"] }, from: ["zeroship_worker"] });
+    revoke({ privileges: ["usage"], on: { kind: "schema", names: ["zeroship"] }, from: ["zeroship_worker"] });
   },
 };

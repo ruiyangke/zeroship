@@ -1,4 +1,4 @@
-import { createFunction, grant, now, raw, t, table } from "@zeroship/migrate";
+import { grant, now, raw, t, table } from "@zeroship/migrate";
 
 // ONE ROW IS ONE LIVE WORKER PROCESS. Control writes this table; the worker
 // never touches it and holds no privilege on it. The worker generates an
@@ -20,12 +20,15 @@ import { createFunction, grant, now, raw, t, table } from "@zeroship/migrate";
 // design and "does" only where something does.
 //
 // THE RING KEY IS CONTROL'S, AND THE REGISTRANT CONTRIBUTES NOTHING TO IT.
-// `HashRing::new` in crates/zeroship-gateway/src/proxy.rs derives ring position
-// from the worker URL. If a registrant could influence its own position it would
-// GRIND its address until it landed beside a target app, and the placement fence
-// would become a lottery the attacker plays until it wins. Control mints these
-// bytes from its own CSPRNG, and they are frozen for the row's life by the
-// trigger below.
+// The registry's ring order is defined in
+// `zeroship_core::worker_ring::vnode_position`, which orders by this column's
+// bytes; the gateway's `HashRing` still derives worker positions from worker
+// URLs and must be replaced by that ordering. If a registrant could influence
+// its own position it would GRIND its address until
+// it landed beside a target app, and the placement fence would become a lottery
+// the attacker plays until it wins. Control mints these bytes from its own
+// CSPRNG, and they are frozen for the row's life by the frozen-columns trigger
+// (20260914000500_worker_join_bindings.ts).
 //
 // THE ADDRESS IS DERIVED FROM THE JOIN CONNECTION, AND THE WORKER SUPPLIES
 // ONLY ITS LISTENING PORT. Control takes the host from the observed peer
@@ -51,8 +54,8 @@ import { createFunction, grant, now, raw, t, table } from "@zeroship/migrate";
 //
 // `advertise_host` IS `inet`, NOT TEXT, and that is a different call from
 // `app_egress_rules.destination`. That column is text because a rule's
-// destination is a DNS NAME OR a range and the native types would need a driver
-// feature no workspace crate enables. This value is neither: it is copied out of
+// destination is a DNS NAME or a range and no address type holds a name. This
+// value is neither: it is copied out of
 // an accepted peer socket, so it is always a literal address, and `IpAddr` is a
 // codec compio-postgres carries unconditionally (its vendored postgres-types
 // implements `FromSql`/`ToSql` for `IpAddr` against INET with no feature gate).
@@ -63,18 +66,22 @@ import { createFunction, grant, now, raw, t, table } from "@zeroship/migrate";
 // once and never re-registered, so those would be the same instant under two
 // names, and two names for one instant is how readers start disagreeing.
 //
-// `status` IS A CLOSED SET OVER EXACTLY WHAT A WRITER WRITES, AND READINESS IS
-// NOT IN IT. Readiness is a PROBE RESULT: it is derived, it expires, and it
-// belongs to whatever performs the probe. Admitting it here would make the
+// `status` IS A CLOSED SET, AND READINESS IS NOT IN IT. `draining` is reserved
+// for a drain path that has no writer yet. Readiness is a PROBE RESULT: it is
+// derived, it expires, and it belongs to whatever performs the probe. Admitting
+// it here would make the
 // column carry two kinds of fact -- what control declared and what a probe
 // observed -- and readers would disagree about which one they were reading.
 //
-// EVERY COLUMN HAS A NAMED READER AND THERE ARE NO OTHERS. `ring_key` is read by
-// the eligible-set computation; `public_key` by control's enrolment verifier;
-// `advertise_host`/`advertise_port` by dispatch, by `fetch_worker_logs` in
-// crates/zeroship-control/src/api.rs, and later by the health probe; `id` and
-// `registered_at` by attribution and revocation; `status` by the eligible-set
-// computation.
+// WHAT READS THESE COLUMNS. `public_key` is read by control's enrolment
+// verifier (`worker_join::active_instance_public_key`); `advertise_host`/
+// `advertise_port` by `worker_health::enrolled_targets`, the health probe's
+// query; `id`/`status` by `worker_join::instance_serves_app` and the probe.
+// `ring_key` is ordered by `zeroship_core::worker_ring::vnode_position`, whose
+// per-app eligible-set caller is not built yet. The join columns declared above
+// carry their own readers: control's join functions read
+// `join_signer_id`/`join_token_id`, and workflow placement reads
+// `execution_zone_id`/`expires_at`.
 //
 // NO DELETE GRANT, ON PURPOSE. `gone` is the terminal state, so an instance ends
 // by being marked, not by being erased -- erasing it would take the attribution
@@ -97,6 +104,21 @@ export default {
         advertise_port: t.int().notNull(),
         registered_at: t.timestamp().notNull().default(now()),
         status: t.text().notNull(),
+        // The signer and the token that admitted this instance. Recorded so
+        // "who vouched for this worker" is a stored fact rather than an
+        // inference, and so purging a leaked signer can enumerate exactly what
+        // it admitted. Both are frozen for the row's life.
+        join_signer_id: t.text().notNull(),
+        join_token_id: t.text().notNull(),
+        // The token's `zone` claim, resolved to an id by Control. Nothing a
+        // worker sends reaches it.
+        execution_zone_id: t.text().notNull(),
+        // THE LEASE. An instance identity expires and the worker renews it, so
+        // revocation stops being the only way a credential ever stops working:
+        // a crashed or abandoned worker's row stops satisfying Control's
+        // instance read on its own, with nothing observing liveness to make it
+        // happen.
+        expires_at: t.timestamp().notNull(),
       },
       primaryKey: ["id"],
     });
@@ -123,57 +145,33 @@ export default {
       .check("worker_instances_status_check")
       .add({ expr: (col) => col("status").in(["active", "draining", "gone"]) });
 
+    // Two Control replicas racing a lost-reply retry must converge on ONE
+    // instance row rather than minting two identities for one key.
+    table("worker_instances", { schema: "zeroship" })
+      .unique("worker_instances_public_key_uq")
+      .add({ columns: ["public_key"] });
+
     // The typed-id domain needs bytewise comparison; PostgreSQL's locale
     // collation does not keep the base36 alphabet in numeric order. There are no
-    // foreign-key copies of this id yet, so this is the only column to pin.
+    // foreign-key copies of this id, so this is the only column to pin.
     raw({
       sql: 'ALTER TABLE "zeroship"."worker_instances" ALTER COLUMN "id" TYPE text COLLATE "C"',
       reason: "typed-id text domains need bytewise comparison",
     });
 
-    // WITHOUT THIS, "immutable" and "INSERT-ONCE" would be prose. Control holds
-    // UPDATE because `status` must progress, and UPDATE is not column-selective
-    // in a grant, so the identity and address columns are frozen here instead.
-    // The ring key is the reason this matters most: a writer that could rotate
-    // it could move an instance's ring position after placement was decided,
-    // which is the grinding attack the mint exists to prevent.
-    createFunction({
-      schema: "zeroship",
-      name: "worker_instances_reject_frozen_change",
-      returns: "trigger",
-      language: "procedural",
-      body:
-        "BEGIN\n"
-        + "  IF NEW.id <> OLD.id\n"
-        + "     OR NEW.ring_key <> OLD.ring_key\n"
-        + "     OR NEW.public_key <> OLD.public_key\n"
-        + "     OR NEW.advertise_host <> OLD.advertise_host\n"
-        + "     OR NEW.advertise_port <> OLD.advertise_port\n"
-        + "     OR NEW.registered_at <> OLD.registered_at THEN\n"
-        + "    RAISE EXCEPTION 'worker_instances identity and address are frozen at enrolment; "
-        + "only status may change'\n"
-        + "      USING ERRCODE = 'check_violation';\n"
-        + "  END IF;\n"
-        + "  RETURN NEW;\n"
-        + "END;",
-    });
-    table("worker_instances", { schema: "zeroship" })
-      .trigger("worker_instances_frozen_columns")
-      .create({
-        timing: "before",
-        events: ["update"],
-        forEach: "row",
-        execute: "worker_instances_reject_frozen_change",
-      });
-
-    // The control plane is the only writer and the only reader. The gateway does
-    // not read this table: control publishes the eligible worker set per app on
-    // the feed it already owns.
+    // The control plane is the only runtime writer; the operator's
+    // `purge_worker_join_signer` is the other writer, and it only marks rows
+    // `gone`. Readers are column-scoped:
+    // `zeroship_cdc` verifies enrolled worker identity (granted below), and
+    // `zeroship_workflow` reads identity and placement facts (granted in
+    // 20260911000000_workflow_coordination.ts and
+    // 20260914000600_placement_eligibility.ts). The gateway does not read this
+    // table: the per-app eligible set it would consume is not built yet.
     //
     // WHY THERE IS NO REVOKE. `zeroship_worker` is denied by PostgreSQL's
     // OWNER-ONLY DEFAULT: a newly created table has a null `relacl` and nobody
     // but the owner holds anything. It is NOT denied by
-    // db/migrations-ts/20260818000200_worker_database_authority.ts, whose
+    // db/migrations-ts/20260702000900_grants.ts, whose
     // `ALTER DEFAULT PRIVILEGES ... REVOKE` lines store nothing, because
     // revoking a privilege that was never in the default set is a no-op.
     //
@@ -186,6 +184,13 @@ export default {
       privileges: ["select", "insert", "update"],
       on: { kind: "table", schema: "zeroship", names: ["worker_instances"] },
       to: ["zeroship_control"],
+    });
+
+    // The CDC relay verifies an enrolled worker's identity and observes its
+    // revocation; column-scoped because it needs nothing else on the row.
+    raw({
+      sql: "GRANT SELECT (id, status, public_key) ON zeroship.worker_instances TO zeroship_cdc",
+      reason: "the relay verifies enrolled worker identities and observes revocation",
     });
   },
 };

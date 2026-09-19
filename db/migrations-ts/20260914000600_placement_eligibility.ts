@@ -1,4 +1,4 @@
-import { createFunction, raw, t, table } from "@zeroship/migrate";
+import { createFunction, raw, table } from "@zeroship/migrate";
 
 // Placement eligibility: the Control-owned zone facts the workflow manager reads
 // before it admits a placement. An execution zone is an operator-declared set
@@ -18,21 +18,9 @@ import { createFunction, raw, t, table } from "@zeroship/migrate";
 export default {
   name: "placement_eligibility",
   schema() {
-    // ---- apps.execution_zone_id ---------------------------------------------
-    // Control NAMES the zone when it creates an app: `Registry::create_app`
-    // resolves the zone the creator asked for, or the deployment's one
-    // declared zone when the creator named none, and refuses a deployment that
-    // declares several without being told which. The creation path therefore
-    // never relies on this default.
-    //
-    // The default names the deployment's single seeded zone
-    // (20260914000450_execution_zones_default_zone.ts) and stays for the rows
-    // written outside that path: harness scripts and test fixtures across
-    // several crates insert an app row directly. The trigger below freezes
-    // whatever value the row was created with, however it got there.
-    table("apps", { schema: "zeroship" })
-      .column("execution_zone_id")
-      .add({ type: t.text().notNull().default("ezn_default000000000000000000") });
+    // ---- apps_execution_zone_fk ---------------------------------------------
+    // An app's zone is fixed when the app is created; this pins it to a
+    // declared zone and the trigger below refuses any later change.
     table("apps", { schema: "zeroship" })
       .foreignKey("apps_execution_zone_fk")
       .add({
@@ -73,13 +61,11 @@ export default {
         forEach: "row",
         execute: "apps_reject_execution_zone_change",
       });
-    // ---- the manager's read of the zone facts -------------------------------
-    // Column grants only: the manager learns an app's zone and terminal
-    // deletion, and an instance's zone and lease. Its id and status are already
-    // granted by 20260911000000_workflow_coordination.ts. The lease is read as
-    // a liveness hint, never as authority - Control refuses a lapsed instance
-    // on every call it authenticates. The manager still cannot read creator
-    // data, keys or addresses, and it cannot write any of these rows.
+
+    // The manager reads the zone facts it needs to admit a placement and the
+    // lease deadline it schedules against, and nothing else: column-scoped
+    // grants because `SELECT` on the table would also open creator-owned
+    // columns Control wrote into `apps`.
     raw({
       sql: "GRANT SELECT (execution_zone_id,deleted_at) ON zeroship.apps TO zeroship_workflow; "
         + "GRANT SELECT (execution_zone_id,expires_at) ON zeroship.worker_instances TO zeroship_workflow",
