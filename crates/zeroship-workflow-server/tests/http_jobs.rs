@@ -625,6 +625,11 @@ async fn queue_routes_authenticate_before_body_and_reject_open_metadata() {
         app_id: AppId::mint(),
         ..fixture.scope()
     };
+    // RED, and the assertion is right. The claim handler observes policy before
+    // the manager authorizes the scope, so this answers 503 unavailable instead
+    // of 403 denied. See the same contract in `tests/http.rs`. Do not make it
+    // pass by expecting 503 - that would tell a worker to retry a scope it can
+    // never hold.
     assert_eq!(
         fixture.post(endpoints::WORKFLOW_JOB_CLAIM, &scope).await.0,
         StatusCode::FORBIDDEN
