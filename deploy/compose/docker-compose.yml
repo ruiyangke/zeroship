@@ -80,7 +80,7 @@ services:
       - --listen
       - 0.0.0.0:4873
     # Loopback-only publication (SEC-8): the registry must not be reachable
-    # from the LAN or from sandbox guests via the host's external interfaces.
+    # from the LAN via the host's external interfaces.
     ports:
       - "127.0.0.1:4873:4873"
     volumes:
@@ -462,10 +462,6 @@ services:
       # without it). Export it in the host shell before `docker compose up`;
       # the empty default lets the stack boot (console AI degrades) if absent.
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      # Sandbox/preview backend - same values the `sandbox` service is
-      # configured with (URL on the compose network + its bearer token).
-      SANDBOX_URL: http://sandbox:9091
-      SANDBOX_TOKEN: sandbox-dev-token-change-me-0123456789abcd
       # NO ZEROSHIP_CONTROL_URL here. `control_url` is declared by auth, gateway
       # and worker; crates/control/src/ contains no reader for it, so setting it
       # on the control container configured nothing. It was set here for "the
@@ -1026,28 +1022,6 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-
-  # zeroship-sandbox - the sandbox/preview backend now lives in the STANDALONE
-  # `zeroship-sandbox` project (sibling repo), NOT in this compose. It is built
-  # and run there (it has its own compose). The control plane reaches it over
-  # HTTP via `SANDBOX_URL` / `SANDBOX_TOKEN` (see the `control` service env).
-  #
-  # The sandbox still uses THIS deployment's shared Postgres: the `migrate`
-  # service applies the sandbox schema + creates the least-privilege roles
-  # (`sandbox_app` / `sandbox_audit` / `sandbox_gdpr`, db/migrations-ts
-  # 20260702000100_schema_roles_extensions.ts and 20260702000900_grants.ts),
-  # and the external sandbox controller connects AS those roles via its own
-  # SANDBOX_DATABASE_URL{,_AUDIT,_GDPR}. To run previews locally, bring up the
-  # zeroship-sandbox project pointed at this Postgres + set the control
-  # service's SANDBOX_URL to the external controller.
-
-  # NOTE: the separate `builder` Vite dev service was RETIRED in the R5 cutover.
-  # The AI app-builder IS the console now: a regular zeroship app built to a
-  # `.zship`, seeded by control's `--bootstrap-console`, served by the gateway
-  # at console.<domain>. Its OPENAI_API_KEY / sandbox creds are
-  # injected as server-side app env on the seeded console app (control env
-  # store), not via a standalone Vite container. The builder's confidential
-  # OIDC client + BUILDER_*/TOKEN_ENCRYPTION_KEY env are gone with it.
 
   # caddy - dev reverse proxy on :80 for the *.<domain> domain.
   # Routes auth/control/console/api + the {app}.<domain> catch-all to the right
