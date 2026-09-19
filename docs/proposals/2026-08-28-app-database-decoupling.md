@@ -946,19 +946,34 @@ the binding role for epoch `E` exists and `SET LOCAL ROLE` succeeds. That direct
 and until then it surfaces as `42703 undefined_column` at query time.
 
 **Error taxonomy.** The classifier
-(`crates/zeroship-data-orm/src/backend/postgres/pg_error.rs`, `is_missing_per_app_session_role`)
-today matches SQLSTATE 22023 plus the exact role name and collapses it into
-`SCHEMA_NOT_PROVISIONED` (`crates/zeroship-data-orm/src/error.rs`). Under this design:
+(`crates/zeroship-data-orm/src/backend/postgres/pg_error.rs`) today matches SQLSTATE 22023 plus the
+exact role name and collapses it into `SCHEMA_NOT_PROVISIONED`
+(`crates/zeroship-data-orm/src/error.rs`). Under this design there are three outcomes, and the
+third is decided BEFORE a statement is sent rather than by a SQLSTATE:
 
 - `42501 permission denied to set role` -> `GRANT_REVOKED`. Terminal, 403-shaped, never retried,
-  never falls back to the pool.
-- `22023 role does not exist` **under a live binding** -> `SCHEMA_EPOCH_STALE`, retryable, the same
-  condition `Verdict::ReResolve` already carries.
-- `22023 role does not exist` with no live binding -> `SCHEMA_NOT_PROVISIONED`, as today.
+  never falls back to the pool. The reconciler leaves a revoked binding's role standing precisely
+  so this stays separate from a retired epoch.
+- `22023 role does not exist` -> `SCHEMA_EPOCH_STALE`, retryable, the same condition
+  `Verdict::ReResolve` already carries.
+- **no binding at all** -> refused at RESOLUTION with `binding_not_resolved`, terminal. A role name
+  is composed only from a database edge (`pg_session_sql::session_setup_sql` returns `Err` when
+  `binding.session_role()` is `None`), and both call sites build the batch and `?` on it before
+  `simple_query`, so a narrowing connection with no edge never reaches the classifier at all.
+  Control serves only a binding that is `active` with `observed_generation` caught up on a database
+  that is `active`, so "never provisioned" is decided where it is decidable.
 
-Telling the second from the third needs no message sniffing: the classifier already composes the
-exact role name it expects, and only needs to compose the epoch-bearing name and to know from the
-injected binding whether a live binding exists.
+**Do not put the third arm back in the classifier.** An earlier revision of this document had it
+there, reasoning that the classifier "only needs to know from the injected binding whether a live
+binding exists". That reasoning is wrong: holding a binding is not evidence that it is live. The
+worker's store is process-wide and cleared only by `deprovision_app`, so a worker can hold an edge
+Control has since stopped serving, and the classifier's only input is the binding it was handed -
+it would have answered `SCHEMA_EPOCH_STALE` for that case either way. What distinguishes a
+withdrawn binding is a re-resolution, which is a protocol rather than a classification.
+
+The three codes being pairwise distinct is bound by
+`pg_error::the_three_setup_outcomes_are_pairwise_distinct`, so a later collapse is a red test rather
+than a silent merge.
 
 **The `__zeroship_admin` schema is created**, in the one shape the privilege invariant permits -
 state a separate service writes and the worker only reads. Exactly one table, holding the current
@@ -1512,7 +1527,7 @@ app's requests and cannot protect a shared cluster from an app under its limit. 
 
 6. **Prove `compio-postgres` surfaces `42501` distinguishably from the multi-statement setup batch.**
    BUILT, as `the_driver_reports_the_setup_batch_s_first_failure_by_sqlstate` in the same target.
-   The taxonomy splits `GRANT_REVOKED` from `SCHEMA_NOT_PROVISIONED` on the code, and the arm sends
+   The taxonomy splits `GRANT_REVOKED` from `SCHEMA_EPOCH_STALE` on the code, and the arm sends
    the setup batch's own shape inside an explicit transaction for both failures, requiring the
    server's own SQLSTATE and message from the FIRST statement and an aborted transaction after it.
    Its control is the same batch under an assumable role, with every setting it applied read back.
@@ -1531,7 +1546,8 @@ app's requests and cannot protect a shared cluster from an app under its limit. 
     `GRANT_REVOKED`, no eviction, no restart. (b) A statement issued without the session-setup batch
     fails with `permission denied`, proving the `WITH INHERIT FALSE` posture rather than the presence
     of a call. (c) Rotate the epoch, reap `E-1`, and assert the stale isolate gets
-    `SCHEMA_EPOCH_STALE` rather than `SCHEMA_NOT_PROVISIONED`. (d) An app bound to two databases: a
+    `SCHEMA_EPOCH_STALE`, with the read before the rotation and a binding resolved at `E+1` as its
+    controls. (d) An app bound to two databases: a
     dispatch against the second inside a transaction on the first is refused rather than run on the
     first's connection. (e) Two databases each declaring `users`: a change event on one is never
     delivered to a subscription on the other. (f) A deploy naming a database the app holds no active
