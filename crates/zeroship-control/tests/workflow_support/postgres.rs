@@ -35,14 +35,15 @@ fn template() -> &'static Template {
         // compile its own subject. `cargo test` does not build `[[example]]`
         // targets and `CARGO_BIN_EXE_` is not set for them, so the path cannot
         // be derived either; the suite that runs these tests must provide it.
-        let binary = std::env::var("ZEROSHIP_WORKFLOW_TEST_ENVIRONMENT_BIN").unwrap_or_else(|_| {
+        let Some(binary) = zeroship_core::test_env!("ZEROSHIP_WORKFLOW_TEST_ENVIRONMENT_BIN")
+        else {
             panic!(
                 "ZEROSHIP_WORKFLOW_TEST_ENVIRONMENT_BIN is required: \
                  `cargo xtask test workflow` builds the workflow environment \
                  example and passes its path. Running this target directly \
                  needs that variable set to the built example."
             )
-        });
+        };
         let logs = root.join("target/workflow-tests");
         std::fs::create_dir_all(&logs).expect("workflow environment logs");
         let path = logs.join(format!("environment-{}.log", uuid::Uuid::new_v4()));
