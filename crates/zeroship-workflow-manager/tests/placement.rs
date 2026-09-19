@@ -265,7 +265,7 @@ async fn after_reads(fixture: &Fixture) {
     let facts = host.facts.clone();
     assert_eq!(
         host.coordinator
-            .claim_job(&worker, &scope, support::delivery_ceiling(), || ready(facts.authorize(&worker)))
+            .claim_job(&worker, &scope, Ok(support::delivery_ceiling()), || ready(facts.authorize(&worker)))
             .await
             .map(|grant| grant.is_some()),
         Err(Error::Denied)

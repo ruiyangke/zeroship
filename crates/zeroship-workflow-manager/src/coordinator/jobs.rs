@@ -37,17 +37,20 @@ impl Coordinator {
     /// Claim using current placement and enrollment, without accepting a caller expiry.
     ///
     /// The caller supplies the app's delivery ceiling from its own policy
-    /// authority: a remote host reads it from the observed policy source, and a
-    /// local host is its app's platform authority, exactly as for admission.
+    /// authority as an already-settled result: a remote host reads it from the
+    /// observed policy source, and a local host is its app's platform authority,
+    /// exactly as for admission. Passing the result rather than the value keeps
+    /// authorization first, so a worker holding no placement on the app is
+    /// denied instead of being told its own authority is unavailable.
     ///
     /// # Errors
-    /// Rejects revoked identity or placement, an invalid ceiling and failed
-    /// queue transactions.
+    /// Rejects revoked identity or placement, an unreadable or invalid ceiling
+    /// and failed queue transactions.
     pub async fn claim_job<F, Fut>(
         &self,
         worker: &WorkerId,
         scope: &AssignedScope,
-        max_delivery_attempts: i64,
+        max_delivery_attempts: Result<i64, Error>,
         authorize: F,
     ) -> Result<Option<DeliveryGrant>, Error>
     where
