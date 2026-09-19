@@ -1106,8 +1106,11 @@ row today:
 **Provenance.** Claims marked RE-DERIVED were measured during this revision against the running
 `postgres:16.15` container, which matches the `deploy/compose/docker-compose.yml` pin; the
 instrument is named with each. Claims marked CARRIED were measured on earlier majors during the
-original drafting and have NOT been re-measured. Six of them become a test target rather than a
-fresh figure in this document, and two are downgraded to rationale; Open 5 says which and why.
+original drafting and have NOT been re-measured. Claims marked GATED name a test that re-runs them:
+six behaviour claims are arms of `crates/zeroship-data-orm/tests/postgres_tenant_fence.rs`, each on
+its own throwaway container that refuses a server below the deploy pin, and each paired with the
+control that keeps it from passing over a fixture which granted nothing. Two claims stay rationale
+rather than becoming arms; Open 5 says which and why.
 
 **Self-hostability decides where topology lives, not convenience.** The table under Where a fact
 lives sorts each fact by who owns it, and the load-bearing asymmetry is that a migration is not
@@ -1175,20 +1178,24 @@ PostgreSQL truncates past it silently, and the epoch sits at the END of `zs_bind
 future prefix change that pushed past the limit would collapse two epochs onto one role rather than
 error. The composer must refuse a name it would have truncated.
 
-**`WITH SET FALSE` on the binding-to-database edge is load-bearing. CARRIED.** Without it the
-worker assumes the database role directly and the chain is decorative. Measured with two bindings
-on one database: the worker assuming the database role gets `permission denied to set role`;
-narrowed to binding A it reads its row; after revoking the database role from A's role it gets
-`permission denied for schema`; co-tenant binding B is unaffected.
+**`WITH SET FALSE` on the binding-to-database edge is load-bearing. GATED** by
+`a_worker_login_reaches_a_shared_database_only_through_a_live_binding_role`. Without it the
+worker assumes the database role directly and the chain is decorative. Two bindings on one
+database: the worker assuming the database role gets `permission denied to set role`; narrowed to
+binding A it reads its row; after revoking the database role from A's role it gets
+`permission denied for schema`; co-tenant binding B is unaffected, which is the arm that separates
+a fence from a database-wide outage.
 
 **`WITH INHERIT FALSE` on the worker-to-binding edge is required, and the role attribute is not a
-substitute. CARRIED.** Three arms differing in one variable: a plain `GRANT` of the intermediate
-with the login inheriting returns the row; the same grant with `ALTER ROLE w NOINHERIT` still
-returns the row; `GRANT ... WITH INHERIT FALSE` refuses with `permission denied for schema`.
-PostgreSQL 16+ records `inherit_option` per membership at grant time, and a pre-existing membership
-stays inheriting when the attribute is flipped. Below 16 the option does not exist and this design
-has no fence. The worker's boot posture already refuses any inheriting membership at all, so a
-database still carrying the old grant shape is detected rather than silently trusted.
+substitute. GATED** by `only_a_noninheriting_membership_keeps_a_binding_out_of_ambient_login_privileges`.
+Three arms differing in one variable, and two of them must SUCCEED: a plain `GRANT` of the
+intermediate with the login inheriting returns the row; the same grant with `ALTER ROLE w NOINHERIT`
+still returns the row; `GRANT ... WITH INHERIT FALSE` refuses with `permission denied for schema`
+while the same login still reaches the database by assuming the binding. PostgreSQL 16+ records
+`inherit_option` per membership at grant time, and a pre-existing membership stays inheriting when
+the attribute is flipped. Below 16 the option does not exist and this design has no fence. The
+worker's boot posture already refuses any inheriting membership at all, so a database still
+carrying the old grant shape is detected rather than silently trusted.
 
 **The worker may never hold a direct membership in a database role.** One such grant restores
 unrevocable access, and nothing in PostgreSQL will complain because both memberships are
@@ -1237,35 +1244,46 @@ the closure, never a one-way narrowing. So every available fence decides whether
 worker-side, enforced by Rust provenance and the absence of a raw-SQL surface. Per-app logins would
 not change it: the process would then hold every tenant's credential.
 
-**Column grants add, they never subtract. CARRIED.** A table-level `GRANT SELECT` alongside a
-column list returns the plaintext, and `ALTER DEFAULT PRIVILEGES` has no column-list form. Schema
-evolution then fails closed by a PostgreSQL property rather than by a reconciler: a column added
-after the grant carries no ACL entry and is unreadable.
+**Column grants add, they never subtract. GATED** by
+`a_table_level_grant_returns_the_column_a_column_list_withheld`. A table-level `GRANT SELECT`
+alongside a column list returns the plaintext, and `ALTER DEFAULT PRIVILEGES` refuses a column list
+outright with `default privileges cannot be set for columns`. Schema evolution then fails closed by
+a PostgreSQL property rather than by a reconciler: a column added after the grant carries no ACL
+entry and is unreadable.
 
-**Logical decoding consults no ACL and no RLS. CARRIED.** The same role refused `SELECT` on a
-column receives its plaintext in the decoded stream when the publication has no column list. A
-publication column list *does* filter decoded output and is a genuine server-side fence, and
-PostgreSQL refuses conflicting column lists for one table across the publications named on one
-decode stream, so a table has exactly one published column set per stream and the shared stream
-serves the weakest reader.
+**Logical decoding consults no ACL and no RLS. GATED** by
+`logical_decoding_ignores_the_column_acl_and_obeys_the_publication_column_list`. The same role
+refused `SELECT` on a column receives its plaintext in the decoded stream when the publication has
+no column list, and does not when the same slot's changes are decoded under a publication whose
+column list omits it. A publication column list *does* filter decoded output and is a genuine
+server-side fence, and PostgreSQL refuses conflicting column lists for one table across the
+publications named on one decode stream, so a table has exactly one published column set per stream
+and the shared stream serves the weakest reader.
 
 **The column list is incompatible with `REPLICA IDENTITY FULL`, and neither DDL step refuses.
-CARRIED.** Adding `REPLICA IDENTITY FULL` to a table that already has a column list is accepted,
-and creating a column list on a table already `FULL` is accepted; then every `UPDATE` and `DELETE`
-fails because the column list does not cover the replica identity. The symptom is not a CDC fault
-but a table that has silently become append-only on the creator's write path.
+GATED** by `a_column_list_and_replica_identity_full_are_accepted_then_make_writes_fail`. Adding
+`REPLICA IDENTITY FULL` to a table that already has a column list is accepted, and creating a
+column list on a table already `FULL` is accepted; then every `UPDATE` and `DELETE` fails
+`42P10` with `Column list used by the publication does not cover the replica identity` while
+`INSERT` still succeeds. The symptom is not a CDC fault but a table that has silently become
+append-only on the creator's write path.
 
-**The two role failures split by SQLSTATE alone. CARRIED**, from a real non-superuser session,
-which matters because a superuser's `SET ROLE` permission is checked against `session_user` and
-hides the split: role does not exist is `22023 invalid_parameter_value`; role exists but the
-session is not a member is `42501 insufficient_privilege`. `22023` is the generic bad-GUC code,
-which is why the classifier pins the exact role name alongside it.
+**The two role failures split by SQLSTATE alone. GATED** by
+`set_role_separates_a_missing_role_from_a_role_the_session_may_not_assume`, from a real
+non-superuser session, which matters because a superuser's `SET ROLE` permission is checked against
+`session_user` and hides the split - the arm runs the same two statements as a superuser and
+watches one of them succeed. Role does not exist is `22023 invalid_parameter_value`; role exists
+but the session is not a member is `42501 insufficient_privilege`. `22023` is the generic bad-GUC
+code, which is why the classifier pins the exact role name alongside it.
 
-**`SET LOCAL ROLE` must remain the FIRST statement of the setup batch.** PostgreSQL aborts a
-simple-query batch at the first failing statement and emits exactly one `ErrorResponse`. If
-anything is placed before it, that statement's failure masks the role failure, the SQLSTATE
-taxonomy silently collapses, and because the epoch rides the same role name, a rotated epoch
-surfaces as whatever the earlier statement failed with.
+**`SET LOCAL ROLE` must remain the FIRST statement of the setup batch. GATED** by
+`the_driver_reports_the_setup_batch_s_first_failure_by_sqlstate`. PostgreSQL aborts a
+simple-query batch at the first failing statement and emits exactly one `ErrorResponse`, and
+`compio-postgres` hands that response's own SQLSTATE and message to the caller for both `42501` and
+`22023`, leaving the transaction in `25P02`. If anything is placed before the role statement, that
+statement's failure masks the role failure, the SQLSTATE taxonomy silently collapses, and because
+the epoch rides the same role name, a rotated epoch surfaces as whatever the earlier statement
+failed with.
 
 **Revocation lands within one in-flight transaction, not one statement. CARRIED.** After a revoke
 from a second connection, the next `SET LOCAL ROLE` on the same backend fails `42501` with no
@@ -1361,20 +1379,18 @@ app's requests and cannot protect a shared cluster from an app under its limit. 
    cluster and executes no creator code. Blocks nothing today; becomes load-bearing when one cluster
    fills while under its database count, and more so because placement is a one-way door.
 
-5. **Turn the CARRIED behaviour claims into a test target.** BUILDABLE. They were measured during
-   the original drafting on majors this platform does not deploy, and writing down a fresh
-   measurement would only move the staleness: a figure in a document is a claim nothing re-runs.
-   Six of them are assertions about what PostgreSQL does, so they belong in `cargo xtask test`
-   against a throwaway container pinned to the minimum supported major: `WITH SET FALSE`,
-   `WITH INHERIT FALSE` versus the role attribute, the `22023`/`42501` split, column grants adding
-   rather than subtracting, decoding ignoring ACLs, and the column-list versus
-   `REPLICA IDENTITY FULL` conflict.
+5. **Turn the behaviour claims into a test target.** BUILT:
+   `crates/zeroship-data-orm/tests/postgres_tenant_fence.rs`, an arm per claim, in the ordinary
+   `cargo xtask test data` suite. Each arm owns a throwaway container through the repository's
+   PostgreSQL fixture and asserts `server_version_num` against the deploy pin before it measures
+   anything, because `inherit_option` does not exist below 16 and an arm that ran on an older
+   server would report that this design has no fence at all.
 
-   Two shape requirements, or the target passes over nothing. **Every arm needs its control**: the
-   inherit case is three arms and two of them must SUCCEED, so a suite asserting only the denial
-   passes equally well when the fixture granted nothing. And **the SQLSTATE arm must run as a real
-   non-superuser**, because a superuser's `SET ROLE` permission is checked against `session_user`,
-   which hides the split entirely.
+   The two shape requirements are met rather than merely stated. **Every arm carries its control**:
+   the inherit case is three grant shapes of which two must SUCCEED, and the fenced login must
+   still reach the database by assuming its binding, so nothing here passes over a fixture that
+   granted nothing. And **the SQLSTATE arm runs as a real non-superuser**, with the same two
+   statements repeated as a superuser to watch the split disappear.
 
    A throwaway container is not a convenience: `pg_authid` and `pg_auth_members` are shared across
    a cluster, so role DDL against a shared instance creates roles every database on it can see.
@@ -1384,9 +1400,11 @@ app's requests and cannot protect a shared cluster from an app under its limit. 
    way.
 
 6. **Prove `compio-postgres` surfaces `42501` distinguishably from the multi-statement setup batch.**
-   BUILDABLE. The taxonomy splits `GRANT_REVOKED` from `SCHEMA_NOT_PROVISIONED` on the code. If the
-   driver collapses or reorders errors from a simple-query batch whose first statement fails, the
-   split does not exist.
+   BUILT, as `the_driver_reports_the_setup_batch_s_first_failure_by_sqlstate` in the same target.
+   The taxonomy splits `GRANT_REVOKED` from `SCHEMA_NOT_PROVISIONED` on the code, and the arm sends
+   the setup batch's own shape inside an explicit transaction for both failures, requiring the
+   server's own SQLSTATE and message from the FIRST statement and an aborted transaction after it.
+   Its control is the same batch under an assumable role, with every setting it applied read back.
 
 7. **Re-prove the pooled-connection reset against a narrowed role.** BUILDABLE.
     `crates/zeroship-data-orm/src/exec.rs` runs the role and timeout guards via `SET LOCAL` inside an

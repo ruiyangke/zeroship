@@ -1,4 +1,4 @@
-//! The PostgreSQL behaviours the app-database decoupling's tenant fence rests
+//! The `PostgreSQL` behaviours the app-database decoupling's tenant fence rests
 //! on, measured against the major the platform deploys.
 //!
 //! `docs/proposals/2026-08-28-app-database-decoupling.md` carries a set of
@@ -22,13 +22,13 @@
 //! **The server is a throwaway container, and that is not a convenience.**
 //! `pg_authid` and `pg_auth_members` are cluster-shared, so the role DDL below
 //! would be visible to every database on a shared instance. Each arm owns its
-//! own server through the repository's PostgreSQL fixture.
+//! own server through the repository's `PostgreSQL` fixture.
 
 #[path = "../../../tests/fixtures/postgres/mod.rs"]
 mod postgres_fixture;
 
-use compio_postgres::Pool;
 use compio_postgres::error::{DbError, SqlState};
+use compio_postgres::Pool;
 use std::rc::Rc;
 use zeroship_data_orm::budgets::{DB_LOCK_TIMEOUT_MS, DB_STATEMENT_TIMEOUT_MS};
 
@@ -444,7 +444,10 @@ async fn a_table_level_grant_returns_the_column_a_column_list_withheld() {
         .await
         .expect("the granted columns read");
     assert_eq!(granted.len(), 1);
-    assert_eq!(granted[0].get::<_, String>("email_mask"), "p***@example.com");
+    assert_eq!(
+        granted[0].get::<_, String>("email_mask"),
+        "p***@example.com"
+    );
 
     let withheld = reader
         .query("SELECT email FROM db_one.people", &[])
@@ -702,7 +705,7 @@ async fn a_column_list_and_replica_identity_full_are_accepted_then_make_writes_f
 /// SET LOCAL lock_timeout ...` as one `simple_query` inside an explicit
 /// transaction
 /// (`crates/zeroship-data-orm/src/backend/postgres/pg_autocommit.rs`,
-/// `with_scoped_transaction`). PostgreSQL aborts that batch at the first
+/// `with_scoped_transaction`). `PostgreSQL` aborts that batch at the first
 /// failing statement and emits exactly one `ErrorResponse`. If
 /// `compio-postgres` collapsed, dropped, reordered or masked it,
 /// `GRANT_REVOKED` and `SCHEMA_EPOCH_STALE` would be one error and the epoch
