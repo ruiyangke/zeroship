@@ -885,16 +885,32 @@ The SDK exports these workflow error classes:
 
 Except `InvalidScheduleError`, which is thrown at build time, every class above
 names a condition the platform records on a run or on a step. The control
-operations an app handler calls on a `WorkflowRun` — `signal`, `pause`,
-`resume`, `cancel`, `restart`, `readStepOutput` — never enter the journal, so
-they never carry one of those names. They reject through a different path with a
-stable failure shape: a plain `Error` whose `code` is one of
+operations an app handler calls, `start` on a workflow and `status`, `signal`,
+`pause`, `resume`, `cancel`, `restart` and `readStepOutput` on a `WorkflowRun`,
+never enter the journal, so they never carry one of those names. They reject
+through a different path with a stable failure shape: every refusal the engine
+returns is a plain `Error` whose `code` is one of `workflow_invalid_request`,
 `workflow_not_found`, `workflow_conflict`, `workflow_unavailable`,
-`workflow_timeout`, `workflow_resource_exhausted`, `workflow_payload_too_large`,
-`workflow_permission_denied`, or `workflow_unauthenticated`. An argument that
-does not parse rejects as a built-in `TypeError` carrying the engine's own
-message and no `code`. The SDK exports no class for either shape; branch on
-`error.code` and on the operation you called, not on the identity of what threw.
+`workflow_timeout`, `workflow_resource_exhausted`,
+`workflow_payload_too_large`, `workflow_permission_denied`,
+`workflow_unauthenticated`, `workflow_ingress_fenced` or
+`workflow_internal_error`. The message is the engine's own, except under
+`workflow_unavailable` and `workflow_internal_error`, which describe a host
+condition you cannot act on and say only that.
+
+`workflow_invalid_request` means the engine refused the arguments themselves
+and the call did nothing: an argument past a platform limit, such as an
+oversized `key` or signal `type`, or one that does not resolve against the run
+it names, such as a `restart` target no step in that run's journal matches.
+Correct the call rather than retrying it. `workflow_conflict` instead names a
+run state that rejects the operation, so the same call can succeed later.
+
+An argument whose *type* is wrong never reaches the engine. The binding rejects
+it before the call with a built-in `TypeError` and no `code`. So
+`instanceof TypeError` means you passed the wrong kind of value, and an
+`error.code` means the engine refused the call. The SDK exports no class for
+either shape; branch on `error.code` and on the operation you called, not on
+the identity of what threw.
 
 ### Matching an error
 
