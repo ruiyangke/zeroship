@@ -662,7 +662,7 @@ async fn creator(directory: &Path, app: &AppId, policies: Arc<HostPolicies>) -> 
     let directory = directory.join(app.as_str());
     std::fs::create_dir_all(&directory).unwrap();
     let store = OrmStore::connect(
-        DbBinding::new(
+        DbBinding::platform(
             app.as_str(),
             "assignment-fixture",
             SchemaName::new(app.as_str()).unwrap(),

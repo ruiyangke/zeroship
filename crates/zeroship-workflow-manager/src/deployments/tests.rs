@@ -17,7 +17,7 @@ async fn database(url: &str) -> Database {
         "zeroship"
     };
     Database::connect(
-        DbBinding::new(
+        DbBinding::platform(
             "platform",
             "deployment-holds-test",
             SchemaName::new(schema).unwrap(),

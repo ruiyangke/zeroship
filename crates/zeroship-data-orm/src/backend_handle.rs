@@ -81,13 +81,12 @@ impl BackendHandle {
     }
     pub async fn open_tx_session(
         &self,
-        app_id: &str,
-        schema: &SchemaName,
+        binding: &DbBinding,
         begin: crate::error::BeginIntent,
     ) -> Result<crate::driver::Session, crate::error::OpenSessionError> {
         Ok(self
             .0
-            .open_tx_session(app_id, schema, begin)
+            .open_tx_session(binding, begin)
             .await?
             .bind_driver(self.1.clone()))
     }
@@ -103,11 +102,10 @@ impl BackendHandle {
     }
     pub async fn append_unmask_audit(
         &self,
-        schema: &SchemaName,
-        attach_alias: &str,
+        binding: &DbBinding,
         row: &UnmaskAuditRow<'_>,
     ) -> Result<(), DbError> {
-        let namespace = SchemaName::new(self.namespace(attach_alias, schema))
+        let namespace = SchemaName::new(self.namespace(binding))
             .map_err(|error| DbError::internal(format!("invalid backend namespace: {error}")))?;
         let params = vec![
             row.actor_id.into(),
@@ -122,7 +120,7 @@ impl BackendHandle {
         ];
         let query =
             crate::crud::internal::unmask_audit(&namespace, params, self.sql_registration())?;
-        self.query(attach_alias, schema, &query.sql, &query.params)
+        self.query(binding, &query.sql, &query.params)
             .await?;
         Ok(())
     }
@@ -201,7 +199,7 @@ async fn read_on_route<T>(
 ) -> Result<T, DbError> {
     if route.in_tx() {
         route.check_scope()?;
-        crate::transaction::driver::execute_operation(route.app_id(), read).await
+        crate::transaction::driver::execute_operation(&route.key(), read).await
     } else {
         read.await
     }
@@ -214,7 +212,7 @@ pub(crate) async fn read_raw_column_value(
     row_pk: &str,
     schema: &crate::schema::FieldMap,
 ) -> Result<ScalarRead<Value>, DbError> {
-    let namespace = SchemaName::new(route.backend().namespace(route.app_id(), route.schema()))
+    let namespace = SchemaName::new(route.backend().namespace(route.binding()))
         .map_err(|error| DbError::internal(format!("invalid backend namespace: {error}")))?;
     let key_column = "id";
     let key_value = match schema.get(key_column).map(|column| column.logical_type) {
@@ -286,6 +284,7 @@ mod routed_read_tests {
         let runtime = compio::runtime::Runtime::new().expect("compio runtime");
         runtime.block_on(async {
             let app = "sqlite_routed_raw_read";
+            let alias = crate::tests::fixtures::harness_alias(app);
             let dir = tempfile::tempdir().expect("tempdir");
             let backend = Rc::new(
                 crate::backend_selection::new_sqlite_backend(
@@ -295,13 +294,13 @@ mod routed_read_tests {
                 .expect("open sqlite backend"),
             );
             backend
-                .attach_app_file(app)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("attach the app file");
             backend
                 .execute_fixture(
                     &format!(
-                        r#"CREATE TABLE "{app}"."people" (
+                        r#"CREATE TABLE "{alias}"."people" (
                                id TEXT PRIMARY KEY,
                                ssn TEXT,
                                "__zs_raw__ssn" TEXT
@@ -322,14 +321,23 @@ mod routed_read_tests {
                 }
             });
 
-            let admission = crate::transaction::TxAdmission::acquire(app.to_owned())
+            let admission = crate::transaction::TxAdmission::acquire(
+                crate::tests::fixtures::harness_route(app),
+            )
                 .await
                 .expect("the fixture claims a free lane");
-            crate::transaction::exec_begin_or_savepoint(false, None, app,
-                crate::sql::SchemaName::new(app).unwrap(), handle.clone()).await.unwrap();
+            crate::transaction::exec_begin_or_savepoint(
+                false,
+                None,
+                &crate::tests::fixtures::harness_binding(app),
+                handle.clone(),
+            )
+            .await
+            .unwrap();
             admission.handed_to_reducer();
-            crate::transaction::driver::run_operation(app,
-                &format!(r#"INSERT INTO "{app}"."people" (id, ssn, "__zs_raw__ssn") VALUES ('p1', '***', '123-45-6789')"#), &[])
+            crate::transaction::driver::run_operation(
+                &crate::tests::fixtures::harness_route(app),
+                &format!(r#"INSERT INTO "{alias}"."people" (id, ssn, "__zs_raw__ssn") VALUES ('p1', '***', '123-45-6789')"#), &[])
                 .await.expect("INSERT on the transaction connection");
 
             // CONTROL: a pool-lane read cannot see the uncommitted row.
@@ -355,8 +363,8 @@ mod routed_read_tests {
 
             // SUBJECT: the same read, routed onto the transaction.
             let inside = read_raw_column_value(
-                &CapturedRoute::tx_for_tests(
-                    app,
+                &CapturedRoute::tx_on_binding_for_tests(
+                    &crate::tests::fixtures::harness_binding(app),
                     crate::sql::registration::SqlRegistration::sqlite(),
                 )
                     .bind(handle.clone())
@@ -375,7 +383,7 @@ mod routed_read_tests {
 
             // The guard must have handed the session back, or the next op in
             // this transaction would find an empty slot.
-            assert!(matches!(crate::transaction::exec_settle(app, false, None).await, crate::transaction::SettleOutcome::Ok));
+            assert!(matches!(crate::transaction::exec_settle(&crate::tests::fixtures::harness_route(app), false, None).await, crate::transaction::SettleOutcome::Ok));
 
         });
     }

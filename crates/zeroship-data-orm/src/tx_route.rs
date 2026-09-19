@@ -7,14 +7,15 @@
 //! the pool even while the app has a transaction open.
 //!
 //! Capture and bind are separate because hosts observe async context
-//! synchronously, while opening a connection can yield. The route also carries
-//! the physical schema and immutable SQL registration used by query preparation,
-//! and the usage sink its host attached to the binding.
+//! synchronously, while opening a connection can yield. The route carries the
+//! whole [`DbBinding`] - the tenant, the database, the physical schema and the
+//! role the session narrows to - plus the immutable SQL registration used by
+//! query preparation and the usage sink its host attached.
 
 use std::sync::Arc;
 
 use crate::backend::BackendHandle;
-use crate::binding::DbBinding;
+use crate::binding::{DbBinding, DbRoute};
 use crate::metrics::UsageSink;
 use crate::sql::SchemaName;
 use crate::sql::registration::SqlRegistration;
@@ -24,12 +25,10 @@ use crate::transaction::scope::TransactionScope;
 /// Capture callback identity before asynchronous connection setup can yield.
 #[derive(Debug)]
 pub struct CapturedRoute {
-    app_id: String,
-    /// Physical schema used for SQL qualification and PostgreSQL role selection.
-    /// App identity remains the transaction-lane key.
-    schema: SchemaName,
+    binding: DbBinding,
     /// `true` iff this dispatch is lexically-and-asynchronously inside a
-    /// `db.transaction(fn)` callback **for this same app**.
+    /// `db.transaction(fn)` callback **for this same app and this same
+    /// database**.
     in_tx: bool,
     scope: Option<TransactionScope>,
     /// Compiler, codecs, and effective support captured before backend acquisition.
@@ -46,14 +45,13 @@ enum CapturedConnection {
     Unbound,
 }
 
-/// A captured dispatch bound to its backend. It carries app identity, callback
+/// A captured dispatch bound to its backend. It carries the binding, callback
 /// scope and SQL registration together, so execution does not re-read host context.
 /// Construct through [`CapturedRoute::bind`].
 #[derive(Clone, Debug)]
 pub struct TxRoute {
-    app_id: String,
+    binding: DbBinding,
     usage: Option<Arc<dyn UsageSink>>,
-    schema: SchemaName,
     in_tx: bool,
     scope: Option<TransactionScope>,
     backend: BackendHandle,
@@ -61,12 +59,20 @@ pub struct TxRoute {
     connection: crate::connection::ConnectionIdentity,
 }
 
+/// Compare the ROUTE this dispatch was captured on against the binding the
+/// operation carries.
+///
+/// The comparison is the route key and the schema, never the deploy token: two
+/// deploys of one app on one database are two descriptor generations sharing a
+/// lane and a role, and a dispatch from one must not be refused because the
+/// other minted the handle. What must never differ is the tenant, the database
+/// or the schema - each of those would run a statement somewhere the capture
+/// did not decide.
 fn validate_binding_target(
-    app_id: &str,
-    schema: &SchemaName,
+    route: &DbBinding,
     binding: &DbBinding,
 ) -> Result<(), crate::error::DbError> {
-    if app_id != binding.app_id() || schema != binding.schema() {
+    if route.route() != binding.route() || route.schema() != binding.schema() {
         return Err(crate::error::DbError::internal(
             "ORM binding does not match the captured database route",
         ));
@@ -76,29 +82,29 @@ fn validate_binding_target(
 
 impl CapturedRoute {
     /// Freeze the host's observed async scope for this dispatch. A scope for
-    /// another app does not confer access to this app's transaction.
+    /// another app, or for the same app on another database, does not confer
+    /// access to this dispatch's transaction.
     ///
     /// `usage` is the sink the host attached to this binding. Every capture
     /// site states it, so a host cannot meter one entry point and forget
     /// another; `None` reports nothing and never refuses the dispatch.
     pub fn capture(
         current_scope: Option<&TransactionScope>,
-        app_id: &str,
-        schema: SchemaName,
+        binding: &DbBinding,
         registration: SqlRegistration,
         connection: crate::connection::ConnectionIdentity,
         usage: Option<Arc<dyn UsageSink>>,
     ) -> Self {
-        // SEC-1 compares TENANT against TENANT. The schema rides along; it is
-        // never the admission key, because two apps sharing one database would
-        // share a schema and must still not share a transaction frame.
-        let scope = current_scope
-            .filter(|scope| scope.app_id() == app_id)
-            .cloned();
+        // SEC-1 compares ROUTE against ROUTE. The tenant half keeps two apps
+        // sharing one database out of each other's transaction frames; the
+        // database half keeps one app's two databases out of each other's, so a
+        // dispatch against the second database inside a transaction on the
+        // first is not admitted to the first's lane.
+        let route = binding.route();
+        let scope = current_scope.filter(|scope| scope.route() == &route).cloned();
         let in_tx = scope.is_some();
         Self {
-            app_id: app_id.to_string(),
-            schema,
+            binding: binding.clone(),
             in_tx,
             scope,
             registration,
@@ -107,14 +113,24 @@ impl CapturedRoute {
         }
     }
 
-    /// The physical schema this dispatch qualifies its tables with.
-    pub fn schema(&self) -> &SchemaName {
-        &self.schema
+    /// The binding this dispatch runs under.
+    pub fn binding(&self) -> &DbBinding {
+        &self.binding
     }
 
-    /// App identity used for transaction lanes.
+    /// The physical schema this dispatch qualifies its tables with.
+    pub fn schema(&self) -> &SchemaName {
+        self.binding.schema()
+    }
+
+    /// App identity. NOT the lane key: see [`Self::key`].
     pub fn app_id(&self) -> &str {
-        &self.app_id
+        self.binding.app_id()
+    }
+
+    /// The key this dispatch's transaction lane is held under.
+    pub fn key(&self) -> DbRoute {
+        self.binding.route()
     }
 
     /// Whether the captured dispatch belongs to a transaction callback.
@@ -130,7 +146,7 @@ impl CapturedRoute {
         &self,
         binding: &DbBinding,
     ) -> Result<(), crate::error::DbError> {
-        validate_binding_target(&self.app_id, &self.schema, binding)
+        validate_binding_target(&self.binding, binding)
     }
 
     /// Bind the frozen decision to the backend its SQL will run on.
@@ -158,8 +174,7 @@ impl CapturedRoute {
         };
         Ok(TxRoute {
             usage: self.usage,
-            app_id: self.app_id,
-            schema: self.schema,
+            binding: self.binding,
             in_tx: self.in_tx,
             scope: self.scope,
             backend,
@@ -173,8 +188,7 @@ impl CapturedRoute {
     #[doc(hidden)]
     pub fn pool_for_tests(app_id: &str, registration: SqlRegistration) -> Self {
         Self {
-            app_id: app_id.to_string(),
-            schema: SchemaName::new(app_id).expect("test app ids are legal schema names"),
+            binding: crate::tests::fixtures::harness_binding(app_id),
             in_tx: false,
             scope: None,
             registration,
@@ -183,15 +197,28 @@ impl CapturedRoute {
         }
     }
 
-    /// Test-only route claiming the app’s currently installed transaction scope.
+    /// Test-only autocommit route on an already-minted binding.
     #[cfg(test)]
     #[doc(hidden)]
-    pub fn tx_for_tests(app_id: &str, registration: SqlRegistration) -> Self {
+    pub fn pool_on_binding_for_tests(binding: &DbBinding, registration: SqlRegistration) -> Self {
         Self {
-            app_id: app_id.to_string(),
-            schema: SchemaName::new(app_id).expect("test app ids are legal schema names"),
+            binding: binding.clone(),
+            in_tx: false,
+            scope: None,
+            registration,
+            connection: CapturedConnection::Unbound,
+            usage: None,
+        }
+    }
+
+    /// Test-only route claiming the binding's currently installed transaction scope.
+    #[cfg(test)]
+    #[doc(hidden)]
+    pub fn tx_on_binding_for_tests(binding: &DbBinding, registration: SqlRegistration) -> Self {
+        Self {
+            binding: binding.clone(),
             in_tx: true,
-            scope: TransactionScope::current(app_id).ok(),
+            scope: TransactionScope::current(&binding.route()).ok(),
             registration,
             connection: CapturedConnection::Unbound,
             usage: None,
@@ -211,7 +238,7 @@ impl TxRoute {
         &self,
         binding: &DbBinding,
     ) -> Result<(), crate::error::DbError> {
-        validate_binding_target(&self.app_id, &self.schema, binding)
+        validate_binding_target(&self.binding, binding)
     }
 
     /// The sink this dispatch reports successful work to, if its host attached one.
@@ -224,19 +251,31 @@ impl TxRoute {
         self.scope.as_ref().map_or(Ok(()), TransactionScope::check)
     }
 
-    /// The TENANT this dispatch runs for: the transaction-lane key, the SQLite
-    /// ATTACH alias, the CDC stamp.
-    ///
-    /// NOT the schema. Use [`Self::schema`] to qualify a table or to derive the
-    /// PostgreSQL runtime role.
-    pub fn app_id(&self) -> &str {
-        &self.app_id
+    /// The binding this dispatch runs under: the tenant, the database, the
+    /// schema statements are qualified with, and the role the session narrows
+    /// to.
+    pub fn binding(&self) -> &DbBinding {
+        &self.binding
     }
 
-    /// The PHYSICAL SCHEMA this dispatch qualifies its tables with, and the one
-    /// the per-app PostgreSQL role is derived from.
+    /// The TENANT this dispatch runs for: the SQLite ATTACH alias, the CDC
+    /// stamp, the app the usage sink attributes to.
+    ///
+    /// NOT the lane key, which also carries the database ([`Self::key`]), and
+    /// not the schema ([`Self::schema`]).
+    pub fn app_id(&self) -> &str {
+        self.binding.app_id()
+    }
+
+    /// The key this dispatch's transaction lane and thread-local state are held
+    /// under.
+    pub fn key(&self) -> DbRoute {
+        self.binding.route()
+    }
+
+    /// The PHYSICAL SCHEMA this dispatch qualifies its tables with.
     pub fn schema(&self) -> &SchemaName {
-        &self.schema
+        self.binding.schema()
     }
 
     /// The backend this dispatch's SQL runs on.
@@ -264,13 +303,13 @@ impl TxRoute {
     /// Promote this already-captured dispatch onto an internal transaction.
     ///
     /// This is deliberately a consuming conversion rather than another
-    /// constructor: the app identity and the original async-scope decision
-    /// still have to come from [`CapturedRoute::capture`]. Bulk write fan-out uses it
+    /// constructor: the binding and the original async-scope decision still
+    /// have to come from [`CapturedRoute::capture`]. Bulk write fan-out uses it
     /// only after opening either a top-level transaction or a savepoint, so
     /// every statement and its deferred broker event share that frame.
     pub fn into_internal_transaction(mut self) -> Result<Self, crate::error::DbError> {
         self.in_tx = true;
-        self.scope = Some(TransactionScope::current(&self.app_id)?);
+        self.scope = Some(TransactionScope::current(&self.binding.route())?);
         Ok(self)
     }
 }

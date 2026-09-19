@@ -791,6 +791,11 @@ mod tests {
             .insert("APP_ID".into(), other.as_str().into());
         let mut isolate = v8::Isolate::new(v8::CreateParams::default());
         isolate.set_slot(state);
+        // `RuntimeState::new` snapshots APP_ID at construction, so the identity
+        // the rehydrator asks for is `app` and not the `other` written over the
+        // live map above. Keying the store on `other` would leave the binding
+        // unresolved while looking wired.
+        crate::tests::fixtures::supply_app_bindings([app.as_str()]);
         v8::scope!(let handles, &mut isolate);
         let context = v8::Context::new(handles, Default::default());
         let scope = &mut v8::ContextScope::new(handles, context);

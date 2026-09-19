@@ -7,18 +7,18 @@ use crate::value::Value;
 use crate::backend::postgres::pg_error;
 use crate::backend::postgres::pg_session_sql::autocommit_local_session_setup_sql;
 use crate::connection::SessionAuthority;
-use crate::sql::SchemaName;
+use crate::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
 
 /// Read driver rows under the binding's authority.
 pub(crate) async fn scoped_rows(
     pool: &Rc<compio_postgres::Pool>,
-    schema: &SchemaName,
+    binding: &DbBinding,
     authority: SessionAuthority,
     sql: &str,
     params: &[Value],
 ) -> Result<Vec<compio_postgres::Row>, DbError> {
-    with_scoped_transaction(pool, schema, authority, async |tx| {
+    with_scoped_transaction(pool, binding, authority, async |tx| {
         let bindings: Vec<_> = params.iter().map(super::params::Parameter).collect();
         let refs: Vec<&(dyn compio_postgres::types::ToSql + Sync)> =
             bindings.iter().map(|value| value as _).collect();
@@ -32,12 +32,12 @@ pub(crate) async fn scoped_rows(
 /// Execute without fetching rows under the binding's authority.
 pub(crate) async fn scoped_execute(
     pool: &Rc<compio_postgres::Pool>,
-    schema: &SchemaName,
+    binding: &DbBinding,
     authority: SessionAuthority,
     sql: &str,
     params: &[Value],
 ) -> Result<u64, DbError> {
-    with_scoped_transaction(pool, schema, authority, async |tx| {
+    with_scoped_transaction(pool, binding, authority, async |tx| {
         let bindings: Vec<_> = params.iter().map(super::params::Parameter).collect();
         let refs: Vec<&(dyn compio_postgres::types::ToSql + Sync)> =
             bindings.iter().map(|value| value as _).collect();
@@ -50,7 +50,7 @@ pub(crate) async fn scoped_execute(
 
 async fn with_scoped_transaction<T>(
     pool: &Rc<compio_postgres::Pool>,
-    schema: &SchemaName,
+    binding: &DbBinding,
     authority: SessionAuthority,
     operation: impl for<'a, 'conn> AsyncFnOnce(
         &'a compio_postgres::Transaction<'conn>,
@@ -72,10 +72,12 @@ async fn with_scoped_transaction<T>(
         err
     })?;
 
-    let setup_sql = autocommit_local_session_setup_sql(schema, authority)?;
+    let setup_sql = autocommit_local_session_setup_sql(binding, authority)?;
     tx.simple_query(&setup_sql).await.map_err(|e| {
         let mut classified = match authority {
-            SessionAuthority::PerAppRole => pg_error::classify_pg_per_app_session_setup(&e, schema),
+            SessionAuthority::PerBindingRole => {
+                pg_error::classify_pg_binding_session_setup(&e, binding)
+            }
             SessionAuthority::Connection => {
                 zeroship_data_orm::error::SessionSetupError::failed(pg_error::classify(&e))
             }
@@ -102,11 +104,11 @@ async fn with_scoped_transaction<T>(
 /// Propagates any error from [`scoped_rows`].
 pub(crate) async fn scoped_json(
     pool: &Rc<compio_postgres::Pool>,
-    schema: &SchemaName,
+    binding: &DbBinding,
     authority: SessionAuthority,
     sql: &str,
     params: &[Value],
 ) -> Result<Vec<Value>, DbError> {
-    let rows = scoped_rows(pool, schema, authority, sql, params).await?;
+    let rows = scoped_rows(pool, binding, authority, sql, params).await?;
     crate::backend::postgres::pg_row_json::rows_to_values(&rows)
 }

@@ -20,6 +20,40 @@ pub(crate) struct Limits {
 
 pub(crate) const SLOT_PREFIX: &str = "__zs_relay_";
 
+/// The physical schema of the one database this app is bound to.
+///
+/// **Read from Control's rows, never composed here.** The database id is a
+/// control-plane fact and `db_<dbs>` is derived from it, so a relay that
+/// composed a schema from the app id would name something no reconciler
+/// created. This is the same read Control's binding endpoint performs, taken
+/// against the pool this process already reads `zeroship.worker_instances`
+/// from when it verifies a worker.
+///
+/// **An app holds exactly one database today, so "the app's binding" is
+/// unambiguous.** When an app can hold several, the subscribe request has to
+/// name WHICH database, and that is a wire-contract change: every producer,
+/// consumer, fixture and doc in one patch.
+async fn bound_database_schema(pool: &Pool, app: &str) -> Result<String, Error> {
+    let rows = pool
+        .query(
+            "SELECT b.database_id \
+               FROM zeroship.database_bindings b \
+               JOIN zeroship.databases d ON d.id = b.database_id \
+              WHERE b.app_id = $1 \
+                AND b.status = 'active' \
+                AND b.observed_generation >= b.generation \
+                AND d.status = 'active' \
+              ORDER BY b.id \
+              LIMIT 1",
+            &[&app],
+        )
+        .await?;
+    let row = rows.first().ok_or("app has no live database binding")?;
+    let database: String = row.try_get(0)?;
+    let database = zeroship_core::DatabaseId::parse(&database)?;
+    Ok(zeroship_core::database_derivation::schema_name(&database))
+}
+
 pub(crate) fn slot_name(app: &str) -> Result<String, Error> {
     let publication = zeroship_core::replication_names::publication_name(app)?;
     let token = publication
@@ -87,6 +121,12 @@ async fn capture(
     {
         return Err("app publication is absent".into());
     }
+    // THE TENANT BOUNDARY IN THIS STREAM. The publication is relay-owned and
+    // spans every database on the datastore, so its membership is NOT a filter:
+    // reading namespaces out of it would admit every co-tenant's relations to
+    // this subscriber. What separates them is this comparison, against the
+    // schema of the ONE database this app is bound to.
+    let schema = bound_database_schema(pool, app).await?;
     // A source restart begins a new snapshot contract. Discard any inactive
     // previous slot rather than claiming that an in-memory queue is durable.
     pool.query("SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1 AND NOT active AND database = current_database()", &[&slot]).await?;
@@ -121,7 +161,7 @@ async fn capture(
                         name,
                         ..
                     } => {
-                        if namespace == app {
+                        if namespace == schema {
                             if !relations.contains_key(&rel_id) && relations.len() >= max_relations
                             {
                                 return Err("relation cache capacity exhausted".into());
@@ -224,6 +264,66 @@ mod tests {
             .expect("CDC source stopped")
     }
 
+    /// One database per app, derived the way the reconciler derives it.
+    ///
+    /// Keyed on the app id so the fixture and the Control rows it declares
+    /// below cannot drift: both call this.
+    fn test_database(app: &str) -> zeroship_core::DatabaseId {
+        use std::collections::HashMap;
+        use std::sync::{Mutex, OnceLock};
+        static DATABASES: OnceLock<Mutex<HashMap<String, zeroship_core::DatabaseId>>> =
+            OnceLock::new();
+        DATABASES
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .expect("database map")
+            .entry(app.to_owned())
+            .or_insert_with(zeroship_core::DatabaseId::mint)
+            .clone()
+    }
+
+    fn test_schema(app: &str) -> String {
+        zeroship_core::database_derivation::schema_name(&test_database(app))
+    }
+
+    /// Declare the Control rows the relay reads to resolve a subscriber's
+    /// schema. Without them capture refuses, which is the production behaviour
+    /// for an app whose binding is not live.
+    async fn declare_binding(pool: &Pool, app: &str) {
+        let database = test_database(app).as_str().to_owned();
+        pool.batch_execute(
+            "CREATE SCHEMA IF NOT EXISTS zeroship;
+             CREATE TABLE IF NOT EXISTS zeroship.databases (
+               id text PRIMARY KEY, status text NOT NULL, schema_epoch int NOT NULL DEFAULT 1
+             );
+             CREATE TABLE IF NOT EXISTS zeroship.database_bindings (
+               id text PRIMARY KEY, app_id text NOT NULL, database_id text NOT NULL,
+               status text NOT NULL, generation bigint NOT NULL DEFAULT 1,
+               observed_generation bigint NOT NULL DEFAULT 1
+             );",
+        )
+        .await
+        .expect("declare the control stand-ins");
+        pool.execute(
+            "INSERT INTO zeroship.databases (id, status) VALUES ($1, 'active') \
+             ON CONFLICT (id) DO NOTHING",
+            &[&database],
+        )
+        .await
+        .expect("declare the database");
+        pool.execute(
+            "INSERT INTO zeroship.database_bindings (id, app_id, database_id, status) \
+             VALUES ($1, $2, $3, 'active') ON CONFLICT (id) DO NOTHING",
+            &[
+                &zeroship_core::BindingId::mint().as_str().to_owned(),
+                &app.to_owned(),
+                &database,
+            ],
+        )
+        .await
+        .expect("declare the binding");
+    }
+
     #[compio::test]
     async fn committed_changes_fan_out_without_values_and_rollback_stays_silent() {
         let postgres = crate::postgres_fixture::Postgres::start();
@@ -232,21 +332,28 @@ mod tests {
         let app = zeroship_core::typed_id::generate(zeroship_core::typed_id::APP_PREFIX);
         let sibling = zeroship_core::typed_id::generate(zeroship_core::typed_id::APP_PREFIX);
         let publication = zeroship_core::replication_names::publication_name(&app).unwrap();
+        // Two DATABASES, one subscriber. The sibling stands in for a co-tenant
+        // whose tables are in the same publication, which is the shape the
+        // relay-owned per-datastore publication has: membership is not a fence,
+        // and the namespace comparison is.
+        let schema = test_schema(&app);
+        let sibling_schema = test_schema(&sibling);
         let ddl = format!(
-            "CREATE SCHEMA \"{app}\";
-             CREATE SCHEMA \"{sibling}\";
-             CREATE TABLE \"{app}\".orders (id int PRIMARY KEY, secret text);
-             CREATE TABLE \"{app}\".rolled_back (id int);
-             CREATE TABLE \"{app}\".__zeroship_events (id int PRIMARY KEY);
-             CREATE TABLE \"{app}\".partitioned_events (id int, bucket int) PARTITION BY LIST (bucket);
-             CREATE TABLE \"{app}\".partitioned_events_default PARTITION OF \"{app}\".partitioned_events DEFAULT;
-             CREATE TABLE \"{sibling}\".noise (id int PRIMARY KEY);
-             CREATE PUBLICATION \"{publication}\" FOR TABLES IN SCHEMA \"{app}\" WITH (publish_via_partition_root = true);
-             ALTER PUBLICATION \"{publication}\" ADD TABLE \"{sibling}\".noise;"
+            "CREATE SCHEMA \"{schema}\";
+             CREATE SCHEMA \"{sibling_schema}\";
+             CREATE TABLE \"{schema}\".orders (id int PRIMARY KEY, secret text);
+             CREATE TABLE \"{schema}\".rolled_back (id int);
+             CREATE TABLE \"{schema}\".__zeroship_events (id int PRIMARY KEY);
+             CREATE TABLE \"{schema}\".partitioned_events (id int, bucket int) PARTITION BY LIST (bucket);
+             CREATE TABLE \"{schema}\".partitioned_events_default PARTITION OF \"{schema}\".partitioned_events DEFAULT;
+             CREATE TABLE \"{sibling_schema}\".noise (id int PRIMARY KEY);
+             CREATE PUBLICATION \"{publication}\" FOR TABLES IN SCHEMA \"{schema}\" WITH (publish_via_partition_root = true);
+             ALTER PUBLICATION \"{publication}\" ADD TABLE \"{sibling_schema}\".noise;"
         );
         pool.batch_execute(&ddl)
             .await
             .expect("logical WAL and publication required");
+        declare_binding(&pool, &app).await;
         let hub = Rc::new(Hub::default());
         let (first, start) = hub.subscribe(&app, 1, 4, 32).unwrap();
         let (second, duplicate) = hub.subscribe(&app, 1, 4, 32).unwrap();
@@ -268,11 +375,11 @@ mod tests {
         let writer = pool.acquire().await.unwrap();
         writer
             .batch_execute(&format!(
-                "INSERT INTO \"{sibling}\".noise VALUES (1); TRUNCATE \"{sibling}\".noise"
+                "INSERT INTO \"{sibling_schema}\".noise VALUES (1); TRUNCATE \"{sibling_schema}\".noise"
             ))
             .await
             .unwrap();
-        writer.batch_execute(&format!("BEGIN; INSERT INTO \"{app}\".rolled_back VALUES (1); ROLLBACK; BEGIN; INSERT INTO \"{app}\".orders VALUES (1, 'must-never-reach-a-worker')")).await.unwrap();
+        writer.batch_execute(&format!("BEGIN; INSERT INTO \"{schema}\".rolled_back VALUES (1); ROLLBACK; BEGIN; INSERT INTO \"{schema}\".orders VALUES (1, 'must-never-reach-a-worker')")).await.unwrap();
         assert!(first.events.is_empty(), "uncommitted changes escaped");
         writer.batch_execute("COMMIT").await.unwrap();
         for lease in [&first, &second] {
@@ -290,7 +397,7 @@ mod tests {
         }
         writer
             .batch_execute(&format!(
-                "INSERT INTO \"{app}\".__zeroship_events VALUES (1)"
+                "INSERT INTO \"{schema}\".__zeroship_events VALUES (1)"
             ))
             .await
             .unwrap();
@@ -305,7 +412,7 @@ mod tests {
         }
         writer
             .batch_execute(&format!(
-                "INSERT INTO \"{app}\".partitioned_events VALUES (1, 7)"
+                "INSERT INTO \"{schema}\".partitioned_events VALUES (1, 7)"
             ))
             .await
             .unwrap();
@@ -319,7 +426,7 @@ mod tests {
             );
         }
         writer
-            .batch_execute(&format!("TRUNCATE \"{app}\".orders"))
+            .batch_execute(&format!("TRUNCATE \"{schema}\".orders"))
             .await
             .unwrap();
         assert_eq!(event(&first).await, Event::Resync);
@@ -340,7 +447,7 @@ mod tests {
             .unwrap()
             .is_empty());
         pool.batch_execute(&format!(
-            "DROP PUBLICATION \"{publication}\"; DROP SCHEMA \"{app}\" CASCADE; DROP SCHEMA \"{sibling}\" CASCADE"
+            "DROP PUBLICATION \"{publication}\"; DROP SCHEMA \"{schema}\" CASCADE; DROP SCHEMA \"{sibling_schema}\" CASCADE"
         ))
         .await
         .unwrap();

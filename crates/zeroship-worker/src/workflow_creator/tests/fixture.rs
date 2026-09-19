@@ -183,7 +183,7 @@ impl Fixture {
             ))
             .unwrap(),
             keys: ProjectKeySource::unavailable(),
-            binding: DbBinding::new(app.as_str(), "creator-fixture", schema),
+            binding: DbBinding::platform(app.as_str(), "creator-fixture", schema),
             objects: StorageStore::from_backend(Arc::new(LocalFs::new(
                 directory.path().join("objects"),
             ))),

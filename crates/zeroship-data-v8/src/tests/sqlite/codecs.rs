@@ -7,11 +7,12 @@ use crate::tests::fixtures::parity;
 fn stored_json_limit_round_trips_through_worker_find() {
     run(async {
         let dir = tempfile::tempdir().unwrap();
+        let alias = crate::tests::fixtures::harness_alias(LOCAL_DEV_APP_ID);
         apply_schema_ahead_of_runtime(
             &dir,
             &format!(
-            "CREATE TABLE \"{LOCAL_DEV_APP_ID}\".documents ({SYSTEM_COLUMNS_SQLITE}, payload TEXT);"
-        ),
+                "CREATE TABLE \"{alias}\".documents ({SYSTEM_COLUMNS_SQLITE}, payload TEXT);"
+            ),
         );
         let limit = zeroship_data_orm::sql::codecs::MAX_JSON_DEPTH;
         let source = sqlite_runtime_source(
@@ -50,8 +51,9 @@ const _procedures = {{
 fn artifact_binary_defaults_reach_sdk_inserts_as_native_bytes() {
     run(async {
         let dir = tempfile::tempdir().unwrap();
+        let alias = crate::tests::fixtures::harness_alias(LOCAL_DEV_APP_ID);
         apply_schema_ahead_of_runtime(&dir, &format!(
-            "CREATE TABLE \"{LOCAL_DEV_APP_ID}\".blobs (id TEXT PRIMARY KEY, payload BLOB NOT NULL DEFAULT X'00FF');"
+            "CREATE TABLE \"{alias}\".blobs (id TEXT PRIMARY KEY, payload BLOB NOT NULL DEFAULT X'00FF');"
         ));
         let descriptor = zeroship_data_orm::value!({
             "version":2, "collections":{"blobs":{"fields":{
@@ -91,10 +93,11 @@ const _procedures = {{
 fn exact_decimal_strings_round_trip_through_v8() {
     run(async {
         let dir = tempfile::tempdir().expect("create decimal fixture dir");
+        let alias = crate::tests::fixtures::harness_alias(LOCAL_DEV_APP_ID);
         apply_schema_ahead_of_runtime(
             &dir,
             &format!(
-                r#"CREATE TABLE "{LOCAL_DEV_APP_ID}"."ledger" ({SYSTEM_COLUMNS_SQLITE}, "amount" TEXT NOT NULL);"#
+                r#"CREATE TABLE "{alias}"."ledger" ({SYSTEM_COLUMNS_SQLITE}, "amount" TEXT NOT NULL);"#
             ),
         );
         let schema = zeroship_data_orm::value!({
@@ -165,13 +168,14 @@ fn bytes_column_stores_a_raw_blob_on_sqlite() {
         let dir = tempfile::tempdir().expect("create parity dir");
         let snapshot = parity::run_matrix(&parity::sqlite_url(&dir), parity::DEV_APP_ID);
 
-        // Re-attach the matrix's app database before using its qualified name.
+        // Re-attach the matrix's database file before using its qualified name.
         let client = crate::tests::fixtures::sqlite::Inspector::open(dir.path());
+        let alias = crate::tests::fixtures::harness_alias(LOCAL_DEV_APP_ID);
         // `query` materialises every cell as `Option<String>` and renders a BLOB
         // as `<N bytes blob>`, so ask SQLite itself for the discriminant and the
         // hex - the same route `p5_*` uses for ciphertext.
         let sql = format!(
-            "SELECT typeof(payload_bytes), hex(payload_bytes) FROM \"{LOCAL_DEV_APP_ID}\".\"{}\" \
+            "SELECT typeof(payload_bytes), hex(payload_bytes) FROM \"{alias}\".\"{}\" \
              WHERE title = 'typed-roundtrip'",
             snapshot.collection
         );

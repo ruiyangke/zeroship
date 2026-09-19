@@ -412,7 +412,7 @@ async fn manager_recovery_authority(fixture: &platform::Platform) {
     };
 
     let queue = Queue::connect(
-        DbBinding::new(
+        DbBinding::platform(
             "workflow_manager",
             "platform-schema",
             SchemaName::new("workflow_manager").unwrap(),
@@ -556,7 +556,7 @@ async fn manager_scheduling_authority(fixture: &platform::Platform) {
     };
 
     let queue = Queue::connect(
-        DbBinding::new(
+        DbBinding::platform(
             "workflow_manager",
             "platform-schema",
             SchemaName::new("workflow_manager").unwrap(),

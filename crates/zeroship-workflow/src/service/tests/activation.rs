@@ -784,8 +784,7 @@ async fn sqlite_activation_receipt_rolls_back_history_and_selection() {
     let attached = store
         .backend
         .query(
-            store.binding.app_id(),
-            store.binding.schema(),
+            &store.binding,
             "PRAGMA database_list",
             &[],
         )
@@ -793,7 +792,7 @@ async fn sqlite_activation_receipt_rolls_back_history_and_selection() {
         .unwrap();
     let namespace = store
         .backend
-        .namespace(store.binding.app_id(), store.binding.schema());
+        .namespace(&store.binding);
     let path = attached
         .iter()
         .find(|row| row.get("name").and_then(Value::as_str) == Some(namespace))

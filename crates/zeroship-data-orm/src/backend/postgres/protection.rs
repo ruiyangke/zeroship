@@ -7,8 +7,7 @@ use async_trait::async_trait;
 impl crate::protection::Catalog for PostgresBackend {
     async fn introspect_schema(
         &self,
-        _app_id: &str,
-        schema: &crate::sql::SchemaName,
+        binding: &crate::binding::DbBinding,
         session: Option<&crate::driver::Session>,
     ) -> Result<crate::sql::catalog::LiveSchema, DbError> {
         let pooled;
@@ -24,7 +23,7 @@ impl crate::protection::Catalog for PostgresBackend {
                 .map_err(|error| pg_error::classify(&error))?;
             &pooled
         };
-        pg_introspect::read_live_schema(client, schema.as_str())
+        pg_introspect::read_live_schema(client, binding.schema().as_str())
             .await
             .map_err(pg_error::classify_schema_error)
     }

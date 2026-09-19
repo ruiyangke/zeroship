@@ -3,25 +3,26 @@ use zeroship_data_orm::value;
 
 fn fixture(body: &str) -> (tempfile::TempDir, SqliteRuntimeSource) {
     let dir = tempfile::tempdir().unwrap();
+    let alias = crate::tests::fixtures::harness_alias(LOCAL_DEV_APP_ID);
     apply_schema_ahead_of_runtime(
         &dir,
         &format!(
             r#"
-CREATE TABLE "{LOCAL_DEV_APP_ID}".users (
+CREATE TABLE "{alias}".users (
     id TEXT PRIMARY KEY, name TEXT NOT NULL, retired TEXT,
     ssn TEXT /* zero-migrate:mask:kind=last4,classification=spi */,
     __zs_raw__ssn TEXT, tally INTEGER, payload BLOB, moment TEXT
 );
-CREATE TABLE "{LOCAL_DEV_APP_ID}".posts (
+CREATE TABLE "{alias}".posts (
     id TEXT PRIMARY KEY, title TEXT NOT NULL, author_id TEXT, editor_id TEXT,
     hidden_owner TEXT,
     masked_owner TEXT /* zero-migrate:mask:kind=last4,classification=pii */,
     __zs_raw__masked_owner TEXT
 );
-INSERT INTO "{LOCAL_DEV_APP_ID}".users VALUES
+INSERT INTO "{alias}".users VALUES
     ('u1', 'Ada', NULL, '***-**-6789', '123-45-6789', 9007199254740993, X'0001FF', '2026-09-12T12:00:00Z'),
     ('u2', 'Deleted', '2026-09-12T12:00:00Z', NULL, NULL, NULL, NULL, NULL);
-INSERT INTO "{LOCAL_DEV_APP_ID}".posts VALUES
+INSERT INTO "{alias}".posts VALUES
     ('p1', 'present', 'u1', 'u1', 'u1', '**', 'u1'),
     ('p2', 'empty', NULL, NULL, NULL, NULL, NULL),
     ('p3', 'deleted', 'u2', NULL, NULL, NULL, NULL),

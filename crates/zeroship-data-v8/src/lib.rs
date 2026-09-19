@@ -56,6 +56,7 @@ pub(crate) mod tx_scope;
 pub struct DbPlugin {
     connection: ConnectionFactory,
     project_keys: std::sync::Arc<zeroship_data_orm::encryption::SuppliedProjectKeys>,
+    app_bindings: std::sync::Arc<zeroship_data_orm::resolved_bindings::SuppliedAppBindings>,
     cdc_relay: Option<zeroship_data_orm::cdc::relay::RelayConfig>,
     meter: Option<std::sync::Arc<zeroship_metering::Meter>>,
 }
@@ -65,12 +66,14 @@ impl DbPlugin {
         cdc_relay: Option<zeroship_data_orm::cdc::relay::RelayConfig>,
         meter: Option<std::sync::Arc<zeroship_metering::Meter>>,
         project_keys: std::sync::Arc<zeroship_data_orm::encryption::SuppliedProjectKeys>,
+        app_bindings: std::sync::Arc<zeroship_data_orm::resolved_bindings::SuppliedAppBindings>,
     ) -> Self {
         Self {
             connection,
             cdc_relay,
             meter,
             project_keys,
+            app_bindings,
         }
     }
 }
@@ -143,11 +146,11 @@ impl NativePlugin for DbPlugin {
         // context anyway, so a future validator change cannot publish a
         // partial schema on error.
         let schemas = descriptor_schemas(descriptor)?;
-        // Same refusal as `mint_db`: an app id that is not a legal schema name
-        // has no binding to key the descriptor under, so publish nothing rather
-        // than key it under a schema that cannot be addressed.
+        // Same refusal as `mint_db`: an app the host resolved no binding for has
+        // nothing to key the descriptor under, so publish nothing rather than key
+        // it under a schema no reconciler converged.
         let binding = v8_classes::db::binding_for_isolate(scope, app_id)
-            .ok_or_else(|| format!("app id {app_id:?} is not a legal database schema name"))?;
+            .ok_or_else(|| format!("app id {app_id:?} has no resolved database binding"))?;
         startup_policy::initialize(scope, binding.clone());
         zeroship_data_orm::descriptor::install_collections(&binding, schemas)
             .map_err(|error| error.to_string())?;
@@ -166,6 +169,7 @@ impl NativePlugin for DbPlugin {
     fn register(&self, _: &mut NativeRegistrar) {
         ctx_mut(|context| {
             context.set_supplied_project_keys(Some(self.project_keys.clone()));
+            context.set_app_bindings(Some(self.app_bindings.clone()));
             context.install_connection(self.connection.clone());
             context.set_cdc_relay(self.cdc_relay.clone());
             context.set_meter(self.meter.clone());
@@ -207,10 +211,15 @@ mod runtime_descriptor_binding_tests {
         env.insert("ZEROSHIP_DEPLOY_ID".to_string(), DEPLOY.to_string());
         let state: SharedState = std::rc::Rc::new(RefCell::new(RuntimeState::new(env, None, None)));
         scope.set_slot(state);
+        // The tests that call this drive the plugin directly rather than
+        // through a Runtime, so `register` never runs and the thread would
+        // carry no binding store at all.
+        crate::tests::fixtures::supply_app_bindings([APP]);
     }
 
     fn plugin() -> std::sync::Arc<DbPlugin> {
         service::DbService::new(service::DbServiceConfig {
+            app_bindings: crate::tests::fixtures::harness_app_bindings([APP]),
             project_keys: crate::tests::fixtures::project_keys(),
             connection: zeroship_data_orm::connection::ConnectionFactory::for_url(
                 "sqlite:descriptor-test.sqlite",
@@ -410,11 +419,7 @@ export default { fetch() { return new Response("ok"); } };
             )
             .expect("bind descriptor");
 
-        let binding = zeroship_data_orm::binding::DbBinding::new(
-            APP,
-            DEPLOY,
-            zeroship_data_orm::sql::SchemaName::new(APP).unwrap(),
-        );
+        let binding = crate::tests::fixtures::harness_binding_at_deploy(APP, DEPLOY);
         let schema = descriptor::collection_schema(&binding, "users")
             .expect("declared collection must resolve before any read");
         assert_eq!(
@@ -505,11 +510,7 @@ export default { fetch() { return new Response("ok"); } };
             .bind_runtime_descriptor(scope, APP, namespace, None)
             .expect("bind schema-less runtime");
 
-        let binding = zeroship_data_orm::binding::DbBinding::new(
-            APP,
-            DEPLOY,
-            zeroship_data_orm::sql::SchemaName::new(APP).unwrap(),
-        );
+        let binding = crate::tests::fixtures::harness_binding_at_deploy(APP, DEPLOY);
         let error = descriptor::collection_schema(&binding, "stale")
             .expect_err("schema-less binding must declare no collection");
         assert!(

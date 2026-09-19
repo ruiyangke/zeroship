@@ -296,7 +296,7 @@ async fn connect_policies(
     };
     compio::time::timeout(options.command_timeout, async {
         let database = Database::connect(
-            DbBinding::new(
+            DbBinding::platform(
                 "platform",
                 "workflow-policy",
                 SchemaName::new("zeroship").map_err(|_| ManagerError::Invalid)?,
@@ -326,7 +326,7 @@ async fn connect_lifecycle(url: &str, options: Options) -> Result<ControlLifecyc
     };
     compio::time::timeout(options.command_timeout, async {
         let database = Database::connect(
-            DbBinding::new(
+            DbBinding::platform(
                 "platform",
                 "workflow-lifecycle",
                 SchemaName::new("zeroship").map_err(|_| ManagerError::Invalid)?,

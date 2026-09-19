@@ -1,9 +1,10 @@
 # Decoupling app identity from database identity
 
 **Status.** PARTLY BUILT, on `feat/app-database-decoupling`. What exists is the identity, the
-entities, the control-plane surface that declares them and the cluster reconciler that makes a
-cluster match. The data path has not moved: the worker still composes a per-app role name, so
-no app reaches a second database and no fence is enforced at runtime yet.
+entities, the control-plane surface that declares them, the cluster reconciler that makes a
+cluster match, and the data path that narrows to what the reconciler granted. What remains is the
+creator surface, the manifest reshape, the migration service's own re-key, the CDC routing key and
+the encryption salt.
 
 Built:
 
@@ -37,10 +38,21 @@ Built:
   datastore_reconciler_pg.rs` drives it against a live control plane and a live tenant cluster,
   including the fence end to end through a real worker login.
 
-Not built, and this is the whole data path: `zeroship_core::app_derivation::schema_name`
-(`crates/zeroship-core/src/app_derivation.rs`) still returns the app id itself; `DbBinding`
-(`crates/zeroship-data-orm/src/binding.rs`) still carries `{ app_id, deploy_token, schema }`;
-the worker still composes the per-app role name, and no apply advances an epoch.
+- the data path's re-key. `DbBinding` (`crates/zeroship-data-orm/src/binding.rs`) carries the
+  database, the schema `db_<dbs>`, the binding role `zs_bind_<bnd>_e<E>` and the epoch, and
+  derives the last two rather than accepting them. The PostgreSQL session-setup batch narrows to
+  that role as its first statement
+  (`crates/zeroship-data-orm/src/backend/postgres/pg_session_sql.rs`), and the classifier splits
+  `42501` from `22023` on it. Transaction lanes, the captured route and the V8 continuation slot
+  key on `(app_id, database_id)`. The SQLite dev tier attaches one file per database under the
+  schema. Control resolves an app's live binding at
+  `GET /internal/apps/{app_id}/binding` and the worker installs it into a host-supplied store
+  (`crates/zeroship-data-orm/src/resolved_bindings.rs`); an isolate composes no part of a binding
+  and an app with none has no `env.db`.
+
+Not built: the creator surface and `env.databases`, the `Manifest.runtime_descriptor` reshape,
+`schema/project-v1.json`, the migration service's own app-id-to-database re-key, the CDC routing
+key, the encryption salt and AAD, and capacity-aware placement. No apply advances an epoch.
 
 **Control still never writes `active` itself.** The management surface declares and stops: a
 database it creates stops at `provisioning` and a binding at `pending` until a reconciler holding
@@ -706,28 +718,40 @@ by roles.
 
 ## Binding resolution
 
-The control plane resolves the app's bindings at deploy time and hands the worker a set:
+BUILT for one binding per app. Control answers `GET /internal/apps/{app_id}/binding`
+(`crates/zeroship-control/src/internal.rs`, `get_app_binding`) with the database id, the edge id
+and the schema epoch, serving only a binding whose status is `active` and whose
+`observed_generation` has caught up. The worker installs it into a process-wide
+`SuppliedAppBindings` (`crates/zeroship-data-orm/src/resolved_bindings.rs`) beside the project key
+it already fetches, and `binding_for_isolate`
+(`crates/zeroship-data-v8/src/v8_classes/db.rs`) READS it. An isolate composes no part of a
+binding; an app Control serves none for gets no `env.db` at all, which is the refusal shape
+`collection_not_declared` (`crates/zeroship-data-orm/src/descriptor.rs`) has.
 
-```
-DbBinding { db: "dbs_...", schema: "db_...", ds: <datastore handle>,
-            cap: "readwrite", epoch: <E> }
-```
+The vehicle is `DbBinding` (`crates/zeroship-data-orm/src/binding.rs`), the per-isolate value
+every `Db` and `Collection` wrapper travels with. It carries the database, the schema, the binding
+role and the epoch, and DERIVES the last two from the ids rather than accepting them, so no call
+site can hand it a name that disagrees with the cluster.
 
-The vehicle is `DbBinding` (`crates/zeroship-data-orm/src/binding.rs`), which already carries
-identity to the plugin without passing through V8 and is already the per-isolate value every
-`Db` and `Collection` wrapper travels with. It gains the database id, the datastore handle, the
-capability and the epoch, and loses nothing.
+Still owed: a SET rather than one binding, which is the creator surface and the manifest reshape,
+and the capability, which Control knows and does not yet serve.
 
-The worker does not compare `epoch` in Rust to authorize a transaction; it composes the role
-name the setup batch sends. An app whose binding is absent is a hard refusal with the same shape
-as `collection_not_declared` (`crates/zeroship-data-orm/src/descriptor.rs`).
+The worker does not compare `epoch` in Rust to authorize a transaction; the epoch is a substring
+of the role name the setup batch sends.
 
-**Per-thread resources become maps keyed by datastore.** `ThreadDbContext`
-(`crates/zeroship-data-v8/src/context.rs`) holds one `Option<LocalConnection>` and
-`install_connection` replaces it whenever the factory identity differs, so registering a second
-target tears the first down. It becomes a map keyed by the datastore, with pools created lazily
-on first use and evicted when idle - the shape the isolate cache already has. A worker thread
-cannot hold a connection floor to every cluster in its zone.
+**Per-thread resources become maps keyed by datastore.** NOT BUILT, and the key is the reason it
+is not. `ThreadDbContext` (`crates/zeroship-data-v8/src/context.rs`) still holds one
+`Option<LocalConnection>`, which `install_connection` replaces whenever the factory identity
+differs. It has to become a map keyed by the DATASTORE - not by the binding and not by the
+database - because the datastore is what determines the connection: two databases on one cluster
+share a pool, and keying by either of the others would open a pool per database to the same
+server. That map is therefore blocked on the datastore handle reaching the worker, which is the
+same plumbing multi-cluster placement needs. Pools are created lazily on first use and evicted
+when idle - the shape the isolate cache already has - so a worker thread cannot hold a connection
+floor to every cluster in its zone.
+
+What `ThreadDbContext` DOES hold per thread today is the host-supplied binding store
+(`set_app_bindings`), which is how an isolate reads the binding Control resolved.
 
 The connection identity that keys that map is `ConnectionFactory::identity()`
 (`crates/zeroship-data-orm/src/connection/factory.rs`), whose `url` is a separate
@@ -945,23 +969,24 @@ behind*. It does not catch *code moving forward against a schema that is behind*
 the binding role for epoch `E` exists and `SET LOCAL ROLE` succeeds. That direction is Open 11,
 and until then it surfaces as `42703 undefined_column` at query time.
 
-**Error taxonomy.** The classifier
-(`crates/zeroship-data-orm/src/backend/postgres/pg_error.rs`) today matches SQLSTATE 22023 plus the
-exact role name and collapses it into `SCHEMA_NOT_PROVISIONED`
-(`crates/zeroship-data-orm/src/error.rs`). Under this design there are three outcomes, and the
-third is decided BEFORE a statement is sent rather than by a SQLSTATE:
+**Error taxonomy.** BUILT. The classifier
+(`crates/zeroship-data-orm/src/backend/postgres/pg_error.rs`, `is_missing_binding_role` and
+`classify_pg_binding_session_setup`) recognises the exact role the batch sent, which the binding
+composed once. There are three outcomes, and the third is decided BEFORE a statement is sent
+rather than by a SQLSTATE:
 
 - `42501 permission denied to set role` -> `GRANT_REVOKED`. Terminal, 403-shaped, never retried,
   never falls back to the pool. The reconciler leaves a revoked binding's role standing precisely
   so this stays separate from a retired epoch.
-- `22023 role does not exist` -> `SCHEMA_EPOCH_STALE`, retryable, the same condition
-  `Verdict::ReResolve` already carries.
-- **no binding at all** -> refused at RESOLUTION with `binding_not_resolved`, terminal. A role name
-  is composed only from a database edge (`pg_session_sql::session_setup_sql` returns `Err` when
-  `binding.session_role()` is `None`), and both call sites build the batch and `?` on it before
-  `simple_query`, so a narrowing connection with no edge never reaches the classifier at all.
-  Control serves only a binding that is `active` with `observed_generation` caught up on a database
-  that is `active`, so "never provisioned" is decided where it is decidable.
+- `22023 role does not exist` -> `SCHEMA_EPOCH_STALE` (`crates/zeroship-data-orm/src/error.rs`),
+  re-resolvable, the same condition `Verdict::ReResolve` carries.
+- **no binding at all** -> refused at RESOLUTION, terminal, with no message sniffing anywhere. A
+  role name is composed only from a database edge (`pg_session_sql::session_setup_sql` returns
+  `Err` when `binding.session_role()` is `None`), and both call sites build the batch and `?` on it
+  before `simple_query`, so a narrowing connection with no edge never reaches the classifier at
+  all. Control serves only a binding that is `active` with `observed_generation` caught up on a
+  database that is `active`, so `env.db` is not minted and "never provisioned" is decided where it
+  is decidable.
 
 **Do not put the third arm back in the classifier.** An earlier revision of this document had it
 there, reasoning that the classifier "only needs to know from the injected binding whether a live
@@ -971,9 +996,10 @@ Control has since stopped serving, and the classifier's only input is the bindin
 it would have answered `SCHEMA_EPOCH_STALE` for that case either way. What distinguishes a
 withdrawn binding is a re-resolution, which is a protocol rather than a classification.
 
-The three codes being pairwise distinct is bound by
-`pg_error::the_three_setup_outcomes_are_pairwise_distinct`, so a later collapse is a red test rather
-than a silent merge.
+The codes being pairwise distinct is bound by
+`pg_error::the_three_setup_outcomes_are_pairwise_distinct`, so a later collapse is a red test
+rather than a silent merge. `crates/zeroship-data-orm/tests/postgres_binding_fence.rs` measures
+both SQLSTATE arms through the ORM against a live cluster whose roles the reconciler created.
 
 **The `__zeroship_admin` schema is created**, in the one shape the privilege invariant permits -
 state a separate service writes and the worker only reads. Exactly one table, holding the current
@@ -1476,13 +1502,23 @@ app's requests and cannot protect a shared cluster from an app under its limit. 
    unsupported it must be chosen when a database is created or not offered, because an existing
    database can never move to its own cluster.
 
-2. **Supply the schema epoch producer.** BUILDABLE. The consumer ships and is tested: `SchemaEpoch`
+2. **Supply the schema epoch producer.** PARTLY BUILT, and the two halves must not be confused.
+
+   The EPOCH FENCE ships: the epoch is the last component of the binding role, Control serves it
+   at `GET /internal/apps/{app_id}/binding` from `databases.schema_epoch`, the binding composes
+   the role from it, and a role the cluster never minted is `SCHEMA_EPOCH_STALE`
+   (`crates/zeroship-data-orm/tests/postgres_binding_fence.rs`). Nothing in the worker compares an
+   epoch; PostgreSQL does, by whether the role exists.
+
+   The REDUCER AUTHORITY MACHINE is still a tautology. `SchemaEpoch`
    (`crates/zeroship-data-orm/src/transaction/reducer/identity.rs`) and its comparison returning
-   `Verdict::ReResolve`. The machine is a tautology in production: the single production
-   construction site (`crates/zeroship-data-orm/src/transaction/driver.rs`) mints a zero epoch and
-   echoes the expectation back as the observation, so `classify` can only return `Current` and the
-   typed denial codes are unreachable outside tests. The work is the record, the migration-service
-   write and the control-plane read that composes the binding.
+   `Verdict::ReResolve` remain wired to a single production construction site
+   (`crates/zeroship-data-orm/src/transaction/driver.rs`) that mints a zero epoch and echoes the
+   expectation back as the observation, so `classify` can only return `Current`. Feeding it the
+   binding's own epoch is the remaining work, and it is a different mechanism from the role name:
+   one fences the session at setup, the other would fence an admitted transaction mid-flight.
+
+   Still owed: the migration-service write that advances `databases.schema_epoch` on an apply.
 
 3. **What bounds total transaction duration?** NEEDS-DECISION. Not `transaction_timeout`: it does
    not exist on 16 and does from 17, so in a mixed fleet the answer differs per cluster and a design
@@ -1540,19 +1576,26 @@ app's requests and cannot protect a shared cluster from an app under its limit. 
     that checks out, narrows, cancels mid-flight, and asserts the next checkout cannot reach the
     first database.
 
-8. **Write the mandatory regression tests.** BUILDABLE. Nothing today fails if the fence is
-    refactored away, because nothing today can be revoked. (a) Bind, query succeeds; revoke from a
-    separate connection; the same warm isolate on the same pooled connection fails with
-    `GRANT_REVOKED`, no eviction, no restart. (b) A statement issued without the session-setup batch
-    fails with `permission denied`, proving the `WITH INHERIT FALSE` posture rather than the presence
-    of a call. (c) Rotate the epoch, reap `E-1`, and assert the stale isolate gets
-    `SCHEMA_EPOCH_STALE`, with the read before the rotation and a binding resolved at `E+1` as its
-    controls. (d) An app bound to two databases: a
-    dispatch against the second inside a transaction on the first is refused rather than run on the
-    first's connection. (e) Two databases each declaring `users`: a change event on one is never
-    delivered to a subscription on the other. (f) A deploy naming a database the app holds no active
-    binding to is refused, and the refusal names the binding command. (g) A migration applied to a
-    shared database does not make any bound app's deploy fail.
+8. **Write the mandatory regression tests.** PARTLY BUILT, in
+    `crates/zeroship-data-orm/tests/postgres_binding_fence.rs`, which drives the ORM against a
+    live cluster the reconciler converged.
+
+    BUILT: (a) bind, read succeeds; revoke through `cluster::revoke_binding`; the next session
+    fails with `GRANT_REVOKED` and the role is still in `pg_roles`. (b) a statement issued on the
+    worker login with no narrowing is refused `42501`, its control being the same row through the
+    ORM under the binding. (c) `an_isolate_left_behind_by_an_epoch_rotation_is_reported_as_stale`
+    mints `E+1` through `cluster::grant_binding` and reaps the retired role through
+    `cluster::drop_binding_role`, then asserts the isolate still holding `E` is refused
+    `SCHEMA_EPOCH_STALE`, with three controls: the read before the rotation, the retired role's
+    absence from `pg_roles`, and a binding resolved at `E+1` still reading. What it does NOT yet
+    exercise is the rotation being DRIVEN BY AN APPLY - it calls the reconciler directly - so the
+    apply's own widen transaction is still unmeasured. (d) one app on two databases holds a
+    transaction on each at once, which is the lane key measured as behaviour; a key without the
+    database half turns the second into `nested_top_level_transaction`.
+
+    BUILDABLE: (e) two databases each declaring `users`, which needs the CDC routing key. (f) a
+    deploy naming a database the app holds no active binding to. (g) a migration applied to a
+    shared database not failing any bound app's deploy.
 
 9. **Make the project config plural without losing cross-target protection.** NEEDS-DECISION.
     `schema/project-v1.json` declares `app` as a single string, and the environments block requires

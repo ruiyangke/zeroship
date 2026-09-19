@@ -5,7 +5,6 @@ use crate::tests::fixtures::Host;
 
 use zeroship_data_orm::backend::BackendHandle;
 
-use zeroship_data_orm::binding::DbBinding;
 
 use zeroship_data_orm::error::DbError;
 
@@ -66,8 +65,9 @@ fn vector_search_returns_k_nearest_sqlite() {
     Host::test(|host| {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
+            let alias = crate::tests::fixtures::harness_alias("vector_topk");
             backend
-                .attach_app_file("vector_topk")
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
 
@@ -78,7 +78,7 @@ fn vector_search_returns_k_nearest_sqlite() {
             backend
                 .execute_fixture(
                     &format!(
-                        "CREATE TABLE \"vector_topk\".\"docs\" (\
+                        "CREATE TABLE \"{alias}\".\"docs\" (\
                        id INTEGER PRIMARY KEY AUTOINCREMENT, \
                        embedding BLOB CHECK(length(embedding) = 32) NOT NULL, \
                        {SYSTEM_COLUMNS_SQLITE_TAIL}\
@@ -98,7 +98,7 @@ fn vector_search_returns_k_nearest_sqlite() {
                 let v = mk_unit_vec(i, dims);
                 let hex = vec_to_hex_lit(&v);
                 let sql =
-                    format!("INSERT INTO \"vector_topk\".\"docs\" (embedding) VALUES ({hex})");
+                    format!("INSERT INTO \"{alias}\".\"docs\" (embedding) VALUES ({hex})");
                 backend.execute_fixture(&sql, &[]).await.expect("INSERT");
             }
 
@@ -106,7 +106,7 @@ fn vector_search_returns_k_nearest_sqlite() {
             // the top-10. Assert MEMBERSHIP (not strict order) to mirror
             // the PG arm's relaxed expectation.
             let query = mk_unit_vec(0, dims);
-            let binding = DbBinding::cold_start("vector_topk");
+            let binding = crate::tests::fixtures::harness_binding("vector_topk");
             let schema = zeroship_data_orm::descriptor::collection_schema(&binding, "docs")
                 .expect("descriptor slice for the search fixture");
             let registration = zeroship_data_orm::sql::registration::SqlRegistration::sqlite();
@@ -175,18 +175,21 @@ fn vector_dimension_mismatch_rejected_at_insert_sqlite() {
     Host::test(|host| {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
+            let alias = crate::tests::fixtures::harness_alias("vector_dim");
             backend
-                .attach_app_file("vector_dim")
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
 
             // 128-d column = 512-byte CHECK.
             backend
                 .execute_fixture(
-                    "CREATE TABLE \"vector_dim\".\"docs\" (\
-                   id INTEGER PRIMARY KEY AUTOINCREMENT, \
-                   embedding BLOB CHECK(length(embedding) = 512) NOT NULL\
-                 )",
+                    &format!(
+                        "CREATE TABLE \"{alias}\".\"docs\" (\
+                       id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                       embedding BLOB CHECK(length(embedding) = 512) NOT NULL\
+                     )"
+                    ),
                     &[],
                 )
                 .await
@@ -197,7 +200,7 @@ fn vector_dimension_mismatch_rejected_at_insert_sqlite() {
             // surface a SchemaRefused {check_violation} typed error.
             let oversized = mk_unit_vec(0, 256);
             let hex = vec_to_hex_lit(&oversized);
-            let sql = format!("INSERT INTO \"vector_dim\".\"docs\" (embedding) VALUES ({hex})");
+            let sql = format!("INSERT INTO \"{alias}\".\"docs\" (embedding) VALUES ({hex})");
             let err = backend
                 .execute_fixture(&sql, &[])
                 .await
@@ -220,8 +223,9 @@ fn vector_search_respects_filter_sqlite() {
     Host::test(|host| {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
+            let alias = crate::tests::fixtures::harness_alias("vector_filter");
             backend
-                .attach_app_file("vector_filter")
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
 
@@ -229,7 +233,7 @@ fn vector_search_respects_filter_sqlite() {
             backend
                 .execute_fixture(
                     &format!(
-                        "CREATE TABLE \"vector_filter\".\"docs\" (\
+                        "CREATE TABLE \"{alias}\".\"docs\" (\
                        id INTEGER PRIMARY KEY AUTOINCREMENT, \
                        tenant TEXT NOT NULL, \
                        embedding BLOB CHECK(length(embedding) = 16) NOT NULL, \
@@ -259,7 +263,7 @@ fn vector_search_respects_filter_sqlite() {
                 backend
                     .execute_fixture(
                         &format!(
-                            "INSERT INTO \"vector_filter\".\"docs\" \
+                            "INSERT INTO \"{alias}\".\"docs\" \
                            (tenant, embedding) VALUES ('a', {hex})"
                         ),
                         &[],
@@ -269,7 +273,7 @@ fn vector_search_respects_filter_sqlite() {
                 backend
                     .execute_fixture(
                         &format!(
-                            "INSERT INTO \"vector_filter\".\"docs\" \
+                            "INSERT INTO \"{alias}\".\"docs\" \
                            (tenant, embedding) VALUES ('b', {hex})"
                         ),
                         &[],
@@ -283,7 +287,7 @@ fn vector_search_respects_filter_sqlite() {
             // SDK already emits.
             let query = mk_unit_vec(0, 4);
             let filter = crate::value!({ "tenant": { "$eq": "a" } });
-            let binding = DbBinding::cold_start("vector_filter");
+            let binding = crate::tests::fixtures::harness_binding("vector_filter");
             let schema = zeroship_data_orm::descriptor::collection_schema(&binding, "docs")
                 .expect("descriptor slice for the search fixture");
             let registration = zeroship_data_orm::sql::registration::SqlRegistration::sqlite();
@@ -333,15 +337,16 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
         // = 2 * cos_distance. Search the same source rows under each metric.
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
+            let alias = crate::tests::fixtures::harness_alias("vector_math");
             backend
-                .attach_app_file("vector_math")
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
 
             backend
                 .execute_fixture(
                     &format!(
-                        "CREATE TABLE \"vector_math\".\"docs\" (\
+                        "CREATE TABLE \"{alias}\".\"docs\" (\
                        id INTEGER PRIMARY KEY AUTOINCREMENT, \
                        emb_cos BLOB CHECK(length(emb_cos) = 16) NOT NULL, \
                        emb_l2  BLOB CHECK(length(emb_l2)  = 16) NOT NULL, \
@@ -368,7 +373,7 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
             backend
                 .execute_fixture(
                     &format!(
-                        "INSERT INTO \"vector_math\".\"docs\" (emb_cos, emb_l2) \
+                        "INSERT INTO \"{alias}\".\"docs\" (emb_cos, emb_l2) \
                      VALUES ({hex1}, {hex1})"
                     ),
                     &[],
@@ -378,7 +383,7 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
             backend
                 .execute_fixture(
                     &format!(
-                        "INSERT INTO \"vector_math\".\"docs\" (emb_cos, emb_l2) \
+                        "INSERT INTO \"{alias}\".\"docs\" (emb_cos, emb_l2) \
                      VALUES ({hex2}, {hex2})"
                     ),
                     &[],
@@ -387,7 +392,7 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
                 .expect("INSERT v2");
 
             // Query the cosine distance from row 1 (v1) to v2.
-            let binding = DbBinding::cold_start("vector_math");
+            let binding = crate::tests::fixtures::harness_binding("vector_math");
             let schema = zeroship_data_orm::descriptor::collection_schema(&binding, "docs")
                 .expect("descriptor slice for the search fixture");
             let registration = zeroship_data_orm::sql::registration::SqlRegistration::sqlite();
@@ -478,15 +483,16 @@ fn near_returns_within_radius() {
     Host::test(|host| {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
+            let alias = crate::tests::fixtures::harness_alias("near_radius");
             backend
-                .attach_app_file("near_radius")
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
 
             backend
                 .execute_fixture(
                     &format!(
-                        "CREATE TABLE \"near_radius\".\"places\" (\
+                        "CREATE TABLE \"{alias}\".\"places\" (\
                        id INTEGER PRIMARY KEY AUTOINCREMENT, \
                        location BLOB CHECK(length(location) = 16) NOT NULL, \
                        {SYSTEM_COLUMNS_SQLITE_TAIL}\
@@ -529,7 +535,7 @@ fn near_returns_within_radius() {
                 };
                 let hex = point_to_hex_lit(p);
                 let sql =
-                    format!("INSERT INTO \"near_radius\".\"places\" (location) VALUES ({hex})");
+                    format!("INSERT INTO \"{alias}\".\"places\" (location) VALUES ({hex})");
                 backend
                     .execute_fixture(&sql, &[])
                     .await
@@ -539,7 +545,7 @@ fn near_returns_within_radius() {
                 }
             }
 
-            let binding = DbBinding::cold_start("near_radius");
+            let binding = crate::tests::fixtures::harness_binding("near_radius");
             let schema = zeroship_data_orm::descriptor::collection_schema(&binding, "places")
                 .expect("descriptor slice for the search fixture");
             let registration = zeroship_data_orm::sql::registration::SqlRegistration::sqlite();
@@ -626,14 +632,15 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
             let app = "near_tx_lane";
+            let alias = crate::tests::fixtures::harness_alias(app);
             backend
-                .attach_app_file(app)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("attach the app database");
             backend
                 .execute_fixture(
                     &format!(
-                        "CREATE TABLE \"{app}\".\"places\" (\
+                        "CREATE TABLE \"{alias}\".\"places\" (\
                        id INTEGER PRIMARY KEY AUTOINCREMENT, \
                        location BLOB CHECK(length(location) = 16) NOT NULL, \
                        {SYSTEM_COLUMNS_SQLITE_TAIL}\
@@ -655,23 +662,24 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
             };
 
             let handle = BackendHandle::new(std::rc::Rc::new(backend));
-            let admission = zeroship_data_orm::transaction::TxAdmission::acquire(app.to_owned())
+            let admission = zeroship_data_orm::transaction::TxAdmission::acquire(
+                crate::tests::fixtures::harness_route(app),
+            )
                 .await
                 .expect("the fixture claims a free lane");
             zeroship_data_orm::transaction::exec_begin_or_savepoint(
                 false,
                 None,
-                app,
-                crate::sql::SchemaName::new(app).unwrap(),
+                &crate::tests::fixtures::harness_binding(app),
                 handle.clone(),
             )
             .await
             .unwrap();
             admission.handed_to_reducer();
             zeroship_data_orm::transaction::driver::run_operation(
-                app,
+                &crate::tests::fixtures::harness_route(app),
                 &format!(
-                    "INSERT INTO \"{app}\".\"places\" (location) VALUES ({})",
+                    "INSERT INTO \"{alias}\".\"places\" (location) VALUES ({})",
                     point_to_hex_lit(london)
                 ),
                 &[],
@@ -679,7 +687,7 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
             .await
             .expect("write inside the transaction");
 
-            let binding = DbBinding::cold_start(app);
+            let binding = crate::tests::fixtures::harness_binding(app);
             let args = crate::value!({
                 "field": "location",
                 "point": { "lat": london.lat, "lng": london.lng },
@@ -724,8 +732,8 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
 
             // ---- SUBJECT: the same near on the transaction's own lane.
             let inside = near_on(
-                zeroship_data_orm::tx_route::CapturedRoute::tx_for_tests(
-                    app,
+                zeroship_data_orm::tx_route::CapturedRoute::tx_on_binding_for_tests(
+                    &crate::tests::fixtures::harness_binding(app),
                     crate::sql::registration::SqlRegistration::sqlite(),
                 )
                 .bind(handle.clone())
@@ -751,7 +759,7 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
             );
 
             assert!(matches!(
-                zeroship_data_orm::transaction::exec_settle(app, false, None).await,
+                zeroship_data_orm::transaction::exec_settle(&crate::tests::fixtures::harness_route(app), false, None).await,
                 zeroship_data_orm::transaction::SettleOutcome::Ok
             ));
         });
@@ -764,12 +772,13 @@ fn near_uses_an_unreadable_identity_without_returning_it() {
     Host::test(|host| {
         host.run(async {
             let app = "near_hidden_identity";
+            let alias = crate::tests::fixtures::harness_alias(app);
             let (backend, _dir) = fresh_backend(host);
-            backend.attach_app_file(app).await.unwrap();
+            backend.attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias)).await.unwrap();
             backend
                 .execute_fixture(
                     &format!(
-                        "CREATE TABLE \"{app}\".\"places\" (\
+                        "CREATE TABLE \"{alias}\".\"places\" (\
                          id INTEGER PRIMARY KEY, \
                          label TEXT NOT NULL, \
                          location BLOB NOT NULL)"
@@ -782,7 +791,7 @@ fn near_uses_an_unreadable_identity_without_returning_it() {
             backend
                 .execute_fixture(
                     &format!(
-                        "INSERT INTO \"{app}\".\"places\" (id, label, location) \
+                        "INSERT INTO \"{alias}\".\"places\" (id, label, location) \
                          VALUES (7, 'visible', {})",
                         point_to_hex_lit(point)
                     ),
@@ -791,7 +800,7 @@ fn near_uses_an_unreadable_identity_without_returning_it() {
                 .await
                 .unwrap();
 
-            let binding = DbBinding::cold_start(app);
+            let binding = crate::tests::fixtures::harness_binding(app);
             let schema = crate::value!({
                 "id":{
                     "type":"integer",
@@ -846,12 +855,13 @@ fn low_level_near_preserves_public_aliases_and_hides_ranking_identity() {
     Host::test(|host| {
         host.run(async {
             let app = "near_projection_aliases";
+            let db_alias = crate::tests::fixtures::harness_alias(app);
             let (backend, _dir) = fresh_backend(host);
-            backend.attach_app_file(app).await.unwrap();
+            backend.attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&db_alias)).await.unwrap();
             backend
                 .execute_fixture(
                     &format!(
-                        "CREATE TABLE \"{app}\".\"places\" (\
+                        "CREATE TABLE \"{db_alias}\".\"places\" (\
                          id INTEGER PRIMARY KEY, \
                          label TEXT NOT NULL, \
                          location BLOB NOT NULL)"
@@ -864,7 +874,7 @@ fn low_level_near_preserves_public_aliases_and_hides_ranking_identity() {
             backend
                 .execute_fixture(
                     &format!(
-                        "INSERT INTO \"{app}\".\"places\" (id, label, location) \
+                        "INSERT INTO \"{db_alias}\".\"places\" (id, label, location) \
                          VALUES (7, 'visible', {})",
                         point_to_hex_lit(point)
                     ),
@@ -873,7 +883,7 @@ fn low_level_near_preserves_public_aliases_and_hides_ranking_identity() {
                 .await
                 .unwrap();
 
-            let binding = DbBinding::cold_start(app);
+            let binding = crate::tests::fixtures::harness_binding(app);
             let registration = zeroship_data_orm::sql::registration::SqlRegistration::sqlite();
             let compile = |column: &str, alias: &str| {
                 let table = Table::aliased(

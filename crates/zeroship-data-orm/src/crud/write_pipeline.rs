@@ -874,7 +874,6 @@ mod tests {
     use crate::value::Value;
 
     use crate::tx_route::TxRoute;
-    use zeroship_data_orm::binding::DbBinding;
 
     use super::{
         apply, inspect_update, validate_update_patch_keys, validate_user_doc_keys, ApplyMode,
@@ -949,7 +948,7 @@ mod tests {
             );
             for (index, &prefix) in crate::sql::mapping::RESERVED_ID_PREFIXES.iter().enumerate() {
                 let app_id = format!("app_reserved_descriptor_id_prefix_{index}");
-                let binding = DbBinding::cold_start(&app_id);
+                let binding = crate::tests::fixtures::harness_binding(&app_id);
                 crate::tests::fixtures::cache_schema(
                     &app_id,
                     collection,
@@ -992,7 +991,7 @@ mod tests {
         run(async {
             let app_id = "app_ordinary_descriptor_id_prefix";
             let collection = "people";
-            let binding = DbBinding::cold_start(app_id);
+            let binding = crate::tests::fixtures::harness_binding(app_id);
             crate::tests::fixtures::cache_schema(
                 app_id,
                 collection,
@@ -1092,7 +1091,7 @@ mod tests {
             .expect("open sqlite backend"),
         );
         let handle = crate::backend::BackendHandle::new(backend);
-        (dir, crate::exec::ambient_route_for_tests(app_id, handle))
+        (dir, crate::exec::ambient_route_for_tests(&crate::tests::fixtures::harness_binding(app_id), handle))
     }
 
     fn last4_mask(plaintext: &str) -> String {
@@ -1173,7 +1172,7 @@ mod tests {
             let app_id = "app_write_pipeline";
             supplied.bind_app(app_id, project_id).unwrap();
             let key_source = encryption::ProjectKeySource::supplied(supplied);
-            let binding = DbBinding::cold_start(app_id);
+            let binding = crate::tests::fixtures::harness_binding(app_id);
             let collection = "users";
             let schema = crate::tests::fixtures::schema::generated_fields(crate::value!({
                 "email": { "type": "string", "required": true, "unique": true },
@@ -1200,7 +1199,7 @@ mod tests {
                     .expect("open sqlite backend"),
             );
             backend
-                .attach_app_file(app_id)
+                .attach_binding(&crate::tests::fixtures::harness_binding(app_id))
                 .await
                 .expect("ensure schema");
             let handle = crate::backend::BackendHandle::new(Rc::clone(&backend));
@@ -1209,12 +1208,12 @@ mod tests {
             // all exercise the protection-floor fence against a table whose
             // sentinels the DDL further down really wrote - the happy arm, where
             // descriptor and catalog agree.
-            let route = crate::exec::ambient_route_for_tests(app_id, handle.clone());
+            let route = crate::exec::ambient_route_for_tests(&crate::tests::fixtures::harness_binding(app_id), handle.clone());
             cache_schema(app_id, collection, schema.clone());
             let schema = crate::tests::fixtures::native_fields(schema);
 
             let ddl = sqlite_fixture_sql(
-                &crate::sql::SchemaName::new(app_id).expect("fixture schema name"),
+                crate::tests::fixtures::harness_binding(app_id).schema(),
                 collection,
                 &ddl_schema,
                 &FkEmission::Inline,
@@ -1259,7 +1258,7 @@ mod tests {
             .await;
 
             let insert_built = crate::crud::insert::build_one(
-                &crate::sql::SchemaName::new(app_id).expect("fixture schema name"),
+                binding.schema(),
                 collection,
                 &schema,
                 insert_doc.clone(),
@@ -1268,7 +1267,7 @@ mod tests {
             .expect("build insert");
             let insert_params = &insert_built.params;
             let client = backend
-                .fixture_session(app_id)
+                .fixture_session(&crate::tests::fixtures::harness_alias(app_id))
                 .await
                 .expect("acquire client");
             client
@@ -1427,7 +1426,7 @@ mod tests {
     fn a_sqlite_write_is_refused_when_the_descriptor_drops_a_mask_the_file_still_records() {
         run(async {
             let app_id = "app_sqlite_protection_floor";
-            let binding = DbBinding::cold_start(app_id);
+            let binding = crate::tests::fixtures::harness_binding(app_id);
             let collection = "people";
             let masked = crate::value!({
                 "ssn": { "type": "string", "mask": { "kind": "last4", "classification": "spi" } },
@@ -1444,14 +1443,14 @@ mod tests {
                 )
                 .expect("open sqlite backend"),
             );
-            backend.attach_app_file(app_id).await.expect("attach app");
+            backend.attach_binding(&crate::tests::fixtures::harness_binding(app_id)).await.expect("attach app");
             let handle = crate::backend::BackendHandle::new(Rc::clone(&backend));
-            let route = crate::exec::ambient_route_for_tests(app_id, handle);
+            let route = crate::exec::ambient_route_for_tests(&crate::tests::fixtures::harness_binding(app_id), handle);
 
             // Build the file-backed fixture from its schema so the raw storage
             // column and masking sentinel match the reader contract.
             let ddl = sqlite_fixture_sql(
-                &crate::sql::SchemaName::new(app_id).expect("fixture schema name"),
+                crate::tests::fixtures::harness_binding(app_id).schema(),
                 collection,
                 &masked,
                 &FkEmission::Inline,

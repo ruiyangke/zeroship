@@ -69,7 +69,7 @@ fn require_pg() -> (crate::tests::fixtures::postgres::Postgres, String) {
 // destroy each other's tables under a parallel run.
 //
 // Each test mints its own id with `test_app_id!()` and injects it, which
-// isolates the schema, the per-app role and the broker key at once - and keeps
+// isolates the schema, the binding role and the broker key at once - and keeps
 // the fixture independent of the runtime's no-`APP_ID` fallback
 // (`crates/zeroship-runtime/src/core/plugin.rs`).
 
@@ -85,10 +85,45 @@ async fn drain_open_connections() {
     );
 }
 
+/// Bring the database to the state a reconciler leaves it in and stop there.
+///
+/// The schema, the capability roles, the binding role and both grant edges
+/// exist, so the binding resolves and `SET LOCAL ROLE` succeeds. No table does,
+/// because putting tables in a schema is what an apply is for. This is the
+/// state EVERY newly created database is in, and nothing before the query can
+/// observe it: every check up to that point passes.
+fn converge_without_migrating(url: &str, app: &str) {
+    let url = url.to_string();
+    let alias = crate::tests::fixtures::harness_alias(app);
+    let binding = crate::tests::fixtures::harness_binding(app);
+    block_on(async move {
+        let (client, connection) = compio_postgres::connect(&url, NoTls).await.unwrap();
+        compio::runtime::spawn(async move {
+            let _ = connection.run().await;
+        })
+        .detach();
+        client
+            .execute(&format!("DROP SCHEMA IF EXISTS \"{alias}\" CASCADE"), &[])
+            .await
+            .unwrap();
+        drop(client);
+
+        crate::tests::fixtures::set_database_url(&url);
+        let pool = std::rc::Rc::new(compio_postgres::Pool::connect(&url, 2).await.unwrap());
+        crate::tests::fixtures::roles::ensure_binding_ladder(&pool, &binding)
+            .await
+            .expect("the reconciler converges the database");
+        pool.close().await;
+        drop(pool);
+        drain_open_connections().await;
+    });
+}
+
 /// Recreate the app schema and provision `notes` before worker boot, standing
 /// in for the migration service's deploy-time apply.
 fn reset_schema(url: &str, app: &str) {
     let url = url.to_string();
+    let alias = crate::tests::fixtures::harness_alias(app);
     let app = app.to_string();
     block_on(async move {
         let (client, connection) = compio_postgres::connect(&url, NoTls).await.unwrap();
@@ -97,7 +132,7 @@ fn reset_schema(url: &str, app: &str) {
         })
         .detach();
         client
-            .execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+            .execute(&format!("DROP SCHEMA IF EXISTS \"{alias}\" CASCADE"), &[])
             .await
             .unwrap();
         drop(client);
@@ -109,8 +144,8 @@ fn reset_schema(url: &str, app: &str) {
         crate::tests::fixtures::set_database_url(&url);
         let pool = std::rc::Rc::new(compio_postgres::Pool::connect(&url, 2).await.unwrap());
         pool.batch_execute(&format!(
-            r#"CREATE SCHEMA IF NOT EXISTS "{app}";
-CREATE TABLE "{app}"."notes" (
+            r#"CREATE SCHEMA IF NOT EXISTS "{alias}";
+CREATE TABLE "{alias}"."notes" (
   id TEXT PRIMARY KEY,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -120,31 +155,31 @@ CREATE TABLE "{app}"."notes" (
   deleted_at TIMESTAMPTZ NULL,
   "title" TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS "notes_deleted_at_idx" ON "{app}"."notes" ("deleted_at");
-CREATE INDEX IF NOT EXISTS "notes_updated_at_idx" ON "{app}"."notes" ("updated_at");
-CREATE INDEX IF NOT EXISTS "notes_created_by_idx" ON "{app}"."notes" ("created_by");"#
+CREATE INDEX IF NOT EXISTS "notes_deleted_at_idx" ON "{alias}"."notes" ("deleted_at");
+CREATE INDEX IF NOT EXISTS "notes_updated_at_idx" ON "{alias}"."notes" ("updated_at");
+CREATE INDEX IF NOT EXISTS "notes_created_by_idx" ON "{alias}"."notes" ("created_by");"#
         ))
         .await
         .expect("deploy stand-in must create the notes table");
 
-        // Re-establish the per-app role, then the binding's column grants.
+        // Re-establish the binding ladder, then the binding's column grants.
         //
         // The `DROP SCHEMA ... CASCADE` above destroys every GRANT on the
         // schema and its tables along with the schema itself. Recreating the
         // schema does not bring them back, so the data path - which runs
-        // `SET LOCAL ROLE app_<id>_role` - was denied with
-        // `permission denied for schema default`, and the sanitization rail
-        // reported it as a bare `internal error`. That is what made these four
-        // tests fail while every test expecting a REFUSAL passed.
+        // `SET LOCAL ROLE zs_bind_<bnd>_e<E>` - is denied for the schema, and
+        // the sanitization rail reports that as a bare `internal error`. A
+        // fixture that skipped this step would therefore fail every test
+        // expecting a READ and pass every test expecting a refusal.
         //
         // The same hazard is a real one in production, on the restore path:
-        // `DROP SCHEMA CASCADE` there destroys the per-app grants AND the
+        // `DROP SCHEMA CASCADE` there destroys the capability grants AND the
         // schema's `ALTER DEFAULT PRIVILEGES` entries, and `pg_restore
         // --no-privileges` puts none back.
-        crate::tests::fixtures::roles::ensure_per_app_role(&pool, &app)
+        crate::tests::fixtures::roles::ensure_binding_ladder(&pool, &crate::tests::fixtures::harness_binding(&app))
             .await
-            .expect("per-app role must be re-established after the CASCADE");
-        fixtures::grant_all_runtime_table_columns(&pool, &app, "notes").await;
+            .expect("the binding ladder must be re-established after the CASCADE");
+        fixtures::grant_all_runtime_table_columns(&pool, &crate::tests::fixtures::harness_binding(&app), "notes").await;
         pool.close().await;
         drop(pool);
         drain_open_connections().await;
@@ -153,14 +188,14 @@ CREATE INDEX IF NOT EXISTS "notes_created_by_idx" ON "{app}"."notes" ("created_b
 
 fn count_notes(url: &str, app: &str) -> i64 {
     let url = url.to_string();
-    let app = app.to_string();
+    let alias = crate::tests::fixtures::harness_alias(app);
     block_on(async move {
         let (client, connection) = compio_postgres::connect(&url, NoTls).await.unwrap();
         compio::runtime::spawn(async move {
             let _ = connection.run().await;
         })
         .detach();
-        let sql = format!("SELECT COUNT(*)::bigint AS c FROM \"{app}\".\"notes\"");
+        let sql = format!("SELECT COUNT(*)::bigint AS c FROM \"{alias}\".\"notes\"");
         let rows = client.query(&sql, &[]).await.unwrap();
         let count = rows[0].get::<_, i64>("c");
         drop(client);
@@ -190,18 +225,46 @@ fn exec_owner_sql(url: &str, sql: &str) {
     });
 }
 
+/// Run owner DDL that ADDS COLUMNS, then re-issue the binding's column grants.
+///
+/// `ALTER TABLE ... ADD COLUMN` gives the new column no ACL entry, and the
+/// binding's capability role holds per-column grants, so the DDL alone leaves a
+/// column the runtime cannot read. Production does the same thing in the same
+/// place: an apply emits the column grants inside the transaction that runs the
+/// DDL. The shared helper re-reads `information_schema.columns`, which is what
+/// makes calling it a second time correct rather than merely idempotent.
+///
+/// The grants go to the CAPABILITY role, never to the binding role: the binding
+/// role holds no privileges of its own, and a grant issued directly to it would
+/// make this fixture pass over a production path that fails.
+fn alter_table_as_owner(url: &str, app: &str, table: &str, ddl: &str) {
+    let url = url.to_string();
+    let ddl = ddl.to_string();
+    let table = table.to_string();
+    let binding = crate::tests::fixtures::harness_binding(app);
+    block_on(async move {
+        let pool = std::rc::Rc::new(compio_postgres::Pool::connect(&url, 2).await.unwrap());
+        pool.batch_execute(&ddl).await.expect("owner DDL");
+        fixtures::grant_all_runtime_table_columns(&pool, &binding, &table).await;
+        pool.close().await;
+        drop(pool);
+        drain_open_connections().await;
+    });
+}
+
 /// The table the deploy-time migration would have created for
 /// [`build_encrypted_users_src`]'s declared schema.
 ///
 /// The runtime descriptor supplies its logical encryption metadata.
 fn create_encrypted_users_table(url: &str, app: &str) {
     let url = url.to_string();
+    let alias = crate::tests::fixtures::harness_alias(app);
     let app = app.to_string();
     block_on(async move {
         crate::tests::fixtures::set_database_url(&url);
         let pool = std::rc::Rc::new(compio_postgres::Pool::connect(&url, 2).await.unwrap());
         pool.batch_execute(&format!(
-            r#"CREATE TABLE "{app}"."users" (
+            r#"CREATE TABLE "{alias}"."users" (
   id TEXT PRIMARY KEY,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -213,17 +276,17 @@ fn create_encrypted_users_table(url: &str, app: &str) {
   name TEXT NOT NULL,
   ssn BYTEA NULL
 );
-CREATE UNIQUE INDEX "users_email_key" ON "{app}"."users" (email);
-CREATE INDEX "users_deleted_at_idx" ON "{app}"."users" (deleted_at);
-CREATE INDEX "users_updated_at_idx" ON "{app}"."users" (updated_at);
-CREATE INDEX "users_created_by_idx" ON "{app}"."users" (created_by);"#
+CREATE UNIQUE INDEX "users_email_key" ON "{alias}"."users" (email);
+CREATE INDEX "users_deleted_at_idx" ON "{alias}"."users" (deleted_at);
+CREATE INDEX "users_updated_at_idx" ON "{alias}"."users" (updated_at);
+CREATE INDEX "users_created_by_idx" ON "{alias}"."users" (created_by);"#
         ))
         .await
         .expect("deploy stand-in must create encrypted users");
-        crate::tests::fixtures::roles::ensure_per_app_role(&pool, &app)
+        crate::tests::fixtures::roles::ensure_binding_ladder(&pool, &crate::tests::fixtures::harness_binding(&app))
             .await
-            .expect("per-app role must exist for encrypted users");
-        fixtures::grant_all_runtime_table_columns(&pool, &app, "users").await;
+            .expect("the binding ladder must exist for encrypted users");
+        fixtures::grant_all_runtime_table_columns(&pool, &crate::tests::fixtures::harness_binding(&app), "users").await;
         pool.close().await;
         drop(pool);
         drain_open_connections().await;
@@ -232,7 +295,7 @@ CREATE INDEX "users_created_by_idx" ON "{app}"."users" (created_by);"#
 
 fn user_email_versions(url: &str, app: &str) -> Vec<(String, i32)> {
     let url = url.to_string();
-    let app = app.to_string();
+    let alias = crate::tests::fixtures::harness_alias(app);
     block_on(async move {
         let (client, connection) = compio_postgres::connect(&url, NoTls).await.unwrap();
         compio::runtime::spawn(async move {
@@ -242,7 +305,7 @@ fn user_email_versions(url: &str, app: &str) -> Vec<(String, i32)> {
         let rows = client
             .query(
                 &format!(
-                    "SELECT email, version FROM \"{app}\".users \
+                    "SELECT email, version FROM \"{alias}\".users \
                      WHERE name = 'Red Team' ORDER BY email"
                 ),
                 &[],
@@ -348,6 +411,7 @@ fn dispatch_zs_for_app_with_descriptor(
         source: source.into(),
     }];
     let plugins: Vec<Arc<dyn NativePlugin>> = vec![DbService::new(DbServiceConfig {
+        app_bindings: crate::tests::fixtures::harness_app_bindings(app_id),
         project_keys: crate::tests::fixtures::project_keys(),
         connection: crate::tests::fixtures::recording::connection(url),
         cdc_relay: None,
@@ -551,10 +615,21 @@ const _procedures = {orphanedScopes};
     );
 }
 
+/// A converged database nobody migrated answers the creator with the command
+/// that fixes it, through the autocommit path.
+///
+/// The binding is live and the session narrows, so nothing earlier can catch
+/// this: the schema is simply empty, which is what a database looks like
+/// between the reconciler creating it and an apply putting tables in it.
+///
+/// CONTROL: the same query after the apply, which differs in one variable -
+/// whether the relation exists. Without it a response that named the command
+/// for any reason at all would pass.
 #[test]
-fn unmigrated_app_autocommit_response_names_migrate() {
+fn an_unmigrated_database_answers_autocommit_with_the_migrate_remediation() {
     let (_postgres, url) = require_pg();
-    let app_id = uuid::Uuid::new_v4().simple().to_string();
+    let app = crate::tests::fixtures::test_app_id!();
+    let app = app.as_str();
     let src = build_src(
         r#"
 function autocommitBeforeMigrate(_input, _ctx) {
@@ -565,15 +640,16 @@ const _procedures = { autocommitBeforeMigrate };
 "#,
     );
 
-    let (status, body) = dispatch_zs_for_app(&url, &src, "autocommitBeforeMigrate", Some(&app_id));
+    converge_without_migrating(&url, app);
+    let (status, body) = dispatch_zs_for_app(&url, &src, "autocommitBeforeMigrate", Some(app));
     assert_eq!(
         status, 500,
-        "missing role must be a 500 response; body={body}"
+        "a relation the database does not hold must be a 500 response; body={body}"
     );
     assert_eq!(
         body.get("code").and_then(|v| v.as_str()),
-        Some("schema_not_provisioned"),
-        "autocommit must preserve the provisioning classification; body={body}"
+        Some("schema_not_migrated"),
+        "autocommit must classify an absent relation as unmigrated; body={body}"
     );
     assert!(
         body.get("message")
@@ -581,9 +657,17 @@ const _procedures = { autocommitBeforeMigrate };
             .is_some_and(|message| message.contains("zeroship migrate")),
         "autocommit response must name the creator remediation; body={body}"
     );
+
+    // CONTROL: apply the migration, and the same query reaches the table.
+    reset_schema(&url, app);
+    let (status, body) = dispatch_zs_for_app(&url, &src, "autocommitBeforeMigrate", Some(app));
+    assert_eq!(
+        status, 200,
+        "the same query must succeed once the relation exists; body={body}"
+    );
 }
 
-/// The unmigrated-app classification must reach the creator, and it must reach
+/// The unmigrated classification must reach the creator, and it must reach
 /// them with the terminal HTTP remedy when nothing catches it.
 ///
 /// `env.db.transaction` is the DB facade wrapper (module header), so it folds
@@ -594,14 +678,20 @@ const _procedures = { autocommitBeforeMigrate };
 /// so a bare `JSON.stringify(result.error)` would drop the remediation text;
 /// rethrowing hands the error to the shim, which copies `message` out
 /// explicitly and reads `status` off the error object.
+///
+/// The query lives INSIDE the callback deliberately: session setup succeeds
+/// here, so the condition is only reachable once a statement names a relation.
 #[test]
-fn unmigrated_app_transaction_response_names_migrate() {
+fn an_unmigrated_database_answers_a_transaction_with_the_migrate_remediation() {
     let (_postgres, url) = require_pg();
-    let app_id = uuid::Uuid::new_v4().simple().to_string();
+    let app = crate::tests::fixtures::test_app_id!();
+    let app = app.as_str();
     let src = build_src(
         r#"
 async function transactionBeforeMigrate(_input, _ctx) {
-    const r = await env.db.transaction(async () => "unreachable");
+    const r = await env.db.transaction(async () => {
+        return await env.db.collection("notes").find({}, {});
+    });
     if (r.error) throw r.error;
     return r.data;
 }
@@ -610,15 +700,16 @@ const _procedures = { transactionBeforeMigrate };
 "#,
     );
 
-    let (status, body) = dispatch_zs_for_app(&url, &src, "transactionBeforeMigrate", Some(&app_id));
+    converge_without_migrating(&url, app);
+    let (status, body) = dispatch_zs_for_app(&url, &src, "transactionBeforeMigrate", Some(app));
     assert_eq!(
         status, 500,
-        "missing role must be a 500 response; body={body}"
+        "a relation the database does not hold must be a 500 response; body={body}"
     );
     assert_eq!(
         body.get("code").and_then(|v| v.as_str()),
-        Some("schema_not_provisioned"),
-        "transaction setup must preserve the provisioning classification; body={body}"
+        Some("schema_not_migrated"),
+        "a transaction must classify an absent relation as unmigrated; body={body}"
     );
     assert!(
         body.get("message")
@@ -626,13 +717,27 @@ const _procedures = { transactionBeforeMigrate };
             .is_some_and(|message| message.contains("zeroship migrate")),
         "transaction response must name the creator remediation; body={body}"
     );
+
+    // CONTROL: apply the migration, and the same transaction commits.
+    reset_schema(&url, app);
+    let (status, body) = dispatch_zs_for_app(&url, &src, "transactionBeforeMigrate", Some(app));
+    assert_eq!(
+        status, 200,
+        "the same transaction must succeed once the relation exists; body={body}"
+    );
 }
 
 /// A classified failure from the top-level transaction's session setup must
 /// survive the begin-completion event. Revoking the login role's membership in
-/// the app role makes the first setup statement, `SET LOCAL ROLE`, fail with
-/// SQLSTATE 42501. The callback must never run, and the error app code
+/// the BINDING role makes the first setup statement, `SET LOCAL ROLE`, fail
+/// with SQLSTATE 42501. The callback must never run, and the error app code
 /// sees must name the terminal grant denial rather than generic BEGIN.
+///
+/// The ladder comes from the shared fixture rather than from hand-written DDL
+/// here, so the name the runtime narrows to and the name this test revokes are
+/// the same name by construction. The one edge the shared helper cannot know
+/// about is added explicitly: it grants the binding role to `CURRENT_USER`, and
+/// this fixture's worker is a private login.
 ///
 /// Two arms, one variable apart. The first reads `result.error` off the
 /// wrapper's envelope, which is the published contract and answers 200. The
@@ -645,8 +750,12 @@ fn revoked_grant_transaction_surfaces_grant_revoked() {
     let app_id = format!("zs_txgrant_{suffix}");
     let login = format!("zs_txlogin_{}", &suffix[..16]);
     let password = "ZsTxGrant9";
-    let app_role = zeroship_core::database_role::per_app_role_name(&app_id)
-        .expect("grant-revocation app id must produce a valid PostgreSQL role name");
+    let binding = crate::tests::fixtures::harness_binding(&app_id);
+    let binding_role = binding
+        .session_role()
+        .expect("a harness binding narrows to a role")
+        .to_owned();
+    let alias = crate::tests::fixtures::harness_alias(&app_id);
     let (scheme, address) = admin_url
         .split_once("://")
         .and_then(|(scheme, rest)| rest.rsplit_once('@').map(|(_, address)| (scheme, address)))
@@ -665,14 +774,29 @@ fn revoked_grant_transaction_surfaces_grant_revoked() {
         admin
             .batch_execute(&format!(
                 "CREATE ROLE \"{login}\" LOGIN PASSWORD '{password}' \
-                   NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT; \
-                 CREATE ROLE \"{app_role}\" NOLOGIN NOSUPERUSER NOCREATEDB \
-                   NOCREATEROLE NOREPLICATION; \
-                 CREATE SCHEMA \"{app_id}\"; \
-                 GRANT \"{app_role}\" TO \"{login}\""
+                   NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT"
             ))
             .await
-            .expect("provision login and app role");
+            .expect("provision the temporary worker login");
+
+        let pool = compio_postgres::Pool::connect(&admin_url, 1)
+            .await
+            .expect("admin pool for the binding ladder");
+        crate::tests::fixtures::roles::ensure_binding_ladder(&pool, &binding)
+            .await
+            .expect("provision the binding ladder");
+        // Spelled the way `zeroship_migrate_server::datastore::cluster::
+        // grant_binding` spells the worker edge, because the membership option
+        // is what the revoke below removes.
+        pool.batch_execute(&format!(
+            "GRANT {} TO {} WITH INHERIT FALSE",
+            zeroship_data_orm::sql::mapping::quote_ident(&binding_role),
+            zeroship_data_orm::sql::mapping::quote_ident(&login),
+        ))
+        .await
+        .expect("grant the worker login its binding edge");
+        pool.close().await;
+        drop(pool);
 
         // Prove this login can set the role before the one variable under test
         // changes. Keeping this same backend alive also proves PostgreSQL
@@ -684,7 +808,7 @@ fn revoked_grant_transaction_surfaces_grant_revoked() {
             let _ = worker_connection.run().await;
         })
         .detach();
-        let set_local_role_sql = crate::tests::fixtures::roles::set_local_role_sql(&app_id)
+        let set_local_role_sql = crate::tests::fixtures::roles::set_local_role_sql(&binding)
             .expect("grant-revocation app id must produce valid SET LOCAL ROLE SQL");
         worker.batch_execute("BEGIN").await.expect("control BEGIN");
         worker
@@ -697,9 +821,13 @@ fn revoked_grant_transaction_surfaces_grant_revoked() {
             .expect("control ROLLBACK");
 
         admin
-            .batch_execute(&format!("REVOKE \"{app_role}\" FROM \"{login}\""))
+            .batch_execute(&format!(
+                "REVOKE {} FROM {}",
+                zeroship_data_orm::sql::mapping::quote_ident(&binding_role),
+                zeroship_data_orm::sql::mapping::quote_ident(&login),
+            ))
             .await
-            .expect("revoke app-role membership");
+            .expect("revoke the binding-role membership");
         worker.batch_execute("BEGIN").await.expect("oracle BEGIN");
         let revoked = worker
             .batch_execute(&set_local_role_sql)
@@ -773,13 +901,22 @@ const _procedures = {
         })
         .detach();
         admin
-            .batch_execute(&format!(
-                "DROP SCHEMA IF EXISTS \"{app_id}\" CASCADE; \
-                 DROP ROLE IF EXISTS \"{app_role}\"; \
-                 DROP ROLE IF EXISTS \"{login}\""
-            ))
+            .batch_execute(&format!("DROP SCHEMA IF EXISTS \"{alias}\" CASCADE"))
             .await
-            .expect("clean up grant-revocation fixture");
+            .expect("clean up the grant-revocation schema");
+        // The ladder's roles go after the schema they own privileges on.
+        let pool = compio_postgres::Pool::connect(&admin_url, 1)
+            .await
+            .expect("admin pool for the ladder teardown");
+        crate::tests::fixtures::roles::drop_binding_ladder(&pool, &binding)
+            .await
+            .expect("drop the grant-revocation ladder");
+        pool.close().await;
+        drop(pool);
+        admin
+            .batch_execute(&format!("DROP ROLE IF EXISTS \"{login}\""))
+            .await
+            .expect("clean up the grant-revocation login");
         drop(admin);
         drain_open_connections().await;
     });
@@ -814,29 +951,36 @@ const _procedures = {
     );
 }
 
+/// The stream lane carries the same remediation, inside its 200.
+///
+/// This is the arm that proves the code is on the 5xx rail's allow-list: an
+/// unlisted code is blanked to `internal error`, and the creator would read a
+/// stream that told them nothing.
 #[test]
-fn unmigrated_app_streaming_response_names_migrate() {
+fn an_unmigrated_database_answers_a_stream_with_the_migrate_remediation() {
     let (_postgres, url) = require_pg();
-    let app_id = uuid::Uuid::new_v4().simple().to_string();
+    let app = crate::tests::fixtures::test_app_id!();
+    let app = app.as_str();
     let src = r#"
 import { env } from "zeroship";
 async function* streamBeforeMigrate(_input, _ctx) {
     await env.db.collection("notes").find({}, {});
-    yield "unreachable";
+    yield "reached";
 }
 streamBeforeMigrate.config = { kind: "stream" };
 export default { rpc: { streamBeforeMigrate } };
 "#;
 
-    let (status, body) = dispatch_zs_for_app(&url, &src, "streamBeforeMigrate", Some(&app_id));
+    converge_without_migrating(&url, app);
+    let (status, body) = dispatch_zs_for_app(&url, src, "streamBeforeMigrate", Some(app));
     assert_eq!(
         status, 200,
         "SSE errors stay inside a 200 stream; body={body}"
     );
     let text = body.as_str().expect("SSE body must be text");
     assert!(
-        text.contains("schema_not_provisioned") || text.contains("SCHEMA_NOT_PROVISIONED"),
-        "streaming response must preserve the provisioning code; body={text}"
+        text.contains("schema_not_migrated") || text.contains("SCHEMA_NOT_MIGRATED"),
+        "streaming response must preserve the unmigrated code; body={text}"
     );
     assert!(
         text.contains("zeroship migrate"),
@@ -845,6 +989,20 @@ export default { rpc: { streamBeforeMigrate } };
     assert!(
         !text.contains("internal error"),
         "streaming response must not replace the remediation; body={text}"
+    );
+
+    // CONTROL: apply the migration, and the generator reaches its yield.
+    reset_schema(&url, app);
+    let (status, body) = dispatch_zs_for_app(&url, src, "streamBeforeMigrate", Some(app));
+    assert_eq!(status, 200, "the stream stays a 200; body={body}");
+    let text = body.as_str().expect("SSE body must be text");
+    assert!(
+        text.contains("reached"),
+        "the stream must reach its yield once the relation exists; body={text}"
+    );
+    assert!(
+        !text.contains("zeroship migrate"),
+        "a migrated database must not be told to migrate; body={text}"
     );
 }
 
@@ -855,13 +1013,12 @@ fn native_bytes_and_bigints_round_trip_through_worker_transactions() {
     let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
-    let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
-    exec_owner_sql(
+    let alias = crate::tests::fixtures::harness_alias(app);
+    alter_table_as_owner(
         &url,
-        &format!(
-            "ALTER TABLE \"{app}\".notes ADD COLUMN payload BYTEA, ADD COLUMN counter BIGINT; \
-         GRANT SELECT, INSERT, UPDATE ON \"{app}\".notes TO \"{role}\""
-        ),
+        app,
+        "notes",
+        &format!("ALTER TABLE \"{alias}\".notes ADD COLUMN payload BYTEA, ADD COLUMN counter BIGINT"),
     );
     let mut descriptor: serde_json::Value =
         serde_json::from_str(&notes_runtime_descriptor()).unwrap();
@@ -903,13 +1060,12 @@ fn native_json_types_round_trip_through_worker_transactions() {
     let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
-    let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
-    exec_owner_sql(
+    let alias = crate::tests::fixtures::harness_alias(app);
+    alter_table_as_owner(
         &url,
-        &format!(
-            "ALTER TABLE \"{app}\".notes ADD COLUMN payload JSONB; \
-             GRANT SELECT, INSERT, UPDATE ON \"{app}\".notes TO \"{role}\""
-        ),
+        app,
+        "notes",
+        &format!("ALTER TABLE \"{alias}\".notes ADD COLUMN payload JSONB"),
     );
     let mut descriptor: serde_json::Value =
         serde_json::from_str(&notes_runtime_descriptor()).unwrap();
@@ -952,13 +1108,12 @@ fn timestamps_round_trip_through_worker_transactions() {
     let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
-    let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
-    exec_owner_sql(
+    let alias = crate::tests::fixtures::harness_alias(app);
+    alter_table_as_owner(
         &url,
-        &format!(
-            "ALTER TABLE \"{app}\".notes ADD COLUMN instant TIMESTAMPTZ; \
-             GRANT SELECT, INSERT, UPDATE ON \"{app}\".notes TO \"{role}\""
-        ),
+        app,
+        "notes",
+        &format!("ALTER TABLE \"{alias}\".notes ADD COLUMN instant TIMESTAMPTZ"),
     );
     let mut descriptor: serde_json::Value =
         serde_json::from_str(&notes_runtime_descriptor()).unwrap();
@@ -1030,13 +1185,12 @@ fn nested_timestamps_follow_worker_descriptors() {
     let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
-    let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
-    exec_owner_sql(
+    let alias = crate::tests::fixtures::harness_alias(app);
+    alter_table_as_owner(
         &url,
-        &format!(
-            "ALTER TABLE \"{app}\".notes ADD COLUMN instants JSONB, ADD COLUMN profile JSONB, ADD COLUMN payload JSONB; \
-         GRANT SELECT, INSERT, UPDATE ON \"{app}\".notes TO \"{role}\""
-        ),
+        app,
+        "notes",
+        &format!("ALTER TABLE \"{alias}\".notes ADD COLUMN instants JSONB, ADD COLUMN profile JSONB, ADD COLUMN payload JSONB"),
     );
     let mut descriptor: serde_json::Value =
         serde_json::from_str(&notes_runtime_descriptor()).unwrap();
@@ -1103,13 +1257,12 @@ fn array_updates_preserve_worker_json_elements() {
     let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
-    let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
-    exec_owner_sql(
+    let alias = crate::tests::fixtures::harness_alias(app);
+    alter_table_as_owner(
         &url,
-        &format!(
-            "ALTER TABLE \"{app}\".notes ADD COLUMN items JSONB; \
-         GRANT SELECT, INSERT, UPDATE ON \"{app}\".notes TO \"{role}\""
-        ),
+        app,
+        "notes",
+        &format!("ALTER TABLE \"{alias}\".notes ADD COLUMN items JSONB"),
     );
     let mut descriptor: serde_json::Value =
         serde_json::from_str(&notes_runtime_descriptor()).unwrap();
@@ -1156,13 +1309,12 @@ fn update_validation_is_shared_by_native_and_sdk_worker_calls() {
     let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
-    let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
-    exec_owner_sql(
+    let alias = crate::tests::fixtures::harness_alias(app);
+    alter_table_as_owner(
         &url,
-        &format!(
-            "ALTER TABLE \"{app}\".notes ADD COLUMN balance DOUBLE PRECISION, ADD COLUMN payload JSONB; \
-         GRANT SELECT, INSERT, UPDATE ON \"{app}\".notes TO \"{role}\""
-        ),
+        app,
+        "notes",
+        &format!("ALTER TABLE \"{alias}\".notes ADD COLUMN balance DOUBLE PRECISION, ADD COLUMN payload JSONB"),
     );
     let mut descriptor: serde_json::Value =
         serde_json::from_str(&notes_runtime_descriptor()).unwrap();
@@ -1217,13 +1369,12 @@ fn native_worker_calls_validate_array_item_types() {
     let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
-    let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
-    exec_owner_sql(
+    let alias = crate::tests::fixtures::harness_alias(app);
+    alter_table_as_owner(
         &url,
-        &format!(
-            "ALTER TABLE \"{app}\".notes ADD COLUMN names JSONB; \
-         GRANT SELECT, INSERT, UPDATE ON \"{app}\".notes TO \"{role}\""
-        ),
+        app,
+        "notes",
+        &format!("ALTER TABLE \"{alias}\".notes ADD COLUMN names JSONB"),
     );
     let mut descriptor: serde_json::Value =
         serde_json::from_str(&notes_runtime_descriptor()).unwrap();
@@ -1275,13 +1426,12 @@ fn calendar_dates_round_trip_through_worker_transactions() {
     let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
-    let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
-    exec_owner_sql(
+    let alias = crate::tests::fixtures::harness_alias(app);
+    alter_table_as_owner(
         &url,
-        &format!(
-            "ALTER TABLE \"{app}\".notes ADD COLUMN birthday DATE; \
-         GRANT SELECT, INSERT, UPDATE ON \"{app}\".notes TO \"{role}\""
-        ),
+        app,
+        "notes",
+        &format!("ALTER TABLE \"{alias}\".notes ADD COLUMN birthday DATE"),
     );
     let mut descriptor: serde_json::Value =
         serde_json::from_str(&notes_runtime_descriptor()).unwrap();
@@ -1332,9 +1482,10 @@ fn worker_upserts_preserve_platform_identity_and_reject_invalid_conflict_keys() 
     let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
+    let alias = crate::tests::fixtures::harness_alias(app);
     exec_owner_sql(
         &url,
-        &format!("CREATE UNIQUE INDEX notes_identity_title ON \"{app}\".notes (title)"),
+        &format!("CREATE UNIQUE INDEX notes_identity_title ON \"{alias}\".notes (title)"),
     );
     let source = build_src(
         r#"
@@ -2007,13 +2158,14 @@ fn commit_that_postgres_rolled_back_must_not_report_success_l8() {
     let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
+    let alias = crate::tests::fixtures::harness_alias(app);
 
     // The poison. `title` is creator data and survives the write path intact, so
     // a duplicate here is a real 23505 - unlike a duplicate `id`, which the
     // platform silently makes unique.
     exec_owner_sql(
         &url,
-        &format!("CREATE UNIQUE INDEX \"notes_title_l8_uniq\" ON \"{app}\".\"notes\" (\"title\")"),
+        &format!("CREATE UNIQUE INDEX \"notes_title_l8_uniq\" ON \"{alias}\".\"notes\" (\"title\")"),
     );
 
     let src = build_src(

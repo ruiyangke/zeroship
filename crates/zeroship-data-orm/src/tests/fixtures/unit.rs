@@ -7,7 +7,7 @@
 /// Must run inside a compio runtime because backend startup spawns a CDC publisher.
 pub(crate) fn unit_route(app_id: &str) -> (crate::tx_route::TxRoute, tempfile::TempDir) {
     let (backend, dir) = unit_backend();
-    (crate::exec::ambient_route_for_tests(app_id, backend), dir)
+    (crate::exec::ambient_route_for_tests(&crate::tests::fixtures::harness_binding(app_id), backend), dir)
 }
 
 /// Open a file-backed SQLite backend with unavailable project keys.

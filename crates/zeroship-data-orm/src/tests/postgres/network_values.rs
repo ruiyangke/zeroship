@@ -37,7 +37,7 @@ fn postgres_network_columns_roundtrip_native_text() {
             let pool = compio_postgres::Pool::connect(&url, 1).await.unwrap();
             pool.batch_execute("CREATE TABLE public.network_values (id TEXT PRIMARY KEY, address INET, subnet CIDR)").await.unwrap();
             let db = Database::connect(
-                DbBinding::new("network_fixture", "network_fixture", SchemaName::new("public").unwrap()),
+                DbBinding::platform("network_fixture", "network_fixture", SchemaName::new("public").unwrap()),
                 ConnectOptions::new(&url, ProjectKeySource::unavailable()).connection_authority(),
                 network_schema::schema(),
             ).await.unwrap();

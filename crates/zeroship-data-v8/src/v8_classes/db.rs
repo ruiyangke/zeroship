@@ -291,9 +291,9 @@ pub fn mint_db<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,
 ) -> Option<v8::Local<'s, v8::Object>> {
-    // No binding, no `env.db`. An app id that is not a legal schema name has no
-    // schema to reach, so the namespace is refused here rather than handed back
-    // as an object whose every operation fails.
+    // No binding, no `env.db`. An app the host resolved nothing for has no
+    // database to reach, so the namespace is refused here rather than handed
+    // back as an object whose every operation fails.
     let binding = binding_for_isolate(scope, app_id)?;
 
     let class_tmpl = Db::install(scope);
@@ -338,33 +338,25 @@ pub fn mint_db<'s>(
 /// Native descriptor binding and the `Db` wrapper both call this helper so
 /// cache keys cannot drift from the receivers that later read them.
 ///
-/// **This is the DATA PLANE's one app-id-to-schema derivation.** Every other
-/// data-plane consumer takes the [`zeroship_data_orm::sql::SchemaName`] off the
-/// binding instead of deriving its own.
+/// **The isolate composes nothing.** The database id, the edge id and the
+/// schema epoch are control-plane facts, and the role the session narrows to is
+/// derived from two of them, so this READS the binding the trusted host
+/// resolved. An isolate that invented one would name a schema and a role no
+/// reconciler created.
 ///
-/// It is NOT the only one in the tree, and changing it alone does not complete
-/// the flip. Two other sites derive or assume the same equality:
+/// Returns `None` when the host resolved no binding for this app, and that
+/// refusal is the point: `env.db` is absent rather than present and doomed.
 ///
-/// - `zeroship_migrate_server::apply::apply_ir_documents` holds the migration
-///   service's own derivation, and says so in its own comment.
-/// - The SQLite ATTACH alias is still minted from the TENANT
-///   (`attach_app_file(binding.app_id())`) while every query builder qualifies
-///   with the SCHEMA. The alias occupies SQLite's schema-name position, so a
-///   schema that stops being the app id has to move the alias with it or every
-///   SQLite statement names an alias nothing attached.
-///
-/// Returns `None` when `app_id` is not a legal schema name. That refusal used
-/// to be deferred: the binding was minted unconditionally and every operation
-/// failed one at a time inside the query builder, so an isolate could hold a
-/// live `env.db` whose every call was doomed with nothing said at mint time.
+/// The SQLite ATTACH alias is the binding's SCHEMA, the same value every query
+/// builder qualifies with, so the dev tier addresses one file per database and
+/// PostgreSQL addresses one schema per database.
 pub(crate) fn binding_for_isolate(
     scope: &mut v8::PinScope<'_, '_>,
     app_id: &str,
 ) -> Option<DbBinding> {
-    let schema = zeroship_data_orm::sql::SchemaName::new(app_id).ok()?;
     // The worker injects `deploy_hash` as `ZEROSHIP_DEPLOY_ID`; pinned workflow
-    // runtimes carry the hash they were started on. Absent in dev/raw-JS
-    // harnesses means the historical `cold_start` token.
+    // runtimes carry the hash they were started on. A dev or raw-JS harness
+    // sets neither, and stands on `COLD_START_DEPLOY_TOKEN`.
     let state = crate::v8_bridge::runtime_state(scope);
     let deploy_token = state
         .borrow()
@@ -372,7 +364,7 @@ pub(crate) fn binding_for_isolate(
         .get("ZEROSHIP_DEPLOY_ID")
         .cloned()
         .unwrap_or_else(|| COLD_START_DEPLOY_TOKEN.to_string());
-    Some(DbBinding::new(app_id, deploy_token, schema))
+    crate::context::with(|context| context.app_binding(app_id, &deploy_token))
 }
 
 #[cfg(test)]
@@ -386,7 +378,6 @@ mod tests {
 
     use super::normalize_isolation_level;
     use crate::v8_classes::collection::Collection;
-    use zeroship_data_orm::binding::DbBinding;
 
     fn runtime_for_deploy(app_id: &str, deploy_token: &str) -> Runtime {
         Runtime::builder()
@@ -462,14 +453,11 @@ mod tests {
         // context is the whole isolation this fixture needs — it cannot reach
         // a concurrently-running test on another thread.
         crate::tests::fixtures::reset_context();
+        crate::tests::fixtures::supply_app_bindings([APP]);
 
         let pinned_runtime = runtime_for_deploy(APP, PINNED);
         let pinned_collection = mint_collection_binding(&pinned_runtime, APP, COLLECTION);
-        let pinned_binding = DbBinding::new(
-            APP,
-            PINNED,
-            zeroship_data_orm::sql::SchemaName::new(APP).unwrap(),
-        );
+        let pinned_binding = crate::tests::fixtures::harness_binding_at_deploy(APP, PINNED);
         crate::tests::fixtures::install_schema(
             &pinned_binding,
             COLLECTION,
@@ -504,11 +492,7 @@ mod tests {
             "the current deploy must not read the pinned deploy's descriptor entry",
         );
 
-        let current_binding = DbBinding::new(
-            APP,
-            CURRENT,
-            zeroship_data_orm::sql::SchemaName::new(APP).unwrap(),
-        );
+        let current_binding = crate::tests::fixtures::harness_binding_at_deploy(APP, CURRENT);
         crate::tests::fixtures::install_schema(
             &current_binding,
             COLLECTION,
@@ -589,38 +573,41 @@ mod tests {
         }
     }
 
-    /// Minting must refuse an app id that is not a legal schema name.
+    /// An app the host resolved no binding for gets no `env.db` at all.
     ///
-    /// Invalid physical schema names are refused before a binding is installed.
+    /// This is the production refusal: the database id, the edge id and the
+    /// epoch are control-plane facts, so an isolate that was handed none of
+    /// them has nothing to address and must not be given a handle that fails
+    /// one operation at a time instead.
+    ///
+    /// Its control is the same mint for an app the host DID resolve, which
+    /// differs in one variable: whether the store holds that app.
     #[test]
-    fn mint_refuses_an_app_id_that_is_not_a_legal_schema_name() {
-        // A double quote is the character that makes `quote_ident`'s escaping
-        // load-bearing, so it is the one whose acceptance matters most.
-        const ILLEGAL: &str = "app\"; DROP SCHEMA public; --";
+    fn mint_refuses_an_app_the_host_resolved_no_binding_for() {
+        const RESOLVED: &str = "app_mint_resolved";
+        const UNRESOLVED: &str = "app_mint_unresolved";
 
-        // CONTROL, differing in one variable: the fixture really is a name the
-        // shared validator rejects, so the arm below is not asserting against an
-        // arbitrary string.
-        let refused = zeroship_data_orm::sql::SchemaName::new(ILLEGAL);
+        crate::tests::fixtures::reset_context();
+        crate::tests::fixtures::supply_app_bindings([RESOLVED]);
+
+        // CONTROL: the store holds this app, so the mint succeeds.
+        let permitted = runtime_for_deploy(RESOLVED, "deploy_mint_refusal");
+        let minted = permitted.with_scope(|scope| super::mint_db(scope, RESOLVED).is_some());
+        permitted.exit_isolate();
         assert!(
-            matches!(
-                refused,
-                Err(zeroship_core::schema_name::SchemaNameError::Invalid(_))
-            ),
-            "control: SchemaName must reject the fixture, got {refused:?}"
+            minted,
+            "control: an app whose binding the host resolved must reach env.db"
         );
 
-        // THE PROPERTY: the mint refuses it, rather than handing back a binding
-        // that only fails one operation at a time.
-        crate::tests::fixtures::reset_context();
-        let runtime = runtime_for_deploy(ILLEGAL, "deploy_mint_refusal");
-        let minted = runtime.with_scope(|scope| super::mint_db(scope, ILLEGAL).is_some());
-        runtime.exit_isolate();
-
+        // THE PROPERTY, one variable apart: the same mint for an app the host
+        // resolved nothing for.
+        let refused = runtime_for_deploy(UNRESOLVED, "deploy_mint_refusal");
+        let minted = refused.with_scope(|scope| super::mint_db(scope, UNRESOLVED).is_some());
+        refused.exit_isolate();
         assert!(
             !minted,
-            "mint_db handed back an env.db binding for an app id that is not a legal \
-             schema name; the refusal is still deferred to per-operation query building"
+            "mint_db handed back an env.db binding for an app the host resolved no \
+             binding for; an isolate cannot compose one of its own"
         );
     }
 }

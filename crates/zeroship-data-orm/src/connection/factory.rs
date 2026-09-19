@@ -117,7 +117,7 @@ impl ConnectionFactory {
     }
     /// Validate built-in configuration without opening a database.
     pub fn for_url(url: &str) -> Result<Self, DbError> {
-        Self::for_url_with_limit(url, None, SessionAuthority::PerAppRole)
+        Self::for_url_with_limit(url, None, SessionAuthority::PerBindingRole)
     }
     pub(super) fn for_url_with_limit(
         url: &str,

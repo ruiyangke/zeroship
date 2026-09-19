@@ -1,7 +1,7 @@
 //! Bindings on schema `main` address the file the backend opened.
 //!
-//! Every other binding addresses its app's own file, attached under the app id.
-//! The pair below differs only in the binding's schema.
+//! Every other binding addresses its app's own file, attached under the
+//! binding's schema. The pair below differs only in the binding's schema.
 
 use std::path::Path;
 
@@ -116,7 +116,7 @@ async fn write_notes(database: &Database) -> Result<Vec<Value>, DbError> {
 }
 
 fn main_binding() -> DbBinding {
-    DbBinding::new(
+    DbBinding::platform(
         "platform",
         "platform-deploy",
         SchemaName::new(MAIN).expect("main is a schema name"),
@@ -149,11 +149,12 @@ async fn a_main_schema_binding_attaches_no_app_file() {
 #[compio::test]
 async fn an_app_binding_addresses_its_attached_file() {
     let directory = tempfile::tempdir().unwrap();
-    let app_file = directory.path().join(format!("zs-{APP}.sqlite"));
+    let alias = crate::tests::fixtures::harness_alias(APP);
+    let app_file = directory.path().join(format!("zs-{alias}.sqlite"));
     create_tables(&app_file);
     let opened = directory.path().join("control.sqlite");
     let database = connect(
-        DbBinding::new(APP, "app-deploy", SchemaName::new(APP).unwrap()),
+        crate::tests::fixtures::harness_binding_at_deploy(APP, "app-deploy"),
         &opened,
     )
     .await;
@@ -162,7 +163,7 @@ async fn an_app_binding_addresses_its_attached_file() {
     assert_eq!(titles, vec![Value::from("first"), Value::from("second")]);
     assert_eq!(
         app_files(directory.path()),
-        vec![format!("zs-{APP}.sqlite")]
+        vec![format!("zs-{alias}.sqlite")]
     );
     assert_eq!(stored_titles(&app_file), ["first", "second"]);
     let opened_tables: i64 = rusqlite::Connection::open(&opened)

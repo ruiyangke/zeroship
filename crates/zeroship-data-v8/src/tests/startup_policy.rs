@@ -7,7 +7,6 @@ use std::time::Duration;
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::connection::ConnectionFactory;
 use zeroship_data_orm::protection::mask_policy::install_mask_policy;
-use zeroship_data_orm::sql::SchemaName;
 use zeroship_data_v8::service::{DbService, DbServiceConfig};
 use zeroship_runtime::{
     CancelFlag, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, Runtime, SettledFetch,
@@ -19,15 +18,12 @@ fn binding() -> DbBinding {
         "app_startup_policy_{}",
         NEXT.fetch_add(1, Ordering::Relaxed)
     );
-    DbBinding::new(
-        &app,
-        "startup_policy_fixture",
-        SchemaName::new(&app).unwrap(),
-    )
+    crate::tests::fixtures::harness_binding_at_deploy(&app, "startup_policy_fixture")
 }
 
 fn runtime(source: &str, binding: &DbBinding, url: &str) -> Runtime {
     let plugin = DbService::new(DbServiceConfig {
+        app_bindings: crate::tests::fixtures::harness_app_bindings([binding.app_id()]),
         project_keys: Default::default(),
         connection: ConnectionFactory::for_url(url).unwrap(),
         cdc_relay: None,
@@ -328,7 +324,8 @@ async fn finalization_rejects_a_conflicting_binding_and_preserves_older_deployme
     for path in ["/fetch", "/__zeroship/v1/inspect"] {
         assert_eq!(dispatch(&conflicting, path).await.0, 500);
     }
-    let next_binding = DbBinding::new(binding.app_id(), "next_deploy", binding.schema().clone());
+    let next_binding =
+        crate::tests::fixtures::harness_binding_at_deploy(binding.app_id(), "next_deploy");
     let next = runtime(changed_source, &next_binding, UNUSED_DATABASE);
     initialize(&next).await.unwrap();
     assert_policy(

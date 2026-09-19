@@ -61,7 +61,7 @@ impl DeploymentHoldApi {
             None
         };
         let database = Database::connect(
-            DbBinding::new(
+            DbBinding::platform(
                 "platform",
                 "control-deployments",
                 SchemaName::new("zeroship").map_err(|_| unavailable())?,

@@ -121,7 +121,7 @@ fn delete_notification_intent_follows_the_schema_lifecycle() {
         for soft_delete in [false, true] {
             let context = crate::OrmContext::new();
             context.with(|| {
-                let binding = DbBinding::cold_start("typed_delete_intent");
+                let binding = crate::tests::fixtures::harness_binding("typed_delete_intent");
                 let mut schema = documents::Entity::schema().fields().clone();
                 if !soft_delete {
                     schema.shift_remove("deleted_at");

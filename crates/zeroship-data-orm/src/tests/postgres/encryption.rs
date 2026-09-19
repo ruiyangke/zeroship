@@ -243,8 +243,9 @@ fn p4_round_trip_encrypted_masked_vector_via_descriptor_metadata() {
             let app = crate::tests::fixtures::test_app_id!();
 
             let app = app.as_str();
+            let alias = crate::tests::fixtures::harness_alias(app);
             let _keys = host.supply_project_key(&[app], &"d".repeat(64));
-            pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+            pool.execute(&format!("DROP SCHEMA IF EXISTS \"{alias}\" CASCADE"), &[])
                 .await
                 .unwrap();
 
@@ -290,9 +291,9 @@ fn p4_round_trip_encrypted_masked_vector_via_descriptor_metadata() {
             // keeps holding ciphertext, unchanged.
             let phone_raw = raw_column_name("phone");
             pool.batch_execute(&format!(
-                r#"CREATE SCHEMA IF NOT EXISTS "{app}";
+                r#"CREATE SCHEMA IF NOT EXISTS "{alias}";
 CREATE EXTENSION IF NOT EXISTS vector;
-CREATE TABLE "{app}"."people" ({PG_COMMON_FIXTURE_COLUMNS},
+CREATE TABLE "{alias}"."people" ({PG_COMMON_FIXTURE_COLUMNS},
   "name" TEXT NOT NULL,
   "ssn" BYTEA,
   "phone" TEXT,
@@ -381,7 +382,7 @@ CREATE TABLE "{app}"."people" ({PG_COMMON_FIXTURE_COLUMNS},
             // bind otherwise, which it cannot encode an `&str` into).
             pool.execute(
                 &format!(
-            "INSERT INTO \"{app}\".\"people\" (id, name, ssn, phone, \"{phone_raw}\", embedding) \
+            "INSERT INTO \"{alias}\".\"people\" (id, name, ssn, phone, \"{phone_raw}\", embedding) \
              VALUES ($1, $2, $3::bytea, $4, $5, '[0.1,0.2,0.3]'::vector)"
         ),
                 &[
@@ -403,7 +404,7 @@ CREATE TABLE "{app}"."people" ({PG_COMMON_FIXTURE_COLUMNS},
                 .query_text_params(
                     &format!(
                         "SELECT id, name, ssn, phone \
-                 FROM \"{app}\".\"people\" WHERE id = $1"
+                 FROM \"{alias}\".\"people\" WHERE id = $1"
                     ),
                     &[row_id.as_str()],
                 )
