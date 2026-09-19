@@ -44,11 +44,7 @@ impl AppWorkflows {
             ));
         };
         let authority = CapturedLease::capture(self, lease);
-        let budget = authority
-            .as_ref()
-            .ok()
-            .and_then(JobLease::remaining)
-            .unwrap_or_else(|| delivery::attempt_budget(None, None));
+        let budget = delivery::attempt_budget(authority.as_ref().ok(), None);
         delivery::run_attempt(
             authority.as_ref().ok().map(CapturedLease::cancelled),
             budget,
