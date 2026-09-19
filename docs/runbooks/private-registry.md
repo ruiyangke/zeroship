@@ -117,64 +117,14 @@ The resolved path should point inside the throwaway directory's `node_modules`, 
 
 ## Generated App Consumption
 
-Generated apps only need scoped read access. The Builder writes this into the
-generated app workspace as `.npmrc` whenever `ZEROSHIP_SDK_REGISTRY` is set:
+Generated apps only need scoped read access. A generated app's workspace
+`.npmrc` carries the scope whenever `ZEROSHIP_SDK_REGISTRY` is set:
 
 ```ini
 @zeroship:registry=<ZEROSHIP_SDK_REGISTRY>
 ```
 
-Do not put publish credentials in generated apps or sandbox workspaces. The
-workspace `.npmrc` intentionally sets only the `@zeroship` scope; the default
-registry remains npmjs so public dependencies such as React, Vite, and Base UI
-continue to resolve normally.
-
-Local Builder env:
-
-```bash
-ZEROSHIP_SDK_REGISTRY=http://host.docker.internal:4873
-```
-
-The Docker sandbox backend injects `host.docker.internal` with Docker's
-`host-gateway` mapping, so this URL reaches either a host-local Verdaccio
-process or the compose Verdaccio service published on `localhost:4873`.
-
-Compose-network option, if you intentionally want Docker DNS instead of the
-host-gateway route:
-
-```bash
-docker network connect zeroship-sandbox-net "$(docker compose -f deploy/compose/docker-compose.yml ps -q verdaccio)"
-ZEROSHIP_SDK_REGISTRY=http://verdaccio:4873
-```
-
-Use this URL only after the Verdaccio container has been attached to
-`zeroship-sandbox-net`, the same network used by Docker-backed sandbox
-containers. The committed compose file does not attach Verdaccio to that named
-network by default because local sandbox harnesses often create it outside
-compose; Docker Compose refuses to take ownership of that pre-existing network.
-
-## Backend Registry URLs
-
-| Backend | Reachable `ZEROSHIP_SDK_REGISTRY` | Status |
-| --- | --- | --- |
-| Docker local | `http://host.docker.internal:4873` | Implemented via `--add-host host.docker.internal:host-gateway` in the Docker backend. |
-| Docker compose network | `http://verdaccio:4873` | Documented optional route. Manually attach the Verdaccio container to `zeroship-sandbox-net` if you prefer compose DNS. |
-| Kubernetes | `http://verdaccio.<namespace>.svc.cluster.local:4873` or the registry Service DNS used by the cluster | Documented. Configure the Builder env to the Service DNS reachable from sandbox pods. |
-| Nomad + Cloud Hypervisor | A routable registry URL from the microVM network, for example `http://<registry-host-or-vip>:4873` | Documented. The VM route/firewall must allow egress to the registry host; no backend code change in Phase 2. |
-
-## Sandbox Acceptance Test
-
-The end-to-end acceptance harness that drove a real Docker sandbox against this
-registry left with the sandbox backend: both it and the sandbox bring-up script
-it called now live in the standalone `zeroship-sandbox` project. Run it from
-that checkout, pointed at the Verdaccio started above.
-
-What it covers there, for reference: publish the SDKs to Verdaccio, create a
-sandbox through the real backend client, and run `pnpm install` plus `pnpm build`
-for a minimal Vite app importing from `@zeroship/ui` - asserting that the sandbox
-workspace `.npmrc` carries only the scoped `@zeroship` line, that
-`pnpm config get @zeroship:registry` resolves to Verdaccio, and that the build
-output contains ZeroShip UI classes such as `zs-theme-root` or `zs-button`.
-
-The registry side of that flow is exercisable from this repo alone with the
-`pnpm publish:packages` and throwaway-consumer steps above.
+Do not put publish credentials in generated apps. The workspace `.npmrc`
+intentionally sets only the `@zeroship` scope; the default registry remains
+npmjs so public dependencies such as React, Vite, and Base UI continue to
+resolve normally.

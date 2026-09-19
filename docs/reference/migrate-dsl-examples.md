@@ -630,15 +630,15 @@ table("orders").create({
 import { maxValue, minValue, table, t } from "@zeroship/migrate";
 
 // 1) Parent declares the strategy at create().
-table("sandbox_events").create({
+table("audit_events").create({
   columns: { id: t.uuid().notNull(), occurred_at: t.timestamp().notNull() },
   primaryKey: ["id", "occurred_at"],
   partitionBy: { range: ["occurred_at"] }, // { range } | { list } | { hash }
 });
 
 // 2) Child partitions (parent-subject). RANGE bounds:
-table("sandbox_events")
-  .partition("sandbox_events_2026_05")
+table("audit_events")
+  .partition("audit_events_2026_05")
   .create({ from: ["2026-05-01 00:00:00+00"], to: ["2026-06-01 00:00:00+00"] });
 
 // LIST bounds:
@@ -648,16 +648,16 @@ table("events").partition("events_eu").create({ in: ["de", "fr", "es"] });
 table("events").partition("events_h0").create({ modulus: 4, remainder: 0 });
 
 // DEFAULT partition (catch-all):
-table("sandbox_events")
-  .partition("sandbox_events_default").create({ default: true });
+table("audit_events")
+  .partition("audit_events_default").create({ default: true });
 
 // Unbounded range ends use the sentinels:
 table("events").partition("events_head").create({ from: [minValue], to: ["2026-01-01"] });
 table("events").partition("events_tail").create({ from: ["2027-01-01"], to: [maxValue] });
 
 // Lifecycle: detach and drop (both parent-subject).
-table("sandbox_events").partition("sandbox_events_2026_05").detach();
-table("sandbox_events").partition("sandbox_events_2026_05").drop();
+table("audit_events").partition("audit_events_2026_05").detach();
+table("audit_events").partition("audit_events_2026_05").drop();
 
 // Attach an existing table as a partition (operator-only; names the platform schema).
 table("events", { schema: "zeroship" }).partition("events_eu").attach({ in: ["de"] });
