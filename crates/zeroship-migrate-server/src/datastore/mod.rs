@@ -352,7 +352,7 @@ impl Reconciler {
     ) -> Result<(), ReconcileError> {
         for declaration in declarations.databases() {
             if declaration.status == DATABASE_STATUS_DELETING {
-                if let Err(failure) = self.tear_down(admin, declarations, declaration, report).await?
+                if let Err(failure) = self.tear_down(admin, declaration, report).await?
                 {
                     report.failures.push(format!(
                         "database {}: {failure}",
@@ -391,24 +391,29 @@ impl Reconciler {
 
     /// Destroy one database, on its own explicit declaration.
     ///
-    /// The precondition is read from the SAME complete declaration set the rest
-    /// of the pass uses: a database any binding still names is not torn down,
-    /// and the composite foreign key refuses the row removal for the same
-    /// reason if one appeared in between. The inner `Result` is the row's
-    /// outcome; the outer one ends the pass.
+    /// # The precondition is read fresh, and the foreign key is not a substitute
+    ///
+    /// A database any binding still names is not torn down. That check reads
+    /// control NOW rather than the pass's declaration snapshot, because the
+    /// snapshot was taken before the databases were converged and
+    /// `zeroship_control::databases::bind` carries no predicate on a database's
+    /// status - an app can be bound to one that is already `deleting`.
+    ///
+    /// `database_bindings_database_project_fkey` refuses the ROW removal for the
+    /// same reason, and it is measurably not enough: it fires after
+    /// [`cluster::drop_database`] has already run, so with this check removed
+    /// the schema is destroyed and the foreign key then reports a violation over
+    /// data that is already gone. The foreign key protects the row; only this
+    /// protects the data.
+    ///
+    /// The inner `Result` is the row's outcome; the outer one ends the pass.
     async fn tear_down(
         &self,
         admin: &mut Client,
-        declarations: &Declarations,
         declaration: &control::DatabaseDeclaration,
         report: &mut PassReport,
     ) -> Result<Result<(), String>, ReconcileError> {
-        let still_bound: Vec<&str> = declarations
-            .bindings()
-            .iter()
-            .filter(|binding| binding.database == declaration.database)
-            .map(|binding| binding.binding.as_str())
-            .collect();
+        let still_bound = self.control.bindings_naming(&declaration.database).await?;
         if !still_bound.is_empty() {
             return Ok(Err(format!(
                 "still bound by {}; a database is destroyed only once no app reaches it",
