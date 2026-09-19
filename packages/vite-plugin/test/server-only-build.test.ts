@@ -202,7 +202,8 @@ describe("ISS-59 — server-only app (no index.html) builds to a valid .zship", 
           control: "http://localhost:9090",
           runtime_date: "2042-03-04",
           build: { mode: "full", dist: "build", output: "build/app.zship" },
-          migrations: { dir: "migrations", out: "generated/zeroship" },
+          databases: {},
+          apps: { app: { databases: [] } },
         }),
       );
 

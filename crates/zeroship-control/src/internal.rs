@@ -566,7 +566,7 @@ pub async fn get_app_data_key(
 /// the authority, so composing a retired one makes `SET LOCAL ROLE` fail and
 /// the caller re-resolve. That is the fail-closed direction and it is why this
 /// serves a projection rather than reading the cluster.
-pub async fn get_app_binding(
+pub async fn get_app_bindings(
     req: web::HttpRequest,
     state: State<Arc<AppState>>,
     app_id: Path<String>,
@@ -574,7 +574,7 @@ pub async fn get_app_binding(
     let id = match zone_scoped_app_read(
         &req,
         &state,
-        endpoints::CONTROL_APP_BINDING,
+        endpoints::CONTROL_APP_BINDINGS,
         &app_id,
         || web::HttpResponse::BadRequest().json(&serde_json::json!({"error":"bad app_id"})),
     )
@@ -583,6 +583,9 @@ pub async fn get_app_binding(
         Ok(id) => id,
         Err(response) => return response,
     };
+    // EVERY live binding, not one: an app may bind many databases and
+    // `env.databases` reaches all of them. A `LIMIT 1` here would leave every
+    // non-primary handle unresolvable while looking like a working endpoint.
     let rows = match state
         .control_pg
         .query(
@@ -593,8 +596,7 @@ pub async fn get_app_binding(
                 AND b.status = 'active' \
                 AND b.observed_generation >= b.generation \
                 AND d.status = 'active' \
-              ORDER BY b.id \
-              LIMIT 1",
+              ORDER BY b.id",
             &[&id.as_str()],
         )
         .await
@@ -606,23 +608,27 @@ pub async fn get_app_binding(
                 .json(&serde_json::json!({"error":"internal error"}));
         }
     };
-    let Some(row) = rows.first() else {
+    if rows.is_empty() {
         return web::HttpResponse::NotFound()
             .json(&serde_json::json!({"error":"no live database binding"}));
-    };
-    let epoch: i32 = row.get("schema_epoch");
-    let Ok(epoch) = u32::try_from(epoch) else {
-        tracing::error!(app_id = %id.as_str(), "control-internal: negative schema epoch");
-        return web::HttpResponse::InternalServerError()
-            .json(&serde_json::json!({"error":"internal error"}));
-    };
-    web::HttpResponse::Ok()
-        .header("cache-control", "no-store")
-        .json(&serde_json::json!({
+    }
+    let mut bindings = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let epoch: i32 = row.get("schema_epoch");
+        let Ok(epoch) = u32::try_from(epoch) else {
+            tracing::error!(app_id = %id.as_str(), "control-internal: negative schema epoch");
+            return web::HttpResponse::InternalServerError()
+                .json(&serde_json::json!({"error":"internal error"}));
+        };
+        bindings.push(serde_json::json!({
             "binding_id": row.get::<_, &str>("binding_id"),
             "database_id": row.get::<_, &str>("database_id"),
             "schema_epoch": epoch,
-        }))
+        }));
+    }
+    web::HttpResponse::Ok()
+        .header("cache-control", "no-store")
+        .json(&serde_json::json!({ "bindings": bindings }))
 }
 
 /// POST /internal/workers/join - a worker registers ONE live process.

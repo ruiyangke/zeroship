@@ -44,8 +44,10 @@ import { buildDevBundle } from "./dev-bundle.js";
 import { DevPublisher } from "./dev-publisher.js";
 import {
   defaultProjectConfig,
+  selectDatabase,
   type ProjectConfigHolder,
   type ResolvedProjectConfig,
+  type TargetDatabase,
 } from "./project-config/index.js";
 import type { TransformState } from "./transform.js";
 import {
@@ -74,6 +76,8 @@ import {
 
 export interface DevServerOptions {
   devServerPort?: number;
+  /** Which declared app this dev server serves. See `ZeroshipOptions.app`. */
+  app?: string;
   /**
    * Dev-tier auth config. `undefined` defaults to ON with the built-in dev
    * user; `false` disables. See `ZeroshipOptions.devAuth`.
@@ -88,7 +92,12 @@ export interface DevServerOptions {
  * can silently substitute its own default (as `?? GEN_TYPES_OUT_DEFAULT` did) and
  * drift from the others.
  */
-type MigrationPaths = { dir: string; out: string };
+/**
+ * Where ONE database keeps its migration sources and its fold. A database, not
+ * the project: the three gen-types filenames are fixed, so each database owns
+ * its own pair.
+ */
+type MigrationPaths = { migrations: string; out: string };
 
 type FetchMethod = "fetchModule" | "getBuiltins";
 
@@ -324,7 +333,7 @@ async function regenTypesDev(
   migrations: MigrationPaths,
   fatal: boolean,
 ): Promise<{ descriptorJson: string | undefined; generated: boolean }> {
-  const migrationsDir = resolve(root, migrations.dir);
+  const migrationsDir = resolve(root, migrations.migrations);
   const outDir = resolve(root, migrations.out);
   let generated = false;
   try {
@@ -400,7 +409,7 @@ function reportDevSchemaState(
   descriptorJson: string | undefined,
   databaseUrl: string,
 ): void {
-  const migrationsDir = resolve(root, migrations.dir);
+  const migrationsDir = resolve(root, migrations.migrations);
   if (!existsSync(migrationsDir)) return; // not a migration-first app
 
   // The collections the app expects to exist, from the descriptor gen-types
@@ -570,6 +579,9 @@ export function devServerPlugin(
   // changed files against it.
   let migrationsAbs: string | null = null;
   let runtimeDescriptorJson: string | undefined;
+  // The database the dev tier serves: the app's primary, the one `env.db`
+  // reaches. `undefined` for an app that declares none.
+  let primaryDatabase: TargetDatabase | undefined;
   // The boot-time gen-types regen (async, in-process). `spawnRuntime` awaits it
   // so the runtime is spawned WITH a fresh descriptor (the pre-in-process CLI
   // path was synchronous; awaiting here preserves that ordering).
@@ -645,12 +657,15 @@ export function devServerPlugin(
       //    root by default; a migrations dir holding `.ts` sources not imported
       //    by app code may not be covered). The `hotUpdate` branch below
       //    regenerates `env.db.ts` on a change.
-      migrationsAbs = resolve(root, projectConfig.migrations.dir);
-      if (existsSync(migrationsAbs)) {
+      primaryDatabase = selectDatabase(projectConfig, { app: options.app });
+      migrationsAbs =
+        primaryDatabase == null ? null : resolve(root, primaryDatabase.migrations);
+      if (primaryDatabase != null && migrationsAbs != null && existsSync(migrationsAbs)) {
+        const database = primaryDatabase;
         server.watcher.add(migrationsAbs);
         // Seed the descriptor from the committed artifact so the very first
         // request has it even before the async regen lands.
-        runtimeDescriptorJson = readGeneratedRuntimeDescriptor(root, projectConfig.migrations);
+        runtimeDescriptorJson = readGeneratedRuntimeDescriptor(root, database);
         // Initial regen on boot: migrations may have changed while the dev server
         // was down (`hotUpdate` only fires on a *subsequent* change, so without
         // this a fresh `pnpm dev` leaves env.db.ts stale). `spawnRuntime` awaits
@@ -658,7 +673,7 @@ export function devServerPlugin(
         // `regenTypesDev` never throws: a malformed migration is logged and
         // survived, a PLATFORM fault exits the process here (`fatal: true`)
         // rather than serving a stale descriptor for the rest of the session.
-        bootRegenDone = regenTypesDev(root, projectConfig.migrations, true).then(async ({
+        bootRegenDone = regenTypesDev(root, database, true).then(async ({
           descriptorJson: json,
         }) => {
           runtimeDescriptorJson = json;
@@ -686,7 +701,7 @@ export function devServerPlugin(
             console.error(`[zeroship] ${(e as Error).message}`);
             return;
           }
-          reportDevSchemaState(root, projectConfig.migrations, json, databaseUrl);
+          reportDevSchemaState(root, database, json, databaseUrl);
         });
       }
 
@@ -858,7 +873,16 @@ export function devServerPlugin(
               await bootRegenDone;
               return buildDevBundle({
                 root, entry: serverEntry, project: projectConfig,
-                runtimeDescriptor: runtimeDescriptorJson,
+                databases:
+                  primaryDatabase == null || runtimeDescriptorJson === undefined
+                    ? []
+                    : [{
+                        label: primaryDatabase.label,
+                        id: primaryDatabase.id,
+                        primary: true,
+                        migrations: primaryDatabase.migrations,
+                        descriptor: runtimeDescriptorJson,
+                      }],
               });
             },
             files => {
@@ -881,7 +905,7 @@ export function devServerPlugin(
           const path = relative(root, file);
           if (path.split(/[\\/]/).some(part => part === ".zeroship" || part === "node_modules")) return;
           if (isUnderMigrationsDir(file, resolve(root, projectConfig.build.dist))) return;
-          if (isUnderMigrationsDir(file, resolve(root, projectConfig.migrations.out))) return;
+          if (primaryDatabase != null && isUnderMigrationsDir(file, resolve(root, primaryDatabase.out))) return;
           // Hidden host state is not an input unless the compiler observed it.
           if (!dependencies.has(file) && path.split(/[\\/]/).some(part => part.startsWith("."))) return;
           if (dependencies.has(file) || /\.(?:[cm]?[jt]sx?|json)$/.test(extname(file))) refreshDeployment();
@@ -1333,7 +1357,7 @@ export function devServerPlugin(
       // immutable runtime input, so replace the child and let native boot bind
       // it into a fresh isolate. `regenTypesDev` never throws, and is NOT fatal
       // here: a bad migration leaves the last valid runtime serving unchanged.
-      if (migrationsAbs != null && isUnderMigrationsDir(file, migrationsAbs)) {
+      if (primaryDatabase != null && migrationsAbs != null && isUnderMigrationsDir(file, migrationsAbs)) {
         // Serialize behind the boot fold. Otherwise a fast hot fold can publish
         // a new descriptor while the first spawn is still awaiting the boot
         // fold, only for that older boot result to overwrite it. Once this
@@ -1343,7 +1367,7 @@ export function devServerPlugin(
         await bootRegenDone;
         const { descriptorJson, generated } = await regenTypesDev(
           root,
-          projectConfig.migrations,
+          primaryDatabase,
           false,
         );
         if (generated && descriptorJson !== runtimeDescriptorJson) {

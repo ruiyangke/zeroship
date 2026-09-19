@@ -46,11 +46,34 @@ export default {
 };
 `;
 
+/**
+ * A `zeroship.jsonc` declaring one database and one app. Every dev-server
+ * fixture carries it, because there is no project-level default for a
+ * database's migration sources or its fold: the file is the one holder, so a
+ * fixture without it declares no database and the dev server has nothing to
+ * regenerate.
+ */
+const PROJECT_CONFIG = JSON.stringify({
+  name: "gentypes-dev",
+  control: "http://localhost:9090",
+  runtime_date: "2026-08-14",
+  build: { mode: "full", dist: "dist", output: "dist/app.zship" },
+  databases: {
+    main: {
+      id: "dbs_03evr3oqx1200yyd6zj2cebfw",
+      migrations: "migrations",
+      out: "generated/zeroship",
+    },
+  },
+  apps: { app: { databases: ["main"], primary: "main" } },
+});
+
 async function makeFixture(
   files: Record<string, string>,
 ): Promise<{ root: string; cleanup: () => Promise<void> }> {
   const root = join(tmpdir(), `gentypes-dev-${randomUUID()}`);
   await fs.mkdir(root, { recursive: true });
+  files = { "zeroship.jsonc": PROJECT_CONFIG, ...files };
   for (const [rel, content] of Object.entries(files)) {
     const abs = resolve(root, rel);
     await fs.mkdir(dirname(abs), { recursive: true });
@@ -171,10 +194,16 @@ describe("dev-server → in-process gen-types", () => {
     }
   });
 
-  // The default now has exactly ONE holder in the whole tree: schema/project-v1.json,
-  // from which DEFAULTS is generated. This assertion is what notices if a
-  // second one reappears in TypeScript.
-  test("the default gen-types output dir is generated/zeroship, held by the schema", () => {
-    assert.equal(DEFAULTS["migrations.out"], "generated/zeroship");
+  // A database's migration sources and its fold have NO default at all: two
+  // databases sharing one directory would be one schema standing in for
+  // another, so the file is the only holder and an absent one declares no
+  // database. This assertion is what notices if a default reappears anywhere.
+  test("a database's paths have no default, in the schema or in TypeScript", () => {
+    const defaulted = Object.keys(DEFAULTS);
+    assert.ok(defaulted.length > 0, "the defaults table must not be empty");
+    assert.deepEqual(
+      defaulted.filter((path) => path.startsWith("databases.") || path.startsWith("apps.")),
+      [],
+    );
   });
 });

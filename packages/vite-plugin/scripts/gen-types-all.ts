@@ -26,11 +26,11 @@
  * out dir; its app root is the nearest ancestor with a `package.json`. A new
  * example is therefore covered the day its artifacts appear, with no edit here.
  *
- * SOURCE SELECTION mirrors the plugin: a migrations dir - named by the app's
- * `zeroship.jsonc`, or `migrations/` when it has none - means the GENERATED
- * source (`genTypesFromMigrations`), otherwise a committed `schema.ts` means the
- * MANUAL source (`genTypesFromSchemaFile`). Neither present is a hard error, not
- * a silent skip.
+ * SOURCE SELECTION mirrors the plugin: the database whose `out` IS this artifact
+ * directory, named by the app's `zeroship.jsonc`, supplies the migrations dir and
+ * means the GENERATED source (`genTypesFromMigrations`); otherwise a committed
+ * `schema.ts` means the MANUAL source (`genTypesFromSchemaFile`). Neither present
+ * is a hard error, not a silent skip.
  *
  * IT READS THE CONFIG NOW, which is the point of `zeroship.jsonc`. Before, this
  * runner REFUSED to run against any app whose vite config mentioned
@@ -56,7 +56,7 @@ import {
   genTypesFromMigrations,
   genTypesFromSchemaFile,
 } from "../src/gen-types/index.js";
-import { readProjectConfig } from "../src/project-config/index.js";
+import { declaredDatabases, readProjectConfig } from "../src/project-config/index.js";
 
 /** Directories a repo walk must never descend into: build output, dependency
  *  trees, sibling git checkouts, and the vendored engine. */
@@ -128,10 +128,18 @@ async function runOne(app: ArtifactApp, check: boolean): Promise<string> {
   // left to protect, and the regex (which would match a comment and miss a
   // spread) goes with it.
   const { config } = readProjectConfig(app.root);
-  const migrationsDir = resolve(app.root, config.migrations.dir);
-  if (existsSync(migrationsDir) && statSync(migrationsDir).isDirectory()) {
-    await genTypesFromMigrations(migrationsDir, app.outDir, { check });
-    return "migrations";
+  // The artifacts were discovered by directory, and a workspace has one
+  // directory per DATABASE, so the sources are the ones of the database whose
+  // `out` is this directory.
+  const database = Object.entries(declaredDatabases(config)).find(
+    ([, declared]) => resolve(app.root, declared.out) === resolve(app.outDir),
+  );
+  if (database != null) {
+    const migrationsDir = resolve(app.root, database[1].migrations);
+    if (existsSync(migrationsDir) && statSync(migrationsDir).isDirectory()) {
+      await genTypesFromMigrations(migrationsDir, app.outDir, { check });
+      return `migrations (${database[0]})`;
+    }
   }
   for (const rel of ["schema.ts", "src/schema.ts"]) {
     const schemaTs = join(app.root, rel);

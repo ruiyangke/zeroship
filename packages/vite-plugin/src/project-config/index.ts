@@ -26,26 +26,141 @@ import {
 } from "jsonc-parser";
 
 import {
+  APP_KNOWN_KEYS,
+  APP_REQUIRED_KEYS,
   CLI_READ_FIELDS,
   CONFIG_ENV_VAR,
   CONFIG_FILENAME,
+  DATABASE_KNOWN_KEYS,
+  DATABASE_REQUIRED_KEYS,
   DEFAULTS,
+  ENVIRONMENT_APP_KNOWN_KEYS,
+  ENVIRONMENT_APP_REQUIRED_KEYS,
+  ENVIRONMENT_DATABASE_KNOWN_KEYS,
+  ENVIRONMENT_DATABASE_REQUIRED_KEYS,
   ENVIRONMENT_KNOWN_KEYS,
   ENVIRONMENT_REQUIRED_KEYS,
   FIELD_RULES,
   FORBIDDEN_KEY_NAMES,
+  LABEL_RULES,
   ROOT_KNOWN_KEYS,
   SCHEMA_ID,
   ROOT_REQUIRED_KEYS,
   BUILD_KNOWN_KEYS,
   BUILD_REQUIRED_KEYS,
-  MIGRATIONS_KNOWN_KEYS,
-  MIGRATIONS_REQUIRED_KEYS,
+  type ResolvedApp,
+  type ResolvedDatabase,
   type ResolvedProjectConfig,
 } from "./generated.js";
 
 export { CONFIG_FILENAME, CONFIG_ENV_VAR, CLI_READ_FIELDS, DEFAULTS };
-export type { ResolvedProjectConfig };
+export type { ResolvedApp, ResolvedDatabase, ResolvedProjectConfig };
+
+/**
+ * Printed with every environment-shape refusal, because the rule is the point
+ * and the missing key is only how it was broken.
+ */
+const NON_INHERITABLE_NOTE =
+  "`apps`, `control` and `databases` are NON-INHERITABLE, and each map must cover every " +
+  "label the root declares. An environment that names a control and inherits the root app " +
+  "targets the wrong code; one that inherits a database id lands WRITES in the wrong data.";
+
+/** The databases a resolved config declares. Absent means none, not unknown. */
+export function declaredDatabases(
+  config: ResolvedProjectConfig,
+): Record<string, ResolvedDatabase> {
+  return config.databases ?? {};
+}
+
+/** The apps a resolved config declares. Absent means none, not unknown. */
+export function declaredApps(config: ResolvedProjectConfig): Record<string, ResolvedApp> {
+  return config.apps ?? {};
+}
+
+/** One database of the app being built, with its label dereferenced. */
+export interface TargetDatabase extends ResolvedDatabase {
+  /** The LOCAL label. It reaches the runtime only through the manifest. */
+  label: string;
+  /** Whether this is the app's `env.db`. Exactly one target carries it. */
+  primary: boolean;
+}
+
+/** Which declared app this build is for, and the databases it uses. */
+export interface BuildTarget {
+  /** `null` only when no file declares any app: a scratch directory. */
+  label: string | null;
+  appId?: string;
+  databases: TargetDatabase[];
+}
+
+/**
+ * Choose the app a build targets, the way the CLI chooses the one a command
+ * targets: the label names an entry of this file, a workspace declaring one
+ * app implies it, and a workspace declaring several must be told which.
+ */
+export function selectBuildTarget(
+  config: ResolvedProjectConfig,
+  appLabel?: string,
+): BuildTarget {
+  const apps = declaredApps(config);
+  const declared = Object.keys(apps);
+  if (appLabel == null && declared.length === 0) {
+    return { label: null, databases: [] };
+  }
+  let label: string;
+  if (appLabel != null) {
+    if (!declared.includes(appLabel)) {
+      throw new Error(
+        `zeroship: app "${appLabel}" is not declared in ${CONFIG_FILENAME} ` +
+          `(declared: ${joinOrNone(declared)})`,
+      );
+    }
+    label = appLabel;
+  } else if (declared.length === 1) {
+    label = declared[0]!;
+  } else {
+    throw new Error(
+      `zeroship: ${CONFIG_FILENAME} declares more than one app (${declared.join(", ")}). ` +
+        `Pass \`zeroship({ app: "<label>" })\` to say which one this build is.`,
+    );
+  }
+
+  const entry = apps[label]!;
+  const known = declaredDatabases(config);
+  const databases = (entry.databases ?? []).map((name) => {
+    const database = known[name];
+    if (database == null) {
+      throw new Error(
+        `zeroship: \`apps.${label}.databases\` names "${name}", which ${CONFIG_FILENAME} does ` +
+          `not declare under \`databases\``,
+      );
+    }
+    return { ...database, label: name, primary: entry.primary === name };
+  });
+  return { label, appId: entry.app, databases };
+}
+
+/**
+ * Which database a single-database tool addresses: the one named, or the app's
+ * primary. `undefined` when the app declares none, which is a schema-less app
+ * rather than an error.
+ */
+export function selectDatabase(
+  config: ResolvedProjectConfig,
+  opts: { app?: string; database?: string } = {},
+): TargetDatabase | undefined {
+  const target = selectBuildTarget(config, opts.app);
+  if (opts.database == null) return target.databases.find((d) => d.primary);
+  const found = target.databases.find((d) => d.label === opts.database);
+  if (found == null) {
+    throw new Error(
+      `zeroship: database "${opts.database}" is not one of the databases ` +
+        `\`apps.${target.label}\` uses ` +
+        `(${joinOrNone(target.databases.map((d) => d.label))})`,
+    );
+  }
+  return found;
+}
 
 type Json = Record<string, unknown>;
 
@@ -165,6 +280,7 @@ function validate(path: string, root: Json): void {
   }
   checkObject(path, root, "", ROOT_KNOWN_KEYS, ROOT_REQUIRED_KEYS);
   checkMembers(path, root, "", true);
+  checkAppWiring(path, root);
 
   const envs = root.environments;
   if (envs != null) {
@@ -178,13 +294,98 @@ function validate(path: string, root: Json): void {
       try {
         checkObject(path, entry as Json, `environments.${name}`, ENVIRONMENT_KNOWN_KEYS, ENVIRONMENT_REQUIRED_KEYS);
       } catch (e) {
-        throw new Error(
-          `${(e as Error).message}\n` +
-            "`app` and `control` are NON-INHERITABLE: an environment that names a control and " +
-            "inherits the root app is exactly the silent cross-targeting this rule exists to prevent.",
-        );
+        throw new Error(`${(e as Error).message}\n${NON_INHERITABLE_NOTE}`);
       }
       checkMembers(path, entry as Json, `environments.${name}`, false);
+      checkEnvironmentLabels(path, root, name, entry as Json);
+    }
+  }
+}
+
+/** The labels one map declares, in file order. */
+function labelsOf(map: Json, section: string): string[] {
+  const entries = map[section];
+  if (entries == null || typeof entries !== "object" || Array.isArray(entries)) return [];
+  return Object.keys(entries as Json);
+}
+
+function joinOrNone(names: readonly string[]): string {
+  return names.length ? names.join(", ") : "none";
+}
+
+/**
+ * An app names database LABELS, so every one has to resolve here, and the
+ * primary has to be one of them. Declaring a database does not grant access to
+ * it: `zeroship db bind` does, and deploy verifies the binding.
+ */
+function checkAppWiring(path: string, root: Json): void {
+  const declared = labelsOf(root, "databases");
+  for (const [label, raw] of Object.entries((root.apps ?? {}) as Json)) {
+    const entry = raw as Json;
+    const used = (entry.databases ?? []) as string[];
+    used.forEach((name, index) => {
+      if (!declared.includes(name)) {
+        throw new Error(
+          `${path}: \`apps.${label}.databases\` names \`${name}\`, which this file does not ` +
+            `declare under \`databases\` (declared: ${joinOrNone(declared)})`,
+        );
+      }
+      if (used.slice(0, index).includes(name)) {
+        throw new Error(`${path}: \`apps.${label}.databases\` names \`${name}\` twice`);
+      }
+    });
+    const primary = entry.primary as string | undefined;
+    if (primary != null && used.length === 0) {
+      throw new Error(
+        `${path}: \`apps.${label}.primary\` is \`${primary}\`, but \`apps.${label}.databases\` ` +
+          `is empty. An app with no database has no primary and no \`env.db\`.`,
+      );
+    }
+    if (primary != null && !used.includes(primary)) {
+      throw new Error(
+        `${path}: \`apps.${label}.primary\` is \`${primary}\`, which is not one of ` +
+          `\`apps.${label}.databases\` (${joinOrNone(used)})`,
+      );
+    }
+    if (primary == null && used.length > 0) {
+      throw new Error(
+        `${path}: \`apps.${label}\` uses ${joinOrNone(used)} but names no \`primary\`. The ` +
+          `primary is \`env.db\`, and \`env.db === env.databases[primary]\` by object identity, ` +
+          `so it cannot be inferred.`,
+      );
+    }
+  }
+}
+
+/**
+ * An environment's `apps` and `databases` must cover every label the root
+ * declares, and no others.
+ *
+ * Partial coverage is the whole hazard: an environment that names a production
+ * control and inherits a development database id lands WRITES in the wrong
+ * place. Requiring the key rather than the whole entry is what keeps the LABEL
+ * local - an environment overrides an id, never a label.
+ */
+function checkEnvironmentLabels(path: string, root: Json, name: string, entry: Json): void {
+  for (const section of ["apps", "databases"] as const) {
+    const declared = labelsOf(root, section);
+    const overridden = labelsOf(entry, section);
+    for (const label of declared) {
+      if (!overridden.includes(label)) {
+        throw new Error(
+          `${path}: \`environments.${name}.${section}\` does not name \`${label}\`, which the ` +
+            `root declares.\n${NON_INHERITABLE_NOTE}`,
+        );
+      }
+    }
+    for (const label of overridden) {
+      if (!declared.includes(label)) {
+        throw new Error(
+          `${path}: \`environments.${name}.${section}.${label}\` names no root \`${section}\` ` +
+            `entry (declared: ${joinOrNone(declared)}). An environment overrides the id under a ` +
+            `label, never the label itself.`,
+        );
+      }
     }
   }
 }
@@ -246,6 +447,40 @@ function checkString(path: string, value: unknown, at: string, dotted: string): 
     }
     throw new Error(`${path}: \`${at}\` must match ${rule.pattern} (got \`${value}\`)`);
   }
+}
+
+/** The rule a creator-chosen LABEL must match, by the map it keys. */
+function labelRuleFor(mapPath: string) {
+  return LABEL_RULES.find((r) => r.path === mapPath);
+}
+
+function checkLabel(path: string, label: unknown, at: string, mapPath: string): void {
+  const rule = labelRuleFor(mapPath);
+  if (typeof label !== "string" || (rule != null && !new RegExp(rule.pattern).test(label))) {
+    throw new Error(
+      `${path}: \`${at}.${String(label)}\` is not a usable label: it must match ` +
+        `${rule?.pattern}. A label is a member name on \`env.databases\` as well as a key here.`,
+    );
+  }
+}
+
+/** Read one label map, checking every key against the rule the schema states. */
+function checkLabelMap(
+  path: string,
+  value: unknown,
+  at: string,
+  mapPath: string,
+): [string, Json][] {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${path}: \`${at}\` must be an object keyed by LOCAL LABELS`);
+  }
+  return Object.entries(value as Json).map(([label, entry]) => {
+    checkLabel(path, label, at, mapPath);
+    if (entry == null || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error(`${path}: \`${at}.${label}\` must be an object`);
+    }
+    return [label, entry as Json];
+  });
 }
 
 function pathContains(parent: string, child: string): boolean {
@@ -312,7 +547,24 @@ function assertWritablePathsAreSafe(
 ): void {
   assertWritablePathIsSafe(root, configPath, "build.dist", config.build.dist);
   assertWritablePathIsSafe(root, configPath, "build.output", config.build.output, ".zship");
-  assertWritablePathIsSafe(root, configPath, "migrations.out", config.migrations.out);
+  // Every database's gen-types directory is a real write target, and no two
+  // may share one: `env.db.ts`, `schema.runtime.json` and `migrations.ir.json`
+  // have fixed names, so a shared directory is one database's schema silently
+  // standing in for another's.
+  const claimed = new Map<string, string>();
+  for (const [label, database] of Object.entries(declaredDatabases(config))) {
+    assertWritablePathIsSafe(root, configPath, `databases.${label}.out`, database.out);
+    const resolved = resolve(root, database.out);
+    const other = claimed.get(resolved);
+    if (other != null) {
+      throw new Error(
+        `${configPath}: \`databases.${label}.out\` and \`databases.${other}.out\` both resolve ` +
+          `to ${resolved}. Two databases cannot share one gen-types directory: the filenames ` +
+          `in it are fixed, so one database's schema would overwrite the other's.`,
+      );
+    }
+    claimed.set(resolved, label);
+  }
 }
 
 function checkMembers(path: string, map: Json, at: string, isRoot: boolean): void {
@@ -340,16 +592,46 @@ function checkMembers(path: string, map: Json, at: string, isRoot: boolean): voi
         }
         break;
       }
-      case "build":
-      case "migrations": {
+      case "build": {
         if (v == null || typeof v !== "object" || Array.isArray(v)) {
           throw new Error(`${path}: \`${qual(k)}\` must be an object`);
         }
-        const known = k === "build" ? BUILD_KNOWN_KEYS : MIGRATIONS_KNOWN_KEYS;
-        const required = isRoot ? (k === "build" ? BUILD_REQUIRED_KEYS : MIGRATIONS_REQUIRED_KEYS) : [];
-        checkObject(path, v as Json, qual(k), known, required);
+        checkObject(path, v as Json, qual(k), BUILD_KNOWN_KEYS, isRoot ? BUILD_REQUIRED_KEYS : []);
         for (const [mk, mv] of Object.entries(v as Json)) {
           checkString(path, mv, `${qual(k)}.${mk}`, `${k}.${mk}`);
+        }
+        break;
+      }
+      case "databases": {
+        const known = isRoot ? DATABASE_KNOWN_KEYS : ENVIRONMENT_DATABASE_KNOWN_KEYS;
+        const required = isRoot ? DATABASE_REQUIRED_KEYS : ENVIRONMENT_DATABASE_REQUIRED_KEYS;
+        for (const [label, entry] of checkLabelMap(path, v, qual(k), "databases.*")) {
+          checkObject(path, entry, `${qual(k)}.${label}`, known, required);
+          for (const [mk, mv] of Object.entries(entry)) {
+            checkString(path, mv, `${qual(k)}.${label}.${mk}`, `databases.*.${mk}`);
+          }
+        }
+        break;
+      }
+      case "apps": {
+        const known = isRoot ? APP_KNOWN_KEYS : ENVIRONMENT_APP_KNOWN_KEYS;
+        const required = isRoot ? APP_REQUIRED_KEYS : ENVIRONMENT_APP_REQUIRED_KEYS;
+        for (const [label, entry] of checkLabelMap(path, v, qual(k), "apps.*")) {
+          checkObject(path, entry, `${qual(k)}.${label}`, known, required);
+          for (const [mk, mv] of Object.entries(entry)) {
+            if (mk === "databases") {
+              if (!Array.isArray(mv)) {
+                throw new Error(
+                  `${path}: \`${qual(k)}.${label}.databases\` must be an array of database LABELS`,
+                );
+              }
+              for (const used of mv) {
+                checkLabel(path, used, `${qual(k)}.${label}.databases`, "databases.*");
+              }
+              continue;
+            }
+            checkString(path, mv, `${qual(k)}.${label}.${mk}`, `apps.*.${mk}`);
+          }
         }
         break;
       }
@@ -374,12 +656,31 @@ function deepMergeBlock(base: unknown, over: unknown): unknown {
 }
 
 /**
+ * Overlay one label map, entry by entry and member by member.
+ *
+ * `apps` and `databases` merge one level deeper than anything else because an
+ * environment overrides the ID under a label, never the label and never the
+ * build-time paths beside it. A whole-entry replace would drop `migrations`,
+ * `out`, `databases` and `primary` on the floor.
+ */
+function mergeLabelMap(base: unknown, over: unknown): unknown {
+  if (base == null || typeof base !== "object" || over == null || typeof over !== "object") {
+    return over;
+  }
+  const merged: Json = { ...(base as Json) };
+  for (const [label, overridden] of Object.entries(over as Json)) {
+    merged[label] = deepMergeBlock(merged[label], overridden);
+  }
+  return merged;
+}
+
+/**
  * The file's own facts, with the named environment overlaid and every schema
  * default applied.
  *
- * `app` / `control` come from the environment ALONE when one is selected (the
- * schema requires both there); `build` / `migrations` / `secrets` merge member
- * by member over the root.
+ * `apps`, `control` and `databases` come from the environment ALONE when one is
+ * selected (the schema requires all three there, and each map must cover every
+ * root label); `build` and `secrets` merge member by member over the root.
  */
 export function resolveProjectConfig(
   loaded: LoadedProjectConfig,
@@ -398,7 +699,12 @@ export function resolveProjectConfig(
       );
     }
     for (const [k, v] of Object.entries(entry)) {
-      out[k] = k === "build" || k === "migrations" ? deepMergeBlock(out[k], v) : v;
+      out[k] =
+        k === "apps" || k === "databases"
+          ? mergeLabelMap(out[k], v)
+          : k === "build"
+            ? deepMergeBlock(out[k], v)
+            : v;
     }
   }
 
@@ -429,9 +735,10 @@ const FILE_RELATIVE_PATHS = [
   ["build", "serverEntry"],
   ["build", "dist"],
   ["build", "output"],
-  ["migrations", "dir"],
-  ["migrations", "out"],
 ] as const;
+
+/** The per-database members that name a directory relative to the file. */
+const DATABASE_RELATIVE_PATHS = ["migrations", "out"] as const;
 
 /** Root paths stated by a config file at that file's own directory. */
 function rootFilePaths(
@@ -439,12 +746,18 @@ function rootFilePaths(
   configRoot: string,
 ): ResolvedProjectConfig {
   const out = structuredClone(config) as unknown as Json;
+  const reroot = (block: Json, member: string) => {
+    const value = block[member];
+    if (typeof value === "string" && !isAbsolute(value)) {
+      block[member] = resolve(configRoot, value);
+    }
+  };
   for (const [section, member] of FILE_RELATIVE_PATHS) {
     const block = out[section] as Json | undefined;
-    const value = block?.[member];
-    if (typeof value === "string" && !isAbsolute(value)) {
-      block![member] = resolve(configRoot, value);
-    }
+    if (block != null) reroot(block, member);
+  }
+  for (const database of Object.values((out.databases ?? {}) as Json)) {
+    for (const member of DATABASE_RELATIVE_PATHS) reroot(database as Json, member);
   }
   return out as unknown as ResolvedProjectConfig;
 }
@@ -453,13 +766,28 @@ function rootFilePaths(
 // The `config` escape hatch
 // ---------------------------------------------------------------------------
 
+/**
+ * Project one dotted path, expanding a `*` segment over every label present.
+ *
+ * The wildcard is what makes the deny-list below cover a map: without it
+ * `databases.*.id` would read `undefined` on both sides and every id change
+ * would compare equal. Expanding to a keyed object also catches a label added
+ * or removed rather than only one edited.
+ */
 function at(value: unknown, dotted: string): unknown {
-  let cursor: unknown = value;
-  for (const seg of dotted.split(".")) {
-    if (cursor == null || typeof cursor !== "object") return undefined;
-    cursor = (cursor as Json)[seg];
+  return project(value, dotted.split("."));
+}
+
+function project(cursor: unknown, segments: readonly string[]): unknown {
+  if (segments.length === 0) return cursor;
+  if (cursor == null || typeof cursor !== "object") return undefined;
+  const [head, ...rest] = segments;
+  if (head !== "*") return project((cursor as Json)[head!], rest);
+  const out: Json = {};
+  for (const key of Object.keys(cursor as Json).sort()) {
+    out[key] = project((cursor as Json)[key], rest);
   }
-  return cursor;
+  return out;
 }
 
 /**
@@ -488,7 +816,12 @@ export function applyProjectConfigOverride(
   const partial = typeof override === "function" ? override(working) : override;
   const next: Json = { ...(working as unknown as Json) };
   for (const [k, v] of Object.entries(partial as Json)) {
-    next[k] = k === "build" || k === "migrations" ? deepMergeBlock(next[k], v) : v;
+    next[k] =
+      k === "apps" || k === "databases"
+        ? mergeLabelMap(next[k], v)
+        : k === "build"
+          ? deepMergeBlock(next[k], v)
+          : v;
   }
 
   for (const field of CLI_READ_FIELDS) {

@@ -50,7 +50,7 @@ async fn executable_loading_preserves_code_schema_and_declarations() {
         "export default 'retained';"
     );
     assert_eq!(
-        original.executable().runtime_descriptor(),
+        original.executable().primary_schema(),
         Some(&json!({"version":2,"collections":{}}))
     );
     let mut declarations = manifest.clone();

@@ -421,17 +421,17 @@ fn collect_expected_hashes(manifest: &Manifest) -> Result<HashSet<String>, Inges
     // content-addressed like every other bundle blob. Gather its hash so step 8
     // asserts the blob was present in the tar. `validate()` already enforced
     // the hash format; re-check here as defence in depth.
-    if let Some(desc) = &manifest.runtime_descriptor {
-        if !crate::blob::validate_hash_format(&desc.hash) {
+    for (index, entry) in manifest.runtime_descriptor.iter().enumerate() {
+        if !crate::blob::validate_hash_format(&entry.hash) {
             return Err(IngestError::bad(
                 "invalid manifest",
                 format!(
-                    "runtime_descriptor.hash {hash:?} is not lowercase sha256 hex",
-                    hash = desc.hash
+                    "runtime_descriptor[{index}].hash {hash:?} is not lowercase sha256 hex",
+                    hash = entry.hash
                 ),
             ));
         }
-        out.insert(desc.hash.clone());
+        out.insert(entry.hash.clone());
     }
     Ok(out)
 }
@@ -626,10 +626,13 @@ mod tests {
     }
 
     #[test]
-    fn collect_expected_walks_runtime_descriptor_blob() {
-        // A manifest carrying a runtime schema descriptor: its blob hash must be
-        // in the expected set so ingest asserts it was present in the tar.
-        let desc = "9".repeat(64);
+    fn collect_expected_walks_every_runtime_descriptor_blob() {
+        // A manifest carrying one descriptor per database: EVERY blob hash must
+        // be in the expected set, so ingest asserts each was present in the
+        // tar. A walk that took only the first would admit an archive missing
+        // the second database's schema.
+        let primary = "9".repeat(64);
+        let secondary = "8".repeat(64);
         let m: Manifest = serde_json::from_value(json!({
             "version": 1,
             "rules": [],
@@ -637,14 +640,28 @@ mod tests {
             "runtime_assets": {},
             "asset_version": 0,
             "sourcemaps": {},
-            "runtime_descriptor": { "hash": desc },
+            "runtime_descriptor": [
+                {
+                    "label": "main",
+                    "database_id": "dbs_03evr3oqx1200yyd6zj2cebfw",
+                    "primary": true,
+                    "hash": primary,
+                },
+                {
+                    "label": "analytics",
+                    "database_id": "dbs_03evr3oqx1200qyvgmdnjrsla",
+                    "primary": false,
+                    "hash": secondary,
+                },
+            ],
             "metadata": { "built_at": "2026-04-29T00:00:00Z" }
         }))
         .unwrap();
         let set = collect_expected_hashes(&m).unwrap();
+        assert!(set.contains(&primary), "the primary's blob must be expected");
         assert!(
-            set.contains(&"9".repeat(64)),
-            "runtime descriptor blob must be in the expected set"
+            set.contains(&secondary),
+            "every non-primary database's blob must be expected too"
         );
     }
 

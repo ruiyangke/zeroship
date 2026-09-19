@@ -1,5 +1,9 @@
 // Every optional project-config field is deliberately absent.
 // The two readers must resolve this file to the same canonical bytes.
+//
+// `databases` and `apps` are present and EMPTY rather than absent: both are
+// required, and an empty pair is the honest shape of a workspace that declares
+// no database and no deploy target yet.
 {
   "name": "minimal-config-fixture",
   "control": "https://control.zeroship.ai",
@@ -9,8 +13,6 @@
     "dist": "dist",
     "output": "dist/app.zship"
   },
-  "migrations": {
-    "dir": "migrations",
-    "out": "generated/zeroship"
-  }
+  "databases": {},
+  "apps": {}
 }

@@ -165,6 +165,7 @@ pub use web::crypto::sync_helpers as crypto;
 // `zeroship_runtime::runtime::...`, etc. The implementations now live in
 // `core::` but the old paths keep working.
 pub use core::channel;
+pub use core::databases;
 pub use core::dispatch;
 pub use core::init;
 pub use core::modules;
