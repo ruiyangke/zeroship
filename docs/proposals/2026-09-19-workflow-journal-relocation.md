@@ -329,15 +329,30 @@ stall the defect fixes that motivate the move.
 
 ## Open
 
-1. **Latency, and whether transitions batch.** A durable workflow makes many small journal
-   appends, and each one that crosses the boundary becomes a round trip. This is less open than
-   it looks: transitions already batch. `apply` in `crates/zeroship-workflow/src/service/frontier.rs`
-   consumes a dispatch's whole outcome set and refuses one wider than the app policy's
-   `max_frontier`, so a dispatch already submits many transitions in a single fold rather than
-   one call per step. What remains open is whether the batch a dispatch produces is the right
-   unit for the wire, and what an activation costs when it is not - which is design work, not a
-   given. Nothing here asserts a number; the instrument is a benchmark against the surface once
-   it exists.
+1. **ANSWERED - latency is not the gate; payload is.** Measured before anything was built, by
+   `crates/zeroship-workflow-client/tests/round_trip_cost.rs`, which exercises the shipped
+   transport with a real assertion minted per call and a peer that really verifies it. Re-run it
+   rather than trusting this paragraph.
+
+   Three findings changed the design. First, a round trip is far cheaper than the work a
+   dispatch already does, and most of a small one is the credential, which pooling does not
+   remove. Second, **the realistic outcome count is one.** `ZsFrontierCoordinator` in
+   `crates/zeroship-workflow-v8/js/dispatch.js` seals shortly after creation and always rejects
+   with a suspend signal, so only steps issued in one synchronous turn share a batch; sequential
+   `await`s become separate dispatches. The corpus agrees - the widest construction anywhere is
+   far below `max_frontier`, which is exercised nowhere. So "transitions already batch" is
+   mechanically true and operationally misleading: a run still costs a crossing per dispatch,
+   spread out rather than concentrated. Third, and decisively, **all three crossings already sit
+   beside a call that is remote today.** Merge them and the relocation adds no round trip; bolt
+   them on as separate endpoints and it doubles the manager's request rate. That is a capacity
+   decision, not a latency one, and it is why Plan step 4 is written as a merge.
+
+   **Where the sign flips.** The assignment carries the whole replay journal on every dispatch,
+   so a run's bytes grow with the square of its steps. Two shipped bounds already disagree about
+   that: `AppPolicy::max_journal_bytes` against the client's `max_response_bytes`, and
+   `AppPolicy::max_input_bytes` against `max_request_bytes` - and the worker takes the client
+   defaults. Deciding how the journal crosses is the real design work behind this move. See
+   Open 2, which is the same question seen from the payload side.
 
 2. **Payload size on the wire.** `read_step_output` and step inputs cross the boundary.
    `WorkflowOutputRef` in `crates/zeroship-workflow/src/engine.rs` suggests large outputs are already referenced rather than
@@ -349,10 +364,12 @@ stall the defect fixes that motivate the move.
    control plane, which is the coupling `docs/proposals/2026-09-05-gateway-central-database-decoupling.md`
    is fighting on a different axis. The promotion is contained; the question is when.
 
-4. **Is the service zone-local?** If the workflow service is global, every journal append from
-   a remote zone is a wide-area round trip. It should be zone-local, which means one workflow
-   store per zone and an app's runs living in its own zone - consistent with the decoupling's
-   co-location rule, and worth stating rather than inheriting.
+4. **Is the service zone-local? This is half of Open 1's answer, not a footnote.** Every number
+   behind Open 1 was taken over loopback. A crossing per dispatch is free at that distance and
+   is not free across a wide area, so if the service is global the term Open 1 dismisses becomes
+   the dominant one. It should be zone-local - one workflow store per zone, an app's runs living
+   in its own zone - consistent with the decoupling's co-location rule, and worth deciding
+   before the cutover rather than inheriting.
 
 5. **What happens to in-flight runs at cutover?** Pre-launch, nothing: there are no runs. That
    answer expires, and the design should say so rather than let a later reader assume a
