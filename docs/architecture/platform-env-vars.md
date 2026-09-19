@@ -274,12 +274,15 @@ Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is
 | --- | --- | --- | --- | --- | --- |
 | `migrate_server.bind` | operational | `ZEROSHIP_MIGRATE_SERVER_BIND` | `migrate_server.bind` | zeroship-migrate-server `--bind` | `127.0.0.1` |
 | `migrate_server.database_url` | secret | `ZEROSHIP_MIGRATE_SERVER_DATABASE_URL` | `migrate_server.database_url` | zeroship-migrate-server `--database-url-file` | - |
+| `migrate_server.execution_zone` | operational | `ZEROSHIP_MIGRATE_SERVER_EXECUTION_ZONE` | `migrate_server.execution_zone` | zeroship-migrate-server `--execution-zone` | empty |
 | `migrate_server.mutation_rate_limit_burst` | operational | `ZEROSHIP_MIGRATE_SERVER_MUTATION_RATE_LIMIT_BURST` | `migrate_server.mutation_rate_limit_burst` | zeroship-migrate-server `--mutation-rate-limit-burst` | `2` |
 | `migrate_server.mutation_rate_limit_per_minute` | operational | `ZEROSHIP_MIGRATE_SERVER_MUTATION_RATE_LIMIT_PER_MINUTE` | `migrate_server.mutation_rate_limit_per_minute` | zeroship-migrate-server `--mutation-rate-limit-per-minute` | `3` |
 | `migrate_server.policy_ceiling_version` | operational | `ZEROSHIP_MIGRATE_SERVER_POLICY_CEILING_VERSION` | `migrate_server.policy_ceiling_version` | zeroship-migrate-server `--policy-ceiling-version` | `1` |
 | `migrate_server.policy_seal_key` | secret | `ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY` | `migrate_server.policy_seal_key` | zeroship-migrate-server `--policy-seal-key-file` | - |
 | `migrate_server.port` | operational | `ZEROSHIP_MIGRATE_SERVER_PORT` | `migrate_server.port` | zeroship-migrate-server `--port` | `9091` |
 | `migrate_server.provision_database_url` | secret | `ZEROSHIP_MIGRATE_SERVER_PROVISION_DATABASE_URL` | `migrate_server.provision_database_url` | zeroship-migrate-server `--provision-database-url-file` | - |
+| `migrate_server.reconcile_interval_seconds` | operational | `ZEROSHIP_MIGRATE_SERVER_RECONCILE_INTERVAL_SECONDS` | `migrate_server.reconcile_interval_seconds` | zeroship-migrate-server `--reconcile-interval-seconds` | `30` |
+| `migrate_server.service_peers_file` | operational | `ZEROSHIP_MIGRATE_SERVER_SERVICE_PEERS_FILE` | `migrate_server.service_peers_file` | zeroship-migrate-server `--service-peers-file` | empty |
 | `migrate_server.tmp_dir` | operational | `ZEROSHIP_MIGRATE_SERVER_TMP_DIR` | `migrate_server.tmp_dir` | zeroship-migrate-server `--tmp-dir` | `std::env::temp_dir().join("zeroship-migrate-server")` |
 
 ### observability
@@ -337,6 +340,7 @@ Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is
 | `workflow.max_connections` | operational | `ZEROSHIP_WORKFLOW_MAX_CONNECTIONS` | `workflow.max_connections` | zeroship-workflow-server `--max-connections` | `1024` |
 | `workflow.max_pending_management` | operational | `ZEROSHIP_WORKFLOW_MAX_PENDING_MANAGEMENT` | `workflow.max_pending_management` | zeroship-workflow-server `--max-pending-management` | `1024` |
 | `workflow.max_request_bytes` | operational | `ZEROSHIP_WORKFLOW_MAX_REQUEST_BYTES` | `workflow.max_request_bytes` | zeroship-workflow-server `--max-request-bytes` | `crate::api::DEFAULT_MAX_REQUEST_BYTES` |
+| `workflow.migrate_url` | operational | `ZEROSHIP_WORKFLOW_MIGRATE_URL` | `workflow.migrate_url` | zeroship-workflow-server `--migrate-url` | empty |
 | `workflow.policy_cache_entries` | operational | `ZEROSHIP_WORKFLOW_POLICY_CACHE_ENTRIES` | `workflow.policy_cache_entries` | zeroship-workflow-server `--policy-cache-entries` | `1024` |
 | `workflow.replay_sweep_ms` | operational | `ZEROSHIP_WORKFLOW_REPLAY_SWEEP_MS` | `workflow.replay_sweep_ms` | zeroship-workflow-server `--replay-sweep-ms` | `30000` |
 | `workflow.service_key_file` | operational | `ZEROSHIP_WORKFLOW_SERVICE_KEY_FILE` | `workflow.service_key_file` | zeroship-workflow-server `--service-key-file` | empty |
