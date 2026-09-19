@@ -1,200 +1,10 @@
 //! Pure durable-workflow fold and DTO contracts.
 
-use std::sync::OnceLock;
-
 use chrono::{DateTime, Utc};
 use serde::{de, Deserialize, Deserializer, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
-use uuid::Uuid;
-use zeroship_core::app_id::AppId;
-use zeroship_core::typed_id;
 
 pub const DEFAULT_TICK_SECS: u64 = 1;
-pub const DEFAULT_MAX_CHILD_DEPTH: i16 = 16;
-pub const DEFAULT_MAX_LIVE_DESCENDANTS: i64 = 1_024;
-pub const DEFAULT_MAX_START_MANY_BATCH: usize = 1_000;
-pub const FREE_WORKFLOW_JOURNAL_MAX_BYTES: i64 = 100 * 1024 * 1024;
-pub const PAID_WORKFLOW_JOURNAL_MAX_BYTES: i64 = 1024 * 1024 * 1024;
-pub const RUN_JOURNAL_LIMIT_FIELD: &str = "workflow_journal_max_bytes";
-pub const APP_JOURNAL_LIMIT_FIELD: &str = "workflow_app_journal_max_bytes";
-pub const MAX_CHILD_DEPTH_FIELD: &str = "workflow_max_child_depth";
-pub const MAX_LIVE_DESCENDANTS_FIELD: &str = "workflow_max_live_descendants";
-pub const MAX_START_MANY_BATCH_FIELD: &str = "workflow_max_start_many_batch";
-
-static OWNER_ID: OnceLock<String> = OnceLock::new();
-
-fn default_owner_id() -> String {
-    OWNER_ID
-        .get_or_init(|| format!("control-wf-{}", std::process::id()))
-        .clone()
-}
-
-fn default_max_child_depth() -> i16 {
-    DEFAULT_MAX_CHILD_DEPTH
-}
-
-fn default_max_live_descendants() -> i64 {
-    DEFAULT_MAX_LIVE_DESCENDANTS
-}
-
-fn default_max_start_many_batch() -> usize {
-    DEFAULT_MAX_START_MANY_BATCH
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkflowJournalLimits {
-    pub run_max_bytes: i64,
-    pub app_max_bytes: i64,
-}
-
-impl Default for WorkflowJournalLimits {
-    fn default() -> Self {
-        Self {
-            run_max_bytes: PAID_WORKFLOW_JOURNAL_MAX_BYTES,
-            app_max_bytes: PAID_WORKFLOW_JOURNAL_MAX_BYTES,
-        }
-    }
-}
-
-pub fn workflow_journal_limits_from_plan(
-    plan_id: &str,
-    plan_name: Option<&str>,
-    runtime_limits: Option<&Value>,
-) -> WorkflowJournalLimits {
-    let default = default_journal_cap(plan_id, plan_name);
-    let run_max_bytes = runtime_limits
-        .and_then(|json| positive_i64_field(json, RUN_JOURNAL_LIMIT_FIELD))
-        .unwrap_or(default);
-    let app_max_bytes = runtime_limits
-        .and_then(|json| positive_i64_field(json, APP_JOURNAL_LIMIT_FIELD))
-        .unwrap_or(default);
-
-    WorkflowJournalLimits {
-        run_max_bytes,
-        app_max_bytes,
-    }
-}
-
-pub fn workflow_engine_limits_from_plan(
-    defaults: &WorkflowEngineConfig,
-    plan_id: &str,
-    plan_name: Option<&str>,
-    runtime_limits: Option<&Value>,
-) -> WorkflowEngineConfig {
-    let mut config = defaults.clone();
-    config.journal_limits = workflow_journal_limits_from_plan(plan_id, plan_name, runtime_limits);
-    if let Some(limit) = runtime_limits
-        .and_then(|json| nonnegative_i64_field(json, MAX_CHILD_DEPTH_FIELD))
-        .and_then(|limit| i16::try_from(limit).ok())
-    {
-        config.max_child_depth = limit;
-    }
-    if let Some(limit) =
-        runtime_limits.and_then(|json| nonnegative_i64_field(json, MAX_LIVE_DESCENDANTS_FIELD))
-    {
-        config.max_live_descendants = limit;
-    }
-    if let Some(limit) = runtime_limits
-        .and_then(|json| nonnegative_i64_field(json, MAX_START_MANY_BATCH_FIELD))
-        .and_then(|limit| usize::try_from(limit).ok())
-    {
-        config.max_start_many_batch = limit;
-    }
-    config
-}
-
-fn default_journal_cap(plan_id: &str, plan_name: Option<&str>) -> i64 {
-    if plan_name == Some("free") || plan_id == free_plan_id() {
-        FREE_WORKFLOW_JOURNAL_MAX_BYTES
-    } else {
-        PAID_WORKFLOW_JOURNAL_MAX_BYTES
-    }
-}
-
-fn positive_i64_field(json: &Value, field: &str) -> Option<i64> {
-    let value = json.get(field)?;
-    match value {
-        Value::Number(n) => n.as_i64().filter(|v| *v > 0),
-        Value::String(s) => s.parse::<i64>().ok().filter(|v| *v > 0),
-        _ => None,
-    }
-}
-
-fn nonnegative_i64_field(json: &Value, field: &str) -> Option<i64> {
-    let value = json.get(field)?;
-    match value {
-        Value::Number(n) => n.as_i64().filter(|v| *v >= 0),
-        Value::String(s) => s.parse::<i64>().ok().filter(|v| *v >= 0),
-        _ => None,
-    }
-}
-
-fn free_plan_id() -> String {
-    let uuid = derive_uuid("zeroship:plan:free:v1", "builtin");
-    typed_id::from_uuid_string(typed_id::PLAN_PREFIX, &uuid.to_string())
-        .expect("derived uuid is a valid uuid string")
-}
-
-fn derive_uuid(label: &str, host: &str) -> Uuid {
-    let mut hasher = Sha256::new();
-    hasher.update(label.as_bytes());
-    hasher.update([0u8]);
-    hasher.update(host.as_bytes());
-    let digest = hasher.finalize();
-
-    let mut bytes = [0u8; 16];
-    bytes.copy_from_slice(&digest[..16]);
-    bytes[6] = (bytes[6] & 0x0f) | 0x80;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    Uuid::from_bytes(bytes)
-}
-
-#[derive(Debug, Clone)]
-pub struct WorkflowEngineConfig {
-    /// Number of distinct apps considered in one tick.
-    pub batch_apps: i64,
-    /// Max due rows claimed per app in one tick.
-    pub per_app_fair_limit: i64,
-    /// Per-app live dispatch cap. Counts only fresh `running` + `claimed_by`
-    /// rows, never queued/sleeping/waiting rows.
-    pub max_inflight_per_app: i64,
-    /// Process-local detached dispatch cap.
-    pub max_inflight_dispatch: usize,
-    /// Lease staleness duration in milliseconds.
-    pub claim_ttl_ms: i64,
-    /// Heartbeat cadence while a detached dispatch is in flight.
-    pub heartbeat_ms: u64,
-    /// Maximum parent/child depth for step.call trees.
-    pub max_child_depth: i16,
-    /// Maximum live descendants under a workflow tree root.
-    pub max_live_descendants: i64,
-    /// Maximum child starts committed by one frontier batch.
-    pub max_start_many_batch: usize,
-    /// Journal size caps resolved by the control plane for this dispatch.
-    pub journal_limits: WorkflowJournalLimits,
-    /// Stable owner id written into `claimed_by`.
-    pub owner_id: String,
-}
-
-impl Default for WorkflowEngineConfig {
-    fn default() -> Self {
-        Self {
-            batch_apps: 32,
-            per_app_fair_limit: 4,
-            max_inflight_per_app: 16,
-            max_inflight_dispatch: 64,
-            claim_ttl_ms: 120_000,
-            heartbeat_ms: 5_000,
-            max_child_depth: DEFAULT_MAX_CHILD_DEPTH,
-            max_live_descendants: DEFAULT_MAX_LIVE_DESCENDANTS,
-            max_start_many_batch: DEFAULT_MAX_START_MANY_BATCH,
-            journal_limits: WorkflowJournalLimits::default(),
-            owner_id: default_owner_id(),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -233,34 +43,6 @@ pub struct ChildWorkflowOptions {
     pub cascade: bool,
     #[serde(default, deserialize_with = "deserialize_optional_wake_duration")]
     pub timeout: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct StepRequest {
-    pub run_id: String,
-    pub generation: i64,
-    pub app_id: AppId,
-    pub workflow_name: String,
-    pub deploy_id: String,
-    pub deploy_hash: String,
-    pub dispatch_nonce: String,
-    #[serde(default = "default_dispatch_phase")]
-    pub phase: String,
-    #[serde(default)]
-    pub input: Option<Value>,
-    pub started_at: DateTime<Utc>,
-    pub journal: Vec<JournalStep>,
-    #[serde(default = "default_owner_id")]
-    pub owner_id: String,
-    #[serde(default = "default_max_child_depth")]
-    pub max_child_depth: i16,
-    #[serde(default = "default_max_live_descendants")]
-    pub max_live_descendants: i64,
-    #[serde(default = "default_max_start_many_batch")]
-    pub max_start_many_batch: usize,
-    #[serde(default)]
-    pub journal_limits: WorkflowJournalLimits,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -340,10 +122,6 @@ pub fn default_compensation_max_attempts() -> i32 {
 /// One execution: a step with no declared `retries` is attempted once.
 pub fn default_max_attempts() -> i32 {
     1
-}
-
-pub fn default_dispatch_phase() -> String {
-    "running".to_string()
 }
 
 pub fn parse_workflow_duration_ms(raw: &str) -> Option<i64> {
