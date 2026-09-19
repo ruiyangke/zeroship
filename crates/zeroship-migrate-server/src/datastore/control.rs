@@ -454,6 +454,31 @@ impl ControlStore {
         Ok(affected == 1)
     }
 
+    /// The bindings that name one database, read NOW.
+    ///
+    /// The teardown precondition reads this rather than the pass's declaration
+    /// snapshot, because the two destructive statements it gates run after that
+    /// snapshot was taken and `zeroship_control::databases::bind` carries no
+    /// predicate on a database's status: an app can be bound to a database that
+    /// is already `deleting`. Reading immediately before the drop narrows the
+    /// window to the drop itself; closing it entirely is a predicate on `bind`,
+    /// which belongs to that surface.
+    ///
+    /// # Errors
+    /// [`ControlError::Query`] on any database failure. A failure here refuses
+    /// the teardown, which is the direction that keeps data.
+    pub async fn bindings_naming(&self, database: &DatabaseId) -> Result<Vec<String>, ControlError> {
+        let rows = self
+            .client
+            .query(
+                "SELECT id FROM zeroship.database_bindings \
+                  WHERE database_id = $1::text ORDER BY id",
+                &[&database.as_str()],
+            )
+            .await?;
+        Ok(rows.iter().map(|row| row.get("id")).collect())
+    }
+
     /// Remove a database row whose schema and roles are gone.
     ///
     /// Guarded on `deleting`, so this can never remove a row that still
