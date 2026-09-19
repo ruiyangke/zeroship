@@ -1,0 +1,404 @@
+# Moving the workflow journal out of creator databases
+
+**Status.** PROPOSED. Nothing here is built. The journal is installed into the creator's own
+schema today and written by the worker over the creator's own connection; this moves storage
+and the durable fold into the workflow service, leaving execution where it is.
+
+This is a sibling of `docs/proposals/2026-08-28-app-database-decoupling.md` and should land
+BEFORE it. See Sequencing: that design breaks journal appends if the journal is still where it
+is.
+
+---
+
+## What is true today
+
+**The engine is embedded in the worker.** `crates/zeroship-workflow/src/service/mod.rs` opens
+with "Workflow engine embedded in customer workers and local development", and
+`crates/zeroship-workflow/src/service/store.rs` with "Customer-bound journal execution through
+the shared Rust ORM". The store holds a `Database`, a `BackendHandle`, a `DbBinding` and a
+`ProjectKeySource`, so journal rows are written through the same ORM, the same binding and the
+same pooled connection as creator data.
+
+**The split is deliberate and documented.**
+`crates/zeroship-workflow-server/src/lib.rs`: "Workflow metadata coordination. Customer workers
+own execution and storage."
+
+**The journal lives inside the creator's schema.**
+`crates/zeroship-worker/src/workflow_creator.rs` resolves a binding and takes
+`binding.schema()`; the control-side caller
+(`crates/zeroship-control/src/publication/journal.rs`) derives the same name. The tables are
+`__zeroship_workflow_*` inside that schema, and `crates/zeroship-workflow-schema/schema/schema.ts`
+declares around twenty of them - `app_state`, `payloads`, `broadcasts`, `schedules`,
+`occurrences`, `tasks`, the publication and page tables, the receipt tables - nearly all keyed
+with an `app_id` column.
+
+**One journal serves many apps already.**
+`crates/zeroship-workflow-schema/src/lib.rs`, under a heading called "The schema is not an app":
+
+> Nothing here takes an app id, and no name here should suggest one. A journal belongs to a
+> creator database, and one schema holds the journals of every app in it - the `app_id` COLUMNS
+> inside the journal are the tenant discriminator, and `STAMP_ROW_ID` is one row per journal,
+> not one per app.
+
+**Provisioning is per schema, through the migration service.**
+`crates/zeroship-workflow-server/src/journal.rs` builds a `SchemaBundle` with
+`SCHEMA_PLACEHOLDER` substituted, and `ensure_journal`
+(`crates/zeroship-workflow-server/src/api.rs`) applies it. It has two callers: control when an
+app registers, and a worker whose host refused the journal it found.
+
+**The service already has its own storage and a stated boundary.**
+`crates/zeroship-workflow-server/src/config.rs` declares `workflow.database_url` with the
+comment "Platform coordination metadata login; no customer database credentials", and
+`db/migrations-ts/20260911000000_workflow_coordination.ts` creates the `workflow_manager`
+schema, a `zeroship_workflow_migrator` role and a `zeroship_workflow` login whose search path is
+`["workflow_manager", "pg_catalog"]`.
+
+**The creator-facing seam is small.** `crates/zeroship-workflow/src/backend.rs` defines
+`WorkflowBackend` with six methods: `start`, `status`, `signal`, `transition`, `restart`,
+`read_step_output`. `crates/zeroship-workflow-v8/src/lib.rs` already composes it through a
+`WorkflowBackendFactory` with `Service` and `Ready` variants.
+
+**Durability does not rest on transactions.** `crates/zeroship-workflow/src/execution.rs`:
+executors receive replay, and "step idempotency keys must carry it". Nothing requires a step's
+data write and its journal record to commit atomically.
+
+---
+
+## Four defects, three of which exist at 1:1
+
+**1. A creator can drop the platform's journal.** The migration service does
+`ALTER SCHEMA ... OWNER TO` the migrator role, and a schema owner's privileges are implicit and
+cannot be revoked. So the schema the platform is actively driving runs against is owned by the
+tenant. `docs/proposals/2026-08-28-migration-record-consolidation.md` accepts exactly this for
+the *migration* journal, on the ground that "it is their database and corrupting it breaks only
+them" - which is true there and false here, because the platform is mid-execution against this
+one.
+
+**2. Dropping a database destroys the journal.** Harmless while one app owns one database.
+Under sharing it destroys the workflow state of every app bound to that database, not just the
+one doing the dropping.
+
+**3. Column-level grants break journal appends.** This one is live and dated.
+`docs/proposals/2026-08-28-app-database-decoupling.md` deletes the blanket
+`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA` and the prospective
+`ALTER DEFAULT PRIVILEGES` from `runtime_role_provisioning_sql`
+(`crates/zeroship-migrate-server/src/apply.rs`), and regenerates explicit per-column grants
+**from the creator's IR**. The journal tables are not in that IR - they arrive in a separate
+bundle - so they receive no grants and the worker loses the ability to write them. The current
+arrangement works only because the blanket grant covers everything in the schema, and that
+grant is what goes.
+
+**4. Under N:M the journal's home is not a function.** `crates/zeroship-worker/src/workflow_creator.rs` takes the schema
+off whichever binding `provider.resolve(scope)` returned. With one binding that is
+deterministic. With several it is not, and an app's runs could split across two schemas with
+each half invisible to the other and nothing raising.
+
+Only the fourth needs the decoupling to matter. The first three are true now.
+
+---
+
+## The design
+
+**Execution stays in the worker. Orchestration and storage move to the service.**
+
+```
+  TODAY
+    worker   V8 task executor + durable fold + journal store (SQL, creator schema)
+    service  metadata coordination, placement, journal provisioning
+
+  TARGET
+    worker   V8 task executor + WorkflowBackend RPC client (six methods)
+    service  durable fold + journal store (SQL, workflow_manager) + coordination
+```
+
+The seam already exists and is narrow. `WorkflowBackend`'s six methods are the whole
+creator-facing surface, `crates/zeroship-workflow/src/engine.rs` is "Pure durable-workflow fold
+and DTO contracts" with no storage in it, and the V8 binding is already built to take a backend
+rather than a database.
+
+**The journal becomes ordinary service schema.** It is installed into `workflow_manager` at
+service boot, by the same mechanism any service installs its own schema, with one stamp row for
+the whole installation. That is what `STAMP_ROW_ID` already describes, now over a set of apps
+scoped by the service rather than by a creator database.
+
+**The worker holds no journal credential**, which is the property that makes the whole thing
+safe without building anything. See Why it is this way.
+
+### What is deleted
+
+```
+  ensure_journal + its route            crates/zeroship-workflow-server/src/api.rs
+  Journal / journal_bundle / bundle_for crates/zeroship-workflow-server/src/journal.rs
+  JournalManager, JournalError          crates/zeroship-control/src/publication/journal.rs
+  the journal ensure at app registration control's deploy path
+  the worker's journal repair path      crates/zeroship-worker/src/workflow_creator.rs
+  SCHEMA_PLACEHOLDER substitution        one fixed schema needs no placeholder,
+                                         except on the dev tier - see SQLite
+  zeroship-data-orm from the engine      crates/zeroship-workflow/Cargo.toml
+```
+
+That last one is a dependency-boundary improvement the AGENTS.md invariant already gestures at:
+`zeroship-workflow-schema` is a leaf so a service can install the journal without depending on
+the engine. Read it as the last step of the move rather than a deletion available on its own,
+because the ORM is not confined to the store: every module under
+`crates/zeroship-workflow/src/service/` reaches it - activation, signals, continuations,
+collection, app, models, control, frontier, delivery - while
+`crates/zeroship-workflow/src/engine.rs` names it nowhere. That asymmetry is exactly what makes
+the split clean, and it is also why what moves is the whole `service/` tree, not one file.
+
+### What it does NOT decide
+
+Whether `workflow_manager` should be promoted from a schema in the control database to a
+database of its own. It has its own migrator role, its own login and its own search path
+already, so the promotion is contained and can be made on capacity grounds later. This design
+only requires that the journal live in the workflow service's storage, not which physical
+database that is. See Open 3.
+
+---
+
+## Why it is this way
+
+**The worker must not hold a credential to a shared journal.** This is the load-bearing reason
+for RPC rather than a second DSN. The journal's only tenant separation is its `app_id` columns:
+no roles, no RLS, one stamp row covering every app in it. That is safe today only because the
+journal sits inside the app's own schema and is reached through the app's own binding, so the
+data plane's role fence covers it for free. Put the same tables in a shared platform database
+that the worker reaches by SQL, and every app's workflow state sits behind a column comparison
+inside the one process that executes creator code.
+
+Note that `db_posture` (`crates/zeroship-worker/src/db_posture.rs`) would not catch it: it
+refuses a login that can resolve the `zeroship` schema, and a workflow database has no such
+schema. The check would pass while the principle behind it was violated. RPC removes the
+question rather than answering it.
+
+**Why not give the worker the ORM and keep one path?** This is the first question a reviewer
+asks, and it deserves an answer in the document rather than in a thread. The appeal is real:
+production would exercise the same store the dev tier does, and the divergence recorded under
+SQLite dev tier would not exist.
+
+It fails on where the fence would have to live. The journal's tenant separation is the `app_id`
+column on its tables - `crates/zeroship-workflow-schema/schema/schema.ts` declares no role, no
+row-level security and no grant of any kind. That is sound today only because the journal sits
+inside the creator's schema and is reached through the creator's binding, so the data plane's
+role fence covers it without the journal owning one. Move the tables into shared storage and
+keep SQL in the worker, and the only thing standing between one app's runs and another's is a
+column comparison evaluated inside the process that executes creator code. AGENTS.md settles
+that case directly: privilege follows the process, and a privileged database function the worker
+can invoke is not a security boundary.
+
+Giving the journal a fence of its own is the honest version of the idea, and it is a larger
+project than this one. Every table would need a policy, the worker would need a per-app
+principal rather than a shared login, and whatever scopes the connection cannot be something the
+executing process can choose for itself. It also does not deliver the single path that motivated
+it: SQLite has no row-level security, so the dev tier diverges again - the same tax, moved from
+"RPC against SQL" to "fenced against unfenced", and now sitting on the tenant boundary instead
+of beside it.
+
+So the arrangement below is not "RPC because RPC is nicer". It is the only one where the fence
+is not inside the process running untrusted code. If the journal ever is reached by SQL from
+outside the service, this paragraph is the thing that has to be answered first.
+
+
+**Nothing needed a shared transaction.** Replay plus idempotency keys is the durability model,
+stated in `crates/zeroship-workflow/src/execution.rs`. A step's data write and its journal record have never been atomic in
+any sense a caller could rely on, so moving the journal to another process removes a property
+nothing was using. Under N:M it would have been lost anyway, since a step writing to database B
+cannot share a transaction with a journal in database A.
+
+**The boundary is already declared.** `workflow.database_url` is documented as a "Platform
+coordination metadata login; no customer database credentials". The service has been keeping
+platform state out of customer databases since it was written; the journal is the piece that
+did not move.
+
+**The creator seam is six methods; the execution seam is its own.** It would be a much larger
+proposal if the storage seam were the RPC boundary, because the store spans roughly twenty
+tables. It is not: the engine's fold is pure and the creator-facing backend is narrow, so the
+whole engine moves server-side and the wire carries `start`, `status`, `signal`, `transition`,
+`restart` and `read_step_output`.
+
+Say plainly that those six are the creator-facing surface and not the whole wire. A worker also
+has to be given work and report it, and that path is not a trait at all. `DeliverySlot` in
+`crates/zeroship-workflow/src/service/runner/delivery.rs` is what production runs, and it calls
+`AppWorkflows::accept_job`, `heartbeat_job` and `complete_job` directly, in process. There is a
+`TaskTransport` trait beside it, but its only consumer, `RunnerSlot`, appears solely in tests -
+do not plan against it, and do not read `WorkerTasks` implementing it as evidence that the
+protocol is already abstracted. `WorkerTasks` is production, in its other role as `TaskPayloads`.
+
+Those three direct calls are what has to cross, and they are the half carrying the durability
+properties: `renewal` in `crates/zeroship-workflow-manager/src/queue.rs` is what advances the
+manager's evidence that an execution began, `complete_job` carries the outcome batch the fold
+consumes, and `settle_attempt` in `crates/zeroship-workflow/src/service/journal.rs` counts a
+reported execution of a run body. A reader who takes "six methods" as the whole surface will
+under-plan the cutover.
+
+---
+
+## SQLite dev tier
+
+The embedded store stays. `crates/zeroship-workflow/src/service/mod.rs` already says the engine is embedded "in customer
+workers **and local development**", and `WorkflowBackendFactory` already carries both a
+`Service` and a `Ready` variant, so both paths exist by construction rather than by a flag.
+
+Two consequences to record in `docs/reference/sqlite-divergences.md` rather than leave silent:
+the dev tier keeps the journal in the local file and therefore exercises the SQL store that
+production no longer uses, so a dev-tier pass is not evidence about the production write path;
+and `SCHEMA_PLACEHOLDER` survives for that tier alone.
+
+---
+
+## Sequencing
+
+**This should land before the app-database decoupling**, for defect 3. If column grants land
+first, journal appends break, and the only repairs are an interim grant path in the journal
+installer that would be deleted immediately afterwards, or shipping both projects as one change.
+
+```
+  1. this proposal       journal leaves the creator schema
+  2. the decoupling      column grants land with nothing in the creator schema
+                         that they must cover beyond the creator's own IR
+```
+
+Neither ordering is forced by anything else: defects 1 and 2 are worth fixing on their own, and
+the decoupling needs nothing from the journal except that it not be in the way.
+
+---
+
+## Plan
+
+Each step below lands on its own and is verifiable on its own. Nothing here is a flag day except
+step 5, and that one is a switch rather than a migration only because of Open 5.
+
+**What is easy, and what is not.** The creator seam is the easy half: `WorkflowBackend` is six
+methods with two implementations already behind a factory in `crates/zeroship-workflow-v8/src/lib.rs`,
+so a third that speaks HTTP is mechanical. The execution seam is the work. `TaskTransport`'s only
+production implementor, `WorkerTasks`, holds the service and calls it directly, so it has to
+become remote - and it is the half carrying the durability semantics. Read the steps with that
+asymmetry in mind: steps 1 to 3 are preparation, step 4 is the project.
+
+The machinery to carry it exists. The worker already reaches the manager over HTTPS through
+`zeroship-workflow-client` with a validated `Transport`, so job delivery is already a remote
+protocol. This extends a working client rather than inventing one.
+
+1. **Install the journal into `workflow_manager` at service boot.** Nothing reads it yet. Verify
+   that the schema installs, that one stamp row covers the installation, and that the
+   creator-schema path is untouched.
+
+2. **Let `AppBackend` bind the service's own store.** It already implements `WorkflowBackend`;
+   today it assumes a creator binding. Make the binding a parameter rather than an assumption.
+   Still nothing remote. Verify the existing suites pass with the service store behind it.
+
+3. **Serve the six creator methods, and add a client for them** in `zeroship-workflow-client`.
+   Not yet wired into the worker. Verify each method round-trips against the service store.
+
+4. **Carry the three direct calls across, merged into the claims that already cross.** This is
+   the step that earns its own review, and it is not "add a remote `TaskTransport`" - that trait
+   is test-only, and building against it would ship a remote implementation of something the
+   worker never calls. What crosses is `accept_job`, `heartbeat_job` and `complete_job`, and
+   each already sits immediately beside a call that is remote today: the manager claim, the
+   manager heartbeat, the manager settlement. Merge them - the assignment rides the claim reply,
+   one renewal carries both leases, the frontier rides the settlement - and the relocation adds
+   no round trip. Bolted on as separate endpoints it doubles them, which is a capacity cost
+   rather than a latency one. `heartbeat_job` must still advance the manager's evidence that an
+   execution began, `complete_job` must still carry the outcome batch the fold consumes, and a
+   reported execution of a run body must still be counted once. Verify by mutation rather than
+   by suite: break each property in turn and require a test to fail on it.
+
+5. **Cut the worker over** to the remote variants.
+
+6. **Delete the creator-schema path** - `ensure_journal` and its route, the journal bundle,
+   `JournalManager`, the worker's repair path, and `SCHEMA_PLACEHOLDER` on the PostgreSQL side.
+   Only once step 5 is green.
+
+7. **Drop `zeroship-data-orm` from the crate the worker links.** The last step of moving the
+   `service/` tree, not a deletion available earlier.
+
+**Measure the latency question before step 1, not after step 4.** Open 1 decides whether this is
+viable under load, and it is answerable now: transitions already batch, so a dispatch's outcome
+count can be measured against a round trip on today's code. That is the cheapest de-risking
+available and it gates the whole design rather than one step.
+
+**The fence is a separate track, not a gate.** Under this design only the service reaches the
+journal, so the `app_id` filter sits inside a trusted process and is defensible without
+row-level security. Giving every table a fence of its own remains worth doing as defence in
+depth - `verify` in `crates/zeroship-workflow-server/src/coordinator.rs` is the pattern to
+extend, since it already proves a login's posture against the catalog rather than trusting
+configuration - but it does not block the steps above, and treating it as a prerequisite would
+stall the defect fixes that motivate the move.
+
+---
+
+## Open
+
+1. **Latency, and whether transitions batch.** A durable workflow makes many small journal
+   appends, and each one that crosses the boundary becomes a round trip. This is less open than
+   it looks: transitions already batch. `apply` in `crates/zeroship-workflow/src/service/frontier.rs`
+   consumes a dispatch's whole outcome set and refuses one wider than the app policy's
+   `max_frontier`, so a dispatch already submits many transitions in a single fold rather than
+   one call per step. What remains open is whether the batch a dispatch produces is the right
+   unit for the wire, and what an activation costs when it is not - which is design work, not a
+   given. Nothing here asserts a number; the instrument is a benchmark against the surface once
+   it exists.
+
+2. **Payload size on the wire.** `read_step_output` and step inputs cross the boundary.
+   `WorkflowOutputRef` in `crates/zeroship-workflow/src/engine.rs` suggests large outputs are already referenced rather than
+   inlined; whether that covers every payload path needs checking before the cutover, not after.
+
+3. **Does `workflow_manager` become its own database?** NEEDS-DECISION, deferrable. It is a
+   schema in the control database today with its own migrator, login and search path. Moving
+   the journal into it puts creator-volume rows - runs, pages, receipts, payloads - in the
+   control plane, which is the coupling `docs/proposals/2026-09-05-gateway-central-database-decoupling.md`
+   is fighting on a different axis. The promotion is contained; the question is when.
+
+4. **Is the service zone-local?** If the workflow service is global, every journal append from
+   a remote zone is a wide-area round trip. It should be zone-local, which means one workflow
+   store per zone and an app's runs living in its own zone - consistent with the decoupling's
+   co-location rule, and worth stating rather than inheriting.
+
+5. **What happens to in-flight runs at cutover?** Pre-launch, nothing: there are no runs. That
+   answer expires, and the design should say so rather than let a later reader assume a
+   migration exists.
+
+6. **Does the fold moving server-side change what a worker may do?** Today the worker holds the
+   engine and can therefore observe and advance any run it is executing. Server-side, the
+   service decides what a worker is told. That is a stronger boundary and probably a better
+   one, but it is a change in authority that should be described rather than arrived at.
+
+---
+
+## Do-not notes
+
+- **Do not give the worker a DSN to the journal database.** It is the one process that executes
+  creator code, and the journal's only tenant separation is its `app_id` columns. A shared
+  journal reachable by SQL from that process is a cross-tenant surface with no fence, and
+  `db_posture` will not catch it because a workflow database carries no `zeroship` schema.
+  If a future design does put SQL to a shared journal anywhere outside the service, every table
+  needs a fence of its own first - a policy per table and a per-app principal, scoped by
+  something the executing process cannot choose for itself. Half a fence is worse than none,
+  because it reads as protection: the `app_id` column looks like a tenant boundary in a query
+  and is only a filter.
+
+- **Do not make the storage seam the RPC boundary.** The store spans roughly twenty tables; the
+  creator-facing backend is six methods. Move the whole engine, not the store.
+
+- **Do not leave the journal in a creator schema and grant it explicitly.** That is the interim
+  repair for defect 3, and it re-establishes the two ownership defects it was written to work
+  around. If the ordering forces it, delete it in the same change that relocates the journal.
+
+- **Do not assume a shared transaction was ever available.** Replay plus idempotency keys is the
+  model. Any future step that relies on a journal record and a data write committing together
+  is relying on something that has never been true and cannot be true across processes.
+
+- **Do not keep `SCHEMA_PLACEHOLDER` on the PostgreSQL path "for symmetry".** One fixed schema
+  needs no substitution, and a placeholder that is always replaced with the same value is a
+  seam inviting a caller to pass something else. It survives for SQLite because that tier has a
+  genuine reason.
+
+---
+
+## History
+
+`docs/proposals/2026-08-28-app-database-decoupling.md` is the sibling that makes defect 4 real
+and defect 3 urgent; its Open 3 is closed by this document.
+`docs/proposals/2026-08-28-migration-record-consolidation.md` sets the rule this one deliberately
+departs from: a creator-owned journal is correct for migrations, where corruption breaks only
+the creator, and wrong for workflows, where the platform is executing against it.

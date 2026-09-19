@@ -1,349 +1,973 @@
 # Decoupling app identity from database identity
 
 **Status.** PROPOSED. No entity in this design exists in the tree. `Resource`
-(`crates/zeroship-authz/src/resource.rs`) has only `App` and `Any`;
-`crates/zeroship-migrate-server/src/apply.rs:284` still reads `let schema = app_id.to_string();`;
-`ls crates/ | grep -i cdc` returns nothing. Four prerequisites HAVE landed and are relied on
-below: the explicit write-verb projection and primary-key row narrowing
-(`crates/zeroship-schema/src/query.rs`, live arms in (DELETED; runtime compilation now lives in `crates/zeroship-data-orm/src/sql/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
-`crates/zeroship-data-v8/tests/column_grants.rs`), the deploy-time schema precondition
-(`crates/zeroship-control/src/api.rs:167`), and the edge split routing `/v1/*` to the
-migration service (`deploy/ops/Caddyfile`). The stale-binding classifier is built and
-reachable but tautological in production - see Open 2.
+(`crates/zeroship-authz/src/resource.rs`) carries `App`, `Project`, `Organization` and `Any`
+and no database variant; `zeroship_core::app_derivation::schema_name`
+(`crates/zeroship-core/src/app_derivation.rs`) still returns the app id itself; `DbBinding`
+(`crates/zeroship-data-orm/src/binding.rs`) still carries `{ app_id, deploy_token, schema }`.
+
+Four things this design depends on HAVE landed and are relied on below: the organization and
+project ladder with its composite ownership keys
+(`db/migrations-ts/20260906000000_organization_entity_model.ts`,
+`db/migrations-ts/20260906000200_apps_project_ownership_key.ts`), execution zones with the
+app's zone frozen by trigger
+(`db/migrations-ts/20260914000400_execution_zones_and_join_signers.ts`,
+`db/migrations-ts/20260914000600_placement_eligibility.ts`), the project-scoped encryption
+root key (`db/migrations-ts/20260911000100_project_data_keys.ts`), and the edge split routing
+`/v1/*` to the migration service (`deploy/ops/Caddyfile`).
+
+The header of the organization migration names this work and its parent:
+
+> DELIBERATELY NOT HERE: ... the project-level `sector_identifier`, and project-owned data
+> resources with their capability bindings. NO COMMITTED DOCUMENT DESIGNS ANY OF THE THREE.
+
+This is that document for the third.
 
 ---
 
 ## What it is
 
 An app id is a tenant. It is not a schema name, not a role name, not an encryption salt and
-not a publication key. Today it is all five by string identity, which is what makes a
-database that outlives its app, or one that two apps share, unrepresentable.
+not a publication key. Today it is all five by string identity, which is what makes a database
+that outlives its app, or one that two apps share, or an app that reaches two databases,
+unrepresentable.
 
-### Entities
-
-```
-ds_<base62 uuidv7>    Datastore  { engine, cluster_id, dsn_secret_ref, resource_key }
-dbs_<base62 uuidv7>   Database   { datastore_id, owner = the CREATOR, physical schema "db_<dbsid>" }
-grant  PK (app_id)               { database_id, capability, granted_to_principal, state }
-                                   capability = readwrite | readonly
-```
-
-- **Datastore** - one physical PostgreSQL database (or one SQLite file directory).
-  Operator-owned; creators never name one. Many Databases sit on one Datastore.
-- **Database** - one schema inside a Datastore. This is the unit that is owned, migrated,
-  granted, published and dropped. It replaces "the app's schema" everywhere. The Database
-  id, not an app id, names the physical schema, the migrator role, the per-capability roles
-  and the apply lock. The Datastore id names the shared publication and slot.
-- **Grant** - the edge, keyed on `app_id` alone because an app binds to exactly one
-  database. There is no `binding_name`; a binding name exists only to disambiguate among
-  several databases an app can see, and an app never sees several.
-
-Many apps may point at one database. One app pointing at several is closed by decision, not
-deferred: it is what keeps `env.db.users` a collection rather than a binding, keeps database
-resolution `f(app_id)`, and keeps the mismatched-pair bug class (right role, wrong schema)
-out of existence rather than bounded by an argument.
-
-The prefix is `dbs` for uniformity with `crates/zeroship-core/src/typed_id.rs`, whose every
-prefix is three lowercase letters. That is convention only: `parse` is `split_once('_')` plus
-a base62 decode and `parse_with_prefix` compares a string, so neither enforces length or
-charset.
-
-**A database is addressed by its id, always.** There is no `(workspace, name) -> database_id`
-resolution anywhere. The creator writes the `dbs_...` id, the CLI sends it, the migration
-service takes it in the URL. An id is not a capability: authorization is "principal may
-migrate N iff principal owns N", evaluated on the database itself.
-
-A DSN never leaves the control plane and the operator config. `Datastore.dsn_secret_ref`
-names a platform secret. The worker is configured with a *set* of DSNs indexed by
-`DbResourceKey` (`crates/zeroship-data-v8/src/service.rs`), which already exists, is
-already a SHA-256 digest chosen so a DSN password cannot reach `Debug` or a log line, and
-needs no change - only its cardinality is wrong. Bring-your-own-datastore is out of scope:
-"which physical database may an app reach" is a privileged decision.
-
-### Enforcement: role membership, not an in-process check
+### The ladder
 
 ```
-zs_db_<dbsid>_mig     owns schema db_<dbsid>                     (replaces the per-app migrator)
-zs_db_<dbsid>_rw      USAGE on db_<dbsid> + column-listed DML
-zs_db_<dbsid>_ro      USAGE on db_<dbsid> + column-listed SELECT
-zs_bind_<gid>_e<E>    NOLOGIN, no privileges of its own; inherits exactly ONE database role
-zeroship_worker       LOGIN, member of zs_bind_<gid>_e<E>, per live (grant, epoch)
+org_  Organization   ownership root, billing subject                  EXISTS
+prj_  Project        shared-infrastructure boundary, audience unit,
+                     holder of the encryption root key                EXISTS
+app_  App            deploy target, runs creator code, zone frozen    EXISTS
+ezn_  ExecutionZone  operator-declared set of worker deployment
+                     units that share creator-side connectivity       EXISTS
+
+dst_  Datastore      ONE PostgreSQL cluster and the one PG database
+                     the platform uses inside it. Operator-owned.
+                     Creators never name one and never see one.       NEW
+dbs_  Database       one schema inside a Datastore. Project-owned.
+                     The unit that is migrated, bound and dropped.    NEW
+bnd_  Binding        (app, database, capability). The N:M edge.       NEW
 ```
 
 ```
-CREATE ROLE zs_bind_<gid>_e<E> NOLOGIN;
-GRANT zs_db_<N>_<cap>    TO zs_bind_<gid>_e<E> WITH SET FALSE;    -- inherits, not assumable
-GRANT zs_bind_<gid>_e<E> TO zeroship_worker    WITH INHERIT FALSE; -- assumable, never ambient
+        organizations
+              |
+              | 1:N
+        projects -------------------+
+          |      \                  |
+          | 1:N   \ 1:1             | 1:N
+          |        project_data_keys|
+        apps                      databases
+          |                           |  N:1
+          | 1:N                       v
+          +----> database_bindings <--+   datastores --N:1--> execution_zones
+                  UNIQUE (app_id, database_id)
 ```
 
-`<gid>` is the app id, because the grant table is keyed on it. `<E>` is the schema epoch.
+**Many apps may bind one database, and one app may bind many databases.** Both directions are
+open. What confines them is not cardinality but one structural predicate: a binding may only join
+an app and a database **in the same project**. Because a project is pinned to one execution zone,
+that predicate carries co-location with it rather than needing a second one.
 
-The data plane narrows per transaction with `SET LOCAL ROLE "zs_bind_<gid>_e<E>"` - the first
-statement of the setup batch that already exists
-(`crates/zeroship-data-orm/src/backend/postgres/pg_session_sql.rs` and `:63`), same statement, same
-batch position, no extra round trip. It replaces the current per-app role name
-(`crates/zeroship-core/src/database_role.rs`) in that builder and nowhere else.
+`dbs`, `dst` and `bnd` are all free against the prefix set in
+`crates/zeroship-id/src/typed_id.rs`. The data-access edge is called a **binding**, not a
+grant: `GRANT_PREFIX` there is `grt` and means one row per (person, audience) in
+`zeroship.grants`, which `db/migrations-ts/20260907000100_session_object.ts` creates. Reusing
+either spelling would put two unrelated entities in one namespace.
 
-- **Granting** is the two edges above, in one control-plane transaction.
-- **Revoking** is `REVOKE` on both edges, in one control-plane transaction. The role is NOT
-  dropped.
-- **Role count** grows to `apps + 3 x databases + grants x live epochs`, live epochs capped
-  at two by the reaper. Every bind, unbind and rotation is shared-catalog DDL serialized
-  through the control plane, which needs rate-limiting against grant-flapping.
-- **Boot posture** gains two catalog-checkable arms on top of what
-  `crates/zeroship-worker/src/db_posture.rs` already refuses: `inherit_option = false` on
-  every `zs_bind_*` membership, and `pg_has_role(login, <database role>, 'SET') = false` for
-  every database role. `db_posture` must run per datastore and refuse boot on any bad one; a
-  partial pass would serve some apps and 500 others behind a gate that half-ran.
+**A database is addressed by its id, always.** There is no `(project, name) -> database_id`
+resolution anywhere on the wire. `databases.name` is display text for dashboards and the CLI's
+local dereference; nothing sends it to a server as an identifier. An id is not a capability:
+authorization is evaluated on the database itself.
 
-Two ambient exceptions survive, both deliberate. The worker holds `zeroship_workflow_owner`
-(`db/migrations-ts/20260818000200_worker_database_authority.ts`), boot *requires* it and the
-posture check exempts it by name (`crates/zeroship-worker/src/db_posture.rs:13`); that role
-owns every app's journal schema and the workflow store never narrows
-(`crates/zeroship-plugin-workflow/src/store/pg.rs`). And the replication plane is not fenced
-at all: the boot posture requires `REPLICATION` and `BYPASSRLS` on the same login. So the
-accurate claim is narrow: **role membership fences the SQL executor plane and nothing else.**
+**A DSN never reaches the control plane at all.** A cluster's credential stays in the config of
+the service that holds it, and control records only the cluster's own identity, its zone and its
+status. There is no secret reference on any row here, because there is nothing for one to point at.
 
-### Binding resolution
+---
 
-The control plane resolves the app's grant at deploy time and hands the worker one binding:
+## The tables
+
+Three new tables. The control plane gains no record of what migrations ran; see below.
+
+### `zeroship.datastores`
 
 ```
-DbBinding { db: "dbs_01J...", schema: "db_01J...",
-            ds: <DbResourceKey>, cap: "readwrite", epoch: 7 }
+id                 text   PK   ^dst_[0-9a-z]{25}$   COLLATE "C"
+system_identifier  bigint NOT NULL  the CLUSTER'S own identity, not a chosen name
+execution_zone_id  text   NOT NULL  -> execution_zones(id) RESTRICT
+status             text   NOT NULL  pending | active | draining | retired | failed
+last_error         text
+created_at, updated_at
+
+UNIQUE (system_identifier)                              <- the natural key
+UNIQUE (id, execution_zone_id)                          <- FK target
+CHECK  status in (...)
 ```
 
-One binding, not a map. Nothing creator-supplied selects it. The vehicle is `DbServiceConfig`
-plus `DbBinding` (`crates/zeroship-data-orm/src/binding.rs`), which already carries the DSN
-to the plugin without passing through V8 and is already the per-isolate identity every `Db`
-and `Collection` wrapper travels with. App JS never needs these values: `env.db` methods are
-native ops, so the plugin reads the binding in Rust when the op runs.
+`system_identifier` is `SELECT system_identifier FROM pg_control_system()`, which is stable for
+the life of a cluster and identical from every database in it. Keying on it rather than on an
+operator-chosen name is what makes registration idempotent: two services configured against the
+same cluster converge on one row instead of creating two, and a mistyped DSN either fails to
+connect or reaches a different cluster, where it becomes a visibly new row rather than a silent
+duplicate.
+
+There is no `name` and no `admin_secret_ref`. The credential lives in the config of the service
+that holds it and never reaches control; a display name can be added when something needs to
+render one.
+
+`status` carries the convergence signal as well as the operator's intent: the cluster
+reconciler flips `pending -> active` when the bootstrap corpus has applied. Placement admits
+`active` only, so a cluster that is unreachable or half-bootstrapped is never chosen. The
+`'%://%'` check catches the one mistake a human will actually make, which is pasting a live
+DSN where a secret name belongs; `file:/...` and `urn:zeroship:file:/...` pass and
+`postgres://user:pass@host` does not.
+
+No capacity columns. A hand-maintained number on an entity row goes stale silently, and
+placement does not need one.
+
+### `zeroship.databases`
+
+```
+id                 text  PK   ^dbs_[0-9a-z]{25}$   COLLATE "C"
+project_id         text  NOT NULL  -> projects(id) RESTRICT
+execution_zone_id  text  NOT NULL  denormalized, kept honest below
+datastore_id       text  NOT NULL
+name               text  NOT NULL  display only
+schema_epoch       int   NOT NULL  a role-name input, NOT a schema record
+status             text  NOT NULL  provisioning | active | draining | deleting
+created_at, updated_at
+
+UNIQUE (project_id, name)
+UNIQUE (id, project_id)                                 <- FK target
+FOREIGN KEY (project_id,   execution_zone_id)
+         -> projects(id, execution_zone_id) RESTRICT
+FOREIGN KEY (datastore_id, execution_zone_id)
+         -> datastores(id, execution_zone_id) RESTRICT
+```
+
+Those two foreign keys are why the denormalized zone is safe, and between them they say the whole
+placement rule: the first makes the database's zone its **project's** zone, the second makes it
+its **cluster's** zone. So a database is placed on a cluster in its project's zone, structurally,
+with no trigger and nothing to forget to run.
+
+`schema_epoch` answers exactly one question - which `zs_bind_<bnd>_e<E>` should control compose
+- and it is a counter, not a description of a shape. Its authority is the epoch row in
+`__zeroship_admin` on the cluster, written inside the transaction that mints the epoch's roles,
+because that is the only place it moves atomically with the DDL. Control keeps a copy solely to
+compose a binding without a cross-zone read on the deploy path. A stale copy composes a role
+name that does not exist, `SET LOCAL ROLE` fails, and the caller re-resolves: fail-closed and
+self-correcting. The column comment must say all of this, or someone will read it as a record
+of the schema and rebuild the deploy gate on top of it.
+
+The physical schema name `db_<id>` is derived, never stored, and the derivation belongs beside
+the app derivations it replaces in `crates/zeroship-core/src/app_derivation.rs` - that module
+exists precisely so the data plane and the migration service cannot answer the question
+differently.
+
+There is no `engine` column. The hosted tier is PostgreSQL only per the AGENTS.md invariant,
+and SQLite is the dev tier, which has no control plane at all.
+
+### `zeroship.database_bindings`
+
+```
+id                   text PK  ^bnd_[0-9a-z]{25}$  COLLATE "C"
+app_id               text NOT NULL
+database_id          text NOT NULL
+project_id           text NOT NULL
+capability           text NOT NULL  readwrite | readonly
+status               text NOT NULL  pending | active | revoking | revoked
+generation           int  NOT NULL  desired state version
+observed_generation  int  NOT NULL  what the reconciler converged
+last_error           text
+created_at, updated_at
+
+UNIQUE (app_id, database_id)
+CHECK  observed_generation <= generation
+
+FOREIGN KEY (app_id,      project_id) -> apps(id, project_id)
+FOREIGN KEY (database_id, project_id) -> databases(id, project_id)
+```
+
+**The two foreign keys are the design.** They agree on `project_id`, so the sharing predicate
+holds on every write to either side rather than at issuance only. This is the mechanism
+`apps_project_ownership_fkey` already uses for app ownership.
+
+**The binding carries no zone, because the project does.** Since a project sits in exactly one
+execution zone, "same project" already implies "same zone" and a zone pair here would be a
+second copy of a fact the project holds. Co-location is not an extra predicate the binding
+enforces; it falls out of ownership.
+
+The row carries its own id because the PostgreSQL role name is derived from it,
+`zs_bind_<bnd>_e<E>`; a composite natural key would put two ids in one identifier. It carries
+no label: the creator's local name for a database rides in the manifest, so the control plane
+never treats a creator-chosen name as an identifier and two apps may call one database
+different things. It carries no epoch: which role names exist for a binding is answerable from
+the cluster catalog, which is authoritative, and a stored copy could only be wrong.
+
+`generation` / `observed_generation` are here and not on `datastores`. A binding's convergence
+is per-app and its failure is routine - a cluster briefly unreachable during a grant - so "the
+row says active but the roles are not there yet" is a state this will actually reach. A
+datastore's convergence is a one-time bootstrap and `status` carries it.
+
+### The control plane records no migration at all
+
+`zeroship.app_schema_applies` is **deleted and not replaced**, and
+`crates/zeroship-migrate-server/src/schema_apply_store.rs` goes with it. It exists today as the
+platform's own record of what schema an app corresponds to, because the engine journal lives in
+the creator's schema where the migrator role can drop it, and it feeds the deploy gate's
+descriptor comparison. Both halves fall under this design.
+
+**The descriptor comparison is an equality test, and equality is a coupling mechanism.** An
+app's build hashes the schema it was generated against. With one app per database that hash
+answered a real question. With several, any migration - a purely additive one included -
+invalidates the build of every app bound to that database, so all of them stop being deployable
+while all of them keep running correctly. Forcing every app on a database to move together is
+precisely the property this design exists to remove. It is not a transient window either: a
+database owned by a project and apps built on their own cadence do not move together, and a
+database that outlives its apps never moves together with any of them.
+
+**The remaining columns have no production reader.** The control-side model
+(`crates/zeroship-control/src/publication/models.rs`) declares only `id`, `app_id`, `status`,
+`descriptor_sha256`, `submitted_at` and `applied_at`, under a comment saying it declares "only
+the columns these operations read or write". `migration_id`, `request_body`,
+`effective_profile`, `ceiling_id`, `ceiling_version`, `applied_versions`, `submitted_by` and
+`last_error` are written and read by nothing - the same one-writer-zero-readers test
+`docs/proposals/2026-08-28-migration-record-consolidation.md` used to delete
+`zeroship.migrated_migration_audit`.
+
+So the engine journal in the creator's own schema becomes the only record of what ran, which is
+what that consolidation set out to achieve and stopped one table short of. Per-apply audit, if
+it is wanted, is an audit event in the audit system rather than a bespoke ledger.
+
+### Changes to existing tables
+
+```
+projects  + execution_zone_id, NOT NULL, frozen by trigger
+          + UNIQUE ("projects_zone_identity_key")  (id, execution_zone_id)
+
+apps      + UNIQUE ("apps_project_identity_key")   (id, project_id)
+          + FOREIGN KEY (project_id, execution_zone_id)
+                     -> projects(id, execution_zone_id)
+
+zeroship.app_schema_applies   DROPPED, no successor
+```
+
+**The zone moves to the project.** `apps.execution_zone_id`
+(`db/migrations-ts/20260914000600_placement_eligibility.ts`) landed before anything above the app
+needed a zone; with a project-owned database it is the project that has to carry it, or "same
+project" stops implying "can share" and every sharing surface has to explain a second rule.
+`projects` therefore gains the column and the freeze trigger `apps` already has, and the app keeps
+its copy under a composite foreign key so the two cannot disagree.
+
+Keeping the app's copy rather than deriving it is deliberate: `instance_serves_app`
+(`crates/zeroship-control/src/worker_join.rs`) joins on `app.execution_zone_id`, and
+`db/migrations-ts/20260914000600_placement_eligibility.ts` grants the workflow manager
+`SELECT (execution_zone_id, deleted_at)` on `apps`. Both keep working untouched, and the composite
+foreign key is what stops the copy drifting.
+
+`apps_project_identity_key` is new too. `apps` today carries only `apps_name_key`, and its
+composite ownership key points outward at `projects(id, organization_id)` with nothing pointing
+in. PostgreSQL requires a real unique constraint on referenced columns, so without it the binding
+foreign key will not create.
+
+`CreateAppBody.execution_zone` (`crates/zeroship-control/src/api.rs`) and the zone resolution in
+`Registry::create_app` move to project creation with it.
+
+`crates/zeroship-authz/src/resource.rs` gains `Resource::Database { id: DatabaseId }`, typed
+rather than `String` for the reason that file already gives for `AppId`: the decode is the
+parse, so a wrapper policy naming a database in any other spelling is a decode failure rather
+than a row that matches nothing. `Resource::validate_ids` is an exhaustive match, so the new
+variant forces an arm.
+
+### Companion registrations, none of them optional
+
+Every new table needs an entry in `policies/platform-table-owners.json`; the applier refuses
+fail-closed on any op targeting a table with no ownership entry, so a table created without one
+halts the whole corpus. Every typed-id text column needs `COLLATE "C"` inline in its creating
+migration, as `project_data_keys` and `execution_zones` already do; the collation map in
+`db/migrations-ts/20260831000001_sortable_entity_id_collations.ts` is a one-time backfill for
+tables that predate it, not a registry new tables join.
+
+---
+
+## Where a fact lives
+
+This platform is self-hostable, so every fact has to be filed by who owns it. Three mechanisms
+already exist in the tree and each is correct for one kind:
+
+| kind | mechanism | exemplar |
+| --- | --- | --- |
+| **Product**, invariant across deployments | source, parameterized where it varies | `deploy/ops/Caddyfile` written `<label>.{$ZEROSHIP_DOMAIN}`, per `crates/zeroship-control/src/reserved_names.rs` |
+| **Product default**, a starting value an operator may extend | boot-time idempotent seed into an operator-editable table | `plan_catalog::seed_plans` (`crates/zeroship-control/src/plan_catalog.rs`), called once from control's main |
+| **Deployment**, true of this installation only | an operator-provided file outside the tree, named by a config key | `control.join_signers_file` (`crates/zeroship-control/src/config.rs`) |
+
+A migration can carry the first two. It cannot carry the third, because **a migration is not
+overridable**: the corpus is ordered, journalled and verified, so a self-hoster declaring their
+own clusters would have to fork it and merge against it forever, while upstream carried a
+stranger's hardware inventory as product.
+
+Which zones and which clusters exist is deployment data. The schema of the three new tables,
+and a seed of the one default zone, are product.
+
+---
+
+## Deployment
+
+A Datastore is one cluster, and the platform uses one PG database inside it. Multiple PG
+databases per cluster are rejected; the reasoning is under Why it is this way.
+
+**A cluster registers itself.** There is no topology document and no new config key. The service
+holding a cluster's privileged credential presents it to control, which records what it can verify
+rather than what it was told - the shape worker join already has:
+
+```
+  migrate-server boots with provision_database_url
+      connects, reads pg_control_system().system_identifier
+      registers with control: identity + its own zone, status = pending
+      runs the datastore bootstrap corpus
+      status = active
+```
+
+Adding a cluster is therefore provisioning it and configuring a service to reach it. Nothing is
+declared twice, and the deployment data stays where deployment data already lives: in a service's
+config, not in a document control has to parse and not in the migration corpus.
+
+**Registration is idempotent by construction**, because the key is the cluster's identity rather
+than a name. Two services configured against one cluster converge; a credential that reaches
+nothing registers nothing; a credential that reaches the wrong cluster registers a row an operator
+can see. None of that needs import semantics, a refusal policy or a runbook.
+
+**Control never learns a DSN.** It records identity, zone and status. The credential stays in the
+config of the service that holds it, which is also what keeps the blast radius of the control
+database's compromise away from every tenant cluster.
+
+**So every service resolves addresses itself, the same way.** A binding names `dst_X`; control
+cannot say where that is, because it does not know. Each service therefore connects to every
+cluster its own config lists, reads `system_identifier`, and builds the map from identity to
+connection. Nothing has to be told which address is which cluster, because the cluster answers
+for itself - the same property that makes registration idempotent makes address resolution need
+no coordination.
+
+**Which puts two config keys into the plural and deliberately leaves one alone:**
+
+```
+  migrate-server   provision_database_url  -> a LIST
+                   one process serves every cluster in its zone
+  worker           database_url            -> a LIST
+                   one process serves every cluster in its zone
+  cdc relay        database_url            -> stays SINGULAR
+                   one relay process per cluster; scale by running more,
+                   not by teaching one process about many
+```
+
+The lists carry DSNs and nothing else. No names, no ids, no ordering: identity is read from the
+cluster, so config that tried to name one would be a second spelling able to disagree.
+
+**Adding a cluster is therefore config in two places plus one process**, not one place. Registration
+buys control a placement registry; it does not buy the worker its addresses, and it was never going
+to while control holds no DSN.
+
+**One manual step survives, and it is a deliberate trade.** A fresh cluster has only its own
+superuser, so someone creates the provisioning login before migrate-server can connect and register
+anything. That could be collapsed - let the bootstrap corpus connect as the cluster's superuser on
+first contact and create its own least-privilege role, making the whole procedure "add a DSN,
+restart" - at the cost of a superuser DSN sitting in a service config, even temporarily. This
+design keeps the manual step. Reversing that is a decision, not a refactor.
+
+**Control owns lifecycle state.** `status` is the operator's only lever and it is control-side, so
+taking a cluster out of rotation during an incident is a row update rather than a deploy or a
+config push across replicas.
+
+**Zones do not follow, and that is deliberate.** A datastore can register itself because reaching
+a cluster proves it exists. A zone proves nothing: it gates which join signers may mint workers,
+and control today "refuses a file naming a zone this deployment does not declare". Letting a
+service invent one by presenting itself would undo that.
+
+So `execution_zones` stays declared rather than registered. The default seed is fine where it is -
+a product default for the single-host case, in the `data()` phase the corpus supports for exactly
+that, with `zeroship_workflow_manager::eligibility::ZoneId::default_zone`
+(`crates/zeroship-workflow-manager/src/eligibility.rs`) already spelling its id once. Where zones
+BEYOND the default are declared is Open 12: a three-zone self-host still cannot say so without
+patching the corpus, and the cheapest answer is probably the existing join-signers file, which
+already lists the zones each signer may mint for.
+
+**Bootstrapping a cluster is a migration.** `migrate-server` gains a second corpus - the
+datastore bootstrap corpus - creating the worker login, the CDC login and the extensions.
+Creating roles is DDL, so this is the job that service already does, done with machinery that is
+journalled, idempotent and re-runnable, rather than a hand-run shell script. The corpus is
+product; which clusters it is applied to is deployment.
+
+**The bootstrap refuses a cluster below PostgreSQL 16, by version.** Below 16 `pg_auth_members`
+carries no `inherit_option` or `set_option`, so `WITH INHERIT FALSE` and `WITH SET FALSE` are not
+a weaker fence, they are no fence. A pre-16 cluster would fail anyway when role creation hit the
+syntax, which is fail-closed but reads as a confusing SQL error while an operator is adding
+capacity. Refusing by version says why.
+
+**The fleet is a set of majors, not one.** Clusters are declared by an operator and upgraded one
+at a time, so a mixed fleet is the normal state rather than a hazard. Anything version-dependent
+is therefore a per-datastore fact, not a global one - `transaction_timeout` being the live example,
+absent on 16 and present from 17.
+
+**Creator storage is not the control database**, and the worker already refuses to boot
+otherwise: `validate` in `crates/zeroship-worker/src/db_posture.rs` fails on a login that can so
+much as resolve the `zeroship` schema, because "the worker connects to the creator database and
+reads app metadata from Control". Splitting creator schemas out of the control plane's own
+PostgreSQL is a prerequisite for the Datastore entity rather than a consequence of it.
+
+**Relocating a database between clusters is not supported.** Placement is therefore a one-way
+door; see Why it is this way for what that gives up and what replaces it.
+
+---
+
+## Placement
+
+An execution zone is, in the words of its own migration, "an operator-declared set of worker
+deployment units that share creator-side connectivity". It is already a secrets boundary and
+not a latency hint: `zone_scoped_app_read` in `crates/zeroship-control/src/internal.rs` narrows
+the three host reads - the app, its environment, and its project data key - to the calling
+worker instance's zone, and the code states why:
+
+> an app's environment is its decrypted secrets and its project data key is a decryption
+> capability, so reaching either from another zone is exactly what zones exist to prevent.
+
+A datastore belongs to exactly one zone. Extending the fence to storage makes enforceable an
+assertion the tree already makes twice but cannot check: that moving an app between zones "is a
+data migration of its creator storage, not a metadata edit"
+(`db/migrations-ts/20260914000600_placement_eligibility.ts`).
+
+**Co-location is required, not preferred.** With one database per app, availability was one
+cluster's availability. With several, it is the product, and across zones it is the product plus
+a wide-area round trip on every statement of the remote one.
+
+Pinning the zone on the **project** closes this without the binding carrying anything: a project
+is in one zone, its apps and its databases inherit that zone under composite foreign keys, so an
+app can only ever bind a database in its own zone. A multi-region product becomes two projects
+under one organization, which is also how data residency usually wants to be drawn - a hard
+boundary rather than a soft one.
+
+**Choosing a cluster uses facts control already owns**, because control created every database
+and knows exactly how many sit on each:
+
+```sql
+SELECT d.id
+  FROM zeroship.datastores d
+ WHERE d.execution_zone_id = $1
+   AND d.status = 'active'
+ ORDER BY (SELECT count(*) FROM zeroship.databases db WHERE db.datastore_id = d.id),
+          d.id
+ LIMIT 1;
+```
+
+One query in the control database, runnable inside the same transaction that admits the
+placement - the discipline the workflow manager already follows for zone facts, reading them
+after taking its locks and again before commit. An empty result is a typed refusal at create
+time; a zone with no capacity must fail loudly rather than overload a cluster.
+
+The operator's lever is `status`. A cluster that is filling gets flipped to `draining` and
+placement stops choosing it. Disk and connection alerting stay in ordinary observability with a
+human deciding when to flip the flag. Capacity-aware placement is deferred deliberately and
+named in Open.
+
+---
+
+## Managing the three resources
+
+Three resources, three owners, three management models.
+
+```
+  Datastore   OPERATOR       registers itself when a service reaches it. No creator surface.
+  Database    PROJECT        created and deleted by a creator with a project seat.
+  Binding     PROJECT        the edge. Both endpoints must already be in that project.
+```
+
+### Authority
+
+| | create | change | delete | authorized by |
+| --- | --- | --- | --- | --- |
+| Datastore | self-registration, keyed on the cluster's `system_identifier` | `status`, control-side | when it holds no database | operator, no API |
+| Database | creator | schema via migrate-server; `name` via control | when it has no binding | `Resource::Database`, project seat |
+| Binding | creator | capability is a role rotation | revoke | both endpoints already in one project and zone |
+
+### Creating a database is two facts in two places
+
+```
+  creator: zeroship db create --project prj_... --name main
+        |
+        v
+  CONTROL     authorize: does the caller hold a qualifying seat on the project
+              place:     the query above, inside this transaction
+              insert:    databases row, status = provisioning
+        |
+        v
+  CLUSTER RECONCILER     CREATE SCHEMA db_<dbs>
+                         CREATE ROLE zs_db_<dbs>_{mig,rw,ro}
+                         column grants
+        |
+        v
+  status = active
+```
+
+Schema *content* is then managed entirely by migrate-server, addressed by database id and
+authorized by the creator's own bearer.
+
+### Deploy verifies bindings; it never creates them, and it never compares schemas
+
+The tempting design is for the manifest to declare which databases an app uses and for deploy to
+reconcile bindings to match. **That is wrong**, and it is worth stating rather than leaving to
+inference: it would mean a revoked binding is silently restored by the next deploy, because the
+config file is a stale snapshot of an intent someone has since changed.
+
+```
+  GRANT is an explicit act     zeroship db bind dbs_... --app app_... --readwrite
+  DEPLOY only verifies         "app X declares database main (dbs_Y) but holds no active
+                               binding to it" -> refuse, naming the command that fixes it
+```
+
+Deploy checks exactly two things, and neither needs to know what schema any database is at:
+every database the manifest declares has an **active binding** for this app, and every database
+the manifest declares has a **descriptor in this bundle**. The second is a self-consistency
+check on the artifact, and it preserves the one refusal worth keeping from today's gate - an app
+that declares a database but carries no schema for it would boot with `env.db` uninstalled over
+live data.
+
+Capability change is not an UPDATE in the usual sense. `readwrite -> readonly` is a role
+rotation: mint the new binding role inheriting the other database role, drop the old. New
+transactions see it immediately; an in-flight transaction that already assumed the old role runs
+to its end.
+
+### The creator surface
+
+```
+  zeroship db create --project prj_... --name main     -> prints dbs_...
+  zeroship db list
+  zeroship db bind   dbs_... --app app_... --readwrite
+  zeroship db unbind dbs_... --app app_...
+  zeroship db bindings dbs_...                          -> which apps, which capability
+  zeroship db delete dbs_...                            -> refuses while bound
+
+  zeroship migrate --database main                      -> migrate-server, by id
+  zeroship deploy                                       -> verifies bindings, not schemas
+```
+
+`main` is the local label from `zeroship.jsonc`; the CLI dereferences it to a `dbs_` before any
+request, so a label never travels as an identifier.
+
+---
+
+## The cluster reconciler
+
+Datastore bootstrap, database provisioning and binding grants are all the same problem - control
+declares, a cluster must be made to match - and all need the same privileged connection to the
+same cluster. They are **one loop per datastore**, not three:
+
+```
+  for each datastore in this zone:
+      converge the bootstrap corpus                 pending -> active
+      converge every database declared on it        schema, db roles, column grants
+      converge every binding to those databases     the two role edges
+      record status / observed_generation
+```
+
+It runs in `migrate-server`, which already holds the privileged DSN per cluster
+(`migrate_server.provision_database_url`, `crates/zeroship-migrate-server/src/config.rs`) and
+already never executes creator code.
+
+**Granting is not one transaction, and never was.** Control's database and the tenant cluster
+are different servers, so nothing spans the control row and the role DDL. Any design claiming
+that transaction is claiming a distributed transaction it does not have.
+
+Nothing downstream trusts a half-converged row: placement admits `status = 'active'` only, and a
+deploy requires a binding whose `observed_generation` has caught up to its `generation`.
+
+---
+
+## Enforcement: role membership, not an in-process check
+
+```
+zs_db_<dbs>_mig     owns schema db_<dbs>
+zs_db_<dbs>_rw      USAGE on db_<dbs> + column-listed DML
+zs_db_<dbs>_ro      USAGE on db_<dbs> + column-listed SELECT
+zs_bind_<bnd>_e<E>  NOLOGIN, no privileges of its own; inherits exactly ONE database role
+zeroship_worker     LOGIN, member of zs_bind_<bnd>_e<E>, per live (binding, epoch)
+```
+
+```sql
+CREATE ROLE zs_bind_<bnd>_e<E> NOLOGIN;
+GRANT zs_db_<dbs>_<cap> TO zs_bind_<bnd>_e<E> WITH SET FALSE;    -- inherits, not assumable
+GRANT zs_bind_<bnd>_e<E> TO zeroship_worker   WITH INHERIT FALSE; -- assumable, never ambient
+```
+
+`<E>` is the schema epoch. The data plane narrows per transaction with
+`SET LOCAL ROLE "zs_bind_<bnd>_e<E>"` as the first statement of the setup batch that already
+exists (`crates/zeroship-data-orm/src/backend/postgres/pg_session_sql.rs`): same statement, same
+batch position, no extra round trip. It replaces the per-app role name composed by
+`crates/zeroship-core/src/database_role.rs` in that builder and nowhere else.
+
+**The role must be per binding, not per database.** `SET ROLE` authorizes against the transitive
+closure of the memberships held by the role that *connected*, which here is always the shared
+worker login and never the app. Revoking one app's edge would therefore have no database
+consequence while any parallel edge survived. A binding role inherits exactly one database role,
+so per-statement confinement stays one database while revocation still bites.
+
+**Boot posture becomes per datastore and stops being fatal.**
+`db_posture::validate_database_url` runs once on one DSN at startup today
+(`crates/zeroship-worker/src/main.rs`). Under many clusters, making boot success the product of
+every cluster's health means a worker in a busy zone never starts. Posture runs per datastore, at
+first use and periodically after, and a datastore that fails it renders its databases unavailable
+under a typed refusal while every other datastore keeps serving. It gains one catalog-checkable
+arm - `pg_has_role(login, <database role>, 'SET') = false` for every database role - and records
+each datastore's `server_version`, so a mixed fleet is an observable fact rather than something
+discovered during an incident.
+
+**The fence partitions per cluster, which makes it narrower rather than weaker.** Roles live in
+one cluster's catalog, so each cluster has its own `zeroship_worker` and its own memberships. If
+the posture fails on one, the blast radius is that cluster's databases. A single-cluster design had
+no such containment, and the instinct on reading "one worker, many clusters" is the opposite of
+what is true.
+
+**There are no ambient exceptions, and the posture is already stricter than this design needs.**
+`validate` in `crates/zeroship-worker/src/db_posture.rs` refuses boot on five arms: a login that
+is not `zeroship_worker`; `SUPERUSER`, `CREATEROLE` or `CREATEDB`; `REPLICATION` or `BYPASSRLS`
+("CDC belongs to the relay"); a login that can resolve the `zeroship` schema at all, which is the
+zone arm; and **any** inheriting membership, deny-by-default with no name exempted, on the stated
+ground that "a future role that genuinely needs one fails boot loudly". So the claim is stronger
+than a per-app design could make: the worker holds no ambient authority of any kind, and the
+replication plane is fenced by living in a different process under a different login rather than
+by roles.
+
+---
+
+## Binding resolution
+
+The control plane resolves the app's bindings at deploy time and hands the worker a set:
+
+```
+DbBinding { db: "dbs_...", schema: "db_...", ds: <datastore handle>,
+            cap: "readwrite", epoch: <E> }
+```
+
+The vehicle is `DbBinding` (`crates/zeroship-data-orm/src/binding.rs`), which already carries
+identity to the plugin without passing through V8 and is already the per-isolate value every
+`Db` and `Collection` wrapper travels with. It gains the database id, the datastore handle, the
+capability and the epoch, and loses nothing.
 
 The worker does not compare `epoch` in Rust to authorize a transaction; it composes the role
-name the setup batch sends. An app whose binding is absent is a hard refusal with the same
-shape as `collection_not_declared` (`crates/zeroship-data-orm/src/descriptor.rs`).
+name the setup batch sends. An app whose binding is absent is a hard refusal with the same shape
+as `collection_not_declared` (`crates/zeroship-data-orm/src/descriptor.rs`).
 
-Per-thread resources become maps keyed by `DbResourceKey`. `ThreadDbContext`
-(`crates/zeroship-data-v8/src/context.rs`) holds one pool, one url, one resource key and
-one backend today, and registering a second URL tears the first down. The target shape
-already exists one module over as `OPERATOR_POOLS: HashMap<DbResourceKey, Rc<Pool>>`
-(`crates/zeroship-data-v8/src/service.rs`).
+**Per-thread resources become maps keyed by datastore.** `ThreadDbContext`
+(`crates/zeroship-data-v8/src/context.rs`) holds one `Option<LocalConnection>` and
+`install_connection` replaces it whenever the factory identity differs, so registering a second
+target tears the first down. It becomes a map keyed by the datastore, with pools created lazily
+on first use and evicted when idle - the shape the isolate cache already has. A worker thread
+cannot hold a connection floor to every cluster in its zone.
 
-### Column-level GRANT is the masking authority
+The connection identity that keys that map is `ConnectionFactory::identity()`
+(`crates/zeroship-data-orm/src/connection/factory.rs`), whose `url` is a separate
+`Option<&str>`. Whether the datastore handle can be made unable to carry a password into `Debug`
+or a log line is work, not an inherited property.
 
-The migration service emits column-level grants from the owner's own IR, withholding every
-column whose classification is not `none` and granting the column that holds the mask
-instead. It already writes classification and mask kind as `COMMENT ON COLUMN` sentinels
-(`crates/zeroship-schema/src/mask_codec.rs`, (DELETED; runtime compilation now lives in `crates/zeroship-data-orm/src/sql/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
-`crates/zeroship-migrate-backend/src/mask_codec.rs`) and is the one process in the tree that
-does not execute creator code, so this satisfies the AGENTS.md privilege invariant with no
-`SECURITY DEFINER` wrapper and no system-schema state. A creator migration cannot widen the
-ACL back open: the CONFINED ceiling grants exactly `schema.create_table`, `schema.rename` and
-`safety.destructive_ops` and nothing else
-(`crates/zeroship-migrate-server/policies/confined.policy.toml`, whole file).
+**The handle must not reach the worker-internal env map.**
+`crates/zeroship-worker/src/cache.rs` states the rule and a live test binds it:
+
+> An identifier naming a resource SHARED WITH ANOTHER TENANT - a datastore key, or a database id
+> once databases are shared - must never enter it, because two apps under one actor that read
+> equal values have confirmed co-residency.
+
+`worker_env_is_exactly_the_app_owned_ids` asserts the exact key set rather than a subset, because
+the failure it guards is an addition.
+
+---
+
+## Column-level GRANT is the masking authority
+
+The migration service emits column-level grants from the owner's own IR, withholding every column
+whose classification is not `none` and granting the column that holds the mask instead. It already
+writes classification and mask kind as `COMMENT ON COLUMN` sentinels
+(`crates/zeroship-migrate-backend/src/mask_codec.rs`) and is the one process in the tree that does
+not execute creator code, so this satisfies the AGENTS.md privilege invariant with no
+`SECURITY DEFINER` wrapper and no system-schema state.
+
+A creator migration cannot widen the ACL back open: the CONFINED ceiling
+(`crates/zeroship-migrate-server/policies/confined.policy.toml`, whole file, plus the shared shape
+at `policies/confined-system-shape.inject.toml`) grants exactly `schema.create_table`,
+`schema.rename` and `safety.destructive_ops`, and a creator draft may only tighten.
 
 Two deletions ship with it, in `runtime_role_provisioning_sql`
-(`crates/zeroship-migrate-server/src/apply.rs:1384`): the blanket
-`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA` at `:1424` and the prospective
-`ALTER DEFAULT PRIVILEGES` rules at `:1426-1428`. Every apply regenerates explicit per-column
-grants inside the same transaction as the DDL.
+(`crates/zeroship-migrate-server/src/apply.rs`): the blanket
+`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA` and the prospective
+`ALTER DEFAULT PRIVILEGES` rules. Both must be deleted rather than supplemented, because a
+table-level grant alongside a column list returns the plaintext and `ALTER DEFAULT PRIVILEGES` has
+no column-list form. Every apply regenerates explicit per-column grants inside the same
+transaction as the DDL.
 
-The runtime descriptor is demoted from security boundary to shape declaration. That is its
-correct altitude whether or not sharing ships.
+The runtime descriptor is demoted from security boundary to shape declaration. That is its correct
+altitude whether or not sharing ships.
 
-### Ownership and migration
+**This deletion breaks the workflow journal, and the ordering is load-bearing.** The journal's
+tables are installed into the creator's schema by a separate bundle, so they are not in the
+creator's IR and the regenerated per-column grants do not cover them. They are reachable today
+only because the blanket grant covers everything in the schema, which is what goes. The answer is
+not an interim grant for them: `docs/proposals/2026-09-19-workflow-journal-relocation.md` moves the
+journal into the workflow service's own storage, and it should land FIRST so this design never has
+to cover a table it does not own. If the ordering slips, the journal installer emits its own
+grants as a throwaway, deleted in the same change that relocates the journal.
 
-A database is owned by the **creator**, not by an app. The creator has full control including
-breaking changes and takes the risk; migration is not coupled to an app. The model is a
-monorepo: several apps in one workspace sharing one migration source and one set of generated
-types. `Database` therefore carries the creator's ownership and no app column, and the
-migrator role `zs_db_<dbsid>_mig` is named by no app. There is no `owner` capability an app
-can hold, so there is no ownership transfer, no ping-pong between apps and nothing for an app
+---
+
+## Ownership and migration
+
+A database is owned by the **project**. The project is the shared-infrastructure boundary and,
+under the auth foundation redesign, the audience a subject is scoped to; it is also where the
+encryption root key already lives. `Database` therefore carries `project_id` and no app column,
+and the migrator role `zs_db_<dbs>_mig` is named by no app. There is no `owner` capability an app
+can hold, so there is no ownership transfer, no ping-pong between apps, and nothing for an app
 deletion to cascade into.
 
-**One route, and the control plane is not on it.** The CLI calls the migration service
-directly, addressing the database by id:
+**One route, and the control plane is not on the apply.** The CLI addresses the database by id:
 
 ```
-creator -> POST /v1/databases/{database_id}/migrations/apply    (zeroship-migrate-server)
+creator -> POST /v1/databases/{database_id}/migrations/apply   (zeroship-migrate-server)
 ```
 
-The CLI reuses the `control` URL and the edge routes the path
-(`deploy/ops/Caddyfile:66-67`, already shipped). No new config key, flag or environment
-variable. A shared hostname is not the control plane being in the path: Caddy hands the
-request to `migrate-server` directly, no control code runs, no second authorization happens.
-Two costs, taken deliberately: the edge config is load-bearing (a missing rule yields
-control's 404), and the control plane must never define a `/v1/*` route - enforced by a gate
-arm, not a convention. `crates/zeroship-migrate-server/src/api.rs` already authorizes against
-its own `ControlPlaneAuthenticator` reading the creator's own bearer, so no authorization is
-lost.
+`crates/zeroship-migrate-server/src/api.rs` already registers `/v1/databases/{database_id}`, and
+its `ControlPlaneAuthenticator` (`crates/zeroship-migrate-server/src/auth.rs`) already authorizes
+against the creator's own bearer rather than the platform control key. What changes is the
+identity: the handler's path type is `AppId` and `provision_app_database`
+(`crates/zeroship-migrate-server/src/provisioning.rs`) derives its schema with
+`app_derivation::schema_name`. The URL was renamed; the identity was not.
 
-`crates/zeroship-authz/src/resource.rs` gains `Resource::Database { id }` with the policy
-"principal may migrate N iff principal owns N", checked against the creator with no app
-indirection. That is the load-bearing change in the re-key, not the mechanical `app_id`
-occurrences across the migration service.
+`Resource::Database` gains the policy "principal may migrate N iff principal holds a qualifying
+seat on N's project", resolved the way app authority already resolves. That is the load-bearing
+change in the re-key, not the mechanical `app_id` occurrences across the service.
+
+**With many zones the migration service is zone-local.** A single global instance would hold a
+session advisory lock across a whole multi-file apply over a wide-area link. So `migrate-server`
+runs per zone, and the CLI resolves a `dbs_` to its zone's endpoint once before the apply. That is
+a real weakening of "the control plane is not in the path" and is recorded as such rather than
+discovered: control answers one resolution request, and no control code runs during the apply.
 
 **The apply lock moves to the database and stays SESSION-scoped.** The engine already takes a
-session lock around a whole plan and releases it explicitly
-(`crates/zeroship-migrate-postgres/src/backend/session.rs`,
-`crates/zeroship-migrate-core/src/engine.rs`); the host acquires once on its pinned session
-and passes `LockMode::AlreadyHeld` for every IR file. Only the logical key changes, from the
-app-as-project to the database. The publication reconciler's own
-`pg_advisory_xact_lock(hashtextextended($1, 0))`
-(`crates/zeroship-migrate-server/src/publication.rs:86`) is keyed on the app-derived
-publication name and is replaced, not reused.
+session lock around a whole plan and releases it explicitly; the host acquires once on its pinned
+session (`crates/zeroship-migrate-server/src/session.rs`) and passes `LockMode::AlreadyHeld` for
+every IR file. Only the logical key changes. The publication reconciler's own advisory lock
+(`crates/zeroship-migrate-server/src/publication.rs`) is keyed on an app-derived publication name
+and is replaced, not reused.
 
-**The apply structure.** All SUBTRACTION from the catalog happens before any DDL commits; all
-ADDITION happens after every DDL has committed:
+**The deploy gate stops comparing schemas.** `crates/zeroship-control/src/registry.rs` today
+predicates the deploy UPDATE on one `descriptor_sha256` matching the newest applied row and
+reports `RegistryError::SchemaNotApplied { descriptor_sha256, applied_sha256 }`. That comparison
+is deleted, along with the catalog read behind it
+(`crates/zeroship-control/src/publication/catalog.rs`). The descriptor-mismatch arm of
+`SchemaNotApplied` goes with it; the artifact-inconsistency arm survives as a manifest
+self-consistency check that needs no knowledge of any database.
+
+`Manifest.runtime_descriptor` (`crates/zeroship-bundle/src/manifest.rs`) still changes shape,
+because an app now carries one descriptor per database: entries of `{ label, database_id }` plus
+that database's declared schema. It carries no hash to compare and no database id used as a name.
+Every producer, consumer, fixture and doc moves in the same patch.
+
+**Nothing is lost that fails closed anyway.** A build expecting a column the database does not
+have gets `42703 undefined_column` at query time, which names the column. The right check is
+compatibility rather than equality - refuse when the database lacks something the app requires,
+say nothing when it has grown things the app does not use - and only a process holding both the
+descriptor and a connection can evaluate that. Control holds a hash and is not such a process; the
+worker is. That is Open 11.
+
+### The apply
+
+All subtraction from the catalog happens before any DDL commits; all addition happens after every
+DDL has committed:
 
 ```
 L    host takes a SESSION advisory lock on the database key, held to U
 P    preflight: lower every IR file, refuse a denied plan
-S    record_submitted on the control connection - the audit row opens
-T1   one transaction: head FOR UPDATE, reap E-1 roles, claim, shrink this Database's publication members
+T1   one transaction: head FOR UPDATE, reap E-1 roles, claim, shrink this
+     Database's publication members
 D1..DN  the DDL, engine-journalled, every file passing LockMode::AlreadyHeld
-T4   one widen transaction: mint E+1 roles, widen those members, advance the head to E+1,
-     emit the marker - iff the committed schema delta requires rotation
-C    mark_applied / mark_failed on the control connection
+T4   one widen transaction: mint E+1 roles for every live binding, widen those
+     members, advance the head to E+1, emit the marker - iff the committed
+     schema delta requires rotation
+E    advance databases.schema_epoch on the control connection
 U    release the lock
 ```
 
-**A serving app is never fenced.** The apply mints `E+1` and drops `E-1`; it never touches
-`E`. Every partial crash state leaves the app serving on `E`. Recovery is a plain retry: the
-engine journal skips completed DDL, and the head's recorded journal state decides whether the
-rotation is still owed. A retry after a crash between the last DDL and T4 finds every version
-applied and must STILL rotate.
+The apply writes nothing to the control plane but step E, and step E is a projection: if it fails
+or is lost to a crash, control composes a role name that no longer exists, the next statement
+fails `SET LOCAL ROLE`, and the caller re-resolves. There is no ledger to close and no
+exactly-once obligation across two databases.
 
-**The deploy gate is scalar and its row re-keys onto the database.**
-`crates/zeroship-control/src/registry.rs` predicates the deploy UPDATE on one
-`descriptor_sha256` matching the newest `applied` row, and `Manifest.runtime_descriptor`
-(`crates/zeroship-bundle/src/manifest.rs:172`) keeps its shape. What changes is the subquery:
-it reads `WHERE m.app_id = $3` today (`crates/zeroship-control/src/registry.rs:553`), and an
-apply belongs to a database. So `zeroship.app_schema_applies` keys `(database_id,
-migration_id)` and the predicate resolves the app's database through its grant first. That is
-also what makes binding a second app to an existing database work at all: with a
-database-keyed row the second app's first deploy matches the apply that already ran; with an
-app-keyed row it finds none. The bundle carries a hash, never a database id.
+**A serving app is never fenced.** The apply mints `E+1` and drops `E-1`; it never touches `E`.
+Every partial crash state leaves apps serving on `E`. Recovery is a plain retry: the engine
+journal skips completed DDL, and the head's recorded journal state decides whether the rotation is
+still owed. A retry after a crash between the last DDL and T4 finds every version applied and must
+STILL rotate.
 
-### CDC
+---
+
+## CDC
 
 - **One relay-owned slot and one pgoutput stream per Datastore.** Slots replicate decode work,
-  they do not partition it; the slot budget is a cluster budget with a stock ceiling of ten.
+  they do not partition it. A logical slot is bound to one PG database, so this part is physics.
+
+- **One relay PROCESS per Datastore, and that part is a choice.** A single relay could hold N
+  replication connections the way the worker holds N pools. It should not, and the reason is what
+  a relay owns when it dies: a slot that falls behind retains WAL upstream, and
+  `max_slot_wal_keep_size` measures `-1`, unbounded, at `context = sighup`. One relay per cluster
+  means one relay's outage threatens one cluster's disk; one relay per zone means every cluster in
+  the zone retains WAL simultaneously.
+
+  The general rule, which also explains why the worker and `migrate-server` go the other way: a
+  **request-serving** process must span clusters or placement fragments, because a request can name
+  any database in the zone. A **stream-consuming** process need not, because each stream is
+  independent, and should not, because the failure it owns is per-stream. So the worker and
+  migrate-server take a list of DSNs; the relay keeps one and is scaled by count.
+
+  The cost is on the worker side and is not yet recorded elsewhere:
+  `ZEROSHIP_WORKER_CDC_RELAY_URL` is one URL today, and becomes a list. The worker resolves which
+  relay serves which cluster the same way it resolves DSNs - connect, ask, build the map - so no
+  new mechanism, but more connections and one more list in config.
 - **One relay-owned shared publication per Datastore**, its membership the union of every
-  Database's safe table projections plus the heartbeat exception. Creating or migrating a
-  Database edits only its member entries under the Datastore publication mutex. One Database
-  must never run `ALTER PUBLICATION ... SET TABLE` over the shared object.
-- **The published column set per table is the INTERSECTION over every grant on the database**,
-  and the plaintext of any column with `classification != none` is never published to anyone.
-  Concretely: publish `ssn` (which holds the mask) and exclude `__zs_raw__ssn` (which holds
-  the plaintext).
+  Database's safe table projections plus the heartbeat exception. Creating or migrating a Database
+  edits only its member entries under the Datastore publication mutex. One Database must never run
+  `ALTER PUBLICATION ... SET TABLE` over the shared object.
+- **The published column set per table is the INTERSECTION over every binding on the database**,
+  and the plaintext of any column with `classification != none` is never published to anyone:
+  publish the field's own column, which holds the mask, and exclude `__zs_raw__<f>`, which holds
+  the plaintext.
 - **The relay performs fan-out**, resolving
-  `(datastore_id, physical_schema) -> database_id -> active Grant -> app_id` and sending an
-  app-keyed frame to each active grantee. The current worker-local namespace filter and decode
-  loop are deleted; the broker's `(app_id, collection)` routing table stays app-keyed.
-- **Fan-out authority is control's Grant topology**, never `pg_auth_members` or a worker
-  refresh map. Grant changes are revision barriers that purge old relay and worker queues
-  before control exposes them.
-- **`pg_logical_emit_message` is revoked from `PUBLIC`** on both four-argument overloads
-  before the marker is trusted; no worker, app or relay role is granted it, and the migration
-  service emits `(database_id, database_epoch)` in the widen transaction.
+  `(datastore, physical schema) -> database_id -> active bindings -> app_id`. Today
+  `crates/zeroship-data-cdc-server/src/source.rs` derives its slot name from
+  `replication_names::publication_name(app)` and is app-keyed throughout; that keying moves to the
+  datastore.
+- **The broker's routing key gains the database.** `crates/zeroship-data-orm/src/cdc/broker.rs`
+  routes on `(app_id, collection)`, and the hub in `crates/zeroship-data-cdc-server/src/hub.rs`
+  keys subscribers under an app. With one app reaching two databases that key is ambiguous: two
+  databases can each declare `users`, and an event from one would land on a subscription to the
+  other with nothing raising. It becomes `(app_id, database_id, collection)`. **This is the one
+  re-key in the design whose omission is silent rather than loud.**
+- **Fan-out authority is control's binding topology**, never `pg_auth_members` or a worker refresh
+  map. Binding changes are revision barriers that purge old relay and worker queues before control
+  exposes them.
+- **`pg_logical_emit_message` is revoked from `PUBLIC`** on both four-argument overloads before the
+  marker is trusted; no worker, app or relay role is granted it, and the migration service emits
+  `(database_id, database_epoch)` in the widen transaction.
 
-Two costs, both named. The owner loses plaintext reactivity on classified columns - a
-subscription never carries the plaintext, for anybody, including the owning app. Reads still
-do. And grant changes pay a relay-and-worker revision barrier, which can reconnect healthy
-apps that shared a relay response.
+Two costs, both named. The owner loses plaintext reactivity on classified columns: a subscription
+never carries the plaintext, for anybody, including the owning app. Reads still do. And binding
+changes pay a relay-and-worker revision barrier, which can reconnect healthy apps that shared a
+relay response.
 
-### The stale-binding fence
+---
+
+## The stale-binding fence
 
 A binding goes stale two ways and both are answered by whether
-`SET LOCAL ROLE "zs_bind_<gid>_e<E>"` succeeds. Role membership answers "does this app still
-hold a live grant"; the `_e<E>` answers "is the shape this isolate was built against still the
-shape the database has". Neither is answered by anything the worker compares.
+`SET LOCAL ROLE "zs_bind_<bnd>_e<E>"` succeeds. Role membership answers "does this app still hold
+a live binding"; the `_e<E>` answers "is the shape this isolate was built against still the shape
+the database has". Neither is answered by anything the worker compares.
 
-An apply that changes the schema advances the epoch `E -> E+1`, mints
-`zs_bind_<gid>_e<E+1>` for every live grant and drops `zs_bind_<gid>_e<E-1>`. An isolate built
-against `E-2` fails at `SET LOCAL ROLE`. Steady-state cost is zero: the epoch is a substring
-of a role name the batch already sends. Live epochs are capped at two, fail-closed: **an apply
-that cannot drop `E-1` refuses before any DDL commits and never advances to `E+1`.** The cost
-is that an isolate at `E-1` loses its grace at the START of the apply and recovers by
-re-resolving to `E`, so the front reap is correct only once the binding producer lands.
+An apply that changes the schema advances `E -> E+1`, mints `zs_bind_<bnd>_e<E+1>` for every live
+binding and drops `zs_bind_<bnd>_e<E-1>`. An isolate built against `E-2` fails at
+`SET LOCAL ROLE`. Steady-state cost is zero: the epoch is a substring of a role name the batch
+already sends. Live epochs are capped at two, fail-closed: **an apply that cannot drop `E-1`
+refuses before any DDL commits and never advances to `E+1`.**
+
+Note what this does and does not cover. It catches *the schema moving forward under code that is
+behind*. It does not catch *code moving forward against a schema that is behind*, because there
+the binding role for epoch `E` exists and `SET LOCAL ROLE` succeeds. That direction is Open 11,
+and until then it surfaces as `42703 undefined_column` at query time.
 
 **Error taxonomy.** The classifier
-(`crates/zeroship-data-orm/src/backend/postgres/pg_error.rs`, `is_missing_per_app_session_role`) today
-matches SQLSTATE 22023 plus the exact role name and collapses it into `SCHEMA_NOT_PROVISIONED`
-(`crates/zeroship-data-orm/src/error.rs`). Under this design:
+(`crates/zeroship-data-orm/src/backend/postgres/pg_error.rs`, `is_missing_per_app_session_role`)
+today matches SQLSTATE 22023 plus the exact role name and collapses it into
+`SCHEMA_NOT_PROVISIONED` (`crates/zeroship-data-orm/src/error.rs`). Under this design:
 
-- `42501 permission denied to set role` -> `GRANT_REVOKED`. Terminal, 403-shaped, never
-  retried, never falls back to the pool.
-- `22023 role does not exist` **under a live grant** -> `SCHEMA_EPOCH_STALE`, retryable, the
-  same condition `Verdict::ReResolve` already carries.
-- `22023 role does not exist` with no live grant -> `SCHEMA_NOT_PROVISIONED`, as today.
+- `42501 permission denied to set role` -> `GRANT_REVOKED`. Terminal, 403-shaped, never retried,
+  never falls back to the pool.
+- `22023 role does not exist` **under a live binding** -> `SCHEMA_EPOCH_STALE`, retryable, the same
+  condition `Verdict::ReResolve` already carries.
+- `22023 role does not exist` with no live binding -> `SCHEMA_NOT_PROVISIONED`, as today.
 
-Telling the second from the third needs no message sniffing: the classifier already composes
-the exact role name it expects, and only needs to compose the epoch-bearing name and to know
-from the injected binding whether a live grant exists.
+Telling the second from the third needs no message sniffing: the classifier already composes the
+exact role name it expects, and only needs to compose the epoch-bearing name and to know from the
+injected binding whether a live binding exists.
 
-**The `__zeroship_admin` schema is created**, in the one shape the privilege invariant permits
-- state a separate service writes and the worker only reads:
+**The `__zeroship_admin` schema is created**, in the one shape the privilege invariant permits -
+state a separate service writes and the worker only reads. Exactly one table, holding the current
+schema epoch per database, written by the migration service inside the transaction that mints the
+new epoch's roles. Zero worker-callable functions: no `SECURITY DEFINER`, no
+`EXECUTE ... TO PUBLIC`, no `GRANT USAGE ON SCHEMA` to any app or binding role. The data plane
+still reads nothing from it - the role name carries the epoch precisely so no query has to.
 
-- An installer in `db/migrations-ts/`. The deleted version was installed only by a
-  `#[cfg(any(test, feature = "test-helpers"))]` helper, so this is new work, not a restoration.
-- **Exactly one table**, holding the current schema epoch per database, written by the
-  migration service inside the transaction that mints the new epoch's roles. Read-only to
-  everyone but the migration service. The **data plane still reads nothing** - the role name
-  carries the epoch precisely so no query has to. The control plane reads it to compose the
-  binding it injects.
-- **Zero worker-callable functions.** No `SECURITY DEFINER`, no `EXECUTE ... TO PUBLIC`, no
-  `GRANT USAGE ON SCHEMA` to any app or grant role, no `PUBLIC` write grant on anything.
+---
 
-### Encryption
+## Encryption
 
-Today the key is `Hkdf::<Sha256>::new(Some(app_id.as_bytes()), root)`
-(`crates/zeroship-data-orm/src/encryption/keys.rs`) and
-`canonical_aad(collection, column, row_pk)` binds a hardcoded `WIRE_VERSION_V1`
-(`crates/zeroship-data-orm/src/encryption/aad.rs`, `:93`) and nothing namespacing. That
-fails in opposite directions on the two new axes: co-grant-holders derive different keys and
-get an AEAD failure on data they are entitled to read, and one app across two databases
-derives one key with no database in the AAD, so a ciphertext lifted from one database verifies
-in the other. The target:
+Today the key derives from a per-app salt and
+`canonical_aad(app_id, collection, column, row_pk)` binds a hardcoded `WIRE_VERSION_V1`
+(`crates/zeroship-data-orm/src/encryption/aad.rs`), while the root key is per project
+(`db/migrations-ts/20260911000100_project_data_keys.ts`,
+`crates/zeroship-data-orm/src/encryption/keys.rs`). App keying fails in opposite directions on both
+new axes: co-binding-holders derive different keys and get an AEAD failure on data they are
+entitled to read, and one app across two databases derives one key with no database in the AAD, so
+a ciphertext lifted from one database verifies in the other. The target:
 
 ```
-derive_key(root, database_id)
+derive_key(project_root, database_id)
 canonical_aad(WIRE_VERSION_V2, database_id, collection, column, row_pk)
 ```
 
-Encryption stops fencing co-grant-holders and becomes purely at-rest, which is what it should
-have been. If a column must be readable by the owner only, that is a column-level GRANT, and
-on the subscription path a column the publication does not carry. Changing the salt changes
-every derived key and changing the AAD changes every tag, so **this lands in the same change
-that makes database ids exist**, not after.
+Encryption stops fencing co-binding-holders and becomes purely at-rest, which is what it should
+have been. If a column must be readable by one app only, that is a column-level GRANT, and on the
+subscription path a column the publication does not carry.
 
-### Metering
+Changing the salt changes every derived key and changing the AAD changes every tag, so **this
+lands in the same change that makes database ids exist**, not after.
+`crates/zeroship-core/src/app_derivation.rs` already records why the deterministic half is the
+dangerous one: a new salt makes equality search over an encrypted column return fewer rows and no
+error. Pre-launch the answer is drop and re-encrypt.
 
-- **Op counts stay keyed on the app.** `db_reads` / `db_writes` / `db_rows_written` are
-  emitted against the server-injected app id at the op boundary
-  (`crates/zeroship-data-orm/src/exec.rs`), and the app that issued the op consumed the
-  compute.
-- **The billing principal for a database is the creator**, because no app owns one. Any metric
-  measuring the *resource* attributes to the creator; any metric measuring an *op* attributes
-  to the app. Collapsing them is what makes one app pay for a co-tenant's bytes.
+Salting by the database rather than the datastore also keeps ciphertext valid if a cluster is ever
+replaced underneath a datastore, since the database id does not change.
+
+**The root key stays on the project, and the zone decision is what settles it.** The argument for
+moving it down to the database was blast radius: a project whose apps sat in two zones would serve
+one root into both, so the key would reach further than any single zone. A project pinned to one
+zone cannot do that. The root is served only into its own zone, `zone_scoped_app_read` narrows it
+there, and the derived key is already per database because the salt is the database id. So
+`project_data_keys` needs no change.
+
+---
+
+## Metering
+
+- **Op counts stay keyed on the app.** `db_reads` / `db_writes` / `db_rows_written` are emitted
+  against the server-injected app id at the op boundary (`crates/zeroship-data-orm/src/exec.rs`),
+  and the app that issued the op consumed the compute.
+- **The billing principal for a resource is the project**, because no app owns a database. Any
+  metric measuring the *resource* attributes to the project; any metric measuring an *op*
+  attributes to the app. Collapsing them is what makes one app pay for a co-tenant's bytes.
 - **The database is a dimension with no producer today.** `UsageEvent.dims`
-  (`crates/zeroship-core/src/usage_event.rs:37`) is constructed empty because
-  `Meter::increment(app_id, metric, n)` (`crates/zeroship-metering/src/meter.rs:195`) and
-  `MeterHandle::record(metric, n)` (`crates/zeroship-metering/src/lib.rs:80`) carry no third
-  axis. Populating it means re-keying `AppCounters`: metering-core work, not filling in a
-  field. The aggregate PK stays `(app_id, period, metric)`, so the dimension is observable and
-  auditable but does not reach the spend engine - spend is an app-level control.
-- **Two suppression holes close.** Failure is free today (every emit sits after the `?`, and a
-  test asserts "the FAILED query did NOT bill"); emit `db_statement_us` in both arms, and
-  change that regression test with it. Subscriptions are entirely unmetered; in the target the
-  relay owns the shared slot, subscription time meters to the app and retained WAL to the
-  creator.
+  (`crates/zeroship-core/src/usage_event.rs`) is constructed empty because `Meter::increment`
+  (`crates/zeroship-metering/src/meter.rs`) and `MeterHandle::record`
+  (`crates/zeroship-metering/src/lib.rs`) carry no third axis. Under N:M this stops being an audit
+  nicety: an app with two databases posting one number cannot be split at all. The aggregate
+  primary key stays `(app_id, period, metric)`, so the dimension is observable and auditable but
+  does not reach the spend engine; spend is an app-level control.
+- **Two suppression holes close.** Failure is free today, every emit sitting after the `?`, with a
+  regression test asserting that a failed query did not bill; emit `db_statement_us` in both arms
+  and change that test with it. Subscriptions are unmetered; in the target the relay owns the
+  shared slot, subscription time meters to the app and retained WAL to the project.
 
-### Creator surface
+---
 
-One `zeroship.jsonc` for the whole workspace. Databases are declared once at workspace level;
-apps are declared beside them and bind to them.
+## Creator surface
+
+One `zeroship.jsonc` for the whole workspace. Databases are declared once at workspace level; apps
+are declared beside them and name the ones they use.
 
 ```jsonc
 "databases": {
@@ -351,206 +975,291 @@ apps are declared beside them and bind to them.
   "analytics": { "id": "dbs_...", "migrations": "./db/analytics", "out": "./generated/zeroship/analytics" }
 },
 "apps": {
-  "storefront": { "app": "<uuid>", "database": "main"      },  // SINGULAR - one db per app
-  "admin":      { "app": "<uuid>", "database": "main"      },  // two apps, one shared db
-  "reporting":  { "app": "<uuid>", "database": "analytics" }
+  "storefront": { "app": "app_...", "databases": ["main"],              "primary": "main" },
+  "admin":      { "app": "app_...", "databases": ["main"],              "primary": "main" },
+  "reporting":  { "app": "app_...", "databases": ["main", "analytics"], "primary": "main" }
 }
 ```
 
-The map key is a **local label**, not a resolvable name: `"main"` refers to an entry a few
-lines above it, nothing sends it to a server, and the CLI dereferences it locally before it
-makes any request. Each entry carries its `dbs_...` id, absent on a fresh project and appended
-by the first create - the same lifecycle `schema/project-v1.json` already specifies for `app`.
+The map key is a **local label**, not a resolvable name: it refers to an entry a few lines above,
+and the CLI dereferences it locally before it makes any request. The label reaches the runtime only
+through the manifest, which is the app's own build artifact. Declaring a database here does not
+grant access to it; deploy verifies that a binding already exists.
 
-The `env.db` surface does not change at all:
+### `env.db` barely moves
+
+`Collection` (`crates/zeroship-data-v8/src/v8_classes/collection.rs`) owns a full `DbBinding` copy
+rather than a reference to a shared one, and `cached_collection`
+(`crates/zeroship-data-v8/src/v8_classes/db.rs`) stamps it in at mint time. So a collection routes
+by what it carries, and the collection surface needs no change at all. The JS side already
+anticipates a second handle: `readFrom` (`crates/zeroship-data-v8/js/runtime/read.ts`) refuses a
+source whose handle differs, with the message "read source belongs to another database".
+
+Four verbs read the `Db` wrapper's single binding and therefore need a handle of their own:
+`transaction` and `collection(name)` and `declareMaskPolicy` (all in
+`crates/zeroship-data-v8/src/v8_classes/db.rs`) cannot infer a database, while `from` and `live`
+already derive theirs from the collections they are given.
 
 ```ts
-await env.db.users.find({ where: { active: true } });     // UNCHANGED
-await env.db.orders.insert({ ... });                      // refused at type level when readonly
-await env.db.transaction(async (tx) => { ... });          // UNCHANGED
+await env.db.users.find({ where: { active: true } });            // unchanged
+await env.db.transaction(async (tx) => { ... });                 // unchanged
+await env.databases.analytics.events.insert({ ... });            // only if declared
+await env.databases.analytics.transaction(async (tx) => { ... });
 ```
 
-`installSchema` plants collections directly on the target with `Object.defineProperty`
-(`sdks/bootstrap/src/install-schema.ts:1270`) alongside `transaction` and `live`, so with
-several bindings a binding named `analytics` and a collection named `analytics` would be the
-same key. With one database there is no binding level and no collision.
-`RESERVED_ENV_DB_NAMES` (`sdks/bootstrap/src/install-schema.ts:984`) keeps its present
-meaning. No call-site sweep, no regenerated types, no edits to `docs/reference/db.md`,
-`examples/starter/` or `tests/golden_path.sh`.
+`env.db` is the app's primary database and `env.db === env.databases[primary]` by object identity,
+so there is one concept and one code path. A single-database app sees no difference. Collection
+name collisions across databases cannot arise, because the collections live on different handles
+rather than in one flat namespace - which also removes any need for a build-time refusal that would
+have been resolved by renaming a collection inside a database the app might share.
+`RESERVED_ENV_DB_NAMES` (`crates/zeroship-data-v8/js/runtime/install-schema.ts`) needs no new
+entries, because nothing new is planted on `env.db`.
 
-### Transactions
+---
 
-`env.db.transaction()` keeps its present shape and covers exactly one database, because an app
-sees exactly one. The multi-database transaction problem is closed by the entity model rather
-than by a runtime check. `tx_conns`, `tx_claims`, `tx_waiters`, `savepoint_depths`,
-`savepoint_emit_marks` and `pending_emits` (`crates/zeroship-data-v8/src/context.rs`) stay
-keyed on `app_id`, because `app_id` still determines the database. `TxRoute`
-(`crates/zeroship-data-orm/src/tx_route.rs`) is unchanged, and its continuation slot stays
-keyed on the app id: SEC-1 is structural there, and the planted key must never become a
-creator-facing name, or two co-resident apps both calling their database `main` would compare
-equal.
+## Transactions
 
-### Teardown
+`env.db.transaction()` covers exactly one database. There is no two-phase commit and none is
+proposed.
 
-**Delete an app** - `REVOKE` both edges of the app's grant role, then
-`DROP ROLE zs_bind_<gid>_e<E>` for every live epoch. That is the complete teardown of an app's
-access, and it is instant. No data is destroyed and no 409 is raised, because the app owns no
-database. A deleted app never destroys data another app can still read.
+**A dispatch against database B inside a transaction on database A is refused.** This is the
+sharpest consequence of opening the second axis, because today it would be silently admitted:
+`CapturedRoute::capture` (`crates/zeroship-data-orm/src/tx_route.rs`) decides `in_tx` by comparing
+app identity alone, and its comment states why the schema is excluded:
 
-**Delete a database** - only when its grant set is empty. The five-step order of
-`crates/zeroship-data-v8/src/drop_namespace.rs` is right; each step is re-keyed:
+> SEC-1 compares TENANT against TENANT. The schema rides along; it is never the admission key,
+> because two apps sharing one database would share a schema and must still not share a transaction
+> frame.
+
+That reasoning is correct for the many-apps direction and incomplete for the many-databases one.
+The admission key becomes the (app, database) pair. Without the change, B's SQL runs on a
+connection narrowed by `SET LOCAL ROLE` to A's binding role. The refusal must exist in Rust, not
+only in JS; `readFrom`'s handle comparison is the pattern to copy.
+
+`validate_binding_target` (same file) already compares both app identity and schema against the
+binding and errors on either mismatch, so the mismatched-pair fence is already written.
+
+`TxLanes` (`crates/zeroship-data-orm/src/tx_lanes.rs`) keys lanes by `app_id`, so an app can hold
+one transaction at a time. Under N:M it holds at most one per database and the key becomes
+`(app_id, database_id)`. **The lane key uses the database id and never the creator's label**, or
+two co-resident apps both calling a database `main` would compare equal.
+
+---
+
+## Teardown
+
+**Delete an app.** Revoke both edges of every binding the app holds, then drop
+`zs_bind_<bnd>_e<E>` for every live epoch. That is the complete teardown of an app's access and it
+is instant. No data is destroyed and no 409 is raised, because the app owns no database. A deleted
+app never destroys data another app can still read.
+
+**Delete a database.** Only when its binding set is empty, and the refusal names the bound apps.
+The step order in `crates/zeroship-data-orm/src/cdc/lifecycle.rs` and
+`crates/zeroship-data-v8/src/service.rs` is right; each step re-keys:
 
 | step today | under the decoupling |
 | --- | --- |
-| 1. subscription gate, keyed on the app | keyed on the database: refuse while any subscription on any grant-holder is observable |
-| 2. drain broker via `subscription_app_dropped` | the broker's routing table is unchanged, so this fans out to every grant holder |
-| 3. consumer cancel **plus slot teardown** | **No shared CDC object is dropped.** The relay-owned slot, stream and publication live for the Datastore; remove only this Database's publication members and fan-out routes |
-| 4. `DROP SCHEMA "<app_id>" CASCADE` | `DROP SCHEMA "db_<dbsid>" CASCADE` |
-| 5. `DROP ROLE "app_<id>_role"` | `DROP ROLE zs_db_<dbsid>_{mig,rw,ro}`, still after the schema |
+| subscription gate, keyed on the app | keyed on the database: refuse while any subscription on any binding holder is observable |
+| drain the broker | the broker's routing table gains the database, so this fans out to every binding holder |
+| consumer cancel plus slot teardown | **No shared CDC object is dropped.** The relay-owned slot, stream and publication live for the Datastore; remove only this Database's publication members and fan-out routes |
+| `DROP SCHEMA "<app_id>" CASCADE` | `DROP SCHEMA "db_<dbs>" CASCADE` |
+| `DROP ROLE "app_<id>_role"` | `DROP ROLE zs_db_<dbs>_{mig,rw,ro}`, still after the schema |
 
-Step 3 is the one that fails silently if it is ported rather than re-keyed.
+The third is the one that fails silently if it is ported rather than re-keyed.
 
-The workflow journal schema `app_<uuid>`
-(`crates/zeroship-migrate-server/src/provisioning.rs`, duplicated deliberately at
-`crates/zeroship-plugin-workflow/src/store/pg.rs`) **stays app-keyed** - a workflow run is app
-state, not database state - and lives on the datastore holding that app's database.
+**Retire a datastore.** Only when it holds no database. With relocation unsupported, that means
+waiting for its databases to be deleted, or replacing the cluster underneath it instead.
 
-### SQLite dev tier
+**No teardown here touches a workflow journal.** The journal leaves creator schemas under
+`docs/proposals/2026-09-19-workflow-journal-relocation.md`, so deleting a database destroys no
+app's runs and deleting an app removes its runs through the workflow service rather than by a
+schema drop. That also closes a defect this design would otherwise create: with the journal still
+in the creator's schema, dropping a SHARED database would take the workflow state of every bound
+app with it, not just the one doing the dropping.
 
-One file per database, `zs-db-<dbsid>.sqlite`, ATTACHed under alias `db_<dbsid>`.
-`attach_app_file` (`crates/zeroship-data-orm/src/backend/sqlite/mod.rs`) already is a per-database handle
-under a different name, with an `app_id_cache` dedup set because SQLite errors on a duplicate
-alias; the dedup key becomes the database id. Three fidelity gaps, all owed to
-`docs/reference/sqlite-divergences.md`:
+---
 
-- **Grants are not enforceable.** SQLite has no roles and no column ACLs. The dev tier's grant
-  fence is the Rust resolution layer only.
-- **The schema epoch has no carrier**, since it rides a role name. A dev-tier equivalent is
-  owed and is not specified here.
-  **THIS IS LIVE DISAGREEMENT, FLAGGED 2026-09-04, NOT AN OVERSIGHT.**
-  `docs/proposals/2026-08-26-sc4-dev-and-hmr-mechanism.md` reaches the opposite conclusion
-  under the heading "No dev epoch, and no dev authority domain": "There is nothing here to
-  specify." Both documents are live and neither cited the other. The disagreement must be
-  settled rather than inherited, and it cannot be settled by deferring to sc4's evidence:
-  sc4 rests on `docs/reviews/2026-08-28-sqlite-authority-row.md`, whose "the carrier already
-  exists" subsection was found FALSE on the same day - `__zeroship_migrations.schema_version`
-  and `next_schema_version` were deleted with the data plane's last DDL, so there is no
-  carrier on either tier.
-- **One writer per file**, so a shared database behaves *worse* in dev than in production -
-  the inverse of the usual direction, and the one that gets filed as a bug.
+## SQLite dev tier
+
+One file per database, `zs-db-<dbs>.sqlite`, ATTACHed under alias `db_<dbs>`. `attach_app_file`
+(`crates/zeroship-data-orm/src/backend/sqlite/mod.rs`) already is a per-database handle under a
+different name, with a dedup set because SQLite errors on a duplicate alias; the dedup key becomes
+the database id. There is no Datastore entity on this tier and no control plane at all.
+
+Three fidelity gaps, all owed to `docs/reference/sqlite-divergences.md`, which carries no grants
+row today:
+
+- **Bindings map to no physical object.** SQLite has no roles and no column ACLs, so everything the
+  production tier enforces in the catalog the dev tier enforces in process. A dev-tier pass is
+  therefore not evidence about production for any binding, capability or epoch behaviour.
+- **The schema epoch has no carrier**, since it rides a role name. A dev-tier equivalent is owed
+  and is not specified here. This is live disagreement, not an oversight: a sibling design reaches
+  the opposite conclusion under the heading "No dev epoch, and no dev authority domain", and it
+  must be settled rather than inherited.
+- **One writer per file**, so a shared database behaves worse in dev than in production, which is
+  the inverse of the usual direction and the one that gets filed as a bug.
 
 ---
 
 ## Why it is this way
 
-**The role must be per grant, not per database.** `SET ROLE` authorizes against the transitive
-closure of the memberships held by the role that *connected*, which here is always the shared
-worker login, never the app. Revoking an app's edge therefore has no database consequence
-while any parallel edge survives (measured on 17.11: with the worker serving two apps that
-both hold the database role, the revoke leaves the read returning one row unchanged). A grant
-role inherits exactly one database role, so per-statement confinement stays one database while
-revocation still bites. Confinement and revocation stop being a trade.
+**Provenance.** Claims marked RE-DERIVED were measured during this revision against the running
+`postgres:16.15` container, which matches the `deploy/compose/docker-compose.yml` pin; the
+instrument is named with each. Claims marked CARRIED were measured on earlier majors during the
+original drafting and have NOT been re-measured. Six of them become a test target rather than a
+fresh figure in this document, and two are downgraded to rationale; Open 5 says which and why.
 
-**`WITH SET FALSE` on the grant-to-database edge is load-bearing.** Without it the worker
-assumes the database role directly and the chain is decorative. Measured on 17.11 with two
-grants on one database: the worker assuming the database role gets
-`permission denied to set role`; narrowed to grant A it reads one row; after
-`REVOKE zs_db_1_rw` from A's role it gets `permission denied for schema`; co-tenant grant B is
-unaffected.
+**Self-hostability decides where topology lives, not convenience.** The table under Where a fact
+lives sorts each fact by who owns it, and the load-bearing asymmetry is that a migration is not
+overridable: the corpus is ordered, journalled and verified, so a self-hoster cannot declare their
+own clusters in it without forking it permanently.
 
-**`WITH INHERIT FALSE` on the worker-to-grant edge is required, and the role attribute is not
-a substitute.** Measured on 18.4, three arms differing in one variable:
+That rules out the corpus. It does not imply a new document, which an earlier revision of this
+design reached for: a cluster already has a credential in a service config, and reaching it proves
+it exists, so registration needs no second declaration and no import semantics. A zone has no such
+proof, which is why it stays declared and datastores do not. Three decisions rest on this - how a
+datastore comes to exist, where zones beyond the default are declared, and why `status` is
+control-side rather than something an operator edits and pushes.
 
-| Configuration | Bare `SELECT` as the login role |
-| --- | --- |
-| plain `GRANT` of the intermediate to `w`, `w` INHERIT | **1 row returned** |
-| same grant, `ALTER ROLE w NOINHERIT` | **1 row returned** |
-| `GRANT ... TO w WITH INHERIT FALSE`, `w` INHERIT | `ERROR: permission denied for schema` |
+**Equality between an app's build and a database's schema is a coupling mechanism.** It is the
+reason the deploy gate and its ledger are deleted rather than re-keyed. A hash comparison forces
+every app bound to a database to move together on every migration, including migrations that break
+nothing, which is the property this design exists to remove. The general form is worth stating
+because it will be tempting again: **any check that compares an app artifact to a database for
+equality re-couples them.** Only a subset test does not.
 
-PostgreSQL 16+ records `inherit_option` per membership at grant time, and a pre-existing
-membership stays inheriting when the attribute is flipped. Confirmed across 16.14, 17.11 and
-18.4; `SET LOCAL ROLE` still works in every arm. Below 16 the option does not exist and this
-design has no fence.
+**Catalog scope decides every cardinality here. RE-DERIVED** with
+`SELECT relname, relisshared FROM pg_class WHERE relname IN (...)`. Shared across the whole
+cluster: `pg_authid`, `pg_auth_members`, `pg_database`, `pg_db_role_setting`, `pg_tablespace`. Per
+PG database: `pg_class`, `pg_namespace`, `pg_extension`, `pg_publication`, `pg_publication_rel`,
+`pg_collation`, `pg_default_acl`. So every database role and every live epoch competes in one
+cluster namespace, while publications are per database.
 
-**The worker may never hold a direct membership in a database role.** One such grant, added
-for convenience or by a provisioning path that predates this rule, restores the unrevocable
-behaviour above, and nothing in PostgreSQL will complain because both memberships are
-individually legal. It is catalog-checkable, and `db_posture`'s boot check already counts
-every inheriting membership row rather than checking a pair
-(`INHERITED_MEMBERSHIPS_SQL`, `crates/zeroship-worker/src/db_posture.rs:42`).
+**A logical slot is bound to one PG database. RE-DERIVED**: `pg_replication_slots` carries a
+`database` column. One slot per Datastore is therefore physics rather than a design choice.
+`max_replication_slots` is `context = postmaster`, so raising it is a restart; read the value with
+`SHOW max_replication_slots`. With Datastore collapsed onto the cluster, one slot is used and the
+budget is not a constraint.
 
-**No CRUD code may reach a raw connection, and this must stay a compile-time property.** The
-role fence is applied by two functions
+**Multiple PG databases in one cluster are rejected.** The four things a separate PG database buys
+are, measured above: extension isolation, `CONNECT` as a fence (`datacl`/`datallowconn`), encoding
+and collation, and a smaller per-backend catalog. The first is unreachable because the CONFINED
+ceiling gives a creator no extension vocabulary at all. The second buys nothing because there are
+no per-tenant logins to fence and the worker must connect to every database it serves. The third is
+already handled more finely by `COLLATE "C"` at the column level. The fourth is real and is a
+density argument, and the answer to density here is another cluster, which shrinks the catalog
+*and* the cluster-wide role namespace *and* the failure domain *and* adds connection capacity.
+Against that: a connection targets one PG database, so N of them means N pools per worker thread;
+one slot means one walsender, so N of them means N walsenders reading the same WAL; and the slot
+budget caps the split anyway. Splitting multiplies decode work rather than partitioning it.
+
+**Relocation is not supported, and the cluster moves instead.** A per-schema move needs
+build-by-replay, its own full-fidelity publication (the relay's is deliberately lossy, since its
+column lists withhold plaintext), a write quiesce with a straggler deadline, manual sequence
+advancement, and a cutover. That is a large amount of machinery for one operation. It is not needed
+for hardware refresh: physical replication, promote, and repoint the service config that reaches
+the cluster. The datastore row is keyed on `system_identifier`, which a promoted replica carries
+forward, so the whole cluster moves with no entity changed, no epoch rotated and no app aware. What is given up is rebalancing a hot cluster,
+consolidating two half-empty ones, and offering a dedicated cluster as an *upgrade* - if that tier
+ships it must be chosen when the database is created.
+
+**`transaction_timeout` does not exist on the deployed major. RE-DERIVED**:
+`SELECT count(*) FROM pg_settings WHERE name='transaction_timeout'` returns zero on 16.15; the GUC
+arrived in PostgreSQL 17. `DB_STATEMENT_TIMEOUT_MS` bounds one statement and
+`DB_IDLE_IN_TX_TIMEOUT_MS` one idle gap (`crates/zeroship-data-orm/src/budgets.rs`), and
+`env.db.transaction()` holds a dedicated connection for a whole JS callback, which is the shape
+that defeats both.
+
+**`max_identifier_length` and truncation. RE-DERIVED** with `SHOW max_identifier_length`.
+PostgreSQL truncates past it silently, and the epoch sits at the END of `zs_bind_<bnd>_e<E>`, so a
+future prefix change that pushed past the limit would collapse two epochs onto one role rather than
+error. The composer must refuse a name it would have truncated.
+
+**`WITH SET FALSE` on the binding-to-database edge is load-bearing. CARRIED.** Without it the
+worker assumes the database role directly and the chain is decorative. Measured with two bindings
+on one database: the worker assuming the database role gets `permission denied to set role`;
+narrowed to binding A it reads its row; after revoking the database role from A's role it gets
+`permission denied for schema`; co-tenant binding B is unaffected.
+
+**`WITH INHERIT FALSE` on the worker-to-binding edge is required, and the role attribute is not a
+substitute. CARRIED.** Three arms differing in one variable: a plain `GRANT` of the intermediate
+with the login inheriting returns the row; the same grant with `ALTER ROLE w NOINHERIT` still
+returns the row; `GRANT ... WITH INHERIT FALSE` refuses with `permission denied for schema`.
+PostgreSQL 16+ records `inherit_option` per membership at grant time, and a pre-existing membership
+stays inheriting when the attribute is flipped. Below 16 the option does not exist and this design
+has no fence. The worker's boot posture already refuses any inheriting membership at all, so a
+database still carrying the old grant shape is detected rather than silently trusted.
+
+**The worker may never hold a direct membership in a database role.** One such grant restores
+unrevocable access, and nothing in PostgreSQL will complain because both memberships are
+individually legal. It is catalog-checkable, and `db_posture`'s boot check already counts every
+inheriting membership row rather than checking a pair.
+
+**No CRUD code may reach a raw connection, and this must stay a compile-time property.** The role
+fence is applied by two functions
 (`crates/zeroship-data-orm/src/backend/postgres/pg_autocommit.rs` and
-`crates/zeroship-data-orm/src/backend/postgres/implementation.rs`, `apply_per_app_role`); anything issuing SQL
-outside them is unfenced. That hole is closed TODAY, and only because
-`PgSqlExecutor::pool_handle` is `#[cfg(any(test, feature = "test-helpers"))]`
-(`crates/zeroship-data-orm/src/backend/postgres/implementation.rs`, `impl PgSqlExecutor for PostgresBackend`).
-Its last four callers were in `crud/mask_drift.rs`, deleted 2026-09-03, so **it now has zero
-callers of any kind** - only the trait definition, the impl, and two `assert_impl` type-level
-witnesses remain. Do not ungate it; deleting the trait outright is now the cheaper option and is
-the recommended follow-up. Under a private database the blast radius of one unfenced statement
-was a single app's schema; under sharing it is every database in the datastore, and
+`crates/zeroship-data-orm/src/backend/postgres/implementation.rs`, `apply_per_app_role`); anything
+issuing SQL outside them is unfenced. Under a private database the blast radius of one unfenced
+statement was a single app's schema; under sharing it is every database in the cluster, and
 `WITH INHERIT FALSE` only converts such a statement from succeeding to failing at runtime. The
 compile-time route is what stops the site existing.
 
-**The irreducible limit.** PostgreSQL has no server-side notion of which app a shared-login
-session is acting for; `session_user` is fixed at authentication, and `SET ROLE` is a
-**lateral move inside the closure**, never a one-way narrowing - a session narrowed to one
-grant role can assume a sibling. So every available fence decides whether a grant is *alive*,
-never whether the worker picked the grant matching the dispatch. That binding is worker-side,
-enforced by Rust provenance and the absence of a raw-SQL surface. Per-app logins would not
-change it: the process would then hold every tenant's credential.
+**Why roles and not RLS, given that nine platform tables use RLS.** They are not alternatives;
+they separate different things, and no substitution is available between them:
 
-**Column grants add, they never subtract.** A table-level `GRANT SELECT` alongside a column
-list returns the plaintext. `ALTER DEFAULT PRIVILEGES` has no column-list form. Both must
-therefore be deleted rather than supplemented. Schema evolution then fails closed by a
-PostgreSQL property, not by a reconciler: a column added after the grant carries no ACL entry
-and is unreadable, so the migration service carries no correctness obligation beyond emitting
-the list.
+```
+  schema separation   roles. Nothing else can do it: a policy is bound to one
+                      relation (pg_policy.polrelid), and reaching a schema at all
+                      is a USAGE grant, which is a role.
+  column separation   column grants. RLS is row-level and cannot express columns,
+                      so the masking design needs grants regardless.
+  row separation      RLS, forced. Roles cannot express rows, which is why
+                      db/migrations-ts/20260702000800_policies_rls.ts uses it for
+                      nine shared platform tables keyed on app_id.
+  decode separation   publication column lists. Neither roles nor RLS reach the
+                      decode path at all.
+```
 
-**Logical decoding consults no ACL and no RLS.** The same role refused `SELECT ssn` receives
-the plaintext in the decoded stream when the publication has no column list. The decode path
-runs on the worker's own login (`crates/zeroship-data-v8/src/change_stream_pg.rs`), which
-the boot posture requires to hold `REPLICATION` and `BYPASSRLS`. A publication column list
-*does* filter decoded output and is a genuine server-side fence - and PostgreSQL **refuses
-conflicting column lists for one table across the publications named on one decode stream**,
-so a table has exactly one published column set per stream and the shared stream serves the
-weakest reader.
+The decisive asymmetry for the data plane is what ABSENCE does. A table created without a grant is
+unreadable; a table created without `ENABLE ROW LEVEL SECURITY` is fully readable. Roles fail
+closed on omission and RLS fails open, and this design applies creator-authored DDL that adds
+tables the platform did not write.
 
-**The column list is incompatible with `REPLICA IDENTITY FULL`, and neither DDL step refuses.**
-Measured on 17.11: adding `REPLICA IDENTITY FULL` to a table that already has a column list is
-accepted, and creating a column list on a table already `FULL` is accepted; then every `UPDATE`
-and `DELETE` fails with `cannot update table "t" ... Column list used by the publication does
-not cover the replica identity`. The symptom is not a CDC fault but a table that has silently
-become append-only on the creator's write path. `crates/zeroship-data-v8/src/wal_consumer.rs`
-records that fixing delete-filtering on non-key columns *needs* `REPLICA IDENTITY FULL`, so the
-two features are mutually exclusive as designed and whichever is given up must be given up
-explicitly, with a refusal at the authoring boundary.
+Shared-table multi-tenancy - one `users` table with a tenant column and a policy - is not available
+here for a product reason rather than a PostgreSQL one: creators author their own schemas, so two
+apps' `users` tables have different columns and there is no shared relation to put a policy on.
+That is also why the nine tables that do use RLS are all platform-authored.
 
-**`BYPASSRLS` does not follow through `SET ROLE`.** Measured on 18.4, the same login sees one
-row as itself and zero after narrowing. RLS is not required by this design and is not proposed
-here, but it becomes usable on the query path, which it is not today. It stays void on the
-decode path.
+**The irreducible limit.** PostgreSQL has no server-side notion of which app a shared-login session
+is acting for; `session_user` is fixed at authentication, and `SET ROLE` is a lateral move inside
+the closure, never a one-way narrowing. So every available fence decides whether a binding is
+*alive*, never whether the worker picked the binding matching the dispatch. That binding is
+worker-side, enforced by Rust provenance and the absence of a raw-SQL surface. Per-app logins would
+not change it: the process would then hold every tenant's credential.
 
-**Scope facts that decide cardinality.** Measured on 18.4: `pg_publication` and
-`pg_publication_rel` have `relisshared = f`, so publications are datastore-scoped and the same
-name in two databases of one cluster is two independent objects. `pg_authid` and
-`pg_auth_members` have `relisshared = t`, so every grant role and every live epoch competes in
-one cluster namespace. Replication slots are cluster-scoped with `max_replication_slots`
-defaulting to **10** at `context = postmaster` (raising it is a restart) and `SQLSTATE 53400`
-past it - so one slot per Datastore means at most ten Datastores on a stock cluster.
-`max_slot_wal_keep_size` measures `-1`, unbounded, at `context = sighup`: bounding it is a
-blast-radius cap, not a fix, and does not clean up an abandoned slot.
+**Column grants add, they never subtract. CARRIED.** A table-level `GRANT SELECT` alongside a
+column list returns the plaintext, and `ALTER DEFAULT PRIVILEGES` has no column-list form. Schema
+evolution then fails closed by a PostgreSQL property rather than by a reconciler: a column added
+after the grant carries no ACL entry and is unreadable.
 
-**The catalog costs the role graph was suspected of both measure at zero.** `CREATE ROLE`
-inside an apply bracket does not serialize applies in other databases of the same cluster
-(session 1 holding an uncommitted `CREATE ROLE`, session 2 with `lock_timeout = '3s'` in
-another database: `CREATE ROLE` in 108 ms). `SET ROLE` is flat across a 2000x growth in
-`pg_auth_members` - 2000 `SET ROLE` + `RESET ROLE` server-side in 6 ms at 3, 103, 1103 and
-6103 membership rows, about 1.5 us per statement at both ends. That is why the epoch rides the
-role name instead of an extra `SELECT epoch` in the setup batch: the name form cannot be
-removed without removing the connection.
+**Logical decoding consults no ACL and no RLS. CARRIED.** The same role refused `SELECT` on a
+column receives its plaintext in the decoded stream when the publication has no column list. A
+publication column list *does* filter decoded output and is a genuine server-side fence, and
+PostgreSQL refuses conflicting column lists for one table across the publications named on one
+decode stream, so a table has exactly one published column set per stream and the shared stream
+serves the weakest reader.
+
+**The column list is incompatible with `REPLICA IDENTITY FULL`, and neither DDL step refuses.
+CARRIED.** Adding `REPLICA IDENTITY FULL` to a table that already has a column list is accepted,
+and creating a column list on a table already `FULL` is accepted; then every `UPDATE` and `DELETE`
+fails because the column list does not cover the replica identity. The symptom is not a CDC fault
+but a table that has silently become append-only on the creator's write path.
+
+**The two role failures split by SQLSTATE alone. CARRIED**, from a real non-superuser session,
+which matters because a superuser's `SET ROLE` permission is checked against `session_user` and
+hides the split: role does not exist is `22023 invalid_parameter_value`; role exists but the
+session is not a member is `42501 insufficient_privilege`. `22023` is the generic bad-GUC code,
+which is why the classifier pins the exact role name alongside it.
 
 **`SET LOCAL ROLE` must remain the FIRST statement of the setup batch.** PostgreSQL aborts a
 simple-query batch at the first failing statement and emits exactly one `ErrorResponse`. If
@@ -558,306 +1267,337 @@ anything is placed before it, that statement's failure masks the role failure, t
 taxonomy silently collapses, and because the epoch rides the same role name, a rotated epoch
 surfaces as whatever the earlier statement failed with.
 
-**The two role failures split by SQLSTATE alone**, measured on 16.14 from a real non-superuser
-session (invisible to a superuser, whose `SET ROLE` permission is checked against
-`session_user`): role does not exist is `22023 invalid_parameter_value`; role exists but the
-session is not a member is `42501 insufficient_privilege`. `22023` is the generic bad-GUC code
-shared with `SET statement_timeout = 'yes'`, which is why the classifier pins the exact role
-name alongside it; `42501` needs no such qualifier.
-
-**Revocation lands within one in-flight transaction, not one statement.** Measured on 18.4 on
-one held connection with the backend pid printed on both sides: after a `REVOKE` from a second
-connection, the next `SET LOCAL ROLE` on the same backend fails `42501`, no reconnect. A
-session running as a role that *inherits* the schema privilege fails on the very next
+**Revocation lands within one in-flight transaction, not one statement. CARRIED.** After a revoke
+from a second connection, the next `SET LOCAL ROLE` on the same backend fails `42501` with no
+reconnect. A session running as a role that *inherits* the privilege fails on its very next
 statement; a session that has *assumed* a role holding it directly continues to the end of the
-transaction. This design assumes the grant role, so the bound is one transaction, capped only
-by `DB_IDLE_IN_TX_TIMEOUT_MS` and `DB_STATEMENT_TIMEOUT_MS`
-(`crates/zeroship-data-orm/src/budgets.rs`), neither of which bounds total transaction
-duration. Re-granting restores service on the same warm connection - which a monotonic
-incarnation id with permanent tombstones cannot express, and revoke-then-regrant is a
-legitimate state while "same app id, different app" is not reachable at all, typed ids being
-UUIDv7.
+transaction. This design assumes the binding role, so the bound is one transaction, which nothing
+currently bounds - see `transaction_timeout` above.
 
-**`max_identifier_length` is 63 and PostgreSQL truncates past it silently.** `zs_bind_` (8) +
-a typed app id (26) + `_e` + the epoch digits leaves headroom, but the epoch sits at the END of
-the name, so a future prefix change that pushes past 63 would collapse two epochs onto one role
-rather than error. The composer must refuse a name it would have truncated.
+**The catalog costs the role graph was suspected of both measured at zero. RATIONALE, not a
+constraint.** `CREATE ROLE` inside an apply bracket did not serialize applies in other databases of
+the same cluster, and `SET ROLE` was flat across a large growth in `pg_auth_members`. That is why
+the epoch rides the role name instead of an extra `SELECT epoch` in the setup batch: the name form
+cannot be removed without removing the connection.
 
-**The apply cannot be one transaction.** `crates/zeroship-migrate-core/src/engine.rs` states
-its contract - everything ahead of it commits in its own transaction - and the host loops the
-engine once per IR file, with earlier files already committed when a later one fails. The
-engine's crash recovery is journal-driven on exactly that basis. A wrapping transaction would
-have to swallow the journal bootstrap and destroy that recovery model.
+These two are deliberately excluded from Open 5's test target. They justify a choice rather than
+hold a boundary: if they turned out false the design would be slower, not wrong. Gating them would
+mean asserting a timing in a test, which is flaky, and recording one here, which the no-statistics
+rule forbids. Re-measure them if the choice is ever questioned, not on a schedule.
 
-**The apply ledger cannot close exactly once across a crash, and that is structural.** The
-audit row and the schema live in different databases - the store opens its own connection on
-the control DSN - so no transaction spans both. The ledger is an audit projection with
-at-least-once closure. The authority for "what schema does this database have" is the app
-database's journal plus its head row, which do move together.
+**The apply cannot be one transaction.** `crates/zeroship-migrate-core/src/engine.rs` states its
+contract - everything ahead of it commits in its own transaction - and the host loops the engine
+once per IR file, with earlier files already committed when a later one fails. The engine's crash
+recovery is journal-driven on exactly that basis.
+
+**Nothing spans the control database and a cluster, and the design no longer needs anything to.**
+`migrate_server.database_url` and `migrate_server.provision_database_url` are separate secrets
+(`crates/zeroship-migrate-server/src/config.rs`), so an apply's control-side write and its DDL
+cannot share a transaction. With the ledger deleted the only control-side write an apply makes is
+the epoch projection, and a lost projection is self-correcting rather than a stale authority. The
+same asymmetry is why granting is a reconciler: a binding's row and its roles live on different
+servers.
 
 **The worker-internal `env_vars` map is a disclosure channel by construction.**
-`crates/zeroship-runtime/src/core/init.rs:3516` copies every entry into `process.env`, so
-anything placed there is readable by app JS and by any npm package that walks `Object.keys`. It
-may carry only identifiers the app already possesses - today exactly `APP_ID` and
-`ZEROSHIP_DEPLOY_ID` (`crates/zeroship-worker/src/cache.rs`). The `ds` field is the sharpest
-edge: `DbResourceKey` is stable per datastore, so two apps under one actor that read equal
-digests have confirmed co-residency, which makes noisy-neighbour and resource-exhaustion
-attacks aimable rather than speculative. Being unforgeable is not sufficient; the map is
-readable.
+`zeroship_runtime::core::init` copies every entry into `process.env`, so anything placed there is
+readable by app JS and by any npm package that walks `Object.keys`. It may carry only identifiers
+the app already possesses. Being unforgeable is not sufficient: that is a forgery property, and the
+concern is disclosure.
 
-**Cross-creator table sharing is refused permanently.** Three independent reasons:
+**Cross-project database sharing is refused permanently.** Three independent reasons:
 
 1. **The unmask policy is authored by the READING app.**
    `crates/zeroship-data-orm/src/protection/mask_policy.rs` states it: the policy comes from the
-   creator's own source, at boot, and nowhere else on the PG arm; the app declares
-   `defineMaskPolicy()`, `installSchema` flushes it into that isolate's cache, and there is no
-   durable policy store. A co-grant-holder ships a permissive policy in its own bundle and
-   unmasks the owner's PII/PHI/PCI. The owner has no artifact anywhere that the co-tenant's
-   isolate consults. The catalog sentinels do not close this: they carry mask kind and
-   classification, not an actor-to-classification policy.
-2. **A PostgreSQL schema has exactly one owner, and ownership IS the migrator's authority**
-   (`ALTER SCHEMA ... OWNER TO`, `crates/zeroship-migrate-server/src/provisioning.rs:198`).
-   Owner privileges are implicit and unrevokable, and there is no second owner slot.
-3. **The apply lock is on the wrong axis and the journal has no tenant column.** The only
-   apply-time lock over the publication name hashes the app id, so two apps in one database
-   take different keys and their DDL interleaves with no mutual exclusion.
+   creator's own source, at boot, and nowhere else on the PostgreSQL arm. A co-binding holder from
+   another project could ship a permissive policy in its own bundle and unmask another project's
+   PII. The catalog sentinels do not close this: they carry mask kind and classification, not an
+   actor-to-classification policy.
+2. **A PostgreSQL schema has exactly one owner, and ownership IS the migrator's authority.** Owner
+   privileges are implicit and unrevokable, and there is no second owner slot.
+3. **The apply lock and the journal have no second-tenant axis.**
 
-Within one creator, a co-grant-holder mis-declaring a mask policy is not a boundary crossing.
-Across creators it is, and no role fixes it. `readwrite` and `readonly` grants are therefore
-restricted to apps under the same creator, which the workspace model satisfies by
-construction.
+Within one project, a co-binding holder mis-declaring a mask policy is not a boundary crossing.
+Across projects it is, and no role fixes it. The composite foreign keys make this structural rather
+than a check.
 
-**What this design does NOT deliver is shared evolution across creators.** Two creators
-jointly evolving one schema needs adjudicated multi-writer DDL, in which the migrator stops
-being least-privilege-by-ownership and becomes a policy-adjudicated writer arbitrating
-per-table claims between peer drafts, with no merge rule for two peers under
-escalation-reject. That puts creator-influenced policy inside the one service trusted
-precisely because it does not execute creator code. If the requirement is cross-creator shared
-evolution, this is the wrong design and multi-writer DDL is the actual project. Confirm that
-before anything is built.
+**What this design does NOT deliver is shared evolution across projects.** Two projects jointly
+evolving one schema needs adjudicated multi-writer DDL, in which the migrator stops being
+least-privilege-by-ownership and becomes a policy-adjudicated writer arbitrating per-table claims
+between peer drafts. That puts creator-influenced policy inside the one service trusted precisely
+because it does not execute creator code. If the requirement is cross-project shared evolution,
+this is the wrong design and multi-writer DDL is the actual project.
 
-**Two costs are PostgreSQL constraints rather than choices, and are accepted:** classified
-columns lose plaintext reactivity for everyone including the owner (one published column set
-per table per decode stream); and blanket table grants plus prospective default privileges are
-deleted, so a migration that fails to regenerate explicit per-column grants leaves the database
-unreadable rather than over-readable - the right failure direction, and still a failure.
-
-**Three residual gaps are accepted, not solved here.** A schema change means rebuilding the
-workspace, and apps deploy independently, so there is a window in which one is rebuilt and
-another is not - ordinary shared-dependency mechanics, the creator's risk, and the platform's
-job is to make the mismatch loud rather than prevent it. Worker boot becomes fatal on any bad
-datastore, an availability regression traded for a boundary. And per-datastore admission
-control does not exist: spend limits throttle an app's requests and cannot protect a shared
-datastore from an app under its limit.
+**Three residual gaps are accepted, not solved here.** An app built against an older shape of a
+shared database is not refused at deploy and not detected until a query touches something that is
+not there, where it fails closed with the column named; the compatibility check that would move
+that earlier is Open 11. Per-cluster admission control does not exist: spend limits throttle an
+app's requests and cannot protect a shared cluster from an app under its limit. And a zone-local
+`migrate-server` means the CLI needs one control round trip to find it.
 
 ---
 
 ## Open
 
-1. **Do the Datastore, Database and Grant entities ship, and in what order?**
-   NEEDS-DECISION. Nothing in this design exists in the tree, and this item heads the longest
-   dependency chain in the proposal set: the encryption re-salt, the epoch's database keying,
-   the deploy-gate re-key, the CDC relay's fan-out topology and the creator-facing config
-   shape all sit behind it. Until it is answered the rest of this list cannot be scheduled.
+1. **Is a dedicated cluster a plan tier?** NEEDS-DECISION, product-shaped. With relocation
+   unsupported it must be chosen when a database is created or not offered, because an existing
+   database can never move to its own cluster.
 
-2. **Supply the schema epoch producer.**
-   BUILDABLE, 8h. The consumer ships and is tested: `SchemaEpoch`
-   (`crates/zeroship-data-orm/src/transaction/reducer/identity.rs`), the comparison at
-   `:265` returning `Verdict::ReResolve`, and the adapter from a classified session-setup
-   outcome into that verdict. **The machine is a tautology in production.** The single
-   production construction site
-   (`crates/zeroship-data-orm/src/transaction/driver.rs`) mints incarnation 0, domain
-   `(0,0)`, epoch 0, `Stable` and an empty ceiling, and echoes the expectation back as the
-   observation, so `classify` can only return `Current` and the three typed denial codes are
-   unreachable outside tests. The work is the record, the migration-service write and the
-   control-plane read that composes the binding.
+2. **Supply the schema epoch producer.** BUILDABLE. The consumer ships and is tested: `SchemaEpoch`
+   (`crates/zeroship-data-orm/src/transaction/reducer/identity.rs`) and its comparison returning
+   `Verdict::ReResolve`. The machine is a tautology in production: the single production
+   construction site (`crates/zeroship-data-orm/src/transaction/driver.rs`) mints a zero epoch and
+   echoes the expectation back as the observation, so `classify` can only return `Current` and the
+   typed denial codes are unreachable outside tests. The work is the record, the migration-service
+   write and the control-plane read that composes the binding.
 
-3. **Where does the owner-side unmask policy live, and what reads it?**
-   NEEDS-DECISION. Column grants fence the plaintext but not the platform's own privileged
-   unmask path, which is gated by a document the READER wrote. Blocks cross-creator co-grants
-   and nothing else; the same-creator restriction ships without it.
-
-4. **What bounds total transaction duration?**
-   NEEDS-DECISION. `DB_STATEMENT_TIMEOUT_MS` bounds one statement and
-   `DB_IDLE_IN_TX_TIMEOUT_MS` one idle gap; neither bounds the transaction, and
-   `transaction_timeout` occurs zero times in `crates/`, `db/` and `deploy/`.
-   `env.db.transaction()` holds a dedicated connection for a whole JS callback, which is the
-   shape that defeats both. Blocks publishing a numeric revocation-lag guarantee, not the
+3. **What bounds total transaction duration?** NEEDS-DECISION. Not `transaction_timeout`: it does
+   not exist on 16 and does from 17, so in a mixed fleet the answer differs per cluster and a design
+   assuming one answer is wrong on half of it. Blocks publishing a revocation-lag guarantee, not the
    mechanism.
 
-5. **Who runs the resource-measuring producer?**
-   NEEDS-DECISION. Per-database `db_bytes_stored` (summed `pg_total_relation_size`) and
-   per-datastore `db_wal_retained_bytes` need a privileged connection in a process that does
-   not execute creator code. **No CDC relay crate exists**, and the process holding the
-   replication connection today IS the worker, so this is a new privileged service, not a free
-   rider. Nothing in production reads `pg_stat_database`, `pg_stat_statements` or any
-   relation-size function today, so decoupled apps would post identical `db_reads` while one
-   holds 400 GB and the other 40 MB. Blocks fair billing on a shared datastore, not isolation.
+4. **Capacity-aware placement.** DEFERRED, named. Placement counts rows control already owns and the
+   operator flips `draining`. Byte, connection and slot awareness needs a probe holding a privileged
+   read connection - the cluster reconciler is the natural home, since it already holds one per
+   cluster and executes no creator code. Blocks nothing today; becomes load-bearing when one cluster
+   fills while under its database count, and more so because placement is a one-way door.
 
-6. **What re-validates "same creator" after issuance?**
-   NEEDS-DECISION. The predicate is "same owning user id", evaluated once at grant issuance.
-   `Resource` has only `App` and `Any`, and the sole production write to `app_members` is one
-   INSERT at app creation. The first app-transfer or team feature silently turns every existing
-   co-grant into a cross-creator grant. Either the grant keys on the principal and re-checks on
-   every binding-table refresh, or a transfer enumerates and refuses-or-revokes outstanding
-   co-grants.
+5. **Turn the CARRIED behaviour claims into a test target.** BUILDABLE. They were measured during
+   the original drafting on majors this platform does not deploy, and writing down a fresh
+   measurement would only move the staleness: a figure in a document is a claim nothing re-runs.
+   Six of them are assertions about what PostgreSQL does, so they belong in `cargo xtask test`
+   against a throwaway container pinned to the minimum supported major: `WITH SET FALSE`,
+   `WITH INHERIT FALSE` versus the role attribute, the `22023`/`42501` split, column grants adding
+   rather than subtracting, decoding ignoring ACLs, and the column-list versus
+   `REPLICA IDENTITY FULL` conflict.
 
-7. **What identity scope does a shared database imply?**
-   NEEDS-DECISION. Two apps sharing one database write DIFFERENT pairwise subjects for the SAME
-   human, because the sector is per-app: `sector_identifier` is `NOT NULL` with one row per app
-   (`db/migrations-ts/20260702000200_control_tables.ts:56`). A shared `users` table gets two
-   rows per person and a foreign key written by app A does not join to a row app B created.
-   Nothing raises; the data is simply wrong. The window is open now and closes at the first
-   post-launch login - the sector is immutable by trigger because `oauth_refresh_tokens.sub`
-   stores a snapshot for refresh-family kill markers, so changing it later de-aligns stored
-   markers and revocation silently stops matching. Today there are no stored refresh tokens, so
-   this is a derivation change plus a schema move with no data migration. Blocks the headline
-   row of this design: N apps reaching the same tables under one creator. Entangled with the
-   workspace/team container decision, since "project", "workspace" and "explicit grant" are
-   three different answers.
+   Two shape requirements, or the target passes over nothing. **Every arm needs its control**: the
+   inherit case is three arms and two of them must SUCCEED, so a suite asserting only the denial
+   passes equally well when the fixture granted nothing. And **the SQLSTATE arm must run as a real
+   non-superuser**, because a superuser's `SET ROLE` permission is checked against `session_user`,
+   which hides the split entirely.
 
-8. **Make `app` plural in the project config without losing cross-target protection.**
-   NEEDS-DECISION. `schema/project-v1.json` declares `app` as a single string, and the
-   environments block requires `app` and `control` and makes them explicitly NON-inheritable,
-   because an environment that names a control and inherits the root app is exactly the silent
-   cross-targeting that rule prevents. With N apps an environment must name a deploy target per
-   app and that property has to survive. Getting it wrong points a production environment at a
-   staging app id, silently.
+   A throwaway container is not a convenience: `pg_authid` and `pg_auth_members` are shared across
+   a cluster, so role DDL against a shared instance creates roles every database on it can see.
 
-9. **Which of the column list and `REPLICA IDENTITY FULL` is given up?**
-   NEEDS-DECISION. They are mutually exclusive, ordering does not save it, and the losing
-   combination is silently configurable with the symptom landing on the creator's write path.
-   Whichever survives, the migration service must refuse the other at the authoring boundary,
-   because PostgreSQL will not. Not reachable until publication column lists ship.
+   The version floor and the per-datastore posture below are the other two thirds of this answer;
+   the catalog-cost claims are deliberately not in the set, for the reason given in Why it is this
+   way.
 
-10. **Re-measure the probe set on the PostgreSQL major the platform deploys.**
-    BUILDABLE, 4h. Every measurement in "Why it is this way" is 18.4 or 17.11 except the
-    inherit-option arm (also 16.14) and the SQLSTATE split (16.14).
-    `deploy/compose/docker-compose.yml:73` pins `postgres:16`. Nine probes in a throwaway
-    container; roles and memberships are cluster-shared, so role DDL must never run against a
-    shared instance.
+6. **Prove `compio-postgres` surfaces `42501` distinguishably from the multi-statement setup batch.**
+   BUILDABLE. The taxonomy splits `GRANT_REVOKED` from `SCHEMA_NOT_PROVISIONED` on the code. If the
+   driver collapses or reorders errors from a simple-query batch whose first statement fails, the
+   split does not exist.
 
-11. **Measure per-backend membership cache construction at CONNECT time.**
-    BUILDABLE, 2h. `SET ROLE` is measured flat on an established backend; a NEW backend still
-    pays to build its membership set, and the role graph multiplies exactly the catalog that
-    cost reads. Pooling amortizes it; it does not remove it. One probe, two scales.
+7. **Re-prove the pooled-connection reset against a narrowed role.** BUILDABLE.
+    `crates/zeroship-data-orm/src/exec.rs` runs the role and timeout guards via `SET LOCAL` inside an
+    explicit transaction so they revert at COMMIT and at the implicit ROLLBACK on drop. That
+    reasoning does not change when the role names a database, but the residue it prevents does: a
+    leaked role today is one app's own schema and under sharing it is a co-tenant's. Needs a test
+    that checks out, narrows, cancels mid-flight, and asserts the next checkout cannot reach the
+    first database.
 
-12. **Prove `compio-postgres` surfaces `42501` distinguishably from the multi-statement
-    session-setup batch.**
-    BUILDABLE, 2h. The taxonomy splits `GRANT_REVOKED` from `SCHEMA_NOT_PROVISIONED` on the
-    code. If the driver collapses or reorders errors from a simple-query batch whose FIRST
-    statement fails, the split does not exist. One live test.
+8. **Write the mandatory regression tests.** BUILDABLE. Nothing today fails if the fence is
+    refactored away, because nothing today can be revoked. (a) Bind, query succeeds; revoke from a
+    separate connection; the same warm isolate on the same pooled connection fails with
+    `GRANT_REVOKED`, no eviction, no restart. (b) A statement issued without the session-setup batch
+    fails with `permission denied`, proving the `WITH INHERIT FALSE` posture rather than the presence
+    of a call. (c) Rotate the epoch, reap `E-1`, and assert the stale isolate gets
+    `SCHEMA_EPOCH_STALE` rather than `SCHEMA_NOT_PROVISIONED`. (d) An app bound to two databases: a
+    dispatch against the second inside a transaction on the first is refused rather than run on the
+    first's connection. (e) Two databases each declaring `users`: a change event on one is never
+    delivered to a subscription on the other. (f) A deploy naming a database the app holds no active
+    binding to is refused, and the refusal names the binding command. (g) A migration applied to a
+    shared database does not make any bound app's deploy fail.
 
-13. **Re-prove the pooled-connection reset against a narrowed role.**
-    BUILDABLE, 3h. `crates/zeroship-data-orm/src/exec.rs` already runs the role and timeout
-    guards via `SET LOCAL` inside an explicit transaction so they auto-revert at COMMIT and at
-    the implicit ROLLBACK on drop, covering a setup error, a query error, or a cancellation
-    between setup and the would-be reset. That reasoning does not change when the role names a
-    database, but the residue it prevents does: a leaked role today is one app's own schema and
-    under sharing it is a co-tenant's. Needs a test that checks out, narrows, cancels
-    mid-flight, and asserts the next checkout cannot reach the first database.
+9. **Make the project config plural without losing cross-target protection.** NEEDS-DECISION.
+    `schema/project-v1.json` declares `app` as a single string, and the environments block requires
+    `app` and `control` and makes them explicitly non-inheritable, because an environment that names
+    a control and inherits the root app is exactly the silent cross-targeting that rule prevents.
+    With N apps and N databases an environment must name a deploy target per app and a database id
+    per label, and that property has to survive.
 
-14. **Write the three mandatory `SET LOCAL ROLE` regression tests.**
-    BUILDABLE, 6h. Nothing today fails if the fence is refactored away, because nothing today
-    can be revoked. (a) Grant, query succeeds; REVOKE from a separate connection; the same warm
-    isolate on the same pooled connection fails with `GRANT_REVOKED`, no eviction, no restart.
-    (b) A statement issued without the session-setup batch fails with `permission denied`,
-    proving the `WITH INHERIT FALSE` posture rather than the presence of a call. (c) Rotate the
-    epoch, reap `E-1`, and assert the stale isolate gets `SCHEMA_EPOCH_STALE` rather than
-    `SCHEMA_NOT_PROVISIONED`.
+10. **Does the CONFINED ceiling need a grant-authority key?** NEEDS-DECISION, blocking nothing now.
+    Nothing in the ceiling vocabulary describes ACL authorship, so a creator draft cannot widen an
+    ACL today by absence rather than by rule. It becomes load-bearing the moment any `access.*` key
+    is granted to a creator draft.
 
-15. **Does the CONFINED ceiling need a grant-authority key?**
-    NEEDS-DECISION, blocking nothing now. Nothing in the ceiling vocabulary describes ACL
-    authorship, so a creator draft cannot widen an ACL today by absence rather than by rule. It
-    becomes load-bearing the moment any `access.*` key is granted to a creator draft.
+11. **Worker-side schema compatibility check.** DEFERRED, named. Deleting the deploy gate's
+    descriptor comparison leaves a build expecting a column the database lacks to fail at query time
+    with `42703 undefined_column`. The check that moves it earlier must be a SUBSET test, never
+    equality: refuse when the database lacks something the app requires, say nothing when it has
+    grown things the app does not use. Equality is what coupled every app on a database to every
+    other, and reintroducing it anywhere reintroduces that. Only a process holding both the
+    descriptor and a connection can evaluate a subset, so this belongs at isolate build in the
+    worker, as one catalog read producing a typed refusal that names the missing collection or
+    column. It is a better error than the gate ever produced and it costs nothing at deploy.
+
+12. **Where are zones beyond the default declared?** NEEDS-DECISION, and it is the one piece of
+    deployment data with no home. Datastores register themselves because reaching a cluster proves
+    it exists; a zone proves nothing and gates which join signers may mint workers, so it must stay
+    declared. But the corpus seeds exactly one, and a deployment with three zones cannot say so
+    without patching it - which is the self-hostability problem this design otherwise avoids. The
+    cheapest answer is likely the existing join-signers file, which already lists the zones each
+    signer may mint for and which control already reads, rather than a second operator document.
+    Blocks a multi-zone self-host, nothing else.
+
+---
+
+## Do-not notes
+
+Each records something that was tried or specified and broke.
+
+- **Do not reuse `grt` or `zeroship.grants` for the data-access edge.** Both name the auth grant,
+  one row per (person, audience). Two unrelated entities in one namespace is exactly what the prefix
+  doc says the disjointness rule exists to prevent.
+
+- **Do not put a cluster's DSN, or a reference to one, on a `datastores` row.** An earlier revision
+  carried an `admin_secret_ref` and an operator document to populate it. Both are unnecessary: the
+  service that can reach a cluster already holds its credential, and reaching it is the only proof
+  of existence anything needs. A secret reference on the row adds a second place for the credential
+  to be wrong and makes the control database a step closer to being worth compromising.
+
+- **Do not reach for a new operator document when a service config already carries the fact.** The
+  same revision introduced a topology file with five import rules and a runbook to declare clusters
+  that were already named by `provision_database_url`. Self-hostability forbids the migration
+  corpus; it does not require a document. Ask first whether the fact is already declared somewhere
+  that is not source.
+
+- **Do not put deployment data in the migration corpus.** An earlier revision of this design declared
+  datastores in a migration, on the reasoning that it reuses machinery that already runs and keeps
+  topology reviewed. Both are true and both are beside the point: this platform is self-hostable, and
+  a migration is not overridable. A self-hoster naming their own clusters would have to fork an
+  ordered, journalled, verified corpus and merge against it forever, while upstream shipped a
+  stranger's hardware inventory as product. A product DEFAULT is a different thing and is fine where
+  it is: `db/migrations-ts/20260914000450_execution_zones_default_zone.ts` seeds the single-host zone
+  in the `data()` phase the corpus supports for exactly that, and it stays.
+
+- **Do not gate a deploy on schema EQUALITY.** An earlier revision kept the descriptor-hash
+  comparison and re-keyed it onto the database. A hash comparison is an equality test, so any
+  migration - a purely additive one included - invalidates the build of every app bound to that
+  database, and all of them stop being deployable while all of them keep running correctly. That
+  makes every app on a database move together, which is the coupling this design exists to remove. If
+  the check is ever reintroduced it must be a subset test evaluated by something that can see the
+  schema, never a hash compared by something that cannot.
+
+- **Do not treat `databases.schema_epoch` as a record of the schema.** It is an input to a role name
+  and nothing else. Reading it as a description of shape puts the deleted deploy gate back under
+  another name.
+
+- **Do not put the workflow journal back in a creator schema.** It was there, and it gave the
+  tenant unrevokable ownership of state the platform executes against, made a database drop
+  destroy every bound app's runs, and left this design's column grants unable to cover it. Those
+  are three separate defects with one cause. The migration journal staying creator-owned is not a
+  precedent for it: corrupting that one breaks only the creator, which is why
+  `docs/proposals/2026-08-28-migration-record-consolidation.md` accepts it there and why it does
+  not transfer here.
+
+- **Do not reintroduce a control-side record of what migrations ran.** The engine journal in the
+  creator's own schema is the only record. A creator can destroy their own journal, and that is
+  accepted: it is their database and corrupting it breaks only them. The platform's answer is to hold
+  no dependency on it, not to keep a shadow copy whose only production reader was a comparison this
+  design deletes.
+
+- **Do not let deploy create or reconcile bindings.** Deploy verifies that an active binding exists
+  and refuses naming the command that makes one. A deploy that reconciled bindings from the manifest
+  would silently restore access somebody revoked, because the config file is a stale snapshot of an
+  intent that has since changed.
+
+- **Do not put the binding, the database id or the datastore handle in the worker-internal
+  `env_vars` map.** An earlier draft prescribed it "on the same path as `APP_ID`", defended on the
+  ground that creator `vars` cannot shadow a worker-internal entry. That is true and answers the
+  wrong question: shadowing is a forgery concern and the requirement is disclosure. Two apps under
+  one actor that read equal datastore handles have confirmed co-residency.
+
+- **Do not interpose a per-app hub role between the worker and the database role.** Measured: the
+  closure is only empty when no app on that worker holds the role, so two hops buy nothing one hop
+  does not. Transitivity is why, not a workaround for it.
+
+- **Do not use `ALTER ROLE <login> NOINHERIT` in place of `WITH INHERIT FALSE`.** The role attribute
+  does nothing to an existing membership.
+
+- **Do not `DROP ROLE` on revoke.** A dropped role yields `22023 role does not exist`; a revoked one
+  yields `42501 permission denied to set role`. The error taxonomy rests on that split, and
+  re-granting restores service on the same warm connection. `DROP ROLE` belongs to exactly two
+  places: the epoch reaper and database teardown.
+
+- **Do not bundle the `E-1` reap into the rotation transaction.** Bundled, a failed reap means N DDL
+  transactions committed, the schema advanced, the epoch stuck at `E`, and every retry failing on the
+  same `DROP ROLE` forever - worse than the leak it guards. At the front the identical refusal costs a
+  clean 409 with zero side effects. The failure is real: a binding role that has been granted a
+  privilege OF ITS OWN cannot be dropped, which is exactly the violation of "no privileges of its
+  own" this design forbids.
+
+- **Do not key the rotation on "did this run apply anything".** A retry after a crash between the last
+  DDL and T4 finds every version already applied and must still rotate.
+
+- **Do not ask the engine for one transaction covering the DDL.** The engine commits per IR file and
+  its crash recovery is journal-driven on that basis.
+
+- **Do not put any statement before `SET LOCAL ROLE` in the session-setup batch.** The simple-query
+  batch aborts at the first failure and emits one `ErrorResponse`, so an earlier failure masks the
+  role error and takes the epoch fence with it.
+
+- **Do not describe granting as one control-plane transaction.** Control's database and the tenant
+  cluster are different servers. Any design that claims that transaction is claiming a distributed
+  transaction it does not have.
+
+- **Do not split the reconciler by resource type.** Bootstrap, database provisioning and binding
+  grants all converge control's declarations onto one cluster through one privileged connection.
+  Three loops would mean three connections, three failure reports and three places for a disagreement
+  with control to be resolved differently.
+
+- **Do not make worker boot fatal on a bad datastore.** With clusters plural, boot success becomes the
+  product of every cluster's health. Refusing the affected apps is the correct failure; killing the
+  process refuses everyone.
+
+- **Do not reuse the relay's publication for anything needing full fidelity.** Its column lists
+  deliberately withhold plaintext columns, so it is lossy by design.
+
+- **Do not port the deleted `__zeroship_admin` installer's statements.** It carried a `PUBLIC` write
+  grant and a `GRANT USAGE ON SCHEMA` that was the reachability precondition for every public
+  `EXECUTE` in it. An acceptance arm that audits routine grants while leaving `USAGE` in place is
+  checking the lock and not the door.
+
+- **Do not add a Rust epoch comparison on the SQLite arm only.** A fence that exists on one tier and
+  not the other is how a divergence becomes a surprise. Whatever the dev-tier equivalent is, it
+  belongs in `docs/reference/sqlite-divergences.md` - which has no grants row to sit beside, because
+  that row is one this proposal itself adds and it has not been filed.
+
+- **Do not write "publish the mask sibling, exclude the parent".** The field's own column holds the
+  mask and `__zs_raw__<f>` holds the plaintext. Anything written against the inverted layout would
+  publish the plaintext.
+
+- **Do not trust a string-compared SQL test as evidence a statement executes.** Every PostgreSQL
+  upsert in one subsystem was broken and survived because the upserts that EXECUTE run on SQLite
+  while the PostgreSQL ones only COMPARE STRINGS, one of them asserting the broken literal.
+
+- **Do not fold the database into a metric name.** `zeroship.billing_metrics` is keyed on `metric`
+  alone and metric names are cluster-global.
+
+- **Do not sweep `app_id -> database_id` mechanically over metering.** `db_reads`, `db_writes` and
+  `db_rows_written` stay app-keyed and must be excluded by name.
+
+- **Do not reintroduce a control-plane-internal id-bearing migration route.** An "internal" route
+  invites the belief that it is a privileged plane, and the day one accepts the control key instead of
+  the caller's bearer, every creator holding a `dbs_` inherits platform authority over that database.
+
+- **Do not cite the physical schema name as a security leak.** It is public under id-addressing;
+  mapping `db_<dbs>` to something readable in error text is a message-quality item and must not be
+  argued as a boundary.
+
+- **Do not let a creator-facing label reach a transaction lane key or a routing key.** Two co-resident
+  apps both calling a database `main` would compare equal. Labels live in the manifest; keys use the
+  database id.
 
 ---
 
 ## History
 
-Deliberation for this design lives in
-`docs/proposals/2026-08-26-runtime-db-binding-decision-log.md` and the index at
-`docs/proposals/2026-08-26-runtime-db-binding-00-index.md`. Sibling specs:
-`docs/proposals/2026-08-28-cdc-service.md`,
-`docs/proposals/2026-08-28-deploy-schema-precondition.md`,
-`docs/proposals/2026-08-31-data-crate-shape.md`. Architecture:
-`docs/architecture/data-system.md`.
-
-Do-not notes, each recording something that was tried or specified and broke:
-
-- **Do not put the binding in the worker-internal `env_vars` map.** An earlier draft
-  prescribed it "on the same path as `APP_ID`", defended on the ground that creator `vars`
-  cannot shadow a worker-internal entry. That is true and answers the wrong question:
-  shadowing is a forgery concern, and the requirement is disclosure. `init.rs` copies the map
-  into `process.env`.
-- **Do not interpose a per-app hub role between the worker and the database role.** Measured:
-  the closure is only empty when NO app on that worker holds the role, so two hops buy nothing
-  one hop does not. Transitivity is why, not a workaround for it.
-- **Do not use `ALTER ROLE <login> NOINHERIT` in place of `WITH INHERIT FALSE`.** Measured on
-  three majors: the role attribute does nothing to an existing membership.
-- **Do not `DROP ROLE` on revoke.** A dropped role yields `22023 role does not exist`; a
-  revoked one yields `42501 permission denied to set role`. The error taxonomy rests on that
-  split, and re-granting restores service on the same warm connection. `DROP ROLE` belongs to
-  exactly two places: the epoch reaper and database teardown.
-- **Do not bundle the `E-1` reap into the rotation transaction.** Bundled, a failed reap means
-  N DDL transactions committed, the schema at `v2`, the epoch stuck at `E`, and every retry
-  failing on the same `DROP ROLE` forever - worse than the leak it guards. At the front the
-  identical refusal costs a clean 409 with zero side effects. The failure is real: a bind role
-  that has been granted a privilege OF ITS OWN cannot be dropped, which is exactly the
-  violation of "no privileges of its own" this design forbids.
-- **Do not key the rotation on "did this run apply anything".** A retry after a crash between
-  the last DDL and T4 finds every version already applied and must still rotate; keying on
-  work-done strands the database at `E` with a `v2` schema forever.
-- **Do not ask the engine for one transaction covering the DDL.** An earlier version of the
-  apply bullet did; the engine commits per IR file and its crash recovery is journal-driven on
-  that basis.
-- **Do not put any statement before `SET LOCAL ROLE` in the session-setup batch.** The
-  simple-query batch aborts at the first failure and emits one `ErrorResponse`, so an earlier
-  failure masks the role error and takes the epoch fence with it.
-- **Do not port the deleted `__zeroship_admin` installer's statements.** It carried
-  `GRANT INSERT, UPDATE, SELECT ON ... pitr_targets TO PUBLIC`, and a `GRANT USAGE ON SCHEMA`
-  that was the reachability precondition for every public `EXECUTE` in it. An acceptance arm
-  that audits routine grants while leaving `USAGE` in place is checking the lock and not the
-  door.
-- **Do not add a Rust epoch comparison on the SQLite arm only.** A fence that exists on one
-  tier and not the other is how a divergence becomes a surprise; whatever the dev-tier
-  equivalent is, it belongs in `docs/reference/sqlite-divergences.md` alongside the grants
-  divergence.
-  **CORRECTED 2026-09-04: THERE IS NO GRANTS ENTRY TO SIT BESIDE.** This line said "beside
-  the grants entry" as though one existed; all 21 rows of that table were enumerated and none
-  is about grants. The grants row is one of the three this proposal itself proposes to ADD
-  (see the list above) and it has not been filed, so this instruction pointed an implementer
-  at a landmark that does not exist. File the grants row first, or drop the positional
-  reference.
-- **Do not write "publish the mask sibling, exclude the parent".** The masking storage flip
-  deleted the `_masked` sibling: the field's own column now holds the mask and `__zs_raw__<f>`
-  holds the plaintext. Anything written against the old layout is inverted and would publish
-  the plaintext. Probe transcripts in the deliberation docs use columns literally named
-  `ssn_masked`; that is the probe's own naming, and the PostgreSQL grant and publication
-  semantics they measure do not depend on it.
-- **Do not trust a string-compared SQL test as evidence a statement executes.** Every
-  PostgreSQL upsert was broken - `DO UPDATE SET "version" = COALESCE("version", 0) + 1` has
-  target and `excluded` both in scope, so PostgreSQL refuses it `42702 ambiguous` - and it
-  survived because the upserts that EXECUTE run on SQLite while the PostgreSQL ones only
-  COMPARE STRINGS, one of them asserting the broken literal.
-- **Do not fold the database into a metric name.** `zeroship.billing_metrics` is PK'd on
-  `metric` alone and metric names are cluster-global.
-- **Do not sweep `app_id -> database_id` mechanically over metering.** `db_reads`,
-  `db_writes` and `db_rows_written` stay app-keyed and must be excluded by name.
-- **Do not reintroduce `crates/zeroship-data-v8/src/cross_app_fk.rs` (DELETED).** It had no
-  production call site and its predicate was wrong in both directions: it blanket-refused
-  cross-schema refs that a shared datastore makes legal, and permitted same-app refs that
-  cross a database boundary. The live rule is `reject_cross_app_ref` in the engine plus
-  schema-qualified REFERENCES rendering, restated as "a foreign key stays inside one database".
-- **Do not treat the apply ledger as authoritative.** Any design that does is claiming a
-  distributed transaction it does not have.
-- **Do not reintroduce a control-plane-internal id-bearing migration route.** The earlier
-  two-route split resolved a creator-facing `(project, name)` path to an id and forwarded it;
-  both the split and the forward are deleted, along with
-  `crates/zeroship-control/src/migrations_api.rs (DELETED)`. An "internal" route invites the
-  belief that it is a privileged plane, and the day one accepts the control key instead of the
-  caller's bearer, every creator holding a `dbs_...` inherits platform authority over that
-  database.
-- **Do not cite the physical schema name as a security leak.** It is public under
-  id-addressing; mapping `db_<dbsid>` to something readable in error text is a
-  message-quality item and must not be argued as a boundary.
+Architecture: `docs/architecture/data-system.md`. Sibling designs whose decisions this one depends
+on: `docs/proposals/2026-09-05-auth-foundation-redesign.md` for the audience sum that scopes end-user
+subjects to the project, `docs/proposals/2026-08-28-migration-record-consolidation.md` for the rule
+that the engine journal is the only record of what ran,
+`docs/proposals/2026-09-19-workflow-journal-relocation.md` for the workflow journal leaving
+creator schemas, which this design requires before its column grants land, and
+`docs/proposals/2026-09-05-gateway-central-database-decoupling.md` for the edge's own
+central-database coupling.
