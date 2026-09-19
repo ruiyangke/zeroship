@@ -13,10 +13,6 @@
 # of which migrate anything. So the one-shot gets its OWN stage (`migrate`,
 # below) and the compose `migrate` service builds that target.
 #
-# NOTE: the sandbox/preview backend (zeroship-sandbox + agent + nomad-driver-ch)
-# now lives in the standalone `zeroship-sandbox` project and is built/shipped
-# there. The control plane talks to it over HTTP (SANDBOX_URL / SANDBOX_TOKEN).
-#
 # Native services are built after the Node workspace. The Node stage emits the
 # database SDK facade embedded by `zeroship-data-v8` and builds the migration
 # add-on and CLI. The Rust builder copies those SDK outputs with the native
