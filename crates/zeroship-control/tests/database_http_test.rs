@@ -144,6 +144,15 @@ fn all_scopes() -> String {
         .join(" ")
 }
 
+/// A response body as JSON, or `Null` when it has none.
+///
+/// Lenient on purpose: an unexpected status often comes with an empty or
+/// non-JSON body, and a parse that panicked there would report "the body is not
+/// JSON" instead of the status assertion that actually names what went wrong.
+async fn json_or_null(response: web::WebResponse) -> serde_json::Value {
+    serde_json::from_slice(&test::read_body(response).await).unwrap_or(serde_json::Value::Null)
+}
+
 fn bearer(user: &UserId) -> String {
     format!(
         "Bearer {}",
@@ -238,8 +247,7 @@ async fn the_database_routes_are_mounted_and_gate_on_the_database_resource() {
     )
     .await;
     let create_status = created.status();
-    let create_body: serde_json::Value =
-        serde_json::from_slice(&test::read_body(created).await).expect("the create body is JSON");
+    let create_body = json_or_null(created).await;
     let database_id = create_body["id"].as_str().unwrap_or_default().to_owned();
 
     let create_refused = test::call_service(
@@ -292,8 +300,7 @@ async fn the_database_routes_are_mounted_and_gate_on_the_database_resource() {
     )
     .await;
     let list_status = listed.status();
-    let list_body: serde_json::Value =
-        serde_json::from_slice(&test::read_body(listed).await).expect("the listing body is JSON");
+    let list_body = json_or_null(listed).await;
     let list_refused = test::call_service(
         &service,
         test::TestRequest::get()
@@ -314,8 +321,7 @@ async fn the_database_routes_are_mounted_and_gate_on_the_database_resource() {
     )
     .await;
     let bound_status = delete_while_bound.status();
-    let bound_body: serde_json::Value = serde_json::from_slice(&test::read_body(delete_while_bound).await)
-        .expect("the refusal body is JSON");
+    let bound_body = json_or_null(delete_while_bound).await;
 
     // 5. UNBIND, then DELETE.
     let unbound = test::call_service(
