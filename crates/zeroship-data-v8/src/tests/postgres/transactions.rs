@@ -972,7 +972,7 @@ export default { rpc: { streamBeforeMigrate } };
 "#;
 
     converge_without_migrating(&url, app);
-    let (status, body) = dispatch_zs_for_app(&url, &src, "streamBeforeMigrate", Some(app));
+    let (status, body) = dispatch_zs_for_app(&url, src, "streamBeforeMigrate", Some(app));
     assert_eq!(
         status, 200,
         "SSE errors stay inside a 200 stream; body={body}"
@@ -993,7 +993,7 @@ export default { rpc: { streamBeforeMigrate } };
 
     // CONTROL: apply the migration, and the generator reaches its yield.
     reset_schema(&url, app);
-    let (status, body) = dispatch_zs_for_app(&url, &src, "streamBeforeMigrate", Some(app));
+    let (status, body) = dispatch_zs_for_app(&url, src, "streamBeforeMigrate", Some(app));
     assert_eq!(status, 200, "the stream stays a 200; body={body}");
     let text = body.as_str().expect("SSE body must be text");
     assert!(

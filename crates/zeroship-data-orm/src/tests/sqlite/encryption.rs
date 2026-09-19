@@ -413,7 +413,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
             let binding = crate::tests::fixtures::harness_binding("app_demo");
             let alias = binding.schema().as_str();
             backend
-                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(alias))
                 .await
                 .expect("ensure_app_schema");
             // Only ciphertext binding is under test, so this fixture omits catalog sentinels.

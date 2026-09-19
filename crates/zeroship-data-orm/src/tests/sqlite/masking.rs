@@ -65,7 +65,7 @@ fn masked_insert_persists_visible_and_raw_columns_sqlite() {
             let binding = crate::tests::fixtures::harness_binding("app_demo");
             let alias = binding.schema().as_str();
             backend
-                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(alias))
                 .await
                 .expect("ensure_app_schema");
             let raw = raw_column_name("ssn");
@@ -139,7 +139,7 @@ fn a_select_serves_the_masked_column_sqlite() {
             let binding = crate::tests::fixtures::harness_binding("app_demo");
             let alias = binding.schema().as_str();
             backend
-                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(alias))
                 .await
                 .expect("ensure_app_schema");
             let raw_ssn = raw_column_name("ssn");
