@@ -41,7 +41,7 @@ function makeMockNative(row: AnyRec | null) {
 
 describe("get(...) select narrowing", () => {
   test("get with select returns Pick<Row, K> | null", async () => {
-    const schema = { ...baseUsersSchema, age: t.number() };
+    const schema = { ...baseUsersSchema, age: t.double() };
     const Users = new Collection<typeof schema>(
       "users",
       fieldsOf(schema),

@@ -58,7 +58,7 @@ function twoParentsOneAskingForOnly(): NamedMigration {
   return authoredMigration("partition_index_only", () => {
     for (const parent of [ASKED_ONLY, ASKED_PLAIN]) {
       table(parent).create({
-        columns: { bucket: t.int().notNull(), payload: t.string().notNull() },
+        columns: { bucket: t.int().required(), payload: t.string().required() },
         partitionBy: { range: ["bucket"] },
       });
     }

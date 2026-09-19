@@ -60,7 +60,7 @@ export const name = "guarded";
 export default {
   schema() {
     table("users").create({
-      columns: { id: t.int().notNull() },
+      columns: { id: t.int().required() },
       primaryKey: ["id"],${guarded ? "\n      ifNotExists: true," : ""}
     });
   },

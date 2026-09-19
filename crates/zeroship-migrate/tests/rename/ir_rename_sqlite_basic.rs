@@ -170,13 +170,13 @@ async fn first_deploy(be: &SqliteBackend, descriptors: &[CollectionDescriptor]) 
                 nullable: Some(!f.required),
                 default: None,
                 unique: None,
-                value_format: None,
                 references: None,
                 id_prefix: None,
                 collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
+                encrypted: None,
                 generated: None,
                 identity: None,
             })
@@ -436,13 +436,13 @@ async fn renamecolumn_sqlite_renders_neutral_type_as_affinity_not_pg_string() {
                     nullable: Some(false),
                     default: None,
                     unique: None,
-                    value_format: None,
                     references: None,
                     id_prefix: None,
                     collation: None,
                     case_sensitive: None,
                     vector_metric: None,
                     mask: None,
+                    encrypted: None,
                     generated: None,
                     identity: None,
                 }],
@@ -666,7 +666,6 @@ fn renamecolumn_sqlite_fails_closed_with_column_but_no_sqlite_schema() {
                 generated_kind: None,
                 identity: None,
                 rowid_alias: false,
-                value_format: None,
                 catalog_uuid_format_check: false,
                 id_default: None,
                 expression_default: None,
@@ -948,4 +947,44 @@ async fn two_renames_of_one_table_in_one_migration_are_refused_on_sqlite() {
     author
         .lower_steps(&two_tables, &live_schema_for(&v2))
         .expect("renames on two different tables still lower");
+}
+
+// A rename of an ENCRYPTED column is refused with its own reason. The IR
+// `Op::RenameColumn` carries no `encrypted` facet, so its `ty` is the plaintext
+// while the live column stores ciphertext; without this gate the author saw a
+// bare `RenameTypeMismatch` (text vs BLOB) that named no actionable cause.
+#[test]
+fn renamecolumn_of_an_encrypted_column_is_refused_with_its_own_reason() {
+    let mut live = live_schema_for(&[descriptor("people", "secret", "string")]);
+    let column = live
+        .table_snapshots
+        .get_mut("people")
+        .expect("people table snapshot")
+        .columns
+        .iter_mut()
+        .find(|c| c.name == "secret")
+        .expect("secret column snapshot");
+    column.data_type = "BLOB".to_string();
+    column.comment_sentinel = Some("zero-migrate:enc:string".to_string());
+
+    let author = IrAuthor::new(
+        zeroship_migrate::shipping_vendors(),
+        PROJECT,
+        APP,
+        &zeroship_migrate_sqlite::DIALECT,
+        &support::confined_charter(),
+    );
+    let ir = rename_ir("people", "secret", "handle", ColType::Text);
+    let err = author
+        .lower_steps(&ir, &live)
+        .expect_err("renaming an encrypted column must fail closed");
+    match err {
+        IrLowerError::RenameLower(msg) => {
+            assert!(
+                msg.contains("encrypted"),
+                "the refusal must name encryption as the cause: {msg}"
+            );
+        }
+        other => panic!("expected RenameLower (encrypted rename), got: {other}"),
+    }
 }

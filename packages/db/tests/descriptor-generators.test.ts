@@ -6,7 +6,7 @@ import { fieldsOf } from "./_install-helper.js";
 
 const fields = {
   id: t.string().primaryKey().assigned({ by: "typedId", on: "insert" }).required(),
-  revision: t.number().assigned({ by: "increment(1)", on: "write" }).required(),
+  revision: t.double().assigned({ by: "increment(1)", on: "write" }).required(),
   removed: t.timestamp().assigned({ by: "now", on: "delete" }),
   title: t.string().required(),
 };

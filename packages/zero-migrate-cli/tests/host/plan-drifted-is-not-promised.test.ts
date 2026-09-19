@@ -56,8 +56,8 @@ function uniqueNamespace(prefix: string): string {
 /** The first migration, whose source is later edited to create the drift. */
 function firstMigration(extraColumn: boolean): string {
   const columns = extraColumn
-    ? `{ id: t.int().notNull(), drifted: t.text() }`
-    : `{ id: t.int().notNull() }`;
+    ? `{ id: t.int().required(), drifted: t.text() }`
+    : `{ id: t.int().required() }`;
   return `import { table, t } from "@zeroship/migrate";
 export const name = "pd_a";
 export default {
@@ -72,7 +72,7 @@ const SECOND_MIGRATION = `import { table, t } from "@zeroship/migrate";
 export const name = "pd_b";
 export default {
   schema() {
-    table("pd_u").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+    table("pd_u").create({ columns: { id: t.int().required() }, primaryKey: ["id"] });
   },
 };
 `;

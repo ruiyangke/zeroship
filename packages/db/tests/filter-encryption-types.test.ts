@@ -10,9 +10,9 @@ const fields = {
   embedding: t.vector(2),
   location: t.geoPoint(),
   emailMasked: t.string().mask({ kind: "email" }),
-  ssnRandom: t.encrypted({  }),
-  secondSecret: t.encrypted({  }),
-  amountSecret: t.encrypted({ of: t.number() }),
+  ssnRandom: t.string().encrypted(),
+  secondSecret: t.string().encrypted(),
+  amountSecret: t.double().encrypted(),
 };
 
 type UserFilter = Filter<typeof fields>;
@@ -52,6 +52,34 @@ void badBooleanRange;
 void badJsonRange;
 void badVectorEquality;
 void badGeoEquality;
+
+// The `this`-guard refuses a non-encryptable plaintext at the type level. The
+// function is never called; tsc is the assertion, and an unused
+// `@ts-expect-error` fails the check if the guard is removed. `t.ref(...)` is
+// NOT in this set: its `T` is a branded string, so it passes the type guard and
+// is refused at authoring time by the runtime `_def.type` gate instead.
+function typeLevelEncryptedRefusals(): void {
+  // @ts-expect-error booleans have no encryption codec
+  t.boolean().encrypted();
+  // @ts-expect-error objects have no encryption codec
+  t.object({ a: t.string() }).encrypted();
+}
+void typeLevelEncryptedRefusals;
+
+// Declaration order carries no semantics: `.nullable().encrypted()` must
+// compile exactly like `.encrypted().nullable()`.
+const nullableThenEncrypted = t.string().nullable().encrypted();
+const encryptedThenNullable = t.string().encrypted().nullable();
+void nullableThenEncrypted;
+void encryptedThenNullable;
+
+// `.encrypted()` preserves the sibling facets' type metadata, so an assigned
+// encrypted field is still excluded from RowInput.
+const assignedEncrypted: { readonly _assigned: true } = t
+  .string()
+  .assigned({ by: "actor", on: "insert" })
+  .encrypted();
+void assignedEncrypted;
 
 test("Filter<S> matches the encrypted-field runtime fence", () => {
   assert.ok(okLike);

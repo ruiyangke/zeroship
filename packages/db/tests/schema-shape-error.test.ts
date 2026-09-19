@@ -47,7 +47,7 @@ describe("schema-shape error clarity (R3 IMPORTANT-5)", () => {
       {
         events: t.union(
           t.object({ kind: t.literal("a"), x: t.string() }),
-          t.object({ kind: t.literal("b"), y: t.number() }),
+          t.object({ kind: t.literal("b"), y: t.double() }),
         ),
       },
       { native },

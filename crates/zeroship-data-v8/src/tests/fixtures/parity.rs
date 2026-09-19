@@ -47,18 +47,18 @@ fn matrix_schema() -> Value {
     value!({
         "_meta": {"strictness": "lenient"},
         "id": {"type": "string", "readOnly": true},
-        "created_at": {"type": "date", "readOnly": true},
-        "updated_at": {"type": "date", "readOnly": true},
+        "created_at": {"type": "timestamp", "readOnly": true},
+        "updated_at": {"type": "timestamp", "readOnly": true},
         "created_by": {"type": "string", "readOnly": true},
         "updated_by": {"type": "string", "readOnly": true},
         "version": {"type": "int", "readOnly": true},
-        "deleted_at": {"type": "date", "readOnly": true},
+        "deleted_at": {"type": "timestamp", "readOnly": true},
         "title": {"type": "string", "required": true},
         "flag": {"type": "boolean", "required": true},
         "meta": {"type": "object", "required": true},
         "optional": {"type": "string"},
         "rank": {"type": "int", "required": true},
-        "occurred_at": {"type": "date"},
+        "occurred_at": {"type": "timestamp"},
         "payload_bytes": {"type": "bytes"},
         "payload_json": {"type": "json"}
     })

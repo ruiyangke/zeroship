@@ -95,7 +95,7 @@ describe("installSchema — decoded projection source", () => {
           fields: {
             id: { type: "id", idPrefix: "post", required: true, primaryKey: true },
             title: { type: "string", required: true },
-            created_at: { type: "date" },
+            created_at: { type: "timestamp" },
           },
           indexes: [],
         },
@@ -141,8 +141,8 @@ describe("installSchema — decoded projection source", () => {
         hits: {
           fields: {
             id: { type: "string", required: true, primaryKey:true, assign:{by:"typedId", on:"insert"} },
-            created_at: { type: "date", required: true, assign:{by:"now", on:"insert"} },
-            updated_at: { type: "date", required: true, assign:{by:"now", on:"write"} },
+            created_at: { type: "timestamp", required: true, assign:{by:"now", on:"insert"} },
+            updated_at: { type: "timestamp", required: true, assign:{by:"now", on:"write"} },
             version: { type: "integer", required: true, assign:{by:"increment(1)", on:"write"} },
             path: { type: "string", required: true },
           },

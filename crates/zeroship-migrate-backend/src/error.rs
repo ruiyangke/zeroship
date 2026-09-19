@@ -199,8 +199,8 @@ pub enum DeclarativeError {
     #[error(
         "unsupported field type '{ty}' (not mapped by the declarative differ; \
          vector/geoPoint/encrypted are out of scope). Supported: string, number, boolean, date, calendarDate, \
-         json, object, array, union, ref, bytes, actor, id, int, smallInt, bigInt, \
-         float, real, inet"
+         json, object, array, union, ref, bytes, actor, id, int, bigInt, \
+         float, inet"
     )]
     UnsupportedType {
         /// The unrecognised / out-of-scope DSL type token.
@@ -599,10 +599,9 @@ pub enum IrLowerError {
     /// verdict meets the operator at plan time, not mid-deploy with the
     /// migration's earlier statements already applied.
     ///
-    /// The permitted set is exactly the server's three, and exactly them: a DOMAIN
-    /// over `integer` is refused by PostgreSQL too, so it is refused
-    /// here. Widening and narrowing WITHIN the set stay legal - `int -> bigint` and
-    /// `int -> smallint` both apply with `attidentity` intact - because a refusal
+    /// The permitted set is `int`/`bigInt`; a DOMAIN over `integer` is refused by
+    /// PostgreSQL too, so it is refused here. Widening within the set stays legal -
+    /// `int -> bigint` applies with `attidentity` intact - because a refusal
     /// broader than the server's would deny a migration the database honours.
     #[error(
         "setColumnType on {table:?}.{column:?} names {to_type}, but that column is an \

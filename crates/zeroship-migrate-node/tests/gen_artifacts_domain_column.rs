@@ -476,7 +476,8 @@ fn encrypted_domain_history(base: Value) -> Vec<Value> {
                 "columns": [
                     {
                         "name": "amount",
-                        "type": { "encrypted": { "of": { "domain": { "name": "positive_number" } } } },
+                        "type": { "domain": { "name": "positive_number" } },
+                        "encrypted": true,
                         "nullable": false,
                     },
                 ],
@@ -492,7 +493,7 @@ fn an_encrypted_domain_column_reports_its_plaintext_type() {
     for dialect in DIALECTS {
         let (fields, runtime_json) = fields_for(&encrypted_domain_history(json!("int")), dialect);
         assert_eq!(
-            fields["amount"]["type"], "number",
+            fields["amount"]["type"], "int",
             "{dialect}: an encrypted domain column reports the domain's BASE token:\n{runtime_json}"
         );
         assert_eq!(
@@ -541,7 +542,8 @@ fn an_encrypted_domain_chain_resolves_and_a_cycle_terminates_unchanged() {
                 "columns": [
                     {
                         "name": "amount",
-                        "type": { "encrypted": { "of": { "domain": { "name": "outer_number" } } } },
+                        "type": { "domain": { "name": "outer_number" } },
+                        "encrypted": true,
                         "nullable": false,
                     },
                 ],
@@ -560,7 +562,8 @@ fn an_encrypted_domain_chain_resolves_and_a_cycle_terminates_unchanged() {
                 "columns": [
                     {
                         "name": "amount",
-                        "type": { "encrypted": { "of": { "domain": { "name": "a" } } } },
+                        "type": { "domain": { "name": "a" } },
+                        "encrypted": true,
                         "nullable": false,
                     },
                 ],
@@ -572,7 +575,7 @@ fn an_encrypted_domain_chain_resolves_and_a_cycle_terminates_unchanged() {
     for dialect in DIALECTS {
         let (fields, runtime_json) = fields_for(&chain, dialect);
         assert_eq!(
-            fields["amount"]["type"], "number",
+            fields["amount"]["type"], "int",
             "{dialect}: a domain over a domain resolves to the ultimate base:\n{runtime_json}"
         );
 
@@ -603,7 +606,8 @@ fn an_encrypted_column_over_an_undeclared_domain_is_unchanged() {
             "columns": [
                 {
                     "name": "amount",
-                    "type": { "encrypted": { "of": { "domain": { "name": "never_declared" } } } },
+                    "type": { "domain": { "name": "never_declared" } },
+                    "encrypted": true,
                     "nullable": false,
                 },
             ],

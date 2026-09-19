@@ -26,7 +26,7 @@ fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
             // this test wrote `DEFAULT CURRENT_TIMESTAMP` as a literal, which meant
             // it could never observe a change to the emitter it claimed to test -
             // the comment asserted a mechanism the code did not drive.
-            let schema = crate::value!({ "occurred_at": { "type": "date" } });
+            let schema = crate::value!({ "occurred_at": { "type": "timestamp" } });
             let ddl = fixture_table_sql_sqlite(
                 &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                 coll,

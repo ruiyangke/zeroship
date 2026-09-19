@@ -13,8 +13,8 @@
 // public Postgres vendor surface — all in ONE module. `index.ts` is the npm public
 // API; this entry additionally exposes the recorder internals.
 //
-// The bundle is fully self-contained: the inlined db type-builder
-// (`./db-types.ts`) is bundled in — there is no external db dependency.
+// The bundle is fully self-contained: the db type-builder (`@zeroship/schema`,
+// a dev dependency) is bundled in — there is no external db dependency.
 
 export {
   // recorder seam (build-evaluator internal)
@@ -46,7 +46,6 @@ export {
   minValue,
   maxValue,
   t,
-  ids,
   perRow,
   // value-position case helper
   cCase,

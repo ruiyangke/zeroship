@@ -5,9 +5,9 @@ import { fieldsOf } from "./_install-helper.js";
 
 describe("assignment builders", () => {
   test("ID type carries its prefix without assigning a value", () => {
-    assert.deepEqual(t.id("post").toFieldDef(), { type: "id", idPrefix: "post" });
-    assert.throws(() => t.id(""), { code: "ID_INVALID_PREFIX" });
-    assert.throws(() => t.id("Post-Type"), { code: "ID_INVALID_PREFIX" });
+    assert.deepEqual(t.typedId("post").toFieldDef(), { type: "string", maxLength: 36, idPrefix: "post" });
+    assert.throws(() => t.typedId(""), { code: "ID_INVALID_PREFIX" });
+    assert.throws(() => t.typedId("Post-Type"), { code: "ID_INVALID_PREFIX" });
   });
 
   test("timestamp modifiers declare their generator and event", () => {
@@ -15,7 +15,7 @@ describe("assignment builders", () => {
     assert.deepEqual(t.timestamp().auto_now().toFieldDef().assign, { by: "now", on: "insert" });
     assert.deepEqual(t.timestamp().auto_now_on_update().toFieldDef().assign, { by: "now", on: "write" });
     assert.throws(() => t.string().auto_now(), { code: "AUTO_NOW_ON_NON_TIMESTAMP" });
-    assert.throws(() => t.number().auto_now_on_update(), { code: "AUTO_NOW_ON_NON_TIMESTAMP" });
+    assert.throws(() => t.double().auto_now_on_update(), { code: "AUTO_NOW_ON_NON_TIMESTAMP" });
   });
 
   test("actor is a nullable string with an assignment", () => {
@@ -29,7 +29,7 @@ describe("assignment builders", () => {
     for (const name of ["id", "created_at", "updated_at", "created_by", "updated_by", "version", "deleted_at"]) {
       assert.deepEqual(fieldsOf({ [name]: t.string() }), { [name]: { type: "string" } });
     }
-    const schema = { id: t.number().required(), created_at: t.string().required() };
+    const schema = { id: t.double().required(), created_at: t.string().required() };
     const input: RowInput<typeof schema> = { id: 12, created_at: "user value" };
     const row: Row<typeof schema> = input;
     assert.equal(row.created_at, "user value");

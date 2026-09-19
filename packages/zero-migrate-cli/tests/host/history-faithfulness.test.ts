@@ -56,7 +56,7 @@ export const name = ${JSON.stringify(name)};
 export default {
   schema() {
     table(${JSON.stringify(table)}).create({
-      columns: { id: t.int().notNull() },
+      columns: { id: t.int().required() },
       primaryKey: ["id"],
     });
   },

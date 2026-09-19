@@ -164,7 +164,7 @@ export const listTodos = procedure(async (input) => []);
 listTodos.config = {
   id: "listTodos",
   idempotent: true,
-  input: z.object({ limit: z.number().optional() }),
+  input: z.object({ limit: z.double().optional() }),
   output: z.array(z.object({ id: z.string() })),
 };
 `;

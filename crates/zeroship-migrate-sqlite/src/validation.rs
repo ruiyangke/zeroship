@@ -148,11 +148,9 @@ impl ValidationPolicy for SqliteValidationPolicy {
             | ColType::Decimal { .. }
             | ColType::Enum { .. }
             | ColType::Char { .. } => "text".to_string(),
-            ColType::SmallInt | ColType::Int | ColType::BigInt | ColType::Boolean => {
-                "integer".to_string()
-            }
-            ColType::Double | ColType::Real => "real".to_string(),
-            ColType::Bytes | ColType::Encrypted { .. } => "blob".to_string(),
+            ColType::Int | ColType::BigInt | ColType::Boolean => "integer".to_string(),
+            ColType::Double => "real".to_string(),
+            ColType::Bytes => "blob".to_string(),
             ColType::Vector { vector } => format!("vector({vector})"),
             ColType::Domain { name, .. } => format!("domain:{name}"),
         }

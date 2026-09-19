@@ -701,14 +701,10 @@ pub const MYSQL_CATALOG_UUID_V4_DEFAULT: &str = "lower(concat(hex(random_bytes(4
 pub fn id_catalog_columns(
     generated_uuid_default: Option<&str>,
     supplied_uuid_default: Option<&str>,
-    type_id_default: Option<&str>,
-    ulid_default: Option<&str>,
 ) -> Vec<Row> {
     id_catalog_columns_with_generated_uuid_extra(
         generated_uuid_default,
         supplied_uuid_default,
-        type_id_default,
-        ulid_default,
         "DEFAULT_GENERATED",
     )
 }
@@ -716,8 +712,6 @@ pub fn id_catalog_columns(
 pub fn id_catalog_columns_with_generated_uuid_extra(
     generated_uuid_default: Option<&str>,
     supplied_uuid_default: Option<&str>,
-    type_id_default: Option<&str>,
-    ulid_default: Option<&str>,
     generated_uuid_extra: &str,
 ) -> Vec<Row> {
     vec![
@@ -754,42 +748,14 @@ pub fn id_catalog_columns_with_generated_uuid_extra(
             supplied_uuid_default,
             supplied_uuid_default.map_or("", |_| "DEFAULT_GENERATED"),
         ),
-        catalog_column_with_generation(
-            "ids",
-            "type_id",
-            "varchar(191)",
-            Some("ascii"),
-            Some("ascii_bin"),
-            false,
-            4,
-            type_id_default,
-            type_id_default.map_or("", |_| "DEFAULT_GENERATED"),
-        ),
-        catalog_column_with_generation(
-            "ids",
-            "ulid",
-            "varchar(191)",
-            Some("ascii"),
-            Some("ascii_bin"),
-            false,
-            5,
-            ulid_default,
-            ulid_default.map_or("", |_| "DEFAULT_GENERATED"),
-        ),
         // An ordinary text default that happens to call uuid() must remain
         // outside the narrow ID-default comparison surface without an
-        // engine-owned UUID format CHECK.
-        //
-        // `text`, NOT `varchar(191)`, because that is what the engine deploys for
-        // a plain `ColType::Text` column - measured against a live MySQL server by
-        // `crates/zeroship-migrate/tests/pg_drift/drift_column_physical_type.rs`, whose `body` column authors `text`
-        // and introspects back as `Lob { tier: "text" }`. The `varchar(191)`
-        // spelling belongs to the two columns ABOVE, which carry a `value_format`
-        // and so need an indexable width. This row read `varchar(191)` until the
-        // drift report learned to print the physical contract: the comparator had
-        // always answered "different" here, and the report dropped the answer
-        // because `mysql_canonical_type` folds `varchar(191)` to the same literal
-        // `text` the fold emits.
+        // engine-owned UUID format CHECK. `text`, NOT `varchar(191)`, because
+        // that is what the engine deploys for a plain `ColType::Text` column -
+        // measured against a live MySQL server by
+        // `crates/zeroship-migrate/tests/pg_drift/drift_column_physical_type.rs`,
+        // whose `body` column authors `text` and introspects back as
+        // `Lob { tier: "text" }`.
         catalog_column_with_generation(
             "ids",
             "ordinary",

@@ -77,7 +77,7 @@ fn generated_types_name_only_the_destination_column() {
 
     let dts = &artifacts.env_db_ts;
     assert!(
-        dts.contains("full_name: t.text().notNull()"),
+        dts.contains("full_name: t.text().required()"),
         "the destination column must appear, carrying the source's nullability: {dts}"
     );
 

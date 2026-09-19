@@ -12,9 +12,9 @@ export default {
   schema() {
     table("notes").create({
       columns: {
-        owner_id: t.text().notNull(),
-        title: t.text().notNull(),
-        body: t.text().notNull(),
+        owner_id: t.text().required(),
+        title: t.text().required(),
+        body: t.text().required(),
       },
       indexes: [
         // Every list query is `WHERE owner_id = $me`, so this is the one index

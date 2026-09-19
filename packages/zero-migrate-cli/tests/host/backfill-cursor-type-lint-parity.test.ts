@@ -90,7 +90,7 @@ export const name = "create";
 export default {
   schema() {
     table("${TABLE}").create({
-      columns: { c: ${cursorType}.notNull(), val: t.int() },
+      columns: { c: ${cursorType}.required(), val: t.int() },
       primaryKey: ["c"],
     });
   },

@@ -97,11 +97,11 @@ scope = { include = [${JSON.stringify(schema)}] }
   );
   writeFileSync(
     join(work, "a", "20260101000000_a.ts"),
-    migration("make_alpha", `table("alpha").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });`),
+    migration("make_alpha", `table("alpha").create({ columns: { id: t.int().required() }, primaryKey: ["id"] });`),
   );
   writeFileSync(
     join(work, "b", "20260102000000_b.ts"),
-    migration("make_beta", `table("beta").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });`),
+    migration("make_beta", `table("beta").create({ columns: { id: t.int().required() }, primaryKey: ["id"] });`),
   );
   writeFileSync(
     join(work, "b_intrudes", "20260103000000_x.ts"),

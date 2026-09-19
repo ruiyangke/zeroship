@@ -109,9 +109,7 @@ const fn minimum_server_version_num(feature: DatabaseFeature) -> i32 {
     match feature {
         DatabaseFeature::UuidV4Generation => 130_000,
         DatabaseFeature::UuidV7Generation => 180_000,
-        DatabaseFeature::UuidValidation
-        | DatabaseFeature::TypeIdValidation
-        | DatabaseFeature::UlidValidation => 0,
+        DatabaseFeature::UuidValidation | DatabaseFeature::TypeIdValidation => 0,
     }
 }
 
@@ -1322,7 +1320,6 @@ mod recording_session_genericity {
         for enforced_throughout in [
             DatabaseFeature::UuidValidation,
             DatabaseFeature::TypeIdValidation,
-            DatabaseFeature::UlidValidation,
         ] {
             assert_eq!(
                 minimum_server_version_num(enforced_throughout),

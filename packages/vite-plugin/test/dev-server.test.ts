@@ -36,7 +36,7 @@ function migrationCreating(table: string, column: string): string {
     `  schema() {`,
     `    table("${table}").create({`,
     `      columns: {`,
-    `        ${column}: t.text().notNull(),`,
+    `        ${column}: t.text().required(),`,
     `      },`,
     `    });`,
     `  },`,

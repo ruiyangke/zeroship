@@ -73,7 +73,7 @@ const RUNTIME_DESCRIPTOR: &str = r#"{
           "primaryKey": true
         },
         "created_at": {
-          "type": "date",
+          "type": "timestamp",
           "required": true,
           "readable": true,
           "filterable": true,
@@ -89,7 +89,7 @@ const RUNTIME_DESCRIPTOR: &str = r#"{
           "writable": false
         },
         "updated_at": {
-          "type": "date",
+          "type": "timestamp",
           "required": true,
           "readable": true,
           "filterable": true,
@@ -154,7 +154,7 @@ const RUNTIME_DESCRIPTOR: &str = r#"{
           "writable": false
         },
         "deleted_at": {
-          "type": "date",
+          "type": "timestamp",
           "readable": true,
           "filterable": true,
           "sortable": true,

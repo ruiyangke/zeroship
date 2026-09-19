@@ -960,8 +960,8 @@ export const name = "m1_gadgets";
 export function schema() {
   table("gadgets").create({
     columns: {
-      sku: t.string({ length: 64 }).notNull(),
-      kind: t.string({ length: 32 }).notNull().default("widget"),
+      sku: t.string({ length: 64 }).required(),
+      kind: t.string({ length: 32 }).required().default("widget"),
     },
   });
 }

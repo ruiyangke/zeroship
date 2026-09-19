@@ -54,7 +54,7 @@ export const name = "create_lk_t";
 export default {
   schema() {
     table("lk_t").create({
-      columns: { id: t.int().notNull() },
+      columns: { id: t.int().required() },
       primaryKey: ["id"],
     });
   },

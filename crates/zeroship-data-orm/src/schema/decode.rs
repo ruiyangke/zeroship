@@ -55,7 +55,7 @@ fn logical_type(value: &str) -> Result<LogicalType, DbError> {
         "number" | "float" | "double" => LogicalType::Number,
         "boolean" | "bool" => LogicalType::Boolean,
         "bytes" => LogicalType::Bytes,
-        "date" | "timestamp" | "timestamptz" => LogicalType::Timestamp,
+        "timestamp" | "timestamptz" => LogicalType::Timestamp,
         "calendarDate" => LogicalType::CalendarDate,
         "time" => LogicalType::Time,
         "json" => LogicalType::Json,

@@ -14,7 +14,7 @@ use zeroship_data_orm::error::DbError;
 use zeroship_data_orm::encryption;
 
 /// Gate #1: round-trip an encrypted string column. Insert a
-/// row with `ssn` declared `t.encrypted({  })`,
+/// row with `ssn` declared `.encrypted()`,
 /// read it back via the PG path, expect the plaintext to recover.
 #[test]
 fn encrypted_column_round_trip_randomised() {

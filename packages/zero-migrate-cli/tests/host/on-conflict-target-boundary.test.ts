@@ -75,7 +75,7 @@ function schemaMigration(): MigrationModule {
     default: {
       schema() {
         table("codes").create({
-          columns: { code: t.int().notNull(), label: t.string({ length: 32 }).notNull() },
+          columns: { code: t.int().required(), label: t.string({ length: 32 }).required() },
           primaryKey: ["code"],
         });
       },

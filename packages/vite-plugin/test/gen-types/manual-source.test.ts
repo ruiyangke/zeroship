@@ -86,16 +86,16 @@ import { schema as defineSchema, t } from "@zeroship/db";
 export const schema = {
   users: defineSchema({
     email: t.string().required().mask({ kind: "email", classification: "pii" }),
-    secret: t.encrypted(),
-    secretAmount: t.encrypted({ of: t.number() }),
-    secretBytes: t.encrypted({ of: t.bytes() }),
-    age: t.number(),
+    secret: t.string().encrypted(),
+    secretAmount: t.double().encrypted(),
+    secretBytes: t.bytes().encrypted(),
+    age: t.double(),
     handle: t.string().required().unique(),
   })
     .softDelete()
     .index("users_email_idx", ["email"]),
   posts: defineSchema({
-    id: t.id("post"),
+    id: t.typedId("post"),
     title: t.string().required(),
     authorId: t.ref("users", { column: "id" }),
     authorHandle: t.ref("users", { column: "handle" }),
@@ -309,8 +309,8 @@ describe("NormalizedSchema -> CollectionDescriptorDto mapping", () => {
     const { schema: defineSchema, t } = await import("@zeroship/db");
     const builder = defineSchema({
       name: t.string().required().unique(),
-      count: t.number(),
-      handle: t.id("handle"),
+      count: t.double(),
+      handle: t.typedId("handle"),
       owner: t.ref("users", { column: "account_key" }),
     });
     const fields = builder.fields as Record<string, { toFieldDef(): import("@zeroship/db").FieldDef }>;
@@ -321,7 +321,7 @@ describe("NormalizedSchema -> CollectionDescriptorDto mapping", () => {
     assert.equal(name.unique, true);
 
     const handle = fieldDefToDto("c", "handle", fields.handle.toFieldDef());
-    assert.equal(handle.type, "id");
+    assert.equal(handle.type, "string");
     assert.equal(handle.idPrefix, "handle");
 
     const owner = fieldDefToDto("c", "owner", fields.owner.toFieldDef());
@@ -354,4 +354,112 @@ describe("NormalizedSchema -> CollectionDescriptorDto mapping", () => {
       /calendarDate|cannot be mapped|no CollectionDescriptorDto home/,
     );
   });
+
+  test("an SDK-evaluated .clientDefault(fn) THROWS (no silent drop)", async () => {
+    const { t } = await import("@zeroship/db");
+    const field = t.string().clientDefault(() => "tok").toFieldDef();
+    assert.throws(
+      () => fieldDefToDto("c", "token", field),
+      /clientDefault|JSON boundary|database default/,
+    );
+  });
 });
+
+describe("refusal matrix at descriptor emission", () => {
+  function codeOf(fn: () => unknown): string | undefined {
+    try {
+      fn();
+    } catch (e) {
+      return (e as { code?: string }).code;
+    }
+    return undefined;
+  }
+
+  test("identity is refused: DDL-authored, use an assignment generator", async () => {
+    const { t } = await import("@zeroship/db");
+    assert.equal(
+      codeOf(() => fieldDefToDto("c", "n", t.int().identity().toFieldDef())),
+      "SCHEMA_FACET_NOT_DECLARABLE",
+    );
+  });
+
+  test("autoIncrement is refused: sugar for the identity DDL facet", async () => {
+    const { t } = await import("@zeroship/db");
+    assert.equal(
+      codeOf(() => fieldDefToDto("c", "n", t.int().autoIncrement().toFieldDef())),
+      "SCHEMA_FACET_NOT_DECLARABLE",
+    );
+  });
+
+  test("generated(expr) is refused: computed columns are DDL-authored", async () => {
+    const { t } = await import("@zeroship/db");
+    const field = t.string().generated({ node: "literal", value: "x" }).toFieldDef();
+    assert.equal(codeOf(() => fieldDefToDto("c", "g", field)), "SCHEMA_FACET_NOT_DECLARABLE");
+  });
+
+  test("enum(name) is refused: standalone type objects are migration-authored", async () => {
+    const { t } = await import("@zeroship/db");
+    assert.equal(
+      codeOf(() => fieldDefToDto("c", "mood", t.enum("mood").toFieldDef())),
+      "SCHEMA_FACET_NOT_DECLARABLE",
+    );
+  });
+
+  test("domain(name) is refused: standalone type objects are migration-authored", async () => {
+    const { t } = await import("@zeroship/db");
+    assert.equal(
+      codeOf(() => fieldDefToDto("c", "email", t.domain("email_addr").toFieldDef())),
+      "SCHEMA_FACET_NOT_DECLARABLE",
+    );
+  });
+
+  test("collation is accepted and ignored: purely physical, no runtime fact", async () => {
+    const { t } = await import("@zeroship/db");
+    const dto = fieldDefToDto("c", "code", t.string().collation("bytewise").toFieldDef());
+    assert.equal(dto.type, "string");
+    assert.equal((dto as { collation?: unknown }).collation, undefined);
+  });
+
+  test("caseSensitive is accepted and carried as a physical facet", async () => {
+    const { t } = await import("@zeroship/db");
+    const dto = fieldDefToDto("c", "code", t.string().caseSensitive(false).toFieldDef());
+    assert.equal(dto.caseSensitive, false);
+  });
+
+  test("min/max/enum(values) stay runtime validation", async () => {
+    const { t } = await import("@zeroship/db");
+    const dto = fieldDefToDto(
+      "c",
+      "score",
+      t.int().min(1).max(10).enum(1, 2, 3).toFieldDef(),
+    );
+    assert.equal(dto.min, 1);
+    assert.equal(dto.max, 10);
+    assert.deepEqual(dto.enum, [1, 2, 3]);
+  });
+
+  test("pattern is refused: no descriptor home, never a silent drop", async () => {
+    const { t } = await import("@zeroship/db");
+    const field = t.string().pattern(/^[a-z]+$/).toFieldDef();
+    assert.equal(codeOf(() => fieldDefToDto("c", "slug", field)), "SCHEMA_FACET_NOT_DECLARABLE");
+  });
+
+  test("mask/encrypted/unique/references/default/primaryKey/required are supported", async () => {
+    const { t } = await import("@zeroship/db");
+    const dto = fieldDefToDto(
+      "c",
+      "owner",
+      t.ref("users", { column: "id" }).required().unique().toFieldDef(),
+    );
+    assert.equal(dto.type, "ref");
+    assert.equal(dto.references, "users");
+    assert.equal(dto.referenceColumn, "id");
+    assert.equal(dto.required, true);
+    assert.equal(dto.unique, true);
+
+    const masked = fieldDefToDto("c", "ssn", t.string().encrypted().toFieldDef());
+    assert.equal(masked.encrypted, true);
+    assert.ok(masked.mask, "encrypted field carries its default mask");
+  });
+});
+

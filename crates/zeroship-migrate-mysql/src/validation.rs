@@ -136,17 +136,15 @@ impl ValidationPolicy for MysqlValidationPolicy {
     fn lowered_reference_storage(&self, ty: &ColType) -> String {
         match ty {
             ColType::String { .. } | ColType::Text | ColType::Ref { .. } => "text".to_string(),
-            ColType::SmallInt => "smallint".to_string(),
             ColType::Int => "integer".to_string(),
             ColType::BigInt => "bigint".to_string(),
             ColType::Double => "double".to_string(),
-            ColType::Real => "real".to_string(),
             ColType::Boolean => "boolean".to_string(),
             ColType::Json => "json".to_string(),
             ColType::Timestamp => "datetime".to_string(),
             ColType::Date => "date".to_string(),
             ColType::Uuid | ColType::Inet | ColType::TextArray => "text".to_string(),
-            ColType::Bytes | ColType::Encrypted { .. } => "blob".to_string(),
+            ColType::Bytes => "blob".to_string(),
             ColType::Char { length } => format!("char({length})"),
             ColType::Vector { vector } => format!("vector({vector})"),
             ColType::GeoPoint => "text".to_string(),

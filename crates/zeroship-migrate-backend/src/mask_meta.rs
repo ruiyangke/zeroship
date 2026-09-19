@@ -28,7 +28,7 @@ pub struct EncryptionMeta {
     pub wraps: WrappedType,
 }
 
-/// The inner type wrapped by a `t.encrypted(...)` builder.
+/// The plaintext type hidden by an `.encrypted()` column.
 ///
 /// Only string / number / bytes are supported. Arbitrary JSON
 /// (object / array) wraps are deferred - they add a serialisation round-trip
@@ -42,7 +42,7 @@ pub enum WrappedType {
 
 /// Column-mask metadata attached to a `ColumnInfo`
 /// when the SDK declares the column with `.mask({ kind, classification })`
-/// or, for `t.encrypted()` columns, when the schema-normaliser
+/// or, for `.encrypted()` columns, when the schema-normaliser
 /// auto-populates the default mask (`{ kind: "full", classification: "pii" }`).
 ///
 /// Path B: when present, the platform emits a sibling `<col>_masked`

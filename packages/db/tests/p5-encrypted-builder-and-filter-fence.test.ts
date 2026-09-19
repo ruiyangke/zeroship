@@ -32,23 +32,42 @@ function makeMockNative() {
 
 
 test("encrypted metadata uses the logical field type", () => {
-  for (const [of, type] of [[t.string(), "string"], [t.number(), "number"], [t.bytes(), "bytes"]] as const) {
-    assert.deepEqual(t.encrypted({ of }).toFieldDef(), {
-      type, encrypted: true, mask: { kind: "full", classification: "pii" },
-    });
-  }
-  assert.deepEqual(t.encrypted().toFieldDef(), t.encrypted({ of: t.string() }).toFieldDef());
+  assert.deepEqual(t.string().encrypted().toFieldDef(), {
+    type: "string", encrypted: true, mask: { kind: "full", classification: "pii" },
+  });
+  assert.deepEqual(t.double().encrypted().toFieldDef(), {
+    type: "number", encrypted: true, mask: { kind: "full", classification: "pii" },
+  });
+  assert.deepEqual(t.bytes().encrypted().toFieldDef(), {
+    type: "bytes", encrypted: true, mask: { kind: "full", classification: "pii" },
+  });
 });
 
 test("encrypted fields reject unique constraints and unsupported plaintext types", () => {
-  assert.throws(() => t.encrypted().unique(), { code: "UNIQUE_ENCRYPTED_UNSUPPORTED" });
-  for (const inner of [t.boolean(), t.object({ a: t.string() }), t.ref("users")]) {
-    assert.throws(() => t.encrypted({ of: inner } as never), { code: "ENCRYPTED_TYPE_UNSUPPORTED" });
+  assert.throws(() => t.string().encrypted().unique(), { code: "UNIQUE_ENCRYPTED_UNSUPPORTED" });
+  for (const field of [t.boolean(), t.object({ a: t.string() }), t.ref("users")]) {
+    assert.throws(
+      () => (field as unknown as { encrypted(): unknown }).encrypted(),
+      { code: "ENCRYPTED_TYPE_UNSUPPORTED" },
+    );
   }
 });
 
+test("an encrypted field cannot be a foreign key in either chain order", () => {
+  assert.throws(
+    () => t.string().references("users").encrypted(),
+    { code: "ENCRYPTED_ON_REF_UNSUPPORTED" },
+  );
+  assert.throws(
+    () => t.string().encrypted().references("users"),
+    { code: "ENCRYPTED_ON_REF_UNSUPPORTED" },
+  );
+  // The control: an unencrypted reference still builds.
+  assert.ok(t.string().references("users"));
+});
+
 function dbWithEncrypted() {
-  return installSchemaForTest({ users: { name: t.string(), secret: t.encrypted() } }, { native: makeMockNative() });
+  return installSchemaForTest({ users: { name: t.string(), secret: t.string().encrypted() } }, { native: makeMockNative() });
 }
 
 for (const value of ["secret", null, { $eq: "secret" }, { $in: ["A", "B"] }, { $gt: "X" }, { $like: "X%" }, { $exists: true }]) {

@@ -9,13 +9,9 @@
         "columns": [
           {
             "name": "id",
-            "type": "text",
+            "type":{"string":{"length":36}},
             "nullable": false,
-            "valueFormat": {
-              "typeId": {
-                "prefix": "dept"
-              }
-            }
+            "idPrefix":"dept"
           },
           {
             "name": "code",
@@ -123,23 +119,15 @@
         "columns": [
           {
             "name": "id",
-            "type": "text",
+            "type":{"string":{"length":36}},
             "nullable": false,
-            "valueFormat": {
-              "typeId": {
-                "prefix": "emp"
-              }
-            }
+            "idPrefix":"emp"
           },
           {
             "name": "dept_id",
-            "type": "text",
+            "type":{"string":{"length":36}},
             "nullable": false,
-            "valueFormat": {
-              "typeId": {
-                "prefix": "dept"
-              }
-            },
+            "idPrefix":"dept",
             "references": {
               "table": "departments",
               "column": "id",
@@ -223,12 +211,7 @@
           },
           {
             "name": "manager_id",
-            "type": "text",
-            "valueFormat": {
-              "typeId": {
-                "prefix": "emp"
-              }
-            },
+            "type":{"string":{"length":36}},"idPrefix":"emp",
             "references": {
               "table": "employees",
               "column": "id",
@@ -281,8 +264,7 @@
           {
             "name": "id",
             "type": "text",
-            "nullable": false,
-            "valueFormat": "ulid"
+            "nullable": false
           },
           {
             "name": "title",
@@ -328,13 +310,9 @@
         "columns": [
           {
             "name": "employee_id",
-            "type": "text",
+            "type":{"string":{"length":36}},
             "nullable": false,
-            "valueFormat": {
-              "typeId": {
-                "prefix": "emp"
-              }
-            },
+            "idPrefix":"emp",
             "references": {
               "table": "employees",
               "column": "id",
@@ -345,7 +323,6 @@
             "name": "position_id",
             "type": "text",
             "nullable": false,
-            "valueFormat": "ulid",
             "references": {
               "table": "positions",
               "column": "id",
@@ -380,8 +357,7 @@
           {
             "name": "id",
             "type": "text",
-            "nullable": false,
-            "valueFormat": "ulid"
+            "nullable": false
           },
           {
             "name": "period_label",
@@ -424,7 +400,6 @@
             "name": "run_id",
             "type": "text",
             "nullable": false,
-            "valueFormat": "ulid",
             "references": {
               "table": "payroll_runs",
               "column": "id",
@@ -433,13 +408,9 @@
           },
           {
             "name": "employee_id",
-            "type": "text",
+            "type":{"string":{"length":36}},
             "nullable": false,
-            "valueFormat": {
-              "typeId": {
-                "prefix": "emp"
-              }
-            },
+            "idPrefix":"emp",
             "references": {
               "table": "employees",
               "column": "id",
@@ -518,13 +489,9 @@
           },
           {
             "name": "employee_id",
-            "type": "text",
+            "type":{"string":{"length":36}},
             "nullable": false,
-            "valueFormat": {
-              "typeId": {
-                "prefix": "emp"
-              }
-            },
+            "idPrefix":"emp",
             "references": {
               "table": "employees",
               "column": "id",

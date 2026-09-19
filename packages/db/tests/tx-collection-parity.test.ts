@@ -97,7 +97,7 @@ const db = installSchemaForTest(
     docs: {
       title: t.string().required(),
       secret: t.string(),
-      embedding: t.array(t.number()),
+      embedding: t.array(t.double()),
       location: t.string(),
     },
   },

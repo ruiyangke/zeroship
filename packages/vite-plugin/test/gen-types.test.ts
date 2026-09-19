@@ -39,7 +39,7 @@ export default {
   schema() {
     table("notes").create({
       columns: {
-        title: t.text().notNull(),
+        title: t.text().required(),
       },
     });
   },

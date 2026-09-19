@@ -89,7 +89,7 @@ export const name = "base";
 export default {
   schema() {
     table("${TABLE}").create({
-      columns: { id: t.int().notNull(), occurred_at: t.timestamp().notNull() },
+      columns: { id: t.int().required(), occurred_at: t.timestamp().required() },
       primaryKey: ["id", "occurred_at"],
       partitionBy: { range: ["occurred_at"], whenUnsupported: "collapse" },
     });

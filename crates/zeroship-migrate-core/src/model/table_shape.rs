@@ -350,7 +350,7 @@ fn resolve_create_table(
                 col.id_prefix = folded_id_prefix.clone();
                 // A primary-key column may also be a typed reference (for
                 // one-to-one inheritance). The prefix fold replaces the author's
-                // UUID carrier with the injected text ID carrier, so copy the
+                // typed-id carrier with the injected ID carrier, so copy the
                 // reference facet explicitly instead of silently discarding it.
                 col.references = collision.and_then(|author_col| author_col.references.clone());
             }
@@ -421,12 +421,12 @@ fn inject_column_to_ir(column: &InjectColumn) -> Result<IrColumn, TableShapeErro
     let default = inject_default_to_ir(column, &ty)?;
     let collation = inject_collation_to_ir(column, &ty, &name)?;
     Ok(IrColumn {
+        encrypted: None,
         name,
         ty,
         nullable: Some(column.nullable),
         default,
         unique: None,
-        value_format: None,
         references: None,
         id_prefix: None,
         case_sensitive: None,
@@ -565,15 +565,11 @@ fn canonical_inject_identifier(raw: &str, kind: &'static str) -> Result<String, 
 }
 
 fn is_id_prefix_declaration(column: &IrColumn) -> bool {
-    matches!(column.ty, ColType::Uuid) && column.id_prefix.is_some()
+    matches!(column.ty, ColType::String { length: 36 }) && column.id_prefix.is_some()
 }
 
 fn is_id_identity_replacement(column: &IrColumn) -> bool {
-    column.identity.is_some()
-        && matches!(
-            column.ty,
-            ColType::SmallInt | ColType::Int | ColType::BigInt
-        )
+    column.identity.is_some() && matches!(column.ty, ColType::Int | ColType::BigInt)
 }
 
 fn validate_folded_id_prefix(table: &str, column: &IrColumn) -> Result<(), TableShapeError> {
@@ -830,13 +826,13 @@ mod tests {
             nullable: None,
             default: None,
             unique: None,
-            value_format: None,
             references: None,
             id_prefix: None,
             collation: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,
+            encrypted: None,
             generated: None,
             identity: None,
         }
@@ -1097,7 +1093,7 @@ columns = [
         ));
 
         let mut id = text_col("id");
-        id.ty = ColType::Uuid;
+        id.ty = ColType::String { length: 36 };
         id.nullable = Some(false);
         id.default = Some(uuid_v4_default());
         id.id_prefix = Some("post".into());
@@ -1116,7 +1112,7 @@ columns = [
     #[test]
     fn id_prefix_fold_preserves_typed_reference_and_remains_idempotent() {
         let mut id = text_col("id");
-        id.ty = ColType::Uuid;
+        id.ty = ColType::String { length: 36 };
         id.nullable = Some(false);
         id.default = Some(uuid_v4_default());
         id.id_prefix = Some("post".into());
@@ -1163,7 +1159,7 @@ columns = [
     #[test]
     fn explicit_uuid_primary_key_is_not_reinterpreted_as_the_platform_id() {
         let mut id = text_col("id");
-        id.ty = ColType::Uuid;
+        id.ty = ColType::String { length: 36 };
         id.nullable = Some(false);
         id.default = Some(uuid_v4_default());
 
@@ -1186,7 +1182,7 @@ columns = [
         // neither is a collision even when it claims no primary key, which is the
         // case the sibling test above does not reach.
         let mut id = text_col("id");
-        id.ty = ColType::Uuid;
+        id.ty = ColType::String { length: 36 };
         id.nullable = Some(false);
 
         let err = resolve_create_table_policy(&ir(vec![id], None), &confined_charter())
@@ -1307,7 +1303,7 @@ columns = [
 ]
 "#).unwrap();
         let mut prefixed = text_col("record_key");
-        prefixed.ty = ColType::Uuid;
+        prefixed.ty = ColType::String { length: 36 };
         prefixed.id_prefix = Some("item".into());
         let mut identity = text_col("record_key");
         identity.ty = ColType::BigInt;

@@ -7,12 +7,12 @@
 //
 // Covers the physical t.* column types + modifiers. This confined-platform
 // fixture intentionally omits `id`; policy injects the internal platform key:
-//   t.text().notNull(), t.numeric(),
+//   t.text().required(), t.numeric(),
 //   t.timestamp().default(now()), t.uuid(), t.bytes(), t.boolean().default,
 //   t.json(), t.text().references(target, column), t.vector({ dimensions }), t.geoPoint(), t.text() (was t.string —
 //   alias removed), t.int() (t.integer deleted), t.bigInt(),
 //   t.double() (was t.float),
-//   t.encrypted({of}), and .unique().
+//   t.text().encrypted(), and .unique().
 import { table, t, decimal, now } from "@zeroship/migrate";
 
 export default {
@@ -21,26 +21,26 @@ export default {
   schema() {
     table("accounts").create({
       columns: {
-        email: t.text().notNull().unique(),
-        balance: t.numeric({ precision: 12, scale: 2 }).notNull().default(decimal("0.00")),
-        authored_at: t.timestamp().notNull().default(now()),
+        email: t.text().required().unique(),
+        balance: t.numeric({ precision: 12, scale: 2 }).required().default(decimal("0.00")),
+        authored_at: t.timestamp().required().default(now()),
         external_id: t.uuid(),
         avatar: t.bytes(),
-        active: t.boolean().notNull().default(true),
+        active: t.boolean().required().default(true),
         profile: t.json(),
         owner: t.text().references("users", "id"),
         embedding: t.vector({ dimensions: 1536 }),
         location: t.geoPoint(),
         label: t.text(), // was t.string() — the alias is removed
-        hits: t.int().notNull().default(0),
+        hits: t.int().required().default(0),
         big_hits: t.bigInt(),
         ratio: t.double(),
-        secret: t.encrypted({ of: t.text() }),
+        secret: t.text().encrypted(),
       },
     });
 
     table("memberships").create({
-      columns: { account_id: t.uuid().notNull(), team: t.text().notNull() },
+      columns: { account_id: t.uuid().required(), team: t.text().required() },
       uniques: [{ name: "memberships_team_uq", columns: ["team"] }],
       checks: [{ name: "memberships_team_chk", expr: (col) => col("team").isNotNull() }],
       foreignKeys: [
@@ -53,7 +53,7 @@ export default {
       indexes: [{ name: "memberships_account_idx", on: ["account_id"] }],
     });
 
-    table("accounts").column("status").add({ type: t.text().notNull().default("new") });
+    table("accounts").column("status").add({ type: t.text().required().default("new") });
 
     table("memberships").foreignKey("memberships_team_fk").add({
       columns: ["team"],

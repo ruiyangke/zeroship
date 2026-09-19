@@ -75,8 +75,7 @@ const CORPUS_IR: &str = r#"{
        "generated":{"expr":{"node":"binOp","op":"add",
          "lhs":{"node":"colRef","name":"qty"},
          "rhs":{"node":"literal","value":1}},"stored":true}},
-      {"name":"sku_code","type":"text","nullable":true,
-       "valueFormat":{"typeId":{"prefix":"sku"}}}
+      {"name":"sku_code","type":{"string":{"length":36}},"nullable":true,"idPrefix":"sku"}
     ],"primaryKey":["id","qty"],"constraints":[
       {"name":"sm_main_uq","kind":{"kind":"unique","columns":["qty","note"]}},
       {"name":"sm_main_ck","kind":{"kind":"check","expr":{

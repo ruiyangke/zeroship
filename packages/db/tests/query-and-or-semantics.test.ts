@@ -75,7 +75,7 @@ describe("Filter AND/OR semantics (Mongo-compatible)", () => {
     const schema = {
       id: t.string().required().primaryKey(),
       name: t.string().required(),
-      age: t.number(),
+      age: t.double(),
       role: t.string(),
     };
     const Users = new Collection<typeof schema>(

@@ -1,5 +1,5 @@
 // `@zeroship/migrate` — the SHARED column-type lexicon bridge from the db type-builder
-// surface (`./db-types.js`).
+// surface (`@zeroship/schema`).
 //
 // The migration DSL and the runtime schema share the same primitive type
 // lexicon. A `t.text()` written in a migration is the same dialect-neutral
@@ -30,7 +30,7 @@
 // the target table as a plain string. Migration `.references(table, column)` is
 // recorded separately on `IrColumn` and validated by the migration planner.
 
-import { TypeBuilder, type FieldDef } from "./db-types.js";
+import { TypeBuilder, type FieldDef } from "@zeroship/schema";
 
 import type { ColType } from "./types.js";
 
@@ -44,10 +44,9 @@ export type DbFieldType = FieldDef["type"];
  *  the same `ColType` through {@link colTypeFromDbField}. */
 export type DbSchemaField = TypeBuilder<any, any, any, any, any> | FieldDef;
 
-/** A column type that has no portable dialect-neutral `ColType` (e.g. a JSON
- *  `array`, a nested `object`, a discriminated `union`, a `literal`). Mirrors the
- *  engine's hard structured boundary: a non-expressible type is a hard error, not
- *  a silent fallback (property A). */
+/** A column type that has no portable dialect-neutral `ColType` (the
+ *  JSON-stored `array`). Mirrors the engine's hard structured boundary: a
+ *  non-expressible type is a hard error, not a silent fallback (property A). */
 export class UnsupportedColTypeError extends Error {
   readonly code = "COLTYPE_UNSUPPORTED" as const;
   readonly dbType: string;
@@ -85,46 +84,70 @@ function toFieldDef(field: DbSchemaField): FieldDef {
  * `"int"`/`"number"` outputs are engine-internal descriptors — see the module
  * header.)
  *
- * Type-only / non-storage db field shapes (`object`/`union`/`literal`/`array`/
- * `actor`/`calendarDate`) that have no single portable column type throw
+ * Type-only db field shapes that have no single portable column type throw
  * {@link UnsupportedColTypeError} — a hard structured boundary, never a silent
- * fallback.
+ * fallback. The portable JSON `array` is the remaining member of that set;
+ * `object`/`literal`/`union` lower to their storage type (JSON, the literal's
+ * primitive, and a JSON image respectively) and the recorder renders the
+ * structured facets.
  */
 export function colTypeFromDbField(field: DbSchemaField): ColType {
   const def = toFieldDef(field);
-  // An encrypted column wraps an inner primitive (`string`/`number`/`bytes`); the
-  // db `FieldDef` keeps the wrapped primitive in `type` and carries the encryption
-  // facet alongside. Reduce to the neutral `encrypted` ColType whose `of` recurses
-  // on the inner token — the same shape the engine's `ColType::Encrypted { of }`
-  // carries. Checked before the type switch so the facet drives the arm.
-  if (def.encrypted === true) {
-    const inner = colTypeFromDbField({ type: def.type } as FieldDef);
-    return { encrypted: { of: inner } };
-  }
   switch (def.type) {
     // Scalars whose db token maps 1:1 onto a neutral ColType. A db `string` field
-    // has no bounded-length contract, so it maps to unbounded `text` (identical
-    // rendering to the retired bare `string` ColType); an explicit bounded string
-    // is authored with `t.string({ length })`.
-    case "string":
+    // with no `maxLength` has no bounded-length contract, so it maps to unbounded
+    // `text`; an explicit bound maps to the neutral bounded string.
+    case "string": {
+      const length = def.maxLength;
+      if (typeof length === "number" && Number.isInteger(length) && length > 0) {
+        return { string: { length } };
+      }
       return "text";
+    }
     case "number":
+    case "float":
+    case "double": {
+      // `number` is a TWO-type token: a `precision` facet decides whether it is
+      // the fixed-precision decimal or the float. Reading it keeps the bridge
+      // total instead of collapsing `t.numeric(20, 4)` to a float.
+      const precision = def.precision;
+      if (typeof precision === "number" && Number.isInteger(precision) && precision > 0) {
+        const scale = def.scale;
+        if (typeof scale === "number" && Number.isInteger(scale) && scale >= 0) {
+          return { decimal: { precision, scale } };
+        }
+      }
       return "double";
+    }
+    // Descriptor-side tokens: integer widths and float precision that no `t.*`
+    // factory authors (`TypeName`'s `DescriptorOnlyTypeName`). They reach the
+    // bridge only from a descriptor-read `FieldDef`, and still reduce portably.
+    case "int":
+    case "integer":
+      return "int";
+    case "bigInt":
+      return "bigInt";
+    case "timestamp":
+      return "timestamp";
     case "boolean":
       return "boolean";
-    case "date":
-      return "timestamp";
+    // SQL DATE. This is a MAPPING, not a boundary: migrate's neutral `date`
+    // ColType is its exact counterpart, the same way it is the engine's
+    // `ColType::Date`. Refusing it would leave the one authored scalar with a
+    // direct neutral target as the only storage-backed type the bridge rejects.
+    case "calendarDate":
+      return "date";
     case "json":
       return "json";
     case "bytes":
       return "bytes";
     case "geoPoint":
       return "geoPoint";
-    // `dbType.id(...)` is the internal platform ID field. The runtime mints
-    // `<prefix>_<25 base36 UUIDv7>` values; this is neither TypeID nor a public
-    // migration-column shortcut. Its bridge carrier is neutral `uuid`.
+    // `dbType.typedId(...)` is the creator typed-id field: storage is the
+    // bounded `string(36)` the `<prefix>_<26 base32>` value fits; the declared
+    // prefix rides on `FieldDef.idPrefix`.
     case "id":
-      return "uuid";
+      return { string: { length: 36 } };
     // A foreign-key column: the neutral `ref` arm carries the target table as a
     // PLAIN STRING (never live-schema-bound). `refTarget` is required on a
     // well-formed `dbType.ref(...)` FieldDef.
@@ -143,18 +166,74 @@ export function colTypeFromDbField(field: DbSchemaField): ColType {
       }
       return { vector: { vector: dims } };
     }
-    // Non-storage / type-only db field shapes that have no single portable
-    // column type are a hard structured boundary (property A): they reduce to
-    // `UnsupportedColTypeError`, never a silent fallback. These ARE part of the
-    // db `FieldDef.type` space, so they must be enumerated explicitly
-    // — the `default` arm below is the exhaustiveness guard, not a catch-all.
-    case "object":
-    case "union":
-    case "literal":
-    case "array":
-    case "actor":
-    case "calendarDate":
+    // The DDL-only tokens the migration lexicon contributes. Each is a MAPPING,
+    // not a boundary: the neutral `ColType` carries the exact counterpart.
+    case "char": {
+      const length = def.charLength;
+      if (typeof length !== "number" || !Number.isInteger(length) || length <= 0) {
+        throw new TypeError("colTypeFromDbField: a char field must carry a positive integer charLength");
+      }
+      return { char: { length } };
+    }
+    case "uuid":
+      return "uuid";
+    case "inet":
+      return "inet";
+    case "enum": {
+      const name = def.enumName;
+      if (typeof name !== "string" || name.length === 0) {
+        throw new TypeError("colTypeFromDbField: an enum field must carry a non-empty enumName");
+      }
+      return def.enumSchema === undefined ? { enum: { name } } : { enum: { name, schema: def.enumSchema } };
+    }
+    case "domain": {
+      const name = def.domainName;
+      if (typeof name !== "string" || name.length === 0) {
+        throw new TypeError("colTypeFromDbField: a domain field must carry a non-empty domainName");
+      }
+      return def.domainSchema === undefined ? { domain: { name } } : { domain: { name, schema: def.domainSchema } };
+    }
+    // A NATIVE text array is the one array shape with a neutral `ColType`; the
+    // portable JSON-stored array has none, so it stays a structured boundary.
+    case "array": {
+      if (def.items === "string" && def.arrayStorage === "native") {
+        return "textArray";
+      }
       throw new UnsupportedColTypeError(def.type);
+    }
+    // Structured db types lower to a storage `ColType`; their structure is not
+    // a dialect-neutral column type.
+    //
+    // A nested object is one JSON document: JSONB on PG, JSON text on
+    // SQLite/MySQL. The nested shape stays on the db `FieldDef` for runtime
+    // validation; the migration IR records the storage type only.
+    case "object":
+      return "json";
+    // A literal is its underlying primitive, paired by the recorder with a
+    // `CHECK (col = <value>)` table constraint. The value's JS type selects the
+    // primitive, the same way the db DDL emitter reads `literalValue`.
+    case "literal": {
+      const value = def.literalValue;
+      switch (typeof value) {
+        case "string":
+          return "text";
+        case "number":
+          return "double";
+        case "boolean":
+          return "boolean";
+        default:
+          throw new TypeError(
+            "colTypeFromDbField: a literal field must carry a string, number, or boolean literalValue",
+          );
+      }
+    }
+    // A discriminated union is a ROW SHAPE, not a single column: the recorder
+    // flat-expands it into one nullable column per variant-wide field plus the
+    // discriminator (see `recordCreateTable`). A single-column image — a union
+    // nested inside a `t.object`, whose whole shape is stored as JSON — is a
+    // JSON document.
+    case "union":
+      return "json";
     default: {
       // Exhaustiveness guard: every member of `DbFieldType` (= the db `TypeName`
       // single source) must be handled by an arm above. If the db type builder

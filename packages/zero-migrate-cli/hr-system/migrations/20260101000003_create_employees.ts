@@ -10,30 +10,30 @@ export default {
   schema() {
     table("employees").create({
       columns: {
-        id: ids.typeId({ prefix: "emp" }).primaryKey(),
+        id: t.typedId("emp" ).primaryKey(),
         dept_id: ids
           .typeId({ prefix: "dept" })
-          .notNull()
+          .required()
           .references("departments", "id", { onDelete: "restrict" }),
         grade_id: t
           .bigInt()
-          .notNull()
+          .required()
           .references("job_grades", "id", { onDelete: "restrict" }),
         // Bounded strings: `email` and `status` are index members (a unique email
         // index and the composite dept/status index), so they must be `t.string`
         // (VARCHAR) — MySQL cannot index unbounded `t.text()`. The rest are bounded
         // by nature (names, a short employment-type vocabulary).
-        email: t.string({ length: 254 }).notNull(),
-        first_name: t.string({ length: 255 }).notNull(),
-        last_name: t.string({ length: 255 }).notNull(),
-        hire_date: t.date().notNull(),
-        base_salary: t.numeric({ precision: 12, scale: 2 }).notNull(),
-        employment_type: t.string({ length: 32 }).notNull(),
-        status: t.string({ length: 32 }).notNull().default("active"),
+        email: t.string({ length: 254 }).required(),
+        first_name: t.string({ length: 255 }).required(),
+        last_name: t.string({ length: 255 }).required(),
+        hire_date: t.calendarDate().required(),
+        base_salary: t.numeric({ precision: 12, scale: 2 }).required(),
+        employment_type: t.string({ length: 32 }).required(),
+        status: t.string({ length: 32 }).required().default("active"),
         manager_id: ids
           .typeId({ prefix: "emp" })
           .references("employees", "id", { onDelete: "setNull" }),
-        created_at: t.timestamp().notNull().default(now()),
+        created_at: t.timestamp().required().default(now()),
       },
     });
   },

@@ -10,7 +10,7 @@ const users = {
   ssn: dbType.encrypted(),
   // Explicit mask on a plain string.
   phone: dbType.string().mask({ kind: "last4", classification: "pii" }),
-  age: dbType.number(),
+  age: dbType.double(),
 };
 
 const docs = {

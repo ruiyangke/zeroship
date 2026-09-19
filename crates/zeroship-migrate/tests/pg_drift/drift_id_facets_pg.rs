@@ -165,9 +165,8 @@ fn fixture(schema: &str) -> MigrationIr {
                     },
                     {
                         "name": "derived_type_id",
-                        "type": "text",
-                        "nullable": false,
-                        "valueFormat": { "typeId": { "prefix": "account" } },
+                        "type":{"string":{"length":36}},"nullable": false,
+                        "idPrefix":"acct",
                         "generated": {
                             "expr": {
                                 "node": "fnCall",
@@ -187,9 +186,8 @@ fn fixture(schema: &str) -> MigrationIr {
                 "name": "type_keys",
                 "columns": [{
                     "name": "id",
-                    "type": "text",
-                    "nullable": false,
-                    "valueFormat": { "typeId": { "prefix": "account" } },
+                    "type":{"string":{"length":36}},"nullable": false,
+                    "idPrefix":"acct",
                     "default": {
                         "expr": {
                             "node": "cast",
@@ -216,7 +214,7 @@ fn fixture(schema: &str) -> MigrationIr {
                     "name": "id",
                     "type": "text",
                     "nullable": false,
-                    "valueFormat": "ulid",
+                    "type":"text",
                     "default": {
                         "literal": { "value": "00000000000000000000000000" }
                     }
@@ -230,9 +228,8 @@ fn fixture(schema: &str) -> MigrationIr {
                 "name": "case_default_keys",
                 "columns": [{
                     "name": "id",
-                    "type": "text",
-                    "nullable": false,
-                    "valueFormat": { "typeId": { "prefix": "account" } },
+                    "type":{"string":{"length":36}},"nullable": false,
+                    "idPrefix":"acct",
                     "default": {
                         "expr": {
                             "node": "case",
@@ -255,9 +252,8 @@ fn fixture(schema: &str) -> MigrationIr {
                 "name": "trim_default_keys",
                 "columns": [{
                     "name": "id",
-                    "type": "text",
-                    "nullable": false,
-                    "valueFormat": { "typeId": { "prefix": "account" } },
+                    "type":{"string":{"length":36}},"nullable": false,
+                    "idPrefix":"acct",
                     "default": {
                         "expr": {
                             "node": "fnCall",
@@ -278,9 +274,8 @@ fn fixture(schema: &str) -> MigrationIr {
                 "name": "single_parent",
                 "columns": [{
                     "name": "id",
-                    "type": "text",
-                    "nullable": false,
-                    "valueFormat": { "typeId": { "prefix": "account" } }
+                    "type":{"string":{"length":36}},"nullable": false,
+                    "idPrefix":"acct"
                 }],
                 "primaryKey": ["id"],
                 "constraints": [],
@@ -291,9 +286,8 @@ fn fixture(schema: &str) -> MigrationIr {
                 "name": "single_parent_alt",
                 "columns": [{
                     "name": "id",
-                    "type": "text",
-                    "nullable": false,
-                    "valueFormat": { "typeId": { "prefix": "account" } }
+                    "type":{"string":{"length":36}},"nullable": false,
+                    "idPrefix":"acct"
                 }],
                 "primaryKey": ["id"],
                 "constraints": [],
@@ -304,9 +298,8 @@ fn fixture(schema: &str) -> MigrationIr {
                 "name": "single_child",
                 "columns": [{
                     "name": "parent_id",
-                    "type": "text",
-                    "nullable": false,
-                    "valueFormat": { "typeId": { "prefix": "account" } },
+                    "type":{"string":{"length":36}},"nullable": false,
+                    "idPrefix":"acct",
                     "default": {
                         "expr": {
                             "node": "fnCall",

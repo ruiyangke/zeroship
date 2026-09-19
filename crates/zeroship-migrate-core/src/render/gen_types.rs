@@ -21,7 +21,7 @@ use crate::model::expr::{Expr, SynthFn};
 use crate::model::ir::{
     ColType, ColumnOrExpr, ColumnReference, EmptyContainerKind, ExclusionMethod, IndexElement,
     IndexSortOrder, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, IrJsonValue,
-    IrScalar, MigrationIr, Op, PartitionSpec, ValueFormat,
+    IrScalar, MigrationIr, Op, PartitionSpec,
 };
 use zeroship_migrate_ir::dialect::DialectId;
 
@@ -1197,7 +1197,7 @@ fn render_column(
 ) -> String {
     let mut chain = render_column_base(column);
     if column.nullable == Some(false) && !primary_key {
-        chain.push_str(".notNull()");
+        chain.push_str(".required()");
     }
     if primary_key {
         chain.push_str(".primaryKey()");
@@ -1250,16 +1250,16 @@ fn render_column(
 }
 
 fn render_column_base(column: &IrColumn) -> String {
-    if let Some(ValueFormat::TypeId { prefix }) = &column.value_format {
-        return format!("ids.typeId({{ prefix: {} }})", js_str(prefix));
+    let base = if let Some(prefix) = &column.id_prefix {
+        format!("t.typedId({})", js_str(prefix))
+    } else {
+        render_col_type(&column.ty, column.case_sensitive, column.vector_metric)
+    };
+    if column.encrypted == Some(true) {
+        format!("{base}.encrypted()")
+    } else {
+        base
     }
-    if matches!(column.value_format, Some(ValueFormat::Ulid)) {
-        return "ids.ulid()".to_string();
-    }
-    if let Some(prefix) = &column.id_prefix {
-        return format!("ids.typeId({{ prefix: {} }})", js_str(prefix));
-    }
-    render_col_type(&column.ty, column.case_sensitive, column.vector_metric)
 }
 
 fn render_col_type(
@@ -1277,17 +1277,15 @@ fn render_col_type(
             _ => "t.text()".to_string(),
         },
         ColType::Int => "t.int()".to_string(),
-        ColType::SmallInt => "t.smallInt()".to_string(),
         ColType::BigInt => "t.bigInt()".to_string(),
         ColType::Double => "t.double()".to_string(),
-        ColType::Real => "t.real()".to_string(),
         ColType::Boolean => "t.boolean()".to_string(),
         ColType::Json => "t.json()".to_string(),
         ColType::Timestamp => "t.timestamp()".to_string(),
-        ColType::Date => "t.date()".to_string(),
+        ColType::Date => "t.calendarDate()".to_string(),
         ColType::Uuid => "t.uuid()".to_string(),
         ColType::Inet => "t.inet()".to_string(),
-        ColType::TextArray => "t.textArray()".to_string(),
+        ColType::TextArray => "t.array(t.text(), { storage: \"native\" })".to_string(),
         ColType::Bytes => "t.bytes()".to_string(),
         ColType::Char { length } => format!("t.char({{ length: {length} }})"),
         ColType::Ref { .. } => "t.text()".to_string(),
@@ -1304,9 +1302,6 @@ fn render_col_type(
         }
         ColType::Enum { name, .. } => format!("t.enum({})", js_str(name)),
         ColType::Domain { name, .. } => format!("t.domain({})", js_str(name)),
-        ColType::Encrypted { of } => {
-            format!("t.encrypted({{ of: {} }})", render_col_type(of, None, None))
-        }
     }
 }
 
@@ -1803,13 +1798,13 @@ mod tests {
             nullable: None,
             default: None,
             unique: None,
-            value_format: None,
             references: None,
             id_prefix: None,
             collation: None,
             vector_metric: None,
             case_sensitive: None,
             mask: None,
+            encrypted: None,
             generated: None,
             identity: None,
         }
@@ -1822,7 +1817,7 @@ mod tests {
         text.unique = Some(true);
         assert_eq!(
             render_column(&text, false, None),
-            "t.text().notNull().unique()"
+            "t.text().required().unique()"
         );
         assert_eq!(render_column_base(&column("n", ColType::Int)), "t.int()");
         assert_eq!(
@@ -1835,7 +1830,7 @@ mod tests {
         );
         assert_eq!(
             render_column_base(&column("day", ColType::Date)),
-            "t.date()"
+            "t.calendarDate()"
         );
     }
 
@@ -1855,24 +1850,11 @@ mod tests {
             "t.bigInt().primaryKey().autoIncrement()"
         );
 
-        let mut type_id = column("id", ColType::Text);
-        type_id.value_format = Some(ValueFormat::TypeId {
-            prefix: "usr".to_string(),
-        });
+        let mut type_id = column("id", ColType::String { length: 36 });
+        type_id.id_prefix = Some("usr".to_string());
         assert_eq!(
             render_column(&type_id, true, None),
-            "ids.typeId({ prefix: \"usr\" }).primaryKey()"
-        );
-
-        let mut ulid = column("trace_id", ColType::Text);
-        ulid.value_format = Some(ValueFormat::Ulid);
-        assert_eq!(render_column_base(&ulid), "ids.ulid()");
-
-        let mut prefixed = column("id", ColType::Text);
-        prefixed.id_prefix = Some("post".to_string());
-        assert_eq!(
-            render_column(&prefixed, true, None),
-            "ids.typeId({ prefix: \"post\" }).primaryKey()"
+            "t.typedId(\"usr\").primaryKey()"
         );
 
         let mut counter = column("counter", ColType::BigInt);
@@ -2032,15 +2014,9 @@ mod tests {
             render_column_base(&vector),
             "t.vector({ dimensions: 1536, metric: \"innerProduct\" })"
         );
-        assert_eq!(
-            render_column_base(&column(
-                "secret",
-                ColType::Encrypted {
-                    of: Box::new(ColType::Text),
-                },
-            )),
-            "t.encrypted({ of: t.text() })"
-        );
+        let mut secret = column("secret", ColType::Text);
+        secret.encrypted = Some(true);
+        assert_eq!(render_column_base(&secret), "t.text().encrypted()");
     }
 
     #[test]
@@ -2163,7 +2139,7 @@ mod tests {
         let fields = BTreeMap::from([(
             "entries".into(),
             serde_json::json!({
-                "key":{"type":"string"}, "removed":{"type":"date"}, "revision":{"type":"integer"},
+                "key":{"type":"string"}, "removed":{"type":"timestamp"}, "revision":{"type":"integer"},
                 "deleted_at":{"type":"string"}, "version":{"type":"string"}
             }),
         )]);

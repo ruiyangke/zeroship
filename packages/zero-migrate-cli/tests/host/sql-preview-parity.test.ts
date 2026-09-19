@@ -108,8 +108,8 @@ test("authored MySQL feature migration renders the SQL sql_preview.rs pins", () 
     schema() {
       table("teams").create({
         columns: {
-          id: t.int().notNull().identity({ always: false }),
-          name: t.text().notNull(),
+          id: t.int().required().identity({ always: false }),
+          name: t.text().required(),
           // Omitted options are a STORED generated column, which is what the Rust
           // fixture's `"generated": { ..., "stored": true }` declares.
           name_lc: t.text().generated((col) => col("name").lower()),
@@ -119,9 +119,9 @@ test("authored MySQL feature migration renders the SQL sql_preview.rs pins", () 
 
       table("members").create({
         columns: {
-          id: t.int().notNull().identity({ always: false }),
-          team_id: t.int().notNull(),
-          email: t.text().notNull(),
+          id: t.int().required().identity({ always: false }),
+          team_id: t.int().required(),
+          email: t.text().required(),
         },
         primaryKey: ["id"],
         foreignKeys: [
@@ -196,8 +196,8 @@ test("authored bounded string renders the per-dialect spellings sql_preview.rs p
     schema() {
       table("widgets").create({
         columns: {
-          id: t.int().notNull().identity({ always: false }),
-          code: t.string({ length: 200 }).notNull(),
+          id: t.int().required().identity({ always: false }),
+          code: t.string({ length: 200 }).required(),
         },
         primaryKey: ["id"],
       });

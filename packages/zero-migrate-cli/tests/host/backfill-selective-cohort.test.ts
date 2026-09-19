@@ -83,9 +83,9 @@ const CREATE_ITEMS = {
     schema() {
       table("items").create({
         columns: {
-          id: t.int().notNull(),
-          grp: t.text().notNull(),
-          val: t.int().notNull(),
+          id: t.int().required(),
+          grp: t.text().required(),
+          val: t.int().required(),
         },
         primaryKey: ["id"],
       });

@@ -92,7 +92,7 @@ function schemaMigration(): MigrationModule {
     default: {
       schema() {
         table("items").create({
-          columns: { id: t.int().notNull(), body: t.text() },
+          columns: { id: t.int().required(), body: t.text() },
           primaryKey: ["id"],
         });
       },

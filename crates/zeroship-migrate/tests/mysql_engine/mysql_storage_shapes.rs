@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use crate::support;
 use zeroship_migrate::model::ir::{
     AlterPrimaryKeyAction, ColType, ColumnReference, EmptyContainerKind, IndexElement, IrColumn,
-    IrConstraint, IrConstraintKind, IrDefault, IrFlagsOverride, IrIndex, IrScalar, Op, ValueFormat,
+    IrConstraint, IrConstraintKind, IrDefault, IrFlagsOverride, IrIndex, IrScalar, Op,
 };
 use zeroship_migrate::model::validate::validate_ir;
 use zeroship_migrate::{
@@ -57,13 +57,13 @@ fn column(name: &str, ty: ColType) -> IrColumn {
         nullable: None,
         default: None,
         unique: None,
-        value_format: None,
         references: None,
         id_prefix: None,
         collation: None,
         vector_metric: None,
         case_sensitive: None,
         mask: None,
+        encrypted: None,
         generated: None,
         identity: None,
     }
@@ -188,7 +188,7 @@ fn accepted(migration: &MigrationIr, dialect: &zeroship_migrate::DialectId, what
 }
 
 // (a) The shape the `create_widgets` host fixture used to carry until it was
-// bounded: `t.text().notNull().default("new")`.
+// bounded: `t.text().required().default("new")`.
 #[test]
 fn mysql_refuses_a_bare_literal_default_on_a_text_column() {
     let mut status = column("status", ColType::Text);
@@ -292,21 +292,21 @@ fn mysql_refuses_a_literal_default_on_a_case_insensitive_text_column() {
     );
 }
 
-// (e') The rule keys on RENDERED storage, not the authored type name: a value
-// format takes the column off the unbounded-text arm and onto VARCHAR(191).
+// (e') The rule keys on RENDERED storage, not the authored type name: a typed
+// id is a bounded string, off the unbounded-text arm.
 #[test]
-fn mysql_accepts_a_literal_default_on_a_value_formatted_text_column() {
-    let mut ticket = column("ticket", ColType::Text);
-    ticket.value_format = Some(ValueFormat::Ulid);
+fn mysql_accepts_a_literal_default_on_a_typed_id_text_column() {
+    let mut ticket = column("ticket", ColType::String { length: 36 });
+    ticket.id_prefix = Some("ticket".to_string());
     ticket.default = Some(IrDefault::Literal {
-        value: IrScalar::Str("01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string()),
+        value: IrScalar::Str("ticket_00000000000000000000000000".to_string()),
     });
     let migration = ir(vec![create_table("widgets", vec![ticket])]);
 
     accepted(
         &migration,
         &zeroship_migrate_mysql::DIALECT,
-        "a value-formatted text default",
+        "a typed-id text default",
     );
 }
 
@@ -351,11 +351,12 @@ fn mysql_accepts_an_index_over_a_bounded_string_column() {
     );
 }
 
-// (g') An authored `t.text()` carrying a legacy id prefix renders VARCHAR(191),
-// so it indexes without a prefix length even though its type name says text.
+// (g') A typed-id column is the bounded `string(36)` its prefix declaration
+// requires, so it indexes without a prefix length even though its storage is a
+// character type.
 #[test]
-fn mysql_accepts_an_index_over_an_id_prefixed_text_column() {
-    let mut id = column("id", ColType::Text);
+fn mysql_accepts_an_index_over_an_id_prefixed_string_column() {
+    let mut id = column("id", ColType::String { length: 36 });
     id.id_prefix = Some("gdg".to_string());
     let migration = ir(vec![
         create_table("gadgets", vec![id]),
@@ -365,7 +366,7 @@ fn mysql_accepts_an_index_over_an_id_prefixed_text_column() {
     accepted(
         &migration,
         &zeroship_migrate_mysql::DIALECT,
-        "an id-prefixed text index",
+        "an id-prefixed string index",
     );
 }
 

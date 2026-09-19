@@ -47,11 +47,11 @@ function record(up: () => void): any[] {
 function createWithCreateTimeNotValid(notValid: boolean): () => void {
   return () => {
     table("parents").create({
-      columns: { id: t.int().notNull() },
+      columns: { id: t.int().required() },
       primaryKey: ["id"],
     });
     table("children").create({
-      columns: { id: t.int().notNull(), parent_id: t.int() },
+      columns: { id: t.int().required(), parent_id: t.int() },
       primaryKey: ["id"],
       foreignKeys: [
         {

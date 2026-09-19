@@ -36,7 +36,14 @@ fn column(
     });
     let object = column.as_object_mut().expect("column fixture is an object");
     if let Some(value_format) = value_format {
-        object.insert("valueFormat".to_string(), value_format);
+        if let Some(prefix) = value_format
+            .get("typeId")
+            .and_then(|type_id| type_id.get("prefix"))
+            .and_then(Value::as_str)
+        {
+            object.insert("type".to_string(), json!({ "string": { "length": 36 } }));
+            object.insert("idPrefix".to_string(), json!(prefix));
+        }
     }
     if let Some(case_sensitive) = case_sensitive {
         object.insert("caseSensitive".to_string(), json!(case_sensitive));
@@ -145,7 +152,7 @@ fn canonical_fixture(name: &str) -> MigrationIr {
         name,
         vec![
             column("tenant_id", "int", false, None, None),
-            column("public_id", "text", false, Some(type_id("account")), None),
+            column("public_id", "text", false, Some(type_id("acct")), None),
         ],
         Some(&["tenant_id", "public_id"]),
         vec![],
@@ -155,7 +162,7 @@ fn canonical_fixture(name: &str) -> MigrationIr {
                 "parent_public_id",
                 "text",
                 true,
-                Some(type_id("account")),
+                Some(type_id("acct")),
                 None,
             ),
         ],
@@ -1070,13 +1077,8 @@ fn rejects_per_position_type_integer_width_format_and_collation_mismatches() {
         ),
         (
             "TypeID prefix",
-            column("child_value", "text", true, Some(type_id("account")), None),
-            column("value", "text", false, Some(type_id("workspace")), None),
-        ),
-        (
-            "ULID format",
-            column("child_value", "text", true, Some(json!("ulid")), None),
-            column("value", "text", false, None, None),
+            column("child_value", "text", true, Some(type_id("acct")), None),
+            column("value", "text", false, Some(type_id("wrksp")), None),
         ),
         (
             "collation",

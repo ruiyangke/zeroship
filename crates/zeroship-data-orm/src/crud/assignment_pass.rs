@@ -296,12 +296,12 @@ mod tests {
     fn schema() -> FieldMap {
         crate::tests::fixtures::native_fields(value!({
             "key": {"type":"string", "primaryKey":true, "idPrefix":"note", "assign":{"by":"typedId", "on":"insert"}},
-            "born": {"type":"date", "assign":{"by":"now", "on":"insert"}},
-            "touched": {"type":"date", "assign":{"by":"now", "on":"write"}},
+            "born": {"type":"timestamp", "assign":{"by":"now", "on":"insert"}},
+            "touched": {"type":"timestamp", "assign":{"by":"now", "on":"write"}},
             "author": {"type":"string", "assign":{"by":"actor", "on":"insert"}},
             "editor": {"type":"string", "assign":{"by":"actor", "on":"write"}},
             "revision": {"type":"int", "concurrency":true, "default":1, "assign":{"by":"increment(1)", "on":"write"}},
-            "removed": {"type":"date", "softDelete":true, "assign":{"by":"now", "on":"delete"}},
+            "removed": {"type":"timestamp", "softDelete":true, "assign":{"by":"now", "on":"delete"}},
             "title":{"type":"string"}
         }))
     }

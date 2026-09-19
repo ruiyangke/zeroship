@@ -113,7 +113,7 @@ export default async function setup(project: TestProject) {
     await symlink(join(example, "node_modules"), join(app, "node_modules"));
     const vite = join(app, "node_modules/vite/bin/vite.js");
     await run(process.execPath, [vite, "build"], app, "build");
-    await run("pnpm", ["migrate"], app, "migrate");
+    await run(process.execPath, [join(root, "packages/vite-plugin/dist/cli/migrate-dev.js")], app, "migrate");
     const apiPort = await port();
     const uiPort = await port();
     const apiUrl = `http://127.0.0.1:${apiPort.value}`;

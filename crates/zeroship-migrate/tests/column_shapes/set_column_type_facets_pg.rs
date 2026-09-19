@@ -297,7 +297,7 @@ async fn server_verdict(tag: &str, rendered_type: &str) -> String {
             .map_err(|error| format!("ensure migration journal: {error}"))?;
         let policy = charter(&cfg.project_schema);
         let source = envelope(
-            r#"{"name":"v","type":"text","valueFormat":{"typeId":{"prefix":"usr"}}}"#,
+            r#"{"name":"v","type":{"string":{"length":36}},"idPrefix":"ent"}"#,
             None,
         );
         let authored: MigrationIr =
@@ -358,34 +358,14 @@ async fn server_verdict(tag: &str, rendered_type: &str) -> String {
 }
 
 #[compio::test]
-async fn postgresql_refuses_a_value_format_retype_to_a_non_text_type() {
-    let verdict = server_verdict("vf_int", "integer").await;
-    assert!(
-        verdict.contains("octet_length(integer) does not exist"),
-        "the reason the fold refuses this op is that the SERVER refuses it: the \
-         engine-emitted format CHECK is re-parsed against the new type and no \
-         longer type-checks. If PostgreSQL ever stops refusing, this assertion is \
-         where the refusal's justification has to be revisited. Got: {verdict:?}"
-    );
-}
-
-#[compio::test]
-async fn postgresql_accepts_a_value_format_retype_to_a_text_type_and_keeps_an_unrecognisable_check()
-{
+async fn postgresql_accepts_a_retype_to_a_text_type_and_keeps_the_check() {
     let verdict = server_verdict("vf_vc", "character varying(50)").await;
     // The half the previous investigation guessed at and this measures: the ALTER
-    // SUCCEEDS and the CHECK survives. It is NOT a licence to keep `value_format` -
-    // PostgreSQL re-parses the body with casts injected
-    // (`octet_length((v)::text)`), which `recover_format_check` does not recognise,
-    // so the live side loses the facet and reports the CHECK as an unexpected
-    // constraint. Both spellings of the fold - keep it, clear it - false-drift, so
-    // the op is refused instead. The refusal test above covers the non-text half;
-    // this one records that the text half is refused for a DIFFERENT reason and
-    // must not be quietly re-enabled on the strength of the server accepting it.
+    // SUCCEEDS for a bounded-string column. A typed id is now a plain bounded
+    // string with no format CHECK, so `server_verdict` measures the server's own
+    // verdict on the ALTER alone.
     assert_eq!(
         verdict, "",
-        "PostgreSQL accepts a value-format retype to a text-family type; the fold \
-         refuses it because introspection cannot recover the rewritten CHECK, not \
-         because the server rejects it"
+        "PostgreSQL accepts a bounded-string retype to a text-family type"
     );
 }

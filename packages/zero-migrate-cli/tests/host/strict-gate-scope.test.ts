@@ -43,7 +43,7 @@ export const name = "create_notes";
 export default {
   schema() {
     table("notes").create({
-      columns: { id: t.int().notNull(), body: t.string({ length: 64 }) },
+      columns: { id: t.int().required(), body: t.string({ length: 64 }) },
       primaryKey: ["id"],
     });
   },
@@ -58,7 +58,7 @@ export const name = "create_more";
 export default {
   schema() {
     table("more_notes").create({
-      columns: { id: t.int().notNull() },
+      columns: { id: t.int().required() },
       primaryKey: ["id"],
     });
   },

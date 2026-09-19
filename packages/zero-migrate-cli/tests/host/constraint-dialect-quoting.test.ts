@@ -89,7 +89,7 @@ export const name = "base";
 export default {
   schema() {
     table("${TABLE}").create({
-      columns: { id: t.int().notNull(), val: t.int().notNull() },
+      columns: { id: t.int().required(), val: t.int().required() },
       primaryKey: ["id"],
       uniques: [{ name: "${TABLE}_inline_uq", columns: ["val"] }],
     });

@@ -13,7 +13,7 @@ use crate::snapshot::{
     ColumnSnapshot, PartitionSnapshot, SequenceSnapshot, TableSnapshot, ViewSnapshot,
 };
 use zeroship_migrate_ir::expr::Expr;
-use zeroship_migrate_ir::ir::{ColType, ValueFormat};
+use zeroship_migrate_ir::ir::ColType;
 use zeroship_migrate_ir::precondition::PreconditionCheck;
 
 /// Exact character storage used when a backend requires both sides of a
@@ -62,7 +62,6 @@ pub enum FoldDatabaseFeature {
     UuidV7Generation,
     UuidValidation,
     TypeIdValidation,
-    UlidValidation,
 }
 
 /// Relative strength of the backend-owned catalog evidence carried by a table
@@ -257,12 +256,6 @@ pub trait CatalogFoldPolicy: std::fmt::Debug + Sync {
         &self,
         ty: &ColType,
         is_reference: bool,
-    ) -> Option<FoldDatabaseFeature>;
-
-    /// Project a logical value-format declaration into live-server requirements.
-    fn database_requirement_for_value_format(
-        &self,
-        value_format: &ValueFormat,
     ) -> Option<FoldDatabaseFeature>;
 
     /// Project one expression node into live-server requirements. The neutral

@@ -181,7 +181,7 @@ const TYPE_TOKEN: Readonly<Record<string, string>> = {
   int: "int",
   bigInt: "bigInt",
   boolean: "boolean",
-  date: "date",
+  timestamp: "timestamp",
   json: "json",
   object: "object",
   array: "array",
@@ -190,6 +190,8 @@ const TYPE_TOKEN: Readonly<Record<string, string>> = {
   ref: "ref",
   vector: "vector",
   geoPoint: "geoPoint",
+  char: "char",
+  inet: "inet",
 };
 
 /**
@@ -205,7 +207,30 @@ const UNSUPPORTED_TYPE_REASON: Readonly<Record<string, string>> = {
   literal: "top-level literal columns are not modelled by the descriptor producer",
   union:
     "union columns require flat-expansion (normalizeSchema) before the descriptor path",
+  uuid:
+    "uuid has no descriptor type token (token_to_col_type omits it)",
+  double:
+    "double has no descriptor type token; the runtime float token is number",
 };
+
+/**
+ * The one error-code family for every facet the declared-schema path refuses.
+ * A shared builder lets a creator write DDL-only facets where no migration
+ * executes them; the descriptor emitter refuses rather than silently dropping,
+ * and this code is how a caller recognises that refusal.
+ */
+const SCHEMA_FACET_NOT_DECLARABLE = "SCHEMA_FACET_NOT_DECLARABLE" as const;
+
+function facetNotDeclarable(where: string, facet: string, reason: string): Error {
+  return Object.assign(
+    new Error(
+      `gen-types: field ${where} declares the "${facet}" facet, which is not ` +
+        `declarable on the declared-schema path — ${reason}. Author this ` +
+        `schema through op.* migrations.`,
+    ),
+    { code: SCHEMA_FACET_NOT_DECLARABLE, facet },
+  );
+}
 
 /**
  * Map one `@zeroship/db` `FieldDef` → a `FieldDescriptorDto`. THROWS on any facet
@@ -217,6 +242,16 @@ export function fieldDefToDto(
   def: FieldDef,
 ): FieldDescriptorDto {
   const where = `${collection}.${fieldName}`;
+
+  // Standalone type objects are migration-authored: a declared schema cannot
+  // declare the ENUM/DOMAIN it references, so the reference is refused rather
+  // than lowered to a type the descriptor producer cannot resolve.
+  if (def.type === "enum") {
+    throw facetNotDeclarable(where, "enum", "standalone type objects are migration-authored");
+  }
+  if (def.type === "domain") {
+    throw facetNotDeclarable(where, "domain", "standalone type objects are migration-authored");
+  }
 
   if (def.type in UNSUPPORTED_TYPE_REASON) {
     throw new Error(
@@ -244,14 +279,48 @@ export function fieldDefToDto(
     if (typeof def.default === "function") {
       // A function default (`() => …`) has no static descriptor image; the
       // migrate producer only carries literal defaults. Refuse rather than drop.
-      throw new Error(
-        `gen-types: field ${where} has a function default that cannot be ` +
-          `serialised into a CollectionDescriptorDto default. Use a literal ` +
-          `default, or author via op.* migrations.`,
+      throw facetNotDeclarable(
+        where,
+        "default",
+        "a function default has no static descriptor image; use a literal default",
       );
     }
     dto.default = def.default;
   }
+
+  if (def.clientDefault !== undefined) {
+    // An SDK-evaluated default is a live function. The CollectionDescriptorDto
+    // crosses a JSON boundary into the engine, where a function cannot survive,
+    // so the runtime descriptor would silently lose the default. Refuse rather
+    // than drop it; a database default belongs on `.default(value)`.
+    throw facetNotDeclarable(
+      where,
+      "clientDefault",
+      "an SDK-evaluated factory cannot cross the descriptor JSON boundary; use .default(value) for a database default",
+    );
+  }
+
+  // DDL-only facets: identity/generated imply write-input exclusion, a runtime
+  // fact the descriptor must drive via assignment metadata, so the declared path
+  // refuses rather than substituting a DDL behaviour for it.
+  if (def.identity !== undefined) {
+    throw facetNotDeclarable(
+      where,
+      "identity",
+      "identity is DDL-authored; use an assignment generator instead",
+    );
+  }
+  if (def.generated !== undefined) {
+    throw facetNotDeclarable(
+      where,
+      "generated",
+      "computed columns are DDL-authored; model the value at write time instead",
+    );
+  }
+  // `collation` is purely physical and has no descriptor slot, so it is accepted
+  // and ignored: the database applies it to every query, so there is no runtime
+  // behaviour to drop. `caseSensitive` is the same physical facet, and the
+  // descriptor DOES carry it, so it is accepted and passed through.
 
   if (def.min !== undefined) dto.min = def.min;
   if (def.max !== undefined) dto.max = def.max;
@@ -260,6 +329,7 @@ export function fieldDefToDto(
   // `ref` facets.
   if (def.refTarget !== undefined) dto.references = def.refTarget;
   if (def.refColumn !== undefined) dto.referenceColumn = def.refColumn;
+  if (def.refName !== undefined) dto.referenceName = def.refName;
   if (def.relation !== undefined) dto.relation = def.relation;
   if (def.onDelete !== undefined) dto.onDelete = def.onDelete;
   if (def.onUpdate !== undefined) dto.onUpdate = def.onUpdate;
@@ -268,9 +338,19 @@ export function fieldDefToDto(
   // `id` prefix.
   if (def.idPrefix !== undefined) dto.idPrefix = def.idPrefix;
 
+  // Bounded string width: `string` is a two-type token, and without this the
+  // descriptor loses the bound and degrades a typed id to unbounded text.
+  if (def.maxLength !== undefined) dto.maxLength = def.maxLength;
+
+  // Fixed `CHAR(N)` width.
+  if (def.charLength !== undefined) dto.charLen = def.charLength;
+
   // `vector` facets.
   if (def.vectorDims !== undefined) dto.vectorDims = def.vectorDims;
   if (def.vectorMetric !== undefined) dto.vectorMetric = def.vectorMetric;
+
+  // Physical text-comparison facet; carried so the DDL keeps it.
+  if (def.caseSensitive !== undefined) dto.caseSensitive = def.caseSensitive;
 
   // Encryption + masking (verbatim sub-objects).
   if (def.encrypted !== undefined) dto.encrypted = def.encrypted;
@@ -288,6 +368,11 @@ export function fieldDefToDto(
   rejectUnmappableFacet(where, def, "variants");
   rejectUnmappableFacet(where, def, "discriminator");
   rejectUnmappableFacet(where, def, "assign");
+  rejectUnmappableFacet(where, def, "enumName");
+  rejectUnmappableFacet(where, def, "enumSchema");
+  rejectUnmappableFacet(where, def, "domainName");
+  rejectUnmappableFacet(where, def, "domainSchema");
+  rejectUnmappableFacet(where, def, "arrayStorage");
 
   return dto;
 }
@@ -299,11 +384,7 @@ function rejectUnmappableFacet(
   facet: keyof FieldDef,
 ): void {
   if (def[facet] !== undefined) {
-    throw new Error(
-      `gen-types: field ${where} carries the "${String(facet)}" facet, which has ` +
-        `no CollectionDescriptorDto home — refusing to silently drop it. ` +
-        `Author this schema through op.* migrations, or extend the manual mapper.`,
-    );
+    throw facetNotDeclarable(where, String(facet), "it has no CollectionDescriptorDto home");
   }
 }
 

@@ -8,7 +8,7 @@
       "columns": [
         {"name":"id", "type":"bigInt", "nullable":false, "identity":{"always":true}},
         {"name":"label", "type":"text", "nullable":false},
-        {"name":"secret", "type":{"encrypted":{"of":"text"}}, "mask":{"kind":"none", "classification":"pii"}}
+        {"name":"secret", "type":"text", "encrypted":true, "mask":{"kind":"none", "classification":"pii"}}
       ],
       "primaryKey": ["id"]
     },

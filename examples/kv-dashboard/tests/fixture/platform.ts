@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
+import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -14,6 +14,7 @@ import { stringify } from "smol-toml";
 import { Parser } from "tar";
 import { GenericContainer, Wait, type StartedTestContainer } from "testcontainers";
 import type { Target } from "../targets";
+import { typedIdFromStableSeed } from "@zeroship/server/typed-id";
 import { issuer } from "./issuer";
 import { Processes } from "./processes";
 
@@ -158,7 +159,7 @@ export class Platform {
     const identity = issuer();
     const jwks = await this.container(identity.container);
     const issuerUrl = `http://${jwks.getHost()}:${jwks.getMappedPort(80)}`;
-    const owner = randomUUID();
+    const owner = typedIdFromStableSeed("usr", "kv-dashboard-fixture-owner");
     const seeded = await postgres.exec(["psql", "-U", "postgres", "-d", "kv_fixture", "-v", "ON_ERROR_STOP=1", "-c",
       `INSERT INTO zeroship.users (id, email, name, email_verified_at) VALUES ('${owner}', 'kv-${owner}@zeroship.test', 'KV fixture owner', NOW())`]);
     assert.equal(seeded.exitCode, 0, `Seed authenticated fixture owner: ${seeded.output}`);
@@ -178,7 +179,7 @@ export class Platform {
     // credential and the import document Control reads at startup, and hands
     // the worker the path Control mints the token into.
     const { publicKey: signerPublicKey, privateKey: signerPrivateKey } = generateKeyPairSync("ed25519");
-    const signerId = "wjs_kvdashboardfixturesigner0";
+    const signerId = typedIdFromStableSeed("wjs", "kv-dashboard-fixture-signer");
     const signerPublicKeyX = (signerPublicKey.export({ format: "jwk" }).x) as string;
     const joinSigner = await this.secret("join-signer.json", JSON.stringify({
       signer_id: signerId,

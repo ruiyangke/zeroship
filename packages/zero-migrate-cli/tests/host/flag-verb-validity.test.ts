@@ -94,7 +94,7 @@ function scratch(): string {
 export const name = "a";
 export default {
   schema() {
-    table("fv_t").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+    table("fv_t").create({ columns: { id: t.int().required() }, primaryKey: ["id"] });
   },
 };
 `,

@@ -32,17 +32,15 @@ const FORBIDDEN_INTERNAL_EXPORTS = [
 test("published runtime exposes the migration DSL without recorder internals", async () => {
   const runtimeRoot = await import("@zeroship/migrate");
   assert.equal(typeof runtimeRoot.table, "function");
-  assert.equal(typeof runtimeRoot.ids, "object");
+  assert.equal((runtimeRoot as unknown as Record<string, unknown>).ids, undefined);
   assert.equal((runtimeRoot.t as unknown as Record<string, unknown>).id, undefined);
   assert.equal((runtimeRoot.t as unknown as Record<string, unknown>).ref, undefined);
   assert.equal(typeof runtimeRoot.t.text().references, "function");
-  assert.equal(typeof runtimeRoot.ids.typeId, "function");
-  assert.equal(typeof runtimeRoot.ids.ulid, "function");
   assert.equal(typeof runtimeRoot.perRow, "object");
   assert.equal(typeof runtimeRoot.perRow.uuidV4, "function");
   assert.equal(typeof runtimeRoot.perRow.uuidV7, "function");
   assert.equal(typeof runtimeRoot.perRow.typeId, "function");
-  assert.equal(typeof runtimeRoot.perRow.ulid, "function");
+  assert.equal((runtimeRoot.perRow as unknown as Record<string, unknown>).ulid, undefined);
 
   const tableHandle = runtimeRoot.table("public_surface_probe") as unknown as Record<string, unknown>;
   assert.equal(typeof tableHandle.primaryKey, "function");

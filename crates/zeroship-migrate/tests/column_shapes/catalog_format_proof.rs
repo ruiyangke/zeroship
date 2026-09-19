@@ -1,11 +1,10 @@
-//! Catalog-proved value formats for references into an unmanaged live target.
+//! Catalog-proved UUID formats for references into an unmanaged live target.
 //!
 //! A format-bearing local column may reference a target that has no authored
 //! contract when the live catalog carries the target's own format evidence:
-//! PostgreSQL's native `uuid` type, the engine's exact UUID spelling CHECK on
-//! MySQL/SQLite, or a recovered TypeID/ULID CHECK on any dialect. A target that
-//! omits its own CHECK and inherits safety through its foreign key carries no
-//! such evidence and stays rejected.
+//! PostgreSQL's native `uuid` type, or the engine's exact UUID spelling CHECK on
+//! MySQL/SQLite. A target that omits its own CHECK and inherits safety through
+//! its foreign key carries no such evidence and stays rejected.
 //!
 //! Both reference surfaces are exercised: the column-level `IrColumn.references`
 //! facet and the table-level single-column `constraints[].kind = "fk"` facet.
@@ -17,7 +16,7 @@ use serde_json::{json, Value};
 use zeroship_migrate::model::ir::{MigrationIr, CURRENT_IR_VERSION};
 use zeroship_migrate::{
     ColumnSnapshot, ConstraintSnapshot, IrAuthor, LiveSchema, SchemaSnapshot, TableSnapshot,
-    TextStorageSnapshot, ValueFormat,
+    TextStorageSnapshot,
 };
 
 const PROJECT_SCHEMA: &str = "app";
@@ -39,10 +38,6 @@ enum Evidence {
     /// on MySQL/SQLite. PostgreSQL has no such shape because its native `uuid`
     /// type is itself the contract.
     UuidWithoutCheck,
-    /// A recovered TypeID CHECK with this exact prefix.
-    TypeId(&'static str),
-    /// TypeID storage with no local CHECK: a chained typed reference.
-    TypeIdWithoutCheck,
     /// Generic unmanaged text with no format contract of any kind.
     PlainText,
 }
@@ -73,23 +68,6 @@ fn target_column(dialect: &zeroship_migrate::DialectId, evidence: Evidence) -> C
                 column.catalog_uuid_format_check = matches!(evidence, Evidence::Uuid);
             } else {
                 panic!("unregistered test dialect {dialect}");
-            }
-        }
-        Evidence::TypeId(_) | Evidence::TypeIdWithoutCheck => {
-            if dialect == &zeroship_migrate_mysql::DIALECT {
-                column.data_type = "varchar(191)".to_string();
-                column.text_storage = Some(ascii_bin());
-            } else if dialect == &zeroship_migrate_postgres::DIALECT
-                || dialect == &zeroship_migrate_sqlite::DIALECT
-            {
-                column.data_type = "text".to_string();
-            } else {
-                panic!("unregistered test dialect {dialect}");
-            }
-            if let Evidence::TypeId(prefix) = evidence {
-                column.value_format = Some(ValueFormat::TypeId {
-                    prefix: prefix.to_string(),
-                });
             }
         }
         Evidence::PlainText => {
@@ -131,20 +109,13 @@ fn live(dialect: &zeroship_migrate::DialectId, evidence: Evidence) -> LiveSchema
     LiveSchema::from_catalog_snapshot(snapshot, "external_owner")
 }
 
-fn type_id(prefix: &str) -> Value {
-    json!({ "typeId": { "prefix": prefix } })
-}
-
-fn local_column(ty: &str, value_format: Option<Value>, references: Option<Value>) -> Value {
+fn local_column(ty: &str, references: Option<Value>) -> Value {
     let mut column = json!({
         "name": "parent_id",
         "type": ty,
         "nullable": true,
     });
     let object = column.as_object_mut().expect("column fixture is an object");
-    if let Some(value_format) = value_format {
-        object.insert("valueFormat".to_string(), value_format);
-    }
     if let Some(references) = references {
         object.insert("references".to_string(), references);
     }
@@ -169,12 +140,11 @@ fn ir(name: &str, columns: Vec<Value>, constraints: Vec<Value>) -> MigrationIr {
 }
 
 /// The column-level `references` surface.
-fn column_reference_ir(name: &str, ty: &str, value_format: Option<Value>) -> MigrationIr {
+fn column_reference_ir(name: &str, ty: &str) -> MigrationIr {
     ir(
         name,
         vec![local_column(
             ty,
-            value_format,
             Some(json!({ "table": PARENT, "column": "id" })),
         )],
         Vec::new(),
@@ -182,10 +152,10 @@ fn column_reference_ir(name: &str, ty: &str, value_format: Option<Value>) -> Mig
 }
 
 /// The table-level single-column foreign-key surface.
-fn table_constraint_ir(name: &str, ty: &str, value_format: Option<Value>) -> MigrationIr {
+fn table_constraint_ir(name: &str, ty: &str) -> MigrationIr {
     ir(
         name,
-        vec![local_column(ty, value_format, None)],
+        vec![local_column(ty, None)],
         vec![json!({
             "name": "children_parent_fk",
             "kind": {
@@ -223,7 +193,7 @@ const DIALECTS: [&zeroship_migrate::DialectId; 3] = [
 
 #[test]
 fn catalog_uuid_evidence_proves_a_table_level_single_column_foreign_key() {
-    let ir = table_constraint_ir("table_level_uuid_fk", "uuid", None);
+    let ir = table_constraint_ir("table_level_uuid_fk", "uuid");
     for dialect in DIALECTS {
         lower(&ir, dialect, &live(dialect, Evidence::Uuid)).unwrap_or_else(|error| {
             panic!("live UUID evidence must prove the {dialect:?} table-level FK: {error}")
@@ -233,7 +203,7 @@ fn catalog_uuid_evidence_proves_a_table_level_single_column_foreign_key() {
 
 #[test]
 fn catalog_uuid_evidence_proves_a_column_level_reference() {
-    let ir = column_reference_ir("column_level_uuid_reference", "uuid", None);
+    let ir = column_reference_ir("column_level_uuid_reference", "uuid");
     for dialect in DIALECTS {
         lower(&ir, dialect, &live(dialect, Evidence::Uuid)).unwrap_or_else(|error| {
             panic!("live UUID evidence must prove the {dialect:?} column reference: {error}")
@@ -242,56 +212,9 @@ fn catalog_uuid_evidence_proves_a_column_level_reference() {
 }
 
 #[test]
-fn exactly_matching_catalog_type_id_evidence_proves_both_reference_surfaces() {
-    let table_level = table_constraint_ir("table_level_type_id_fk", "text", Some(type_id("acct")));
-    let column_level = column_reference_ir(
-        "column_level_type_id_reference",
-        "text",
-        Some(type_id("acct")),
-    );
-    for dialect in DIALECTS {
-        let live = live(dialect, Evidence::TypeId("acct"));
-        lower(&table_level, dialect, &live).unwrap_or_else(|error| {
-            panic!("matching TypeID evidence must prove the {dialect:?} table-level FK: {error}")
-        });
-        lower(&column_level, dialect, &live).unwrap_or_else(|error| {
-            panic!("matching TypeID evidence must prove the {dialect:?} column reference: {error}")
-        });
-    }
-}
-
-#[test]
-fn differing_catalog_type_id_evidence_stays_rejected() {
-    let table_level = table_constraint_ir(
-        "table_level_type_id_mismatch",
-        "text",
-        Some(type_id("acct")),
-    );
-    let column_level = column_reference_ir(
-        "column_level_type_id_mismatch",
-        "text",
-        Some(type_id("acct")),
-    );
-    for dialect in DIALECTS {
-        let live = live(dialect, Evidence::TypeId("order"));
-        for (surface, ir) in [
-            ("table-level", &table_level),
-            ("column-level", &column_level),
-        ] {
-            let error = lower(ir, dialect, &live)
-                .expect_err("a different catalog TypeID prefix must not prove this reference");
-            assert!(
-                error.contains(MISSING_METADATA),
-                "{surface} {dialect:?} prefix mismatch must stay a missing-metadata rejection: {error}"
-            );
-        }
-    }
-}
-
-#[test]
 fn a_live_text_target_without_uuid_evidence_stays_rejected() {
-    let table_level = table_constraint_ir("table_level_uuid_no_evidence", "uuid", None);
-    let column_level = column_reference_ir("column_level_uuid_no_evidence", "uuid", None);
+    let table_level = table_constraint_ir("table_level_uuid_no_evidence", "uuid");
+    let column_level = column_reference_ir("column_level_uuid_no_evidence", "uuid");
     for dialect in DIALECTS {
         let live = live(dialect, Evidence::PlainText);
         for (surface, ir) in [
@@ -309,30 +232,12 @@ fn a_live_text_target_without_uuid_evidence_stays_rejected() {
 }
 
 #[test]
-fn a_chained_typed_reference_target_without_its_own_check_stays_rejected() {
-    let table_level = table_constraint_ir("table_level_chained", "text", Some(type_id("acct")));
-    let column_level = column_reference_ir("column_level_chained", "text", Some(type_id("acct")));
-    for dialect in DIALECTS {
-        let live = live(dialect, Evidence::TypeIdWithoutCheck);
-        for (surface, ir) in [
-            ("table-level", &table_level),
-            ("column-level", &column_level),
-        ] {
-            let error = lower(ir, dialect, &live).expect_err(
-                "a chained typed reference omits its own CHECK and cannot be catalog-proved",
-            );
-            assert!(
-                error.contains(MISSING_METADATA),
-                "{surface} {dialect:?} chained TypeID target must stay rejected: {error}"
-            );
-        }
-    }
-
+fn a_chained_uuid_reference_target_without_its_own_check_stays_rejected() {
     // A chained UUID reference on MySQL/SQLite carries UUID storage but no
     // CHECK. PostgreSQL has no equivalent shape: its native `uuid` type is the
     // contract, so a chained PostgreSQL UUID target is legitimately provable.
-    let table_level = table_constraint_ir("table_level_chained_uuid", "uuid", None);
-    let column_level = column_reference_ir("column_level_chained_uuid", "uuid", None);
+    let table_level = table_constraint_ir("table_level_chained_uuid", "uuid");
+    let column_level = column_reference_ir("column_level_chained_uuid", "uuid");
     for dialect in [&zeroship_migrate_mysql::DIALECT, &zeroship_migrate_sqlite::DIALECT] {
         let live = live(dialect, Evidence::UuidWithoutCheck);
         for (surface, ir) in [

@@ -137,11 +137,9 @@ impl ValidationPolicy for PostgresValidationPolicy {
     fn lowered_reference_storage(&self, ty: &ColType) -> String {
         match ty {
             ColType::String { .. } | ColType::Text | ColType::Ref { .. } => "text".to_string(),
-            ColType::SmallInt => "smallint".to_string(),
             ColType::Int => "integer".to_string(),
             ColType::BigInt => "bigint".to_string(),
             ColType::Double => "double precision".to_string(),
-            ColType::Real => "real".to_string(),
             ColType::Boolean => "boolean".to_string(),
             ColType::Json => "jsonb".to_string(),
             ColType::Timestamp => "timestamp with time zone".to_string(),
@@ -149,7 +147,7 @@ impl ValidationPolicy for PostgresValidationPolicy {
             ColType::Uuid => "uuid".to_string(),
             ColType::Inet => "inet".to_string(),
             ColType::TextArray => "text[]".to_string(),
-            ColType::Bytes | ColType::Encrypted { .. } => "bytea".to_string(),
+            ColType::Bytes => "bytea".to_string(),
             ColType::Char { length } => format!("char({length})"),
             ColType::Vector { vector } => format!("vector({vector})"),
             ColType::GeoPoint => "geography(point,4326)".to_string(),

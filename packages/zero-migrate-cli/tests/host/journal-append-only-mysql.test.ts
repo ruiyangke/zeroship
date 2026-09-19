@@ -56,7 +56,7 @@ const MIGRATION = `import { table, t } from "@zeroship/migrate";
 export const name = "creates_one_table";
 export default {
   schema() {
-    table("t1").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+    table("t1").create({ columns: { id: t.int().required() }, primaryKey: ["id"] });
   },
 };
 `;

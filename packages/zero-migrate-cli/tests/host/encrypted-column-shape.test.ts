@@ -1,8 +1,8 @@
-// `t.encrypted({ of })` stores ciphertext in the hidden raw sibling and the
+// `t.text().encrypted()` stores ciphertext in the hidden raw sibling and the
 // creator-facing mask in the declared field. The catalogs must match that storage
 // contract on every supported target:
 //
-//   authored   secret: t.encrypted({ of: t.text() })
+//   authored   secret: t.text().encrypted()
 //
 //   PostgreSQL   __zs_raw__secret  bytea          encryption sentinel
 //                secret            text           mask sentinel
@@ -79,7 +79,7 @@ export const name = "a";
 export default {
   schema() {
     table("${TABLE}").create({
-      columns: { id: t.int().notNull(), secret: t.encrypted({ of: t.text() }) },
+      columns: { id: t.int().required(), secret: t.text().encrypted() },
       primaryKey: ["id"],
     });
   },

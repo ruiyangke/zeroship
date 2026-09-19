@@ -166,8 +166,8 @@ pub const CODE_PARTITION_BOUNDS_ILL_FORMED: &str = "PARTITION_BOUNDS_ILL_FORMED"
 /// Partition tier split: hash child drops have no portable collapse predicate.
 pub const CODE_PARTITION_HASH_DROP_UNDERIVABLE: &str = "PARTITION_HASH_DROP_UNDERIVABLE";
 
-/// The length bound for internal typed-ID prefixes, separate from TypeID formats.
-pub const MAX_ID_PREFIX_LEN: usize = 4;
+/// The length bound for typed-ID prefixes, separate from TypeID formats.
+pub const MAX_ID_PREFIX_LEN: usize = 6;
 
 /// Validate the dialect-neutral structural contract of an explicit primary-key
 /// lifecycle action.

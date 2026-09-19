@@ -86,7 +86,7 @@ scope = "all"
     `import { table, t } from "@zeroship/migrate";
 export const name = "one";
 export default { schema() {
-  table("rbv_one").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+  table("rbv_one").create({ columns: { id: t.int().required() }, primaryKey: ["id"] });
 } };
 `,
   );
@@ -95,7 +95,7 @@ export default { schema() {
     `import { table, t } from "@zeroship/migrate";
 export const name = "two";
 export default { schema() {
-  table("rbv_two").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
+  table("rbv_two").create({ columns: { id: t.int().required() }, primaryKey: ["id"] });
 } };
 `,
   );

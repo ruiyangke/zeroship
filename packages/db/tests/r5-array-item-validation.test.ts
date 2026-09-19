@@ -59,7 +59,7 @@ describe("R5 MINOR — t.array() rejects non-primitive item types", () => {
       t.array(
         t.union(
           t.object({ kind: t.literal("a"), x: t.string() }),
-          t.object({ kind: t.literal("b"), y: t.number() }),
+          t.object({ kind: t.literal("b"), y: t.double() }),
         ),
       );
       assert.fail("t.array(t.union(...)) should have thrown");
@@ -106,9 +106,9 @@ describe("R5 MINOR — t.array() rejects non-primitive item types", () => {
   test("still accepts all primitive item builders", () => {
     // Sanity — Option A must not regress any current usage.
     assert.equal(t.array(t.string()).toFieldDef().items, "string");
-    assert.equal(t.array(t.number()).toFieldDef().items, "number");
+    assert.equal(t.array(t.double()).toFieldDef().items, "number");
     assert.equal(t.array(t.boolean()).toFieldDef().items, "boolean");
-    assert.equal(t.array(t.timestamp()).toFieldDef().items, "date");
+    assert.equal(t.array(t.timestamp()).toFieldDef().items, "timestamp");
     assert.equal(t.array(t.json()).toFieldDef().items, "json");
     assert.equal(t.array(t.calendarDate()).toFieldDef().items, "calendarDate");
   });

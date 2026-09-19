@@ -229,9 +229,9 @@ async fn hr_migrations_apply_in_sequence_on_real_sqlite() {
         .iter()
         .find(|column| column.name == "id")
         .expect("employees.id is introspected");
-    assert!(
-        employee_id.value_format.is_some(),
-        "the TypeID CHECK survives the rename rebuild and remains introspectable"
+    assert_eq!(
+        employee_id.data_type, "text",
+        "the typed-id column survives the rename rebuild as its bounded text storage"
     );
     assert!(
         employee_snapshot.constraints.iter().any(|constraint| {

@@ -86,7 +86,7 @@ test("MySQL refuses a data migration whose target is non-InnoDB or carries a use
   const created = authored("create_targets", () => {
     for (const name of TARGETS) {
       table(name).create({
-        columns: { id: t.int().notNull(), stage: t.string({ length: 16 }) },
+        columns: { id: t.int().required(), stage: t.string({ length: 16 }) },
         primaryKey: ["id"],
       });
     }

@@ -10,6 +10,7 @@ use crate::{error::DbError, sql::statement::DecimalStorage};
 pub(crate) enum PlaintextType {
     String,
     Number,
+    Integer,
     ExactDecimal(DecimalStorage),
     Bytes,
 }
@@ -33,10 +34,11 @@ impl PlaintextType {
                 })?)))
             }
             LogicalType::Number => Ok(Some(Self::Number)),
+            LogicalType::Integer | LogicalType::BigInt => Ok(Some(Self::Integer)),
             LogicalType::Bytes => Ok(Some(Self::Bytes)),
             _ => Err(DbError::validation(
                 "encrypted_type_unsupported",
-                "encrypted field type must be string, number, or bytes",
+                "encrypted field type must be string, number, integer, or bytes",
             )),
         }
     }
@@ -48,6 +50,7 @@ impl PlaintextType {
                 .as_f64()
                 .filter(|n| n.is_finite())
                 .map(|n| n.to_be_bytes().to_vec()),
+            Self::Integer => value.as_i64().map(|n| n.to_be_bytes().to_vec()),
             Self::ExactDecimal(storage) => match value {
                 Value::Decimal(value) if crate::sql::decimal::valid(value) => {
                     crate::sql::decimal::quantize(value, storage)
@@ -79,6 +82,12 @@ impl PlaintextType {
                 })?;
                 Value::try_from(f64::from_be_bytes(bytes)).map_err(DbError::internal)
             }
+            Self::Integer => {
+                let bytes = bytes.try_into().map_err(|_| {
+                    DbError::internal("decrypted integer has an invalid encoded length")
+                })?;
+                Ok(Value::from(i64::from_be_bytes(bytes)))
+            }
             Self::ExactDecimal(storage) => {
                 let value = std::str::from_utf8(bytes)
                     .map_err(|_| DbError::internal("decrypted decimal is not valid UTF-8"))?;
@@ -98,6 +107,9 @@ impl PlaintextType {
                 .to_owned(),
             Self::Number => {
                 f64::from_be_bytes(bytes.try_into().expect("encoded number")).to_string()
+            }
+            Self::Integer => {
+                i64::from_be_bytes(bytes.try_into().expect("encoded integer")).to_string()
             }
             Self::ExactDecimal(_) => std::str::from_utf8(bytes)
                 .expect("encoded decimal")
@@ -143,6 +155,30 @@ mod tests {
         assert_eq!(codec.mask_text(&bytes), "9007199254740993.01");
     }
 
+    #[test]
+    fn encrypted_integer_round_trips_beyond_the_f64_exact_range() {
+        for (kind, value) in [
+            (LogicalType::Integer, Value::from(2_147_483_647_i64)),
+            (LogicalType::BigInt, Value::from(9_007_199_254_740_993_i64)),
+            (LogicalType::BigInt, Value::from(i64::MIN)),
+        ] {
+            let mut field = ColumnSchema::new(kind);
+            field.encrypted = true;
+            let codec = PlaintextType::from_field(&field).unwrap().unwrap();
+            let bytes = codec.encode(&value).unwrap();
+            assert_eq!(codec.decode(&bytes).unwrap(), value);
+        }
+        let codec = PlaintextType::Integer;
+        let exact = Value::from(9_007_199_254_740_993_i64);
+        let bytes = codec.encode(&exact).unwrap();
+        assert_eq!(codec.decode(&bytes).unwrap(), exact);
+        assert_eq!(codec.mask_text(&bytes), "9007199254740993");
+    }
+
+    #[test]
+    fn encrypted_integer_refuses_a_fractional_value() {
+        assert!(PlaintextType::Integer.encode(&Value::try_from(42.25).unwrap()).is_err());
+    }
     #[test]
     fn encrypted_plaintext_rejects_invalid_encoding() {
         assert!(PlaintextType::String.decode(&[0xff]).is_err());

@@ -107,7 +107,7 @@ function project(namespace: string | null, posture: "allow" | null): string {
 export const name = "make_doomed";
 export default {
   schema() {
-    table("doomed").create({ columns: { id: t.int().notNull(), val: t.int().notNull() }, primaryKey: ["id"] });
+    table("doomed").create({ columns: { id: t.int().required(), val: t.int().required() }, primaryKey: ["id"] });
   },
 };
 `,

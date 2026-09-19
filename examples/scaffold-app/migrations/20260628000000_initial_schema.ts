@@ -6,14 +6,14 @@ export default {
   schema() {
     table("users").create({
       columns: {
-        email: t.text().notNull().unique(),
-        name: t.text().notNull(),
+        email: t.text().required().unique(),
+        name: t.text().required(),
       },
     });
 
     table("notes").create({
       columns: {
-        title: t.text().notNull(),
+        title: t.text().required(),
         body: t.text(),
       },
     });
