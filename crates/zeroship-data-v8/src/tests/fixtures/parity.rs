@@ -445,7 +445,7 @@ pub fn dispatch_zs_metered(
         .modules(modules)
         .env_vars(env_vars)
         .plugins(plugins)
-        .runtime_descriptor(Some(descriptor.to_string()))
+        .runtime_descriptor(Some(super::harness_descriptor_document(app_id, descriptor)))
         .build();
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());

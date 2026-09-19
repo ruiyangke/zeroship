@@ -69,11 +69,29 @@ impl ThreadDbContext {
             None => ProjectKeySource::unavailable(),
         }
     }
-    /// The bindings a trusted host resolved for the apps on this thread.
-    pub(crate) fn app_binding(&self, app_id: &str, deploy_token: &str) -> Option<zeroship_data_orm::binding::DbBinding> {
+    /// One binding a trusted host resolved for an app on this thread, by the
+    /// DATABASE it names.
+    pub(crate) fn app_binding(
+        &self,
+        app_id: &str,
+        deploy_token: &str,
+        database: &zeroship_core::DatabaseId,
+    ) -> Option<zeroship_data_orm::binding::DbBinding> {
         self.app_bindings
             .as_ref()
-            .and_then(|bindings| bindings.binding_for(app_id, deploy_token))
+            .and_then(|bindings| bindings.binding_for(app_id, deploy_token, database))
+    }
+
+    /// Every binding a trusted host resolved for an app on this thread.
+    pub(crate) fn app_bindings(
+        &self,
+        app_id: &str,
+        deploy_token: &str,
+    ) -> Vec<zeroship_data_orm::binding::DbBinding> {
+        self.app_bindings
+            .as_ref()
+            .map(|bindings| bindings.bindings_for(app_id, deploy_token))
+            .unwrap_or_default()
     }
     pub(crate) fn set_app_bindings(
         &mut self,

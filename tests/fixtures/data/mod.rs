@@ -317,3 +317,26 @@ pub use tracing::init_test_tracing;
 pub(crate) mod roles;
 
 pub(crate) use test_app_id;
+
+/// The same binding at another deploy token, for a fixture that already holds
+/// one rather than only an app id.
+///
+/// A test with TWO databases holds two bindings for one app, so the app-keyed
+/// [`harness_binding_at_deploy`] cannot name the second.
+#[allow(dead_code)]
+pub fn harness_binding_at_deploy_for(
+    binding: &zeroship_data_orm::binding::DbBinding,
+    deploy_token: &str,
+) -> zeroship_data_orm::binding::DbBinding {
+    let edge = binding
+        .edge()
+        .expect("a harness binding addresses a database");
+    zeroship_data_orm::binding::DbBinding::to_database(
+        binding.app_id(),
+        deploy_token,
+        edge.database().clone(),
+        edge.binding().clone(),
+        edge.epoch(),
+    )
+    .expect("a harness binding composes a legal role name at any deploy")
+}

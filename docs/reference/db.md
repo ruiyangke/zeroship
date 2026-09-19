@@ -10,6 +10,34 @@ Every table a migration creates gets a fixed set of system columns, including
 the `id` primary key. **You do not declare them** — see
 [System columns](#system-columns).
 
+## More than one database
+
+An app may use several databases. Declare each under `databases` in
+`zeroship.jsonc`, list the ones this app uses under its `apps` entry, and name
+one of them `primary` (see [`project-config.md`](project-config.md)).
+
+```ts
+await env.db.users.find({ where: { active: true } });            // unchanged
+await env.db.transaction(async (tx) => { /* ... */ });          // unchanged
+await env.databases.analytics.events.insert({ /* ... */ });     // only if declared
+await env.databases.analytics.transaction(async (tx) => { /* ... */ });
+```
+
+`env.db` **is** the primary: `env.db === env.databases[primary]` holds by
+object identity, so there is one concept and one code path, and an app with one
+database sees no difference at all.
+
+Each handle carries its own database. A collection routes by the handle it came
+from, so collection names cannot collide across databases, and a read whose
+source belongs to another database is refused rather than silently run against
+the wrong one. A transaction covers exactly ONE database: there is no two-phase
+commit, and a statement against a second database inside a transaction on the
+first is refused.
+
+Declaring a database in `zeroship.jsonc` grants nothing. `zeroship db bind`
+grants access, and `zeroship deploy` refuses an app whose manifest names a
+database it holds no active binding to.
+
 ```ts
 // migrations/20260628000000_initial_schema.ts
 import { table, t } from "@zeroship/migrate";

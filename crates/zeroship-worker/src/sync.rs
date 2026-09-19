@@ -482,13 +482,17 @@ pub async fn fetch_app_env_supplying(
     if let Some(bindings) = bindings {
         let app = app_id.as_str();
         if !bindings.is_bound(app).map_err(|error| error.to_string())? {
-            let url = format!("{url_base}/internal/apps/{app}/binding");
+            let url = format!("{url_base}/internal/apps/{app}/bindings");
             match http_get(&url, control_authorization(service_auth)?.as_deref()).await {
                 Ok(body) => {
-                    let resolved = parse_resolved_binding(&body)?;
-                    bindings
-                        .supply(app, resolved)
-                        .map_err(|error| error.to_string())?;
+                    // EVERY live binding, because `env.databases` reaches every
+                    // database this app binds. Supplying only the first would
+                    // leave the rest unresolvable at isolate build.
+                    for resolved in parse_resolved_bindings(&body)? {
+                        bindings
+                            .supply(app, resolved)
+                            .map_err(|error| error.to_string())?;
+                    }
                 }
                 // An app with no live binding is ordinary: not every app
                 // declares a database. It is recorded and the environment is
@@ -505,15 +509,27 @@ pub async fn fetch_app_env_supplying(
     http_get(&url, control_authorization(service_auth)?.as_deref()).await
 }
 
-/// Decode Control's binding response.
+/// Decode Control's binding response: the SET of live bindings for one app.
 ///
 /// Every field is parsed through its typed id, so a malformed response is a
 /// refusal rather than a binding that composes a role name nothing created.
-fn parse_resolved_binding(
+/// One malformed entry refuses the whole response: a partial set would leave
+/// an isolate reaching for a handle the host never supplied.
+fn parse_resolved_bindings(
     body: &str,
-) -> Result<zeroship_data_orm::resolved_bindings::ResolvedBinding, String> {
+) -> Result<Vec<zeroship_data_orm::resolved_bindings::ResolvedBinding>, String> {
     let value: serde_json::Value =
         serde_json::from_str(body).map_err(|_| "invalid control binding response".to_string())?;
+    let entries = value
+        .get("bindings")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "control binding response has no bindings".to_string())?;
+    entries.iter().map(parse_resolved_binding).collect()
+}
+
+fn parse_resolved_binding(
+    value: &serde_json::Value,
+) -> Result<zeroship_data_orm::resolved_bindings::ResolvedBinding, String> {
     let field = |name: &str| -> Result<String, String> {
         value
             .get(name)

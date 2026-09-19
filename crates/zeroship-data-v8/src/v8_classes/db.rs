@@ -294,8 +294,19 @@ pub fn mint_db<'s>(
     // No binding, no `env.db`. An app the host resolved nothing for has no
     // database to reach, so the namespace is refused here rather than handed
     // back as an object whose every operation fails.
-    let binding = binding_for_isolate(scope, app_id)?;
+    let binding = primary_binding_for_isolate(scope, app_id)?;
+    mint_db_for_binding(scope, binding)
+}
 
+/// Mint a `Db` wrapper around one already-resolved binding.
+///
+/// Every handle on `env.databases` comes through here, and so does `env.db`:
+/// the primary's handle is the SAME object under both names, so there is one
+/// concept and one code path and a single-database app sees no difference.
+pub(crate) fn mint_db_for_binding<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    binding: DbBinding,
+) -> Option<v8::Local<'s, v8::Object>> {
     let class_tmpl = Db::install(scope);
     let inst_tmpl = class_tmpl.instance_template(scope);
     let obj = inst_tmpl.new_instance(scope)?;
@@ -334,9 +345,10 @@ pub fn mint_db<'s>(
     Some(obj)
 }
 
-/// Resolve the immutable app-at-deploy identity for the active isolate.
-/// Native descriptor binding and the `Db` wrapper both call this helper so
-/// cache keys cannot drift from the receivers that later read them.
+/// Resolve the immutable app-at-deploy identity for the active isolate, for
+/// ONE database. Native descriptor binding and the `Db` wrapper both call
+/// this helper so cache keys cannot drift from the receivers that later read
+/// them.
 ///
 /// **The isolate composes nothing.** The database id, the edge id and the
 /// schema epoch are control-plane facts, and the role the session narrows to is
@@ -353,18 +365,65 @@ pub fn mint_db<'s>(
 pub(crate) fn binding_for_isolate(
     scope: &mut v8::PinScope<'_, '_>,
     app_id: &str,
+    database: &zeroship_core::DatabaseId,
 ) -> Option<DbBinding> {
-    // The worker injects `deploy_hash` as `ZEROSHIP_DEPLOY_ID`; pinned workflow
-    // runtimes carry the hash they were started on. A dev or raw-JS harness
-    // sets neither, and stands on `COLD_START_DEPLOY_TOKEN`.
+    let deploy_token = deploy_token_for_isolate(scope);
+    crate::context::with(|context| context.app_binding(app_id, &deploy_token, database))
+}
+
+/// Every binding the host resolved for this app, for a caller that has no
+/// database in hand yet.
+pub(crate) fn bindings_for_isolate(
+    scope: &mut v8::PinScope<'_, '_>,
+    app_id: &str,
+) -> Vec<DbBinding> {
+    let deploy_token = deploy_token_for_isolate(scope);
+    crate::context::with(|context| context.app_bindings(app_id, &deploy_token))
+}
+
+/// The binding `env.db` reaches: the one for the PRIMARY database the
+/// deployment's descriptor document names.
+///
+/// `None` when the deployment declares no database, when it names no primary,
+/// or when the host resolved no binding for the primary it names - each of
+/// which leaves `env.db` absent rather than present and doomed.
+pub(crate) fn primary_binding_for_isolate(
+    scope: &mut v8::PinScope<'_, '_>,
+    app_id: &str,
+) -> Option<DbBinding> {
+    let document = {
+        let state = crate::v8_bridge::runtime_state(scope);
+        let json = state.borrow().runtime_descriptor.clone();
+        json.and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+    };
+    if let Some(primary) = document
+        .as_ref()
+        .and_then(zeroship_runtime::databases::primary_of)
+    {
+        let database = zeroship_core::DatabaseId::parse(&primary.database_id).ok()?;
+        return binding_for_isolate(scope, app_id, &database);
+    }
+    // A host that declared no databases but resolved exactly ONE binding has
+    // named its primary unambiguously - the raw-JS and dev harness shape. Two
+    // and no document is ambiguous, and an ambiguous `env.db` is worse than an
+    // absent one.
+    let mut resolved = bindings_for_isolate(scope, app_id);
+    (resolved.len() == 1).then(|| resolved.remove(0))
+}
+
+/// The deploy token this isolate runs under.
+///
+/// The worker injects `deploy_hash` as `ZEROSHIP_DEPLOY_ID`; pinned workflow
+/// runtimes carry the hash they were started on. A dev or raw-JS harness sets
+/// neither, and stands on `COLD_START_DEPLOY_TOKEN`.
+fn deploy_token_for_isolate(scope: &mut v8::PinScope<'_, '_>) -> String {
     let state = crate::v8_bridge::runtime_state(scope);
-    let deploy_token = state
+    let token = state
         .borrow()
         .env_vars
         .get("ZEROSHIP_DEPLOY_ID")
-        .cloned()
-        .unwrap_or_else(|| COLD_START_DEPLOY_TOKEN.to_string());
-    crate::context::with(|context| context.app_binding(app_id, &deploy_token))
+        .cloned();
+    token.unwrap_or_else(|| COLD_START_DEPLOY_TOKEN.to_string())
 }
 
 #[cfg(test)]

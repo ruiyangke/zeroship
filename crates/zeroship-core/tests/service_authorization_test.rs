@@ -33,7 +33,7 @@ const CATALOG: &[ServiceEndpoint] = &[
     endpoints::CONTROL_APP,
     endpoints::CONTROL_APP_ENV,
     endpoints::CONTROL_APP_DATA_KEY,
-    endpoints::CONTROL_APP_BINDING,
+    endpoints::CONTROL_APP_BINDINGS,
     endpoints::CDC_SUBSCRIBE,
     endpoints::CONTROL_WORKER_RETIRE,
     endpoints::CONTROL_WORKER_RENEW,
@@ -246,10 +246,10 @@ fn endpoint_catalog_records_exact_measured_operations() {
             "/internal/apps/{app_id}/data-key",
         ),
         (
-            endpoints::CONTROL_APP_BINDING,
+            endpoints::CONTROL_APP_BINDINGS,
             "control",
             "GET",
-            "/internal/apps/{app_id}/binding",
+            "/internal/apps/{app_id}/bindings",
         ),
         (
             endpoints::CONTROL_WORKER_RETIRE,
@@ -369,7 +369,7 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
             endpoints::CONTROL_APP_DATA_KEY,
             // And the app's resolved database binding, which the worker
             // composes no part of.
-            endpoints::CONTROL_APP_BINDING,
+            endpoints::CONTROL_APP_BINDINGS,
             // An instance may retire ITSELF on graceful exit, and nothing
             // else: the endpoint takes no selector.
             endpoints::CONTROL_WORKER_RETIRE,

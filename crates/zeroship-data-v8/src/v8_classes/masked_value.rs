@@ -338,7 +338,7 @@ impl MaskedValue {
                         // resolve with the declared plaintext type directly.
                         OpResult::JsValue {
                             resolver,
-                            value: crate::v8_values::resolve(result.plaintext, false),
+                            value: crate::v8_values::resolve(result.plaintext),
                             request_id,
                         }
                     }
@@ -454,7 +454,7 @@ impl MaskedValue {
                     }
                     OpResult::JsValue {
                         resolver,
-                        value: crate::v8_values::resolve(Value::Object(payload), false),
+                        value: crate::v8_values::resolve(Value::Object(payload)),
                         request_id,
                     }
                 }
@@ -538,20 +538,14 @@ pub(crate) fn mint_masked_value<'s>(
 pub fn rehydrate_masked_values<'s, 'a>(
     scope: &mut v8::PinScope<'s, 'a>,
     value: v8::Local<'s, v8::Value>,
+    binding: DbBinding,
 ) -> Option<v8::Local<'s, v8::Value>> {
-    let app_id = {
-        let state = runtime_state(scope);
-        let app_id = state.borrow().app_id().map(str::to_owned);
-        app_id.unwrap_or_else(|| zeroship_core::app_id::LOCAL_DEV_APP_ID.to_string())
-    };
-    // Same identity `v8_classes::db::mint_db` captures, through the same one
-    // helper: a pinned workflow isolate and a current isolate of one app hold
-    // different descriptor entries, so a `MaskedValue` minted in one must not
-    // resolve its column metadata out of the other. Routing through
-    // `binding_for_isolate` is also what keeps the app-id-to-schema derivation
-    // to a single site - and it refuses an app id that is not a legal schema
-    // name, in which case there is nothing to rehydrate against.
-    let binding = crate::v8_classes::db::binding_for_isolate(scope, &app_id)?;
+    // THE BINDING THE ROWS CAME FROM, carried here from the dispatch that
+    // produced them. A pinned workflow isolate and a current isolate of one app
+    // hold different descriptor entries, and an app on two databases holds two
+    // schemas at once, so a `MaskedValue` must resolve its column metadata out
+    // of the database it was read from rather than out of whatever `env.db`
+    // happens to name.
     let mut walker = RehydrateWalker {
         binding,
         depth: 0,
@@ -803,7 +797,12 @@ mod tests {
             scope,
             Some(zeroship_data_orm::protection::mask_pass::mask_sentinel_signature()),
         );
-        let value = rehydrate_masked_values(scope, signed.into()).unwrap();
+        let value = rehydrate_masked_values(
+            scope,
+            signed.into(),
+            crate::tests::fixtures::harness_binding(app.as_str()),
+        )
+        .unwrap();
         let object = v8::Local::<v8::Object>::try_from(value).unwrap();
         assert!(MaskedValue::is_instance(scope, object.into()));
         let field = object.get_internal_field(scope, 0).unwrap();
