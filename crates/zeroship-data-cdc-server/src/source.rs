@@ -29,10 +29,13 @@ pub(crate) const SLOT_PREFIX: &str = "__zs_relay_";
 /// against the pool this process already reads `zeroship.worker_instances`
 /// from when it verifies a worker.
 ///
-/// **An app holds exactly one database today, so "the app's binding" is
+/// **An app holds exactly one database today, so "the app.s binding" is
 /// unambiguous.** When an app can hold several, the subscribe request has to
 /// name WHICH database, and that is a wire-contract change: every producer,
-/// consumer, fixture and doc in one patch.
+/// consumer, fixture and doc in one patch. Until then this REFUSES a second
+/// live binding rather than ordering and taking the first: picking silently
+/// would stream one database to a subscriber expecting another, and the day
+/// that becomes possible is the day nobody is looking at this function.
 async fn bound_database_schema(pool: &Pool, app: &str) -> Result<String, Error> {
     let rows = pool
         .query(
@@ -44,10 +47,15 @@ async fn bound_database_schema(pool: &Pool, app: &str) -> Result<String, Error> 
                 AND b.observed_generation >= b.generation \
                 AND d.status = 'active' \
               ORDER BY b.id \
-              LIMIT 1",
+              LIMIT 2",
             &[&app],
         )
         .await?;
+    if rows.len() > 1 {
+        return Err("app holds more than one live database binding; the subscribe request must \
+                    name which database"
+            .into());
+    }
     let row = rows.first().ok_or("app has no live database binding")?;
     let database: String = row.try_get(0)?;
     let database = zeroship_core::DatabaseId::parse(&database)?;
