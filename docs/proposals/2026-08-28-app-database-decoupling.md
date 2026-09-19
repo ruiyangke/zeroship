@@ -1130,7 +1130,23 @@ and a re-bind would either resurrect a dropped role or collide with
 declaration names, which is the same sweep that must reap a role left by a create whose row rolled
 back. `revoking` and `revoked` stay in the CHECK for the reconciler's own use.
 
-**Delete a database.** Only when its binding set is empty, and the refusal names the bound apps.
+**Delete a database MARKS the row `deleting`; it does not remove it.** Only when its binding set
+is empty, and the refusal names the bound apps. The row survives because the schema and its data
+survive: control is not the process that can drop them, and the reconciler that can must be TOLD
+to, never left to infer it. Absence is the one thing a reconciler cannot read safely - a failed or
+partial read of the declarations is indistinguishable from "nothing is declared here", and under
+that reading a network error destroys a tenant's data. So the two sweeps are deliberately
+asymmetric: a ROLE is reaped by absence, because the next pass re-grants it, and a SCHEMA is
+dropped only against an explicit `deleting` row, because nothing re-creates the data. The
+`databases_status_check` already admits the value. The reconciler removes the row once the drop
+has committed, which is also what frees the name for reuse.
+
+Two consequences worth stating rather than discovering. A database being deleted still holds its
+name under `databases_project_name_key`, so re-creating one by the same name waits for the drop -
+correct, because the old schema is still there. And `bind_database` refuses a `deleting` database:
+bind and delete serialize on the same organization lock, so without that refusal a bind admitted
+just after the mark would hand an app a binding to a schema already condemned.
+
 The step order in `crates/zeroship-data-orm/src/cdc/lifecycle.rs` and
 `crates/zeroship-data-v8/src/service.rs` is right; each step re-keys:
 
