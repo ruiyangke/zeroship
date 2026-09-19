@@ -98,13 +98,6 @@ http://control.{$ZEROSHIP_DOMAIN:zeroship.localhost} {
 }
 
 # console.<domain> - the creator console.
-#
-# NOTE, 2026-08-11: this block currently proxies to a console that THIS IMAGE
-# DOES NOT SHIP. apps/zeroship-builder was extracted out of the repo by
-# 8dbe4a8d4, and control no longer runs with --bootstrap-console, so no `console`
-# app is seeded and the gateway will not resolve this host to anything. The
-# block is kept so the route is ready when the console is restored from its own
-# repo; until then, expect the gateway's not-found body here. See task #318.
 http://console.{$ZEROSHIP_DOMAIN:zeroship.localhost} {
 	reverse_proxy gateway:8000
 }
