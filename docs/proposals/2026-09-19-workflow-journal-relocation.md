@@ -93,7 +93,19 @@ off whichever binding `provider.resolve(scope)` returned. With one binding that 
 deterministic. With several it is not, and an app's runs could split across two schemas with
 each half invisible to the other and nothing raising.
 
-Only the fourth needs the decoupling to matter. The first three are true now.
+The fourth needs plurality to reach an app before it bites, and that is close rather than
+hypothetical: `feat/dbd-plurality` makes `SuppliedAppBindings` hold a set per app, gives
+`binding_for` a `&DatabaseId` and adds `bindings_for`, while `Manifest.runtime_descriptor`
+becomes one entry per database. The worker still reads a singular
+`.storage.binding.schema()` in two places in `workflow_creator.rs`, so when that lands the
+journal's home stops being a lookup and becomes a choice - and "the primary entry" is the
+obvious answer only until a creator changes which database is primary, at which point every
+existing run is in the schema the app no longer points at.
+
+Relocating removes the question rather than answering it. A journal in `workflow_manager`
+has no creator binding to pick.
+
+The first three are true now.
 
 ---
 
