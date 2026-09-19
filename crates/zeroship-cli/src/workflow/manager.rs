@@ -684,7 +684,7 @@ impl JobTransport for LocalTransport {
                 async move {
                     manager
                         .coordinator
-                        .claim_job(&manager.worker, &scope, ceiling, || {
+                        .claim_job(&manager.worker, &scope, Ok(ceiling), || {
                             ready(Ok(manager.worker.clone()))
                         })
                         .await
