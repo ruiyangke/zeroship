@@ -52,7 +52,7 @@ pub struct SqliteBackend {
     session: Rc<SqliteSession>,
     lock_registry: Rc<InProcessLockRegistry>,
     db_dir: PathBuf,
-    app_id_cache: RefCell<HashSet<String>>,
+    alias_cache: RefCell<HashSet<String>>,
     /// Keeps change publication alive with the backend.
     _publisher: compio::runtime::JoinHandle<()>,
     /// Project encryption keys supplied by the trusted host.
@@ -86,7 +86,7 @@ impl SqliteBackend {
         crate::backend::sqlite::row_json::typed_rows_to_values(&typed)
     }
 
-    /// Open a control file and place per-app database files beside it.
+    /// Open a control file and place one file per database beside it.
     pub async fn open(
         path: impl AsRef<Path>,
         sink: Arc<dyn ChangeSink>,
@@ -186,7 +186,7 @@ impl SqliteBackend {
             session,
             lock_registry: Rc::new(InProcessLockRegistry::new()),
             db_dir,
-            app_id_cache: RefCell::new(HashSet::new()),
+            alias_cache: RefCell::new(HashSet::new()),
             _publisher,
             key_store,
         }
@@ -379,31 +379,30 @@ impl SqliteBackend {
     /// Private: reaching it without a binding would attach a database whose
     /// tenant nothing recorded, and a change on it would then be published to
     /// no app at all.
-    async fn attach_alias_file(&self, app_id: &str) -> Result<(), DbError> {
+    async fn attach_alias_file(&self, alias: &str) -> Result<(), DbError> {
         // Idempotent guard. The cache must be checked before the
         // ATTACH because SQLite hard-errors on a duplicate ATTACH of
         // the same alias ("database <alias> is already in use"); the
         // PG side gets idempotency for free via `IF NOT EXISTS`.
-        if self.app_id_cache.borrow().contains(app_id) {
+        if self.alias_cache.borrow().contains(alias) {
             return Ok(());
         }
 
-        // Compute the per-app file path. `to_string_lossy` is safe in
+        // Compute the database file path. `to_string_lossy` is safe in
         // practice — see the rustdoc note above.
-        let file_path = self.db_dir.join(format!("zs-{app_id}.sqlite"));
+        let file_path = self.db_dir.join(format!("zs-{alias}.sqlite"));
         let path_str = file_path.to_string_lossy().into_owned();
 
         // Route through the session actor's `attach` helper. The
         // actor's `run_attach` constructs the formatted ATTACH SQL
         // inline (the alias is double-quote-escaped — matches the
         // dialect's `quote_ident` byte-for-byte — and the path's
-        // single quotes are doubled). The ATTACH is spelled ONLY there:
-        // a dialect-level template for it used to exist alongside, with
-        // no consumer, because the actor needs the file_path substituted
-        // upstream anyway.
-        match self.session.attach(app_id, &path_str).await {
+        // single quotes are doubled). The ATTACH is spelled ONLY there,
+        // because the actor needs the file_path substituted upstream
+        // anyway, so a dialect-level template would carry no consumer.
+        match self.session.attach(alias, &path_str).await {
             Ok(()) => {
-                self.app_id_cache.borrow_mut().insert(app_id.to_string());
+                self.alias_cache.borrow_mut().insert(alias.to_string());
                 Ok(())
             }
             Err(e) => {
@@ -416,7 +415,7 @@ impl SqliteBackend {
                 // then return Ok. Other errors propagate verbatim.
                 let msg = format!("{e}");
                 if msg.contains("already in use") || msg.contains("already attached") {
-                    self.app_id_cache.borrow_mut().insert(app_id.to_string());
+                    self.alias_cache.borrow_mut().insert(alias.to_string());
                     Ok(())
                 } else {
                     Err(e)
