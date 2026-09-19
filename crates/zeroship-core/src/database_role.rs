@@ -1,18 +1,33 @@
-//! PostgreSQL role names shared by the migration and data planes.
+//! `PostgreSQL` role names shared by the migration and data planes.
 //!
-//! PostgreSQL limits identifier length through `NAMEDATALEN`. It truncates a
+//! `PostgreSQL` limits identifier length through `NAMEDATALEN`. It truncates a
 //! longer name with only a notice, so a role name
 //! used as an authorization fence must be refused rather than shortened. A
 //! truncation could otherwise make a newly derived name resolve to a role that
 //! was meant to be reaped.
+//!
+//! The database-keyed names are where that refusal is load-bearing rather than
+//! defensive. [`binding_role_name`] carries the schema epoch as the LAST
+//! component of `zs_bind_<binding>_e<epoch>`, so a truncation drops the epoch
+//! digits first and two epochs of one binding land on one role - the role the
+//! newer epoch exists to leave behind. The collision and the refusal that
+//! prevents it are exhibited by
+//! `tests::truncating_an_over_long_binding_role_would_collapse_two_epochs`.
+//!
+//! Every composer here takes text and returns text, because a role name is a
+//! physical identifier and not an identity: the app-keyed composer takes a
+//! schema name that can differ from the platform id outright, and this is the
+//! layer at which a name too long for `PostgreSQL` can be exhibited.
+//! `zeroship_core::database_derivation` is the typed seam over the
+//! database-keyed composers.
 
-/// PostgreSQL's default identifier limit (`NAMEDATALEN - 1`), in bytes.
+/// `PostgreSQL`'s default identifier limit (`NAMEDATALEN - 1`), in bytes.
 pub const POSTGRES_IDENTIFIER_MAX_BYTES: usize = 63;
 
-/// Why a per-app PostgreSQL role name could not be composed safely.
+/// Why a per-app `PostgreSQL` role name could not be composed safely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum PerAppRoleNameError {
-    /// The complete, unmodified role name does not fit in a PostgreSQL
+    /// The complete, unmodified role name does not fit in a `PostgreSQL`
     /// identifier. The composer never truncates or hashes authorization roles.
     #[error("per-app PostgreSQL role name is {actual_bytes} bytes; maximum is {max_bytes} bytes")]
     TooLong {
@@ -21,19 +36,110 @@ pub enum PerAppRoleNameError {
     },
 }
 
-/// Compose the per-app PostgreSQL role name.
+/// A composed role name `PostgreSQL` would have truncated, refused instead.
+///
+/// One failure mode, so one type: a composer here either returns the complete
+/// name or this. There is no shortening arm to select between.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("derived PostgreSQL role name is {actual_bytes} bytes; maximum is {max_bytes} bytes")]
+pub struct RoleNameTooLong {
+    pub actual_bytes: usize,
+    pub max_bytes: usize,
+}
+
+/// The privilege set one binding holds on one database.
+///
+/// The migrator is deliberately absent: it owns the schema and is named by no
+/// binding, so a capability value can never compose the owner's role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum DatabaseCapability {
+    /// `USAGE` on the schema plus the column-listed DML grants.
+    ReadWrite,
+    /// `USAGE` on the schema plus the column-listed `SELECT` grants.
+    ReadOnly,
+}
+
+impl DatabaseCapability {
+    /// The trailing component that distinguishes this capability's role from
+    /// the other's.
+    #[must_use]
+    pub const fn role_suffix(self) -> &'static str {
+        match self {
+            Self::ReadWrite => "rw",
+            Self::ReadOnly => "ro",
+        }
+    }
+}
+
+/// Compose the per-app `PostgreSQL` role name.
 ///
 /// The input is the physical schema name. It can differ from the platform
-/// AppId; preserving its spelling keeps distinct schemas in distinct roles.
+/// `AppId`; preserving its spelling keeps distinct schemas in distinct roles.
 ///
 /// # Errors
 ///
-/// Returns [`PerAppRoleNameError::TooLong`] rather than allowing PostgreSQL to
+/// Returns [`PerAppRoleNameError::TooLong`] rather than allowing `PostgreSQL` to
 /// silently truncate a name beyond [`POSTGRES_IDENTIFIER_MAX_BYTES`].
 pub fn per_app_role_name(schema_name: &str) -> Result<String, PerAppRoleNameError> {
-    let role = format!("app_{schema_name}_role");
+    refuse_truncation(format!("app_{schema_name}_role")).map_err(|too_long| {
+        PerAppRoleNameError::TooLong {
+            actual_bytes: too_long.actual_bytes,
+            max_bytes: too_long.max_bytes,
+        }
+    })
+}
+
+/// Compose the role that OWNS a database's schema and applies its DDL.
+///
+/// It is held by the migration service alone. No binding names it, so no app
+/// can reach schema change through role membership.
+///
+/// # Errors
+///
+/// [`RoleNameTooLong`] rather than a name `PostgreSQL` would truncate onto
+/// another database's.
+pub fn database_migrator_role_name(database_id: &str) -> Result<String, RoleNameTooLong> {
+    refuse_truncation(format!("zs_db_{database_id}_mig"))
+}
+
+/// Compose one of a database's two capability roles.
+///
+/// A binding role inherits exactly one of these, which is what keeps
+/// per-statement confinement to one database while revoking one app's edge
+/// still bites.
+///
+/// # Errors
+///
+/// [`RoleNameTooLong`] rather than a truncated name. Truncation here would
+/// drop the capability suffix and hand a readonly binding the readwrite role.
+pub fn database_capability_role_name(
+    database_id: &str,
+    capability: DatabaseCapability,
+) -> Result<String, RoleNameTooLong> {
+    refuse_truncation(format!("zs_db_{database_id}_{}", capability.role_suffix()))
+}
+
+/// Compose the role one binding narrows to at one schema epoch.
+///
+/// The epoch is last, which is exactly why this composer may not truncate:
+/// `PostgreSQL` drops the tail, so a shortened name is the SAME name at every
+/// epoch. The role is then no longer the thing that expires, and an isolate
+/// built against a retired epoch keeps its access.
+///
+/// # Errors
+///
+/// [`RoleNameTooLong`] rather than a name `PostgreSQL` would truncate.
+pub fn binding_role_name(binding_id: &str, epoch: u32) -> Result<String, RoleNameTooLong> {
+    refuse_truncation(format!("zs_bind_{binding_id}_e{epoch}"))
+}
+
+/// Return `role` unchanged, or refuse it if `PostgreSQL` would have shortened it.
+///
+/// The one place the limit is compared, so a new composer cannot acquire a
+/// different opinion about where it sits.
+fn refuse_truncation(role: String) -> Result<String, RoleNameTooLong> {
     if role.len() > POSTGRES_IDENTIFIER_MAX_BYTES {
-        return Err(PerAppRoleNameError::TooLong {
+        return Err(RoleNameTooLong {
             actual_bytes: role.len(),
             max_bytes: POSTGRES_IDENTIFIER_MAX_BYTES,
         });
@@ -91,6 +197,186 @@ mod tests {
                 actual_bytes: 65,
                 max_bytes: POSTGRES_IDENTIFIER_MAX_BYTES,
             })
+        );
+    }
+
+    /// The spellings the cluster reconciler provisions, pinned to their bytes.
+    #[test]
+    fn database_keyed_role_names_are_pinned_spellings() {
+        assert_eq!(
+            database_migrator_role_name("dbs_demo").unwrap(),
+            "zs_db_dbs_demo_mig"
+        );
+        assert_eq!(
+            database_capability_role_name("dbs_demo", DatabaseCapability::ReadWrite).unwrap(),
+            "zs_db_dbs_demo_rw"
+        );
+        assert_eq!(
+            database_capability_role_name("dbs_demo", DatabaseCapability::ReadOnly).unwrap(),
+            "zs_db_dbs_demo_ro"
+        );
+        assert_eq!(
+            binding_role_name("bnd_demo", 7).unwrap(),
+            "zs_bind_bnd_demo_e7"
+        );
+    }
+
+    /// The four names one database and one binding produce are four roles.
+    ///
+    /// The migrator owns the schema and the two capability roles carry
+    /// different grants, so any pair collapsing onto one name would hand an
+    /// app authority the design withheld.
+    #[test]
+    fn one_database_produces_four_distinct_roles() {
+        let names = [
+            database_migrator_role_name("dbs_demo").unwrap(),
+            database_capability_role_name("dbs_demo", DatabaseCapability::ReadWrite).unwrap(),
+            database_capability_role_name("dbs_demo", DatabaseCapability::ReadOnly).unwrap(),
+            binding_role_name("bnd_demo", 1).unwrap(),
+        ];
+        let mut distinct = names.to_vec();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(distinct.len(), names.len(), "composed {names:?}");
+    }
+
+    #[test]
+    fn database_keyed_role_names_do_not_collapse_distinct_databases() {
+        assert_ne!(
+            database_migrator_role_name("dbs-demo").unwrap(),
+            database_migrator_role_name("dbs_demo").unwrap()
+        );
+        assert_ne!(
+            database_capability_role_name("dbs-demo", DatabaseCapability::ReadWrite).unwrap(),
+            database_capability_role_name("dbs_demo", DatabaseCapability::ReadWrite).unwrap()
+        );
+        assert_ne!(
+            binding_role_name("bnd-demo", 1).unwrap(),
+            binding_role_name("bnd_demo", 1).unwrap()
+        );
+    }
+
+    /// The composer accepts a name that exactly fills the identifier.
+    ///
+    /// The control for the refusal below: without it, a composer that refused
+    /// everything would pass that arm.
+    #[test]
+    fn binding_role_name_accepts_exactly_63_bytes() {
+        let binding = "b".repeat(POSTGRES_IDENTIFIER_MAX_BYTES - "zs_bind__e1".len());
+        let role = binding_role_name(&binding, 1).expect("63-byte role name");
+        assert_eq!(role.len(), POSTGRES_IDENTIFIER_MAX_BYTES);
+        assert_eq!(role, format!("zs_bind_{binding}_e1"));
+    }
+
+    #[test]
+    fn binding_role_name_refuses_64_bytes_without_shortening() {
+        let binding = "b".repeat(POSTGRES_IDENTIFIER_MAX_BYTES - "zs_bind__e1".len() + 1);
+        assert_eq!(
+            binding_role_name(&binding, 1),
+            Err(RoleNameTooLong {
+                actual_bytes: POSTGRES_IDENTIFIER_MAX_BYTES + 1,
+                max_bytes: POSTGRES_IDENTIFIER_MAX_BYTES,
+            })
+        );
+    }
+
+    /// What truncation would cost, exhibited rather than described.
+    ///
+    /// The epoch is the last component, so `PostgreSQL` shortening the name
+    /// eats the epoch digits first. This arm builds the two names the composer
+    /// is handed - independently of the composer, so the composed shape is
+    /// checked too - shows that their first
+    /// [`POSTGRES_IDENTIFIER_MAX_BYTES`] bytes are ONE name, and then shows
+    /// the composer refusing both rather than returning it.
+    #[test]
+    fn truncating_an_over_long_binding_role_would_collapse_two_epochs() {
+        let binding = "b".repeat(POSTGRES_IDENTIFIER_MAX_BYTES - "zs_bind__e".len());
+        let first = format!("zs_bind_{binding}_e1");
+        let second = format!("zs_bind_{binding}_e2");
+
+        assert_ne!(first, second, "the two epochs are two names in full");
+        assert_eq!(first.len(), POSTGRES_IDENTIFIER_MAX_BYTES + 1);
+        assert_eq!(second.len(), POSTGRES_IDENTIFIER_MAX_BYTES + 1);
+        assert_eq!(
+            first[..POSTGRES_IDENTIFIER_MAX_BYTES],
+            second[..POSTGRES_IDENTIFIER_MAX_BYTES],
+            "the collision being prevented: shortened to the identifier limit, \
+             two epochs of one binding are one role"
+        );
+
+        for epoch in [1u32, 2] {
+            assert_eq!(
+                binding_role_name(&binding, epoch),
+                Err(RoleNameTooLong {
+                    actual_bytes: POSTGRES_IDENTIFIER_MAX_BYTES + 1,
+                    max_bytes: POSTGRES_IDENTIFIER_MAX_BYTES,
+                }),
+                "epoch {epoch} must be refused, not shortened onto its neighbour"
+            );
+        }
+    }
+
+    /// A long epoch is refused on the same terms as a long id.
+    ///
+    /// The digits are the part of this name that grows at runtime, so the
+    /// limit has to be compared against the composed name and not against its
+    /// id half.
+    #[test]
+    fn binding_role_name_counts_the_epoch_digits() {
+        let binding = "b".repeat(POSTGRES_IDENTIFIER_MAX_BYTES - "zs_bind__e".len() - 1);
+        assert_eq!(
+            binding_role_name(&binding, 9)
+                .expect("one digit fits")
+                .len(),
+            POSTGRES_IDENTIFIER_MAX_BYTES
+        );
+        assert_eq!(
+            binding_role_name(&binding, 10),
+            Err(RoleNameTooLong {
+                actual_bytes: POSTGRES_IDENTIFIER_MAX_BYTES + 1,
+                max_bytes: POSTGRES_IDENTIFIER_MAX_BYTES,
+            }),
+            "the second digit is past the limit"
+        );
+    }
+
+    #[test]
+    fn database_keyed_role_names_refuse_rather_than_shorten() {
+        let database = "d".repeat(POSTGRES_IDENTIFIER_MAX_BYTES);
+        assert_eq!(
+            database_migrator_role_name(&database),
+            Err(RoleNameTooLong {
+                actual_bytes: "zs_db__mig".len() + POSTGRES_IDENTIFIER_MAX_BYTES,
+                max_bytes: POSTGRES_IDENTIFIER_MAX_BYTES,
+            })
+        );
+        for capability in [DatabaseCapability::ReadWrite, DatabaseCapability::ReadOnly] {
+            assert_eq!(
+                database_capability_role_name(&database, capability),
+                Err(RoleNameTooLong {
+                    actual_bytes: "zs_db__rw".len() + POSTGRES_IDENTIFIER_MAX_BYTES,
+                    max_bytes: POSTGRES_IDENTIFIER_MAX_BYTES,
+                }),
+                "{capability:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn database_keyed_role_name_limits_count_bytes() {
+        let database = "\u{e9}".repeat(29);
+        assert_eq!(
+            database_migrator_role_name(&database),
+            Err(RoleNameTooLong {
+                actual_bytes: "zs_db__mig".len() + 58,
+                max_bytes: POSTGRES_IDENTIFIER_MAX_BYTES,
+            }),
+            "a two-byte character counts twice against NAMEDATALEN"
+        );
+        assert_eq!(
+            database.chars().count(),
+            29,
+            "the control: the same input is well under the limit counted in chars"
         );
     }
 }
