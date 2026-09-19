@@ -39,6 +39,11 @@
       "types": "./dist/rules/no-nested-step.d.ts",
       "import": "./dist/rules/no-nested-step.js",
       "default": "./dist/rules/no-nested-step.js"
+    },
+    "./rules/no-step-catch-without-rethrow": {
+      "types": "./dist/rules/no-step-catch-without-rethrow.d.ts",
+      "import": "./dist/rules/no-step-catch-without-rethrow.js",
+      "default": "./dist/rules/no-step-catch-without-rethrow.js"
     }
   },
   "scripts": {
