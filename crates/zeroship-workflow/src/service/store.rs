@@ -73,6 +73,27 @@ fn invalid_row(key: &str) -> WorkflowServiceError {
     WorkflowServiceError::Internal(format!("invalid workflow database field {key}"))
 }
 
+/// How long the customer's database clock may take to answer before the
+/// journal names it as the stall.
+///
+/// This is a fact about the clock, and it stays independent of
+/// `delivery::ATTEMPT_IO_CEILING` even though the two agree today. Callers
+/// outside a delivery attempt reach this diagnosis on their own, as do the
+/// attempts that budget themselves by their captured lease. An attempt that
+/// budgets itself by `delivery::attempt_budget` arms its own deadline first,
+/// and where the lease and the task leave room that deadline is this same
+/// value; `compio::time::timeout` then resolves the pair through
+/// `futures::select!`, which shuffles its branches, so the attempt names the
+/// clock for some stalls and reports `Timeout` for others. A budget shorter
+/// than this one always reports `Timeout`, which is the truer answer there.
+/// Tightening this value to settle the pair would make a storage ceiling
+/// depend on a delivery one, and the retry path already treats both alike.
+const CLOCK_CEILING: Duration = Duration::from_secs(5);
+
+fn clock_unavailable() -> WorkflowServiceError {
+    WorkflowServiceError::Unavailable("workflow database clock unavailable".into())
+}
+
 /// Customer journal and database clock on the host's compio thread.
 #[derive(Clone, Debug)]
 pub struct OrmStore {
@@ -126,14 +147,12 @@ impl OrmStore {
     pub async fn begin(&self) -> Result<Transaction, WorkflowServiceError> {
         // Resolve lazy SQLite attachments before reserving the journal writer.
         compio::time::timeout(
-            Duration::from_secs(5),
+            CLOCK_CEILING,
             self.clock
                 .prepare_for_app(self.binding.app_id(), self.binding.schema()),
         )
         .await
-        .map_err(|_| {
-            WorkflowServiceError::Unavailable("workflow database clock unavailable".into())
-        })??;
+        .map_err(|_| clock_unavailable())??;
         let (opened, receive_database) = oneshot::channel();
         let (settle, receive_intent) = oneshot::channel();
         let (finished, receive_result) = oneshot::channel();
@@ -323,14 +342,12 @@ impl Transaction {
             _ => return Err(schema::incompatible()),
         };
         let rows = compio::time::timeout(
-            Duration::from_secs(5),
+            CLOCK_CEILING,
             self.clock
                 .query(self.binding.app_id(), self.binding.schema(), sql, &[]),
         )
         .await
-        .map_err(|_| {
-            WorkflowServiceError::Unavailable("workflow database clock unavailable".into())
-        })??;
+        .map_err(|_| clock_unavailable())??;
         rows.into_iter()
             .next()
             .ok_or_else(|| invalid_row("now"))
