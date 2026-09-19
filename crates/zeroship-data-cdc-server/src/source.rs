@@ -20,6 +20,40 @@ pub(crate) struct Limits {
 
 pub(crate) const SLOT_PREFIX: &str = "__zs_relay_";
 
+/// The physical schema of the one database this app is bound to.
+///
+/// **Read from Control's rows, never composed here.** The database id is a
+/// control-plane fact and `db_<dbs>` is derived from it, so a relay that
+/// composed a schema from the app id would name something no reconciler
+/// created. This is the same read Control's binding endpoint performs, taken
+/// against the pool this process already reads `zeroship.worker_instances`
+/// from when it verifies a worker.
+///
+/// **An app holds exactly one database today, so "the app's binding" is
+/// unambiguous.** When an app can hold several, the subscribe request has to
+/// name WHICH database, and that is a wire-contract change: every producer,
+/// consumer, fixture and doc in one patch.
+async fn bound_database_schema(pool: &Pool, app: &str) -> Result<String, Error> {
+    let rows = pool
+        .query(
+            "SELECT b.database_id \
+               FROM zeroship.database_bindings b \
+               JOIN zeroship.databases d ON d.id = b.database_id \
+              WHERE b.app_id = $1 \
+                AND b.status = 'active' \
+                AND b.observed_generation >= b.generation \
+                AND d.status = 'active' \
+              ORDER BY b.id \
+              LIMIT 1",
+            &[&app],
+        )
+        .await?;
+    let row = rows.first().ok_or("app has no live database binding")?;
+    let database: String = row.try_get(0)?;
+    let database = zeroship_core::DatabaseId::parse(&database)?;
+    Ok(zeroship_core::database_derivation::schema_name(&database))
+}
+
 pub(crate) fn slot_name(app: &str) -> Result<String, Error> {
     let publication = zeroship_core::replication_names::publication_name(app)?;
     let token = publication
@@ -87,6 +121,12 @@ async fn capture(
     {
         return Err("app publication is absent".into());
     }
+    // THE TENANT BOUNDARY IN THIS STREAM. The publication is relay-owned and
+    // spans every database on the datastore, so its membership is NOT a filter:
+    // reading namespaces out of it would admit every co-tenant's relations to
+    // this subscriber. What separates them is this comparison, against the
+    // schema of the ONE database this app is bound to.
+    let schema = bound_database_schema(pool, app).await?;
     // A source restart begins a new snapshot contract. Discard any inactive
     // previous slot rather than claiming that an in-memory queue is durable.
     pool.query("SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1 AND NOT active AND database = current_database()", &[&slot]).await?;
@@ -121,7 +161,7 @@ async fn capture(
                         name,
                         ..
                     } => {
-                        if namespace == app {
+                        if namespace == schema {
                             if !relations.contains_key(&rel_id) && relations.len() >= max_relations
                             {
                                 return Err("relation cache capacity exhausted".into());

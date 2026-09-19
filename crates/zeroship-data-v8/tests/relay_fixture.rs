@@ -63,6 +63,47 @@ impl RelayFixture {
             "INSERT INTO zeroship.worker_instances (id, ring_key, public_key, advertise_host, advertise_port, status) VALUES ($1, $2, $2, '127.0.0.1'::inet, 8080, 'active')",
             &[&instance, &key.verifying_key_bytes().to_vec()],
         ).await.unwrap();
+        // Stand-ins for the two Control tables the relay reads to learn which
+        // schema a subscriber is entitled to. The relay composes no schema from
+        // the app id, so without these rows its capture refuses rather than
+        // streaming a namespace it guessed.
+        let edge = binding
+            .edge()
+            .expect("the fixture binding addresses a database");
+        let database = edge.database().as_str().to_owned();
+        admin.batch_execute(&format!(
+            "CREATE TABLE IF NOT EXISTS zeroship.databases (
+               id text PRIMARY KEY, status text NOT NULL, schema_epoch int NOT NULL DEFAULT 1
+             );
+             CREATE TABLE IF NOT EXISTS zeroship.database_bindings (
+               id text PRIMARY KEY, app_id text NOT NULL, database_id text NOT NULL,
+               status text NOT NULL, generation bigint NOT NULL DEFAULT 1,
+               observed_generation bigint NOT NULL DEFAULT 1
+             );
+             GRANT SELECT (id, status, schema_epoch) ON zeroship.databases TO \"{relay_role}\";
+             GRANT SELECT (id, app_id, database_id, status, generation, observed_generation)
+               ON zeroship.database_bindings TO \"{relay_role}\";"
+        )).await.unwrap();
+        admin
+            .execute(
+                "INSERT INTO zeroship.databases (id, status) VALUES ($1, 'active') \
+                 ON CONFLICT (id) DO NOTHING",
+                &[&database],
+            )
+            .await
+            .unwrap();
+        admin
+            .execute(
+                "INSERT INTO zeroship.database_bindings (id, app_id, database_id, status) \
+                 VALUES ($1, $2, $3, 'active') ON CONFLICT (id) DO NOTHING",
+                &[
+                    &edge.binding().as_str().to_owned(),
+                    &binding.app_id().to_owned(),
+                    &database,
+                ],
+            )
+            .await
+            .unwrap();
         let files = tempfile::tempdir().unwrap();
         let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let cert = files.path().join("cert.pem");
