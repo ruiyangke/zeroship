@@ -709,7 +709,7 @@ impl JobTransport for NativeManager {
         scope: &AssignedScope,
     ) -> Result<Option<Self::Lease>, WorkflowServiceError> {
         self.coordinator
-            .claim_job(&self.worker, scope, AppPolicy::default().max_delivery_attempts, || async { Ok(self.worker.clone()) })
+            .claim_job(&self.worker, scope, Ok(AppPolicy::default().max_delivery_attempts), || async { Ok(self.worker.clone()) })
             .await
             .map_err(manager_error)
     }
