@@ -141,6 +141,7 @@ mod background_scope;
 mod child_errors;
 mod closure;
 mod compensation_summary;
+mod completion_batch;
 mod continuations;
 mod cron;
 mod delivery;
