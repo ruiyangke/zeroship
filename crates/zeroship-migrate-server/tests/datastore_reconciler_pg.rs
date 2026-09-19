@@ -520,13 +520,14 @@ async fn a_pass_registers_bootstraps_and_converges_then_a_second_pass_changes_no
     // A cluster's authentication material is deployment, and a bootstrap that
     // baked a known password into every tenant cluster's worker login would be
     // worse than the manual step it saves.
-    let unusable = compio_postgres::connect(
+    let Err(unusable) = compio_postgres::connect(
         &cluster_fixture.url_as(WORKER_ROLE, TENANT_PASSWORD),
         NoTls,
     )
     .await
-    .err()
-    .expect("a passwordless login must not authenticate");
+    else {
+        panic!("a passwordless login must not authenticate")
+    };
     let unusable = server_error(&unusable);
     assert_eq!(
         unusable.code().code().get(0..2),
