@@ -6,11 +6,7 @@ const DENORMALIZED_USER_ID_COLUMNS: &[(&str, &str)] = &[
     ("app_egress_rules", "created_by"),
     ("audit_events", "actor_user_id"),
     ("authz_decisions", "actor_user_id"),
-    ("deleted_sandboxes", "user_id"),
     ("gateway_sessions", "user_id"),
-    ("sandbox_events", "user_id"),
-    ("sandboxes", "user_id"),
-    ("shares", "iss"),
 ];
 
 #[test]
