@@ -28,7 +28,6 @@ Built:
   and authorizes at `Resource::Database` or at the project, so this is the first surface that
   constructs that Cedar resource. Control writes no `datastores` row: placement READS that
   table, and a cluster registers itself through the service holding its credential.
-
 - the cluster reconciler (`crates/zeroship-migrate-server/src/datastore/`), one loop per
   datastore inside the migration service: a cluster self-registers on its own
   `pg_control_system()` identity, the bootstrap corpus creates the platform logins and the
