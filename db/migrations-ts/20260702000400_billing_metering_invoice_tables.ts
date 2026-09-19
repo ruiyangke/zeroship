@@ -1,19 +1,5 @@
 import { table, t, now } from "@zeroship/migrate";
 
-const userIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
-  billing_customer_refs: ["creator_id"],
-  billing_notifications: ["creator_id"],
-  connect_checkout_failures: ["creator_id"],
-  creator_billing: ["creator_id"],
-  creator_billing_status: ["creator_id"],
-  creator_billing_status_history: ["creator_id"],
-  creator_fee_policy: ["creator_id"],
-  credit_ledger: ["creator_id"],
-  invoices: ["creator_id"],
-  metering_exports: ["creator_id"],
-  payout_failures: ["creator_id"],
-};
-
 export default {
   name: "billing_metering_invoice_tables",
   schema() {
@@ -43,17 +29,6 @@ export default {
     table("app_spend_state", { schema: "zeroship" }).unique("app_spend_state_natural_key").add({ columns: ["app_id"] });
     table("app_spend_state", { schema: "zeroship" }).check("app_spend_state_eval_limit_cents_check").add({ expr: (col) => col("eval_limit_cents").ge(0) });
     table("app_spend_state", { schema: "zeroship" }).check("app_spend_state_spend_cents_check").add({ expr: (col) => col("spend_cents").ge(0) });
-    table("billing_customer_refs", { schema: "zeroship" }).create({
-      columns: {
-        id: t.bigInt().notNull().identity(),
-        creator_id: t.text().notNull(),
-        provider: t.text().notNull(),
-        external_id: t.text().notNull(),
-        created_at: t.timestamp().notNull().default(now()),
-      },
-      primaryKey: ["id"],
-    });
-    table("billing_customer_refs", { schema: "zeroship" }).unique("billing_customer_refs_natural_key").add({ columns: ["creator_id", "provider"] });
     table("billing_disputes", { schema: "zeroship" }).create({
       columns: {
         id: t.text().notNull(),
@@ -100,19 +75,6 @@ export default {
       primaryKey: ["id"],
     });
     table("billing_metrics", { schema: "zeroship" }).unique("billing_metrics_natural_key").add({ columns: ["metric"] });
-    table("billing_notifications", { schema: "zeroship" }).create({
-      columns: {
-        id: t.bigInt().notNull().identity(),
-        creator_id: t.text().notNull(),
-        kind: t.domain("billing_notification_kind").notNull(),
-        transition_id: t.text().notNull(),
-        status: t.domain("notification_status").notNull().default("pending"),
-        claimed_at: t.timestamp().notNull().default(now()),
-        sent_at: t.timestamp(),
-      },
-      primaryKey: ["id"],
-    });
-    table("billing_notifications", { schema: "zeroship" }).unique("billing_notifications_natural_key").add({ columns: ["creator_id", "kind", "transition_id"] });
     table("billing_provider_refs", { schema: "zeroship" }).create({
       columns: {
         id: t.bigInt().notNull().identity(),
@@ -159,7 +121,6 @@ export default {
     table("connect_checkout_failures", { schema: "zeroship" }).create({
       columns: {
         id: t.text().notNull(),
-        creator_id: t.text().notNull(),
         provider_payment_intent_id: t.text().notNull(),
         stripe_account_id: t.text().notNull(),
         amount_cents: t.bigInt().notNull(),
@@ -168,72 +129,15 @@ export default {
         failure_message: t.text(),
         occurred_at: t.timestamp().notNull(),
         created_at: t.timestamp().notNull().default(now()),
+        organization_id: t.text().notNull(),
       },
       primaryKey: ["id"],
     });
     table("connect_checkout_failures", { schema: "zeroship" }).check("connect_checkout_failures_amount_cents_check").add({ expr: (col) => col("amount_cents").ge(0) });
     table("connect_checkout_failures", { schema: "zeroship" }).check("connect_checkout_failures_currency_check").add({ expr: (col) => col("currency").regex("^[a-z]{3}$") });
-    table("creator_billing", { schema: "zeroship" }).create({
-      columns: {
-        id: t.bigInt().notNull().identity(),
-        creator_id: t.text().notNull(),
-        default_pm_set: t.boolean().notNull().default(false),
-        created_at: t.timestamp().notNull().default(now()),
-        updated_at: t.timestamp().notNull().default(now()),
-      },
-      primaryKey: ["id"],
-    });
-    table("creator_billing", { schema: "zeroship" }).unique("creator_billing_natural_key").add({ columns: ["creator_id"] });
-    table("creator_billing_status", { schema: "zeroship" }).create({
-      columns: {
-        id: t.bigInt().notNull().identity(),
-        creator_id: t.text().notNull(),
-        state: t.domain("account_state").notNull().default("active"),
-        past_due_since: t.timestamp(),
-        suspended_at: t.timestamp(),
-        last_payment_failure_at: t.timestamp(),
-        failed_invoice_id: t.text(),
-        last_event_at: t.timestamp(),
-        last_recovered_at: t.timestamp(),
-        updated_at: t.timestamp().notNull().default(now()),
-      },
-      primaryKey: ["id"],
-    });
-    table("creator_billing_status", { schema: "zeroship" }).unique("creator_billing_status_natural_key").add({ columns: ["creator_id"] });
-    table("creator_billing_status_history", { schema: "zeroship" }).create({
-      columns: {
-        id: t.text().notNull(),
-        creator_id: t.text().notNull(),
-        from_state: t.domain("account_state").notNull(),
-        to_state: t.domain("account_state").notNull(),
-        reason: t.text(),
-        at: t.timestamp().notNull().default(now()),
-      },
-      primaryKey: ["id"],
-    });
-    table("creator_fee_policy", { schema: "zeroship" }).create({
-      columns: {
-        id: t.bigInt().notNull().identity(),
-        creator_id: t.text().notNull(),
-        kind: t.text().notNull(),
-        amount_cents: t.bigInt(),
-        percent_bps: t.int(),
-        cap_cents: t.bigInt(),
-        floor_cents: t.bigInt(),
-        updated_at: t.timestamp().notNull().default(now()),
-      },
-      primaryKey: ["id"],
-    });
-    table("creator_fee_policy", { schema: "zeroship" }).unique("creator_fee_policy_natural_key").add({ columns: ["creator_id"] });
-    table("creator_fee_policy", { schema: "zeroship" }).check("creator_fee_policy_cap_nonneg").add({ expr: (col) => col("cap_cents").isNull().or(col("cap_cents").ge(0)) });
-    table("creator_fee_policy", { schema: "zeroship" }).check("creator_fee_policy_floor_le_cap").add({ expr: (col) => col("floor_cents").isNull().or(col("cap_cents").isNull(), col("floor_cents").le(col("cap_cents"))) });
-    table("creator_fee_policy", { schema: "zeroship" }).check("creator_fee_policy_floor_nonneg").add({ expr: (col) => col("floor_cents").isNull().or(col("floor_cents").ge(0)) });
-    table("creator_fee_policy", { schema: "zeroship" }).check("creator_fee_policy_kind_check").add({ expr: (col) => col("kind").in(["fixed", "percent"]) });
-    table("creator_fee_policy", { schema: "zeroship" }).check("creator_fee_policy_shape").add({ expr: (col) => col("kind").eq("fixed").and(col("amount_cents").isNotNull(), col("amount_cents").ge(0)).or(col("kind").eq("percent").and(col("percent_bps").isNotNull(), col("percent_bps").ge(0).and(col("percent_bps").le(10000)))) });
     table("credit_ledger", { schema: "zeroship" }).create({
       columns: {
         id: t.text().notNull(),
-        creator_id: t.text().notNull(),
         kind: t.domain("credit_entry_kind").notNull(),
         amount_cents: t.bigInt().notNull(),
         currency: t.char({ length: 3 }).notNull().default("usd"),
@@ -244,6 +148,7 @@ export default {
         idempotency_key: t.text(),
         request_fingerprint: t.text(),
         created_at: t.timestamp().notNull().default(now()),
+        organization_id: t.text().notNull(),
       },
       primaryKey: ["id"],
     });
@@ -265,14 +170,17 @@ export default {
         created_at: t.timestamp().notNull().default(now()),
         segment_no: t.smallInt().notNull().default(0),
         plan_id: t.text().notNull(),
+        line_kind: t.text().notNull().default("usage"),
+        correction_dedup_key: t.text(),
       },
       primaryKey: ["id"],
     });
     table("invoice_lines", { schema: "zeroship" }).unique("invoice_lines_natural_key").add({ columns: ["invoice_id", "app_id", "segment_no"] });
-    table("invoice_lines", { schema: "zeroship" }).check("invoice_lines_amount_cents_check").add({ expr: (col) => col("amount_cents").ge(0) });
+    table("invoice_lines", { schema: "zeroship" }).check("invoice_lines_amount_cents_check").add({ expr: (col) => col("line_kind").eq("usage").and(col("amount_cents").ge(0), col("correction_dedup_key").isNull()).or(col("line_kind").eq("debit_note").and(col("amount_cents").gt(0), col("correction_dedup_key").isNotNull())).or(col("line_kind").eq("credit_note").and(col("amount_cents").lt(0), col("correction_dedup_key").isNotNull())) });
     table("invoice_lines", { schema: "zeroship" }).check("invoice_lines_base_fee_cents_check").add({ expr: (col) => col("base_fee_cents").ge(0) });
     table("invoice_lines", { schema: "zeroship" }).check("invoice_lines_fx_pico_cents_per_unit_check").add({ expr: (col) => col("fx_pico_cents_per_unit").ge(1000) });
     table("invoice_lines", { schema: "zeroship" }).check("invoice_lines_included_units_check").add({ expr: (col) => col("included_units").ge(0) });
+    table("invoice_lines", { schema: "zeroship" }).check("invoice_lines_line_kind_check").add({ expr: (col) => col("line_kind").in(["usage", "debit_note", "credit_note"]) });
     table("invoice_lines", { schema: "zeroship" }).check("invoice_lines_segment_no_check").add({ expr: (col) => col("segment_no").ge(0) });
     table("invoice_payments", { schema: "zeroship" }).create({
       columns: {
@@ -291,7 +199,6 @@ export default {
     table("invoices", { schema: "zeroship" }).create({
       columns: {
         id: t.text().notNull(),
-        creator_id: t.text().notNull(),
         period: t.domain("billing_period").notNull(),
         status: t.domain("invoice_status").notNull().default("draft"),
         currency: t.char({ length: 3 }).notNull().default("usd"),
@@ -303,6 +210,7 @@ export default {
         voided_at: t.timestamp(),
         created_at: t.timestamp().notNull().default(now()),
         updated_at: t.timestamp().notNull().default(now()),
+        organization_id: t.text().notNull(),
       },
       primaryKey: ["id"],
     });
@@ -312,22 +220,6 @@ export default {
     table("invoices", { schema: "zeroship" }).check("invoices_subtotal_cents_check").add({ expr: (col) => col("subtotal_cents").ge(0) });
     table("invoices", { schema: "zeroship" }).check("invoices_tax_cents_check").add({ expr: (col) => col("tax_cents").ge(0) });
     table("invoices", { schema: "zeroship" }).check("invoices_total_cents_check").add({ expr: (col) => col("total_cents").ge(0) });
-    table("metering_exports", { schema: "zeroship" }).create({
-      columns: {
-        id: t.bigInt().notNull().identity(),
-        creator_id: t.text().notNull(),
-        period: t.domain("billing_period").notNull(),
-        exported_units: t.bigInt().notNull().default(0),
-        consecutive_failures: t.int().notNull().default(0),
-        last_error: t.text(),
-        last_attempt_at: t.timestamp(),
-        updated_at: t.timestamp().notNull().default(now()),
-      },
-      primaryKey: ["id"],
-    });
-    table("metering_exports", { schema: "zeroship" }).unique("metering_exports_natural_key").add({ columns: ["creator_id", "period"] });
-    table("metering_exports", { schema: "zeroship" }).check("metering_exports_consecutive_failures_check").add({ expr: (col) => col("consecutive_failures").ge(0) });
-    table("metering_exports", { schema: "zeroship" }).check("metering_exports_exported_units_check").add({ expr: (col) => col("exported_units").ge(0) });
     table("metric_weights", { schema: "zeroship" }).create({
       columns: {
         id: t.bigInt().notNull().identity(),
@@ -344,7 +236,6 @@ export default {
     table("payout_failures", { schema: "zeroship" }).create({
       columns: {
         id: t.text().notNull(),
-        creator_id: t.text().notNull(),
         provider_payout_id: t.text().notNull(),
         stripe_account_id: t.text().notNull(),
         amount_cents: t.bigInt().notNull(),
@@ -353,6 +244,7 @@ export default {
         failure_message: t.text(),
         occurred_at: t.timestamp().notNull(),
         created_at: t.timestamp().notNull().default(now()),
+        organization_id: t.text().notNull(),
       },
       primaryKey: ["id"],
     });
@@ -496,12 +388,5 @@ export default {
     });
     table("usage_aggregates", { schema: "zeroship" }).unique("usage_aggregates_natural_key").add({ columns: ["app_id", "period", "metric"] });
     table("usage_aggregates", { schema: "zeroship" }).check("usage_aggregates_total_check").add({ expr: (col) => col("total").ge(0) });
-    for (const [tableName, columns] of Object.entries(userIdColumnsByTable)) {
-      for (const column of columns) {
-        table(tableName, { schema: "zeroship" })
-          .check(`${tableName}_${column}_usr_shape`)
-          .add({ expr: (col) => col(column).regex("^usr_[0-9a-z]{25}$") });
-      }
-    }
   },
 };

@@ -3,13 +3,15 @@ import { createFunction, grant, raw, t, table } from "@zeroship/migrate";
 // The other half of 20260914000400_execution_zones_and_join_signers.ts, split
 // into its own file because a foreign key authored in the SAME file as the
 // COLLATE "C" fix on its target is checked against a pre-file catalog snapshot
-// and refused. Both target columns are fixed in the previous migration, so this
-// file's foreign keys to them are safe.
+// and refused. Both target columns are fixed in
+// 20260914000400_execution_zones_and_join_signers.ts, so this file's foreign
+// keys to them are safe.
 //
 // This file spends the signer table. It records which zones each signer may
 // mint for, accounts for a token's uses, binds each worker instance to the
-// signer and token that admitted it, gives the instance an expiry it must renew
-// to keep, and adds the functions that are the mechanism.
+// signer and token that admitted it, and adds the functions that are the
+// mechanism. The instance's expiry column is declared with the table itself
+// (20260907000300_worker_instances.ts).
 export default {
   name: "worker_join_bindings",
   schema() {
@@ -124,31 +126,9 @@ export default {
       to: ["zeroship_control"],
     });
 
-    // ---- the instance's binding, zone and lease -----------------------------
-    table("worker_instances", { schema: "zeroship" })
-      .column("join_signer_id")
-      .add({ type: t.text().notNull() });
-    // The token id that admitted this instance. Recorded so "who vouched for
-    // this worker" is a stored fact rather than an inference, and so purging a
-    // leaked signer can enumerate exactly what it admitted.
-    table("worker_instances", { schema: "zeroship" })
-      .column("join_token_id")
-      .add({ type: t.text().notNull() });
-    // The zone moved HERE from the per-unit row, because there is no per-unit
-    // row any more. It is the token's `zone` claim, resolved to an id by
-    // Control and frozen by the trigger below; nothing a worker sends reaches
-    // it.
-    table("worker_instances", { schema: "zeroship" })
-      .column("execution_zone_id")
-      .add({ type: t.text().notNull() });
-    // THE LEASE. An instance identity expires and the worker renews it, so
-    // revocation stops being the only way a credential ever stops working: a
-    // crashed or abandoned worker's row stops satisfying Control's instance
-    // read on its own, with nothing observing liveness to make it happen.
-    table("worker_instances", { schema: "zeroship" })
-      .column("expires_at")
-      .add({ type: t.timestamp().notNull() });
-
+    // ---- the instance's binding and zone ------------------------------------
+    // The instance columns are declared in 20260907000300_worker_instances.ts;
+    // this file adds the foreign keys and the bytewise collations they need.
     table("worker_instances", { schema: "zeroship" })
       .foreignKey("worker_instances_join_signer_fk")
       .add({
@@ -173,24 +153,18 @@ export default {
       reason: "typed-id text domains need bytewise comparison",
     });
 
-    // Two Control replicas racing a lost-reply retry must converge on ONE
-    // instance row rather than minting two identities for one key.
-    table("worker_instances", { schema: "zeroship" })
-      .unique("worker_instances_public_key_uq")
-      .add({ columns: ["public_key"] });
-
-    // Re-issue the frozen-columns trigger body so the new identity columns
-    // freeze with everything else, and so `expires_at` is permitted to move --
-    // it is the one thing renewal writes. `replace: true` because this function
-    // already exists (20260907000300_worker_instances.ts): a stored plpgsql
-    // body is a string PostgreSQL never rewrites when a column is added, so the
-    // un-replaced function would silently let the new columns move after join.
+    // WITHOUT THIS, "immutable" and "INSERT-ONCE" would be prose. Control holds
+    // UPDATE because `status` must progress and `expires_at` must renew, and
+    // UPDATE is not column-selective in a grant, so the identity and address
+    // columns are frozen here instead. The ring key is the reason this matters
+    // most: a writer that could rotate it could move an instance's ring position
+    // after placement was decided, which is the grinding attack the mint exists
+    // to prevent.
     createFunction({
       schema: "zeroship",
       name: "worker_instances_reject_frozen_change",
       returns: "trigger",
       language: "procedural",
-      replace: true,
       body:
         "BEGIN\n"
         + "  IF NEW.id <> OLD.id\n"
@@ -209,6 +183,14 @@ export default {
         + "  RETURN NEW;\n"
         + "END;",
     });
+    table("worker_instances", { schema: "zeroship" })
+      .trigger("worker_instances_frozen_columns")
+      .create({
+        timing: "before",
+        events: ["update"],
+        forEach: "row",
+        execute: "worker_instances_reject_frozen_change",
+      });
 
     // ---- consuming one use of a join token ----------------------------------
     //

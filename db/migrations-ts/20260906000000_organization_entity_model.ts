@@ -9,9 +9,10 @@ const userIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
 };
 
 // The ownership root. An ORGANIZATION owns projects, a project owns apps, and an
-// app reaches its organization through exactly ONE path: apps.project_id ->
-// projects.organization_id. There is no second edge to keep in agreement,
-// because a second edge is a second answer.
+// app reaches its organization through `apps.project_id -> projects.organization_id`.
+// `apps.organization_id` is an FK-CONSUMED copy rather than a second answer: the
+// composite key over `(project_id, organization_id)` refuses any row whose copy
+// disagrees with the project's organization.
 //
 // THE WORD IS SPELLED IN FULL EVERYWHERE A HUMAN READS IT. Columns, constraints
 // and indexes say `organization`, never `org`. The abbreviation appears only
@@ -20,8 +21,9 @@ const userIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
 //
 // A PERSONAL ORGANIZATION IS AN ORDINARY ROW. `personal_owner_id` is a nullable
 // pointer to the single user a solo creator's organization was minted for, and
-// no read path branches on it: a personal organization has members, projects,
-// apps and a billing subject exactly like any other. Clearing the pointer IS the
+// no authorization read path derives authority from it: a personal organization
+// has members, projects, apps and a billing subject exactly like any other.
+// Clearing the pointer IS the
 // personal-to-shared conversion, which is why the foreign key is SET NULL rather
 // than CASCADE -- cascading would delete the billing subject, and would not even
 // succeed, since it would then abort against the RESTRICT edge from projects.
@@ -64,26 +66,28 @@ const userIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
 // organization. Both are closed by COMPOSITE foreign keys over a shared
 // `organization_id` column rather than by a check anything could forget to run:
 // `(project_id, organization_id)` is consumed by `projects(id, organization_id)`
-// and `(organization_id, user_id)` is consumed by the `organization_members`
-// primary key, so the two agree on every write to either side.
+// and `(organization_id, user_id)` is consumed by the
+// `organization_members_natural_key` unique, so the two agree on every write to
+// either side.
 //
 // User references use the same internal `usr` ID contract as `zeroship.users.id`.
-// App references remain UUIDs because `zeroship.apps.id` is still a UUID.
 //
-// `apps.project_id` IS ADDED NOT NULL WITH NO BACKFILL. Pre-launch, no deployed
-// database holds app rows to carry across, so a default-less NOT NULL add is the
-// end state rather than a step toward it. `zeroship.app_members` is DELETED in
-// the same change, not demoted: app-level membership is replaced by organization
-// membership narrowed per project, and leaving both would leave two answers.
+// `apps.project_id` IS DECLARED WITH THE `apps` TABLE, and this migration owns
+// only its bytewise collation. It is nullable there because a deleted app is
+// detached from its project while keeping its organization; the composite key
+// that consumes the pair lives in
+// db/migrations-ts/20260906000200_apps_project_ownership_key.ts, and the
+// organization copy it pairs with is declared with `apps` in
+// db/migrations-ts/20260702000200_control_tables.ts.
 //
 // DELIBERATELY NOT HERE: the subscription move (`organizations.plan_id` and the
 // composite tie to `apps.plan_id`), the project-level `sector_identifier`, and
-// project-owned data resources with their capability bindings. NO COMMITTED
-// DOCUMENT DESIGNS ANY OF THE THREE. This header is the design record for what
-// landed, and the three are named here so a later reader can tell a deferral
-// from an oversight -- not as a pointer to a design that exists somewhere else.
-// Each carries its own consumers to re-plumb, and each needs its design written
-// before it is built.
+// project-owned data resources with their capability bindings. The first two
+// have no design document yet; the third is designed in
+// docs/proposals/2026-08-28-app-database-decoupling.md. This header is the
+// design record for what landed, and the three are named here so a later reader
+// can tell a deferral from an oversight. Each carries its own consumers to
+// re-plumb.
 //
 // `crates/zeroship-migrate-node/tests/platform_corpus/organization_authority.rs`
 // applies the corpus to owned PostgreSQL databases and exercises these
@@ -93,9 +97,7 @@ const userIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
 // EACH NEW TABLE IS ALSO REGISTERED IN policies/platform-table-owners.json, and
 // that file is not optional bookkeeping: the applier refuses fail-closed on any
 // op targeting a table with no ownership entry, so a table created here without
-// one halts the whole corpus. Its entries also outlive the tables they name -
-// `app_members` stays listed after the drop below, because the earlier
-// migrations that create and constrain it still run on a fresh database.
+// one halts the whole corpus.
 export default {
   name: "organization_entity_model",
   schema() {
@@ -119,9 +121,9 @@ export default {
       .add({ columns: ["role", "rank", "billing_rank"] });
     // The seed is `raw` because the platform ceiling grants no DML capability
     // key at all (policies/platform.policy.toml), and `sql.raw` is the granted,
-    // exercised path. Every other catalog row in this corpus is inserted by test
-    // or runtime code; this one cannot be, because the ladder must exist before
-    // the first membership row references it.
+    // exercised path. The ladder must exist before the first membership row
+    // references it, so it is seeded in the migration rather than by test or
+    // runtime code.
     raw({
       sql:
         "INSERT INTO zeroship.organization_roles (role, rank, billing_rank, label) VALUES "
@@ -149,26 +151,40 @@ export default {
         created_by: t.text(),
         created_at: t.timestamp().notNull().default(now()),
         updated_at: t.timestamp().notNull().default(now()),
+        // The close, rather than a DELETE: the organization is the billing
+        // subject and every invoice names it, while `projects.organization_id`
+        // is RESTRICT. Setting the timestamp releases the slug and the personal
+        // slot it was holding (the two partial indexes below) without taking the
+        // counterparty out of a money record.
+        dissolved_at: t.timestamp(),
       },
       primaryKey: ["id"],
     });
     table("organizations", { schema: "zeroship" })
       .check("organizations_id_shape")
       .add({ expr: (col) => col("id").regex("^org_[0-9a-z]{25}$") });
+    // Unique among LIVE organizations: a closed organization releases its
+    // human-facing slug, and the identity is `id`, which nothing here touches.
     table("organizations", { schema: "zeroship" })
-      .unique("organizations_slug_key")
-      .add({ columns: ["slug"] });
+      .index("organizations_live_slug_key")
+      .add({
+        on: ["slug"],
+        unique: true,
+        where: (col) => col("dissolved_at").isNull(),
+      });
     table("organizations", { schema: "zeroship" })
       .check("organizations_slug_grammar")
       .add({ expr: (col) => col("slug").regex("^[a-z0-9][a-z0-9-]*$") });
-    // A user has at most one personal organization. Partial and unique: shared
-    // organizations leave the column NULL and do not compete for the slot.
+    // A user has at most one LIVE personal organization. Partial and unique:
+    // shared organizations leave the column NULL and do not compete for the
+    // slot, and a dissolved organization releases it so the creator's next
+    // deploy can mint a replacement.
     table("organizations", { schema: "zeroship" })
-      .index("organizations_personal_owner_key")
+      .index("organizations_live_personal_owner_key")
       .add({
         on: ["personal_owner_id"],
         unique: true,
-        where: (col) => col("personal_owner_id").isNotNull(),
+        where: (col) => col("personal_owner_id").isNotNull().and(col("dissolved_at").isNull()),
       });
     table("organizations", { schema: "zeroship" })
       .foreignKey("organizations_personal_owner_id_fkey")
@@ -324,9 +340,10 @@ export default {
       primaryKey: ["id"],
     });
     table("project_members", { schema: "zeroship" }).unique("project_members_natural_key").add({ columns: ["project_id", "user_id"] });
-    // NO EXPLICIT INDEX ON THE TWO COMPOSITE EDGES. The primary key leads on
-    // project_id, so neither composite foreign key is covered by it -- and the
-    // engine emits an index for a composite foreign key of its own accord
+    // NO EXPLICIT INDEX ON THE TWO COMPOSITE EDGES. Neither the `id` primary
+    // key nor the `(project_id, user_id)` natural key covers either foreign
+    // key's column pair -- and the engine emits an index for a composite
+    // foreign key of its own accord
     // (`project_members_organization_member_fkey_idx`,
     // `project_members_project_ownership_fkey_idx` on a live apply). Declaring
     // them here as well produces two identical indexes on the same columns.
@@ -491,36 +508,14 @@ export default {
         onUpdate: "restrict",
       });
 
-    // ---- apps: re-rooted onto a project -----------------------------------
-    // NOT NULL with no default and no backfill. Pre-launch there is no deployed
-    // database holding app rows, so this is the end state rather than a step
-    // toward one; a development database with rows is recreated rather than
-    // migrated.
-    table("apps", { schema: "zeroship" })
-      .column("project_id")
-      .add({ type: t.text().notNull() });
-    table("apps", { schema: "zeroship" })
-      .check("apps_project_id_shape")
-      .add({ expr: (col) => col("project_id").regex("^prj_[0-9a-z]{25}$") });
-    // RESTRICT: an app is the deployable unit and a project delete must not take
-    // one silently. There is no `apps.organization_id` -- the organization is
-    // reached through the project, and one path cannot disagree with itself.
-    table("apps", { schema: "zeroship" })
-      .foreignKey("apps_project_id_fkey")
-      .add({
-        columns: ["project_id"],
-        references: { table: "projects", columns: ["id"], schema: "zeroship" },
-        onDelete: "restrict",
-        onUpdate: "restrict",
-      });
-    table("apps", { schema: "zeroship" })
-      .index("apps_project_id_idx")
-      .add({ on: ["project_id"] });
-
-    // App-level membership is replaced, not demoted. Organization membership
-    // narrowed per project is the one answer to "who may act on this app", and
-    // leaving the old table would leave a second one.
-    table("app_members", { schema: "zeroship" }).drop({ ifExists: true });
+    // ---- apps: only the project_id collation is owned here -----------------
+    // `apps.project_id` and its shape check are declared with the `apps` table
+    // in db/migrations-ts/20260702000200_control_tables.ts; the composite key
+    // that consumes the pair lives in
+    // db/migrations-ts/20260906000200_apps_project_ownership_key.ts. What this
+    // migration contributes to `apps` is the bytewise collation registered in
+    // the map below, without which a join from a collated id to its copy would
+    // silently fall back to the locale ordering.
 
     // ---- sortable typed-id collations -------------------------------------
     // Every column above whose whole semantic domain is a canonical typed id,
@@ -568,14 +563,15 @@ export default {
     }
 
     // ---- grants ------------------------------------------------------------
-    // The control plane is the only service that reaches any of these. The
-    // gateway and the auth service never resolve creator authority, and the
-    // worker holds nothing here, so neither needs a revoke.
+    // The control plane owns every table here. The auth service reads two of
+    // them, and only for the account reaper's ownership check; the gateway never
+    // resolves creator authority, and the worker holds nothing here, so neither
+    // needs a revoke.
     //
     // WHAT DENIES THE WORKER: PostgreSQL's OWNER-ONLY DEFAULT - a newly
     // created table has a null `relacl` and nobody but the owner holds anything.
     // It is NOT the `ALTER DEFAULT PRIVILEGES ... REVOKE` in
-    // db/migrations-ts/20260818000200_worker_database_authority.ts, whose lines
+    // db/migrations-ts/20260702000900_grants.ts, whose lines
     // store nothing - revoking a privilege that was never in the default set is
     // a no-op.
     //
@@ -607,6 +603,27 @@ export default {
       privileges: ["select"],
       on: { kind: "table", schema: "zeroship", names: ["organization_roles"] },
       to: ["zeroship_control"],
+    });
+    // The account reaper decides the ownership rule INSIDE its erasure
+    // transaction, under the same `organizations` row lock every membership
+    // mutation takes, so it reads both tables and takes the lock on the
+    // organization. The column grant is what makes that lock expressible: a
+    // `SELECT ... FOR UPDATE` is refused with SELECT alone, while the column
+    // form permits the lock and no writable column, so the reaper can serialize
+    // against a departure without being able to rename, re-slug or dissolve.
+    grant({
+      privileges: ["select"],
+      on: {
+        kind: "table",
+        schema: "zeroship",
+        names: ["organizations", "organization_members"],
+      },
+      to: ["zeroship_auth"],
+    });
+    raw({
+      sql: "GRANT UPDATE (id) ON zeroship.organizations TO zeroship_auth",
+      reason:
+        "PostgreSQL requires UPDATE for a row lock; the column form grants the lock and no writable column",
     });
   },
 };
