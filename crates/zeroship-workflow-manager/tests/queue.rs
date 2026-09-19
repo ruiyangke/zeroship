@@ -1132,7 +1132,7 @@ async fn revocation_rolls_back_mutations(fixture: &Fixture) {
     let checks = Cell::new(0);
     assert!(matches!(
         queue
-            .claim_authorized(&identity(&authority), support::delivery_ceiling(), |tx| {
+            .claim_authorized(&identity(&authority), Ok(support::delivery_ceiling()), |tx| {
                 checks.set(checks.get() + 1);
                 revoke_in_transaction(tx, &authority, &spec, ["ready", "leased"], checks.get())
             })
@@ -1334,7 +1334,7 @@ async fn claim_timeout_rolls_back(fixture: &Fixture) {
     let checks = Cell::new(0);
     let timed = compio::time::timeout(
         Duration::from_secs(1),
-        expiring.claim_authorized(&identity(&expiring_authority), support::delivery_ceiling(), |_| {
+        expiring.claim_authorized(&identity(&expiring_authority), Ok(support::delivery_ceiling()), |_| {
             checks.set(checks.get() + 1);
             let first = checks.get() == 1;
             let authority = expiring_authority.clone();
@@ -1527,7 +1527,7 @@ async fn delivery_budget_bounds_redelivery(fixture: &Fixture) {
         let queue = queue.clone();
         async move {
             queue
-                .claim_authorized(&selector, ceiling, move |_| ready(Ok(authority.clone())))
+                .claim_authorized(&selector, Ok(ceiling), move |_| ready(Ok(authority.clone())))
                 .await
                 .unwrap()
         }
@@ -1585,7 +1585,7 @@ async fn delivery_budget_bounds_redelivery(fixture: &Fixture) {
     assert_eq!(readmitted.delivery().job, spec);
     assert!(matches!(
         queue
-            .claim_authorized(&selector, 0, |_| ready(Ok(authority.clone())))
+            .claim_authorized(&selector, Ok(0), |_| ready(Ok(authority.clone())))
             .await,
         Err(Error::Invalid)
     ));
@@ -1621,7 +1621,7 @@ async fn delivery_grant_budget(fixture: &Fixture) {
         .unwrap();
     assert!(matches!(queue.claim(&stale).await, Err(Error::Denied)));
     let grant = queue
-        .claim_authorized(&selector, support::delivery_ceiling(), |_| ready(Ok(authority.clone())))
+        .claim_authorized(&selector, Ok(support::delivery_ceiling()), |_| ready(Ok(authority.clone())))
         .await
         .unwrap()
         .unwrap();
