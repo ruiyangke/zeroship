@@ -166,7 +166,7 @@ pub(crate) fn single_stmt(mig: Migration) -> LoweredUnit {
 pub struct FieldDescriptor {
     /// The field (column) name.
     pub name: String,
-    /// The DSL type token (`string`, `number`, `boolean`, `date`,
+    /// The DSL type token (`string`, `number`, `boolean`, `timestamp`,
     /// `calendarDate`, `json`, `object`, `array`, `union`, `ref`, `bytes`,
     /// `actor`, `id`). The descriptor-aware type resolver maps this token and its
     /// sibling facets to the selected backend's physical type.

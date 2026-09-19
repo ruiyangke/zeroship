@@ -5250,7 +5250,7 @@ fn token_to_col_type(f: &crate::render::declarative::FieldDescriptor) -> Option<
             "real" => ColType::Real,
             "boolean" => ColType::Boolean,
             "json" | "object" | "array" => ColType::Json,
-            "date" | "timestamp" => ColType::Timestamp,
+            "timestamp" => ColType::Timestamp,
             "bytes" => ColType::Bytes,
             "inet" => ColType::Inet,
             "textArray" => ColType::TextArray,

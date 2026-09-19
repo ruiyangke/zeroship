@@ -541,10 +541,6 @@ pub fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
         Some("bigInt") => "BIGINT",
         Some("boolean") => "BOOLEAN",
         Some("timestamp") => "TIMESTAMPTZ",
-        // The retired spelling. Kept as an EXPLICIT arm so a stray legacy
-        // descriptor renders the type it meant instead of falling into the
-        // silent TEXT fallback at the end of this match.
-        Some("date") => "TIMESTAMPTZ",
         // `t.calendarDate()` is a `YYYY-MM-DD` value with no time
         // and no timezone, distinct from `t.timestamp()` (TIMESTAMPTZ stored
         // as Unix-ms numbers at the SDK layer).
