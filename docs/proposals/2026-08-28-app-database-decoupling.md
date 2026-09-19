@@ -1077,8 +1077,21 @@ two co-resident apps both calling a database `main` would compare equal.
 
 **Delete an app.** Revoke both edges of every binding the app holds, then drop
 `zs_bind_<bnd>_e<E>` for every live epoch. That is the complete teardown of an app's access and it
-is instant. No data is destroyed and no 409 is raised, because the app owns no database. A deleted
-app never destroys data another app can still read.
+is instant. No data is destroyed, because the app owns no database, and a deleted app never
+destroys data another app can still read.
+
+**But app deletion must learn to revoke first, and today it does not.** `delete_app`
+(`crates/zeroship-control/src/organizations.rs`) ends an app by setting `apps.project_id = NULL`,
+which is an UPDATE to the exact key `database_bindings_app_project_fkey` references under
+`onUpdate: "restrict"`. So deleting an app that still holds a binding is refused by PostgreSQL
+with a foreign-key violation rather than by a typed refusal naming what to unbind. Unbinding
+first works; nothing tells the creator that.
+
+Two ways to close it, and the choice belongs to app lifecycle rather than to this design: app
+deletion revokes the app's bindings as part of its own teardown, which is what the paragraph above
+describes and what makes deletion instant; or it refuses early with a typed error listing the
+bindings, which is weaker but smaller. Either way the raw constraint violation is not an
+acceptable creator-facing outcome.
 
 **Delete a database.** Only when its binding set is empty, and the refusal names the bound apps.
 The step order in `crates/zeroship-data-orm/src/cdc/lifecycle.rs` and
