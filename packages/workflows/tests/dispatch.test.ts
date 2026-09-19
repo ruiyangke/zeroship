@@ -109,7 +109,11 @@ type WorkflowClass = new () => {
 function replay(
   Main: WorkflowClass,
   journal: JournalRow[] = [],
-  options: { generation?: number; children?: WorkflowClass[] } = {},
+  options: {
+    generation?: number;
+    children?: WorkflowClass[];
+    phase?: "running" | "compensating";
+  } = {},
 ): Promise<DispatchResult> {
   const exports: Record<string, WorkflowClass> = { Checkout: Main };
   for (const child of options.children ?? []) exports[child.name] = child;
@@ -119,7 +123,7 @@ function replay(
     generation: options.generation ?? 0,
     nonce: "wfd_checkout",
     workflowName: "Checkout",
-    phase: "running",
+    phase: options.phase ?? "running",
     trigger: {
       runId: RUN_ID,
       workflowName: "Checkout",
@@ -1553,4 +1557,190 @@ test("every exported workflow error matches its own name and nothing else", () =
       );
     }
   }
+});
+
+// ---------------------------------------------------------------------------
+// The consumed signal envelope. `journal.rs` records `createdAt` as an RFC 3339
+// string, and `SignalEnvelope` declares a `Date`, so the bridge rebuilds it on
+// the way into the body the same way it rebuilds the trigger's `startedAt`.
+// ---------------------------------------------------------------------------
+
+/** The instant the engine records, and the spelling `chrono` writes for it. */
+const SIGNAL_INSTANT_MS = Date.UTC(2026, 6, 5, 1, 2, 3);
+const SIGNAL_CREATED_AT = new Date(SIGNAL_INSTANT_MS).toISOString();
+
+/**
+ * A consumed wait row exactly as `resolve` in
+ * `crates/zeroship-workflow/src/service/journal.rs` commits it: the envelope
+ * lands in the row's `output`, and `createdAt` is `to_rfc3339` of the signal's
+ * stored instant.
+ */
+function consumedSignalRow(createdAt: string = SIGNAL_CREATED_AT): JournalRow {
+  return {
+    ordinal: 0,
+    name: "approved",
+    nameOccurrence: 0,
+    kind: "wait_signal",
+    state: "completed",
+    output: {
+      id: "wfs_1",
+      type: "order.approved",
+      payload: { approved: true },
+      createdAt,
+      origin: "app",
+      delivery: "direct",
+      topic: null,
+    },
+  };
+}
+
+class SignalReader extends Workflow<unknown, unknown> {
+  async run(_trigger: WorkflowTrigger<unknown>, step: WorkflowStep): Promise<unknown> {
+    const signal = await step.waitForSignal("approved", { type: "order.approved" });
+    if (signal === null) return { timedOut: true };
+    return {
+      isDate: signal.createdAt instanceof Date,
+      at: signal.createdAt instanceof Date ? signal.createdAt.getTime() : null,
+      type: signal.type,
+      payload: signal.payload,
+    };
+  }
+}
+
+test("a consumed signal reaches the body with createdAt as a Date", { timeout: TEST_TIMEOUT_MS }, async () => {
+  const result = await replay(SignalReader, [consumedSignalRow()]);
+
+  assert.equal(result.kind, "RunCompleted", show(result));
+  const output = result.output as { isDate: boolean; at: number | null };
+  assert.equal(output.isDate, true, show(result));
+  // The control on the revival itself: an `Invalid Date` is still a Date, so
+  // the case above passes for a value that lost the instant. This pins the
+  // instant the producer wrote, which only a real parse can reach.
+  assert.equal(output.at, SIGNAL_INSTANT_MS, show(result));
+});
+
+test("reviving createdAt leaves the rest of the envelope alone", { timeout: TEST_TIMEOUT_MS }, async () => {
+  const result = await replay(SignalReader, [consumedSignalRow()]);
+
+  assert.equal(result.kind, "RunCompleted", show(result));
+  const output = result.output as { type: string; payload: unknown };
+  assert.equal(output.type, "order.approved", show(result));
+  assert.deepEqual(output.payload, { approved: true }, show(result));
+});
+
+test("a timed-out wait still resolves to null, not an envelope", { timeout: TEST_TIMEOUT_MS }, async () => {
+  // The control differing in one variable: the same completed wait row, but
+  // carrying the `null` output `resolve` writes when the wait expired with no
+  // matching signal. Reviving must not turn that into an object.
+  const expired: JournalRow = { ...consumedSignalRow(), output: null };
+
+  const result = await replay(SignalReader, [expired]);
+
+  assert.equal(result.kind, "RunCompleted", show(result));
+  assert.deepEqual(result.output, { timedOut: true }, show(result));
+});
+
+// ---------------------------------------------------------------------------
+// Compensator misuse. A compensator runs after the registry rebuild, past the
+// journal prefix, so a step call from one has no record to issue against. What
+// the run records for it must be the documented misuse, never the bridge's own
+// replay signal: a compensation failure is a durable journal fact a creator
+// reads back off `compensation.failures`.
+// ---------------------------------------------------------------------------
+
+/** The compensable prefix a rollback dispatch rebuilds its registry from. */
+function compensableRow(): JournalRow {
+  return {
+    ordinal: 0,
+    name: "reserve",
+    nameOccurrence: 0,
+    kind: "run",
+    state: "completed",
+    output: { reservationId: "res_1" },
+    compensationState: "pending",
+  };
+}
+
+/** Bridge-internal control signals, which must never reach the journal. */
+const BRIDGE_SIGNAL_NAMES = [
+  "CompensationReplayReady",
+  "SuspendSignal",
+  "ContinueAsNewSignal",
+];
+
+class CompensatorCallingStep extends Workflow<unknown, unknown> {
+  async run(_trigger: WorkflowTrigger<unknown>, step: WorkflowStep): Promise<unknown> {
+    await step.run(
+      "reserve",
+      { compensate: async () => step.sideEffect("undo-id", () => "id") },
+      () => ({ reservationId: "res_1" }),
+    );
+    throw new PermanentError("rolled back");
+  }
+}
+
+class CompensatorLeavingStepAlone extends Workflow<unknown, unknown> {
+  async run(_trigger: WorkflowTrigger<unknown>, step: WorkflowStep): Promise<unknown> {
+    await step.run(
+      "reserve",
+      { compensate: async () => "released" },
+      () => ({ reservationId: "res_1" }),
+    );
+    throw new PermanentError("rolled back");
+  }
+}
+
+test("a compensator that calls a step records the misuse, not a bridge signal", { timeout: TEST_TIMEOUT_MS }, async () => {
+  const result = await replay(CompensatorCallingStep, [compensableRow()], {
+    phase: "compensating",
+  });
+
+  assert.equal(result.kind, "CompensationFailed", show(result));
+  const error = result.error;
+  assert.ok(error, show(result));
+  for (const internal of BRIDGE_SIGNAL_NAMES) {
+    assert.notEqual(error.type, internal, show(result));
+  }
+  assert.equal(error.type, "NestedStepError", show(result));
+  assert.ok(error.message.includes("compensator"), show(result));
+});
+
+test("a compensator that calls no step still completes", { timeout: TEST_TIMEOUT_MS }, async () => {
+  // The control differing in one variable: the same rollback over the same
+  // journal, whose compensator does not touch the step surface. Without it the
+  // case above would pass for a build where every compensator fails.
+  const result = await replay(CompensatorLeavingStepAlone, [compensableRow()], {
+    phase: "compensating",
+  });
+
+  assert.equal(result.kind, "CompensationCompleted", show(result));
+  assert.equal(result.ordinal, 0, show(result));
+  assert.equal(result.name, "reserve", show(result));
+});
+
+test("a compensator can match its own misuse as NestedStepError", { timeout: TEST_TIMEOUT_MS }, async () => {
+  class Handled extends Workflow<unknown, unknown> {
+    async run(_trigger: WorkflowTrigger<unknown>, step: WorkflowStep): Promise<unknown> {
+      await step.run(
+        "reserve",
+        {
+          compensate: async () => {
+            try {
+              await step.sideEffect("undo-id", () => "id");
+            } catch (e) {
+              if (e instanceof NestedStepError) return "handled nested step misuse";
+              throw e;
+            }
+            throw new Error("the step surface answered a compensator");
+          },
+        },
+        () => ({ reservationId: "res_1" }),
+      );
+      throw new PermanentError("rolled back");
+    }
+  }
+
+  const result = await replay(Handled, [compensableRow()], { phase: "compensating" });
+
+  assert.equal(result.kind, "CompensationCompleted", show(result));
 });
