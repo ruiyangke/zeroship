@@ -23,8 +23,13 @@ use serde_json::json;
 use zeroship_authz::{load_platform_policies, PlatformPolicies};
 
 const APP: &str = "app_blog";
+const DATABASE: &str = "dbs_0000000000000000000000001";
 const PROJECT: &str = "prj_0000000000000000000000001";
 const ORGANIZATION: &str = "org_0000000000000000000000001";
+
+/// Every action the database bands name. Written once so a test asserting the
+/// family cannot silently rule on a subset of it.
+const DATABASE_ACTIONS: &[&str] = &["database:read", "database:write", "database:migrate"];
 
 const VIEWER: i64 = 10;
 const DEVELOPER: i64 = 20;
@@ -204,6 +209,128 @@ fn developer_rank_holds_no_organization_authority_and_no_money() {
 }
 
 // ---------------------------------------------------------------------------
+// The database bands - a database is PROJECT-owned
+// ---------------------------------------------------------------------------
+
+/// A viewer sees a database and changes nothing about it.
+#[test]
+fn viewer_rank_reads_a_database_and_changes_neither_it_nor_its_schema() {
+    let policies = load_platform_policies().expect("static policies parse");
+
+    assert_allow(&policies, "database:read", "Database", DATABASE, VIEWER, 0);
+    // The control that makes the line above a boundary rather than a list: one
+    // rank lower is not a viewer at all, and the identical request denies.
+    assert_deny(
+        &policies,
+        "database:read",
+        "Database",
+        DATABASE,
+        VIEWER - 1,
+        0,
+    );
+
+    for action in ["database:write", "database:migrate"] {
+        assert_deny(&policies, action, "Database", DATABASE, VIEWER, 0);
+        assert_deny(&policies, action, "Project", PROJECT, VIEWER, 0);
+    }
+}
+
+/// The developer band carries the whole database family, and one rank lower
+/// collapses exactly the two that change something.
+#[test]
+fn developer_rank_creates_binds_and_migrates_a_database() {
+    let policies = load_platform_policies().expect("static policies parse");
+
+    for action in DATABASE_ACTIONS {
+        assert_allow(&policies, action, "Database", DATABASE, DEVELOPER, 0);
+        // The same authority named at the project. `database:write` there is
+        // "create a database in this project", which has no Database to name,
+        // and it is also the resource `is_authorized_anywhere` probes - no
+        // database is ever probed, so a database action absent from a Project
+        // statement would read as ungrantable on the consent screen.
+        assert_allow(&policies, action, "Project", PROJECT, DEVELOPER, 0);
+    }
+
+    for action in ["database:write", "database:migrate"] {
+        assert_deny(&policies, action, "Database", DATABASE, DEVELOPER - 1, 0);
+        assert_deny(&policies, action, "Project", PROJECT, DEVELOPER - 1, 0);
+    }
+    // The read survives the same single-variable step down, so the denials
+    // above are the developer/viewer boundary rather than a dead resource type.
+    assert_allow(
+        &policies,
+        "database:read",
+        "Database",
+        DATABASE,
+        DEVELOPER - 1,
+        0,
+    );
+}
+
+/// **A database is reached through its PROJECT, never through an app.**
+///
+/// Every band discriminates the resource TYPE in its scope, so no database
+/// action is satisfiable at `resource is App` at any rank. This is the fence
+/// that stops an app binding - which is data access for running code - from
+/// reading as authority over the database it reaches, and it is what makes
+/// `is_authorized_anywhere`'s answer for a database scope the true one.
+#[test]
+fn a_database_action_is_unsatisfiable_at_app_scope() {
+    let policies = load_platform_policies().expect("static policies parse");
+
+    let mut ruled_on = 0usize;
+    for action in DATABASE_ACTIONS {
+        for rank in [0, VIEWER, DEVELOPER, ADMIN, OWNER] {
+            ruled_on += 1;
+            assert_deny(&policies, action, "App", APP, rank, 20);
+        }
+        // Organization scope is refused too: a database belongs to one project,
+        // so organization-wide authority over every database in it is an
+        // authority no band grants.
+        assert_deny(&policies, action, "Organization", ORGANIZATION, OWNER, 20);
+        // The self-service baseline names no resource, and a bearer wrapper
+        // lowers to exactly that. It must not reach a database either.
+        assert_deny(&policies, action, "Resource", "*", OWNER, 20);
+    }
+    assert_eq!(
+        ruled_on,
+        DATABASE_ACTIONS.len() * 5,
+        "the enumeration collapsed, so the clean result above means nothing"
+    );
+    // The control: the same actions at the resource type that DOES carry them,
+    // at a rank that holds them. Without it every assertion above would pass on
+    // a policy set that had lost the database bands entirely.
+    for action in DATABASE_ACTIONS {
+        assert_allow(&policies, action, "Database", DATABASE, DEVELOPER, 0);
+    }
+}
+
+/// The app family is the mirror image: no app action is satisfiable at
+/// `resource is Database`, so a seat that reaches a database confers nothing
+/// over the apps bound to it.
+#[test]
+fn an_app_action_is_unsatisfiable_at_database_scope() {
+    let policies = load_platform_policies().expect("static policies parse");
+
+    for action in [
+        "apps:read",
+        "apps:write",
+        "apps:deploy",
+        "apps:archive",
+        "env:read",
+        "env:write",
+        "secrets:read",
+        "secrets:write",
+        "deployments:read",
+    ] {
+        assert_deny(&policies, action, "Database", DATABASE, OWNER, 20);
+        // The control, one variable changed: the same action at App scope, at a
+        // rank that holds it.
+        assert_allow(&policies, action, "App", APP, OWNER, 20);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Admin and owner
 // ---------------------------------------------------------------------------
 
@@ -361,14 +488,19 @@ fn the_billing_axis_moves_independently_of_rank() {
     }
 }
 
-/// Money is organization-scoped: there is no per-app or per-project invoice, so
-/// no band names an App or a Project for a billing action. A route that gated
-/// billing on an app would deny at every billing rank, which is what this pins.
+/// Money is organization-scoped: there is no per-app, per-database or
+/// per-project invoice, so no band names one of those for a billing action. A
+/// route that gated billing on an app would deny at every billing rank, which
+/// is what this pins.
 #[test]
-fn billing_is_not_satisfiable_at_app_or_project_scope() {
+fn billing_is_not_satisfiable_below_organization_scope() {
     let policies = load_platform_policies().expect("static policies parse");
 
-    for (resource_type, id) in [("App", APP), ("Project", PROJECT)] {
+    for (resource_type, id) in [
+        ("App", APP),
+        ("Database", DATABASE),
+        ("Project", PROJECT),
+    ] {
         for action in ["billing:read", "billing:write"] {
             assert_deny(&policies, action, resource_type, id, OWNER, 20);
         }
@@ -380,11 +512,12 @@ fn billing_is_not_satisfiable_at_app_or_project_scope() {
 // ---------------------------------------------------------------------------
 
 /// Every band discriminates the resource TYPE in its SCOPE. An organization
-/// action therefore cannot be satisfied by an App- or Project-typed request, no
-/// matter how high the rank - which is what stops `is_authorized_anywhere`
-/// answering "yes" for `organization:members:write` on the strength of an app.
+/// action therefore cannot be satisfied by an App-, Database- or
+/// Project-typed request, no matter how high the rank - which is what stops
+/// `is_authorized_anywhere` answering "yes" for `organization:members:write` on
+/// the strength of an app.
 #[test]
-fn an_organization_action_is_unsatisfiable_at_app_or_project_scope() {
+fn an_organization_action_is_unsatisfiable_below_organization_scope() {
     let policies = load_platform_policies().expect("static policies parse");
 
     for action in [
@@ -395,6 +528,7 @@ fn an_organization_action_is_unsatisfiable_at_app_or_project_scope() {
         "organization:members:write",
     ] {
         assert_deny(&policies, action, "App", APP, OWNER, 20);
+        assert_deny(&policies, action, "Database", DATABASE, OWNER, 20);
         assert_deny(&policies, action, "Project", PROJECT, OWNER, 20);
     }
 }
@@ -415,9 +549,11 @@ fn rank_zero_reads_nothing_on_a_concrete_resource() {
         "deployments:read",
         "organization:members:read",
         "project:read",
+        "database:read",
     ] {
         for (resource_type, id) in [
             ("App", APP),
+            ("Database", DATABASE),
             ("Project", PROJECT),
             ("Organization", ORGANIZATION),
         ] {
@@ -439,6 +575,7 @@ fn no_rank_reaches_operator_only_migration_approval() {
 
     for (resource_type, id) in [
         ("App", APP),
+        ("Database", DATABASE),
         ("Project", PROJECT),
         ("Organization", ORGANIZATION),
         ("Resource", "*"),
