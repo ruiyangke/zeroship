@@ -155,8 +155,8 @@ export default {
 
     // WITHOUT THIS, "immutable" and "INSERT-ONCE" would be prose. Control holds
     // UPDATE because `status` must progress and `expires_at` must renew, and
-    // UPDATE is not column-selective in a grant, so the identity and address
-    // columns are frozen here instead. The ring key is the reason this matters
+    // its table-wide UPDATE grant also covers the identity and address columns,
+    // so those are frozen here instead. The ring key is the reason this matters
     // most: a writer that could rotate it could move an instance's ring position
     // after placement was decided, which is the grinding attack the mint exists
     // to prevent.
@@ -339,7 +339,8 @@ export default {
     // ROTATE is the hygiene path: the key is merely old. It stops every future
     // token minted under it and leaves the fleet running, because one signer
     // covers many units and retiring a key must not take all of them down.
-    // Outstanding tokens die at their own expiry.
+    // Outstanding tokens are refused immediately, because verification resolves
+    // only an active signer.
     //
     // PURGE is the incident path: the key is believed to have leaked. It does
     // what rotate does AND retires every instance the signer admitted, in one

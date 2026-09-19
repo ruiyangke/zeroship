@@ -609,8 +609,9 @@ export default {
     // mutation takes, so it reads both tables and takes the lock on the
     // organization. The column grant is what makes that lock expressible: a
     // `SELECT ... FOR UPDATE` is refused with SELECT alone, while the column
-    // form permits the lock and no writable column, so the reaper can serialize
-    // against a departure without being able to rename, re-slug or dissolve.
+    // form permits the lock and no column the reaper writes, so the reaper can
+    // serialize against a departure without being able to rename, re-slug or
+    // dissolve.
     grant({
       privileges: ["select"],
       on: {
@@ -623,7 +624,7 @@ export default {
     raw({
       sql: "GRANT UPDATE (id) ON zeroship.organizations TO zeroship_auth",
       reason:
-        "PostgreSQL requires UPDATE for a row lock; the column form grants the lock and no writable column",
+        "PostgreSQL requires UPDATE for a row lock; the column form grants the lock and no column the reaper writes",
     });
   },
 };
