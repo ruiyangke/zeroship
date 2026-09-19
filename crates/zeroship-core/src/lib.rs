@@ -17,6 +17,7 @@ pub mod auth_provider;
 pub mod client_ip;
 pub mod config;
 pub mod crypto;
+pub mod database_derivation;
 pub mod database_role;
 pub mod db_url;
 pub mod device_grant;
@@ -57,8 +58,9 @@ pub mod workflow_signal_token;
 // keys can be depended on by an artifact format. One `AppId` for the whole tree
 // is the property being bought.
 pub use zeroship_id::{
-    app_id, deploy_command, entity_id, invite_id, organization_id, project_id, typed_id, user_id,
-    AppId, DeployCommandId, InviteId, OrganizationId, ProjectId, UserId,
+    app_id, binding_id, database_id, deploy_command, entity_id, invite_id, organization_id,
+    project_id, typed_id, user_id, AppId, BindingId, DatabaseId, DeployCommandId, InviteId,
+    OrganizationId, ProjectId, UserId,
 };
 
 pub use superjson::Envelope;
