@@ -48,15 +48,16 @@
 //! followed by one.
 //!
 //! That matters more here than it reads. A mis-rendered id does not fail this
-//! query: `zeroship.apps` and `zeroship.databases` are each reached by a LEFT
-//! JOIN, so an id in a rendering the column does not hold contributes NO ROW,
-//! every rank comes back NULL, and the caller is told they hold no seat on a
-//! resource they own. The types are what make that unreachable.
+//! query: the owning project is found by a scalar subquery over `zeroship.apps`
+//! or `zeroship.databases`, so an id in a rendering the column does not hold
+//! yields NULL, joins no project, brings every rank back NULL, and the caller is
+//! told they hold no seat on a resource they own. The types are what make that
+//! unreachable.
 //!
 //! **This binds `zeroship.apps.id` and `zeroship.databases.id` as `text`, and
 //! that is a REQUIREMENT ON THOSE COLUMNS, not a description of them.** Neither
 //! [`AppId`] nor [`DatabaseId`] exposes a route to a uuid - there is no
-//! `uuid()` to call - so text against text is the only comparison these joins
+//! `uuid()` to call - so text against text is the only comparison these lookups
 //! can make, and a platform database whose `apps.id` or `databases.id` is not
 //! `text` fails outright with a type error rather than resolving anything.
 //! Loud, and on the first query.
@@ -141,11 +142,68 @@ pub async fn resolve(
         Resource::Any => resolve_unranked(pg, principal_id).await,
         Resource::Organization { id } => resolve_organization(pg, principal_id, id).await,
         Resource::Project { id } => {
-            resolve_narrowed(pg, principal_id, Some(id.as_str()), None, None).await
+            resolve_narrowed(pg, principal_id, Narrowed::Project(id)).await
         }
-        Resource::App { id } => resolve_narrowed(pg, principal_id, None, Some(id), None).await,
+        Resource::App { id } => resolve_narrowed(pg, principal_id, Narrowed::App(id)).await,
         Resource::Database { id } => {
-            resolve_narrowed(pg, principal_id, None, None, Some(id)).await
+            resolve_narrowed(pg, principal_id, Narrowed::Database(id)).await
+        }
+    }
+}
+
+/// A resource whose authority is a PROJECT SEAT, paired with the id that finds
+/// that project.
+///
+/// The narrowed resolve is one statement with this as its only substitution, so
+/// the three kinds share the whole rank derivation and differ in exactly the
+/// clause that differs. Writing them as three statements is what would let the
+/// narrowing drift between the paths.
+///
+/// Carrying the id in the variant rather than beside it is what makes a
+/// mismatched pair unspellable: a database id can never be handed to the app
+/// lookup, so the failure this type exists to prevent - a join against the
+/// wrong table, which returns no row and reads as "no seat" - cannot be
+/// written.
+///
+/// The variant also decides which table the statement touches AT ALL. An
+/// app-scoped resolve names `zeroship.apps` and nothing else; a database-scoped
+/// one names `zeroship.databases` and nothing else. One statement joining both
+/// would make every app authorization depend on the database registry existing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Narrowed<'a> {
+    /// The named resource IS the project.
+    Project(&'a str),
+    /// `zeroship.apps.project_id`. An app reaches an organization only through
+    /// the project that owns it.
+    App(&'a AppId),
+    /// `zeroship.databases.project_id`.
+    ///
+    /// A database is project-owned, so this is a DIRECT lookup and not a walk
+    /// through a binding: a binding is an app's access to a database, and an
+    /// app holding one confers no authority over that database on the app's own
+    /// members.
+    Database(&'a DatabaseId),
+}
+
+impl Narrowed<'_> {
+    /// The scalar SQL expression yielding the owning project's id, with `$2`
+    /// bound to [`Self::id`].
+    const fn owning_project_sql(self) -> &'static str {
+        match self {
+            Self::Project(_) => "$2::text",
+            Self::App(_) => "SELECT a.project_id FROM zeroship.apps a WHERE a.id = $2::text",
+            Self::Database(_) => {
+                "SELECT d.project_id FROM zeroship.databases d WHERE d.id = $2::text"
+            }
+        }
+    }
+
+    /// The id the request names, bound as `text`.
+    fn id(&self) -> &str {
+        match self {
+            Self::Project(id) => id,
+            Self::App(id) => id.as_str(),
+            Self::Database(id) => id.as_str(),
         }
     }
 }
@@ -199,44 +257,32 @@ async fn resolve_organization(
     })
 }
 
-/// The project-, app- and database-scoped resolve. ONE query serves all three,
-/// because an app and a database each reach an organization only through their
-/// project: exactly one of `project_id` / `app_id` / `database_id` is supplied,
-/// and the other arms' joins contribute nothing.
+/// The project-, app- and database-scoped resolve. ONE statement serves all
+/// three, because an app and a database each reach an organization only through
+/// the project that owns it. [`Narrowed`] is its single substitution, so the
+/// whole narrowing is written once and the three kinds differ in exactly the
+/// clause that differs.
 ///
-/// Duplicating this as three nearly identical statements is what would let the
-/// narrowing drift between the paths, so it is written once.
-///
-/// **A database is project-owned, so there is no app in its chain.** It is
-/// reached by `zeroship.databases.project_id` directly, not by walking a
-/// binding: a binding is an app's access to a database, and an app holding one
-/// confers no authority over the database on the app's own members.
-///
-/// Every bound id is `text` and every one arrives already parsed - the app id
-/// as an [`AppId`], the database id as a [`DatabaseId`], the project id as a
+/// The bound id is `text` and it arrives already parsed: the app id as an
+/// [`AppId`], the database id as a [`DatabaseId`], the project id as a
 /// validated [`Resource::Project`] id. There is no cast to get wrong and no
 /// second rendering to pick between, which is what the deleted
 /// `app_uuid_or_refuse` existed to arbitrate.
 async fn resolve_narrowed(
     pg: &Client,
     principal_id: &UserId,
-    project_id: Option<&str>,
-    app_id: Option<&AppId>,
-    database_id: Option<&DatabaseId>,
+    narrowed: Narrowed<'_>,
 ) -> Result<Authority, AuthzError> {
-    let app_id = app_id.map(AppId::as_str);
-    let database_id = database_id.map(DatabaseId::as_str);
+    let owning_project = narrowed.owning_project_sql();
+    let resource_id = narrowed.id();
     let sql = format!(
         "SELECT {USER_ATTRS}, \
                 organization_role.rank         AS organization_rank, \
                 organization_role.billing_rank AS organization_billing_rank, \
                 project_role.rank              AS project_rank, \
-                (SELECT rank FROM zeroship.organization_roles WHERE role = $4) AS admin_rank \
+                (SELECT rank FROM zeroship.organization_roles WHERE role = $3) AS admin_rank \
            FROM zeroship.users u \
-           LEFT JOIN zeroship.apps a ON a.id = $3::text \
-           LEFT JOIN zeroship.databases d ON d.id = $5::text \
-           LEFT JOIN zeroship.projects p \
-                  ON p.id = COALESCE($2::text, a.project_id, d.project_id) \
+           LEFT JOIN zeroship.projects p ON p.id = ({owning_project}) \
            LEFT JOIN zeroship.organization_members m \
                   ON m.organization_id = p.organization_id AND m.user_id = u.id \
            LEFT JOIN zeroship.organization_roles organization_role \
@@ -252,10 +298,8 @@ async fn resolve_narrowed(
             &sql,
             &[
                 &principal_id.as_str(),
-                &project_id,
-                &app_id,
+                &resource_id,
                 &PROJECT_WIDE_ROLE,
-                &database_id,
             ],
         )
         .await
