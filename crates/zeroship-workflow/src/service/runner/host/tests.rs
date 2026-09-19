@@ -488,3 +488,48 @@ async fn host_rejects_invalid_intervals_before_network_io() {
     )
     .await;
 }
+
+/// The host thread runs on the declared stack budget, not the platform default.
+///
+/// Measured from the mapping the kernel actually gave the thread, because the
+/// builder's setting is a request and what the call chain can spend before the
+/// process aborts is the mapping. The control thread asks for a small stack
+/// explicitly, so the reading has to discriminate rather than answer "large"
+/// for anything; asking for it explicitly also keeps the control out of reach
+/// of whatever default the surrounding process was started with.
+#[test]
+fn the_host_thread_runs_on_the_declared_stack_budget() {
+    let budget = mapped_stack_bytes(thread()).expect("host thread stack mapping");
+    let control = mapped_stack_bytes(std::thread::Builder::new().stack_size(1024 * 1024))
+        .expect("control thread stack mapping");
+    assert!(
+        control < STACK_BYTES / 2,
+        "control thread measured {control} bytes, so this reading does not discriminate"
+    );
+    // A guard page and page rounding are the only shortfall the kernel may
+    // impose on a requested stack.
+    assert!(
+        budget + 64 * 1024 >= STACK_BYTES,
+        "host thread received {budget} bytes of stack, under its declared budget"
+    );
+}
+
+/// Bytes the kernel mapped for the stack of a thread this builder spawns.
+fn mapped_stack_bytes(builder: std::thread::Builder) -> Option<usize> {
+    builder
+        .spawn(|| {
+            let anchor = 0u8;
+            let address = std::ptr::addr_of!(anchor) as usize;
+            let maps = std::fs::read_to_string("/proc/self/maps").ok()?;
+            maps.lines().find_map(|line| {
+                let (range, _) = line.split_once(' ')?;
+                let (start, end) = range.split_once('-')?;
+                let start = usize::from_str_radix(start, 16).ok()?;
+                let end = usize::from_str_radix(end, 16).ok()?;
+                (start..end).contains(&address).then_some(end - start)
+            })
+        })
+        .ok()?
+        .join()
+        .ok()?
+}
