@@ -48,6 +48,11 @@ export interface AstNode {
   test?: AstNode | null;
   consequent?: AstNode;
   alternate?: AstNode | null;
+  operator?: string;
+  block?: AstNode;
+  handler?: AstNode | null;
+  finalizer?: AstNode | null;
+  param?: AstNode | null;
 }
 
 export interface Visitor {
