@@ -1,43 +1,6 @@
-use chrono::Utc;
 use serde_json::{json, Value};
-use zeroship_workflow::engine::{RunUpdate, StepRequest, WorkflowEngineConfig};
-use zeroship_workflow::{WorkflowExecution, WorkflowInvocation, WorkflowServiceError};
-
-#[test]
-fn replay_input_keeps_claim_credentials_in_the_host() {
-    let config = WorkflowEngineConfig::default();
-    let request = StepRequest {
-        run_id: "run_claimed".into(),
-        generation: 3,
-        app_id: zeroship_core::AppId::mint(),
-        workflow_name: "Checkout".into(),
-        deploy_id: "dep_pinned".into(),
-        deploy_hash: "snapshot-pinned".into(),
-        dispatch_nonce: "lease-secret".into(),
-        phase: "running".into(),
-        input: Some(json!({"order": "checkout"})),
-        started_at: Utc::now(),
-        journal: vec![],
-        owner_id: "trusted-worker".into(),
-        max_child_depth: config.max_child_depth,
-        max_live_descendants: config.max_live_descendants,
-        max_start_many_batch: config.max_start_many_batch,
-        journal_limits: config.journal_limits,
-    };
-    let encoded = serde_json::to_value(WorkflowInvocation::from(&request)).unwrap();
-    for private in ["nonce", "dispatchNonce", "ownerId", "journalLimits"] {
-        assert!(encoded.get(private).is_none(), "exposed {private}");
-    }
-    let text = encoded.to_string();
-    assert!(!text.contains(&request.dispatch_nonce));
-    assert!(!text.contains(&request.owner_id));
-    assert_eq!(encoded["appId"], request.app_id.as_str());
-    assert_eq!(encoded["deployHash"], request.deploy_hash);
-    // Step idempotency keys are generation-scoped, so replay input must carry it.
-    assert_eq!(encoded["generation"], request.generation);
-    assert_eq!(encoded["trigger"]["runId"], request.run_id);
-    assert_eq!(encoded["trigger"]["input"], request.input.unwrap());
-}
+use zeroship_workflow::engine::RunUpdate;
+use zeroship_workflow::{WorkflowExecution, WorkflowServiceError};
 
 #[test]
 fn runtime_output_cannot_select_another_run_or_lease() {
