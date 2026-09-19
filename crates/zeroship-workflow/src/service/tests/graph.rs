@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     engine::StepCheckpoint,
     operations::{RestartOptions, RunState},
-    service::{app, frontier, journal, models, types::storage_id},
+    service::{app, frontier, journal, models, types::storage_id, WorkerIdentity},
 };
 use zeroship_data_orm::{
     budgets::MAX_INSERT_MANY_BATCH,
@@ -48,6 +48,19 @@ async fn sqlite_restart_inspects_terminal_descendants_and_rejects_corrupt_ancest
 async fn postgres_restart_inspects_terminal_descendants_and_rejects_corrupt_ancestry() {
     let fixture = PostgresFixture::start().await;
     restart_contract(Rc::new(fixture.store.clone())).await;
+}
+
+#[compio::test]
+async fn sqlite_a_parent_at_the_child_depth_ceiling_starts_no_further_child() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
+    Box::pin(depth_contract(Rc::new(store))).await;
+}
+
+#[compio::test]
+async fn postgres_a_parent_at_the_child_depth_ceiling_starts_no_further_child() {
+    let fixture = PostgresFixture::start().await;
+    Box::pin(depth_contract(Rc::new(fixture.store.clone()))).await;
 }
 
 async fn dependency_contract(store: Rc<OrmStore>) {
@@ -327,6 +340,121 @@ async fn restart_contract(store: Rc<OrmStore>) {
     assert!(
         matches!(scope.restart(&RequestId::mint(), &root, RestartOptions::default()).await,
         Err(WorkflowServiceError::Internal(message)) if message == "workflow descendants contain a cycle")
+    );
+}
+
+/// How deep a tree the app may build, for the cases that bind that ceiling.
+///
+/// Lowered so a chain can reach it in a case a reader can follow. The
+/// production default is untouched: what a test varies is the policy the app
+/// was granted, never the limit the engine enforces.
+const DEPTH_CEILING: i64 = 1;
+
+/// One `step.startChild` call, as the replay bridge emits it.
+///
+/// Unkeyed, because a keyed call that finds a live run of that key joins it and
+/// returns before the ceiling is consulted. Joining starts no run, so it adds no
+/// depth; a case that reached the ceiling through a key would be asserting on
+/// the lookup rather than on the ceiling.
+fn child_call() -> crate::WorkflowExecution {
+    execution(json!([{
+        "kind":"Child", "ordinal":0, "name":"join", "childWorkflowName":"Child",
+        "options":{}, "input":{},
+    }]))
+}
+
+/// The child run the accepted checkpoint of `parent` points at, if it has one.
+async fn child_run(service: &WorkflowService, app_id: &AppId, parent: &str) -> Option<String> {
+    let mut tx = service.begin().await.unwrap();
+    app::lock_app(&mut tx, app_id).await.unwrap();
+    let run = app::lock_run(&mut tx, app_id, parent).await.unwrap();
+    let child = journal::load(&mut tx, app_id, parent, run.integer("generation").unwrap())
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|step| step.kind == "child")
+        .and_then(|step| step.child_run_id);
+    tx.commit().await.unwrap();
+    child
+}
+
+/// How far one run sits from the root of its tree.
+async fn depth_of(service: &WorkflowService, app_id: &AppId, run: &str) -> i64 {
+    let mut tx = service.begin().await.unwrap();
+    app::lock_app(&mut tx, app_id).await.unwrap();
+    let depth = app::lock_run(&mut tx, app_id, run)
+        .await
+        .unwrap()
+        .integer("depth")
+        .unwrap();
+    tx.commit().await.unwrap();
+    depth
+}
+
+/// How deep the tree a run may build goes, and the level below it that is
+/// admitted.
+///
+/// The chain is built by the production path rather than seeded, so the case
+/// rests on the depth the engine itself records for a child. The two halves are
+/// the same call, from the same worker, under the same policy; the one variable
+/// is the depth of the parent making it.
+async fn depth_contract(store: Rc<OrmStore>) {
+    let (service, app_id, _, _deployments) = registered_service(store).await;
+    let scope = service.fixture_app(app_id.clone());
+    let worker = WorkerIdentity::new("child-depth".into()).unwrap();
+    service
+        .policies
+        .fixture_install(
+            &app_id,
+            leased_policy(
+                2,
+                AppPolicy {
+                    max_child_depth: DEPTH_CEILING,
+                    ..Default::default()
+                },
+            ),
+        )
+        .unwrap();
+
+    // The control: a root sits one level under the ceiling, so its call is
+    // admitted and the child it starts lands on the ceiling.
+    let root = scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let task = service.poll(&worker).await.unwrap().unwrap();
+    assert_eq!(task.invocation.run_id, root.id);
+    service
+        .complete(&worker, &task.id, &task.token, child_call())
+        .await
+        .expect("a parent under the ceiling starts its child");
+    let child = child_run(&service, &app_id, &root.id)
+        .await
+        .expect("the admitted call journals a child run");
+    assert_eq!(
+        depth_of(&service, &app_id, &child).await,
+        DEPTH_CEILING,
+        "the admitted child lands on the ceiling"
+    );
+
+    // The same call from that child, which is at the ceiling.
+    let task = service.poll(&worker).await.unwrap().unwrap();
+    assert_eq!(
+        task.invocation.run_id, child,
+        "the root parks on its join, leaving only the child runnable"
+    );
+    let refused = service
+        .complete(&worker, &task.id, &task.token, child_call())
+        .await;
+    assert!(
+        matches!(&refused, Err(WorkflowServiceError::ResourceExhausted(message))
+            if message == "workflow child depth limit reached"),
+        "a parent at the depth ceiling must start no child: {refused:?}"
+    );
+    assert_eq!(
+        child_run(&service, &app_id, &child).await,
+        None,
+        "a refused call journals no grandchild"
     );
 }
 
