@@ -1217,3 +1217,110 @@ async fn the_listings_are_scoped_to_their_project_and_their_database() {
         "the neighbouring database's binding must not be listed"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The app-deletion funnel
+// ---------------------------------------------------------------------------
+
+/// Deleting an app that still binds a database is refused, and the refusal
+/// names the databases to unbind. The control is the SAME call once the binding
+/// is withdrawn.
+///
+/// This is a boundary between two surfaces rather than one module's rule.
+/// `organizations::delete_app` sets `apps.project_id = NULL`, which changes the
+/// key `database_bindings_app_project_fkey` references under `ON UPDATE
+/// RESTRICT`; before the predicate existed `PostgreSQL` refused the statement and
+/// the creator was handed a 500 for an ordinary ordering mistake. The path was
+/// unreachable until a binding row could exist at all, which is what this
+/// surface added.
+#[compio::test]
+async fn deleting_an_app_that_still_binds_a_database_is_refused_and_names_it() {
+    let fx = Fx::new().await;
+    let mut world = World::new(&fx, "delete-app").await;
+    world.datastore(&fx, &world.zone_id, "active").await;
+    let project_id = world.project_id.clone();
+    let app = world.app(&fx, &project_id, "bound-app").await;
+
+    let created = databases::create_database(
+        &fx.registry,
+        &world.owner,
+        &project_id,
+        &create_body("main"),
+        None,
+    )
+    .await
+    .expect("create database");
+    let database_id = DatabaseId::parse(&created.id).expect("a minted database id");
+    databases::bind_database(
+        &fx.registry,
+        &world.owner,
+        &database_id,
+        &bind_body(&app, CAPABILITY_READWRITE),
+        None,
+    )
+    .await
+    .expect("bind app");
+
+    // Archive first: delete is the terminal step of the funnel and refuses an
+    // unarchived app for its own reason, which is not the one under test.
+    fx.pg
+        .execute(
+            "UPDATE zeroship.apps SET archived_at = NOW() WHERE id = $1",
+            &[&app.as_str()],
+        )
+        .await
+        .expect("archive the app");
+
+    let refused = organizations::delete_app(&fx.registry, &world.owner, &app, None).await;
+    let still_attached: Option<String> = fx
+        .pg
+        .query_one(
+            "SELECT project_id FROM zeroship.apps WHERE id = $1",
+            &[&app.as_str()],
+        )
+        .await
+        .expect("read the app")
+        .get("project_id");
+
+    // CONTROL: one variable moves - the binding is withdrawn.
+    databases::unbind_database(&fx.registry, &world.owner, &database_id, &app, None)
+        .await
+        .expect("unbind");
+    let admitted = organizations::delete_app(&fx.registry, &world.owner, &app, None).await;
+    let detached: Option<String> = fx
+        .pg
+        .query_one(
+            "SELECT project_id FROM zeroship.apps WHERE id = $1",
+            &[&app.as_str()],
+        )
+        .await
+        .expect("read the app")
+        .get("project_id");
+
+    world.cleanup(&fx).await;
+    drop(fx);
+    common::drain_pg().await;
+
+    match refused {
+        Err(organizations::OrganizationError::AppHasDatabaseBindings(databases)) => {
+            assert_eq!(
+                databases,
+                vec!["main".to_string()],
+                "the refusal must name the database to unbind"
+            );
+        }
+        other => panic!(
+            "deleting a bound app must be a typed refusal, not a constraint error, got {other:?}"
+        ),
+    }
+    assert_eq!(
+        still_attached.as_deref(),
+        Some(project_id.as_str()),
+        "a refused delete must leave the app attached to its project"
+    );
+    admitted.expect("an unbound app deletes");
+    assert_eq!(
+        detached, None,
+        "the admitted delete detached the app from its project"
+    );
+}
