@@ -770,7 +770,12 @@ async fn every_mutation_refuses_a_viewer_and_admits_a_developer() {
         "a refused delete must leave the database in place"
     );
     deleted.expect("a developer may delete an unbound database");
-    assert_eq!(after_delete, None, "the admitted delete removed the row");
+    assert_eq!(
+        after_delete.as_deref(),
+        Some("deleting"),
+        "the admitted delete must MARK the row: the schema outlives this call, and the \
+         reconciler that drops it must be told to rather than infer it from an absent row"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -858,7 +863,7 @@ async fn deleting_a_bound_database_is_refused_and_names_the_apps() {
         "a refused delete must leave the row"
     );
     admitted.expect("an unbound database deletes");
-    assert_eq!(after_delete, None);
+    assert_eq!(after_delete.as_deref(), Some("deleting"));
 }
 
 // ---------------------------------------------------------------------------
@@ -1323,4 +1328,84 @@ async fn deleting_an_app_that_still_binds_a_database_is_refused_and_names_it() {
         detached, None,
         "the admitted delete detached the app from its project"
     );
+}
+
+/// A database being deleted takes no new binding, and the same bind against the
+/// same database one moment earlier is the control.
+///
+/// Without this the two calls serialize on the organization lock and BOTH
+/// succeed, leaving a binding whose schema the reconciler is already dropping.
+/// What proves the guard is the pair: remove it and the refused arm turns into
+/// a second `Ok`, not into a different error.
+#[compio::test]
+async fn binding_a_database_being_deleted_is_refused() {
+    let fx = Fx::new().await;
+    let mut world = World::new(&fx, "bind-deleting").await;
+    world.datastore(&fx, &world.zone_id, "active").await;
+    let project_id = world.project_id.clone();
+    let early = world.app(&fx, &project_id, "early").await;
+    let late = world.app(&fx, &project_id, "late").await;
+
+    let created = databases::create_database(
+        &fx.registry,
+        &world.owner,
+        &project_id,
+        &create_body("main"),
+        None,
+    )
+    .await
+    .expect("create database");
+    let database_id = DatabaseId::parse(&created.id).expect("a minted database id");
+
+    // CONTROL: the identical call while the database is live.
+    let admitted = databases::bind_database(
+        &fx.registry,
+        &world.owner,
+        &database_id,
+        &bind_body(&early, CAPABILITY_READWRITE),
+        None,
+    )
+    .await;
+    databases::unbind_database(&fx.registry, &world.owner, &database_id, &early, None)
+        .await
+        .expect("unbind so the delete is admitted");
+
+    databases::delete_database(&fx.registry, &world.owner, &database_id, None)
+        .await
+        .expect("an unbound database deletes");
+    let marked = world.database_status(&fx, &database_id).await;
+
+    let refused = databases::bind_database(
+        &fx.registry,
+        &world.owner,
+        &database_id,
+        &bind_body(&late, CAPABILITY_READWRITE),
+        None,
+    )
+    .await;
+    let late_binding = world.binding_status(&fx, &database_id, &late).await;
+
+    // A second delete is a no-op that succeeds rather than a refusal: the
+    // caller asked for a state the database is already in.
+    let repeated = databases::delete_database(&fx.registry, &world.owner, &database_id, None).await;
+
+    world.cleanup(&fx).await;
+    drop(fx);
+    common::drain_pg().await;
+
+    admitted.expect("a live database takes a binding");
+    assert_eq!(
+        marked.as_deref(),
+        Some("deleting"),
+        "the delete must mark the row rather than remove it"
+    );
+    assert!(
+        matches!(refused, Err(DatabaseError::DatabaseDeleting)),
+        "a database being deleted must refuse a new binding, got {refused:?}"
+    );
+    assert_eq!(
+        late_binding, None,
+        "the refused bind must write no binding row for a schema being dropped"
+    );
+    repeated.expect("deleting a database that is already deleting succeeds");
 }
