@@ -35,10 +35,10 @@ export default {
 
     // ---- the app's frozen zone ----------------------------------------------
     // Control holds UPDATE on this table for other columns (archive, delete),
-    // and UPDATE is not column-selective in a grant, so the zone column is
-    // frozen by trigger instead. A worker instance's zone is frozen by its own
-    // table's trigger (20260914000500_worker_join_bindings.ts), which already
-    // refuses every change to the identity a join recorded.
+    // and its table-wide UPDATE grant also covers the zone column, so the zone
+    // is frozen by trigger instead. A worker instance's zone is frozen by its
+    // own table's trigger (20260914000500_worker_join_bindings.ts), which
+    // already refuses every change to the identity a join recorded.
     createFunction({
       schema: "zeroship",
       name: "apps_reject_execution_zone_change",
@@ -62,10 +62,11 @@ export default {
         execute: "apps_reject_execution_zone_change",
       });
 
-    // The manager reads the zone facts it needs to admit a placement and the
-    // lease deadline it schedules against, and nothing else: column-scoped
-    // grants because `SELECT` on the table would also open creator-owned
-    // columns Control wrote into `apps`.
+    // The manager reads an app's zone and terminal deletion, and an instance's
+    // zone and lease; its identity and status columns are granted separately in
+    // 20260911000000_workflow_coordination.ts. Column-scoped grants because
+    // `SELECT` on the table would also open creator-owned columns Control wrote
+    // into `apps`.
     raw({
       sql: "GRANT SELECT (execution_zone_id,deleted_at) ON zeroship.apps TO zeroship_workflow; "
         + "GRANT SELECT (execution_zone_id,expires_at) ON zeroship.worker_instances TO zeroship_workflow",
