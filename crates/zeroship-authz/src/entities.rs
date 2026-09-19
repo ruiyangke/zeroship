@@ -12,8 +12,8 @@ use crate::{AuthzError, Resource};
 /// **The store no longer carries membership, and there is no cache in front of
 /// it.** It holds exactly two entities: the principal `User`, whose attributes
 /// come from `zeroship.users` alone, and the request's own resource, which
-/// exists so `resource is App` / `is Project` / `is Organization` has something
-/// to bind to.
+/// exists so `resource is App` / `is Database` / `is Project` /
+/// `is Organization` has something to bind to.
 ///
 /// The authority that decides the request rides in the request CONTEXT
 /// ([`crate::eval`]), not here. Two properties follow, and both are the reason:
@@ -75,6 +75,7 @@ fn user_entity(principal_id: &UserId, authority: &Authority) -> Result<Entity, A
 pub(crate) fn resource_entity_uid(resource: &Resource) -> Result<EntityUid, AuthzError> {
     match resource {
         Resource::App { id } => uid(resource.cedar_type(), id.as_str()),
+        Resource::Database { id } => uid(resource.cedar_type(), id.as_str()),
         Resource::Project { id } | Resource::Organization { id } => uid(resource.cedar_type(), id),
         Resource::Any => uid(resource.cedar_type(), "*"),
     }
@@ -133,6 +134,9 @@ mod tests {
             Resource::Any,
             Resource::App {
                 id: zeroship_id::AppId::mint(),
+            },
+            Resource::Database {
+                id: zeroship_id::DatabaseId::mint(),
             },
             Resource::Project {
                 id: "prj_0000123456789abcdefghijkl".to_owned(),
