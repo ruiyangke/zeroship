@@ -751,6 +751,11 @@ fn authorize_task(
 /// rather than holding both until the grant lapses, and a caller that can
 /// retry does so under the authority it already holds.
 ///
+/// An attempt that reaches the platform between transactions opens more than
+/// one, and each of them takes the same app-state row lock, so this bounds the
+/// whole sequence rather than a single BEGIN through COMMIT. Work outside the
+/// journal transaction does not put an attempt outside this ceiling.
+///
 /// This is an absolute duration rather than a fraction of the lease on
 /// purpose. The lease answers how long this worker may act, which
 /// [`attempt_budget`] applies as its own separate term; this answers how long
