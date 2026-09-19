@@ -69,11 +69,8 @@ impl AppWorkflows {
         let command = Command::read(job)?;
         let captured = CapturedLease::capture(self, lease)
             .and_then(|authority| Ok((authority.bind(self)?, authority)));
-        let budget = captured
-            .as_ref()
-            .ok()
-            .and_then(|(_, authority)| authority.remaining())
-            .unwrap_or_else(|| delivery::attempt_budget(None, None));
+        let budget =
+            delivery::attempt_budget(captured.as_ref().ok().map(|(_, authority)| authority), None);
         let policy = captured
             .as_ref()
             .ok()

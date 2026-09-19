@@ -6,7 +6,7 @@
 use super::*;
 use crate::{
     deployment_holds::{DeploymentHoldClient, HoldGeneration, HoldReceipt, HoldScope},
-    service::AppWorkflows,
+    service::{delivery::ATTEMPT_IO_CEILING, AppWorkflows},
 };
 use std::{
     cell::{Cell, RefCell},
@@ -130,6 +130,11 @@ case!(
     sqlite_activation_recovers_lost_or_mismatched_unknown_hash_receipts,
     postgres_activation_recovers_lost_or_mismatched_unknown_hash_receipts,
     hold_replies
+);
+case!(
+    sqlite_activation_ends_a_stalled_attempt_at_the_io_ceiling,
+    postgres_activation_ends_a_stalled_attempt_at_the_io_ceiling,
+    io_ceiling
 );
 
 async fn empty_service(
@@ -844,4 +849,75 @@ async fn rollback(store: Rc<OrmStore>, fault: ReceiptFault) {
         JobOutcome::Completed {}
     );
     assert_eq!(selected(&service, &app).await, second.id);
+}
+
+/// One activation attempt ends at the journal I/O ceiling, not at the end of
+/// the authority it captured. The stall sits in the platform hold client, so
+/// the window measured here is the attempt's own budget and not a journal wait.
+///
+/// This pins the composition, not the magnitude. Both arms move with
+/// [`ATTEMPT_IO_CEILING`], so retuning the ceiling keeps them green; what fails
+/// is dropping the ceiling term and handing one attempt its whole authority.
+async fn io_ceiling(store: Rc<OrmStore>) {
+    let (service, app, other, platform) = empty_service(store, Deployments::new().await).await;
+    let client = Rc::new(Holds::new(&platform, &app));
+    let service = service.with_deployments(
+        platform
+            .binding(&[&app, &other])
+            .with_hold_client(client.clone()),
+    );
+    let deployment = platform.deploy(&app).await;
+    let scope = service.fixture_app(app.clone());
+
+    let mut grant = Grant::new(&app, &deployment, 1);
+    grant.expires = Instant::now() + ATTEMPT_IO_CEILING * 6;
+    assert!(
+        grant.remaining().unwrap() > ATTEMPT_IO_CEILING * 3,
+        "the fixture authority is narrower than the window asserted below, so it \
+         would bound this attempt instead of the ceiling"
+    );
+    let (wait, _entered, _resume) = gate();
+    *client.gate.borrow_mut() = Some(wait);
+    let started = Instant::now();
+    let result = scope.activate_job(&grant).await;
+    let capped = started.elapsed();
+    assert!(
+        matches!(result, Err(WorkflowServiceError::Timeout)),
+        "{result:?}"
+    );
+    assert!(
+        capped >= ATTEMPT_IO_CEILING,
+        "the attempt ended before the ceiling, so something other than its budget \
+         stopped it and this measures nothing: {capped:?}"
+    );
+    assert!(
+        capped < ATTEMPT_IO_CEILING * 3,
+        "one attempt was handed authority beyond the ceiling: {capped:?}"
+    );
+
+    // The control moves one variable. An authority narrower than the ceiling
+    // binds the same stalled attempt instead, so the arm above is not a fixed
+    // wait that would pass with the ceiling term removed.
+    let narrow = ATTEMPT_IO_CEILING / 5;
+    let mut short = grant.retry();
+    short.expires = Instant::now() + narrow;
+    let (wait, _entered, _resume) = gate();
+    *client.gate.borrow_mut() = Some(wait);
+    let started = Instant::now();
+    let result = scope.activate_job(&short).await;
+    let bounded = started.elapsed();
+    assert!(
+        matches!(result, Err(WorkflowServiceError::Timeout)),
+        "{result:?}"
+    );
+    assert!(
+        bounded >= narrow,
+        "the control ended before its own authority, so it bounded nothing: {bounded:?}"
+    );
+    assert!(
+        bounded < ATTEMPT_IO_CEILING,
+        "the control was capped by the ceiling too, so the arm above proves \
+         nothing: {bounded:?}"
+    );
+    assert_unaccepted(&service, &scope, &grant).await;
 }
