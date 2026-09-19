@@ -38,7 +38,7 @@ pub enum FetchOutcome {
 /// Result of executing the embedded durable-workflow replay entry.
 pub enum WorkflowOutcome {
     /// Replay completed synchronously or settled during the dispatch
-    /// microtask checkpoint. `json` is the already-stringified StepResult.
+    /// microtask checkpoint. `json` is the already-stringified dispatch result.
     Response {
         json: String,
         logs: Vec<String>,
