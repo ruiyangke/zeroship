@@ -496,11 +496,7 @@ fn the_billing_axis_moves_independently_of_rank() {
 fn billing_is_not_satisfiable_below_organization_scope() {
     let policies = load_platform_policies().expect("static policies parse");
 
-    for (resource_type, id) in [
-        ("App", APP),
-        ("Database", DATABASE),
-        ("Project", PROJECT),
-    ] {
+    for (resource_type, id) in [("App", APP), ("Database", DATABASE), ("Project", PROJECT)] {
         for action in ["billing:read", "billing:write"] {
             assert_deny(&policies, action, resource_type, id, OWNER, 20);
         }
