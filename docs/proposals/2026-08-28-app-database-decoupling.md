@@ -51,8 +51,19 @@ Built:
   and an app with none has no `env.db`.
 
 Not built: the creator surface and `env.databases`, the `Manifest.runtime_descriptor` reshape,
-`schema/project-v1.json`, the migration service's own app-id-to-database re-key, the CDC routing
-key, the encryption salt and AAD, and capacity-aware placement. No apply advances an epoch.
+`schema/project-v1.json`, the migration service's own app-id-to-database re-key, the encryption
+salt and AAD, and capacity-aware placement. No apply advances an epoch.
+
+Three things are narrower than "built" and are recorded here rather than discovered later. The CDC
+relay DOES filter on the bound database's schema
+(`zeroship_data_cdc_server::source::bound_database_schema`) and refuses a second live binding
+rather than picking one, but the subscribe request still names only the app, so carrying a database
+on that wire is the routing key's remaining half.
+`zeroship_core::app_derivation::schema_name` still returns the app id for the migration service,
+Control's publication journal and the CLI; no data crate calls it. And `ThreadDbContext` holds one
+connection plus a per-app binding map rather than a connection map keyed `(app_id, database_id)`,
+because keying it that way needs per-database datastore coordinates that arrive with
+`env.databases`.
 
 **Control still never writes `active` itself.** The management surface declares and stops: a
 database it creates stops at `provisioning` and a binding at `pending` until a reconciler holding
