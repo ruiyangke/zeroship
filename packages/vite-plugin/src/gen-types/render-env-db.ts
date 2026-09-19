@@ -199,7 +199,6 @@ function renderBuilderChain(def: RuntimeFieldDef): string {
       case "array":
         chain = "t.json()";
         break;
-      case "date":
       case "timestamp":
         chain = "t.timestamp()";
         break;

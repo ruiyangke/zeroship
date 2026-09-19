@@ -408,7 +408,7 @@ export type ArrayTypeDef = { type: "array"; items: PrimitiveTypeName };
  *
  * `timestamp` is here on the generator's authority rather than on a sighting:
  * no descriptor in this repo currently emits it, because no example calls
- * `t.timestamp()`, but the renderer handles it beside `date`. Waiting for an
+ * `t.timestamp()`, but the renderer handles it. Waiting for an
  * example to use it is how the integer case stayed broken.
  */
 export type DescriptorOnlyTypeName = "int" | "integer" | "bigInt" | "float";

@@ -538,8 +538,8 @@ mod timestamp_tests {
     use crate::value;
 
     #[test]
-    fn timestamp_aliases_validate_storage_without_echoing_values() {
-        for kind in ["date", "timestamp"] {
+    fn timestamp_validates_storage_without_echoing_values() {
+        for kind in ["timestamp"] {
             let schema =
                 crate::schema::CollectionSchema::from_fields(&value!({"instant":{"type":kind}}))
                     .unwrap()
@@ -587,6 +587,19 @@ mod timestamp_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn retired_date_token_is_refused() {
+        // `"date"` was the pre-rename timestamptz spelling. The runtime
+        // descriptor emits `"timestamp"`, so the reader fails closed on the
+        // retired token instead of accepting a descriptor no producer emits.
+        let error = crate::schema::CollectionSchema::from_fields(
+            &value!({"instant":{"type":"date"}}),
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "invalid_schema");
+        assert!(error.to_string().contains("unsupported logical column type"));
     }
 
     #[test]
@@ -734,7 +747,6 @@ mod binary_read_tests {
             "vector",
             "geoPoint",
             "json",
-            "date",
             "calendarDate",
         ] {
             let schema = crate::schema::CollectionSchema::from_fields(
