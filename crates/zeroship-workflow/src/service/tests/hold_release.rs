@@ -6,7 +6,11 @@
 )]
 
 use super::*;
-use crate::operations::RunOperation;
+use crate::{
+    deployment_holds::{DeploymentHoldClient, HoldGeneration, HoldReceipt, HoldScope},
+    operations::RunOperation,
+    service::delivery::ATTEMPT_IO_CEILING,
+};
 use std::time::{Duration, Instant};
 use zeroship_core::workflow_jobs::{
     Delivery, DeploymentId, JobId, JobLease, JobOperation, JobOutcome, JobSpec,
@@ -167,4 +171,126 @@ async fn release_contract(store: Rc<OrmStore>) {
             .await,
         Err(WorkflowServiceError::InvalidRequest(_))
     ));
+}
+
+/// A platform client that never answers, so the only thing that can end an
+/// attempt waiting on it is that attempt's own budget.
+struct Stalled(deployment_fixture::OwnedClient);
+#[async_trait::async_trait(?Send)]
+impl DeploymentHoldClient for Stalled {
+    fn scope(&self) -> &HoldScope {
+        self.0.scope()
+    }
+    async fn acquire(
+        &self,
+        _deployment: &str,
+        _generation: HoldGeneration,
+    ) -> Result<HoldReceipt, WorkflowServiceError> {
+        futures::future::pending().await
+    }
+    async fn release(
+        &self,
+        _deployment: &str,
+        _generation: HoldGeneration,
+    ) -> Result<HoldReceipt, WorkflowServiceError> {
+        futures::future::pending().await
+    }
+}
+
+#[compio::test]
+async fn sqlite_release_job_ends_a_stalled_attempt_at_the_io_ceiling() {
+    let dir = tempfile::tempdir().unwrap();
+    io_ceiling(Rc::new(
+        sqlite_store(&dir.path().join("customer.sqlite")).await,
+    ))
+    .await;
+}
+#[compio::test]
+async fn postgres_release_job_ends_a_stalled_attempt_at_the_io_ceiling() {
+    let fixture = PostgresFixture::start().await;
+    io_ceiling(Rc::new(fixture.store.clone())).await;
+}
+
+/// One release attempt ends at the journal I/O ceiling, not at the end of the
+/// authority it captured. The stall sits in the platform hold client, so the
+/// window measured here is the attempt's own budget and not a journal wait.
+///
+/// This pins the composition, not the magnitude. Both arms move with
+/// [`ATTEMPT_IO_CEILING`], so retuning the ceiling keeps them green; what fails
+/// is dropping the ceiling term and handing one attempt its whole authority.
+async fn io_ceiling(store: Rc<OrmStore>) {
+    let (service, app, other, platform) = registered_service(store).await;
+    let client = platform.client(&app);
+    let service = service.with_deployments(
+        platform
+            .binding(&[&app, &other])
+            .with_hold_client(Rc::new(Stalled(client.clone()))),
+    );
+    let superseded = platform.deploy(&app).await;
+    service
+        .acquire_deployment_hold(&app, &superseded.id, &superseded.hash, &client)
+        .await
+        .unwrap();
+    service.activate_deploy(&app, &superseded).await.unwrap();
+    let current = platform.deploy(&app).await;
+    service
+        .acquire_deployment_hold(&app, &current.id, &current.hash, &client)
+        .await
+        .unwrap();
+    service.activate_deploy(&app, &current).await.unwrap();
+    let scope = service.fixture_app(app.clone());
+    drain(&scope).await;
+
+    let mut lease = Lease::release(&app, &superseded.id);
+    lease.expires = Instant::now() + ATTEMPT_IO_CEILING * 6;
+    assert!(
+        lease.remaining().unwrap() > ATTEMPT_IO_CEILING * 3,
+        "the fixture authority is narrower than the window asserted below, so it \
+         would bound this attempt instead of the ceiling"
+    );
+    let started = Instant::now();
+    let result = scope.release_hold_job(&lease).await;
+    let capped = started.elapsed();
+    assert!(
+        matches!(result, Err(WorkflowServiceError::Timeout)),
+        "{result:?}"
+    );
+    assert!(
+        capped >= ATTEMPT_IO_CEILING,
+        "the attempt ended before the ceiling, so something other than its budget \
+         stopped it and this measures nothing: {capped:?}"
+    );
+    assert!(
+        capped < ATTEMPT_IO_CEILING * 3,
+        "one attempt was handed authority beyond the ceiling: {capped:?}"
+    );
+
+    // The control moves one variable. An authority narrower than the ceiling
+    // binds the same stalled attempt instead, so the arm above is not a fixed
+    // wait that would pass with the ceiling term removed.
+    let narrow = ATTEMPT_IO_CEILING / 5;
+    let mut short = Lease::release(&app, &superseded.id);
+    short.expires = Instant::now() + narrow;
+    let started = Instant::now();
+    let result = scope.release_hold_job(&short).await;
+    let bounded = started.elapsed();
+    assert!(
+        matches!(result, Err(WorkflowServiceError::Timeout)),
+        "{result:?}"
+    );
+    assert!(
+        bounded >= narrow,
+        "the control ended before its own authority, so it bounded nothing: {bounded:?}"
+    );
+    assert!(
+        bounded < ATTEMPT_IO_CEILING,
+        "the control was capped by the ceiling too, so the arm above proves \
+         nothing: {bounded:?}"
+    );
+    assert!(scope
+        .job_receipt(&lease.delivery.job)
+        .await
+        .unwrap()
+        .is_none());
+    platform.assert_held(&app, &superseded.id).await;
 }
