@@ -1,4 +1,4 @@
-import { createFunction, grant, now, raw, t, table } from "@zeroship/migrate";
+import { grant, now, raw, t, table } from "@zeroship/migrate";
 
 // The app/database decoupling's three entities, from
 // docs/proposals/2026-08-28-app-database-decoupling.md.
@@ -24,16 +24,11 @@ import { createFunction, grant, now, raw, t, table } from "@zeroship/migrate";
 // an extra predicate the edge enforces; it falls out of ownership. `databases`
 // still carries the zone, under two composite keys that between them say the
 // whole placement rule: the first makes a database's zone its PROJECT'S zone,
-// the second makes it its CLUSTER'S zone.
-//
-// THE ZONE MOVES TO THE PROJECT. `apps.execution_zone_id`
-// (20260914000600_placement_eligibility.ts) landed before anything above the app
-// needed a zone. With a project-owned database it is the project that has to
-// carry it, or "same project" stops implying "can share" and every sharing
-// surface has to explain a second rule. The app keeps its copy under a composite
-// foreign key so the two cannot disagree, because `instance_serves_app` joins on
-// it and the workflow manager holds a column grant on it; both keep working
-// untouched.
+// the second makes it its CLUSTER'S zone. Both keys, and the two the binding
+// carries, are authored in 20260919000300_database_placement_keys.ts: a
+// composite key is lowered position by position against a catalog snapshot
+// taken before the migration runs, and the bytewise collation these columns
+// need is applied here by a `raw` island that snapshot cannot see.
 //
 // `datastores` IS KEYED ON THE CLUSTER'S OWN IDENTITY, not on a chosen name.
 // `system_identifier` comes from `pg_control_system()` and is stable for the life
@@ -47,71 +42,6 @@ import { createFunction, grant, now, raw, t, table } from "@zeroship/migrate";
 export default {
   name: "database_entities",
   schema() {
-    // ---- projects gains the zone ------------------------------------------
-    table("projects", { schema: "zeroship" })
-      .column("execution_zone_id")
-      .add({ type: t.text().required().default("ezn_default000000000000000000") });
-    table("projects", { schema: "zeroship" })
-      .foreignKey("projects_execution_zone_fkey")
-      .add({
-        columns: ["execution_zone_id"],
-        references: { table: "execution_zones", columns: ["id"], schema: "zeroship" },
-        onDelete: "restrict",
-        onUpdate: "restrict",
-      });
-    raw({
-      sql: 'ALTER TABLE "zeroship"."projects" ALTER COLUMN "execution_zone_id" TYPE text COLLATE "C"',
-      reason: "typed-id text domains need bytewise comparison with execution_zones.id",
-    });
-    table("projects", { schema: "zeroship" })
-      .unique("projects_zone_identity_key")
-      .add({ columns: ["id", "execution_zone_id"] });
-
-    // Frozen for the same reason an app's zone is: placement reads the fact
-    // after taking its locks and again before commit, and a fact that could move
-    // between those two reads would reopen the window the second read closes.
-    createFunction({
-      schema: "zeroship",
-      name: "projects_reject_execution_zone_change",
-      returns: "trigger",
-      language: "procedural",
-      body:
-        "BEGIN\n"
-        + "  IF NEW.execution_zone_id IS DISTINCT FROM OLD.execution_zone_id THEN\n"
-        + "    RAISE EXCEPTION 'a project''s execution zone is fixed when the project is created'\n"
-        + "      USING ERRCODE = 'check_violation';\n"
-        + "  END IF;\n"
-        + "  RETURN NEW;\n"
-        + "END;",
-    });
-    table("projects", { schema: "zeroship" })
-      .trigger("projects_frozen_execution_zone")
-      .create({
-        timing: "before",
-        events: ["update"],
-        forEach: "row",
-        execute: "projects_reject_execution_zone_change",
-      });
-
-    // ---- apps: the identity keys the bindings consume ----------------------
-    //
-    // `apps` carries only `apps_name_key` today, and its composite ownership key
-    // points OUTWARD at projects with nothing pointing in. PostgreSQL requires a
-    // real unique constraint on referenced columns, so without this the binding
-    // foreign key cannot create.
-    table("apps", { schema: "zeroship" })
-      .unique("apps_project_identity_key")
-      .add({ columns: ["id", "project_id"] });
-    // And the app's zone copy cannot disagree with its project's.
-    table("apps", { schema: "zeroship" })
-      .foreignKey("apps_project_zone_fkey")
-      .add({
-        columns: ["project_id", "execution_zone_id"],
-        references: { table: "projects", columns: ["id", "execution_zone_id"], schema: "zeroship" },
-        onDelete: "restrict",
-        onUpdate: "restrict",
-      });
-
     // ---- datastores --------------------------------------------------------
     table("datastores", { schema: "zeroship" }).create({
       columns: {
@@ -124,6 +54,14 @@ export default {
         updated_at: t.timestamp().required().default(now()),
       },
       primaryKey: ["id"],
+    });
+    raw({
+      sql: 'ALTER TABLE "zeroship"."datastores" ALTER COLUMN "id" TYPE text COLLATE "C"',
+      reason: "typed-id text domains need bytewise comparison",
+    });
+    raw({
+      sql: 'ALTER TABLE "zeroship"."datastores" ALTER COLUMN "execution_zone_id" TYPE text COLLATE "C"',
+      reason: "match the referenced execution zone identity collation",
     });
     table("datastores", { schema: "zeroship" })
       .check("datastores_id_shape")
@@ -148,14 +86,6 @@ export default {
         onDelete: "restrict",
         onUpdate: "restrict",
       });
-    raw({
-      sql: 'ALTER TABLE "zeroship"."datastores" ALTER COLUMN "id" TYPE text COLLATE "C"',
-      reason: "typed-id text domains need bytewise comparison",
-    });
-    raw({
-      sql: 'ALTER TABLE "zeroship"."datastores" ALTER COLUMN "execution_zone_id" TYPE text COLLATE "C"',
-      reason: "match the referenced execution zone identity collation",
-    });
 
     // ---- databases ---------------------------------------------------------
     table("databases", { schema: "zeroship" }).create({
@@ -180,6 +110,22 @@ export default {
         updated_at: t.timestamp().required().default(now()),
       },
       primaryKey: ["id"],
+    });
+    raw({
+      sql: 'ALTER TABLE "zeroship"."databases" ALTER COLUMN "id" TYPE text COLLATE "C"',
+      reason: "typed-id text domains need bytewise comparison",
+    });
+    raw({
+      sql: 'ALTER TABLE "zeroship"."databases" ALTER COLUMN "project_id" TYPE text COLLATE "C"',
+      reason: "match the referenced project identity collation",
+    });
+    raw({
+      sql: 'ALTER TABLE "zeroship"."databases" ALTER COLUMN "execution_zone_id" TYPE text COLLATE "C"',
+      reason: "match the referenced execution zone identity collation",
+    });
+    raw({
+      sql: 'ALTER TABLE "zeroship"."databases" ALTER COLUMN "datastore_id" TYPE text COLLATE "C"',
+      reason: "match the referenced datastore identity collation",
     });
     table("databases", { schema: "zeroship" })
       .check("databases_id_shape")
@@ -206,41 +152,17 @@ export default {
         onDelete: "restrict",
         onUpdate: "restrict",
       });
-    // The zone is its PROJECT'S zone ...
+
+    // The indexes the two placement keys read from, declared rather than left to
+    // the engine's emission: an emitted index is conditional on the live catalog,
+    // which would make this plan a different length on a first apply than on a
+    // re-apply.
     table("databases", { schema: "zeroship" })
-      .foreignKey("databases_project_zone_fkey")
-      .add({
-        columns: ["project_id", "execution_zone_id"],
-        references: { table: "projects", columns: ["id", "execution_zone_id"], schema: "zeroship" },
-        onDelete: "restrict",
-        onUpdate: "restrict",
-      });
-    // ... and its CLUSTER'S zone. Together: a database is placed on a cluster in
-    // its project's zone, structurally, with no trigger and nothing to forget.
+      .index("databases_project_zone_fkey_idx")
+      .add({ on: ["project_id", "execution_zone_id"] });
     table("databases", { schema: "zeroship" })
-      .foreignKey("databases_placement_fkey")
-      .add({
-        columns: ["datastore_id", "execution_zone_id"],
-        references: { table: "datastores", columns: ["id", "execution_zone_id"], schema: "zeroship" },
-        onDelete: "restrict",
-        onUpdate: "restrict",
-      });
-    raw({
-      sql: 'ALTER TABLE "zeroship"."databases" ALTER COLUMN "id" TYPE text COLLATE "C"',
-      reason: "typed-id text domains need bytewise comparison",
-    });
-    raw({
-      sql: 'ALTER TABLE "zeroship"."databases" ALTER COLUMN "project_id" TYPE text COLLATE "C"',
-      reason: "match the referenced project identity collation",
-    });
-    raw({
-      sql: 'ALTER TABLE "zeroship"."databases" ALTER COLUMN "execution_zone_id" TYPE text COLLATE "C"',
-      reason: "match the referenced execution zone identity collation",
-    });
-    raw({
-      sql: 'ALTER TABLE "zeroship"."databases" ALTER COLUMN "datastore_id" TYPE text COLLATE "C"',
-      reason: "match the referenced datastore identity collation",
-    });
+      .index("databases_placement_fkey_idx")
+      .add({ on: ["datastore_id", "execution_zone_id"] });
 
     // ---- database_bindings -------------------------------------------------
     //
@@ -275,39 +197,6 @@ export default {
       },
       primaryKey: ["id"],
     });
-    table("database_bindings", { schema: "zeroship" })
-      .check("database_bindings_id_shape")
-      .add({ expr: (col) => col("id").regex("^bnd_[0-9a-z]{25}$") });
-    table("database_bindings", { schema: "zeroship" })
-      .check("database_bindings_capability_check")
-      .add({ expr: (col) => col("capability").in(["readwrite", "readonly"]) });
-    table("database_bindings", { schema: "zeroship" })
-      .check("database_bindings_status_check")
-      .add({ expr: (col) => col("status").in(["pending", "active", "revoking", "revoked"]) });
-    table("database_bindings", { schema: "zeroship" })
-      .check("database_bindings_generation_order")
-      .add({ expr: (col) => col("observed_generation").le(col("generation")) });
-    table("database_bindings", { schema: "zeroship" })
-      .unique("database_bindings_natural_key")
-      .add({ columns: ["app_id", "database_id"] });
-    // THE TWO EDGES. Both agree on project_id, so an app can bind only a
-    // database in its own project, on every write to either side.
-    table("database_bindings", { schema: "zeroship" })
-      .foreignKey("database_bindings_app_project_fkey")
-      .add({
-        columns: ["app_id", "project_id"],
-        references: { table: "apps", columns: ["id", "project_id"], schema: "zeroship" },
-        onDelete: "restrict",
-        onUpdate: "restrict",
-      });
-    table("database_bindings", { schema: "zeroship" })
-      .foreignKey("database_bindings_database_project_fkey")
-      .add({
-        columns: ["database_id", "project_id"],
-        references: { table: "databases", columns: ["id", "project_id"], schema: "zeroship" },
-        onDelete: "restrict",
-        onUpdate: "restrict",
-      });
     raw({
       sql: 'ALTER TABLE "zeroship"."database_bindings" ALTER COLUMN "id" TYPE text COLLATE "C"',
       reason: "typed-id text domains need bytewise comparison",
@@ -324,6 +213,29 @@ export default {
       sql: 'ALTER TABLE "zeroship"."database_bindings" ALTER COLUMN "project_id" TYPE text COLLATE "C"',
       reason: "match the referenced project identity collation",
     });
+    table("database_bindings", { schema: "zeroship" })
+      .check("database_bindings_id_shape")
+      .add({ expr: (col) => col("id").regex("^bnd_[0-9a-z]{25}$") });
+    table("database_bindings", { schema: "zeroship" })
+      .check("database_bindings_capability_check")
+      .add({ expr: (col) => col("capability").in(["readwrite", "readonly"]) });
+    table("database_bindings", { schema: "zeroship" })
+      .check("database_bindings_status_check")
+      .add({ expr: (col) => col("status").in(["pending", "active", "revoking", "revoked"]) });
+    table("database_bindings", { schema: "zeroship" })
+      .check("database_bindings_generation_order")
+      .add({ expr: (col) => col("observed_generation").le(col("generation")) });
+    table("database_bindings", { schema: "zeroship" })
+      .unique("database_bindings_natural_key")
+      .add({ columns: ["app_id", "database_id"] });
+
+    // The indexes the two edges read from, for the reason above.
+    table("database_bindings", { schema: "zeroship" })
+      .index("database_bindings_app_project_fkey_idx")
+      .add({ on: ["app_id", "project_id"] });
+    table("database_bindings", { schema: "zeroship" })
+      .index("database_bindings_database_project_fkey_idx")
+      .add({ on: ["database_id", "project_id"] });
 
     // ---- grants ------------------------------------------------------------
     //
