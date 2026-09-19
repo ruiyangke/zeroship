@@ -92,7 +92,7 @@ fn eviction_bounds_entries_and_a_late_result_cannot_recreate_them() {
     let pending = reserve(&cache, &app);
     let current = reserve(&cache, &peer).complete(observation(&peer)).unwrap();
     assert!(pending.complete(observation(&app)).is_err());
-    assert_eq!(cache.entries.borrow().len(), 1);
+    assert_eq!(cache.entries().unwrap().len(), 1);
     assert!(cache.revalidate(&current).is_ok());
     let next = reserve(&cache, &app).complete(observation(&app)).unwrap();
     assert!(cache.revalidate(&current).is_err());
@@ -111,7 +111,7 @@ fn expired_and_foreign_source_results_are_refused() {
     let mut expired = observation(&app);
     expired.expires_at = Instant::now();
     assert!(reserve(&cache, &app).complete(expired).is_err());
-    assert!(cache.entries.borrow().is_empty());
+    assert!(cache.entries().unwrap().is_empty());
 }
 
 #[compio::test]
@@ -132,4 +132,65 @@ async fn expiration_requires_new_authoritative_values_and_never_revalidates_old_
     let replacement = reserve(&cache, &app).complete(observation(&app)).unwrap();
     assert!(cache.revalidate(&original).is_err());
     assert!(cache.revalidate(&replacement).is_ok());
+}
+
+/// One manager answers for an app from ONE observation, whichever of its HTTP
+/// threads is asked.
+///
+/// A validity window opens when its observation was read, so a store per thread
+/// gives one app as many windows as the manager has threads, at whatever
+/// offsets those threads happened to read Control. A worker's leases land on
+/// whichever thread accepted the connection, so the deadline it is granted
+/// alternates between those windows and moves backwards by their offset - far
+/// past the round trip its host allows for re-anchoring, so the host reads it
+/// as a shortening and cancels every operation bound to the epoch it holds.
+#[test]
+fn one_process_observation_answers_every_thread_that_asks() {
+    let observations = PolicyObservations::new(NonZeroUsize::new(2).unwrap());
+    let app = AppId::mint();
+    let installed = reserve(observations.cache(), &app)
+        .complete(observation(&app))
+        .unwrap();
+
+    let peer = observations.clone();
+    let (revision, expires_at) = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let Reservation::Cached(cached) = peer.cache().reserve(&app).unwrap() else {
+                    panic!("a thread that did not observe must be served the one that did")
+                };
+                (cached.revision(), cached.expires_at())
+            })
+            .join()
+            .unwrap()
+    });
+    assert_eq!(revision, installed.revision());
+    assert_eq!(expires_at, installed.expires_at());
+    assert_eq!(
+        observations.cache().revalidate(&installed).unwrap(),
+        installed.expires_at()
+    );
+
+    // The control: a store of its own holds nothing this one observed, which is
+    // what separate stores give and why one manager may not have two.
+    let separate = PolicyObservations::new(NonZeroUsize::new(2).unwrap());
+    assert!(matches!(
+        separate.cache().reserve(&app).unwrap(),
+        Reservation::Refresh(_)
+    ));
+    assert!(separate.cache().revalidate(&installed).is_err());
+}
+
+/// Nothing a caller holds across its source read carries the map lock.
+///
+/// A reservation is held across the database read that completes it, and the
+/// manager's threads each drive a single-threaded executor: a guard reaching
+/// that far would not contend, it would deadlock the thread against its own
+/// other tasks. `MutexGuard` is `!Send`, so this stops compiling the moment
+/// either value starts carrying one.
+#[test]
+fn a_reservation_carries_no_lock_across_its_source_read() {
+    const fn escapes_no_guard<T: Send>() {}
+    escapes_no_guard::<Reservation<'static>>();
+    escapes_no_guard::<Ticket<'static>>();
 }
