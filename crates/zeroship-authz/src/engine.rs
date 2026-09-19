@@ -15,9 +15,6 @@ use crate::AuthzError;
 /// hosting vendor's staff permission model belongs to the vendor's own portal,
 /// against its own copy of the data.
 ///
-/// The three `app_members`-bound files (`app_owner` / `app_editor` /
-/// `app_viewer`) are deleted with the table that backed them.
-///
 /// **THIS LIST IS THE ONLY THING THAT LOADS A POLICY.** `build.rs` walks
 /// `deploy/policies/`, and parses AND schema-validates every `.cedar` file it
 /// finds, but it LOADS none of them - so a policy file that is committed,

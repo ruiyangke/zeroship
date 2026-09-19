@@ -440,9 +440,8 @@ async fn make_user(state: &AppState, label: &str) -> UserId {
 
 /// Issue a platform OAuth bearer for `user_id` carrying `scope`.
 ///
-/// It used to take an optional platform role and seed a `platform_admin_roles`
-/// row for the operator paths. That table and those roles are deleted, so every
-/// principal this mints is an ordinary organization.
+/// Every principal this mints is an ordinary creator: there is no platform
+/// role to grant.
 async fn issue_bearer(state: &AppState, user_id: &UserId, scope: &str) -> Caller {
     let _ = state;
     Caller {

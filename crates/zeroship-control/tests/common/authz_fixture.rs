@@ -39,12 +39,9 @@ impl SeededPrincipal {
 
 /// A creator holding EVERY OAuth scope.
 ///
-/// This used to come in two flavours, `admin_principal` and
-/// `non_admin_principal`, differing only in whether a `platform_admin_roles`
-/// row was written. There is no platform role any more - the staff policies
-/// were cross-tenant grants and are deleted - so the two collapsed into one:
-/// every principal is a creator, authorized by the self-scoped baseline and by
-/// whatever `app_members` rows it holds.
+/// Every principal is a creator, authorized by the self-scoped baseline and by
+/// whatever organization and project seats it holds. There is no platform role
+/// to hold.
 ///
 /// The scope set is the whole closed vocabulary on purpose. The wrapper policy
 /// the bearer path derives is a NARROWING filter, so holding everything the

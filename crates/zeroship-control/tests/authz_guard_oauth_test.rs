@@ -250,7 +250,7 @@ async fn create_app(fx: &mut Fixture, label: &str) -> AppId {
 /// tests that need the principal to NOT be the owner must seed a distinct owner.
 async fn create_app_owned_by(fx: &mut Fixture, label: &str, owner_id: &UserId) -> AppId {
     if owner_id != &fx.user_id {
-        // The owner must exist (FK on app_members.user_id → users.id).
+        // The owner must exist (FK on organization_members.user_id -> users.id).
         insert_user(&fx.state, owner_id, &format!("{label}-owner")).await;
     }
     let app_name = format!("{label}-{}", Uuid::new_v4().simple());
@@ -1224,18 +1224,19 @@ async fn oauth_token_ignores_standard_oidc_scopes() {
     common::drain_pg().await;
 }
 
-/// F3 — drives the REAL self-service path end to end with NO pre-seeded
-/// `app_members` / platform role:
+/// F3 - drives the REAL self-service path end to end with NO pre-seeded
+/// membership:
 ///
 ///   1. A default-role creator (OAuth token, scopes `apps:write apps:read`)
-///      POSTs `/api/apps` → 201. This exercises the create gate AND
-///      `registry::create_app` binding the principal as the app's `owner` row.
-///   2. The same creator GETs `/api/apps` → 200 and sees EXACTLY the app they
+///      POSTs `/api/apps` -> 201. This exercises the create gate AND
+///      `registry::create_app` seating the principal as owner of the personal
+///      organization the app lands in.
+///   2. The same creator GETs `/api/apps` -> 200 and sees EXACTLY the app they
 ///      just created (ownership-scoped list).
 ///   3. Another creator's app (owned by a different principal) is NOT visible.
 ///
-/// This test must NOT pre-seed any `app_members` row for the principal —
-/// the owner row has to come from the production create path.
+/// This test must NOT pre-seed any membership row for the principal - the
+/// owner seat has to come from the production create path.
 #[compio::test]
 async fn creator_self_service_creates_and_lists_only_own_apps() {
     let user_id = UserId::mint();
