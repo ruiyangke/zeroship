@@ -104,7 +104,8 @@ impl PreparedExecution {
     ///
     /// # Errors
     /// Rejects malformed runtime results or invalid output configuration.
-    /// Exceeding a host data limit produces a terminal limit outcome instead.
+    /// Exceeding a host data limit produces a limit outcome instead, named for
+    /// the `run` step whose output it was, or for nothing when no step owns it.
     pub fn from_runtime_json(
         assignment: &TaskAssignment,
         source: &str,
@@ -118,7 +119,7 @@ impl PreparedExecution {
             uploads: Vec::new(),
         };
         if source.len() > limits.max_result_bytes {
-            result.outcomes.push(limit_failure());
+            result.outcomes.push(limit_failure(None));
             return Ok(result);
         }
         let raw =
@@ -137,6 +138,10 @@ impl PreparedExecution {
             {
                 return Err(invalid("output configuration requires step.run"));
             }
+            // Read before the borrow below: a refused payload is recorded
+            // against the step that produced it, and that step's identity is
+            // still here while the outcome is.
+            let step = limit_step(&outcome);
             let (value, reference, can_reference) = match &mut outcome {
                 StepOutcome::StepCompleted {
                     output,
@@ -167,7 +172,7 @@ impl PreparedExecution {
                 || (bytes.len() > limits.max_inline_bytes
                     && (matches!(mode, OutputMode::Inline) || !can_reference))
             {
-                result.outcomes.push(limit_failure());
+                result.outcomes.push(limit_failure(step));
                 break;
             }
             if can_reference && (mode.requires_reference() || bytes.len() > limits.max_inline_bytes)
@@ -227,7 +232,13 @@ impl PreparedExecution {
                 }
                 Err(WorkflowServiceError::PayloadTooLarge) => {
                     let mut outcomes = self.outcomes[..upload.outcome].to_vec();
-                    outcomes.push(limit_failure());
+                    // The outcome that owns this upload is still held, one past
+                    // the prefix the service accepted. Uploads deduplicate by
+                    // reference, so a payload several outcomes share is named
+                    // for the first of them, which is where the batch stops.
+                    outcomes.push(limit_failure(
+                        self.outcomes.get(upload.outcome).and_then(limit_step),
+                    ));
                     return Ok(WorkflowExecution { outcomes });
                 }
                 Err(error) => return Err(error),
@@ -242,14 +253,65 @@ impl PreparedExecution {
 fn invalid(message: &str) -> WorkflowServiceError {
     WorkflowServiceError::InvalidRequest(message.into())
 }
-fn limit_failure() -> StepOutcome {
+/// The journal identity a refused payload is recorded against.
+struct LimitStep {
+    ordinal: i32,
+    name: String,
+    name_occurrence: i32,
+}
+
+/// The step that owns an outcome's payload, when one does.
+///
+/// Only a `run` step has a journal row a failure can be written to:
+/// `fold_outcomes` records a named `RunFailed` as `kind: "run"`, so naming a
+/// `sideEffect` ordinal would replay as a kind mismatch. A run output and a
+/// continuation seed belong to the run, not to any step.
+fn limit_step(outcome: &StepOutcome) -> Option<LimitStep> {
+    match outcome {
+        StepOutcome::StepCompleted {
+            ordinal,
+            name,
+            name_occurrence,
+            step_kind,
+            ..
+        } if step_kind == "run" => Some(LimitStep {
+            ordinal: *ordinal,
+            name: name.clone(),
+            name_occurrence: *name_occurrence,
+        }),
+        _ => None,
+    }
+}
+
+/// The outcome a payload over a host or service budget is replaced by.
+///
+/// Named for a step, this is the step's terminal failure: the body ran and
+/// produced a value the platform refuses, so `retryable` is false and the one
+/// attempt it declares is the one already spent. The run keeps going, and the
+/// body resumes at that row, so a `catch` around the step can take another
+/// path. Named for nothing, it is the run's verdict and the run rests failed.
+fn limit_failure(step: Option<LimitStep>) -> StepOutcome {
+    let (ordinal, name, name_occurrence, message) = match step {
+        Some(step) => (
+            Some(step.ordinal),
+            Some(step.name),
+            step.name_occurrence,
+            "workflow step output exceeds the configured payload limits",
+        ),
+        None => (
+            None,
+            None,
+            0,
+            "workflow result exceeds the configured payload limits",
+        ),
+    };
     StepOutcome::RunFailed {
-        ordinal: None,
-        name: None,
-        name_occurrence: 0,
+        ordinal,
+        name,
+        name_occurrence,
         error: json!({
             "type":"LimitExceededError",
-            "message":"workflow result exceeds the configured payload limits",
+            "message":message,
             "retryable":false
         }),
         max_attempts: 1,
