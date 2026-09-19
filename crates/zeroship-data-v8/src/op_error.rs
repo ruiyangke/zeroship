@@ -99,12 +99,49 @@ mod tests {
     use zeroship_data_orm::error::*;
 
     #[test]
-    fn missing_role_message_names_the_command_and_leaks_no_identity() {
-        // THE ACCEPTANCE BAR. A creator who skipped the migrate step must
-        // learn what to run from the RESPONSE, not from a worker log they
+    fn unmigrated_database_message_names_the_command_and_leaks_no_identity() {
+        // THE ACCEPTANCE BAR. A creator whose deploy outran their migration
+        // must learn what to run from the RESPONSE, not from a worker log they
         // cannot see. The remediation must be in `message`: `hint` is
         // populated and then dropped -- `build_verbose_error_body` never
         // emits it.
+        let err = DbError::config_hinted(
+            SCHEMA_NOT_MIGRATED,
+            NOT_MIGRATED_MESSAGE,
+            NOT_MIGRATED_HINT,
+        );
+        let op = err.to_op_error();
+        match &op.kind {
+            zeroship_runtime::state::OpErrorKind::CodedError { code, hint, .. } => {
+                assert_eq!(code, SCHEMA_NOT_MIGRATED);
+                assert!(hint.is_some(), "hint is set for direct env.db callers");
+            }
+            other => panic!("expected CodedError, got {other:?}"),
+        }
+        assert!(
+            op.message.contains("zeroship migrate"),
+            "the response must name the command that fixes it: {}",
+            op.message
+        );
+        // Platform-authored and fixed: no server text, no relation name, no
+        // app id, and nothing interpolated at all.
+        assert!(
+            !op.message.contains("ERROR:"),
+            "no server text: {}",
+            op.message
+        );
+        assert!(op.message.is_ascii(), "ASCII only: {}", op.message);
+    }
+
+    /// The OTHER database refusal must not borrow this one's remedy.
+    ///
+    /// A retired epoch is resolved by resolving the binding again, which the
+    /// platform does on its own. Telling that creator to run a migration sends
+    /// them to change their schema to fix a rotation that needed nothing from
+    /// them, so the two messages are asserted apart rather than merely asserted
+    /// non-empty.
+    #[test]
+    fn a_retired_epoch_names_its_own_remedy_and_not_the_migrate_command() {
         let err = DbError::config_hinted(
             SCHEMA_EPOCH_STALE,
             STALE_EPOCH_MESSAGE,
@@ -119,14 +156,19 @@ mod tests {
             other => panic!("expected CodedError, got {other:?}"),
         }
         assert!(
-            op.message.contains("zeroship migrate"),
-            "the response must name the command that fixes it: {}",
+            op.message.contains("redeploy resolves the binding afresh"),
+            "the response must name the remedy for a retired epoch: {}",
             op.message
         );
-        // Platform-authored and fixed: no server text, no role name, no
-        // app id, and nothing interpolated at all.
         assert!(
-            !op.message.contains("_role"),
+            !op.message.contains("zeroship migrate"),
+            "a rotation is not fixed by migrating: {}",
+            op.message
+        );
+        // The role name embeds the binding id and the epoch; neither leaves
+        // the operator log.
+        assert!(
+            !op.message.contains("zs_bind_"),
             "no role name: {}",
             op.message
         );
@@ -139,7 +181,7 @@ mod tests {
     }
 
     #[test]
-    fn prefix_message_leaves_the_provisioning_message_alone() {
+    fn prefix_message_leaves_the_binding_refusal_message_alone() {
         // `exec.rs` adds "db: per-app session setup: " to ordinary setup
         // failures. `prefix_message` skips `Configuration`, so the
         // creator-facing string stays clean. If that skip is ever removed,

@@ -22,7 +22,7 @@
 //! | [`DbError::Serialization`] | Postgres 40001 | SSI conflict in REPEATABLE READ / SERIALIZABLE |
 //! | [`DbError::LockContention`] | Postgres 55P03 / lock-not-available | `SELECT … FOR UPDATE NOWAIT` |
 //! | [`DbError::Transient`] | Postgres class 08, deadlock, out-of-memory | connection drop, 40P01 |
-//! | [`DbError::Configuration`] | Plugin mis-configured, OR the binding does not resolve on the cluster | `DB_URL` not set; `schema_epoch_stale` (the binding role for this epoch does not exist) |
+//! | [`DbError::Configuration`] | Plugin mis-configured, OR the binding does not resolve on the cluster, OR the bound database holds no such relation | `DB_URL` not set; `schema_epoch_stale` (the binding role for this epoch does not exist); `schema_not_migrated` (Postgres 42P01/42703, fix: `zeroship migrate`) |
 //! | [`DbError::PermissionDenied`] | A classified authorization refusal with a terminal HTTP remedy | revoked database binding |
 //! | [`DbError::Coded`] | Pre-typed code from another subsystem | migrations.rs `migration_*` codes |
 //! | [`DbError::Internal`] | Anything else; logged but stamped `internal` | a `JSON.stringify` that lost a column |
@@ -459,6 +459,43 @@ pub const STALE_EPOCH_HINT: &str =
     "The binding role names the schema epoch. A migration that changed the \
      schema retires the previous epoch's role, and a database that has not been \
      converged has none yet.";
+
+/// Public error code for a query naming a relation its database does not hold.
+///
+/// This is the state a freshly created database is in: the reconciler creates
+/// the schema, the capability roles and the grants, so the binding resolves and
+/// the session narrows, and the schema is EMPTY until an apply runs. Nothing
+/// before the query can see it, because every check up to that point succeeds.
+///
+/// It is a query-time condition and never a session-setup one, which is why it
+/// is reached from [`crate::backend::postgres::pg_error::classify`] rather than
+/// from the binding classifier: by the time `SET LOCAL ROLE` has succeeded, the
+/// role exists and the grant stands, and only the relation is absent.
+///
+/// On the 5xx allow-list in `crates/zeroship-runtime/src/core/dispatch.rs` in
+/// BOTH spellings, for the same reason [`SCHEMA_EPOCH_STALE`] is.
+pub const SCHEMA_NOT_MIGRATED: &str = "schema_not_migrated";
+
+/// The wire message for [`SCHEMA_NOT_MIGRATED`]. Platform-authored and fixed:
+/// it names the condition and the exact command that fixes it, and it
+/// interpolates NOTHING. The server text, which carries the relation name, stays
+/// in the operator log.
+///
+/// The remediation lives in the MESSAGE, not the hint, because `hint` is
+/// populated by `OpError::coded` and then dropped -- `build_verbose_error_body`
+/// emits `message`/`name`/`code`/`details`/`retryable` and never `hint`. A
+/// creator reading the HTTP response only ever sees the message.
+pub const NOT_MIGRATED_MESSAGE: &str =
+    "this app's database does not have the table or column this query names. \
+     Run `zeroship migrate` for this app, then retry.";
+
+/// Operator/`env.db`-caller hint for [`SCHEMA_NOT_MIGRATED`]. Reaches app JS as
+/// `err.hint` on a direct native throw; does NOT reach the HTTP wire.
+pub const NOT_MIGRATED_HINT: &str =
+    "`zeroship migrate` applies this app's migrations to the database it is \
+     bound to. A deploy alone does not: the binding resolves and the session \
+     narrows either way, so the first query is what discovers the relation is \
+     absent.";
 
 impl DbError {
     /// Borrow the backend-independent error code for diagnostics and boundaries.

@@ -221,6 +221,7 @@ fn is_public_error_code(code: &str) -> bool {
         code,
         "capability_violation"
             | "schema_epoch_stale"
+            | "schema_not_migrated"
             | "concurrency_mismatch"
             | "concurrency_filter_must_be_top_level"
             | "multi_row_concurrency_filter_unsupported"
@@ -232,6 +233,7 @@ fn is_public_error_code(code: &str) -> bool {
             | "filter_nesting_too_deep"
             | "CAPABILITY_VIOLATION"
             | "SCHEMA_EPOCH_STALE"
+            | "SCHEMA_NOT_MIGRATED"
             | "OPTIMISTIC_CONCURRENCY"
             | "CONCURRENCY_FILTER_MUST_BE_TOP_LEVEL"
             | "MULTI_ROW_CONCURRENCY_FILTER_UNSUPPORTED"
@@ -671,10 +673,10 @@ mod tests {
         }
     }
 
-    /// A missing per-app Postgres role must reach the caller as
-    /// `schema_epoch_stale` WITH its message, so the response itself
-    /// names `zeroship migrate`. The sanitiser is right to blank unlisted
-    /// codes; the classifier is what must stamp this one.
+    /// A binding role that does not exist at this build's epoch must reach the
+    /// caller as `schema_epoch_stale` WITH its message, so the response itself
+    /// names the remedy. The sanitiser is right to blank unlisted codes; the
+    /// classifier is what must stamp this one.
     ///
     /// Both spellings, for the reason the sibling test above documents:
     /// `@zeroship/db` re-stamps native codes through `canonicalErrorCode`
@@ -688,19 +690,61 @@ mod tests {
     /// same extras. Without that partner this test would only show the rail
     /// emits things, not that it DISCRIMINATES.
     ///
-    /// WHAT THIS TEST DOES NOT CATCH: that plugin-db actually produces this
-    /// code for a missing role (that is
-    /// `crates/zeroship-data-v8/src/tests/postgres/roles.rs`), and that the message it pairs with
-    /// it names `zeroship migrate` (that is `error.rs`'s own unit test).
-    /// This test would pass if the code were stamped on an empty string.
+    /// WHAT THIS TEST DOES NOT CATCH: that the ORM actually produces this code
+    /// for a retired epoch (that is
+    /// `crates/zeroship-data-orm/tests/postgres_binding_fence.rs`), nor which
+    /// message it pairs with the code (that is `error.rs`). This test would
+    /// pass if the code were stamped on an empty string.
     #[test]
     fn schema_epoch_stale_survives_the_5xx_rail_in_both_spellings() {
         for code in ["schema_epoch_stale", "SCHEMA_EPOCH_STALE"] {
             let body = build_error_body(
                 500,
                 1,
-                "this app's database is not provisioned: its per-app Postgres role \
-                 does not exist. Run `zeroship migrate` for this app, then retry.",
+                "this app's database binding is not live at the schema epoch this \
+                 build was resolved at. Retry the request; a redeploy resolves the \
+                 binding afresh.",
+                "Error",
+                extras_with_code(code),
+            );
+            assert!(
+                body.contains(&format!(r#""code":"{code}""#)),
+                "code {code:?} must survive the 5xx rail, got: {body}"
+            );
+            assert!(
+                body.contains("a redeploy resolves the binding afresh"),
+                "the creator must learn the remedy from the RESPONSE, not a worker \
+                 log they cannot see; got: {body}"
+            );
+            assert!(
+                !body.contains(r#""message":"internal error""#),
+                "verbatim body expected for {code:?}, got sanitized: {body}"
+            );
+        }
+    }
+
+    /// A query against a bound database that holds no such relation must reach
+    /// the caller as `schema_not_migrated` WITH its message, so the response
+    /// itself names `zeroship migrate`.
+    ///
+    /// This is the code that carries that command, and it is a QUERY-time
+    /// condition: a converged database has a schema, roles and grants from the
+    /// moment it is created, so the binding resolves and the session narrows,
+    /// and only an apply puts relations in it. A creator whose deploy outran
+    /// their migration meets this and nothing earlier.
+    ///
+    /// WHAT THIS TEST DOES NOT CATCH: that the ORM classifies `42P01`/`42703`
+    /// into this code (that is `pg_error.rs`), nor that a live unmigrated
+    /// database reaches it end to end (that is
+    /// `crates/zeroship-data-v8/src/tests/postgres/transactions.rs`).
+    #[test]
+    fn schema_not_migrated_survives_the_5xx_rail_in_both_spellings() {
+        for code in ["schema_not_migrated", "SCHEMA_NOT_MIGRATED"] {
+            let body = build_error_body(
+                500,
+                1,
+                "this app's database does not have the table or column this query \
+                 names. Run `zeroship migrate` for this app, then retry.",
                 "Error",
                 extras_with_code(code),
             );
@@ -710,7 +754,7 @@ mod tests {
             );
             assert!(
                 body.contains("zeroship migrate"),
-                "the creator must learn the fix from the RESPONSE, not a worker \
+                "the creator must learn the command from the RESPONSE, not a worker \
                  log they cannot see; got: {body}"
             );
             assert!(
@@ -723,9 +767,9 @@ mod tests {
     /// Unlisted internal failures remain blanked.
     #[test]
     fn genuinely_internal_db_failure_is_still_blanked() {
-        let leaky = "this app's database is not provisioned: its per-app Postgres role \
-                     does not exist. Run `zeroship migrate` for this app, then retry.";
-        for code in ["internal", "transient", "schema_epoch_stale_typo"] {
+        let leaky = "this app's database does not have the table or column this query \
+                     names. Run `zeroship migrate` for this app, then retry.";
+        for code in ["internal", "transient", "schema_not_migrated_typo"] {
             let body = build_error_body(500, 1, leaky, "Error", extras_with_code(code));
             assert_eq!(
                 body, r#"{"message":"internal error","name":"Error","request_id":"1"}"#,
