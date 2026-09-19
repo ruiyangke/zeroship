@@ -27,11 +27,11 @@
 //!
 //! # NOTHING HERE REACHES `status = 'active'`
 //!
-//! Control DECLARES; a per-cluster reconciler converges. That reconciler does
-//! not exist yet, so no schema and no role is ever created, and a row created
-//! here stops at `provisioning` while a binding stops at `pending`. Placement
-//! admits `active` datastores only, so nothing downstream can consume what this
-//! module writes. That is deliberate: a transition written here would be a
+//! Control DECLARES; a per-cluster reconciler converges
+//! (`zeroship_migrate_server::datastore`), inside the service that holds the
+//! cluster's privileged credential. A row created here therefore stops at
+//! `provisioning`, and a binding at `pending`, until that loop has made the
+//! cluster match. That is deliberate: a transition written here would be a
 //! claim about a cluster this process cannot reach and holds no credential for.
 //!
 //! # Control never inserts a datastore
@@ -60,6 +60,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 use zeroship_authz::{Action as AuthzAction, Resource};
+use zeroship_core::database_role::DatabaseCapability;
 use zeroship_core::project_id::ProjectId;
 use zeroship_core::{AppId, BindingId, DatabaseId, UserId};
 
@@ -80,12 +81,17 @@ pub const DATABASE_PAYLOAD_BYTES: usize = 4 * 1024;
 
 /// The two capabilities `database_bindings_capability_check` admits.
 ///
-/// Spelled here as well as in the CHECK because a caller's value is refused
-/// before it reaches a statement, so the refusal names the two legal values
-/// rather than surfacing a constraint name. The pair is pinned to the schema by
+/// Named here because a caller's value is refused before it reaches a
+/// statement, so the refusal names the two legal values rather than surfacing a
+/// constraint name. The pair is pinned to the schema by
 /// `binding_capabilities_are_the_two_the_check_admits`.
-pub const CAPABILITY_READWRITE: &str = "readwrite";
-pub const CAPABILITY_READONLY: &str = "readonly";
+///
+/// The TEXT comes from [`DatabaseCapability::as_wire`], which is also what the
+/// cluster reconciler parses the stored value back through when it composes a
+/// binding's role name. A second spelling here would let this surface write a
+/// capability the reconciler cannot read.
+pub const CAPABILITY_READWRITE: &str = DatabaseCapability::ReadWrite.as_wire();
+pub const CAPABILITY_READONLY: &str = DatabaseCapability::ReadOnly.as_wire();
 
 /// The status a freshly created database stops at.
 ///
