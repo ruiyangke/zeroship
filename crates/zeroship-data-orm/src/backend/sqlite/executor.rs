@@ -1,6 +1,6 @@
 //! Host database routing and transaction authority setup.
 use super::SqliteBackend;
-use crate::sql::SchemaName;
+use crate::binding::DbBinding;
 use crate::value::Value;
 use crate::{
     driver::{Driver, LeaseKind, Session},
@@ -42,21 +42,20 @@ const BEGIN_TRANSACTION: &str = "BEGIN IMMEDIATE";
 
 #[async_trait(?Send)]
 impl ScopedExecutor for SqliteBackend {
-    fn namespace<'a>(&self, app_id: &'a str, schema: &'a SchemaName) -> &'a str {
-        Self::database_alias(app_id, schema)
+    fn namespace<'a>(&self, binding: &'a DbBinding) -> &'a str {
+        Self::database_alias(binding.app_id(), binding.schema())
     }
 
-    async fn prepare_for_app(&self, app_id: &str, schema: &SchemaName) -> Result<(), DbError> {
-        self.attach_binding(app_id, schema).await
+    async fn prepare_for_app(&self, binding: &DbBinding) -> Result<(), DbError> {
+        self.attach_binding(binding.app_id(), binding.schema()).await
     }
     async fn query(
         &self,
-        app_id: &str,
-        schema: &SchemaName,
+        binding: &DbBinding,
         sql: &str,
         params: &[Value],
     ) -> Result<Vec<Value>, DbError> {
-        self.connection_driver(app_id, schema)
+        self.connection_driver(binding)
             .await?
             .acquire(LeaseKind::Autocommit)
             .await?
@@ -65,12 +64,11 @@ impl ScopedExecutor for SqliteBackend {
     }
     async fn exec(
         &self,
-        app_id: &str,
-        schema: &SchemaName,
+        binding: &DbBinding,
         sql: &str,
         params: &[Value],
     ) -> Result<u64, DbError> {
-        self.connection_driver(app_id, schema)
+        self.connection_driver(binding)
             .await?
             .acquire(LeaseKind::Autocommit)
             .await?
@@ -85,8 +83,7 @@ impl ScopedExecutor for SqliteBackend {
     }
     async fn open_tx_session(
         &self,
-        app_id: &str,
-        schema: &SchemaName,
+        binding: &DbBinding,
         begin: BeginIntent,
     ) -> Result<Session, OpenSessionError> {
         if let BeginIntent::Isolation(level) = begin {
@@ -102,7 +99,7 @@ impl ScopedExecutor for SqliteBackend {
             }
         }
         let session = self
-            .connection_driver(app_id, schema)
+            .connection_driver(binding)
             .await?
             .acquire(LeaseKind::Transaction)
             .await?;
@@ -114,13 +111,12 @@ impl SqliteBackend {
     /// Make the binding's database addressable before exposing a physical source.
     pub async fn connection_driver(
         &self,
-        app_id: &str,
-        schema: &SchemaName,
+        binding: &DbBinding,
     ) -> Result<super::driver::SqliteDriver, DbError> {
-        self.attach_binding(app_id, schema).await?;
+        self.attach_binding(binding.app_id(), binding.schema()).await?;
         Ok(super::driver::SqliteDriver::new(
             self.session.clone(),
-            app_id.to_owned(),
+            binding.app_id().to_owned(),
         ))
     }
 }

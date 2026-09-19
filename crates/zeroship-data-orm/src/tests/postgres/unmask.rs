@@ -10,7 +10,6 @@ use zeroship_migrate::schema::query::FkEmission;
 
 use compio_postgres::Pool;
 
-use zeroship_data_orm::binding::DbBinding;
 
 use crate::value::value;
 
@@ -31,7 +30,7 @@ async fn unmask_backend(host: &Host) -> zeroship_data_orm::backend::BackendHandl
 /// parks a transaction, so every call binds `in_tx = false` and takes the lane
 /// it took before.
 async fn unmask_route(host: &Host, app: &str) -> zeroship_data_orm::tx_route::TxRoute {
-    zeroship_data_orm::exec::ambient_route_for_tests(app, unmask_backend(host).await)
+    zeroship_data_orm::exec::ambient_route_for_tests(&crate::tests::fixtures::harness_binding(app), unmask_backend(host).await)
 }
 
 #[test]
@@ -48,7 +47,7 @@ fn unmask_fetch_runs_under_per_app_role_via_rls() {
             let app = app.as_str();
             let coll = "users";
             let role = provision_app_with_role(&admin_pool, app).await;
-            crate::tests::fixtures::roles::ensure_per_app_role(&admin_pool, app)
+            crate::tests::fixtures::roles::ensure_binding_ladder(&admin_pool, &crate::tests::fixtures::harness_binding(app))
                 .await
                 .unwrap();
             let schema = value!({
@@ -79,7 +78,7 @@ fn unmask_fetch_runs_under_per_app_role_via_rls() {
                 )
                 .await
                 .unwrap();
-            fixtures::grant_runtime_select_columns(&admin_pool, app, coll, &["id", &ssn_raw]).await;
+            fixtures::grant_runtime_select_columns(&admin_pool, &crate::tests::fixtures::harness_binding(app), coll, &["id", &ssn_raw]).await;
             install_role_bound_select_policy(&admin_pool, app, coll, &role).await;
             let login_role = "p6a_unmask_login";
             let (login_url, login_pool) =
@@ -108,7 +107,7 @@ fn unmask_fetch_runs_under_per_app_role_via_rls() {
 
             let result = unmask::dispatch_unmask(
                 &unmask_route(host, app).await,
-                &DbBinding::cold_start(app),
+                &crate::tests::fixtures::harness_binding(app),
                 UnmaskFieldArgs {
                     collection: coll.to_string(),
                     row_pk: "u1".to_string(),
@@ -155,7 +154,7 @@ fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
             let _keys = host.supply_project_key(&[app], &"b".repeat(64));
             let coll = "users";
             let role = provision_app_with_role(&admin_pool, app).await;
-            crate::tests::fixtures::roles::ensure_per_app_role(&admin_pool, app)
+            crate::tests::fixtures::roles::ensure_binding_ladder(&admin_pool, &crate::tests::fixtures::harness_binding(app))
                 .await
                 .unwrap();
             let schema = value!({
@@ -200,7 +199,7 @@ fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
                 )
                 .await
                 .unwrap();
-            fixtures::grant_runtime_select_columns(&admin_pool, app, coll, &["id", &ssn_raw]).await;
+            fixtures::grant_runtime_select_columns(&admin_pool, &crate::tests::fixtures::harness_binding(app), coll, &["id", &ssn_raw]).await;
             install_role_bound_select_policy(&admin_pool, app, coll, &role).await;
             let login_role = "p6a_unmask_enc_login";
             let (login_url, login_pool) =
@@ -213,7 +212,7 @@ fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
 
             let result = unmask::dispatch_unmask(
                 &unmask_route(host, app).await,
-                &DbBinding::cold_start(app),
+                &crate::tests::fixtures::harness_binding(app),
                 UnmaskFieldArgs {
                     collection: coll.to_string(),
                     row_pk: "u1".to_string(),
@@ -281,7 +280,7 @@ fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
             let app = app.as_str();
             let coll = "patients";
             let role = provision_app_with_role(&admin_pool, app).await;
-            crate::tests::fixtures::roles::ensure_per_app_role(&admin_pool, app)
+            crate::tests::fixtures::roles::ensure_binding_ladder(&admin_pool, &crate::tests::fixtures::harness_binding(app))
                 .await
                 .unwrap();
             let schema = value!({
@@ -312,7 +311,7 @@ fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
                 )
                 .await
                 .unwrap();
-            fixtures::grant_runtime_select_columns(&admin_pool, app, coll, &["id", &ssn_raw]).await;
+            fixtures::grant_runtime_select_columns(&admin_pool, &crate::tests::fixtures::harness_binding(app), coll, &["id", &ssn_raw]).await;
 
             let login_role = "p6a_unmask_audit_login";
             let _ = admin_pool
@@ -361,7 +360,7 @@ fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
 
             let result = unmask::dispatch_unmask(
                 &unmask_route(host, app).await,
-                &DbBinding::cold_start(app),
+                &crate::tests::fixtures::harness_binding(app),
                 UnmaskFieldArgs {
                     collection: coll.to_string(),
                     row_pk: "p1".to_string(),
@@ -434,7 +433,7 @@ fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
             // the read path checks for -- without it the unmask SELECT refuses
             // with `schema_not_provisioned` before authorization is ever reached.
             let role = provision_app_with_role(&pool, app).await;
-            crate::tests::fixtures::roles::ensure_per_app_role(&pool, app)
+            crate::tests::fixtures::roles::ensure_binding_ladder(&pool, &crate::tests::fixtures::harness_binding(app))
                 .await
                 .unwrap();
 
@@ -465,7 +464,7 @@ fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
             )
             .await
             .unwrap();
-            fixtures::grant_runtime_select_columns(&pool, app, coll, &["id", &ssn_raw]).await;
+            fixtures::grant_runtime_select_columns(&pool, &crate::tests::fixtures::harness_binding(app), coll, &["id", &ssn_raw]).await;
 
             host.install_postgres_pool(pool.clone(), &url);
             crate::tests::fixtures::cache_schema(app, coll, schema);
@@ -473,7 +472,7 @@ fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
 
             // Install the app-provided policy as the isolate does at boot.
             mask_policy::install_mask_policy(
-                &DbBinding::cold_start(app),
+                &crate::tests::fixtures::harness_binding(app),
                 value!({ "support": ["spi"] }),
             )
             .expect("setMaskPolicy must install the declared policy on PG");
@@ -481,7 +480,7 @@ fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
             // A role the declared policy grants reads through.
             let granted = unmask::dispatch_unmask(
                 &unmask_route(host, app).await,
-                &DbBinding::cold_start(app),
+                &crate::tests::fixtures::harness_binding(app),
                 UnmaskFieldArgs {
                     collection: coll.to_string(),
                     row_pk: "u1".to_string(),
@@ -500,7 +499,7 @@ fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
             // which is exactly the failure mode a cache-only policy could hide.
             let err = unmask::dispatch_unmask(
                 &unmask_route(host, app).await,
-                &DbBinding::cold_start(app),
+                &crate::tests::fixtures::harness_binding(app),
                 UnmaskFieldArgs {
                     collection: coll.to_string(),
                     row_pk: "u1".to_string(),

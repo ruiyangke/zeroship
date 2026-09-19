@@ -132,7 +132,7 @@ impl CollectionFixture {
     ) -> Self {
         crate::tests::fixtures::reset_engine();
         let directory = tempfile::tempdir().unwrap();
-        let binding = DbBinding::cold_start(zeroship_core::app_id::AppId::mint().as_str());
+        let binding = crate::tests::fixtures::harness_binding(zeroship_core::app_id::AppId::mint().as_str());
         let file = directory
             .path()
             .join(format!("zs-{}.sqlite", binding.app_id()));
@@ -197,7 +197,7 @@ impl CollectionFixture {
             ))
             .await
             .unwrap();
-        crate::tests::fixtures::roles::ensure_per_app_role(backend.pool(), &app)
+        crate::tests::fixtures::roles::ensure_binding_ladder(backend.pool(), &crate::tests::fixtures::harness_binding(&app))
             .await
             .unwrap();
         let role = crate::sql::mapping::quote_ident(
@@ -211,7 +211,7 @@ impl CollectionFixture {
             .await
             .unwrap();
         let database = Database::from_schema(
-            DbBinding::cold_start(&app),
+            crate::tests::fixtures::harness_binding(&app),
             crate::backend_handle::BackendHandle::new(backend.clone()),
             Schema::from_collections(vec![(collection.into(), fields)]).unwrap(),
         )
@@ -258,7 +258,7 @@ impl CollectionFixture {
             .batch_execute(&zeroship_migrate_server::provisioning::audit_unmask_table_sql(&app))
             .await
             .unwrap();
-        crate::tests::fixtures::roles::ensure_per_app_role(backend.pool(), &app)
+        crate::tests::fixtures::roles::ensure_binding_ladder(backend.pool(), &crate::tests::fixtures::harness_binding(&app))
             .await
             .unwrap();
         let role = crate::sql::mapping::quote_ident(
@@ -275,7 +275,7 @@ impl CollectionFixture {
             .await
             .unwrap();
         let database = Database::from_schema(
-            DbBinding::cold_start(&app),
+            crate::tests::fixtures::harness_binding(&app),
             crate::backend_handle::BackendHandle::new(backend.clone()),
             Schema::from_collections(vec![(
                 collection.into(),

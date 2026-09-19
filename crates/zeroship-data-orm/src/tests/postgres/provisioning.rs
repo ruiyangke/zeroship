@@ -1,40 +1,50 @@
+//! What a session narrowed to a binding role may and may not do.
 use crate::tests::fixtures::roles::*;
-use zeroship_core::database_role::per_app_role_name;
+use crate::tests::fixtures::{harness_binding, harness_capability_role};
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn set_local_role_sql_shape_is_quoted_and_correct() {
+    fn set_local_role_sql_names_the_binding_role_quoted() {
+        let binding = harness_binding("app_demo");
         assert_eq!(
-            set_local_role_sql("app_demo").unwrap(),
-            r#"SET LOCAL ROLE "app_app_demo_role""#
+            set_local_role_sql(&binding).unwrap(),
+            format!(
+                r#"SET LOCAL ROLE "{}""#,
+                binding.session_role().expect("a creator binding narrows")
+            )
         );
     }
 
     #[test]
     fn the_role_statement_is_transaction_scoped_not_session_scoped() {
-        let sql = set_local_role_sql("app_demo").unwrap();
+        let sql = set_local_role_sql(&harness_binding("app_demo")).unwrap();
         assert!(
             sql.starts_with("SET LOCAL ROLE "),
             "the role fence must be transaction-scoped: {sql}"
         );
     }
 
+    /// A binding that narrows to nothing has no role statement to compose.
+    ///
+    /// Its control is a creator binding, which must compose one: without it
+    /// this would pass for a helper that refused everything.
     #[test]
-    fn set_role_sql_doubles_embedded_quote_via_quote_ident() {
-        assert_eq!(
-            set_local_role_sql(r#"a"b"#).unwrap(),
-            r#"SET LOCAL ROLE "app_a""b_role""#
+    fn a_platform_binding_composes_no_role_statement() {
+        let platform = zeroship_data_orm::binding::DbBinding::platform(
+            "platform",
+            "fixture",
+            crate::sql::SchemaName::new("zeroship").expect("fixture schema"),
         );
+        assert!(set_local_role_sql(&platform).is_err());
+        assert!(set_local_role_sql(&harness_binding("app_demo")).is_ok());
     }
 
     #[test]
     fn role_creation_attributes_exclude_platform_authority() {
-        let attrs = format!(
-            "NOLOGIN NOREPLICATION NOCREATEDB NOCREATEROLE INHERIT IN ROLE \"{APP_ROLE_TEMPLATE}\""
-        );
+        let attrs = "NOLOGIN NOREPLICATION NOCREATEDB NOCREATEROLE INHERIT";
         assert!(attrs.contains("NOLOGIN"));
         assert!(attrs.contains("NOREPLICATION"));
         assert!(attrs.contains("NOCREATEDB"));
@@ -42,14 +52,18 @@ mod tests {
         assert!(!attrs.contains(" REPLICATION"));
     }
 
+    /// The binding role and the capability role are different objects.
+    ///
+    /// The fence rests on that: the capability role carries the privileges and
+    /// the binding role inherits exactly one of them, so a ladder that composed
+    /// one name for both would have nothing to revoke.
     #[test]
-    fn app_role_template_has_the_shared_name() {
-        assert_eq!(APP_ROLE_TEMPLATE, "__zeroship_app_role_template");
-    }
-
-    #[test]
-    fn per_app_role_composition_remains_shared() {
-        assert_eq!(per_app_role_name("app_demo").unwrap(), "app_app_demo_role");
+    fn the_binding_role_is_not_the_capability_role() {
+        let binding = harness_binding("app_demo");
+        assert_ne!(
+            binding.session_role().expect("narrows"),
+            harness_capability_role(&binding)
+        );
     }
 }
 
@@ -59,6 +73,7 @@ mod live_role_grant_tests {
     use compio_postgres::{Client, NoTls, Pool};
 
     use crate::backend::pg_session_sql::tx_session_setup_sql;
+    use zeroship_data_orm::binding::DbBinding;
 
     const TABLES: &[&str] = &[
         "widgets",
@@ -82,67 +97,63 @@ mod live_role_grant_tests {
         format!("zs{label}_{}", uuid::Uuid::new_v4().simple())
     }
 
-    fn table_ref(app: &str, table: &str) -> String {
+    fn table_ref(binding: &DbBinding, table: &str) -> String {
         format!(
             "{}.{}",
-            crate::sql::mapping::quote_ident(app),
+            crate::sql::mapping::quote_ident(binding.schema().as_str()),
             crate::sql::mapping::quote_ident(table)
         )
     }
 
-    async fn create_schema_with_tables(admin: &Client, app: &str, tables: &[&str]) {
-        admin
-            .batch_execute(&format!(
-                "CREATE SCHEMA {}",
-                crate::sql::mapping::quote_ident(app)
-            ))
-            .await
-            .expect("create scratch app schema");
-        create_tables(admin, app, tables).await;
-    }
-
-    async fn create_tables(admin: &Client, app: &str, tables: &[&str]) {
+    async fn create_tables(admin: &Client, binding: &DbBinding, tables: &[&str]) {
         for table in tables {
             admin
                 .batch_execute(&format!(
                     "CREATE TABLE {} (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL)",
-                    table_ref(app, table)
+                    table_ref(binding, table)
                 ))
                 .await
                 .expect("create scratch app table");
         }
     }
 
-    async fn teardown(admin: &Client, app: &str) {
-        let role = crate::sql::mapping::quote_ident(
-            &per_app_role_name(app).expect("scratch app role name"),
-        );
+    async fn teardown(admin: &Client, binding: &DbBinding) {
         let _ = admin
             .batch_execute(&format!(
                 "DROP SCHEMA IF EXISTS {} CASCADE",
-                crate::sql::mapping::quote_ident(app)
+                crate::sql::mapping::quote_ident(binding.schema().as_str())
             ))
             .await;
-        let _ = admin
-            .batch_execute(&format!("DROP OWNED BY {role} CASCADE"))
-            .await;
-        let _ = admin
-            .batch_execute(&format!("DROP ROLE IF EXISTS {role}"))
-            .await;
+        for role in [
+            binding.session_role().expect("narrows").to_owned(),
+            harness_capability_role(binding),
+        ] {
+            let quoted = crate::sql::mapping::quote_ident(&role);
+            let _ = admin
+                .batch_execute(&format!("DROP OWNED BY {quoted} CASCADE"))
+                .await;
+            let _ = admin
+                .batch_execute(&format!("DROP ROLE IF EXISTS {quoted}"))
+                .await;
+        }
     }
 
-    async fn as_runtime_role(
+    /// Run one statement the way the data plane does: the binding's own setup
+    /// batch first, inside an explicit transaction that reverts it.
+    async fn as_binding_role(
         admin: &Client,
-        app: &str,
+        binding: &DbBinding,
         sql: &str,
     ) -> Result<(), compio_postgres::Error> {
-        let schema = crate::sql::SchemaName::new(app).expect("scratch app id is a schema");
         admin.batch_execute("BEGIN").await?;
         let scoped = async {
             admin
                 .batch_execute(
-                    &tx_session_setup_sql(&schema, crate::connection::SessionAuthority::PerAppRole)
-                        .expect("scratch app role name"),
+                    &tx_session_setup_sql(
+                        binding,
+                        crate::connection::SessionAuthority::PerBindingRole,
+                    )
+                    .expect("the binding composes its setup batch"),
                 )
                 .await?;
             admin.batch_execute(sql).await
@@ -158,28 +169,33 @@ mod live_role_grant_tests {
         error.code() == Some(&compio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
     }
 
-    async fn assert_runtime_dml(admin: &Client, app: &str, table: &str) {
-        let relation = table_ref(app, table);
+    async fn assert_runtime_dml(admin: &Client, binding: &DbBinding, table: &str) {
+        let relation = table_ref(binding, table);
         for sql in [
             format!("INSERT INTO {relation} (name) VALUES ('created')"),
             format!("UPDATE {relation} SET name = 'updated' WHERE name = 'created'"),
             format!("SELECT name FROM {relation}"),
             format!("DELETE FROM {relation} WHERE name = 'updated'"),
         ] {
-            as_runtime_role(admin, app, &sql)
+            as_binding_role(admin, binding, &sql)
                 .await
                 .unwrap_or_else(|error| panic!("runtime DML failed for {relation}: {error:?}"));
         }
     }
 
-    async fn assert_ordinary_dml_grants(admin: &Client, app: &str, role: &str, table: &str) {
+    async fn assert_ordinary_dml_grants(
+        admin: &Client,
+        binding: &DbBinding,
+        role: &str,
+        table: &str,
+    ) {
         let privileges = admin
             .query_text_params(
                 "SELECT privilege_type \
                    FROM information_schema.table_privileges \
                   WHERE grantee = $1 AND table_schema = $2 AND table_name = $3 \
                   ORDER BY privilege_type",
-                &[role, app, table],
+                &[role, binding.schema().as_str(), table],
             )
             .await
             .expect("query runtime table grants")
@@ -190,39 +206,39 @@ mod live_role_grant_tests {
             privileges,
             ["DELETE", "INSERT", "SELECT", "UPDATE"],
             "unexpected runtime grants for {}",
-            table_ref(app, table)
+            table_ref(binding, table)
         );
     }
 
     #[compio::test]
     async fn every_bound_schema_table_receives_runtime_dml() {
         let (postgres, admin) = admin_client().await;
-        let app = scratch_app("grants");
-        teardown(&admin, &app).await;
-        create_schema_with_tables(&admin, &app, TABLES).await;
+        let binding = harness_binding(&scratch_app("grants"));
+        teardown(&admin, &binding).await;
 
         let pool = Pool::connect(&postgres.url(), 2)
             .await
             .expect("pool for role provisioning");
-        ensure_per_app_role(&pool, &app)
+        ensure_binding_ladder(&pool, &binding)
             .await
-            .expect("provision runtime role");
+            .expect("provision the binding ladder");
+        create_tables(&admin, &binding, TABLES).await;
 
         for table in TABLES {
-            assert_runtime_dml(&admin, &app, table).await;
+            assert_runtime_dml(&admin, &binding, table).await;
         }
 
         let future_table = "created_after_provisioning";
-        create_tables(&admin, &app, &[future_table]).await;
-        assert_runtime_dml(&admin, &app, future_table).await;
+        create_tables(&admin, &binding, &[future_table]).await;
+        assert_runtime_dml(&admin, &binding, future_table).await;
 
-        let role = per_app_role_name(&app).expect("scratch app role name");
+        let role = harness_capability_role(&binding);
         let catalog_tables = admin
             .query_text_params(
                 "SELECT table_name FROM information_schema.tables \
                   WHERE table_schema = $1 AND table_type = 'BASE TABLE' \
                   ORDER BY table_name",
-                &[app.as_str()],
+                &[binding.schema().as_str()],
             )
             .await
             .expect("enumerate bound-schema tables")
@@ -231,56 +247,66 @@ mod live_role_grant_tests {
             .collect::<Vec<_>>();
         assert!(!catalog_tables.is_empty());
         for table in catalog_tables {
-            assert_ordinary_dml_grants(&admin, &app, &role, &table).await;
+            assert_ordinary_dml_grants(&admin, &binding, &role, &table).await;
         }
 
-        teardown(&admin, &app).await;
+        teardown(&admin, &binding).await;
     }
 
     #[compio::test]
-    async fn runtime_role_keeps_ddl_and_sibling_schema_out_of_reach() {
+    async fn a_binding_keeps_ddl_and_a_neighbours_schema_out_of_reach() {
         let (postgres, admin) = admin_client().await;
-        let app = scratch_app("owner");
-        let sibling = scratch_app("sibling");
-        teardown(&admin, &app).await;
-        teardown(&admin, &sibling).await;
-        create_schema_with_tables(&admin, &app, &["widgets"]).await;
-        create_schema_with_tables(&admin, &sibling, &["secrets"]).await;
+        let binding = harness_binding(&scratch_app("owner"));
+        let neighbour = harness_binding(&scratch_app("neighbour"));
+        teardown(&admin, &binding).await;
+        teardown(&admin, &neighbour).await;
 
         let pool = Pool::connect(&postgres.url(), 2)
             .await
             .expect("pool for role provisioning");
-        ensure_per_app_role(&pool, &app)
-            .await
-            .expect("provision runtime role");
+        for ladder in [&binding, &neighbour] {
+            ensure_binding_ladder(&pool, ladder)
+                .await
+                .expect("provision the binding ladder");
+        }
+        create_tables(&admin, &binding, &["widgets"]).await;
+        create_tables(&admin, &neighbour, &["secrets"]).await;
+
+        // Control: the permitted case succeeds under the same narrowing, so the
+        // refusals below are about WHAT was asked rather than about a ladder
+        // that granted nothing.
+        assert_runtime_dml(&admin, &binding, "widgets").await;
 
         for (operation, sql) in [
             (
                 "CREATE TABLE",
-                format!("CREATE TABLE {} (id BIGINT)", table_ref(&app, "forbidden")),
+                format!(
+                    "CREATE TABLE {} (id BIGINT)",
+                    table_ref(&binding, "forbidden")
+                ),
             ),
             (
                 "ALTER TABLE",
                 format!(
                     "ALTER TABLE {} ADD COLUMN extra TEXT",
-                    table_ref(&app, "widgets")
+                    table_ref(&binding, "widgets")
                 ),
             ),
             (
                 "DROP TABLE",
-                format!("DROP TABLE {}", table_ref(&app, "widgets")),
+                format!("DROP TABLE {}", table_ref(&binding, "widgets")),
             ),
             (
                 "TRUNCATE",
-                format!("TRUNCATE {}", table_ref(&app, "widgets")),
+                format!("TRUNCATE {}", table_ref(&binding, "widgets")),
             ),
             (
-                "sibling SELECT",
-                format!("SELECT * FROM {}", table_ref(&sibling, "secrets")),
+                "neighbour SELECT",
+                format!("SELECT * FROM {}", table_ref(&neighbour, "secrets")),
             ),
         ] {
-            let error = match as_runtime_role(&admin, &app, &sql).await {
-                Ok(()) => panic!("runtime role unexpectedly performed {operation}"),
+            let error = match as_binding_role(&admin, &binding, &sql).await {
+                Ok(()) => panic!("the binding role unexpectedly performed {operation}"),
                 Err(error) => error,
             };
             assert!(
@@ -289,36 +315,36 @@ mod live_role_grant_tests {
             );
         }
 
-        teardown(&admin, &app).await;
-        teardown(&admin, &sibling).await;
+        teardown(&admin, &binding).await;
+        teardown(&admin, &neighbour).await;
     }
 
     #[compio::test]
-    async fn role_lifecycle_is_idempotent_and_transaction_scoped() {
+    async fn ladder_lifecycle_is_idempotent_and_transaction_scoped() {
         let (postgres, admin) = admin_client().await;
-        let app = scratch_app("lifecycle");
-        teardown(&admin, &app).await;
-        create_schema_with_tables(&admin, &app, &["widgets"]).await;
+        let binding = harness_binding(&scratch_app("lifecycle"));
+        teardown(&admin, &binding).await;
 
         let pool = Pool::connect(&postgres.url(), 2)
             .await
             .expect("pool for role provisioning");
-        let first = ensure_per_app_role(&pool, &app)
+        let first = ensure_binding_ladder(&pool, &binding)
             .await
-            .expect("create runtime role");
-        let second = ensure_per_app_role(&pool, &app)
+            .expect("create the binding ladder");
+        let second = ensure_binding_ladder(&pool, &binding)
             .await
-            .expect("re-provision runtime role");
+            .expect("re-provision the binding ladder");
         assert!(first.created_role);
         assert!(!second.created_role);
+        create_tables(&admin, &binding, &["widgets"]).await;
 
         let session_user: String = admin
             .query_one_scalar("SELECT current_user", &[])
             .await
             .expect("read admin identity");
-        as_runtime_role(&admin, &app, "SELECT 1")
+        as_binding_role(&admin, &binding, "SELECT 1")
             .await
-            .expect("run transaction as runtime role");
+            .expect("run a transaction narrowed to the binding role");
         let restored_user: String = admin
             .query_one_scalar("SELECT current_user", &[])
             .await
@@ -328,19 +354,16 @@ mod live_role_grant_tests {
         admin
             .batch_execute(&format!(
                 "DROP SCHEMA {} CASCADE",
-                crate::sql::mapping::quote_ident(&app)
+                crate::sql::mapping::quote_ident(binding.schema().as_str())
             ))
             .await
             .expect("drop scratch app schema");
-        drop_per_app_role(&pool, &app)
+        drop_binding_ladder(&pool, &binding)
             .await
-            .expect("drop runtime role");
-        let role = per_app_role_name(&app).expect("scratch app role name");
+            .expect("drop the binding ladder");
+        let role = binding.session_role().expect("narrows");
         let remaining = admin
-            .query_text_params(
-                "SELECT 1 FROM pg_roles WHERE rolname = $1",
-                &[role.as_str()],
-            )
+            .query_text_params("SELECT 1 FROM pg_roles WHERE rolname = $1", &[role])
             .await
             .expect("query dropped role");
         assert!(remaining.is_empty());

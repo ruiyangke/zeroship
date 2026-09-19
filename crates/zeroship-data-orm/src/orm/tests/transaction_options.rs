@@ -116,7 +116,7 @@ async fn retired_callback_cannot_settle_replacement(postgres: bool) {
         .database
         .context
         .scope(crate::transaction::driver::cancel(
-            fixture.database.binding.app_id(),
+            &fixture.database.binding.route(),
         ))
         .await;
     let (new_ready, new_started) = oneshot::channel();

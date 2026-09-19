@@ -212,7 +212,7 @@ mod tests {
             "secret": 3
         })];
 
-        let binding = DbBinding::cold_start("app_aggregate_scope");
+        let binding = crate::tests::fixtures::harness_binding("app_aggregate_scope");
         let alias = ["secret".to_string()];
         let rt = compio::runtime::Runtime::new().expect("compio runtime build");
         // `apply` takes the ROUTE rather than resolving a backend; none of the
@@ -293,7 +293,7 @@ mod tests {
             "email": "a***@example.com"
         })];
 
-        let binding = DbBinding::cold_start("app_distinct_masked");
+        let binding = crate::tests::fixtures::harness_binding("app_distinct_masked");
         let rt = compio::runtime::Runtime::new().expect("compio runtime build");
         // Inside the runtime: see the sibling test above.
         //

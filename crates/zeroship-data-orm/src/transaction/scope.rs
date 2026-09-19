@@ -1,12 +1,13 @@
 //! Identity carried by a transaction callback and its continuations.
 
+use crate::binding::DbRoute;
 use crate::error::DbError;
 
-/// A captured transaction and savepoint identity. An app's next transaction
+/// A captured transaction and savepoint identity. A route's next transaction
 /// must never inherit work left running by a previous callback.
 #[derive(Clone, Debug)]
 pub struct TransactionScope {
-    app_id: String,
+    route: DbRoute,
     generation: u64,
     frame: u64,
 }
@@ -14,26 +15,31 @@ pub struct TransactionScope {
 impl TransactionScope {
     /// Decode the scope preserved by a host's async context. These values are
     /// observations, checked against the live ORM protocol before use.
-    pub fn observed(app_id: String, generation: u64, frame: u64) -> Self {
+    pub fn observed(route: DbRoute, generation: u64, frame: u64) -> Self {
         Self {
-            app_id,
+            route,
             generation,
             frame,
         }
     }
 
     /// Capture the frame after BEGIN or SAVEPOINT has succeeded.
-    pub fn current(app_id: &str) -> Result<Self, DbError> {
+    pub fn current(route: &DbRoute) -> Result<Self, DbError> {
         crate::tx_lanes::with(|lanes| {
-            let reducer = lanes.transaction_reducer(app_id).ok_or_else(expired)?;
+            let reducer = lanes.transaction_reducer(route).ok_or_else(expired)?;
             let generation = reducer.generation().ok_or_else(expired)?;
             let frame = reducer.frames().top().ok_or_else(expired)?.id();
-            Ok(Self::observed(app_id.to_owned(), generation.0, frame.get()))
+            Ok(Self::observed(route.clone(), generation.0, frame.get()))
         })
     }
 
+    /// The tenant AND database this scope belongs to.
+    pub fn route(&self) -> &DbRoute {
+        &self.route
+    }
+
     pub fn app_id(&self) -> &str {
-        &self.app_id
+        self.route.app_id()
     }
     pub fn generation(&self) -> u64 {
         self.generation
@@ -46,9 +52,7 @@ impl TransactionScope {
     /// resolution. An open child also excludes work from its parent frame.
     pub fn check(&self) -> Result<(), DbError> {
         crate::tx_lanes::with(|lanes| {
-            let reducer = lanes
-                .transaction_reducer(&self.app_id)
-                .ok_or_else(expired)?;
+            let reducer = lanes.transaction_reducer(&self.route).ok_or_else(expired)?;
             if reducer.generation().map(|generation| generation.0) != Some(self.generation)
                 || !reducer.frames().contains(self.frame)
             {

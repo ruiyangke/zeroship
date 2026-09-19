@@ -95,10 +95,7 @@ mod tests {
         .await
         .unwrap();
         let driver = backend
-            .connection_driver(
-                "app_owned_driver",
-                &crate::sql::SchemaName::new("app_owned_driver").unwrap(),
-            )
+            .connection_driver(&crate::tests::fixtures::harness_binding("app_owned_driver"))
             .await
             .unwrap();
         drop(backend);
@@ -140,10 +137,7 @@ mod tests {
         .await
         .unwrap();
         let source = reopened
-            .connection_driver(
-                "app_owned_driver",
-                &crate::sql::SchemaName::new("app_owned_driver").unwrap(),
-            )
+            .connection_driver(&crate::tests::fixtures::harness_binding("app_owned_driver"))
             .await
             .unwrap();
         let session = source.acquire(LeaseKind::Autocommit).await.unwrap();
@@ -164,10 +158,7 @@ mod tests {
         )
         .unwrap();
         let driver = backend
-            .connection_driver(
-                "app_driver",
-                &crate::sql::SchemaName::new("app_driver").unwrap(),
-            )
+            .connection_driver(&crate::tests::fixtures::harness_binding("app_driver"))
             .await
             .unwrap();
         crate::driver::tests::native_commands(driver, "BLOB").await;
@@ -185,10 +176,7 @@ mod tests {
         )
         .unwrap();
         let driver = backend
-            .connection_driver(
-                "app_decode",
-                &crate::sql::SchemaName::new("app_decode").unwrap(),
-            )
+            .connection_driver(&crate::tests::fixtures::harness_binding("app_decode"))
             .await
             .unwrap();
         let session = driver.acquire(LeaseKind::Autocommit).await.unwrap();

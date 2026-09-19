@@ -1,48 +1,45 @@
 //! Render PostgreSQL authority and resource-budget setup for ORM sessions.
 //!
-//! Role names derive from the physical schema provisioned by the migration service.
-//! Timeout policy comes from `crate::budgets`; this module supplies SQL spelling.
+//! The role a session narrows to is the BINDING's, composed once on the
+//! binding itself (`zeroship_data_orm::binding::DbBinding::to_database`) from
+//! the binding id and the schema epoch. This module never composes a role: it
+//! sends the one the binding carries, so the name the batch asks for is the
+//! name `zeroship_migrate_server::datastore::cluster::grant_binding` created.
+//!
+//! Timeout policy comes from `crate::budgets`; this module supplies SQL
+//! spelling.
 
+use crate::binding::DbBinding;
 use crate::connection::SessionAuthority;
-use crate::sql::SchemaName;
-use zeroship_core::database_role::per_app_role_name;
-
 use zeroship_data_orm::budgets::{
     DB_IDLE_IN_TX_TIMEOUT_MS, DB_LOCK_TIMEOUT_MS, DB_STATEMENT_TIMEOUT_MS,
 };
 use zeroship_data_orm::error::DbError;
 
-/// Compose the per-app role from the SCHEMA, the way the migration service does.
+/// A creator session asked to narrow, on a binding that names no role.
 ///
-/// Both builders below go through this rather than calling
-/// [`per_app_role_name`] on whatever they were handed, so the two data-plane
-/// spellings cannot drift from each other - and neither can drift from
-/// `zeroship_migrate_server::apply::runtime_role_provisioning_sql`, which takes
-/// the same [`SchemaName`] type.
-///
-/// **The parameter's identity is the whole point.** The migration service
-/// creates the role from the schema it created. A `&str` here would accept the
-/// tenant id just as happily, and while the two are the same string that is
-/// invisible; the day they diverge, `SET LOCAL ROLE` names a role nobody ever
-/// created, every transaction fails at session setup, and
-/// `pg_error::is_missing_per_app_session_role` stops matching - which turns an
-/// actionable SCHEMA_NOT_PROVISIONED into a generic failure.
-fn quoted_per_app_role(schema: &SchemaName) -> Result<String, DbError> {
-    Ok(crate::sql::mapping::quote_ident(&per_app_role_name(
-        schema.as_str(),
-    )?))
+/// It is a refusal rather than a session that silently keeps the shared worker
+/// login's authority: that login is a member of every live binding role on the
+/// cluster, so a batch that skipped `SET LOCAL ROLE` would run with no fence at
+/// all rather than with none of the privileges.
+fn unbound_session() -> DbError {
+    DbError::config(
+        "binding_not_resolved",
+        "db: this connection narrows per binding, and the binding names no database",
+    )
 }
 
 /// Compose transaction-local authority and resource limits after `BEGIN`.
 ///
 /// # Errors
 ///
-/// Returns a typed error if a selected per-app role name is invalid.
+/// [`DbError`] when the connection narrows per binding and the binding carries
+/// no database edge to narrow to.
 pub(crate) fn tx_session_setup_sql(
-    schema: &SchemaName,
+    binding: &DbBinding,
     authority: SessionAuthority,
 ) -> Result<String, DbError> {
-    session_setup_sql(schema, authority, true)
+    session_setup_sql(binding, authority, true)
 }
 
 /// Compose setup for one statement in a short transaction. All settings are
@@ -50,22 +47,27 @@ pub(crate) fn tx_session_setup_sql(
 ///
 /// # Errors
 ///
-/// Returns a typed error if a selected per-app role name is invalid.
+/// [`DbError`] when the connection narrows per binding and the binding carries
+/// no database edge to narrow to.
 pub(crate) fn autocommit_local_session_setup_sql(
-    schema: &SchemaName,
+    binding: &DbBinding,
     authority: SessionAuthority,
 ) -> Result<String, DbError> {
-    session_setup_sql(schema, authority, false)
+    session_setup_sql(binding, authority, false)
 }
 
 fn session_setup_sql(
-    schema: &SchemaName,
+    binding: &DbBinding,
     authority: SessionAuthority,
     include_idle_timeout: bool,
 ) -> Result<String, DbError> {
     let mut statements = Vec::with_capacity(4);
-    if authority == SessionAuthority::PerAppRole {
-        statements.push(format!("SET LOCAL ROLE {}", quoted_per_app_role(schema)?));
+    if authority == SessionAuthority::PerBindingRole {
+        let role = binding.session_role().ok_or_else(unbound_session)?;
+        statements.push(format!(
+            "SET LOCAL ROLE {}",
+            crate::sql::mapping::quote_ident(role)
+        ));
     }
     statements.push(format!(
         "SET LOCAL statement_timeout = {DB_STATEMENT_TIMEOUT_MS}"
@@ -82,9 +84,18 @@ fn session_setup_sql(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sql::SchemaName;
+    use zeroship_core::{BindingId, DatabaseId};
 
-    fn demo_schema() -> SchemaName {
-        SchemaName::new("app_demo").expect("fixture schema name")
+    fn creator_binding() -> DbBinding {
+        DbBinding::to_database(
+            "app_demo",
+            "deploy_demo",
+            DatabaseId::mint(),
+            BindingId::mint(),
+            3,
+        )
+        .expect("the fixture ids compose a legal role name")
     }
 
     #[test]
@@ -94,9 +105,13 @@ mod tests {
         // long a statement may run — the defense against one tenant exhausting
         // the shared Postgres connection pool fleet-wide. SET LOCAL so they
         // revert at COMMIT/ROLLBACK.
-        let sql = tx_session_setup_sql(&demo_schema(), SessionAuthority::PerAppRole).unwrap();
+        let binding = creator_binding();
+        let sql = tx_session_setup_sql(&binding, SessionAuthority::PerBindingRole).unwrap();
         assert!(
-            sql.contains(r#"SET LOCAL ROLE "app_app_demo_role""#),
+            sql.contains(&format!(
+                r#"SET LOCAL ROLE "{}""#,
+                binding.session_role().expect("a creator binding narrows")
+            )),
             "{sql}"
         );
         assert!(
@@ -107,15 +122,61 @@ mod tests {
         assert!(sql.contains("SET LOCAL lock_timeout ="), "{sql}");
     }
 
+    /// The role is the FIRST statement of the batch.
+    ///
+    /// PostgreSQL aborts a simple-query batch at its first failure, so a role
+    /// statement anywhere but first would let the budgets apply under the
+    /// login's own authority before the narrow was refused.
+    #[test]
+    fn the_binding_role_is_the_first_statement_of_both_batches() {
+        let binding = creator_binding();
+        let expected = format!(
+            r#"SET LOCAL ROLE "{}""#,
+            binding.session_role().expect("a creator binding narrows")
+        );
+        for sql in [
+            tx_session_setup_sql(&binding, SessionAuthority::PerBindingRole).unwrap(),
+            autocommit_local_session_setup_sql(&binding, SessionAuthority::PerBindingRole).unwrap(),
+        ] {
+            assert!(sql.starts_with(&expected), "{sql}");
+        }
+    }
+
+    /// The epoch rides in the role name, so the batch changes when it moves.
+    ///
+    /// Its control is the same binding at the same epoch, which must produce
+    /// the same batch: without it this would pass for a batch that varied with
+    /// anything at all.
+    #[test]
+    fn the_batch_names_the_epoch_the_binding_was_resolved_at() {
+        let database = DatabaseId::mint();
+        let edge = BindingId::mint();
+        let at_one =
+            DbBinding::to_database("app_demo", "d", database.clone(), edge.clone(), 1).unwrap();
+        let at_two =
+            DbBinding::to_database("app_demo", "d", database.clone(), edge.clone(), 2).unwrap();
+        let again =
+            DbBinding::to_database("app_demo", "d", database, edge, 1).unwrap();
+
+        let batch = |binding: &DbBinding| {
+            tx_session_setup_sql(binding, SessionAuthority::PerBindingRole).unwrap()
+        };
+        assert_ne!(batch(&at_one), batch(&at_two));
+        assert_eq!(batch(&at_one), batch(&again));
+    }
+
     #[test]
     fn autocommit_local_session_setup_bounds_statement_time_via_set_local() {
         // The short transaction bounds the statement and keeps every setting
         // scoped to this pool lease.
+        let binding = creator_binding();
         let setup =
-            autocommit_local_session_setup_sql(&demo_schema(), SessionAuthority::PerAppRole)
-                .unwrap();
+            autocommit_local_session_setup_sql(&binding, SessionAuthority::PerBindingRole).unwrap();
         assert!(
-            setup.contains(r#"SET LOCAL ROLE "app_app_demo_role""#),
+            setup.contains(&format!(
+                r#"SET LOCAL ROLE "{}""#,
+                binding.session_role().expect("a creator binding narrows")
+            )),
             "{setup}"
         );
         assert!(setup.contains("SET LOCAL statement_timeout ="), "{setup}");
@@ -134,11 +195,12 @@ mod tests {
 
     #[test]
     fn connection_authority_keeps_the_login_role_and_applies_transaction_limits() {
-        let setup = tx_session_setup_sql(
-            &demo_schema(),
-            crate::connection::SessionAuthority::Connection,
-        )
-        .unwrap();
+        let platform = DbBinding::platform(
+            "platform",
+            "fixture",
+            SchemaName::new("zeroship").expect("fixture schema"),
+        );
+        let setup = tx_session_setup_sql(&platform, SessionAuthority::Connection).unwrap();
         assert!(!setup.contains("ROLE"), "{setup}");
         assert!(setup.contains("SET LOCAL statement_timeout ="), "{setup}");
         assert!(
@@ -148,32 +210,35 @@ mod tests {
         assert!(setup.contains("SET LOCAL lock_timeout ="), "{setup}");
     }
 
+    /// A connection that narrows per binding refuses a binding with no role.
+    ///
+    /// The control is the same binding under `Connection` authority, which must
+    /// compose: the refusal is about the PAIRING, not about the binding.
     #[test]
-    fn both_session_setup_batches_refuse_overlong_role_names() {
-        // 55 characters of `a` is a legal schema name and an ILLEGAL role name:
-        // `app_` + 55 + `_role` is 64 bytes, one over PostgreSQL's limit. The
-        // two validations are separate on purpose, so `SchemaName` accepting it
-        // is not the composer accepting it.
-        let schema = SchemaName::new(&"a".repeat(55)).expect("55 chars is a legal schema name");
+    fn both_session_setup_batches_refuse_a_binding_that_names_no_database() {
+        let platform = DbBinding::platform(
+            "platform",
+            "fixture",
+            SchemaName::new("zeroship").expect("fixture schema"),
+        );
         for result in [
-            tx_session_setup_sql(&schema, SessionAuthority::PerAppRole),
-            autocommit_local_session_setup_sql(&schema, SessionAuthority::PerAppRole),
+            tx_session_setup_sql(&platform, SessionAuthority::PerBindingRole),
+            autocommit_local_session_setup_sql(&platform, SessionAuthority::PerBindingRole),
         ] {
-            let error = result.expect_err("64-byte role names must be refused");
-            assert!(
-                error.to_string().contains("64 bytes; maximum is 63 bytes"),
-                "unexpected refusal: {error}"
-            );
+            let error = result.expect_err("a narrowing connection needs a role to narrow to");
+            assert_eq!(error.code(), "binding_not_resolved", "{error}");
         }
+        tx_session_setup_sql(&platform, SessionAuthority::Connection)
+            .expect("control: the same binding composes under the login's own authority");
     }
 
     /// Every value must be transaction scoped so it cannot survive pool reuse.
     #[test]
     fn every_setting_is_transaction_scoped() {
+        let binding = creator_binding();
         for sql in [
-            tx_session_setup_sql(&demo_schema(), SessionAuthority::PerAppRole).unwrap(),
-            autocommit_local_session_setup_sql(&demo_schema(), SessionAuthority::PerAppRole)
-                .unwrap(),
+            tx_session_setup_sql(&binding, SessionAuthority::PerBindingRole).unwrap(),
+            autocommit_local_session_setup_sql(&binding, SessionAuthority::PerBindingRole).unwrap(),
         ] {
             for stmt in sql.split(';') {
                 let stmt = stmt.trim();

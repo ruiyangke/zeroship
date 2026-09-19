@@ -1089,8 +1089,14 @@ fn impatient_probe(path: &std::path::Path) -> rusqlite::Connection {
     probe
 }
 
-fn main_schema() -> crate::sql::SchemaName {
-    crate::sql::SchemaName::new("main").expect("main is a legal schema name")
+/// The dev tier opens its shared file under SQLite's own `main`, which no
+/// binding role narrows: the fixture runs under the connection's own authority.
+fn main_binding(who: &str) -> zeroship_data_orm::binding::DbBinding {
+    zeroship_data_orm::binding::DbBinding::platform(
+        who,
+        "replica",
+        crate::sql::SchemaName::new("main").expect("main is a legal schema name"),
+    )
 }
 
 /// **The write lock is taken at `BEGIN`, before the transaction's first
@@ -1115,7 +1121,7 @@ fn a_transaction_holds_the_write_lock_from_begin_before_any_statement() {
                 .expect("create the table");
 
             let session = backend
-                .open_tx_session("replica", &main_schema(), BeginIntent::Default)
+                .open_tx_session(&main_binding("replica"), BeginIntent::Default)
                 .await
                 .expect("open the transaction");
 
@@ -1160,7 +1166,7 @@ fn two_replicas_reading_before_they_write_both_commit() {
 
             async fn replica(backend: &SqliteBackend, who: &str) -> Result<(), DbError> {
                 let session = backend
-                    .open_tx_session(who, &main_schema(), BeginIntent::Default)
+                    .open_tx_session(&main_binding(who), BeginIntent::Default)
                     .await
                     .map_err(|error| match error {
                         OpenSessionError::Failed(error) => error,
@@ -1221,8 +1227,7 @@ fn two_apps_on_one_backend_serialize_their_transactions_through_main() {
     Host::test(|host| {
         host.run(async {
             let (backend, dir) = fresh_backend(host);
-            let app_schema =
-                crate::sql::SchemaName::new("tenant_a").expect("legal schema name");
+            let app_binding = crate::tests::fixtures::harness_binding("tenant_a");
             backend
                 .attach_app_file("tenant_a")
                 .await
@@ -1235,7 +1240,7 @@ fn two_apps_on_one_backend_serialize_their_transactions_through_main() {
                 .expect("create a table in main");
 
             let session = backend
-                .open_tx_session("tenant_a", &app_schema, BeginIntent::Default)
+                .open_tx_session(&app_binding, BeginIntent::Default)
                 .await
                 .expect("open the app's transaction");
 
