@@ -123,5 +123,10 @@
     "file": "20260914000600_placement_eligibility.ts",
     "name": "placement_eligibility",
     "opCount": 5
+  },
+  {
+    "file": "20260919000000_workflow_journal.ts",
+    "name": "workflow_journal",
+    "opCount": 2
   }
 ]
