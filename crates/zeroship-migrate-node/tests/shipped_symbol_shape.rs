@@ -1,6 +1,5 @@
 #[cfg(target_os = "linux")]
 mod linux {
-    use std::ffi::OsString;
     use std::path::{Path, PathBuf};
     use std::process::{Command, Output};
 
@@ -10,8 +9,7 @@ mod linux {
             .parent()
             .and_then(Path::parent)
             .expect("the crate lives under the workspace crates directory");
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-        let build = Command::new(cargo)
+        let build = Command::new(env!("CARGO"))
             .current_dir(workspace)
             .args([
                 "build",
