@@ -5,7 +5,10 @@ use super::{
     *,
 };
 use crate::service::{
-    delivery::{creator_deadline, DeliveredTask, JobAcceptance},
+    delivery::{
+        attempt_budget, creator_deadline, CapturedLease, DeliveredTask, JobAcceptance,
+        ATTEMPT_IO_CEILING,
+    },
     AppWorkflows, WorkerIdentity,
 };
 use std::time::{Duration, Instant};
@@ -666,6 +669,93 @@ async fn lock_waits(store: Rc<OrmStore>) {
         .fixture_install(&app, leased_policy(5, AppPolicy::default()))
         .unwrap();
     task(scope.accept_job(&grant).await.unwrap());
+}
+
+/// The app lease of the case the ceiling has to bound. Wider than the ceiling,
+/// so an attempt that took its whole authority would be visibly longer.
+const UNBOUNDED_LEASE: Duration = Duration::from_mins(1);
+/// The control's app lease. Narrower than the ceiling, so the authority bounds
+/// that attempt and the ceiling never becomes its binding term.
+const BOUNDED_LEASE: Duration = Duration::from_secs(1);
+
+/// Install `lease` as the app's authority and report the budget one attempt
+/// gets under it, beside the authority that attempt still holds. Only the
+/// lease moves between the two calls below: the revision advances because
+/// installing requires it, and the policy is otherwise identical.
+fn budget_under(
+    service: &WorkflowService,
+    scope: &AppWorkflows,
+    app: &AppId,
+    grant: &impl JobLease,
+    revision: i64,
+    lease: Duration,
+) -> (Duration, Duration) {
+    service
+        .policies
+        .fixture_install(
+            app,
+            leased_policy(
+                revision,
+                AppPolicy {
+                    lease_ms: i64::try_from(lease.as_millis()).unwrap(),
+                    ..AppPolicy::default()
+                },
+            ),
+        )
+        .unwrap();
+    let captured = CapturedLease::capture(scope, grant).unwrap();
+    let budget = attempt_budget(Some(&captured), None);
+    (budget, captured.remaining().unwrap())
+}
+
+case!(
+    sqlite_delivery_bounds_one_attempt_below_its_authority,
+    postgres_delivery_bounds_one_attempt_below_its_authority,
+    io_ceiling
+);
+
+/// An attempt never gets the whole authority it holds: the journal I/O ceiling
+/// caps it, so a stalled attempt ends while its grant is still live instead of
+/// holding that grant until it lapses.
+///
+/// This pins the composition, not the magnitude. Both cases move with
+/// [`ATTEMPT_IO_CEILING`], so retuning the ceiling keeps them green; what fails
+/// is dropping the ceiling term, or letting a lease wider than it through.
+async fn io_ceiling(store: Rc<OrmStore>) {
+    let (service, app, _, _deployments) = registered_service(store).await;
+    let scope = service.fixture_app(app.clone());
+    scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let manager = Manager::new(&app).await;
+    let owner = assignment(&app);
+    publish(&scope, &manager).await;
+    let grant = manager.queue.claim(&owner).await.unwrap().unwrap();
+    assert!(
+        grant.remaining().unwrap() > ATTEMPT_IO_CEILING,
+        "the manager grant is narrower than the ceiling, so it would bound both cases"
+    );
+
+    let (unbounded, authority) = budget_under(&service, &scope, &app, &grant, 2, UNBOUNDED_LEASE);
+    assert_eq!(
+        unbounded, ATTEMPT_IO_CEILING,
+        "an attempt under an authority wider than the ceiling was not capped by it: {unbounded:?}"
+    );
+    assert!(
+        unbounded < authority,
+        "one attempt was handed the whole remaining authority: {unbounded:?} of {authority:?}"
+    );
+
+    let (bounded, _) = budget_under(&service, &scope, &app, &grant, 3, BOUNDED_LEASE);
+    assert!(
+        bounded < ATTEMPT_IO_CEILING,
+        "the control was capped by the ceiling too, so the wide case proves nothing: {bounded:?}"
+    );
+    assert!(
+        !bounded.is_zero(),
+        "the control spent its whole authority before it was measured, so it bounded nothing"
+    );
 }
 
 fn assignment(app: &AppId) -> Assignment {
