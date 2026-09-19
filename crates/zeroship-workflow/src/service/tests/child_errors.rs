@@ -1,9 +1,14 @@
-//! What a parent run is handed when its child ends without an error of its own.
+//! What a parent run is handed when its child ends.
 //!
 //! Error identity crosses the journal by name, under the `type` key the V8
 //! replay bridge reconstructs a class from. These cases assert the value the
 //! engine *writes*, read back off the parent's own replay journal, because that
 //! row is what the bridge is handed and what a creator's `catch` matches on.
+//!
+//! A child that recorded an error of its own hands the parent that error; the
+//! engine's own verdict stands in only for a child that recorded none. Both
+//! sides are here, because a join row is read the same way either way and a
+//! creator can only tell them apart by what it carries.
 
 #![expect(
     clippy::future_not_send,
@@ -52,6 +57,11 @@ paired!(
     postgres_a_child_wait_with_no_timeout_leaves_its_parent_waiting,
     untimed_child_wait
 );
+paired!(
+    sqlite_a_failed_childs_own_error_reaches_its_parent_unchanged,
+    postgres_a_failed_childs_own_error_reaches_its_parent_unchanged,
+    failed_child
+);
 
 /// An instant far enough behind any test clock that the wait is already past
 /// due when the parent is next examined. Absolute rather than a duration, so no
@@ -94,6 +104,16 @@ async fn parent_awaiting_child(
 
 /// The child run the parent's accepted checkpoint points at.
 async fn accepted_child(scope: &AppWorkflows, parent: &str) -> String {
+    accepted_children(scope, parent)
+        .await
+        .into_iter()
+        .next()
+        .unwrap()
+        .1
+}
+
+/// Every child run the parent's accepted checkpoints point at, by ordinal.
+async fn accepted_children(scope: &AppWorkflows, parent: &str) -> Vec<(i32, String)> {
     let mut tx = scope.service.begin().await.unwrap();
     crate::service::app::lock_app(&mut tx, scope.app_id())
         .await
@@ -101,16 +121,21 @@ async fn accepted_child(scope: &AppWorkflows, parent: &str) -> String {
     let run = crate::service::app::lock_run(&mut tx, scope.app_id(), parent)
         .await
         .unwrap();
-    let child = crate::service::journal::load(&mut tx, scope.app_id(), parent, run.integer("generation").unwrap())
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|step| step.kind == "child")
-        .unwrap()
-        .child_run_id
-        .unwrap();
+    let mut children: Vec<(i32, String)> = crate::service::journal::load(
+        &mut tx,
+        scope.app_id(),
+        parent,
+        run.integer("generation").unwrap(),
+    )
+    .await
+    .unwrap()
+    .into_iter()
+    .filter(|step| step.kind == "child")
+    .map(|step| (step.ordinal, step.child_run_id.unwrap()))
+    .collect();
     tx.commit().await.unwrap();
-    child
+    children.sort_unstable();
+    children
 }
 
 /// The parent's next dispatch, and with it the replayed journal row for the
@@ -253,4 +278,110 @@ async fn untimed_child_wait(store: Rc<OrmStore>) {
         scope.status(&parent).await.unwrap().state,
         RunState::Waiting
     );
+}
+
+/// What the child at `ordinal` raises: two errors a creator body would see
+/// thrown out of its own `step.call`, distinct in every field including the
+/// class name under `type`.
+fn child_error(ordinal: i32) -> serde_json::Value {
+    match ordinal {
+        0 => json!({
+            "type":"LimitExceededError", "message":"child output exceeded the payload limit",
+            "retryable":false,
+        }),
+        _ => json!({
+            "type":"StalledError", "message":"child stopped reporting", "retryable":true,
+            "strikes":3,
+        }),
+    }
+}
+
+/// The error a child recorded, reaching its parent unchanged.
+///
+/// `ChildCancelledError` is the engine's verdict for a child that recorded
+/// nothing; a child that failed on its own recorded something, and the parent's
+/// join carries that instead. Creator code rests on the difference: a body that
+/// catches `LimitExceededError` at its `step.call` is catching an error the
+/// child raised, and it reaches the body only because this row is the child's
+/// own value rather than a verdict about it.
+///
+/// The control differing in one variable: two children of the same parent, in
+/// the same batch and resolved by the same dispatch, failing with different
+/// errors. A join filled from any constant - the engine's own verdict among
+/// them - matches at most one half, so a passing run means the value came from
+/// the child and not from the engine.
+async fn failed_child(store: Rc<OrmStore>) {
+    let (service, app_id, _, _deployments) = registered_service(store).await;
+    let scope = service.fixture_app(app_id);
+    let worker = WorkerIdentity::new("failed-child".into()).unwrap();
+    let parent = scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let task = service.poll(&worker).await.unwrap().unwrap();
+    assert_eq!(task.invocation.run_id, parent.id);
+    service
+        .complete(
+            &worker,
+            &task.id,
+            &task.token,
+            execution(json!([
+                {"kind":"Child", "ordinal":0, "name":"join-0", "childWorkflowName":"Child",
+                 "options":{}, "input":{}},
+                {"kind":"Child", "ordinal":1, "name":"join-1", "childWorkflowName":"Child",
+                 "options":{}, "input":{}},
+            ])),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !scope.status(&parent.id).await.unwrap().state.is_terminal(),
+        "the parent parks on its joins"
+    );
+
+    let children = accepted_children(&scope, &parent.id).await;
+    assert_eq!(children.len(), 2, "{children:?}");
+    for _ in &children {
+        let task = service.poll(&worker).await.unwrap().unwrap();
+        let ordinal = children
+            .iter()
+            .find(|(_, child)| *child == task.invocation.run_id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "a run other than a child was dispatched: {}",
+                    task.invocation.run_id
+                )
+            })
+            .0;
+        service
+            .complete(
+                &worker,
+                &task.id,
+                &task.token,
+                execution(json!([{"kind":"RunFailed", "error":child_error(ordinal)}])),
+            )
+            .await
+            .unwrap();
+    }
+    for (ordinal, child) in &children {
+        assert_eq!(
+            scope.status(child).await.unwrap().state,
+            RunState::Failed,
+            "child at {ordinal} records its own failure"
+        );
+    }
+    deliver_propagations(&scope).await;
+
+    let task = service.poll(&worker).await.unwrap().unwrap();
+    assert_eq!(task.invocation.run_id, parent.id);
+    for (ordinal, _) in &children {
+        let row = task
+            .invocation
+            .journal
+            .iter()
+            .find(|step| step.name == format!("join-{ordinal}"))
+            .unwrap_or_else(|| panic!("the parent replays every join: {:?}", task.invocation));
+        assert_eq!(row.error.as_ref(), Some(&child_error(*ordinal)), "{row:?}");
+        assert!(row.output.is_none(), "{row:?}");
+    }
 }
