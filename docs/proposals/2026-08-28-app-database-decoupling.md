@@ -8,8 +8,11 @@ Built:
 
 - the typed ids `dst_`, `dbs_` and `bnd_` (`crates/zeroship-id/`), with prefix disjointness bound
   by a test rather than asserted in a comment
-- the physical-name derivations (`crates/zeroship-core/src/database_derivation.rs`), refusing a
-  role name they would have truncated rather than shortening it
+- the physical-name derivations: the composers and their truncation refusal in
+  `crates/zeroship-core/src/database_role.rs`, and the typed seam over them in
+  `crates/zeroship-core/src/database_derivation.rs`. A name PostgreSQL would have truncated is
+  refused rather than shortened, because truncation drops the epoch digits of
+  `zs_bind_<binding>_e<epoch>` first and lands two epochs of one binding on one role
 - `Resource::Database` and its policy bands (`crates/zeroship-authz/`,
   `deploy/policies/zeroship.cedarschema`)
 - the three tables and the project's zone
