@@ -37,6 +37,28 @@ pub struct HostOptions {
     pub policy_interval: Duration,
 }
 
+/// Stack reserved for the thread a workflow host runs on.
+///
+/// The host thread carries ONE unbroken call chain: the coordination lanes,
+/// the delivered-job path, the journal engine, the ORM and the database
+/// driver, plus the creator's own start path when applying a frontier that
+/// spawns a child. It also enters V8 to run creator workflow bodies, and V8
+/// derives its own limit from whatever is left. The platform default thread
+/// stack is not a budget anyone chose for that chain, and overrunning it
+/// aborts the entire process rather than failing one job - every app placed on
+/// the worker goes down with it. Reserved address space is not resident
+/// memory: pages commit only as the chain touches them.
+pub const STACK_BYTES: usize = 16 * 1024 * 1024;
+
+/// The thread a workflow host runs on, named for operators and carrying the
+/// stack its call chain needs. Every host spawner uses this, so the name and
+/// the budget are declared once.
+pub fn thread() -> std::thread::Builder {
+    std::thread::Builder::new()
+        .name("workflow-host".into())
+        .stack_size(STACK_BYTES)
+}
+
 /// Owns one enrolled process identity and its joined execution capacity.
 ///
 /// The injected factory supplies independently authorized creator resources.
