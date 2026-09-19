@@ -1,8 +1,9 @@
 //! Classify real PostgreSQL role-setup failures at the adapter boundary.
 //!
-//! Missing app roles must produce a provisioning error during session setup;
-//! ordinary SQL errors retain generic classification. The fixture uses PostgreSQL’s
-//! English messages. These assertions cover error lowering, not HTTP delivery.
+//! A binding role the cluster never minted must produce a re-resolvable error
+//! during session setup; ordinary SQL errors retain generic classification. The
+//! fixture uses PostgreSQL's English messages. These assertions cover error
+//! lowering, not HTTP delivery.
 
 use compio_postgres::NoTls;
 use zeroship_data_orm::backend::pg_error;
@@ -174,12 +175,14 @@ async fn classify_missing_role(app_id: &str) -> DbError {
 }
 
 #[compio::test]
-async fn missing_per_app_role_is_creator_facing_not_internal() {
-    // A name no cluster will have. Shaped like `per_app_role_name` output
-    // so the case is the production one.
+async fn a_binding_role_the_cluster_never_minted_is_creator_facing_not_internal() {
+    // A name no cluster will have: a freshly minted edge that no reconciler has
+    // converged, which is the production shape of this condition.
     let app_id = uuid::Uuid::new_v4().simple().to_string();
-    let role = zeroship_core::database_role::per_app_role_name(&app_id)
-        .expect("missing-role fixture app id must produce a valid PostgreSQL role name");
+    let role = crate::tests::fixtures::harness_binding(&app_id)
+        .session_role()
+        .expect("a harness binding narrows to a role")
+        .to_owned();
     let classified = classify_missing_role(&app_id).await;
 
     let op = classified.to_op_error();
@@ -190,37 +193,34 @@ async fn missing_per_app_role_is_creator_facing_not_internal() {
 
     assert_eq!(
         code, "schema_epoch_stale",
-        "a missing per-app role is a creator CONFIGURATION state with a documented \
-         one-command fix, not an internal fault. Got {code:?} with message {:?}",
+        "a binding role the cluster never minted is a re-resolvable CONFIGURATION \
+         state, not an internal fault. Got {code:?} with message {:?}",
         op.message
     );
 
-    // THE ACCEPTANCE BAR: the response names the command.
-    assert!(
-        op.message.contains("zeroship migrate"),
-        "the creator must learn what to run from this message: {:?}",
-        op.message
-    );
-
-    // And it names nothing else. The message is the platform CONSTANT --
-    // not a composition -- so nothing from the server can appear in it.
-    // Asserting equality rather than absence is the stronger form: an
-    // absence list can only rule out the leaks someone thought of.
+    // The message is the platform CONSTANT -- not a composition -- so nothing
+    // from the server can appear in it. Asserting equality rather than absence
+    // is the stronger form: an absence list can only rule out the leaks someone
+    // thought of.
     assert_eq!(
         op.message,
         zeroship_data_orm::error::STALE_EPOCH_MESSAGE,
         "the wire message must be the fixed platform constant"
     );
 
-    // The three specific things that WOULD have ridden out on the old
-    // `Internal` path, spelled out so a future edit that starts composing
-    // the message fails here with a readable reason rather than only on
-    // the equality above. The role name embeds the app id; `ERROR:` is
+    // The three specific things that WOULD ride out on an `Internal` path,
+    // spelled out so a future edit that starts composing the message fails here
+    // with a readable reason rather than only on the equality above. The role
+    // name identifies the binding and its epoch; `ERROR:` is
     // `compio_postgres::DbError`'s severity prefix; `caused by` is
     // `walk_pg_chain`'s source-chain joiner.
+    //
+    // The witness is the role the batch actually SENT. Composing a second
+    // spelling here would rule out a string the classifier could never have
+    // interpolated, which reads as protection and measures nothing.
     assert!(
         !op.message.contains(&role),
-        "the role name (which embeds the app id) must not ride out: {:?}",
+        "the role name (which identifies the binding) must not ride out: {:?}",
         op.message
     );
     assert!(
@@ -239,13 +239,12 @@ async fn missing_per_app_role_is_creator_facing_not_internal() {
 #[compio::test]
 async fn a_real_internal_pg_failure_is_still_internal() {
     // ONE-VARIABLE CONTROL, run against the SAME live server through the
-    // SAME classifier: a statement that fails for a reason the creator
-    // cannot fix with `zeroship migrate`. If the new arm had widened into
-    // "any configuration-shaped SQLSTATE is creator-facing", this would
-    // come back `schema_epoch_stale` too.
+    // SAME classifier: a statement that fails for a reason resolving the
+    // binding again cannot change. If the arm had widened into "any
+    // configuration-shaped SQLSTATE is creator-facing", this would come back
+    // `schema_epoch_stale` too.
     //
-    // 22023 deliberately -- the SAME SQLSTATE the missing-role case
-    // reports. The only thing separating the two is the server's primary
+    // 22023 deliberately -- the SAME SQLSTATE the missing-role case reports. The only thing separating the two is the server's primary
     // message, so this proves the discriminator narrows rather than
     // rubber-stamping the SQLSTATE.
     let postgres = crate::tests::fixtures::postgres::Postgres::start();
@@ -290,10 +289,15 @@ async fn a_real_internal_pg_failure_is_still_internal() {
 }
 
 #[compio::test]
-async fn pool_reconnect_missing_app_shaped_login_role_stays_internal() {
+async fn pool_reconnect_naming_a_binding_role_stays_internal() {
+    // Shaped as the role the data path really narrows to, so the claim is that
+    // a reconnect naming THAT role still routes through `classify` and stays
+    // internal - a reconnect failure never passes the binding classifier.
     let app_id = uuid::Uuid::new_v4().simple().to_string();
-    let role = zeroship_core::database_role::per_app_role_name(&app_id)
-        .expect("pool-reconnect fixture app id must produce a valid PostgreSQL role name");
+    let role = crate::tests::fixtures::harness_binding(&app_id)
+        .session_role()
+        .expect("a harness binding narrows to a role")
+        .to_owned();
     let (url, server) = spawn_pool_reconnect_server(&role);
 
     // A SHORT lifetime the warm entry then outlives, not `Duration::ZERO`.

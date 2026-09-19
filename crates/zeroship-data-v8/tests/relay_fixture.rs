@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use zeroship_core::service_assertion::{ServiceIssuer, ServiceSigningKey, ServiceTrustBundle};
 use zeroship_core::service_peers::{ServiceAuth, ServiceKeyring};
+use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::cdc::relay::RelayConfig;
 
 pub struct RelayFixture {
@@ -26,17 +27,29 @@ impl Drop for RelayFixture {
 }
 
 impl RelayFixture {
-    pub async fn start(admin: &Pool, admin_url: &str, app: &str) -> Self {
+    /// Start the relay and mint the two logins the exercise connects as.
+    ///
+    /// `binding` is the edge the caller provisioned the cluster for. The worker
+    /// login is admitted to that binding's role and to nothing else, so a
+    /// session that narrows with `SET LOCAL ROLE` reaches exactly the schema
+    /// the ladder granted and the connection itself carries none of it.
+    pub async fn start(admin: &Pool, admin_url: &str, binding: &DbBinding) -> Self {
         let suffix = zeroship_core::typed_id::generate("tst");
         let relay_role = format!("relay_{suffix}");
         let worker_role = format!("worker_{suffix}");
         let instance = zeroship_core::typed_id::generate("wkr");
         let key = ServiceSigningKey::generate();
-        let app_role = zeroship_core::database_role::per_app_role_name(app).unwrap();
+        let binding_role = binding
+            .session_role()
+            .expect("the worker login assumes a binding that names a role");
+        // `WITH INHERIT FALSE` alone, spelled the way
+        // `zeroship_migrate_server::datastore::cluster::grant_binding` spells
+        // the worker edge. A fixture that added `SET TRUE` would provision an
+        // option the reconciler never emits.
         admin.batch_execute(&format!(
             "CREATE ROLE \"{relay_role}\" LOGIN REPLICATION NOSUPERUSER NOCREATEROLE NOCREATEDB NOINHERIT NOBYPASSRLS PASSWORD 'fixture';
              CREATE ROLE \"{worker_role}\" LOGIN NOREPLICATION NOSUPERUSER NOCREATEROLE NOCREATEDB NOINHERIT NOBYPASSRLS PASSWORD 'fixture';
-             GRANT \"{app_role}\" TO \"{worker_role}\" WITH INHERIT FALSE, SET TRUE;
+             GRANT \"{binding_role}\" TO \"{worker_role}\" WITH INHERIT FALSE;
              CREATE SCHEMA IF NOT EXISTS zeroship;
              CREATE TABLE IF NOT EXISTS zeroship.worker_instances (
                id text PRIMARY KEY, ring_key bytea NOT NULL, public_key bytea NOT NULL,
