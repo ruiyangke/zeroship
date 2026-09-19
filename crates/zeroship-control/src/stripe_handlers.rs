@@ -1783,7 +1783,7 @@ fn invoice_payment_object_ids(obj: &StripeObject) -> (Option<String>, Option<Str
 ///      `invoice.paid`'s resolution),
 ///   2. in ONE txn, UPSERT a `billing_disputes` row (`status='open'`) AND append a
 ///      NEGATIVE `dispute_debit` `invoice_payments` row (= cash clawed back). The negative
-/// row lowers `Σ(invoice_payments)`, so the over-refund cap auto-tightens — no
+///      row lowers `Σ(invoice_payments)`, so the over-refund cap auto-tightens — no
 ///      cross-table trigger.
 ///
 /// The dispute is NEVER auto-refunded (the funds already moved) and NEVER mutates the
