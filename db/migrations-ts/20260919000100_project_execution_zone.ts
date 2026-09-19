@@ -7,9 +7,10 @@ import { createFunction, raw, t, table } from "@zeroship/migrate";
 // before anything above the app needed a zone. With a project-owned database it
 // is the project that has to carry it, or "same project" stops implying "can
 // share" and every sharing surface has to explain a second rule. The app keeps
-// its copy under a composite foreign key, in the next migration, so the two
-// cannot disagree: `instance_serves_app` joins on it and the workflow manager
-// holds a column grant on it, and both keep working untouched.
+// its copy under a composite foreign key, `apps_project_zone_fkey` in
+// 20260919000300_database_placement_keys.ts, so the two cannot disagree:
+// `instance_serves_app` joins on it and the workflow manager holds a column
+// grant on it, and both keep working untouched.
 //
 // THE FOREIGN KEY THAT SPENDS THE PAIR IS AUTHORED ELSEWHERE, for the reason
 // 20260906000200_apps_project_ownership_key.ts states: the engine lowers a

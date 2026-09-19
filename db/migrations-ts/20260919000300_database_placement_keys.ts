@@ -1,8 +1,8 @@
 import { table } from "@zeroship/migrate";
 
-// The composite keys that carry the decoupling's two predicates: a database is
-// placed on a cluster in its project's zone, and a binding joins an app and a
-// database of one project. From
+// The composite keys that carry the decoupling's predicates: an app's zone is
+// its project's, a database is placed on a cluster in its project's zone, and a
+// binding joins an app and a database of one project. From
 // docs/proposals/2026-08-28-app-database-decoupling.md.
 //
 // A SEPARATE FILE FROM THE TABLES THEY CONSTRAIN, for the reason
@@ -17,7 +17,7 @@ import { table } from "@zeroship/migrate";
 export default {
   name: "database_placement_keys",
   schema() {
-    // And the app's zone copy cannot disagree with its project's.
+    // The app's zone copy cannot disagree with its project's.
     table("apps", { schema: "zeroship" })
       .foreignKey("apps_project_zone_fkey")
       .add({
