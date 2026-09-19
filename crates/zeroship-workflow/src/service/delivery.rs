@@ -741,22 +741,44 @@ fn authorize_task(
     Ok(())
 }
 
+/// How long one attempt may wait on the creator journal.
+///
+/// An attempt holds a journal connection from BEGIN through COMMIT and takes
+/// the app-state row lock that every other attempt for the same app also
+/// takes, so storage that stops answering pins that connection and queues the
+/// app's other attempts behind it. Ending the attempt here gives the
+/// connection and the worker's slot back while the grant is still live,
+/// rather than holding both until the grant lapses, and a caller that can
+/// retry does so under the authority it already holds.
+///
+/// This is an absolute duration rather than a fraction of the lease on
+/// purpose. The lease answers how long this worker may act, which
+/// [`attempt_budget`] applies as its own separate term; this answers how long
+/// the journal may take to answer at all, which is a fact about storage.
+/// Deriving it from the lease would put admission policy in charge of how long
+/// a journal connection can be pinned.
+///
+/// Reaching it is cheap. The manager counts an attempt against its delivery
+/// ceiling only on that attempt's first renewal, so an acceptance that ends
+/// here leaves the ceiling where it was and the job stays deliverable.
+pub(super) const ATTEMPT_IO_CEILING: Duration = Duration::from_secs(5);
+
 // Fresh attempts consume their captured authority even while BEGIN, locks or
 // COMMIT wait. Expired attempts can only reach the bounded receipt branches.
 pub(super) fn attempt_budget(
     lease: Option<&CapturedLease>,
     task: Option<&DeliveredTask>,
 ) -> Duration {
-    let io_limit = Duration::from_secs(5);
     let Some(lease) = lease else {
-        return io_limit;
+        return ATTEMPT_IO_CEILING;
     };
     let remaining = lease.expires.saturating_duration_since(Instant::now());
     task.map_or_else(
-        || io_limit.min(remaining),
+        || ATTEMPT_IO_CEILING.min(remaining),
         |task| {
-            task.remaining()
-                .map_or(io_limit, |task| io_limit.min(remaining).min(task))
+            task.remaining().map_or(ATTEMPT_IO_CEILING, |task| {
+                ATTEMPT_IO_CEILING.min(remaining).min(task)
+            })
         },
     )
 }
