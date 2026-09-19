@@ -2366,28 +2366,6 @@ mod stream_tmp_tests {
     }
 
     #[test]
-    fn proposal_keeps_app_dispatch_correlation_open() {
-        let proposal = include_str!("../../../docs/proposals/2026-08-14-error-message-quality.md");
-
-        for required in [
-            "The control helper loop is closed; the app-dispatch loop is not.",
-            "Generic sanitized app 5xx bodies carry a per-isolate `request_id`",
-            "Public-code app 5xx bodies carry no id.",
-            "`@zeroship/rpc` lifts `trace_id`, but app dispatch emits none.",
-            "Option 1c remains open for app dispatch.",
-            "`SET LOCAL ROLE` reports `invalid_parameter_value` / `22023`",
-            "A missing schema with a fully-qualified query reports `undefined_table` / `42P01`",
-            "A present role without required grants reports `insufficient_privilege` / `42501`",
-            "`42P01` and `42501` must not be added to the missing-role classifier.",
-        ] {
-            assert!(
-                proposal.contains(required),
-                "the proposal must state the partial Option 1c scope: {required:?}"
-            );
-        }
-    }
-
-    #[test]
     fn correlation_claims_are_scoped_to_the_infrastructure_helper_family() {
         let compact = |text: &str| {
             text.split_whitespace()

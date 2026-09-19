@@ -8,11 +8,10 @@
 //! is left to prove that the rank the database produces is the right one.
 //!
 //! **The developer and viewer bands get their first behavioural tests here.**
-//! Their predecessors (`app_editor.cedar` / `app_viewer.cedar`) never had one,
-//! for a reason worth remembering: `zeroship.app_members` had exactly one
-//! writer in the whole tree, `Registry::create_app`, with the role as the SQL
-//! literal `'owner'`. No editor or viewer row could exist, so two shipped
-//! policies could not match a live principal and nothing noticed.
+//! A shipped policy no live principal can reach is invisible: it can be wrong,
+//! or absent from the loaded set, and nothing fails. Membership authority is a
+//! rank on the organization role ladder, and these two bands sit at its lower
+//! rungs - so they are pinned here rather than left to match nothing.
 
 use std::str::FromStr;
 

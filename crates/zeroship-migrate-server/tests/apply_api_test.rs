@@ -274,18 +274,6 @@ async fn cleanup_user(conn: &Client, user_id: &UserId) {
         .await;
     let _ = conn
         .execute(
-            "DELETE FROM zeroship.permission_tokens WHERE owner_id = $1",
-            &[&user_id.as_str()],
-        )
-        .await;
-    let _ = conn
-        .execute(
-            "DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1",
-            &[&user_id.as_str()],
-        )
-        .await;
-    let _ = conn
-        .execute(
             "DELETE FROM zeroship.organization_members WHERE user_id = $1",
             &[&user_id.as_str()],
         )

@@ -9,13 +9,12 @@
 //! keep serving. This control-side cron applies the same archive marker as the
 //! creator-facing lifecycle route.
 //!
-//! WHAT "OWNER-LESS" NOW MEANS, AND WHY THE REAPER GOT NARROWER. Under
-//! `app_members` an erased user's apps were orphaned one for one. An app now
-//! reaches its owner through `apps.project_id -> projects.organization_id`, so
-//! erasing ONE owner of a shared organization orphans nothing: the remaining
-//! owners still answer for every app in it. Only an organization that loses its
-//! LAST owner produces reap candidates - which for a personal organization is
-//! the same event as before, and for a shared one is a much rarer one.
+//! WHAT "OWNER-LESS" MEANS, AND WHY THE REAPER IS NARROW. An app reaches its
+//! owner through `apps.project_id -> projects.organization_id`, so erasing ONE
+//! owner of a shared organization orphans nothing: the remaining owners still
+//! answer for every app in it. Only an organization that loses its LAST owner
+//! produces reap candidates - a personal organization losing its owner, or a
+//! shared one losing its final owner.
 //! The erased owner cannot authorize a restore, so these rows and their names
 //! remain retained until a future operator-owned database lifecycle handles
 //! them. This reaper does not silently substitute privileged teardown.

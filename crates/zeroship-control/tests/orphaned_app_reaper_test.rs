@@ -1,10 +1,11 @@
 //! Integration tests for ISS-12b: the control-side orphaned-app reaper that
 //! archives apps left owner-less by the ISS-12 account-erase reaper (auth).
 //!
-//! Why control owns this: when auth hard-deletes a user, `app_members` cascade-
-//! deletes the owner link, but `zeroship.apps` has no FK to users — so the app
-//! row can keep serving. Auth has no call path to control, so lifecycle cleanup
-//! lives here. Archive retains the app row, manifests, billing attribution, and
+//! Why control owns this: when auth hard-deletes a user, their
+//! `organization_members` rows cascade-delete, but `zeroship.apps` has no FK to
+//! users - so an app whose organization is left owner-less can keep serving.
+//! Auth has no call path to control, so lifecycle cleanup lives here. Archive
+//! retains the app row, manifests, billing attribution, and
 //! database state.
 //!
 //! These run the REAL path: a real `Registry` (PG-backed), a real `LocalFs`
@@ -415,7 +416,8 @@ async fn reaper_never_touches_system_app() {
     let state = &fx.state;
 
     // A system-owned app can be owner-less BY CONSTRUCTION (no
-    // app_members row). Mirror that exactly: owner-less + system = true + old.
+    // organization_members owner seat). Mirror that exactly: owner-less + system
+    // = true + old.
     let app_id = AppId::mint();
     let name = format!("sys-console-{}", Uuid::new_v4().simple());
     insert_app(state, &app_id, &name, true, "1 year").await;

@@ -1464,13 +1464,11 @@ Control used to be a second issuance authority of its own. It held an Ed25519
 signing key, `POST /me/tokens` minted a `pat+jwt` credential lasting up to 365
 days with a stored Cedar wrapper policy, `GET /me/tokens` and
 `DELETE /me/tokens/{id}` managed them, and the shared `BearerVerifier` tried
-local PAT verification against `zeroship.permission_tokens` before it tried
-OAuth introspection. Migrated verified the same credential class.
+local PAT verification before it tried OAuth introspection. Migrated verified
+the same credential class.
 
-All of it is gone: the three routes and their handler module, the
-`permission_tokens` table
-(`db/migrations-ts/20260817000000_drop_permission_tokens.ts`), the audit columns
-only a PAT ever populated
+All of it is gone: the three routes and their handler module, the stored PAT
+rows, the audit columns only a PAT ever populated
 (`db/migrations-ts/20260817000100_drop_audit_token_columns.ts`), the `PatIssuer`
 and `PatClaims` types, the token-policy lookup in the authz evaluator, and the
 `token_id` field those carried through `AuthzContext` and the control-plane
@@ -2293,8 +2291,7 @@ owner. The owner predicate blocked cross-owner access, but the advertised
 token-policy ceiling was absent on those two authorization decisions.
 
 RESOLVED BY DELETION: `GET /me/tokens`, `DELETE /me/tokens/{id}` and the handler
-module are gone, and so is the `zeroship.permission_tokens` table they read
-(`db/migrations-ts/20260817000000_drop_permission_tokens.ts`). No route reaches
+module are gone, along with the stored PAT rows they read. No route reaches
 that decision any more. See section 4.1.
 
 ### 5. HIGH: `auth: "admin"` is enforced exactly as `auth: "user"`
@@ -2344,9 +2341,7 @@ modification, not exfiltration.
 VERIFIED: the handler comment says it revokes the grant and active tokens, but
 the disconnect transaction deletes the `oauth_grants` row, revokes the relay
 alias, and writes an access-token family marker without updating
-`zeroship.sessions` or `app_session_anchors` (the finding was written against
-`oauth_refresh_tokens`, which the session object replaced; the gap is the same
-one against the row that replaced it)
+`zeroship.sessions` or `app_session_anchors`
 (`crates/zeroship-control/src/oauth_grants_handlers.rs:82-84`,
 `crates/zeroship-control/src/oauth_grants_handlers.rs:101-155`,
 `crates/zeroship-control/src/oauth_grants_handlers.rs:158-231`). The refresh exchange

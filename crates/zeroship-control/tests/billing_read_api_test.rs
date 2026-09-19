@@ -160,9 +160,8 @@ impl Caller {
 
 /// Issue a platform OAuth bearer for `user_id` carrying `scope`.
 ///
-/// It used to take an optional platform role and seed a `platform_admin_roles`
-/// row for the operator paths. That table and those roles are deleted, so every
-/// principal this mints is an ordinary organization.
+/// Every principal this mints is an ordinary creator: there is no platform
+/// role to grant.
 async fn issue_bearer(state: &AppState, user_id: &UserId, scope: &str) -> Caller {
     let _ = state;
     Caller {
@@ -1355,7 +1354,7 @@ async fn invoice_detail_denies_a_different_creator() {
 // ==========================================================================
 
 #[compio::test]
-async fn invoice_read_denied_via_shared_app_membership() {
+async fn invoice_read_denied_via_shared_membership() {
     let url = db_url();
     let fx = build_test_state(&url, "shared-membership").await;
     let pg = fx.state.control_pg.clone();

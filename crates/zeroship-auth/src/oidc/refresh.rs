@@ -2,11 +2,11 @@
 //! detection.
 //!
 //! The refresh FAMILY is one `zeroship.sessions` row whose secret rotates in
-//! place - not a chain of `zeroship.oauth_refresh_tokens` rows joined by
-//! `refresh_family_id` - and every statement that reads it lives in
-//! `crate::session_store`. What is left here is the OAuth policy around those
-//! statements: client authentication, scope narrowing, the response shape, and
-//! the transaction and lock discipline the rotation runs under.
+//! place - `secret_hash` and `prev_secret_hash` under the idle and absolute
+//! expiry - and every statement that reads it lives in `crate::session_store`.
+//! What is left here is the OAuth policy around those statements: client
+//! authentication, scope narrowing, the response shape, and the transaction
+//! and lock discipline the rotation runs under.
 //!
 //! **Nothing in this file mints.** Every mint goes through a
 //! `session_store::ValidatedSession`, which only the validating statements
