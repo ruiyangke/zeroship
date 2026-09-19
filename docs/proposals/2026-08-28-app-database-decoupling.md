@@ -161,10 +161,18 @@ name that does not exist, `SET LOCAL ROLE` fails, and the caller re-resolves: fa
 self-correcting. The column comment must say all of this, or someone will read it as a record
 of the schema and rebuild the deploy gate on top of it.
 
-The physical schema name `db_<id>` is derived, never stored, and the derivation belongs beside
-the app derivations it replaces in `crates/zeroship-core/src/app_derivation.rs` - that module
-exists precisely so the data plane and the migration service cannot answer the question
-differently.
+The physical schema name `db_<id>` is derived, never stored, and it lives in
+`crates/zeroship-core/src/database_derivation.rs`, a sibling of
+`crates/zeroship-core/src/app_derivation.rs` rather than an addition to it. Both exist for the
+same reason - so the data plane and the migration service cannot answer the question differently
+- but they are kept apart because the app-keyed derivations do not all retire: the lifecycle lock
+seed stays app-keyed, and so does the workflow journal until
+`docs/proposals/2026-09-19-workflow-journal-relocation.md` moves it. One module holding both would
+invite a future reader to assume every derivation in it moved.
+
+The text layer beneath them is shared: `crates/zeroship-core/src/database_role.rs` composes every
+role name and refuses one it would have truncated, so the 63-byte ceiling is enforced at a single
+site rather than once per caller.
 
 There is no `engine` column. The hosted tier is PostgreSQL only per the AGENTS.md invariant,
 and SQLite is the dev tier, which has no control plane at all.
