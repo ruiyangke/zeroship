@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { naming, t } from "../src/index.js";
 import { installSchemaForTest } from "./_install-helper.js";
 import type { NativeDb } from "../src/native.js";
-import { Query } from "../src/query.js";
+import { Query } from "../../../crates/zeroship-data-v8/js/runtime/query.js";
 
 type Row = Record<string, unknown>;
 type Call = { collection: string; filter: Row; opts: Row; transaction: boolean };

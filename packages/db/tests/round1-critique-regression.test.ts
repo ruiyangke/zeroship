@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { env } from "zeroship";
 import { installSchemaForTest } from "./_install-helper.js";
 import { schema, t } from "../src/index.js";
-import { __zeroshipDbResetIndexWarnings } from "../src/collection.js";
+import { __zeroshipDbResetIndexWarnings } from "../../../crates/zeroship-data-v8/js/runtime/collection.js";
 import type { NativeDb } from "../src/native.js";
 
 /** Wire `env.db.openSubscription` to a mock so the `subscribe.ts`
@@ -406,7 +406,7 @@ describe("transaction bookkeeping follows async continuations", () => {
 
 describe("IMPORTANT #12 — loader tx-race rejection carries error.code", () => {
   test("rejection from snapshot-vs-current mismatch has code === loader_tx_race", async () => {
-    const { IdLoader } = await import("../src/loader.js");
+    const { IdLoader } = await import("../../../crates/zeroship-data-v8/js/runtime/loader.js");
     let currentDepth = 0;
     // typed_id (P7 PR 3) - `IdLoader<R extends { id: string }>` (src/loader.ts)
     // requires a string id. This literal predates that cascade and used a

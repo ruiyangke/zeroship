@@ -2924,17 +2924,6 @@ VERIFIED drift:
   `rg 'bootstrap_console|bootstrap-console|console_zship|console-zship|console_host|console-host'
   crates/zeroship-control/src deploy/compose deploy/Dockerfile` found the supposed
   wiring only in comments, not a field, flag, or call.
-- Several references present `SANDBOX_TOKEN` as a live Control-to-sandbox bearer
-  (`docs/architecture/overview.md:41-44`,
-  `docs/architecture/distributed.md:72-81`,
-  `docs/architecture/builder.md:15-27`,
-  `docs/reference/env-vars.md:449-456`). Compose still assigns the literal to
-  Control while its adjacent comment says nothing reads it
-  (`deploy/compose/docker-compose.yml:335-358`). Search method:
-  `rg 'SANDBOX_URL|SANDBOX_TOKEN|sandbox_url|sandbox_token' crates/control crates/core crates/cli --glob '*.rs'`
-  returned no reader; the positive environment inventory and extracted-sandbox
-  notes were inspected, so this is stale configuration/documentation, not a live
-  service-auth flow in this map.
 - Signup tells users they can resend verification, but Auth's complete route
   inventory has no resend endpoint
   (`crates/zeroship-auth/src/ui/signup.rs:202-210`,

@@ -1,47 +1,49 @@
-import { isIdValue } from "../identity.js";
+import { isIdValue } from "./identity";
 import {
   ValidationError,
   OptimisticLockError,
-  mapOptimisticConcurrencyError,
   type ConcurrencyExpectation,
-} from "../errors";
-import { trackCollectionAccess } from "../live";
-import { IdLoader } from "../loader";
-import type { NativeCollection } from "../native";
-import { Query } from "../query";
-import type { NormalizedSchema } from "../schema";
+} from "../../../../packages/db/src/errors";
+import { mapOptimisticConcurrencyError } from "./errors";
+import { trackCollectionAccess } from "./live";
+import { IdLoader } from "./loader";
+import type { NativeCollection } from "../../../../packages/db/src/native";
+import { Query } from "./query";
+import type { NormalizedSchema } from "../../../../packages/db/src/schema";
 import {
   mapResultDoc,
   mapDocOutbound,
   mapFilterOutbound,
   mapUpdateOutbound,
   translateAggregatePipeline,
-} from "../utils";
+} from "./utils";
 import {
   validateDoc,
   checkPartial,
   isArrayElement,
-} from "../validate";
+} from "./validate";
 import {
-  type Actor,
-  type DistinctField,
-  type Filter,
-  type FieldDef,
-  type IdValue,
-  type RowId,
-  type NamedIndexSpec,
-  type PlainObject,
-  type Result,
-  type Row,
-  type RowInput,
-  type SortSpec,
-  type UpsertOptions,
-  type UpdateExpression,
-  type WithRelations,
-  type WithSpec,
   err,
   ok,
-} from "../types";
+} from "../../../../packages/db/src/types";
+import type {
+  Actor,
+  DistinctField,
+  Filter,
+  FieldDef,
+  IdValue,
+  RowId,
+  NamedIndexSpec,
+  PlainObject,
+  Result,
+  Row,
+  RowInput,
+  SortSpec,
+  UpsertOptions,
+  UpdateExpression,
+  WithRelations,
+  WithSpec,
+} from "../../../../packages/db/src/types";
 import { trackRelations, type ReadResultMapper } from "./read-mapping";
 import { validateEncryptedFieldsInFilter } from "./encryption-fence";
 import { _maybeWarnUnindexedFilter } from "./index-warnings";

@@ -1,4 +1,4 @@
-import type { FieldDef, IdValue } from "./types.js";
+import type { FieldDef, IdValue } from "../../../../packages/db/src/types";
 
 export function isIdValue(value: unknown): value is IdValue {
   return typeof value === "string" || typeof value === "bigint"

@@ -15,12 +15,12 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { t } from "../src/index.js";
-import { validateDoc, isJsonSerializable } from "../src/validate.js";
-import { normalizeSchema } from "../../../crates/zeroship-data-v8/js/testing.js";
+import { validateDoc, isJsonSerializable } from "../../../crates/zeroship-data-v8/js/runtime/validate.js";
+import { fieldsOf } from "./_install-helper.js";
 import { ValidationError } from "../src/errors.js";
 
 describe("R7 M1 — top-level t.json() validates the value", () => {
-  const schema = normalizeSchema({ payload: t.json() });
+  const schema = fieldsOf({ payload: t.json() });
 
   test("accepts plain JSON values (object, array, scalar, null)", () => {
     assert.doesNotThrow(() => validateDoc({ payload: { ok: 1 } }, schema));
@@ -126,7 +126,7 @@ describe("R7 m2 — isJsonSerializable rejects Map/Set/typed-arrays/etc.", () =>
   });
 
   test("array containing a Map is rejected", () => {
-    const schema = normalizeSchema({ data: t.array(t.json()) });
+    const schema = fieldsOf({ data: t.array(t.json()) });
     assert.throws(
       () => validateDoc({ data: [new Map([["k", "v"]])] }, schema),
       ValidationError,
@@ -134,7 +134,7 @@ describe("R7 m2 — isJsonSerializable rejects Map/Set/typed-arrays/etc.", () =>
   });
 
   test("top-level json field containing a Set is rejected", () => {
-    const schema = normalizeSchema({ payload: t.json() });
+    const schema = fieldsOf({ payload: t.json() });
     assert.throws(
       () => validateDoc({ payload: new Set([1, 2, 3]) }, schema),
       ValidationError,

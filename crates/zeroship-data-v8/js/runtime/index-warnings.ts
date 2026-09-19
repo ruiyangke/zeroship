@@ -1,5 +1,5 @@
-import type { NormalizedSchema } from "../schema";
-import type { NamedIndexSpec, PlainObject } from "../types";
+import type { NormalizedSchema } from "../../../../packages/db/src/schema";
+import type { NamedIndexSpec, PlainObject } from "../../../../packages/db/src/types";
 
 /**
  * D1 — set of `${collection}:${sortedFilterKeys}` shapes already warned

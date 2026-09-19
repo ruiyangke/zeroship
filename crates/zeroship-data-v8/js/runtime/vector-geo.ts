@@ -1,8 +1,8 @@
-import { ValidationError } from "../errors";
-import { trackCollectionAccess } from "../live";
-import type { NativeCollection } from "../native";
-import { mapFilterOutbound, mapResultDoc } from "../utils";
-import type { Filter, GeoField, PlainObject, Result, Row, VectorField, VectorMetric } from "../types";
+import { ValidationError } from "../../../../packages/db/src/errors";
+import { trackCollectionAccess } from "./live";
+import type { NativeCollection } from "../../../../packages/db/src/native";
+import { mapFilterOutbound, mapResultDoc } from "./utils";
+import type { Filter, GeoField, PlainObject, Result, Row, VectorField, VectorMetric } from "../../../../packages/db/src/types";
 
 export interface VectorGeoCollectionInternals<S> {
   _name: string;

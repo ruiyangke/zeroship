@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isValidCalendarDate } from "../src/validate";
+import { isValidCalendarDate } from "../../../crates/zeroship-data-v8/js/runtime/validate";
 
 test("calendar dates accept early years and Gregorian leap days", () => {
   for (const date of ["0001-01-01", "0004-02-29", "0099-12-31", "0100-03-01", "2000-02-29", "9999-12-31"]) {

@@ -21,10 +21,6 @@ worker (`crates/worker`)
   -> env snapshots from control
   -> worker-entry blobs from blob root
   -> V8 runtime cache
-
-builder / operator
-  -> sandbox controller (external: the standalone `zeroship-sandbox` project,
-     reached over HTTP via SANDBOX_URL / SANDBOX_TOKEN)
 ```
 
 ## Current coordination model
@@ -68,21 +64,6 @@ when a hot app would otherwise overload one node.
 ```
 
 This is request-boundary eventual propagation. There is no cross-service transactional switchover.
-
-## Builder sandbox path
-
-The builder stack is outside the app-serving hot path, and it is no longer part
-of this repo:
-
-- the sandbox controller, its in-VM agent, and the Nomad + Cloud-Hypervisor
-  backend live in the standalone `zeroship-sandbox` project (sibling repo)
-- this deployment reaches it over HTTP only, via `SANDBOX_URL` / `SANDBOX_TOKEN`
-- it shares this deployment's Postgres, connecting as the least-privilege
-  `sandbox_*` roles created by `db/migrations-ts/`
-
-Snapshot, restore, wake, and cold-boot flows belong to that external service,
-not to the gateway/worker request path. See
-[Builder sandbox](../architecture/builder.md).
 
 ## Current boundaries
 

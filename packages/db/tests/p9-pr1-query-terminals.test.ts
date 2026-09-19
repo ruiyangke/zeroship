@@ -16,13 +16,16 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { model } from "../../../crates/zeroship-data-v8/js/testing.js";
+import {
+  Collection,
+} from "../../../crates/zeroship-data-v8/js/runtime/collection.js";
 import {
   t,
   NotFoundError,
   NotUniqueError,
   InvalidOperationError,
 } from "../src/index.js";
+import { fieldsOf } from "./_install-helper.js";
 import type { NativeDb } from "../src/native.js";
 
 type AnyRec = Record<string, unknown>;
@@ -71,7 +74,7 @@ describe("Query.unique() — strict exactly-one terminal", () => {
     const { native, calls } = makeMockNative([
       [{ id: 1, email: "a@b.com", name: "Alice" }],
     ]);
-    const Users = model("users", schemaUsers, native);
+    const Users = new Collection<typeof schemaUsers>("users", fieldsOf(schemaUsers), native);
     const result = await Users.find({ email: "a@b.com" }).unique();
     assert.equal(result.error, null);
     assert.ok(result.data);
@@ -82,7 +85,7 @@ describe("Query.unique() — strict exactly-one terminal", () => {
 
   test("0 rows → err(NotFoundError) with code NOT_FOUND", async () => {
     const { native } = makeMockNative([[]]);
-    const Users = model("users", schemaUsers, native);
+    const Users = new Collection<typeof schemaUsers>("users", fieldsOf(schemaUsers), native);
     const { data, error } = await Users.find({ email: "missing@x" }).unique();
     assert.equal(data, null);
     assert.ok(error);
@@ -95,7 +98,7 @@ describe("Query.unique() — strict exactly-one terminal", () => {
       { id: 1, email: "a@b.com", name: "Alice" },
       { id: 2, email: "a@b.com", name: "Bob" },
     ]]);
-    const Users = model("users", schemaUsers, native);
+    const Users = new Collection<typeof schemaUsers>("users", fieldsOf(schemaUsers), native);
     const { data, error } = await Users.find({ email: "a@b.com" }).unique();
     assert.equal(data, null);
     assert.ok(error);
@@ -109,7 +112,7 @@ describe("Query.unique() — strict exactly-one terminal", () => {
       code: "CONN_REFUSED",
     });
     const native = makeFailingNative(boom);
-    const Users = model("users", schemaUsers, native);
+    const Users = new Collection<typeof schemaUsers>("users", fieldsOf(schemaUsers), native);
     const { error } = await Users.find({ email: "x" }).unique();
     assert.ok(error);
     assert.equal((error as Error & { code?: string }).code, "CONN_REFUSED");
@@ -120,7 +123,7 @@ describe("Query.unique() — strict exactly-one terminal", () => {
       [{ id: 1, email: "a@b.com", name: "Alice" }],
       [{ id: 1, email: "a@b.com", name: "Alice" }],
     ]);
-    const Users = model("users", schemaUsers, native);
+    const Users = new Collection<typeof schemaUsers>("users", fieldsOf(schemaUsers), native);
     const q = Users.find({ email: "a@b.com" }).limit(50);
     await q.unique();
     await q; // re-run the iterator path; old limit must still be in effect
@@ -134,7 +137,7 @@ describe("Query.unique() — strict exactly-one terminal", () => {
     const { native, calls } = makeMockNative([
       [{ id: 1, email: "a@b.com", name: "Alice" }],
     ]);
-    const Users = model("users", schemaUsers, native);
+    const Users = new Collection<typeof schemaUsers>("users", fieldsOf(schemaUsers), native);
     await Users.find({ name: "Alice" }).sort({ id: -1 }).select(["email"]).unique();
     assert.deepEqual(calls[0].opts.orderBy, { id: -1 });
     assert.deepEqual(calls[0].opts.select, ["email"]);
@@ -145,7 +148,7 @@ describe("Query.unique() — strict exactly-one terminal", () => {
 describe("Query.last() — last matching row in the current sort", () => {
   test("no sort set → err(InvalidOperationError) code last_requires_sort", async () => {
     const { native } = makeMockNative([[]]);
-    const Users = model("users", schemaUsers, native);
+    const Users = new Collection<typeof schemaUsers>("users", fieldsOf(schemaUsers), native);
     const { data, error } = await Users.find({}).last();
     assert.equal(data, null);
     assert.ok(error);
@@ -157,7 +160,7 @@ describe("Query.last() — last matching row in the current sort", () => {
     const { native, calls } = makeMockNative([
       [{ id: 99, email: "z@b.com", name: "Zoe" }],
     ]);
-    const Users = model("users", schemaUsers, native);
+    const Users = new Collection<typeof schemaUsers>("users", fieldsOf(schemaUsers), native);
     const { data, error } = await Users.find({}).sort({ id: 1 }).last();
     assert.equal(error, null);
     assert.ok(data);
@@ -172,7 +175,7 @@ describe("Query.last() — last matching row in the current sort", () => {
     const { native, calls } = makeMockNative([
       [{ id: 1, email: "a@b.com", name: "Alice" }],
     ]);
-    const Users = model("users", schemaUsers, native);
+    const Users = new Collection<typeof schemaUsers>("users", fieldsOf(schemaUsers), native);
     const { error } = await Users.find({}).sort({ id: -1 }).last();
     assert.equal(error, null);
     assert.deepEqual(calls[0].opts.orderBy, { id: 1 });
@@ -181,7 +184,7 @@ describe("Query.last() — last matching row in the current sort", () => {
 
   test("empty result with valid sort → ok(null)", async () => {
     const { native } = makeMockNative([[]]);
-    const Users = model("users", schemaUsers, native);
+    const Users = new Collection<typeof schemaUsers>("users", fieldsOf(schemaUsers), native);
     const { data, error } = await Users.find({ email: "missing@x" })
       .sort({ id: 1 })
       .last();
@@ -194,7 +197,7 @@ describe("Query.last() — last matching row in the current sort", () => {
       code: "TIMEOUT",
     });
     const native = makeFailingNative(boom);
-    const Users = model("users", schemaUsers, native);
+    const Users = new Collection<typeof schemaUsers>("users", fieldsOf(schemaUsers), native);
     const { error } = await Users.find({}).sort({ id: 1 }).last();
     assert.ok(error);
     assert.equal((error as Error & { code?: string }).code, "TIMEOUT");
@@ -205,7 +208,7 @@ describe("Query.last() — last matching row in the current sort", () => {
       [{ id: 5, email: "x@b.com", name: "X" }],
       [{ id: 1, email: "a@b.com", name: "Alice" }],
     ]);
-    const Users = model("users", schemaUsers, native);
+    const Users = new Collection<typeof schemaUsers>("users", fieldsOf(schemaUsers), native);
     const q = Users.find({}).sort({ id: 1 }).limit(10);
     await q.last();
     await q;

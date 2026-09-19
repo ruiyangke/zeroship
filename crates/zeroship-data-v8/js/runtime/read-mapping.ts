@@ -1,7 +1,7 @@
-import { trackCollectionAccess } from "../live";
-import type { NormalizedSchema } from "../schema";
-import type { NamingStrategy, PlainObject } from "../types";
-import { mapResultDoc } from "../utils";
+import { trackCollectionAccess } from "./live";
+import type { NormalizedSchema } from "../../../../packages/db/src/schema";
+import type { NamingStrategy, PlainObject } from "../../../../packages/db/src/types";
+import { mapResultDoc } from "./utils";
 
 type RelationSelection = Readonly<Record<string, true | undefined>>;
 export type ReadResultMapper = (row: PlainObject, withSpec?: RelationSelection) => PlainObject;

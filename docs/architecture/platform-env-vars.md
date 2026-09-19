@@ -434,7 +434,6 @@ A few values are literals in the deployment definition and ignore `.env`:
 
 | Service | Variable | Value |
 | --- | --- | --- |
-| control | `SANDBOX_URL`, `SANDBOX_TOKEN` | a sandbox address and a dev token |
 | control | `ZEROSHIP_CONTROL_URL` | the control service's address |
 | postgres | `POSTGRES_PASSWORD`, `POSTGRES_DB` | the database's password and name |
 
@@ -464,7 +463,7 @@ the operator's overlay; for the creator toolchain it names the project file
 after an explicit flag or plugin option, and a path that does not exist is an
 error rather than a fall-through to auto-discovery. Exporting it in a shell that
 runs both a server process and a deploy points each at a file written for the
-other, so scope it to the command. See [`zeroship.jsonc`](project-config.md).
+other, so scope it to the command. See [`zeroship.jsonc`](../reference/project-config.md).
 
 **Dev-only:** `ZEROSHIP_DEV` `ZEROSHIP_DEV_AUTH_SECRET`
 

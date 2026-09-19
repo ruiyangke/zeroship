@@ -9,14 +9,13 @@ import {
   requireNativeCollection,
   type NativeCollection,
   type NativeDb,
-} from "./native";
+} from "../../../../packages/db/src/native";
 import {
-  mapNativeError,
   OptimisticLockError,
   ValidationError,
-} from "./errors";
+} from "../../../../packages/db/src/errors";
 import type { Query } from "./query";
-import { validateCollectionIdentity, type NormalizedSchema } from "./schema";
+import { validateCollectionIdentity, type NormalizedSchema } from "../../../../packages/db/src/schema";
 import type {
   Actor,
   ExactWithSpec,
@@ -38,8 +37,9 @@ import type {
   VectorField,
   WithRelations,
   WithSpec,
-} from "./types";
-import { err, naming, ok } from "./types";
+} from "../../../../packages/db/src/types";
+import { err, naming, ok } from "../../../../packages/db/src/types";
+import type { Collection as CollectionContract } from "../../../../packages/db/src/db-types";
 import {
   aggregateCollection,
   countCollection,
@@ -61,21 +61,22 @@ import {
   updateManyCollection,
   validateArrayPushOps,
   type CrudCollectionInternals,
-} from "./collection/crud";
+} from "./crud";
 import {
   __zeroshipDbResetIndexWarnings,
   __zeroshipDbWarnedShapesSize,
-} from "./collection/index-warnings";
+} from "./index-warnings";
 import {
   bulkUnmaskCollection,
   type MaskingCollectionInternals,
-} from "./collection/masking";
-import { createReadResultMapper, type ReadResultMapper } from "./collection/read-mapping";
+} from "./masking";
+import { createReadResultMapper, type ReadResultMapper } from "./read-mapping";
 import {
   nearCollection,
   searchCollection,
   type VectorGeoCollectionInternals,
-} from "./collection/vector-geo";
+} from "./vector-geo";
+import { mapNativeError } from "./errors";
 
 export { validateArrayPushOps };
 export { __zeroshipDbResetIndexWarnings, __zeroshipDbWarnedShapesSize };
@@ -138,7 +139,7 @@ export class Collection<
   S = PlainObject,
   N extends string = string,
   AllSchemas extends Record<string, unknown> = Record<string, unknown>,
-> {
+> implements CollectionContract<S, N, AllSchemas> {
   private _name: string;
   private _schema: NormalizedSchema;
   private _native: NativeDb;
@@ -382,7 +383,7 @@ export class Collection<
     args: {
       vector: number[];
       k?: number;
-      metric?: import("./types").VectorMetric;
+      metric?: import("../../../../packages/db/src/types").VectorMetric;
       column?: VectorField<S>;
       filter?: Filter<S>;
     },

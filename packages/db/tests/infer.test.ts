@@ -1,4 +1,4 @@
-import { generatedSchema } from "./_install-helper.js";
+import { fieldsOf, generatedSchema } from "./_install-helper.js";
 /**
  * InferRow / InferRowInput / InferId — type-level helper checks.
  * These are compile-time assertions in disguise: the test bodies are
@@ -6,7 +6,7 @@ import { generatedSchema } from "./_install-helper.js";
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { model } from "../../../crates/zeroship-data-v8/js/testing.js";
+import { Collection } from "../../../crates/zeroship-data-v8/js/runtime/collection.js";
 import { schema, t } from "../src/index.js";
 import type { Db, Id, InferId, InferRow, InferRowInput } from "../src/index.js";
 import type { NativeDb } from "../src/native.js";
@@ -17,21 +17,23 @@ const native = {
   }),
 } as unknown as NativeDb;
 
-const Users = model(
-  "users",
-  { ...generatedSchema,
-    email: t.string().required().unique(),
-    name: t.string().required(),
-  },
-  native,
-);
+const usersSchema = {
+  ...generatedSchema,
+  email: t.string().required().unique(),
+  name: t.string().required(),
+};
 
-const UsersWithDefault = model(
+const Users = new Collection<typeof usersSchema>("users", fieldsOf(usersSchema), native);
+
+const usersWithDefaultSchema = {
+  ...generatedSchema,
+  email: t.string().required().unique(),
+  role: t.string().required().default("user"),
+};
+
+const UsersWithDefault = new Collection<typeof usersWithDefaultSchema>(
   "users_with_default",
-  { ...generatedSchema,
-    email: t.string().required().unique(),
-    role: t.string().required().default("user"),
-  },
+  fieldsOf(usersWithDefaultSchema),
   native,
 );
 

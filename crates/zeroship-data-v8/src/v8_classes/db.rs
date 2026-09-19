@@ -209,23 +209,6 @@ pub(crate) fn cached_collection<'s>(
     }
 }
 
-pub(crate) fn collection_for_namespace<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    namespace: v8::Local<'s, v8::Object>,
-    name: &str,
-) -> Result<v8::Local<'s, v8::Object>, String> {
-    let external: v8::Local<v8::External> = namespace
-        .get_internal_field(scope, 0)
-        .ok_or_else(|| "native env.db state is missing".to_string())?
-        .try_into()
-        .map_err(|_| "native env.db state has an invalid type".to_string())?;
-    // SAFETY: DbPlugin supplies the namespace from `mint_db`, which stores a
-    // live `Box<Db>` in this internal field for the wrapper's lifetime.
-    let db = unsafe { &*(external.value() as *const Db) };
-    db.collection(scope, name.to_string())
-        .map_err(|error| error.to_string())
-}
-
 /// Cheap JS-side type label for error messages. Matches the labels
 /// `typeof` would surface so users can correlate with what they
 /// passed.

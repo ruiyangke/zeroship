@@ -2,7 +2,8 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { installSchemaForTest } from "./_install-helper.js";
-import { Collection, t, schema as schemaWrap } from "../src/index.js";
+import { Collection } from "../../../crates/zeroship-data-v8/js/runtime/collection.js";
+import { t, schema as schemaWrap } from "../src/index.js";
 import { OptimisticLockError } from "../src/index.js";
 import type { NativeDb } from "../src/native.js";
 

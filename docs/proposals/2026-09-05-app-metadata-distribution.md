@@ -1710,7 +1710,7 @@ MEASURED, on the state of the tree: `gossip`, `libp2p`, `SWIM`, `consul`,
 `hickory` and `trust-dns` each appear **zero** times across `crates/` and `libs/`
 in any `.rs` or `.toml` (word-boundary search); `Cargo.lock` contains no package
 beginning `hickory` or `trust-dns`; `etcd` appears only in a blocklist of
-service-discovery ports (`crates/zeroship-core/src/preview_ports.rs`). None of the
+service-discovery ports. None of the
 four rejected options is being removed. All four are being declined. A
 zero-occurrence arm keeps that true, and prints the set and the roots it searched,
 because a sweep that matches nothing otherwise reports success.
@@ -2245,8 +2245,8 @@ document and the etcd argument never depended on their value, only on the role
 being filled.
 
 **A27. The rejected mechanisms stay absent.** Fails when `gossip`, `libp2p`,
-`SWIM`, `consul`, `hickory` or `trust-dns` appears outside the known port
-blocklist (`crates/zeroship-core/src/preview_ports.rs`). A sweep that matches
+`SWIM`, `consul`, `hickory` or `trust-dns` appears outside the known preview-port
+blocklist. A sweep that matches
 nothing must PRINT the set it searched and the roots it searched, per this repo's
 standing lesson that a sweep matching nothing otherwise reports success. When it
 goes red, every DESIGNED tag in Part 4 is what to re-audit.

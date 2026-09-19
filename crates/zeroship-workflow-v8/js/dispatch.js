@@ -90,14 +90,6 @@ class ZsWorkflowContinueAsNewSignal extends Error {
     }
 }
 
-class ZsWorkflowTimeoutError extends Error {
-    constructor(message = "workflow signal wait timed out") {
-        super(message);
-        this.name = "WorkflowTimeoutError";
-        this.retryable = false;
-    }
-}
-
 // A step body that outlived `StepConfig.timeout`. Retryable: the bound says the
 // attempt was too slow, not that the work is impossible.
 class ZsStepTimeoutError extends Error {
@@ -170,19 +162,17 @@ function wfSerializeError(e) {
 }
 
 function wfDeserializeError(error) {
-    const e = error && error.type === "WorkflowTimeoutError"
-        ? new ZsWorkflowTimeoutError(error.message)
-        : error && error.type === "StepTimeoutError"
-            ? new ZsStepTimeoutError(error.message)
-            : error && error.type === "NondeterministicError"
-                ? new ZsNondeterministicError(error.message)
-                : error && error.type === "ChildCancelledError"
-                    ? new ZsChildCancelledError(error.message)
-                    : error && error.type === "ChildTimeoutError"
-                        ? new ZsChildTimeoutError(error.message)
-                        : error && error.type === "LimitExceededError"
-                            ? new ZsLimitExceededError(error.message)
-                            : new Error((error && error.message) || "workflow step failed");
+    const e = error && error.type === "StepTimeoutError"
+        ? new ZsStepTimeoutError(error.message)
+        : error && error.type === "NondeterministicError"
+            ? new ZsNondeterministicError(error.message)
+            : error && error.type === "ChildCancelledError"
+                ? new ZsChildCancelledError(error.message)
+                : error && error.type === "ChildTimeoutError"
+                    ? new ZsChildTimeoutError(error.message)
+                    : error && error.type === "LimitExceededError"
+                        ? new ZsLimitExceededError(error.message)
+                        : new Error((error && error.message) || "workflow step failed");
     e.name = (error && error.type) || e.name;
     if (error && error.stack) e.stack = error.stack;
     // A body that catches a replayed failure sees the flag the journal holds,

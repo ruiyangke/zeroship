@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { resolve } from "node:path";
 import ts from "typescript";
 import * as sdk from "@zeroship/db";
-import { normalizeSchema } from "../../../crates/zeroship-data-v8/js/testing.js";
+import { fieldsOf } from "../../db/tests/_install-helper.js";
 import { renderGeneratedEnvDb, type RuntimeDescriptor } from "../src/gen-types/render-env-db.js";
 import { fieldDefToDto } from "../src/gen-types/manual.js";
 
@@ -37,7 +37,7 @@ test("generated builders preserve named edges, scalar references, and ordinary f
     return sdk;
   }, exports);
   assert.ok(exports.schema?.todos);
-  const normalized = normalizeSchema(exports.schema.todos as Parameters<typeof normalizeSchema>[0]);
+  const normalized = fieldsOf(exports.schema.todos);
   assert.deepEqual(normalized.integerUserId, { type: "integer", required: true, refTarget: "integerUsers", refColumn: "id", relation: "integerUser" });
   assert.deepEqual(normalized.bigintUserId, { type: "bigInt", required: true, refTarget: "bigintUsers", refColumn: "id", relation: "bigintUser" });
   assert.deepEqual(exports.schema.todos.userId.toFieldDef(), {

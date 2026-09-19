@@ -188,6 +188,15 @@ impl Subscription {
 // mint_subscription — build a wrapper from a fresh broker entry
 // ---------------------------------------------------------------------------
 
+/// Test-only failure-injection seam for the V8 allocation phase of
+/// [`mint_subscription`]. Armed by
+/// `tests::mint_subscription_does_not_leak_broker_entry_on_v8_alloc_failure`
+/// to prove that a failure before the broker subscribe leaves no entry
+/// behind. Never compiled into production builds.
+#[cfg(test)]
+static FAIL_MINT_ALLOC: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Mint a `Subscription` JS wrapper for the given `(app_id,
 /// collection)` pair.
 ///
@@ -216,6 +225,15 @@ pub fn mint_subscription<'s>(
     app_id: &str,
     collection: &str,
 ) -> Result<v8::Local<'s, v8::Object>, OpError> {
+    // Test-only failure injection: stands in for the first fallible V8
+    // operation failing. It sits ahead of every broker interaction, so an
+    // armed flag must return without leaving a broker entry behind. See
+    // `tests::mint_subscription_does_not_leak_broker_entry_on_v8_alloc_failure`.
+    #[cfg(test)]
+    if FAIL_MINT_ALLOC.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(OpError::type_error("simulated V8 allocation failure"));
+    }
+
     let entries = crate::read_capture::current(scope)
         .map_err(ToOpError::to_op_error)?
         .snapshot_for(collection);
@@ -306,25 +324,24 @@ pub fn mint_subscription<'s>(
 #[cfg(test)]
 mod tests {
     //! Regression guard for the broker-leak fix (code-critique r4
-    //! 2026-05-22, M-NEW-2): if `broker::subscribe` runs BEFORE the
-    //! fallible V8 alloc chain, any `?` propagation between the
-    //! subscribe call and the wrapper install leaks a broker entry —
-    //! `Broker::subscription_count` only prunes `is_closed()` slots,
-    //! and `is_closed` is flipped exclusively by the JS-side wrapper's
-    //! `Drop`/finalizer, which never runs if the wrapper was never
-    //! constructed.
+    //! 2026-05-22, M-NEW-2): if `broker::try_subscribe` runs BEFORE the
+    //! fallible V8 alloc chain, an error between the subscribe call and
+    //! the wrapper install leaks a broker entry — `Broker::subscription_count`
+    //! only prunes `is_closed()` slots, and `is_closed` is flipped
+    //! exclusively by the JS-side wrapper's `Drop`/finalizer, which never
+    //! runs if the wrapper was never constructed.
     //!
-    //! Simulating V8 allocation failure deterministically in a unit
-    //! test is impractical (we'd need to drive the isolate into OOM),
-    //! so this is a structural assertion: the source text of
-    //! `mint_subscription` must place `broker::try_subscribe(` AFTER every
-    //! `?` operator in the function body. Future refactors that
-    //! reintroduce the bug will trip this test.
+    //! `mint_subscription_does_not_leak_broker_entry_on_v8_alloc_failure`
+    //! exercises that path behaviorally: it arms the test-only
+    //! [`super::FAIL_MINT_ALLOC`] seam so the first fallible V8 op fails,
+    //! then asserts the broker saw no entry. Moving `broker::try_subscribe`
+    //! ahead of the seam makes the armed call subscribe first, so the
+    //! count assertion fails.
     //!
     //! The integration test
     //! `tests/subscription_finalizer.rs::dropping_subscription_closes_broker_handle_on_gc`
     //! covers the happy path (V8 alloc succeeds → broker entry reclaimed
-    //! on GC); this test covers the unhappy path's structural invariant.
+    //! on GC); this test covers the unhappy path.
 
     use std::collections::HashMap;
 
@@ -333,101 +350,45 @@ mod tests {
 
     use crate::{broker, v8_classes::db::mint_db};
 
-    const MINT_SUBSCRIPTION_SOURCE: &str = include_str!("subscription.rs");
-
-    /// Locate the `mint_subscription` function body and return the
-    /// substring between its opening `{` and the matching closing `}`.
-    fn mint_subscription_body() -> &'static str {
-        let needle = "pub fn mint_subscription<";
-        let start = MINT_SUBSCRIPTION_SOURCE
-            .find(needle)
-            .expect("mint_subscription not found in source");
-        let after_sig = &MINT_SUBSCRIPTION_SOURCE[start..];
-        let open = after_sig.find('{').expect("no opening brace");
-        // Walk the brace stack to find the matching close. Naive but
-        // sufficient for this function (no string literals containing
-        // unbalanced braces).
-        let bytes = after_sig.as_bytes();
-        let mut depth = 0i32;
-        let mut i = open;
-        while i < bytes.len() {
-            match bytes[i] {
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return &after_sig[open + 1..i];
-                    }
-                }
-                _ => {}
-            }
-            i += 1;
-        }
-        panic!("mint_subscription: unmatched braces");
-    }
-
     #[test]
     fn mint_subscription_does_not_leak_broker_entry_on_v8_alloc_failure() {
-        // Structural invariant: every `?` operator in
-        // `mint_subscription` must appear BEFORE the
-        // `broker::subscribe(` call. If a future refactor moves the
-        // subscribe call back above any `?`, an error returned from
-        // that `?` would leak a broker entry (Drop of the JS wrapper
-        // never runs because the wrapper was never created, so the
-        // broker's is_closed() filter never prunes it).
-        let body = mint_subscription_body();
-        let subscribe_pos = body
-            .find("broker::try_subscribe(")
-            .expect("broker::try_subscribe call not found in mint_subscription");
-
-        // Find every `?` operator. Ignore `?` characters inside
-        // doc/line comments and string literals — but in this function
-        // there are no `?` chars in literals, only operators after V8
-        // ops. The simplest correct scan: walk char-by-char and skip
-        // `//`-to-newline ranges.
-        let bytes = body.as_bytes();
-        let mut i = 0;
-        let mut question_positions: Vec<usize> = Vec::new();
-        while i < bytes.len() {
-            // Skip `//` line comments.
-            if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
-                while i < bytes.len() && bytes[i] != b'\n' {
-                    i += 1;
-                }
-                continue;
+        // Behavioral guard: arm the test-only seam so `mint_subscription`
+        // returns from its V8 alloc phase before it reaches
+        // `broker::try_subscribe`, then assert the broker saw no entry.
+        // If a refactor moves `broker::try_subscribe` ahead of the seam,
+        // the armed call subscribes first and the count assertion fails.
+        let handle = std::thread::spawn(|| {
+            const APP_ID: &str = "test_app_alloc_fail";
+            assert_eq!(broker::app_subscription_count(APP_ID), 0);
+            zeroship_runtime::init_v8();
+            let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+            v8::scope!(let handle_scope, &mut isolate);
+            let context = v8::Context::new(handle_scope, Default::default());
+            let scope = &mut v8::ContextScope::new(handle_scope, context);
+            {
+                v8::scope!(let inner, scope);
+                super::FAIL_MINT_ALLOC.store(true, std::sync::atomic::Ordering::SeqCst);
+                let result = super::mint_subscription(inner, APP_ID, "messages");
+                super::FAIL_MINT_ALLOC.store(false, std::sync::atomic::Ordering::SeqCst);
+                assert!(
+                    result.is_err(),
+                    "armed failure seam must make mint_subscription return Err"
+                );
+                assert_eq!(
+                    broker::app_subscription_count(APP_ID),
+                    0,
+                    "a V8 allocation failure must not leave a broker entry behind"
+                );
             }
-            if bytes[i] == b'?' {
-                question_positions.push(i);
-            }
-            i += 1;
-        }
-
-        assert!(
-            !question_positions.is_empty(),
-            "expected at least one `?` operator in mint_subscription; \
-             test invariant is meaningless without one"
-        );
-
-        for q in &question_positions {
-            assert!(
-                *q < subscribe_pos,
-                "found `?` operator at byte {q} AFTER broker::try_subscribe call \
-                 at byte {subscribe_pos} in mint_subscription. This means a \
-                 V8 alloc failure between subscribe() and the wrapper install \
-                 would leak a broker entry. Reorder so every fallible V8 op \
-                 runs BEFORE broker::try_subscribe."
-            );
-        }
-
-        // Cross-check: the happy-path test below confirms the broker
-        // sees the new entry only after V8 alloc commits.
+        });
+        handle.join().expect("thread panicked");
     }
 
     #[test]
     fn mint_subscription_happy_path_registers_exactly_one_broker_entry() {
         // Sanity counterpart: when V8 alloc succeeds the function
-        // DOES register a broker entry (so the structural test above
-        // isn't accidentally passing by removing the subscribe call
+        // DOES register a broker entry (so the failure-injection test
+        // above isn't accidentally passing by removing the subscribe call
         // altogether). Run in a fresh thread so we don't race with
         // other broker users on this test runner thread.
         let handle = std::thread::spawn(|| {

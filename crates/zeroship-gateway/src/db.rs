@@ -6,13 +6,10 @@
 //! server, where the `Arc<GateState>` is shared across worker *arbiter*
 //! threads — which means a `Pool` cannot live in `GateState`.
 //!
-//! We solve this the same way the sandbox controller handles its
-//! per-compio-worker pool (that service now lives in its own repository,
-//! so the code is not readable from this tree): the shared state carries
-//! only the `Send + Sync` connection *parameters* ([`DbConfig`]),
-//! and the actual [`Pool`] is built lazily **per worker thread**, wrapped
-//! in an [`Rc`], and stashed in a thread-local. The first DB touch on a
-//! given thread opens the pool's warm connections and starts its
+//! The shared state carries only the `Send + Sync` connection *parameters*
+//! ([`DbConfig`]), and the actual [`Pool`] is built lazily **per worker
+//! thread**, wrapped in an [`Rc`], and stashed in a thread-local. The first DB
+//! touch on a given thread opens the pool's warm connections and starts its
 //! housekeeper; every subsequent touch on that thread reuses it.
 //!
 //! Each per-request DB operation [`checkout`]s this thread's `Rc<Pool>`

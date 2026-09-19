@@ -43,17 +43,26 @@
  * - `env.db.transaction(fn)` itself → `Promise<Result<R>>` — never throws.
  */
 
-import type { Collection } from "./collection";
-import type { NativeCollection } from "./native";
-import type { AliasedCollection, ReadFrom } from "./read";
-import type { LiveOptions, LiveQuery } from "./live";
-import type { PaginationResult } from "./query";
+import type { NativeCollection, NativeDb } from "./native";
+import type { NormalizedSchema } from "./schema";
+import type {
+  ReadColumn,
+  ReadRow,
+  ReadCondition,
+  ReadOrder,
+  Projection,
+  Projected,
+  Allowed,
+} from "./read";
 import type {
   PlainObject,
   Actor,
   DistinctField,
   ExactWithSpec,
   GeoField,
+  Id,
+  NamedIndexSpec,
+  NamingStrategy,
   Result,
   Row,
   RowId,
@@ -65,6 +74,7 @@ import type {
   UpsertOptions,
   UpdateExpression,
   VectorField,
+  VectorMetric,
   Filter,
   IsolationLevel,
   WithSpec,
@@ -72,6 +82,184 @@ import type {
   SchemaBuilder,
   TypeBuilder,
 } from "./types";
+
+// ---------------------------------------------------------------------------
+// Facade contract — the public shape of the runtime objects the host facade
+// installs over native collections. The implementation classes live in the
+// zeroship-data-v8 crate and `implement` these interfaces, so the public type
+// contract and the runtime implementation are separate but checked against
+// each other.
+// ---------------------------------------------------------------------------
+
+/** Read hints shared by the collection read methods. */
+export type ReadHints<S> = {
+  actor?: Actor;
+  unmask?: (string & keyof Row<S>)[];
+  unmaskReason?: string;
+};
+
+/** Constructor options accepted by the runtime `Collection`. */
+export interface CollectionOptions {
+  naming?: NamingStrategy;
+  indexes?: readonly NamedIndexSpec[];
+  schemas?: Readonly<Record<string, NormalizedSchema>>;
+}
+
+/** Page envelope returned by `Query.paginate()`. */
+export type PaginationResult<R> = {
+  page: R[];
+  continueCursor: string;
+  isDone: boolean;
+};
+
+/** Options for `db.live`. */
+export interface LiveOptions {
+  /**
+   * Explicit list of tables to subscribe to. When provided, the
+   * Collection-method auto-tracking is bypassed.
+   */
+  tables?: string[];
+}
+
+/** The handle returned by `db.live`. */
+export interface LiveQuery<R> extends AsyncIterableIterator<R[]> {
+  /** Idempotent. Cancels every underlying subscription. */
+  close(): void;
+}
+
+/** A collection joined into a `db.from(...)` read. */
+export interface AliasedCollection<T, A extends string = string> {
+  readonly native: NativeDb;
+  readonly collection: string;
+  readonly alias: A;
+  readonly columns: { [K in keyof T]-?: ReadColumn<T[K], A> };
+  readonly toColumn: (field: string) => string;
+  readonly toField: (field: string) => string;
+  row(): ReadRow<T, A, false>;
+  optionalRow(): ReadRow<T, A, true>;
+}
+
+/** Chainable read builder returned by a `db.from(...)` call. */
+export interface ReadBuilder<P = never, Nullable extends string = never, Throws extends boolean = false> {
+  innerJoin<T, A extends string>(source: AliasedCollection<T, A>, on: ReadCondition): ReadBuilder<P, Nullable, Throws>;
+  leftJoin<T, A extends string>(source: AliasedCollection<T, A>, on: ReadCondition): ReadBuilder<P, Nullable | A, Throws>;
+  where(where: ReadCondition): ReadBuilder<P, Nullable, Throws>;
+  having(having: ReadCondition): ReadBuilder<P, Nullable, Throws>;
+  groupBy(...columns: ReadColumn<unknown>[]): ReadBuilder<P, Nullable, Throws>;
+  orderBy(...keys: ReadOrder[]): ReadBuilder<P, Nullable, Throws>;
+  limit(limit: number): ReadBuilder<P, Nullable, Throws>;
+  offset(offset: number): ReadBuilder<P, Nullable, Throws>;
+  select<const Q extends Record<string, Projection>>(projection: Q & Allowed<Q, Nullable>): ReadBuilder<Projected<Q, Nullable>, Nullable, Throws>;
+  all(): Promise<Throws extends true ? P[] : Result<P[]>>;
+}
+
+/** Entry point for joining collections in a read. */
+export type ReadFrom<Throws extends boolean = false> = <T, A extends string>(source: AliasedCollection<T, A>) => ReadBuilder<never, never, Throws>;
+
+/**
+ * A typed collection — the full CRUD + aggregate surface exposed at
+ * `env.db.<name>`. Generic over the raw schema shape `S`, the collection name
+ * `N`, and the parent database's schema map `AllSchemas` (which resolves named
+ * relation edges to their target row types).
+ */
+export interface Collection<
+  S = PlainObject,
+  N extends string = string,
+  AllSchemas extends Record<string, unknown> = Record<string, unknown>,
+> {
+  readonly Id: Id<N, RowId<S>>;
+  readonly RowInput: RowInput<S>;
+  as<const A extends string>(alias: A): AliasedCollection<Row<S>, A>;
+  insert(row: RowInput<S>): Promise<Result<Row<S>>>;
+  insertMany(rows: RowInput<S>[]): Promise<Result<Row<S>[]>>;
+  get<K extends string & keyof Row<S>>(
+    idOrFilter: RowId<S> | Filter<S>,
+    opts: { select: K[]; orderBy?: SortSpec<S> } & ReadHints<S>,
+  ): Promise<Result<Pick<Row<S>, K> | null>>;
+  get<const W extends WithSpec<S>, K extends string & keyof Row<S> = string & keyof Row<S>>(
+    idOrFilter: RowId<S> | Filter<S>,
+    opts: { with: ExactWithSpec<S, W>; select?: K[]; orderBy?: SortSpec<S> } & ReadHints<S>,
+  ): Promise<Result<(Pick<Row<S>, K> & WithRelations<S, W, AllSchemas>) | null>>;
+  get(
+    idOrFilter: RowId<S> | Filter<S>,
+    opts?: { orderBy?: SortSpec<S> } & ReadHints<S>,
+  ): Promise<Result<Row<S> | null>>;
+  exists(filter?: Filter<S>): Promise<Result<boolean>>;
+  find<const W extends WithSpec<S>>(
+    filter: Filter<S>,
+    opts: { with: ExactWithSpec<S, W> } & ReadHints<S>,
+  ): Query<S, Row<S> & WithRelations<S, W, AllSchemas>, AllSchemas>;
+  find(filter?: Filter<S>): Query<S, Row<S>, AllSchemas>;
+  upsert(row: RowInput<S>, options: UpsertOptions<S>): Promise<Result<Row<S>>>;
+  update(idOrFilter: RowId<S> | Filter<S>, patch: UpdateExpression<S>): Promise<Result<Row<S> | null>>;
+  updateMany(filter: Filter<S>, update: UpdateExpression<S>): Promise<Result<{ count: number }>>;
+  delete(idOrFilter: RowId<S> | Filter<S>): Promise<Result<Row<S> | null>>;
+  deleteMany(filter?: Filter<S>): Promise<Result<{ deletedCount: number }>>;
+  purge(idOrFilter: RowId<S> | Filter<S>): Promise<Result<Row<S> | null>>;
+  purgeMany(filter?: Filter<S>): Promise<Result<{ purgedCount: number }>>;
+  restore(idOrFilter: RowId<S> | Filter<S>): Promise<Result<Row<S> | null>>;
+  restoreMany(filter?: Filter<S>): Promise<Result<{ restoredCount: number }>>;
+  count(filter?: Filter<S>): Promise<Result<number>>;
+  distinct<K extends DistinctField<S> & keyof Row<S>>(field: K, filter?: Filter<S>): Promise<Result<Exclude<Row<S>[K], undefined>[]>>;
+  aggregate(pipeline: ZeroshipDbAggregateStage[]): Promise<Result<PlainObject[]>>;
+  bulkUnmask(
+    items: ReadonlyArray<{
+      id: RowId<S>;
+      columns: readonly (string & keyof Row<S>)[];
+    }>,
+    opts: { actor: Actor; reason?: string },
+  ): Promise<Result<Map<RowId<S>, Record<string, unknown>>>>;
+  search(args: {
+    vector: number[];
+    k?: number;
+    metric?: VectorMetric;
+    column?: VectorField<S>;
+    filter?: Filter<S>;
+  }): Promise<Result<(Row<S> & { _distance?: number })[]>>;
+  near(args: {
+    field: GeoField<S>;
+    point: { lat: number; lng: number };
+    radius: number;
+    filter?: Filter<S>;
+    limit?: number;
+  }): Promise<Result<(Row<S> & { _distance_m: number })[]>>;
+}
+
+/**
+ * Chainable query object returned by `Collection.find()`. Collects
+ * sort/limit/skip/select options lazily and executes via the native layer when
+ * awaited. Generic over the raw schema shape `S`, the projected document shape
+ * `P`, and the parent database's schema map `AllSchemas`.
+ */
+export interface Query<
+  S = PlainObject,
+  P = Row<S>,
+  AllSchemas extends Record<string, unknown> = Record<string, unknown>,
+> {
+  sort(s: SortInput<S>): this;
+  limit(n: number): this;
+  skip(n: number): this;
+  after(id: RowId<S>): this;
+  with<const W extends WithSpec<S>>(
+    spec: ExactWithSpec<S, W>,
+  ): Query<S, Omit<P, keyof W> & WithRelations<S, W, AllSchemas>, AllSchemas>;
+  select<K extends SelectableField<S>>(field: K): Query<S, Pick<Row<S>, K> & Omit<P, keyof Row<S>>, AllSchemas>;
+  select<K extends SelectableField<S>>(fields: readonly K[]): Query<S, Pick<Row<S>, K> & Omit<P, keyof Row<S>>, AllSchemas>;
+  select<const Selection extends SelectSpec<S>>(
+    fields: Selection,
+  ): Query<S, Pick<Row<S>, keyof Selection & keyof Row<S>> & Omit<P, keyof Row<S>>, AllSchemas>;
+  paginate(opts: {
+    cursor?: string | null;
+    numItems: number;
+  }): Promise<Result<PaginationResult<P>>>;
+  first(): Promise<Result<P | null>>;
+  unique(): Promise<Result<P>>;
+  last(): Promise<Result<P | null>>;
+  then<TResult1 = Result<P[]>, TResult2 = never>(
+    resolve?: ((value: Result<P[]>) => TResult1 | PromiseLike<TResult1>) | null,
+    reject?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null
+  ): Promise<TResult1 | TResult2>;
+}
 
 // ---------------------------------------------------------------------------
 // Schema-shape input used by the public collection and generated env types.
