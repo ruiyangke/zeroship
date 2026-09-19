@@ -93,7 +93,24 @@ off whichever binding `provider.resolve(scope)` returned. With one binding that 
 deterministic. With several it is not, and an app's runs could split across two schemas with
 each half invisible to the other and nothing raising.
 
-Only the fourth needs the decoupling to matter. The first three are true now.
+The fourth is dormant, and what holds it dormant is narrower than it looks. The journal's
+schema is not resolved from a creator binding at all: `app_schema` in
+`crates/zeroship-worker/src/workflow_host.rs` composes it as
+`app_derivation::schema_name(app)`, which returns the app id, and hands it to the binding
+that `workflow_creator.rs` later reads back. So plurality alone does not reach it - an app
+gaining several databases leaves the journal where it was, because nothing consulted
+`SuppliedAppBindings` to place it.
+
+What makes it live is `app_derivation::schema_name` ceasing to return the app id. That
+function is deliberately narrower than what is built around it, and when it widens, the
+journal's home becomes a choice with no owner: "the app's primary database" holds only
+until a creator changes which database is primary, at which point every existing run sits
+in a schema the app no longer points at - invisible, not deleted, and nothing raising.
+
+Relocating removes the question rather than answering it. A journal in `workflow_manager`
+has no creator schema to derive.
+
+The first three are true now.
 
 ---
 
