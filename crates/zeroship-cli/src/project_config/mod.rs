@@ -614,10 +614,8 @@ fn check_members(map: &Map<String, Value>, path: &str) -> Result<(), String> {
             "app" | "control" => {
                 as_str(v, &at(k))?;
             }
-            "protected" => {
-                if !v.is_boolean() {
-                    return Err(format!("`{}` must be a boolean", at(k)));
-                }
+            "protected" if !v.is_boolean() => {
+                return Err(format!("`{}` must be a boolean", at(k)));
             }
             "secrets" => {
                 let items = v
