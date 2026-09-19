@@ -153,6 +153,61 @@ async fn journal_is_installed_and_unread(fixture: &platform::Platform) {
     );
 }
 
+/// Which columns of the CORPUS-installed `workflow_manager` carry creator
+/// payload, as a closed set.
+///
+/// `metadata_schema_has_no_customer_authority_and_ids_are_bytewise`
+/// (`crates/zeroship-workflow-server/tests/coordinator.rs`) states this property
+/// over a `workflow_manager` its own fixture builds from
+/// `zeroship_workflow_server::coordinator::SCHEMA_SQL` and
+/// `zeroship_workflow_manager::deployments::POSTGRES_SCHEMA`. The journal is not
+/// in either, so that assertion reads a schema the journal never reached. This
+/// runs the same predicate against the schema the migration corpus installs,
+/// which is where `db/migrations-ts/20260919000000_workflow_journal.ts` puts it.
+///
+/// The set is closed, so a new json, jsonb or bytea column anywhere in
+/// `workflow_manager`, or a new column named for a payload, fails here. The two
+/// it names are the journal's inline generation payload;
+/// `docs/proposals/2026-09-19-workflow-journal-relocation.md` settles that they
+/// leave, and emptying this list is what that change looks like from here.
+///
+/// WHAT THIS DOES NOT SEE. The predicate matches a column's TYPE or its NAME, so
+/// creator payload carried in a text column under another name passes it. The
+/// `record` column of `__zeroship_workflow_steps` is a serialized
+/// `StoredCheckpoint` wrapping the `StepCheckpoint` declared in
+/// `crates/zeroship-workflow/src/engine.rs`, whose `output`, `error` and
+/// `child_input` are creator values; `finish_run`
+/// (`crates/zeroship-workflow/src/service/frontier.rs`) writes a creator error
+/// into `__zeroship_workflow_generations.error` beside the two columns named
+/// below; the `payload` columns of `__zeroship_workflow_signals` and
+/// `__zeroship_workflow_broadcasts` take `options.payload` from the caller; and
+/// `__zeroship_workflow_deploys.manifest` carries every `ScheduleRegistration`
+/// input the deployment declared. An empty list here is not the same claim as a
+/// payload-free journal.
+async fn journal_payload_columns_are_a_closed_set(fixture: &platform::Platform) {
+    let columns = fixture
+        .admin
+        .query(
+            "SELECT table_name,column_name FROM information_schema.columns \
+             WHERE table_schema='workflow_manager' AND (data_type IN ('json','jsonb','bytea') \
+             OR column_name IN ('input','output','history','payload_url','database_url','task_token')) \
+             ORDER BY table_name,column_name",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        columns
+            .iter()
+            .map(|row| (row.get::<_, String>(0), row.get::<_, String>(1)))
+            .collect::<Vec<_>>(),
+        vec![
+            (format!("{JOURNAL_PREFIX}generations"), "input".to_owned()),
+            (format!("{JOURNAL_PREFIX}generations"), "output".to_owned()),
+        ],
+    );
+}
+
 #[ntex::test]
 async fn platform_role_can_coordinate_without_customer_or_journal_privileges() {
     let fixture = platform::Platform::new().await;
@@ -223,6 +278,7 @@ async fn platform_role_can_coordinate_without_customer_or_journal_privileges() {
     }
     manager_queue_authority(&fixture, &runtime).await;
     journal_is_installed_and_unread(&fixture).await;
+    journal_payload_columns_are_a_closed_set(&fixture).await;
     manager_recovery_authority(&fixture).await;
     manager_scheduling_authority(&fixture).await;
     let schema = fixture
