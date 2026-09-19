@@ -1527,11 +1527,22 @@ app's requests and cannot protect a shared cluster from an app under its limit. 
     deployment data with no home. Datastores register themselves because reaching a cluster proves
     it exists; a zone proves nothing and gates which join signers may mint workers, so it must stay
     declared. But the corpus seeds exactly one, and a deployment with three zones cannot say so
-    without patching it - which is the self-hostability problem this design otherwise avoids. The
-    cheapest answer is likely the existing join-signers file, which already lists the zones each
-    signer may mint for and which control already reads, rather than a second operator document.
+    without patching it - which is the self-hostability problem this design otherwise avoids.
     Blocks a multi-zone self-host, nothing else.
 
+    **The join-signer file cannot be the answer as it stands, and the reason is a guard worth
+    keeping.** `resolve_zones` in `crates/zeroship-control/src/worker_join.rs` reads each zone name
+    the file uses out of `zeroship.execution_zones` and refuses the whole import when a name is not
+    there, rolling back rather than importing the rest. So that file is today VALIDATED AGAINST the
+    zone set; making it the authority for that set inverts the direction and deletes the refusal
+    that catches a misspelt zone before a signer can mint for one nobody declared.
+
+    The shape that keeps both properties is an explicit `zones` block in the same file, imported
+    insert-only BEFORE the signers are resolved, with signer entries still resolving their names
+    against the table. A zone then has one declaration site, a typo inside a signer entry still
+    refuses because it is absent from the block, and nothing new is introduced: the file is already
+    control config (`control.join_signers_file`), which is deployment data rather than source. The
+    corpus keeps seeding `default`, so a single-host deployment still declares nothing.
 ---
 
 ## Do-not notes
