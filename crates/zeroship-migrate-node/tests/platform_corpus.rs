@@ -6,6 +6,8 @@ mod fixture;
 mod app_identity;
 #[path = "platform_corpus/credential_storage.rs"]
 mod credential_storage;
+#[path = "platform_corpus/database_placement.rs"]
+mod database_placement;
 #[path = "platform_corpus/organization_authority.rs"]
 mod organization_authority;
 #[path = "platform_corpus/table_identity.rs"]
