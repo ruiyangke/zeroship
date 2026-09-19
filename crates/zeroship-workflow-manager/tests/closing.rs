@@ -199,7 +199,7 @@ impl Host {
 
     async fn claim(&self) -> Option<DeliveryGrant> {
         self.coordinator
-            .claim_job(&self.worker, &self.scope, support::delivery_ceiling(), || ready(Ok(self.worker.clone())))
+            .claim_job(&self.worker, &self.scope, Ok(support::delivery_ceiling()), || ready(Ok(self.worker.clone())))
             .await
             .unwrap()
     }
