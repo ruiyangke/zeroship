@@ -15,18 +15,21 @@
 //   - a comma inside a string, immediately before a closing brace
 //   - a trailing comma in an object and in an array
 //   - non-ASCII content in a string
-//   - a nested `app` key under `environments`, which the writeback splice must
-//     not mistake for the top-level one
+//   - an `app` key nested under `environments`, at the SAME depth as the one
+//     the writeback splices, which it must not mistake for the target
 //
 // EVERY CROSS-TOOL KEY IS EXPLICIT, which is not decoration either: the Rust
 // reader has no defaults, so an omitted key would make it error
 // while the TypeScript reader produced the schema default. That asymmetry is
 // tested directly in each owning reader suite, not by this file.
+//
+// TWO DATABASES AND TWO APPS, because the plural shape is the contract: one of
+// each would resolve identically under a reader that only ever looked at the
+// first entry.
 {
   "$schema": "https://zeroship.ai/schema/project-v1.json",
 
   "name": "config-fixture",
-  "app": "11111111-1111-4111-8111-111111111111",
   /* The control plane. Note the `//` in the value. */
   "control": "https://control.zeroship.ai",
   "runtime_date": "2026-08-14",
@@ -38,19 +41,46 @@
     "output": "dist/app.zship",
   },
 
-  "migrations": {
-    "dir": "migrations",
-    "out": "generated/zeroship",
+  "databases": {
+    "main": {
+      "id": "dbs_03evr3oqx1200yyd6zj2cebfw",
+      "migrations": "migrations",
+      "out": "generated/zeroship/main",
+    },
+    "analytics": {
+      "id": "dbs_03evr3oqx1200qyvgmdnjrsla",
+      "migrations": "migrations/analytics",
+      "out": "generated/zeroship/analytics",
+    },
+  },
+
+  "apps": {
+    "storefront": {
+      "app": "11111111-1111-4111-8111-111111111111",
+      "databases": ["main", "analytics",],
+      "primary": "main",
+    },
+    "admin": {
+      "app": "33333333-3333-4333-8333-333333333333",
+      "databases": ["main"],
+      "primary": "main",
+    },
   },
 
   "secrets": ["STRIPE_SECRET_KEY", "OPENAI_API_KEY",],
 
   "environments": {
     "staging": {
-      "app": "22222222-2222-4222-8222-222222222222",
+      "apps": {
+        "storefront": { "app": "22222222-2222-4222-8222-222222222222" },
+        "admin": { "app": "44444444-4444-4444-8444-444444444444" },
+      },
+      "databases": {
+        "main": { "id": "dbs_03evr3oqx1200uzh8k6gycpgg" },
+        "analytics": { "id": "dbs_03evr3oqx12012zcpsh30ivwy" },
+      },
       "control": "https://control.staging.zeroship.ai",
       "protected": true,
-      "migrations": { "out": "generated/staging" },
       // The pathological string lives HERE rather than in the root block so the
       // root stays legible as an example. `--env=staging` is dumped and
       // compared too, so it is just as load-bearing.

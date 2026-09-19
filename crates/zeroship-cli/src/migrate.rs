@@ -49,18 +49,35 @@ use crate::{
 /// hardcoded `generated/zeroship/migrations.ir.json` while the build wrote
 /// wherever `genTypesOut` said - two spellings of one fact, and the one the CLI
 /// held could not see the one the build used.
-fn resolve_ir_path(args: &[String], cfg: Option<&Resolved>) -> Result<PathBuf, String> {
+fn resolve_ir_path(
+    args: &[String],
+    cfg: Option<&Resolved>,
+    app_label: Option<&str>,
+) -> Result<PathBuf, String> {
     if let Some(p) = positional_path(args) {
         return Ok(PathBuf::from(p));
     }
-    let Some(cfg) = cfg else {
+    let (Some(cfg), Some(app_label)) = (cfg, app_label) else {
         return Err(format!(
             "no migration set to apply. Pass the path written by the build \
-             (`<migrations.out>/{IR_FILENAME}`), or add a {} declaring `migrations.out`.",
+             (`<out>/{IR_FILENAME}`), or add a {} declaring the database under `databases`.",
             project_config::CONFIG_FILENAME
         ));
     };
-    Ok(cfg.require_path("migrations.out")?.join(IR_FILENAME))
+    let database = project_config::select_database(args, cfg, app_label)?;
+    // THE MIGRATION SERVICE IS STILL KEYED ON THE APP, so the only database
+    // this command can address is the one that app's sessions narrow to. A
+    // non-primary label would post one database's IR against another's schema.
+    let primary = cfg.app_primary(app_label);
+    if primary != Some(database.as_str()) {
+        return Err(format!(
+            "--database={database} is not `apps.{app_label}`'s primary ({}). The migration \
+             service addresses the app's primary database, so applying another one's \
+             migrations through it would land them in the wrong schema.",
+            primary.unwrap_or("none")
+        ));
+    }
+    Ok(cfg.database_path(&database, "out")?.join(IR_FILENAME))
 }
 
 /// The filename the build writes inside `migrations.out`.
@@ -79,7 +96,7 @@ pub const IR_FILENAME: &str = "migrations.ir.json";
 /// control plane named on the command line, and applying a migration set to
 /// the wrong database is not something an error message afterwards can undo.
 const MIGRATE_KNOWN_FLAGS: &[&str] = &[
-    "--app", "--app-name", "--control", "--token", "--config", "--env", "--yes",
+    "--app", "--app-name", "--database", "--control", "--token", "--config", "--env", "--yes",
 ];
 
 pub fn cmd_migrate(args: &[String]) -> Result<(), String> {
@@ -102,11 +119,11 @@ pub fn cmd_migrate(args: &[String]) -> Result<(), String> {
         (None, None) => None,
     };
 
-    let (app, target) = resolve_migrate_app(args, resolved.as_ref())?;
+    let (label, app, target) = resolve_migrate_app(args, resolved.as_ref())?;
     let control_url = project_config::resolve_control(args, resolved.as_ref())?;
     let token = resolve_bearer_token(args)?;
 
-    let input = resolve_ir_path(args, resolved.as_ref())?;
+    let input = resolve_ir_path(args, resolved.as_ref(), label.as_deref())?;
 
     // BEFORE the POST, always. Applying a migration set to the wrong database
     // "is not something an error message afterwards can undo", and with a
@@ -116,6 +133,16 @@ pub fn cmd_migrate(args: &[String]) -> Result<(), String> {
         &[("app", &app), ("control", &control_url)],
     );
     eprintln!("zeroship migrate: migrations = {}", input.display());
+    // The LABEL and the id it dereferenced to, side by side. The label is local
+    // to this file and never travels; the id is what a server sees, and seeing
+    // both is what tells a creator the dereference landed where they meant.
+    if let (Some(cfg), Some(label)) = (resolved.as_ref(), label.as_deref()) {
+        if let Ok(database) = project_config::select_database(args, cfg, label) {
+            if let Ok(id) = cfg.database_id(&database) {
+                eprintln!("zeroship migrate: database = {database} ({id})");
+            }
+        }
+    }
 
     // A CORRECT config run at the wrong moment is the one failure the
     // provenance line cannot stop. `"protected": true` on an environment is the
@@ -267,16 +294,18 @@ impl MigrateClient for CurlMigrateClient {
 fn resolve_migrate_app(
     args: &[String],
     resolved: Option<&Resolved>,
-) -> Result<(project_config::Sourced, AppTarget), String> {
+) -> Result<(Option<String>, project_config::Sourced, AppTarget), String> {
     if let Some(name) = parse_flag(args, "--app-name") {
         if parse_flag(args, "--app").is_some() {
             return Err(
-                "--app and --app-name both name a target; pass one. --app takes the \
-                 app's ID (the identity), --app-name its routing label."
+                "--app and --app-name both name a target; pass one. --app names an app \
+                 the config file declares (an app ID when there is no file), --app-name \
+                 its routing label."
                     .to_string(),
             );
         }
         return Ok((
+            None,
             project_config::Sourced {
                 value: name.clone(),
                 source: project_config::Source::Flag("--app-name"),
@@ -285,9 +314,16 @@ fn resolve_migrate_app(
         ));
     }
 
-    let sourced = project_config::resolve_value(args, "--app", None, None, resolved, "app", None)?;
+    let selection = project_config::select_app(args, resolved)?;
+    let sourced = selection.id.ok_or_else(|| {
+        format!(
+            "`apps.{}` carries no `app` id yet. `zeroship migrate` never creates an app; \
+             run `zeroship deploy` first.",
+            selection.label.as_deref().unwrap_or("<none>")
+        )
+    })?;
     let id = app_id_or_refuse(&sourced.value)?;
-    Ok((sourced, AppTarget::Id(id)))
+    Ok((selection.label, sourced, AppTarget::Id(id)))
 }
 
 /// POST the body to the app `app` names, resolving a name through the app list.

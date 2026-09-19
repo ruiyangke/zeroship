@@ -1,10 +1,11 @@
 # `zeroship.jsonc`
 
-`zeroship.jsonc` is this project's tooling configuration. It records the facts
-that more than one tool needs and that everyone working on the project shares:
-which app this directory deploys to, which control plane, where the build
-writes its artifact, and where the migrations live. See `control` in the [Key
-reference](#key-reference) for what a control plane is and how you name one.
+`zeroship.jsonc` is this workspace's tooling configuration. It records the
+facts that more than one tool needs and that everyone working on the project
+shares: which apps this workspace deploys, which databases they use, which
+control plane, where the build writes its artifact, and where each database's
+migrations live. See `control` in the [Key reference](#key-reference) for what
+a control plane is and how you name one.
 
 It is read by the **`zeroship` CLI** (`deploy`, `migrate`, `secret`, `var`,
 `config`, and `login`) and by the **build** through `@zeroship/vite-plugin`. It
@@ -31,15 +32,40 @@ required keys, at their required minimum:
   "control": "https://control.zeroship.ai",
   "runtime_date": "2026-08-14",
   "build": { "mode": "full", "dist": "dist", "output": "dist/app.zship" },
-  "migrations": { "dir": "migrations", "out": "generated/zeroship" }
+  "databases": {
+    "main": {
+      "id": "dbs_03evr3oqx1200yyd6zj2cebfw",
+      "migrations": "migrations",
+      "out": "generated/zeroship"
+    }
+  },
+  "apps": {
+    "app": { "databases": ["main"], "primary": "main" }
+  }
 }
 ```
 
-`name`, `control`, `runtime_date`, `build`, and `migrations` are required at the
-root. Inside `build`, `mode`, `dist`, and `output` are required; inside
-`migrations`, `dir` and `out` are. Everything else — `app`, `secrets`,
-`environments`, and `build.serverEntry` — is optional. The precise rules per
-field are in the [Key reference](#key-reference).
+`name`, `control`, `runtime_date`, `build`, `databases` and `apps` are required
+at the root. Inside `build`, `mode`, `dist`, and `output` are required; inside
+a database entry, `id`, `migrations` and `out` are; inside an app entry,
+`databases` is. Everything else — an app's `app` id and `primary`, `secrets`,
+`environments`, and `build.serverEntry` — is optional. An app that reaches no
+database declares `"databases": []` and both maps may be empty. The precise
+rules per field are in the [Key reference](#key-reference).
+
+### Labels
+
+The keys of `databases` and `apps` are **local labels**. A label is not
+resolvable and never travels: it names an entry a few lines above, the CLI
+dereferences it to that entry's id before it makes any request, and the only
+place it reaches a server is inside the app's own build artifact, where it
+becomes the member name on `env.databases`. Two workspaces may both call a
+database `main` without colliding, because nothing outside either file compares
+labels.
+
+A label is lowercase letters, digits and underscores, starting with a letter,
+which is what keeps it usable as `env.databases.<label>` and excludes
+`__proto__` and every other inherited member name.
 
 ## Key reference
 
@@ -55,15 +81,20 @@ operationally identical, so both tools apply its empty default.
 | --- | --- | --- | --- |
 | `$schema` | string | — | neither; an editor hint. A file whose `$schema` names a different contract than the one this CLI validates is refused. |
 | `name` | string, `^[a-z0-9][a-z0-9-]{0,62}$` | required | CLI `deploy`, and only as the app name on a first push (see [The writeback, and starting a project with no app yet](#the-writeback-and-starting-a-project-with-no-app-yet)). The build validates it and otherwise ignores it. |
-| `app` | string | none | CLI: `deploy`, `migrate`, `secret`, `var`. An app id (uuid) or an app name. |
+| `databases.<label>` | object | — | see [Labels](#labels). One entry per database this workspace uses. |
+| `databases.<label>.id` | string, `^dbs_[0-9a-z]{25}$` | required | CLI. The database's id, as `zeroship db create` printed it. The CLI dereferences the label to this before any request. |
+| `databases.<label>.migrations` | string | required | build (production and dev). This database's migration sources. |
+| `databases.<label>.out` | string | required | build (writes this database's generated artifacts) and CLI `migrate` (posts `<out>/migrations.ir.json`, the migration set's intermediate representation, or IR). It cannot resolve to the project root or an ancestor, generation overwrites only the artifacts it recognizes, and two databases may not share one — the three filenames in it are fixed. |
+| `apps.<label>` | object | — | see [Labels](#labels). One entry per app this workspace deploys. |
+| `apps.<label>.app` | string | none | CLI: `deploy`, `migrate`, `secret`, `var`. The app's id. Absent on a fresh project; see [The writeback](#the-writeback-and-starting-a-project-with-no-app-yet). |
+| `apps.<label>.databases` | string[] | required | build and CLI. The database LABELS this app uses. Each becomes a member of `env.databases`. |
+| `apps.<label>.primary` | string | required when `databases` is non-empty | build and CLI. Which of them is `env.db`. `env.db === env.databases[primary]` holds by object identity, so it cannot be inferred. |
 | `control` | string | required | CLI: `deploy`, `migrate`, `secret`, `var`, and `login`. Control-plane base URL. |
 | `runtime_date` | string, `^[0-9]{4}-[0-9]{2}-[0-9]{2}$` | required | build (transport only). The scaffold stamps the current UTC date; the build copies it into the manifest; the runtime ignores it. See [`runtime_date`](#runtime_date-is-transported-but-inert). |
 | `build.mode` | `"full"` \| `"static"` | `"full"` | build. `"full"` builds a worker — server code plus its remote-callable procedures (RPC) — and the client; `"static"` is a static-site (SSG) deploy with no worker, just the files in `dist`. |
 | `build.serverEntry` | string | auto-detected | build (dev server and production build). Omit for auto-detection. |
 | `build.dist` | string | `"dist"` | build. The directory the client build writes, and the only directory the packer — the build step that assembles the `.zship` — walks. It cannot resolve to the project root or to a directory that contains `zeroship.jsonc`. |
 | `build.output` | string | `"dist/app.zship"` | build (writes it) and CLI `deploy` (uploads it). It cannot resolve to the project root, an ancestor, a symlink, or an existing path that is not a `.zship`. |
-| `migrations.dir` | string | `"migrations"` | build (production and dev). |
-| `migrations.out` | string | `"generated/zeroship"` | build (writes the generated database artifacts) and CLI `migrate` (posts `<out>/migrations.ir.json`, the migration set's intermediate representation, or IR). It cannot resolve to the project root or an ancestor, and generation overwrites only the artifacts it recognizes. |
 | `secrets` | string[], each `^[A-Z][A-Z0-9_]{0,63}$` | `[]` | CLI `deploy` checks the declared names before upload. See [Secrets](#secrets). |
 | `environments.<name>` | object | — | see [Environments](#environments). |
 
@@ -75,13 +106,14 @@ that provisions and operates your app. The scaffold writes
 fallback for `control` is `http://localhost:9090` (see
 [Precedence](#precedence)).
 
-Required at the root: `name`, `control`, `runtime_date`, `build`, `migrations`;
-inside `build`, `mode`, `dist` and `output`; inside `migrations`, `dir` and
-`out`. Only `build.serverEntry`, `app`, `secrets` and `environments` may be
-omitted. The scaffold writes every required key explicitly rather than leaning
-on a default. The same `build` and `migrations` blocks inside an
-`environments` entry require nothing, because they overlay a root that already
-stated everything.
+Required at the root: `name`, `control`, `runtime_date`, `build`, `databases`
+and `apps`; inside `build`, `mode`, `dist` and `output`; inside a database
+entry, `id`, `migrations` and `out`; inside an app entry, `databases`. Only
+`build.serverEntry`, an app's `app` id and `primary`, `secrets` and
+`environments` may be omitted. The scaffold writes every required key explicitly
+rather than leaning on a default. The `build` block inside an `environments`
+entry requires nothing, because it overlays a root that already stated
+everything; an environment's `apps` and `databases` entries carry only the id.
 
 **Unknown keys are refused at every level**, with the known set in the message.
 Six names — `password`, `token`, `secret`, `key`, `apiKey`, and `credentials` —
@@ -90,8 +122,9 @@ are refused **anywhere** in the tree, with a message pointing at
 
 ### The keys the CLI reads
 
-`name`, `app`, `control`, `runtime_date`, `build.output`, `migrations.dir`,
-`migrations.out`, `secrets`, and environment-only `protected` are the fields the
+`name`, `control`, `runtime_date`, `build.output`, every member of a
+`databases` entry and of an `apps` entry, `secrets`, and environment-only
+`protected` are the fields the
 CLI reads, and the build plugin's `config` option may not change them (see [The
 `config` escape hatch](#the-config-escape-hatch)). None of the cross-tool scalar
 facts has a CLI default — see the "Default" paragraph above.
@@ -103,7 +136,7 @@ That scope line decides every question about what belongs:
 
 | | `zeroship.jsonc` | the `.zship` manifest |
 | --- | --- | --- |
-| Written by | you, plus the first-deploy `app` writeback | the build |
+| Written by | you, plus the first-deploy app-id writeback | the build |
 | Read by | the `zeroship` CLI and the build | control plane, gateway, worker |
 | Travels | never leaves your machine | uploaded on every deploy |
 | Describes | how the tooling operates | how the app behaves |
@@ -134,7 +167,7 @@ plugin's equivalents of `--config=`, `--env=`, and a build-time-only override.
 
 There are no format fallbacks — one filename, one format — and **no upward
 directory walk**. A build or deploy run in a subdirectory would otherwise pick
-up a sibling app's `app` and `control` in silence, which is the cross-targeting
+up a sibling workspace's `apps` and `control` in silence, which is the cross-targeting
 hazard the [Environments](#environments) rule exists to close, arriving through
 the file-location door.
 
@@ -152,7 +185,8 @@ Once a file is selected, its directory is the project root for every relative
 path stored in that file. This is also true for an external file named by the
 plugin `configPath` option, `--config`, or `ZEROSHIP_CONFIG`: the command's
 working directory
-roots the selector, never `build.*` or `migrations.*` inside the selected file.
+roots the selector, never `build.*` or a database's `migrations`/`out` inside
+the selected file.
 Explicit positional paths remain relative to the command's working directory.
 
 ## Precedence
@@ -175,12 +209,20 @@ the key, not a fallback:
 
 ```
 $ zeroship migrate
-zeroship migrate: /home/me/app/zeroship.jsonc does not set `app`, and `zeroship` has no default for it.
+zeroship migrate: /home/me/app/zeroship.jsonc does not set `databases.main.out`, and `zeroship` has no default for it.
 Add it to the file (the scaffold writes every cross-tool key explicitly), or pass the matching flag. ...
 ```
 
-Only two values take this path today. `--app` has no environment variable and
-no fallback at all; `--control` reads `ZEROSHIP_CONTROL_URL` and falls back to
+`--app` is a case of its own, because of what a label is. **With a file
+present it names one of the file's `apps` labels**, and the id comes from the
+file — so a label never travels as an identifier, and a typo lists the labels
+that exist. With no file there are no labels, so `--app` is an app id exactly
+as before; which case you are in is decided by whether there is a file, never
+by inspecting the value. A workspace declaring one app implies it and the flag
+is optional; one declaring several requires it. `--database=<label>` selects
+among the app's own databases the same way, defaulting to its primary.
+
+`--control` reads `ZEROSHIP_CONTROL_URL` and falls back to
 `http://localhost:9090` when there is no file. Your platform credential is not
 in this file and never resolves from it: `--token=<PAT>` (a personal access
 token — a plain bearer token), then `ZEROSHIP_TOKEN`, then the token `zeroship
@@ -200,15 +242,20 @@ it resolved and where it came from, on stderr, before it acts:
 
 ```
 $ zeroship migrate --env=prod
-zeroship migrate: app = prod-app (from zeroship.jsonc environments.prod)
+zeroship migrate: app = app_034klb07lrb9jgma6imvmx000 (from zeroship.jsonc environments.prod apps.storefront)
 zeroship migrate: control = https://control.example (from zeroship.jsonc environments.prod)
 zeroship migrate: migrations = /home/me/app/generated/zeroship/migrations.ir.json
+zeroship migrate: database = main (dbs_03evr3oqx1200yyd6zj2cebfw)
 ```
+
+The `database` line prints the label beside the id it dereferenced to, which is
+what tells you the dereference landed where you meant: the label is local to
+your file and the id is what the server sees.
 
 The source is one of `<flag> flag`, `$ZEROSHIP_CONTROL_URL`, `zeroship.jsonc`,
 `zeroship.jsonc <member>` (a different member standing in for the one asked for
-— today only `deploy` using `name` for `app`), `zeroship.jsonc
-environments.<name>`, or `built-in default`.
+— today only `deploy` using `name` for an app with no id yet), `zeroship.jsonc
+apps.<label>` (optionally under `environments.<name>`), or `built-in default`.
 
 ## Environments
 
@@ -218,25 +265,40 @@ CLI and via the plugin's `env` option:
 ```jsonc
 "environments": {
   "staging": {
-    "app": "stg-app",
-    "control": "https://control.staging.example"
+    "control": "https://control.staging.example",
+    "apps": { "app": { "app": "app_034klb07lrb9jgma6imvmx001" } },
+    "databases": { "main": { "id": "dbs_03evr3oqx1200uzh8k6gycpgg" } }
   },
   "prod": {
-    "app": "prod-app",
     "control": "https://control.example",
+    "apps": { "app": { "app": "app_034klb07lrb9jgma6imvmx000" } },
+    "databases": { "main": { "id": "dbs_03evr3oqx1200yyd6zj2cebfw" } },
     "protected": true
   }
 }
 ```
 
-**`app` and `control` are non-inheritable.** Every environment must state both;
-one that omits either fails validation (see [Errors](#errors)). This is the
-rule the whole block exists for: an environment that names a staging `control`
-and inherits the root `app` targets a production app through a staging control
-plane, and nothing in the command line shows it. Everything else inherits per
-member — `build` and `migrations` merge member by member over the root, so an
-environment can set `build.mode` alone and keep the root's `dist` and
-`output`. `secrets` is replaced wholesale, not merged.
+**`apps`, `control` and `databases` are non-inheritable, and each map must
+cover every label the root declares.** An environment that omits one of the
+three, leaves a root label out of a map, or names a label the root does not
+declare fails validation (see [Errors](#errors)).
+
+This is the rule the whole block exists for. An environment that names a
+staging `control` and inherits the root app targets a production app through a
+staging control plane, and nothing in the command line shows it. Inheriting a
+database id is the same mistake one level worse: it lands **writes** in the
+wrong data rather than the wrong code. Partial coverage is that same hazard
+hiding behind a key that is present, which is why stating some labels is not
+enough.
+
+An environment overrides the **id** under a label, never the label itself and
+never the build-time paths beside it. `migrations` and `out` stay label-local,
+so the manifest and the generated client are the same artifact across every
+environment and no code path branches on the environment name.
+
+Everything else inherits per member — `build` merges member by member over the
+root, so an environment can set `build.mode` alone and keep the root's `dist`
+and `output`. `secrets` is replaced wholesale, not merged.
 
 **There is no implicit environment and no `ZEROSHIP_ENV`.** You pass `--env=` or
 you get the root. An environment variable that silently switched which database
@@ -315,8 +377,9 @@ zeroship({
 })
 ```
 
-**It may not change any field the CLI also reads** — `name`, `app`, `control`,
-`runtime_date`, `build.output`, `migrations.dir`, `migrations.out`, `secrets`,
+**It may not change any field the CLI also reads** — `name`, `control`,
+`runtime_date`, `build.output`, every member of a `databases` or `apps` entry,
+`secrets`,
 or environment-only `protected`. Trying to is an error naming the field. The
 reason is structural: a `config` function runs inside the build, and the CLI
 reads the same file directly and can never see it, so an override there would
@@ -325,49 +388,48 @@ put the two tools back into the disagreement this file removes. Change those in
 
 Overridable: `build.mode`, `build.serverEntry`, `build.dist`.
 The denial is on **change**, not on presence, because the idiom above spreads
-`app` and `control` into its own result every time.
+`apps` and `control` into its own result every time.
 Writable-path safety checks run after this override, so an accepted
 `build.dist` change still cannot move the build over the project or its config.
 
 ## The writeback, and starting a project with no app yet
 
-`app` accepts an app id or an app **name**, and `zeroship deploy` resolves a
-name against the control plane, creating the app when it does not exist
-(`--no-create` turns that off). A fresh project therefore does not need an `app`
-at all: the scaffold ships without one, and `deploy` falls back to `name` for
+An app entry's `app` id is optional, and `zeroship deploy` resolves an app
+**name** against the control plane, creating the app when it does not exist
+(`--no-create` turns that off; `--app-name=<name>` states one explicitly). A
+fresh project therefore does not need an id at all: the scaffold ships an
+`apps` entry without one, and `deploy` falls back to the workspace `name` for
 that first push, saying so in its provenance line.
 
 ```
 $ zeroship deploy
 zeroship deploy: app = my-app (from zeroship.jsonc name)
 ...
-created app my-app (11111111-1111-4111-8111-111111111111)
+created app my-app (app_034klb07lrb9jgma6imvmx000)
 ```
 
 **The fallback is `deploy`-only.** `migrate` does not take it — a typo'd name
 would migrate a fresh empty app while the real one stayed broken — and
-`secret` / `var` could not use it if they wanted to, because the control plane
-parses that path segment as a uuid. Those three still error naming `app` until
-the id is in the file. It is also off under `--no-create`, which is the flag
-that says "do not invent an app".
+`secret` / `var` could not use it if they wanted to. Those three error naming
+the entry until the id is in the file. It is also off under `--no-create`,
+which is the flag that says "do not invent an app".
 
 `zeroship deploy` considers recording an auto-created id in exactly one
-situation: the resolved file had no `app`, so deploy used its `name` fallback.
-An existing config `app` or an explicit `--app` is never a writeback target,
-even if that named target is auto-created. The file is not opened for writing.
+situation: the selected `apps` entry had no `app`, so deploy used the `name`
+fallback. An entry that already carries an id, or an explicit `--app-name`, is
+never a writeback target, even if that named target is auto-created. The file
+is not opened for writing.
 
-Because the eligible file has no `app` member, the CLI appends it as the final
-root member and reports the path it wrote. The edit preserves your comments,
-key order, interior blank lines, trailing commas, CRLF line endings, and
-multibyte text. It may normalise extra blank lines immediately after the
-root `{` or immediately before its `}`; no other formatting is normalised. The
-CLI re-parses the complete project config before it writes. Immediately before
-writing, it also re-reads the file as bytes. If the bytes changed since load,
-writeback leaves them untouched and prints the app id with an instruction to
-add it by hand.
+The CLI appends the `app` member to **that label's entry** and reports the path
+it wrote. The edit preserves your comments, key order, interior blank lines,
+trailing commas, CRLF line endings, and multibyte text. Appending reflows the
+entry it writes into and nothing outside it. The CLI re-parses the complete
+project config before it writes. Immediately before writing, it also re-reads
+the file as bytes. If the bytes changed since load, writeback leaves them
+untouched and prints the app id with an instruction to add it by hand.
 
 ```
-created app my-app (11111111-1111-4111-8111-111111111111)
+created app my-app (app_034klb07lrb9jgma6imvmx000)
   wrote app id into /home/me/app/zeroship.jsonc
 ```
 
@@ -375,17 +437,16 @@ No other config member is ever written. In particular, `control` is never a
 writeback target: a `--control=` typo becoming permanent is worse than typing
 the flag twice.
 
-**A deploy run with `--env=` never writes either.** The writeback only targets
-the top-level member, and an id created for staging written at the root is
-where every un-flagged command would then read production's — the
-cross-targeting the non-inheritable rule exists to prevent, arriving through
-the writeback door. So the command prints the line and says which block it
-belongs in:
+**A deploy run with `--env=` never writes either.** The writeback targets the
+root entry, and an id created for staging written there is where every
+un-flagged command would then read production's — the cross-targeting the
+non-inheritable rule exists to prevent, arriving through the writeback door. So
+the command prints the line and says which block it belongs in:
 
 ```
-created app my-app-staging (2222...)
-  add this under environments.staging in /home/me/app/zeroship.jsonc:
-    "app": "2222...",
+created app my-app-staging (app_034klb07lrb9jgma6imvmx001)
+  add this under environments.staging.apps.app in /home/me/app/zeroship.jsonc:
+    "app": "app_034klb07lrb9jgma6imvmx001",
 ```
 
 ## `zeroship config`
@@ -400,7 +461,7 @@ whitespace, after the environment overlay:
 
 ```console
 $ zeroship config show --env=prod
-{"app":"prod-app","build":{"dist":"dist","mode":"static","output":"dist/app.zship"},"control":"https://control.example","migrations":{"dir":"migrations","out":"generated/zeroship"},"name":"zeroship-starter","protected":true,"runtime_date":"2026-08-14","secrets":["STRIPE_SECRET_KEY"]}
+{"apps":{"app":{"app":"app_034klb07lrb9jgma6imvmx000","databases":["main"],"primary":"main"}},"build":{"dist":"dist","mode":"static","output":"dist/app.zship"},"control":"https://control.example","databases":{"main":{"id":"dbs_03evr3oqx1200yyd6zj2cebfw","migrations":"migrations","out":"generated/zeroship"}},"name":"zeroship-starter","protected":true,"runtime_date":"2026-08-14","secrets":["STRIPE_SECRET_KEY"]}
 ```
 
 It answers "which app and which control plane is this directory pointed at",
@@ -427,9 +488,6 @@ lines the mutating commands print.
   "$schema": "https://zeroship.ai/schema/project-v1.json",
 
   "name": "my-app",
-
-  // An app id or name. An explicit value is never rewritten by deploy.
-  "app": "my-app",
   "control": "https://control.zeroship.ai",
 
   // Scaffolded as the current UTC date. The runtime does not branch on it.
@@ -441,21 +499,49 @@ lines the mutating commands print.
     "output": "dist/app.zship"
   },
 
-  "migrations": {
-    "dir": "migrations",
-    "out": "generated/zeroship"
+  // Databases by LOCAL LABEL. The id is what `zeroship db create` printed;
+  // the label is what this file, the manifest and `env.databases` use.
+  "databases": {
+    "main": {
+      "id": "dbs_03evr3oqx1200yyd6zj2cebfw",
+      "migrations": "migrations",
+      "out": "generated/zeroship"
+    },
+    "analytics": {
+      "id": "dbs_03evr3oqx1200qyvgmdnjrsla",
+      "migrations": "migrations/analytics",
+      "out": "generated/zeroship/analytics"
+    }
+  },
+
+  // `primary` is this app's `env.db`; every label listed is also on
+  // `env.databases`, and `env.db === env.databases[primary]`.
+  "apps": {
+    "storefront": {
+      "app": "app_034klb07lrb9jgma6imvmx000",
+      "databases": ["main", "analytics"],
+      "primary": "main"
+    }
   },
 
   "secrets": ["STRIPE_SECRET_KEY"],
 
   "environments": {
     "staging": {
-      "app": "my-app-staging",
-      "control": "https://control.zeroship.ai"
+      "control": "https://control.zeroship.ai",
+      "apps": { "storefront": { "app": "app_034klb07lrb9jgma6imvmx001" } },
+      "databases": {
+        "main": { "id": "dbs_03evr3oqx1200uzh8k6gycpgg" },
+        "analytics": { "id": "dbs_03evr3oqx12012zcpsh30ivwy" }
+      }
     },
     "prod": {
-      "app": "my-app-prod",
       "control": "https://control.zeroship.ai",
+      "apps": { "storefront": { "app": "app_034klb07lrb9jgma6imvmx002" } },
+      "databases": {
+        "main": { "id": "dbs_03evr3oqx1200mf301taes352" },
+        "analytics": { "id": "dbs_03evr3oqx1200q6fb1hf7sfig" }
+      },
       "protected": true
     }
   }
@@ -476,9 +562,9 @@ export default defineConfig({
 The whole flow, with no target flags anywhere:
 
 ```bash
-pnpm build                       # writes build.output and migrations.out
-zeroship deploy                  # reads app, control, build.output
-zeroship migrate                 # posts <migrations.out>/migrations.ir.json
+pnpm build                       # writes build.output and each database's out
+zeroship deploy                  # reads the app entry, control, build.output
+zeroship migrate                 # posts <out>/migrations.ir.json for the primary
 
 zeroship deploy --env=staging    # the staging app and control
 zeroship migrate --env=prod --yes   # protected: --yes is required
@@ -486,9 +572,10 @@ zeroship migrate --env=prod --yes   # protected: --yes is required
 zeroship secret set STRIPE_SECRET_KEY=sk_live_...   # value, never in the file
 ```
 
-The flags survive as overrides where they always were: `zeroship deploy
-./other.zship --app=<id> --control=<url>` still works, wins over the file, and
-says so in its provenance lines.
+With one app declared, `--app` is optional; with several, it names which label
+to act on. The other flags survive as overrides where they always were:
+`zeroship deploy ./other.zship --control=<url>` still works, wins over the
+file, and says so in its provenance lines.
 
 ## Errors
 
@@ -523,6 +610,13 @@ below, `<key>` and `<value>` stand for that key and its value:
 - a `secrets` entry off pattern → `<path>: secrets entry <value> must match ^[A-Z][A-Z0-9_]{0,63}$ - this array holds NAMES, never values`
 - `build.dist` resolves to a forbidden directory → `<path>: build.dist (<value>) cannot resolve to the project root or an ancestor containing zeroship.jsonc`
 - `build.output` resolves to an existing non-`.zship` file → `<path>: build.output (<value>) resolves to existing non-artifact file <resolved>; refusing to overwrite creator data`
+- a label off pattern → `<path>: databases.<label> is not a usable label: it must match ^[a-z][a-z0-9_]{0,31}$. A label is a member name on env.databases as well as a key here.`
+- a database id off pattern → `<path>: databases.<label>.id must match ^dbs_[0-9a-z]{25}$ (got <value>). zeroship db create prints it.`
+- two databases sharing one `out` → `<path>: databases.<a>.out and databases.<b>.out are both <value>. Two databases cannot share one gen-types directory: the filenames in it are fixed, so one database's schema would overwrite the other's.`
+- an app naming an undeclared database → `<path>: apps.<label>.databases names <name>, which this file does not declare under databases (declared: <comma list>)`
+- an app that uses a database but names no primary → `<path>: apps.<label> uses <comma list> but names no primary. The primary is env.db, and env.db === env.databases[primary] by object identity, so it cannot be inferred.`
+- a primary the app does not use → `<path>: apps.<label>.primary is <value>, which is not one of apps.<label>.databases (<comma list>)`
+- an environment naming a label the root does not declare → `<path>: environments.<name>.<section>.<label> names no root <section> entry (declared: <comma list>). An environment overrides the id under a label, never the label itself.`
 
 The remaining refusals are multi-line. A forbidden key name, anywhere in the
 tree:
@@ -534,24 +628,35 @@ set TOKEN=<value> --app=<id>` for a deployed value, or `.env` for a dev one,
 and declare only the NAME here under `secrets`.
 ```
 
-An environment missing `app` or `control`:
+An environment missing `apps`, `control` or `databases`, or leaving a root
+label out of one of the two maps:
 
 ```
-<path>: missing required key `app`
-`app` and `control` are NON-INHERITABLE: an environment that names a control
-and inherits the root app is exactly the silent cross-targeting this rule
-exists to prevent.
+<path>: missing required key `environments.prod.databases`
+`apps`, `control` and `databases` are NON-INHERITABLE, and each map must cover
+every label the root declares. An environment that names a control and
+inherits the root app targets the wrong code; one that inherits a database id
+lands WRITES in the wrong data.
 ```
 
 A key a command needs that the file omits (there is no fallback to guess):
 
 ```
-<path> does not set `app`, and `zeroship` has no default for it.
+<path> does not set `databases.main.out`, and `zeroship` has no default for it.
 Add it to the file (the scaffold writes every cross-tool key explicitly), or
 pass the matching flag. A guess here would disagree with the build, which is
 the drift this file exists to remove.
-Fields with no CLI-side fallback: name, app, control, runtime_date,
-build.output, migrations.dir, migrations.out, secrets, protected.
+Fields with no CLI-side fallback: name, control, runtime_date, build.output,
+databases.*.id, databases.*.migrations, databases.*.out, apps.*.app,
+apps.*.databases, apps.*.primary, secrets, protected.
+```
+
+`--app` naming something the file does not declare:
+
+```
+--app=<value> names no app in <path> (declared: <comma list>).
+With a zeroship.jsonc present `--app` names one of its labels: the id comes
+from the file, so a label never travels as an identifier.
 ```
 
 `zeroship migrate` against a `protected` environment without `--yes`:

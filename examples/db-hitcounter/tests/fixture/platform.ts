@@ -49,8 +49,9 @@ async function checkManifest(bundle: string) {
   await pipeline(Readable.from([zstdDecompressSync(await readFile(bundle))]), parser);
   assert.equal(first, "manifest.json");
   const manifest = JSON.parse(Buffer.concat(chunks).toString());
-  assert.equal(typeof manifest.runtime_descriptor?.hash, "string");
-  assert(manifest.runtime_descriptor.hash.length > 0, "Bundle must bind its runtime descriptor");
+  assert.equal(typeof manifest.runtime_descriptor?.[0]?.hash, "string");
+  assert(manifest.runtime_descriptor[0].hash.length > 0, "Bundle must bind its runtime descriptor");
+  assert(manifest.runtime_descriptor[0].primary, "the primary database is the one env.db reaches");
 }
 
 export class Platform {

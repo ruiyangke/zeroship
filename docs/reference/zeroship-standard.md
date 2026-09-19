@@ -92,11 +92,13 @@ to app code wholesale.
 ## Schema source of truth
 
 The committed `op.*` migration set is the schema source of truth. The build
-folds those migrations into two generated artifacts under `generated/zeroship`:
+folds each database's migrations into two generated artifacts under that
+database's own output directory:
 
 - `env.db.ts` — the app's typed `Env.db` augmentation.
 - `schema.runtime.json` — the v2 `RuntimeSchemaDescriptor` carried into the
-  `.zship` manifest as `runtime_descriptor`.
+  `.zship` manifest as one `runtime_descriptor` entry, beside the database's
+  label and id.
 
 The descriptor is version 2, and a deploy that carries any other version is
 refused rather than upgraded.

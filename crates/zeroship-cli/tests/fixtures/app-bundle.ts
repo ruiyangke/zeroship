@@ -45,7 +45,7 @@ export default {
 };
 `);
 const bundle = await buildDevBundle({
-  root, entry, project: defaultProjectConfig(), runtimeDescriptor: undefined,
+  root, entry, project: defaultProjectConfig(), databases: [],
 });
 const pending = join(root, "pending.zship");
 await fs.writeFile(pending, bundle.archive);

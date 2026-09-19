@@ -100,7 +100,15 @@ impl VerifiedDeployment {
         Ok(Self {
             hash,
             manifest_json,
-            descriptor_sha256: manifest.runtime_descriptor.map(|entry| entry.hash),
+            // The PRIMARY database, the one `env.db` reaches, is the one this
+            // app-keyed gate can be about: the migration service addresses an
+            // app, so that is the only database a deploy can have applied
+            // migrations to through it.
+            descriptor_sha256: manifest
+                .runtime_descriptor
+                .into_iter()
+                .find(|entry| entry.primary)
+                .map(|entry| entry.hash),
             schedules,
             workflows,
         })

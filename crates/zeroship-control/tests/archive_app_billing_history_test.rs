@@ -472,9 +472,12 @@ async fn restore_requires_a_staged_deploy_matching_the_latest_applied_schema() {
     );
 
     let mut staged_manifest = Manifest::passthrough();
-    staged_manifest.runtime_descriptor = Some(zeroship_bundle::RuntimeDescriptorEntry {
+    staged_manifest.runtime_descriptor = vec![zeroship_bundle::RuntimeDescriptorEntry {
+        label: "main".into(),
+        database_id: zeroship_core::DatabaseId::mint(),
+        primary: true,
         hash: descriptor_hash.clone(),
-    });
+    }];
     let staged_hash = common::deployments::deploy(&registry, &app.id, &owner, staged_manifest)
         .await
         .expect("stage schema-compatible deploy")
@@ -503,7 +506,8 @@ async fn restore_requires_a_staged_deploy_matching_the_latest_applied_schema() {
         route
             .manifest
             .runtime_descriptor
-            .as_ref()
+            .iter()
+            .find(|entry| entry.primary)
             .map(|entry| entry.hash.as_str()),
         Some(descriptor_hash.as_str())
     );

@@ -382,7 +382,7 @@ fn cmd_serve(args: &[String]) {
             .executable
             .as_ref()
             .expect("loaded app deployment");
-        if let Some(descriptor) = executable.runtime_descriptor() {
+        if let Some(descriptor) = executable.primary_schema() {
             env_vars.insert("ZEROSHIP_RUNTIME_DESCRIPTOR".into(), descriptor.to_string());
         } else {
             env_vars.remove("ZEROSHIP_RUNTIME_DESCRIPTOR");
@@ -443,7 +443,7 @@ fn cmd_deploy(args: &[String]) {
         eprintln!("zeroship deploy: {e}");
         std::process::exit(1);
     }
-    let (config, resolved, app, target, control_url, input) =
+    let (config, resolved, label, app, target, control_url, input) =
         deploy_target(args).unwrap_or_else(|e| {
             eprintln!("zeroship deploy: {e}");
             std::process::exit(1);
@@ -483,7 +483,7 @@ fn cmd_deploy(args: &[String]) {
     // order; control REFUSES a deploy whose migrations have not been applied,
     // so this line is what a creator reads on the way to that 409 rather than
     // a footnote under a green result.
-    print_migrate_reminder(&app, &control_url, resolved.as_ref());
+    print_migrate_reminder(&app, &control_url, label.as_deref(), resolved.as_ref());
 
     eprintln!(
         "Deploying {} ({:.1}KB) to {control_url}/api/apps/{app}/deploy...",
@@ -509,6 +509,7 @@ fn cmd_deploy(args: &[String]) {
                 record_created_app(
                     config.as_ref(),
                     flag_str(args, "--env=").as_deref(),
+                    label.as_deref(),
                     &app_source,
                     &created.id,
                 );
@@ -538,6 +539,8 @@ fn cmd_deploy(args: &[String]) {
 type DeployTarget = (
     Option<project_config::ProjectConfig>,
     Option<project_config::Resolved>,
+    // The `apps` label this deploy targets, when a config file declares one.
+    Option<String>,
     project_config::Sourced,
     AppTarget,
     project_config::Sourced,
@@ -568,7 +571,7 @@ fn deploy_target(args: &[String]) -> Result<DeployTarget, String> {
         (None, None) => None,
     };
 
-    let (app, target) = resolve_deploy_app(args, resolved.as_ref())?;
+    let (label, app, target) = resolve_deploy_app(args, resolved.as_ref())?;
     let control_url = project_config::resolve_control(args, resolved.as_ref())?;
 
     let input = match args.get(2).filter(|a| !a.starts_with("--")) {
@@ -585,7 +588,7 @@ fn deploy_target(args: &[String]) -> Result<DeployTarget, String> {
             }
         },
     };
-    Ok((config, resolved, app, target, control_url, input))
+    Ok((config, resolved, label, app, target, control_url, input))
 }
 
 /// Decide WHAT the deploy was pointed at, from which input carried the value.
@@ -613,16 +616,18 @@ fn deploy_target(args: &[String]) -> Result<DeployTarget, String> {
 fn resolve_deploy_app(
     args: &[String],
     resolved: Option<&project_config::Resolved>,
-) -> Result<(project_config::Sourced, AppTarget), String> {
+) -> Result<(Option<String>, project_config::Sourced, AppTarget), String> {
     if let Some(name) = parse_flag(args, "--app-name") {
         if parse_flag(args, "--app").is_some() {
             return Err(
-                "--app and --app-name both name a target; pass one. --app takes the \
-                 app's ID (the identity), --app-name its routing label."
+                "--app and --app-name both name a target; pass one. --app names an app \
+                 the config file declares (an app ID when there is no file), --app-name \
+                 its routing label."
                     .to_string(),
             );
         }
         return Ok((
+            None,
             project_config::Sourced {
                 value: name.clone(),
                 source: project_config::Source::Flag("--app-name"),
@@ -631,20 +636,29 @@ fn resolve_deploy_app(
         ));
     }
 
-    match project_config::resolve_value(args, "--app", None, None, resolved, "app", None) {
-        Ok(sourced) => {
+    let selection = project_config::select_app(args, resolved)?;
+    match selection.id {
+        Some(sourced) => {
             let id = app_id_or_refuse(&sourced.value)?;
-            Ok((sourced, AppTarget::Id(id)))
+            Ok((selection.label, sourced, AppTarget::Id(id)))
         }
-        Err(e) => match resolved.and_then(|r| r.str("name")) {
+        // A declared app with no id yet is a fresh project: the first deploy
+        // creates it under the workspace name and writes the id back under
+        // this label.
+        None => match resolved.and_then(|r| r.str("name")) {
             Some(name) if deploy_auto_create(args) => Ok((
+                selection.label,
                 project_config::Sourced {
                     value: name.to_string(),
                     source: project_config::Source::FileMember("name"),
                 },
                 AppTarget::Name(name.to_string()),
             )),
-            _ => Err(e),
+            _ => Err(format!(
+                "`apps.{}` carries no `app` id and --no-create was passed, so there is \
+                 nothing to deploy to.",
+                selection.label.as_deref().unwrap_or("<none>")
+            )),
         },
     }
 }
@@ -663,6 +677,7 @@ fn resolve_deploy_app(
 fn record_created_app(
     config: Option<&project_config::ProjectConfig>,
     environment: Option<&str>,
+    label: Option<&str>,
     app_source: &project_config::Source,
     id: &AppId,
 ) {
@@ -677,9 +692,10 @@ fn record_created_app(
     // staging's id where every un-flagged command reads production's - which is
     // the cross-targeting the non-inheritable rule exists to prevent, arriving
     // through the writeback door.
+    let label = label.unwrap_or("<label>");
     if let Some(env) = environment {
         eprintln!(
-            "  add this under environments.{env} in {}:\n    \"app\": \"{}\",",
+            "  add this under environments.{env}.apps.{label} in {}:\n    \"app\": \"{}\",",
             config.path.display(),
             id.as_str()
         );
@@ -688,12 +704,13 @@ fn record_created_app(
     if app_source != &project_config::Source::FileMember("name") {
         return;
     }
-    match config.write_app(id) {
+    match config.write_app_id(label, id) {
         Ok(()) => {
             eprintln!("  wrote app id into {}", config.path.display());
         }
         Err(e) => eprintln!(
-            "  could not record the app id ({e}); add it by hand: \"app\": \"{}\",",
+            "  could not record the app id ({e}); add it by hand under apps.{label}: \
+             \"app\": \"{}\",",
             id.as_str()
         ),
     }
@@ -717,21 +734,35 @@ fn record_created_app(
 fn print_migrate_reminder(
     app: &str,
     control_url: &str,
+    label: Option<&str>,
     resolved: Option<&project_config::Resolved>,
 ) {
-    // The reminder now reads the SAME `migrations.out` the build wrote to.
-    // Before this it read a hardcoded const, so a project that moved its
-    // generated dir got silence from the one hint it had.
-    let Some(out) = resolved.and_then(|r| r.resolve_path("migrations.out")) else {
+    // The reminder reads the SAME `out` directories the build wrote to, one
+    // per database this app declares. Before this it read a hardcoded const,
+    // so a project that moved its generated dir got silence from the one hint
+    // it had.
+    let Some(cfg) = resolved else {
         return;
     };
-    let ir = out.join(migrate::IR_FILENAME);
-    if !ir.is_file() {
+    let Some(label) = label else {
+        return;
+    };
+    let pending: Vec<&str> = cfg
+        .app_databases(label)
+        .into_iter()
+        .filter(|database| {
+            cfg.database_path(database, "out")
+                .is_ok_and(|out| out.join(migrate::IR_FILENAME).is_file())
+        })
+        .collect();
+    if pending.is_empty() {
         return;
     }
     eprintln!();
     eprintln!("This app has committed migrations. Deploy does NOT apply them:");
-    eprintln!("  zeroship migrate --app={app} --control={control_url}");
+    for database in pending {
+        eprintln!("  zeroship migrate --app={app} --database={database} --control={control_url}");
+    }
     eprintln!("Until you do, this deploy is REFUSED with 409 schema_not_applied.");
 }
 
@@ -1894,11 +1925,11 @@ mod tests {
         let config_path = temp.path().join(project_config::CONFIG_FILENAME);
         let original = r#"{
   "name": "production-app",
-  "app": "app_034klb07lrb9jgma6imvmx000",
   "control": "http://control.test",
   "runtime_date": "2026-08-14",
   "build": { "mode": "full", "dist": "dist", "output": "dist/app.zship" },
-  "migrations": { "dir": "migrations", "out": "generated/zeroship" },
+  "databases": {},
+  "apps": { "storefront": { "app": "app_034klb07lrb9jgma6imvmx000", "databases": [] } },
   "secrets": []
 }
 "#;
@@ -1911,8 +1942,9 @@ mod tests {
             "dist/app.zship",
             "--app-name=scratch-test",
         ]);
-        let (app, target) =
+        let (label, app, target) =
             resolve_deploy_app(&args, Some(&resolved)).expect("resolve the by-name flag");
+        assert!(label.is_none(), "--app-name names no label in the file");
         assert_eq!(app.source, project_config::Source::Flag("--app-name"));
         assert_eq!(
             target,
@@ -1933,7 +1965,7 @@ mod tests {
             .expect("name deploy should create and retry by id");
 
         let created = outcome.created_app.expect("scratch app was created");
-        record_created_app(Some(&config), None, &app.source, &created.id);
+        record_created_app(Some(&config), None, label.as_deref(), &app.source, &created.id);
 
         assert_eq!(outcome.accepted.deploy_hash, "sha256:def");
         assert_eq!(
@@ -1959,32 +1991,29 @@ mod tests {
         // config `resolve_deploy_app` refuses.
         let original = r#"{
   "name": "production-app",
-  "app": "app_034klb07lrb9jgma6imvmx000",
   "control": "http://control.test",
   "runtime_date": "2026-08-14",
   "build": { "mode": "full", "dist": "dist", "output": "dist/app.zship" },
-  "migrations": { "dir": "migrations", "out": "generated/zeroship" },
+  "databases": {},
+  "apps": { "storefront": { "app": "app_034klb07lrb9jgma6imvmx000", "databases": [] } },
   "secrets": []
 }
 "#;
         std::fs::write(&config_path, original).expect("write project config");
         let config = project_config::ProjectConfig::load(&config_path).expect("load config");
         let resolved = config.resolve(None).expect("resolve config");
-        let app = project_config::resolve_value(
-            &s(&["zeroship", "deploy"]),
-            "--app",
-            None,
-            None,
-            Some(&resolved),
-            "app",
-            None,
-        )
-        .expect("resolve file app");
-        assert_eq!(app.source, project_config::Source::File);
+        let selection = project_config::select_app(&s(&["zeroship", "deploy"]), Some(&resolved))
+            .expect("resolve file app");
+        let app = selection.id.expect("the file carries an id");
+        assert_eq!(
+            app.source,
+            project_config::Source::FileLabel("zeroship.jsonc apps.storefront".to_string())
+        );
 
         record_created_app(
             Some(&config),
             None,
+            selection.label.as_deref(),
             &app.source,
             &app_id("app_034klb07lrb9jgma6imvmx001"),
         );
@@ -2005,12 +2034,14 @@ mod tests {
   "control": "http://control.test",
   "runtime_date": "2026-08-14",
   "build": { "mode": "full", "dist": "dist", "output": "dist/app.zship" },
-  "migrations": { "dir": "migrations", "out": "generated/zeroship" },
+  "databases": {},
+  "apps": { "storefront": { "databases": [] } },
   "secrets": [],
   "environments": {
     "staging": {
-      "app": "staging-app",
-      "control": "http://staging-control.test"
+      "control": "http://staging-control.test",
+      "apps": { "storefront": { "app": "staging-app" } },
+      "databases": {}
     }
   }
 }
@@ -2021,6 +2052,7 @@ mod tests {
         record_created_app(
             Some(&config),
             Some("staging"),
+            Some("storefront"),
             &project_config::Source::FileMember("name"),
             &app_id("app_034klb07lrb9jgma6imvmx001"),
         );
@@ -2232,8 +2264,9 @@ mod tests {
         );
 
         let by_name = s(&["zeroship", "deploy", "dist/app.zship", "--app-name=my-app"]);
-        let (sourced, target) =
+        let (label, sourced, target) =
             resolve_deploy_app(&by_name, None).expect("--app-name takes a name");
+        assert!(label.is_none(), "there is no file, so there is no label");
         assert_eq!(target, AppTarget::Name("my-app".to_string()));
         assert_eq!(sourced.source, project_config::Source::Flag("--app-name"));
     }

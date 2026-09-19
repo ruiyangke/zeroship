@@ -15,7 +15,7 @@
   ],
   "type": "object",
   "additionalProperties": false,
-  "required": ["name", "control", "runtime_date", "build", "migrations"],
+  "required": ["name", "control", "runtime_date", "build", "databases", "apps"],
   "properties": {
     "$schema": {
       "type": "string",
@@ -25,12 +25,7 @@
       "type": "string",
       "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
       "x-cli-read": true,
-      "description": "The project name. Used as the app name when `zeroship deploy` auto-creates."
-    },
-    "app": {
-      "type": "string",
-      "x-cli-read": true,
-      "description": "The deploy target's app id (uuid) or name. Absent on a fresh project: the first `zeroship deploy` auto-creates the app and appends its id here."
+      "description": "The workspace name. Used as the app name when `zeroship deploy` auto-creates."
     },
     "control": {
       "type": "string",
@@ -48,10 +43,19 @@
       "x-required-members": ["mode", "dist", "output"],
       "description": "The build shape. `output` crosses the tool boundary (the packer writes it, `zeroship deploy` reads it); the rest is plugin-only."
     },
-    "migrations": {
-      "$ref": "#/$defs/migrations",
-      "x-required-members": ["dir", "out"],
-      "description": "Where migrations are authored and where the fold is written. Both cross the tool boundary; both are x-cli-read."
+    "databases": {
+      "type": "object",
+      "x-entry-name": "database",
+      "propertyNames": { "$ref": "#/$defs/label" },
+      "additionalProperties": { "$ref": "#/$defs/database" },
+      "description": "The workspace's databases, by LOCAL LABEL. A label is not resolvable: it names an entry in this map, and the CLI dereferences it to the entry's `id` before it makes any request, so a label never travels as an identifier. Declaring a database here grants nothing - `zeroship db bind` does, and deploy verifies the binding exists."
+    },
+    "apps": {
+      "type": "object",
+      "x-entry-name": "app",
+      "propertyNames": { "$ref": "#/$defs/label" },
+      "additionalProperties": { "$ref": "#/$defs/app" },
+      "description": "The workspace's apps, by LOCAL LABEL. Each names the database labels it uses and which of them is its primary. `env.db` is the primary and `env.db === env.databases[primary]` by object identity."
     },
     "secrets": {
       "$ref": "#/$defs/secrets",
@@ -63,10 +67,23 @@
       "additionalProperties": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["app", "control"],
-        "description": "`app` and `control` are NON-INHERITABLE: an environment that names a control and inherits the root app is exactly the silent cross-targeting this rule exists to prevent. Everything else inherits, per member.",
+        "required": ["apps", "control", "databases"],
+        "description": "`apps`, `control` and `databases` are NON-INHERITABLE, and each map must cover every label the root declares. An environment that names a production control and inherits a development database id lands WRITES in the wrong place, which is the cross-targeting this rule exists to prevent, one level worse than the wrong code. Everything else inherits, per member.",
         "properties": {
-          "app": { "type": "string", "x-cli-read": true },
+          "apps": {
+            "type": "object",
+            "x-entry-name": "environmentApp",
+            "propertyNames": { "$ref": "#/$defs/label" },
+            "additionalProperties": { "$ref": "#/$defs/environmentApp" },
+            "description": "One entry per root-declared app label, overriding its id. The LABEL is never overridden, so the manifest and the generated client are the same artifact across environments."
+          },
+          "databases": {
+            "type": "object",
+            "x-entry-name": "environmentDatabase",
+            "propertyNames": { "$ref": "#/$defs/label" },
+            "additionalProperties": { "$ref": "#/$defs/environmentDatabase" },
+            "description": "One entry per root-declared database label, overriding its id. `migrations` and `out` are build-time paths and stay label-local."
+          },
           "control": { "type": "string", "x-cli-read": true },
           "protected": {
             "type": "boolean",
@@ -74,7 +91,6 @@
             "description": "`zeroship migrate` against a protected environment requires --yes."
           },
           "build": { "$ref": "#/$defs/build" },
-          "migrations": { "$ref": "#/$defs/migrations" },
           "secrets": { "$ref": "#/$defs/secrets" }
         }
       }
@@ -109,22 +125,73 @@
         }
       }
     },
-    "migrations": {
+    "database": {
       "type": "object",
       "additionalProperties": false,
+      "required": ["id", "migrations", "out"],
       "properties": {
-        "dir": {
+        "id": { "$ref": "#/$defs/databaseId" },
+        "migrations": {
           "type": "string",
-          "default": "migrations",
           "x-cli-read": true,
-          "description": "Migration sources, relative to the project root."
+          "description": "This database's migration sources, relative to the project root."
         },
         "out": {
           "type": "string",
-          "default": "generated/zeroship",
           "x-cli-read": true,
-          "description": "The gen-types output dir holding env.db.ts, schema.runtime.json and migrations.ir.json. `zeroship migrate` posts <out>/migrations.ir.json. Both readers resolve it and reject the project root or an ancestor; the emitter refuses to overwrite unknown existing targets."
+          "description": "The gen-types output dir holding env.db.ts, schema.runtime.json and migrations.ir.json for THIS database. `zeroship migrate` posts <out>/migrations.ir.json. Both readers resolve it and reject the project root or an ancestor; the emitter refuses to overwrite unknown existing targets. Two databases may not share one, because the three filenames are fixed."
         }
+      }
+    },
+    "label": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,31}$",
+      "description": "A creator-chosen LOCAL label. It is a map key, a member name on `env.databases`, and the only name a database has in the manifest, so it is constrained to what reads as one: lowercase, digits and underscores, starting with a letter. That excludes `__proto__` and every other inherited member name a plain property write could reach."
+    },
+    "databaseId": {
+      "type": "string",
+      "pattern": "^dbs_[0-9a-z]{25}$",
+      "x-cli-read": true,
+      "description": "The database's typed id. `zeroship db create` prints it. An identifier of real data, exactly as an app id is."
+    },
+    "app": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["databases"],
+      "properties": {
+        "app": { "$ref": "#/$defs/appId" },
+        "databases": {
+          "type": "array",
+          "items": { "type": "string" },
+          "x-cli-read": true,
+          "description": "The database LABELS this app uses. Every entry must name an entry of the workspace `databases` map. An empty array is a schema-less app: it gets no `env.db` at all."
+        },
+        "primary": {
+          "type": "string",
+          "x-cli-read": true,
+          "description": "Which of `databases` is this app's primary, and therefore `env.db`. Required when `databases` is non-empty; refused when it is empty."
+        }
+      }
+    },
+    "appId": {
+      "type": "string",
+      "x-cli-read": true,
+      "description": "The deploy target's app id. Absent on a fresh project: the first `zeroship deploy` auto-creates the app and writes its id here."
+    },
+    "environmentApp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["app"],
+      "properties": {
+        "app": { "$ref": "#/$defs/appId" }
+      }
+    },
+    "environmentDatabase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {
+        "id": { "$ref": "#/$defs/databaseId" }
       }
     },
     "secrets": {

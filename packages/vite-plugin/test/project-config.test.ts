@@ -48,18 +48,22 @@ const FULL = `{
   // a comment, which is the whole reason the format is JSONC
   "$schema": "https://zeroship.ai/schema/project-v1.json",
   "name": "demo-app",
-  "app": "11111111-1111-4111-8111-111111111111",
   "control": "https://control.zeroship.ai",
   "runtime_date": "2026-08-14",
   "build": { "mode": "full", "dist": "dist", "output": "dist/app.zship" },
-  "migrations": { "dir": "migrations", "out": "generated/zeroship" },
+  "databases": {
+    "main": { "id": "dbs_03evr3oqx1200yyd6zj2cebfw", "migrations": "migrations", "out": "generated/zeroship" }
+  },
+  "apps": {
+    "storefront": { "app": "11111111-1111-4111-8111-111111111111", "databases": ["main"], "primary": "main" }
+  },
   "secrets": ["STRIPE_SECRET_KEY"],
   "environments": {
     "staging": {
-      "app": "22222222-2222-4222-8222-222222222222",
       "control": "https://control.staging.zeroship.ai",
-      "protected": true,
-      "migrations": { "out": "generated/staging" }
+      "apps": { "storefront": { "app": "22222222-2222-4222-8222-222222222222" } },
+      "databases": { "main": { "id": "dbs_03evr3oqx1200uzh8k6gycpgg" } },
+      "protected": true
     }
   }
 }`;
@@ -92,10 +96,23 @@ function schemaCliReadFields(): string[] {
   const visit = (raw: Record<string, any>, path: string) => {
     const node = deref(raw);
     if (node["x-cli-read"] === true) fields.add(path);
-    if (node.type === "object") {
-      for (const [key, child] of Object.entries(node.properties ?? {})) {
-        visit(child as Record<string, any>, path ? `${path}.${key}` : key);
+    if (node.type !== "object") return;
+    // A map keys its values by a creator-chosen LABEL, so its members take a
+    // `*` segment. Walking only `properties` would miss every one of them and
+    // let this independent re-derivation agree with a generator that had
+    // dropped them.
+    const entry =
+      node.additionalProperties != null && typeof node.additionalProperties === "object"
+        ? deref(node.additionalProperties as Record<string, any>)
+        : null;
+    if (entry != null) {
+      for (const [key, child] of Object.entries(entry.properties ?? {})) {
+        visit(child as Record<string, any>, `${path}.*.${key}`);
       }
+      return;
+    }
+    for (const [key, child] of Object.entries(node.properties ?? {})) {
+      visit(child as Record<string, any>, path ? `${path}.${key}` : key);
     }
   };
   for (const [key, child] of Object.entries(schema.properties)) {
@@ -109,12 +126,28 @@ function schemaCliReadFields(): string[] {
   return [...fields].sort();
 }
 
+/**
+ * Resolve a dotted path against the fixture, taking a `*` segment to mean the
+ * first label present. The fixture declares one entry per map, so the choice
+ * is unambiguous there.
+ */
+function segments(value: Record<string, any>, dotted: string): string[] {
+  const out: string[] = [];
+  let cursor: any = value;
+  for (const part of dotted.split(".")) {
+    const key = part === "*" ? Object.keys(cursor ?? {})[0]! : part;
+    out.push(key);
+    cursor = cursor?.[key];
+  }
+  return out;
+}
+
 function valueAt(value: Record<string, any>, dotted: string): unknown {
-  return dotted.split(".").reduce((cursor, part) => cursor?.[part], value as any);
+  return segments(value, dotted).reduce((cursor, part) => cursor?.[part], value as any);
 }
 
 function setValueAt(value: Record<string, any>, dotted: string, replacement: unknown): void {
-  const parts = dotted.split(".");
+  const parts = segments(value, dotted);
   const member = parts.pop()!;
   const parent = parts.reduce((cursor, part) => cursor[part], value);
   parent[member] = replacement;
@@ -191,8 +224,8 @@ describe("locating the file", () => {
       assert.equal(config.build.serverEntry, join(appRoot, "src/server.ts"));
       assert.equal(config.build.dist, join(appRoot, "dist"));
       assert.equal(config.build.output, join(appRoot, "dist/app.zship"));
-      assert.equal(config.migrations.dir, join(appRoot, "migrations"));
-      assert.equal(config.migrations.out, join(appRoot, "generated/zeroship"));
+      assert.equal(config.databases!.main.migrations, join(appRoot, "migrations"));
+      assert.equal(config.databases!.main.out, join(appRoot, "generated/zeroship"));
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -224,9 +257,55 @@ describe("validation", () => {
     }
   });
 
-  test("an environment missing app or control is refused as NON-INHERITABLE", () => {
-    const body = FULL.replace('"app": "22222222-2222-4222-8222-222222222222",\n      ', "");
-    assert.throws(() => parseProjectConfig("zeroship.jsonc", body), /NON-INHERITABLE/);
+  // `apps`, `control` and `databases` are all non-inheritable, and each map
+  // must cover every root label: an environment that names a control and
+  // inherits the root app targets the wrong code, and one that inherits a
+  // database id lands WRITES in the wrong data.
+  test("an environment missing any of apps, control or databases is refused", () => {
+    for (const removed of [
+      '"apps": { "storefront": { "app": "22222222-2222-4222-8222-222222222222" } },\n      ',
+      '"databases": { "main": { "id": "dbs_03evr3oqx1200uzh8k6gycpgg" } },\n      ',
+      '"control": "https://control.staging.zeroship.ai",\n      ',
+    ]) {
+      const body = FULL.replace(removed, "");
+      assert.notEqual(body, FULL, "the fixture must actually change");
+      assert.throws(() => parseProjectConfig("zeroship.jsonc", body), /NON-INHERITABLE/);
+    }
+    // The control: untouched, the same fixture parses.
+    parseProjectConfig("zeroship.jsonc", FULL);
+  });
+
+  test("an environment that leaves a root label out of a map is refused", () => {
+    const two = FULL.replace(
+      '"main": { "id": "dbs_03evr3oqx1200yyd6zj2cebfw", "migrations": "migrations", "out": "generated/zeroship" }',
+      '"main": { "id": "dbs_03evr3oqx1200yyd6zj2cebfw", "migrations": "migrations", "out": "generated/zeroship" },\n    "events": { "id": "dbs_03evr3oqx1200qyvgmdnjrsla", "migrations": "migrations/events", "out": "generated/events" }',
+    );
+    assert.notEqual(two, FULL, "the second database must actually be added");
+    assert.throws(() => parseProjectConfig("zeroship.jsonc", two), /does not name `events`/);
+
+    const covered = two.replace(
+      '"databases": { "main": { "id": "dbs_03evr3oqx1200uzh8k6gycpgg" } }',
+      '"databases": { "main": { "id": "dbs_03evr3oqx1200uzh8k6gycpgg" }, "events": { "id": "dbs_03evr3oqx12012zcpsh30ivwy" } }',
+    );
+    parseProjectConfig("zeroship.jsonc", covered);
+  });
+
+  test("an app naming a database the file does not declare is refused", () => {
+    const body = FULL.replace('"databases": ["main"]', '"databases": ["main", "ghost"]');
+    assert.notEqual(body, FULL, "the stray label must actually be added");
+    assert.throws(() => parseProjectConfig("zeroship.jsonc", body), /does not\s+declare under/);
+  });
+
+  test("an app that uses a database but names no primary is refused", () => {
+    const body = FULL.replace(', "primary": "main" }', " }");
+    assert.notEqual(body, FULL, "the primary must actually be removed");
+    assert.throws(() => parseProjectConfig("zeroship.jsonc", body), /names no `primary`/);
+  });
+
+  test("a label that is not a usable member name is refused", () => {
+    const body = FULL.replace('"main": { "id": "dbs_', '"__proto__": { "id": "dbs_');
+    assert.notEqual(body, FULL, "the label must actually change");
+    assert.throws(() => parseProjectConfig("zeroship.jsonc", body), /not a usable label|__proto__/);
   });
 
   test("secrets entries must look like NAMES, not values", () => {
@@ -314,7 +393,7 @@ describe("validation", () => {
     }
   });
 
-  test("migrations.out cannot target the project root or one of its ancestors", () => {
+  test("a database's out cannot target the project root or one of its ancestors", () => {
     for (const out of [".", "..", "generated/zeroship/../..", "/tmp"]) {
       const body = FULL.replace(
         '"out": "generated/zeroship"',
@@ -324,8 +403,8 @@ describe("validation", () => {
       try {
         assert.throws(
           () => readProjectConfig(root),
-          /migrations\.out/,
-          `migrations.out=${JSON.stringify(out)} must be refused`,
+          /databases\.main\.out/,
+          `databases.main.out=${JSON.stringify(out)} must be refused`,
         );
       } finally {
         rmSync(root, { recursive: true, force: true });
@@ -337,18 +416,23 @@ describe("validation", () => {
 describe("resolution", () => {
   test("the root resolution drops $schema and environments", () => {
     const r = resolveProjectConfig(parsed());
-    assert.equal(r.app, "11111111-1111-4111-8111-111111111111");
-    assert.equal(r.migrations.out, "generated/zeroship");
+    assert.equal(r.apps!.storefront.app, "11111111-1111-4111-8111-111111111111");
+    assert.equal(r.databases!.main.out, "generated/zeroship");
     assert.ok(!("environments" in (r as unknown as Record<string, unknown>)));
     assert.ok(!("$schema" in (r as unknown as Record<string, unknown>)));
   });
 
-  test("an environment replaces app/control and merges migrations member by member", () => {
+  test("an environment replaces control and overrides the id under each label", () => {
     const r = resolveProjectConfig(parsed(), "staging");
-    assert.equal(r.app, "22222222-2222-4222-8222-222222222222");
+    assert.equal(r.apps!.storefront.app, "22222222-2222-4222-8222-222222222222");
     assert.equal(r.control, "https://control.staging.zeroship.ai");
-    assert.equal(r.migrations.out, "generated/staging");
-    assert.equal(r.migrations.dir, "migrations", "unstated members inherit");
+    assert.equal(r.databases!.main.id, "dbs_03evr3oqx1200uzh8k6gycpgg");
+    // The label, the build-time paths and the app wiring are the same artifact
+    // across environments: only the ids move.
+    assert.equal(r.databases!.main.migrations, "migrations");
+    assert.equal(r.databases!.main.out, "generated/zeroship");
+    assert.deepEqual(r.apps!.storefront.databases, ["main"]);
+    assert.equal(r.apps!.storefront.primary, "main");
     assert.equal(r.protected, true);
   });
 
@@ -366,8 +450,8 @@ describe("resolution", () => {
       assert.equal(config.build.mode, "full");
       assert.equal(config.build.dist, "dist");
       assert.equal(config.build.output, "dist/app.zship");
-      assert.equal(config.migrations.dir, "migrations");
-      assert.equal(config.migrations.out, "generated/zeroship");
+      assert.equal(config.databases, undefined, "a scratch directory declares none");
+      assert.equal(config.apps, undefined);
       assert.deepEqual(config.secrets, []);
       assert.deepEqual(defaultProjectConfig(), config);
     } finally {
@@ -455,7 +539,7 @@ describe("the config escape hatch", () => {
   test("the spread idiom does not trip the deny-list", () => {
     const base = resolveProjectConfig(parsed());
     const out = applyProjectConfigOverride(base, (c) => ({ ...c }));
-    assert.equal(out.app, base.app);
+    assert.equal(out.apps!.storefront.app, base.apps!.storefront.app);
     assert.equal(out.control, base.control);
   });
 
@@ -465,13 +549,18 @@ describe("the config escape hatch", () => {
       const before = canonicalJson(base);
       const current = valueAt(base as unknown as Record<string, any>, field);
       assert.notEqual(current, undefined, `${field} needs a stated fixture value`);
-      const replacement = typeof current === "boolean" ? !current : `${String(current)}-changed`;
+      const replacement = Array.isArray(current)
+        ? [...current, "changed"]
+        : typeof current === "boolean"
+          ? !current
+          : `${String(current)}-changed`;
+      const escaped = field.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       assert.throws(
         () => applyProjectConfigOverride(base, (c) => {
           setValueAt(c as unknown as Record<string, any>, field, replacement);
           return {};
         }),
-        new RegExp(`may not change \\\`${field.replace(".", "\\.")}\\\``),
+        new RegExp(`may not change \\\`${escaped}\\\``),
         `${field} must be refused after an in-place change`,
       );
       assert.equal(canonicalJson(base), before, `${field} mutation escaped the callback copy`);
@@ -490,11 +579,14 @@ describe("the config escape hatch", () => {
 
   test("the deny-list and schema markers match the explicit Rust-read contract", () => {
     const expected = [
-      "app",
+      "apps.*.app",
+      "apps.*.databases",
+      "apps.*.primary",
       "build.output",
       "control",
-      "migrations.dir",
-      "migrations.out",
+      "databases.*.id",
+      "databases.*.migrations",
+      "databases.*.out",
       "name",
       "protected",
       "runtime_date",
@@ -508,7 +600,7 @@ describe("the config escape hatch", () => {
 describe("the canonical dump", () => {
   test("keys are sorted and the output is compact", () => {
     const dump = canonicalJson(resolveProjectConfig(parsed()));
-    assert.ok(dump.startsWith('{"app":'), dump);
+    assert.ok(dump.startsWith('{"apps":'), dump);
     assert.ok(!dump.includes("\n"), dump);
     assert.equal(canonicalJson({ b: 1, a: 2 }), '{"a":2,"b":1}');
     assert.equal(canonicalJson({ a: 2, b: 1 }), '{"a":2,"b":1}');
@@ -525,7 +617,8 @@ describe("JSONC edge cases the two readers must agree on", () => {
     const body =
       '{"name":"a","control":"u","runtime_date":"2026-08-14",' +
       '"build":{"mode":"full","dist":"d","output":"o","serverEntry":"x\\"/*y*/,}-café-😀.ts",},' +
-      '"migrations":{"dir":"m","out":"g",},}';
+      '"databases":{"main":{"id":"dbs_03evr3oqx1200yyd6zj2cebfw","migrations":"m","out":"g",},},' +
+      '"apps":{"storefront":{"databases":["main",],"primary":"main",},},}';
     const r = resolveProjectConfig(parseProjectConfig("zeroship.jsonc", body));
     assert.equal(r.build.serverEntry, 'x"/*y*/,}-café-😀.ts');
   });
@@ -587,7 +680,7 @@ describe("JSONC edge cases the two readers must agree on", () => {
   test("loose JSON extensions are rejected", () => {
     const cases = [
       FULL.replace('"name":', "name:"),
-      FULL.replace('"name": "demo-app",\n  "app"', '"name": "demo-app"\n  "app"'),
+      FULL.replace('"name": "demo-app",\n  "control"', '"name": "demo-app"\n  "control"'),
       FULL.replace('"demo-app"', "'demo-app'"),
       FULL.replace('"demo-app"', "0x10"),
       FULL.replace('"demo-app"', "+1"),
@@ -616,6 +709,8 @@ describe("JSONC edge cases the two readers must agree on", () => {
     );
     const r = resolveProjectConfig(loadProjectConfig(fixture));
     assert.equal(r.name, "config-fixture");
-    assert.equal(r.migrations.out, "generated/zeroship");
+    assert.deepEqual(Object.keys(r.databases ?? {}), ["main", "analytics"]);
+    assert.equal(r.databases!.main.out, "generated/zeroship/main");
+    assert.deepEqual(r.apps!.storefront.databases, ["main", "analytics"]);
   });
 });

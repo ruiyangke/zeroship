@@ -13,10 +13,6 @@
   "name": "zeroship-app",
 
   // Where `zeroship deploy` and `zeroship migrate` send things.
-  //
-  // `app` is ABSENT on purpose: your first `zeroship deploy` creates the app
-  // and appends its id here. After that, `deploy`, `migrate`,
-  // `secret` and `var` all read it and you never type `--app=` again.
   "control": "https://control.zeroship.ai",
 
   // Stamped with today's UTC date by the scaffolder and carried in the manifest.
@@ -31,26 +27,52 @@
     "output": "dist/app.zship"
   },
 
+  // Your databases, by LOCAL LABEL. The label is yours; the `id` is what
+  // `zeroship db create` printed and the only thing that reaches a server.
+  //
   // Every key is written out rather than left to a default. The CLI has NO
   // fallbacks for these: if the file is silent it errors naming the key, which
   // is what stops it and the build from quietly disagreeing about a path.
-  "migrations": {
-    "dir": "migrations",
-    "out": "generated/zeroship"
+  //
+  // Declaring a database here grants nothing. `zeroship db bind` does, and
+  // `zeroship deploy` refuses when the binding is missing.
+  "databases": {
+    "main": {
+      "id": "dbs_03evr3oqx12012zcpsh30ivwy",
+      "migrations": "migrations",
+      "out": "generated/zeroship"
+    }
+  },
+
+  // Your apps, by LOCAL LABEL. `primary` is the database `env.db` reaches;
+  // every database listed is also on `env.databases`, and
+  // `env.db === env.databases[primary]` by object identity.
+  //
+  // `app` is ABSENT on purpose: your first `zeroship deploy` creates the app
+  // and writes its id here. After that, `deploy`, `migrate`, `secret` and `var`
+  // all read it and you never type `--app=` again.
+  "apps": {
+    "app": {
+      "databases": ["main"],
+      "primary": "main"
+    }
   },
 
   // Secret NAMES only. `zeroship deploy` can then tell you which ones the
   // deployed app is still missing.
   "secrets": []
 
-  // Named deploy targets, selected with --env=<name>. Both `app` and `control`
-  // must be stated in each one - an environment that names a staging control
-  // and inherits the production app is the mistake this rule exists to stop.
+  // Named deploy targets, selected with --env=<name>. Each one must state
+  // `apps`, `control` AND `databases`, and its maps must cover every label
+  // above - an environment that names a staging control and inherits the
+  // production app targets the wrong code, and one that inherits a database id
+  // lands writes in the wrong data.
   //
   // "environments": {
   //   "staging": {
-  //     "app": "<staging app id>",
   //     "control": "https://control.zeroship.ai",
+  //     "apps": { "app": { "app": "<staging app id>" } },
+  //     "databases": { "main": { "id": "<staging database id>" } },
   //     "protected": true
   //   }
   // }

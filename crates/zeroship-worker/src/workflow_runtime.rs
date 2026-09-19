@@ -123,7 +123,7 @@ impl WorkerWorkflowRuntimeLoader {
             })
             .collect();
         let descriptor = executable
-            .runtime_descriptor()
+            .primary_schema()
             .map(serde_json::to_string)
             .transpose()
             .map_err(|_| invalid("invalid workflow runtime descriptor"))?;
@@ -351,7 +351,12 @@ mod tests {
                 let bytes = serde_json::to_vec(&descriptor).unwrap();
                 let hash = zeroship_bundle::sha256_hex(&bytes);
                 self.blobs.put_blob(&hash, &bytes).await.unwrap();
-                manifest.runtime_descriptor = Some(RuntimeDescriptorEntry { hash });
+                manifest.runtime_descriptor = vec![RuntimeDescriptorEntry {
+                    label: "main".into(),
+                    database_id: zeroship_core::DatabaseId::mint(),
+                    primary: true,
+                    hash,
+                }];
             }
             LoadedWorker::load(&manifest, &self.blobs, 1024 * 1024)
                 .await
