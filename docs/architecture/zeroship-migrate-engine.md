@@ -611,15 +611,15 @@ table("app_audit", { schema: "zeroship" }).trigger("app_audit_block_delete").cre
 Authored from the parent handle: `table(parent).partition(child)` → `PartitionRef`. The parent declares strategy at create via `partitionBy: { range | list | hash: string[] }`; children declare bounds:
 
 ```ts
-table("sandbox_events", { schema: "zeroship" }).create({ columns: {…}, primaryKey: ["id","occurred_at"],
+table("audit_events", { schema: "zeroship" }).create({ columns: {…}, primaryKey: ["id","occurred_at"],
   partitionBy: { range: ["occurred_at"] } });
-table("sandbox_events").partition("y2026_05").create({ from: ["2026-05-01"], to: ["2026-06-01"] });  // RANGE
+table("audit_events").partition("y2026_05").create({ from: ["2026-05-01"], to: ["2026-06-01"] });  // RANGE
 table("events").partition("events_eu").create({ in: ["de","fr","es"] });                             // LIST
 table("events").partition("events_h0").create({ modulus: 4, remainder: 0 });                         // HASH
 table("events").partition("events_default").create({ default: true });                               // DEFAULT
 table("events").partition("events_head").create({ from: [minValue], to: ["2026-01-01"] });           // unbounded sentinel
-table("sandbox_events").partition("y2026_05").detach();   // PG concurrently
-table("sandbox_events").partition("y2026_05").drop();
+table("audit_events").partition("y2026_05").detach();   // PG concurrently
+table("audit_events").partition("y2026_05").drop();
 ```
 
 `minValue`/`maxValue` are frozen sentinels. `PartitionBoundArgs` is exactly one of `{from,to}`, `{in}`, `{modulus,remainder}`, `{default:true}`.
@@ -869,7 +869,7 @@ meet at one wire type - the v2
 `RuntimeSchemaDescriptor`: gen-types *emits* it, the `.zship` packer *carries*
 it, native boot *binds* it, and `installSchema` projects its typed JavaScript
 wrappers. See
-[§11.6–§11.7](#11-platform-self-hosting--build-integration).
+[§11.5–§11.6](#11-platform-self-hosting--build-integration).
 
 ---
 
@@ -1123,7 +1123,7 @@ Distinct from the hard `AuthoringError` gate above, `analysis/analyze.rs` (today
 | `TRUNCATE_DATA_LOSS` | `TRUNCATE` — irreversible, not MVCC-rolled-back the way `DELETE` is |
 | `LOCK_HEAVY_MAINTENANCE` | `CLUSTER`/`VACUUM FULL`/non-concurrent `REINDEX` — heavy lock for its duration |
 
-`analyze(sql)` runs every analyzer over a parseable statement (unparseable SQL yields no advisories — the guard already denies it); `analyze_migration(&Migration)` runs it over a `Migration.up`, the seam the declarative differ uses to attach operational advisories to each generated migration. These advisories surface (never gate) in `GuardReport.advisories`, the `submit_migration` outcome ([§11.8](#11-platform-self-hosting--build-integration)), and the CLI `lint` verb ([§12.8](#12-testing--operating)).
+`analyze(sql)` runs every analyzer over a parseable statement (unparseable SQL yields no advisories — the guard already denies it); `analyze_migration(&Migration)` runs it over a `Migration.up`, the seam the declarative differ uses to attach operational advisories to each generated migration. These advisories surface (never gate) in `GuardReport.advisories`, the `submit_migration` outcome ([§11.7](#11-platform-self-hosting--build-integration)), and the CLI `lint` verb ([§12.8](#12-testing--operating)).
 
 ### 7.10 Validation boundaries
 
@@ -1592,7 +1592,7 @@ Every layer is explicit about its own limits and names the next layer that cover
 
 ## §11 Platform self-hosting & build integration
 
-The zeroship platform is its own biggest `@zeroship/migrate` customer. The entire platform database — control-plane, auth/OIDC, billing/metering, and the extracted sandbox's tables — is authored as a committed JS-DSL corpus in `db/migrations-ts/` and applied by the same engine creators use, but under the widened **Platform** trust profile instead of **Confined**.
+The zeroship platform is its own biggest `@zeroship/migrate` customer. The entire platform database — control-plane, auth/OIDC and billing/metering — is authored as a committed JS-DSL corpus in `db/migrations-ts/` and applied by the same engine creators use, but under the widened **Platform** trust profile instead of **Confined**.
 
 ### 11.1 The platform migration corpus (`db/migrations-ts/`)
 
@@ -1603,17 +1603,16 @@ SQL/Flyway/Liquibase, no committed `.ir.json`):
 
 | File | default-exported `name` | Contents |
 | --- | --- | --- |
-| `20260702000100_schema_roles_extensions.ts` | `schema_roles_extensions` | `zeroship` schema, `citext` ext, 10 roles, 13 domains, 1 sequence |
+| `20260702000100_schema_roles_extensions.ts` | `schema_roles_extensions` | `zeroship` schema, `citext` ext, 5 roles, 13 domains, 1 sequence |
 | `20260702000200_control_tables.ts` | `control_tables` | 19 control-plane tables (`apps`, `app_members`, `app_secrets`, `app_schema_applies`, …) |
 | `20260702000300_auth_oauth_tables.ts` | `auth_oauth_tables` | 28 auth/OIDC tables (`users`, `oauth_clients`, `gateway_sessions`, `signing_keys`, …) |
 | `20260702000400_billing_metering_invoice_tables.ts` | `billing_metering_invoice_tables` | 31 billing tables (`invoices`, `invoice_lines`, `credit_ledger`, `plans`, …) |
-| `20260702000500_sandbox_tables.ts` | `sandbox_tables` | 5 sandbox tables (`sandboxes`, `shares`, `hosts`, `wake_jobs`, partitioned `sandbox_events`) |
 | `20260702000600_constraints_indexes_fks.ts` | `constraints_indexes_fks` | uniques, plain + partial indexes, FKs across all tables |
 | `20260702000700_functions_triggers_comments.ts` | `functions_triggers_comments` | 15 `createFunction` plpgsql triggers, trigger wiring, comments |
 | `20260702000800_policies_rls.ts` | `policies_rls` | `setRls` + tenant-isolation `policy()` on 9 tables |
 | `20260702000900_grants.ts` | `grants` | per-role `grant`/`revoke` |
 
-**Naming/timestamp grammar.** The 14-digit prefix `YYYYMMDDHHMMSS` is the corpus order key (`^(\d{14})_([A-Za-z0-9_]+)\.ts$`, enforced by `packages/vite-plugin/src/gen-types/recorder.ts:37` and the Rust loader) — no master/changelog file. **Never edit an already-applied migration** — the engine validates per-migration checksums and aborts on drift; add a new timestamped file. The nine files share the date and increment the time component, split by *concern* (schema/roles → tables-per-domain → constraints → functions → RLS → grants) because objects have creation-order dependencies.
+**Naming/timestamp grammar.** The 14-digit prefix `YYYYMMDDHHMMSS` is the corpus order key (`^(\d{14})_([A-Za-z0-9_]+)\.ts$`, enforced by `packages/vite-plugin/src/gen-types/recorder.ts:37` and the Rust loader) — no master/changelog file. **Never edit an already-applied migration** — the engine validates per-migration checksums and aborts on drift; add a new timestamped file. The eight files share the date and increment the time component, split by *concern* (schema/roles → tables-per-domain → constraints → functions → RLS → grants) because objects have creation-order dependencies.
 
 ### 11.2 The "explicit `{schema}`" convention — the key confined-vs-platform difference
 
@@ -1627,7 +1626,7 @@ grant({ privileges: ["usage"], on: { kind: "schema", names: ["zeroship"] }, to: 
 
 A confined creator writes `table("posts").create({…})` with **no** `{schema}` — their unqualified ops resolve against a default project schema at apply time (and `gen-types` folds them under the neutral literal `"public"`, [§5.3](#5-authoring-declarative-desired-state--the-fold)). The Platform corpus spans the shared `zeroship` schema and must name it explicitly on every op. The Platform profile is the only profile that permits `cross_schema` references and schema/extension/role/grant DDL at all ([§10.5](#10-security-first-design)).
 
-The bootstrap file `schema_roles_extensions.ts` is the infrastructure floor: the `zeroship` schema, `citext`, 10 roles (service roles `zeroship_{auth,control,gateway,worker,app}` — the first two `bypassRls: true` — plus four `sandbox_*` roles, §11.5), 13 `domain`s acting as platform-wide enums (`spend_state ∈ {allow,warn,degrade,block}`, `invoice_status`, `billing_period`), and the `audit_events_id_seq` sequence. The corpus uses one `table(...)` handle for portable and PG-vendor table operations alike: partial indexes, RLS, regex CHECKs, and constraint validation all stay capability/dialect-gated by the engine. Where the DSL cannot express a construct, the corpus uses the gated `raw({ sql, reason })` escape — e.g. a `CREATE TRIGGER … BEFORE UPDATE OF sector_identifier …` the trigger DSL cannot express (`functions_triggers_comments.ts:27`). `raw`/`raw_view_body` are capabilities *only Platform enables*. The trigger-heavy file encodes financial-integrity invariants in plpgsql (append-only audit tables, immutable ledgers, controlled state machines); RLS tenant isolation keys off `current_setting('zeroship.tenant_app', true)::uuid`.
+The bootstrap file `schema_roles_extensions.ts` is the infrastructure floor: the `zeroship` schema, `citext`, 5 roles (service roles `zeroship_{auth,control,gateway,worker,app}` — the first two `bypassRls: true`), 13 `domain`s acting as platform-wide enums (`spend_state ∈ {allow,warn,degrade,block}`, `invoice_status`, `billing_period`), and the `audit_events_id_seq` sequence. The corpus uses one `table(...)` handle for portable and PG-vendor table operations alike: partial indexes, RLS, regex CHECKs, and constraint validation all stay capability/dialect-gated by the engine. Where the DSL cannot express a construct, the corpus uses the gated `raw({ sql, reason })` escape — e.g. a `CREATE TRIGGER … BEFORE UPDATE OF sector_identifier …` the trigger DSL cannot express (`functions_triggers_comments.ts:27`). `raw`/`raw_view_body` are capabilities *only Platform enables*. The trigger-heavy file encodes financial-integrity invariants in plpgsql (append-only audit tables, immutable ledgers, controlled state machines); RLS tenant isolation keys off `current_setting('zeroship.tenant_app', true)::uuid`.
 
 ### 11.3 Policy-defined table shape
 
@@ -1655,13 +1654,9 @@ The engine tracks applied work in an append-only journal, so `migrate` runs only
 
 **Where the journal lives depends on who owns the schema.** The PLATFORM corpus keeps its own meta schema, `zeroship_migrations`, because it has no tenant: nothing owns `zeroship` the way a migrator role owns an app schema. A CREATOR app's journal lives in the app's own schema (`"<app_uuid>".__zeroship_schema_migrations` and five siblings), because a tenant does own theirs. On both, the table names carry the `__zeroship_` prefix: the engine bootstraps with `CREATE TABLE IF NOT EXISTS` and its table names are literals, so an unfenced `schema_migrations` in a schema a creator can declare tables in would be silently adopted as the journal.
 
-**A creator can drop their own journal**, and that is accepted rather than fixed: they own the schema, owner privileges are implicit and cannot be revoked away, and corrupting it breaks only them. The platform therefore never treats it as a trust anchor — the deploy precondition reads `zeroship.app_schema_applies` (§11.6), which the migration service writes on the control plane's own database.
+**A creator can drop their own journal**, and that is accepted rather than fixed: they own the schema, owner privileges are implicit and cannot be revoked away, and corrupting it breaks only them. The platform therefore never treats it as a trust anchor — the deploy precondition reads `zeroship.app_schema_applies` (§11.5), which the migration service writes on the control plane's own database.
 
-### 11.5 The `sandbox_*` roles + tables shared with the extracted sandbox
-
-The sandbox backend was extracted to the standalone `zeroship-sandbox` repo but **shares this deployment's Postgres**; the contract lives entirely in the platform corpus. **Roles** (`schema_roles_extensions.ts:14-17`): `sandbox_admin` (nologin, DDL-owning), `sandbox_app` (login, runtime), `sandbox_audit` (append-only event writer), `sandbox_gdpr` (deletion/erasure). **Tables** (`sandbox_tables.ts`): `sandboxes`, `shares`, `hosts`, `wake_jobs`, the range-partitioned `sandbox_events` (monthly partitions + a `default` partition via `partitionBy: { range: ["ts"] }`), with regex CHECKs enforcing typed-id shapes. **Grants** (`grants.ts:7-10,32-36`) scope each role's CRUD. The control plane reaches the sandbox over HTTP (`SANDBOX_URL`/`SANDBOX_TOKEN`), but the *database contract* is these platform-authored roles/tables — so editing `sandbox_tables.ts` here is a cross-repo API change.
-
-### 11.6 `app_schema_applies` — the platform's own record of a creator apply
+### 11.5 `app_schema_applies` — the platform's own record of a creator apply
 
 The platform schema carries ONE table for the creator-migration service: `zeroship.app_schema_applies` (`control_tables.ts`, PK `["app_id","migration_id"]`, `status ∈ {submitted, applied, failed}`, storing `request_body`/`effective_profile`/`ceiling_id`/`ceiling_version`/`descriptor_sha256`/`applied_versions`/`applied_at`/`last_error`). Granted `select, insert, update` to `zeroship_control` only.
 
@@ -1669,11 +1664,11 @@ The platform schema carries ONE table for the creator-migration service: `zerosh
 
 **THREE `migrated_*` TABLES USED TO LIVE HERE and were deleted on 2026-08-28.** `migrated_migrations` carried a `planned → pending_approval → approved → applied` workflow whose approval endpoint no dashboard, CLI or service ever called; `migrated_migration_audit` had one writer and zero readers; `migrated_app_policies` stored a policy that is now declared in the creator's repository and folded at build time, arriving with the apply request. Operator approval of destructive creator migrations is a capability removed on purpose, not an omission.
 
-### 11.7 The build fold (cross-ref)
+### 11.6 The build fold (cross-ref)
 
 The `gen-types` fold that turns a creator's migration set into `env.db.ts` + `schema.runtime.json`, and how the vite-plugin / `.zship` packer / `installSchema` consume the v2 `RuntimeSchemaDescriptor`, are documented in [§5.3–§5.4](#5-authoring-declarative-desired-state--the-fold). The two directions (declarative-differ vs migration-first fold) and the runtime installation meet at that one wire type.
 
-### 11.8 The submission ingress pipeline (`submit_migration`)
+### 11.7 The submission ingress pipeline (`submit_migration`)
 
 `ops/submit.rs` is the **single safe ingress** for a client-authored (builder / control plane / CLI) migration script — the confined creator path. A client hands in a `Submission` (raw `up` SQL, optional `down`, a little metadata) and `submit_migration` runs it through the FULL stack — **ingest → guard → lint → live-seeded dry-run → gate → apply** — never letting any step be skipped or its verdict forged. The submitter cannot reach `executor::apply` (nor the engine gate) except through this funnel (`submit.rs:1-9`).
 
@@ -1685,10 +1680,10 @@ The `gen-types` fold that turns a creator's migration set into `env.db.ts` + `sc
 
 This ingress is where the §11.3 seal machinery meets the effective-policy meet: the Confined ingress → `effective = ceiling ⊓ draft` (`PolicyProfile::meet_ceiling_draft`) → `SealedProfile` HMAC → journal. `ops/submit.rs` is ~1,047 lines.
 
-### 11.9 Caveats
+### 11.8 Caveats
 
 - The corpus uses `raw({ sql, reason })` where the structured DSL cannot express a construct, such as `trigger().create` for `UPDATE OF <column>`.
-- The engine journal (`zeroship_migrations.__zeroship_schema_migrations` for the platform corpus) and `zeroship.app_schema_applies` are different things (§11.4 vs §11.6): the first records what the engine ran, the second what the platform accepted. No `.ts` authors the journal itself — consistent with it being engine-internal (bootstrapped by the apply path).
+- The engine journal (`zeroship_migrations.__zeroship_schema_migrations` for the platform corpus) and `zeroship.app_schema_applies` are different things (§11.4 vs §11.5): the first records what the engine ran, the second what the platform accepted. No `.ts` authors the journal itself — consistent with it being engine-internal (bootstrapped by the apply path).
 - **Historical snapshot:** reverse bodies in the then-nine-file platform corpus
   were empty. The current corpus uses the same `schema()` / `data()` contract as
   every other `@zeroship/migrate` caller.

@@ -26,7 +26,6 @@ pub mod net_policy;
 pub mod observability;
 pub mod oidc_verify;
 pub mod pkce;
-pub mod preview_ports;
 pub mod project_data_key;
 pub mod readiness;
 pub mod replication_names;

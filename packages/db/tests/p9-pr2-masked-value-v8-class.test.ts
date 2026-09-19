@@ -32,7 +32,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { installSchemaForTest } from "./_install-helper.js";
 import { t, schema as schemaWrap } from "../src/index.js";
-import { mapResultDoc } from "../src/utils.js";
+import { mapResultDoc } from "../../../crates/zeroship-data-v8/js/runtime/utils.js";
 import type { Row, MaskedValue } from "../src/index.js";
 import type { NativeDb } from "../src/native.js";
 

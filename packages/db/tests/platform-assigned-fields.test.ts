@@ -1,7 +1,7 @@
 // Assignment validation uses the declared fixture schema and leaves caller input intact.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { validateDoc } from "../src/validate.js";
+import { validateDoc } from "../../../crates/zeroship-data-v8/js/runtime/validate.js";
 import { ValidationError } from "../src/errors.js";
 import type { NormalizedSchema } from "../src/schema.js";
 import { generatedSchema } from "./_install-helper.js";

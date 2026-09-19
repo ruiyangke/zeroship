@@ -10,9 +10,8 @@ import { raw } from "@zeroship/migrate";
 // This map is semantic, not name-based. It deliberately excludes raw UUID
 // domains;
 // pricing_config.id and workflow_rollout_config.id (the constant "global");
-// OAuth client ids, provider ids, hashes, idempotency keys, boot ids, snapshot
-// and worker ids, the URL-safe share token id, and arbitrary text. Some included
-// ids, such as built-in plan ids and sandbox project ids, are deterministically
+// OAuth client ids, provider ids, hashes, idempotency keys, and arbitrary text.
+// Some included ids, such as built-in plan ids, are deterministically
 // UUID-derived rather than UUIDv7; bytewise comparison is still the canonical
 // identity-domain rule, but those particular values do not encode creation time.
 // ONE ENTRY PER TABLE. This is an object literal, so a table named twice keeps
@@ -104,15 +103,6 @@ const typedIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
   // Workflow identities and immutable deployment references.
   app_deploy_holds: ["app_id", "deploy_id", "holder_id"],
   workflow_policy_ledger: ["id"],
-
-  // Sandbox typed-id world. Partition children inherit the sandbox_events
-  // column collations from the partitioned parent.
-  deleted_sandboxes: ["sandbox_id", "user_id"],
-  hosts: ["host_id"],
-  sandbox_events: ["event_id", "sandbox_id", "user_id"],
-  sandboxes: ["sandbox_id", "user_id", "project_id", "host_id"],
-  shares: ["sandbox_id", "iss"],
-  wake_jobs: ["wake_id", "sandbox_id"],
 };
 
 export default {

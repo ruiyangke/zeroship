@@ -368,11 +368,7 @@ is live in `crates/zeroship-authz/src/resource.rs`, the narrowing rule is
 `crates/zeroship-control/src/organizations.rs` serves the create, read and
 membership routes. So every `projects.id` foreign key in the sketches below
 points at a live table carrying exactly the `prj_` spelling this paragraph used
-to tell a reader to reconcile. The prefix collision it warned about is still
-live and still not a join: `zeroship.sandboxes.project_id` in
-`db/migrations-ts/20260702000500_sandbox_tables.ts` carries its own `prj_` check
-for a derived dedup key belonging to the extracted sandbox subsystem, with no
-foreign key into this corpus.
+to tell a reader to reconcile.
 
 **What the landed entity leaves for step 9, and it is a real obligation rather
 than nothing.** `projects.id` carries a NON-DEFAULT catalog collation: the

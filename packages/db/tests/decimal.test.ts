@@ -9,7 +9,7 @@ import {
   type SortSpec,
   type UpdateExpression,
 } from "../src/index.js";
-import { validateDoc } from "../src/validate.js";
+import { validateDoc } from "../../../crates/zeroship-data-v8/js/runtime/validate.js";
 
 const fields = {
   amount: t.numeric({ precision: 30, scale: 2 }).required(),

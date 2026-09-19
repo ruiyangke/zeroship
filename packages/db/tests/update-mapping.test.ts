@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mapUpdateOutbound } from "../src/utils.js";
+import { mapUpdateOutbound } from "../../../crates/zeroship-data-v8/js/runtime/utils.js";
 import { ValidationError } from "../src/errors.js";
 
 test("update mapping refuses assignments that collide after column mapping", () => {

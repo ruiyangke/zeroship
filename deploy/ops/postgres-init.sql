@@ -17,8 +17,8 @@
 -- boot) gives every connection the right resolution order.
 --
 -- This covers `postgres` only - the role the `migrate` service connects as. The
--- per-service login roles (zeroship_{auth,control,gateway}; sandbox_{app,
--- audit,gdpr}) get their OWN `ALTER ROLE ... SET search_path = zeroship, public`
--- inside migrations V0025/V0026, since those roles do not exist yet at
--- initdb time (the platform migration runner creates them on first boot).
+-- per-service login roles (zeroship_{auth,control,gateway}) get their OWN
+-- `ALTER ROLE ... SET search_path = zeroship, public` inside the migrations,
+-- since those roles do not exist yet at initdb time (the platform migration
+-- runner creates them on first boot).
 ALTER ROLE postgres SET search_path = zeroship, public;

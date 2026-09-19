@@ -19,16 +19,6 @@
 //!   database they share would be useless for exactly the case that motivates
 //!   sharing it.
 //!
-//! # The prefix collision, and why it is not a foreign key
-//!
-//! `zeroship.sandboxes.project_id` carries a `^prj_[0-9a-z]{25}$` CHECK.
-//! That column is NOT this entity: it holds a derived dedup key minted by the
-//! extracted `zeroship-sandbox` controller - usually an app id re-tagged into
-//! the `prj_` namespace - it has no foreign key to anything, and its only use is
-//! a partial unique index over live sandboxes. It is being retired so this
-//! prefix carries one meaning per schema. Until that lands, the two must not be
-//! joined, and this crate deliberately offers no conversion between them.
-//!
 //! Like every macro-declared id it exposes no route to the embedded bits, and
 //! like [`crate::organization_id::OrganizationId`] it seeds no physical name: a
 //! project id keys rows and scopes a subject derivation that lives in the auth

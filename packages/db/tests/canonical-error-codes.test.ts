@@ -2,12 +2,14 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import {
   canonicalErrorCode,
-  mapNativeError,
-  mapOptimisticConcurrencyError,
   NotFoundError,
   OptimisticLockError,
   ValidationError,
 } from "../src/errors.js";
+import {
+  mapNativeError,
+  mapOptimisticConcurrencyError,
+} from "../../../crates/zeroship-data-v8/js/runtime/errors.js";
 
 function nativeError(code: string): Error {
   return Object.assign(new Error(code), { code });

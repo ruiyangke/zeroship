@@ -3,9 +3,11 @@
  * Validates documents and partial update objects against a NormalizedSchema,
  * collecting all field errors before throwing a single ValidationError.
  */
-import { NormalizedSchema } from "./schema";
-import { decimal, FieldDef, PlainObject, TypeName, PrimitiveTypeName } from "./types";
-import { ValidationError, FieldError } from "./errors";
+import type { NormalizedSchema } from "../../../../packages/db/src/schema";
+import { decimal } from "../../../../packages/db/src/types";
+import type { FieldDef, PlainObject, TypeName, PrimitiveTypeName } from "../../../../packages/db/src/types";
+import { ValidationError } from "../../../../packages/db/src/errors";
+import type { FieldError } from "../../../../packages/db/src/errors";
 
 type Doc = PlainObject;
 

@@ -1,34 +1,40 @@
-import { trackRelations, type ReadResultMapper } from "./collection/read-mapping";
-import type { FieldDef } from "./types";
+import { trackRelations, type ReadResultMapper } from "./read-mapping";
+import type { FieldDef } from "../../../../packages/db/src/types";
 /**
  * Lazy query builder for @zeroship/db.
  * A Query is a thenable that collects sort/limit/skip/select options and
  * executes the native find call only when awaited or .then() is called.
  */
 import { mapResultDoc } from "./utils";
-import { isIdValue } from "./identity.js";
+import { isIdValue } from "./identity";
 import {
   InvalidOperationError,
   NotFoundError,
   NotUniqueError,
-} from "./errors";
+} from "../../../../packages/db/src/errors";
 import {
+  ok,
+  err,
+} from "../../../../packages/db/src/types";
+import type {
   PlainObject,
   Result,
   Row,
-  type Actor,
-  type ExactWithSpec,
-  type IdValue,
-  type RowId,
-  type SelectableField,
-  type SelectInput,
-  type SelectSpec,
-  type SortInput,
-  type WithRelations,
-  type WithSpec,
-  ok,
-  err,
-} from "./types";
+  Actor,
+  ExactWithSpec,
+  IdValue,
+  RowId,
+  SelectableField,
+  SelectInput,
+  SelectSpec,
+  SortInput,
+  WithRelations,
+  WithSpec,
+} from "../../../../packages/db/src/types";
+import type {
+  PaginationResult,
+  Query as QueryContract,
+} from "../../../../packages/db/src/db-types";
 
 type NativeFn = (
   collection: string,
@@ -47,14 +53,6 @@ type CursorState = {
   /** Values for every ordering key in the last returned row. */
   lastValues: Record<string, unknown>;
   lastId: IdValue;
-};
-
-/** Page envelope returned by `Query.paginate()`. Matches Convex's shape so
- *  a future `useZShipPaginatedQuery` hook can adopt it without translation. */
-export type PaginationResult<R> = {
-  page: R[];
-  continueCursor: string;
-  isDone: boolean;
 };
 
 /** Base64-encode a CursorState using `btoa` so the cursor is a plain
@@ -159,7 +157,7 @@ export class Query<
   S = PlainObject,
   P = Row<S>,
   AllSchemas extends Record<string, unknown> = Record<string, unknown>,
-> {
+> implements QueryContract<S, P, AllSchemas> {
   private _collection: string;
   private _filter: ZeroshipDbFilter;
   private _toField: (s: string) => string;

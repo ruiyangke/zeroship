@@ -143,10 +143,6 @@ services:
       - "127.0.0.1:9090:9090"
 ```
 
-There is no `sandbox` service here: the sandbox/preview backend lives in the
-standalone `zeroship-sandbox` project and is run from there. The `control`
-service reaches it over HTTP via `SANDBOX_URL` / `SANDBOX_TOKEN`.
-
 ### Image build
 
 The single `Dockerfile` builds the platform services and the Node migration
@@ -210,7 +206,7 @@ and writes the same content-addressed deploy blobs. The worker also passes
 `--storage-url /data/app-storage` (the `app-storage` volume) for the
 creator-facing `env.storage` namespace.
 
-The compose file already sets the current service names, keys, and sandbox env vars. Use it as the source of truth before copying flags into ad-hoc commands.
+The compose file already sets the current service names and keys. Use it as the source of truth before copying flags into ad-hoc commands.
 
 ### Production object storage (S3 / R2 / MinIO)
 
@@ -267,8 +263,7 @@ console.zeroship.localhost --console-zship /opt/zeroship/console/app.zship` in
 this stack. On first boot it ingests that prebuilt `.zship` (emitted by the
 image's `js-packages` stage) and registers it as a public-PKCE gateway-fronted app, so
 Caddy proxies `console.zeroship.localhost` to the gateway like any creator app.
-Its runtime config - `OPENAI_API_KEY`, `SANDBOX_URL`/`SANDBOX_TOKEN`,
-`ZEROSHIP_CONTROL_URL` - is forwarded from control's process env onto the seeded
+Its runtime config - `OPENAI_API_KEY`, `ZEROSHIP_CONTROL_URL` - is forwarded from control's process env onto the seeded
 console app's server-side env store at install time (secrets encrypted, plain
 URLs as vars), replacing what the retired `builder` Vite service used to inject.
 The standalone Vite container and its confidential OIDC client
@@ -467,5 +462,4 @@ schema. See [Database migrations](db-migrations.md) for the layout,
 
 - [Database migrations](db-migrations.md) - platform JS DSL migrations, the `migrate` service, and `deploy/ops/db-migrate.sh`.
 - [Local dev setup](../runbooks/local-dev.md) - the same platform stack run as four bare `cargo`-built binaries instead of containers.
-- [Builder sandbox](../architecture/builder.md) - where the sandbox/preview backend lives now and how `control` reaches it.
 - [Distributed architecture](../architecture/distributed.md) - what the `control`/`gateway`/`worker` services are and how they coordinate.

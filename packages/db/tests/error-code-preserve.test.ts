@@ -11,12 +11,15 @@ import { generatedSchema } from "./_install-helper.js";
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { model } from "../../../crates/zeroship-data-v8/js/testing.js";
+import { Collection } from "../../../crates/zeroship-data-v8/js/runtime/collection.js";
 import { t } from "../src/index.js";
-import { mapNativeError } from "../src/errors.js";
+import { fieldsOf } from "./_install-helper.js";
+import { mapNativeError } from "../../../crates/zeroship-data-v8/js/runtime/errors.js";
 import type { NativeDb } from "../src/native.js";
 
 type AnyRec = Record<string, unknown>;
+
+const usersSchema = { ...generatedSchema, name: t.string().required() };
 
 function makeFailingNative(err: Error) {
   const native = {
@@ -38,7 +41,7 @@ describe("native error .code preservation", () => {
         code: "MIGRATION_ALREADY_RUNNING",
       }),
     );
-    const Users = model("users", { ...generatedSchema, name: t.string().required() }, native);
+    const Users = new Collection<typeof usersSchema>("users", fieldsOf(usersSchema), native);
     const { error } = await Users.insert({ name: "Alice" });
     assert.ok(error);
     assert.equal((error as Error & { code?: string }).code, "MIGRATION_ALREADY_RUNNING");
@@ -49,7 +52,7 @@ describe("native error .code preservation", () => {
     const native = makeFailingNative(
       Object.assign(new Error("unique violation"), { code: "UNIQUE_VIOLATION" }),
     );
-    const Users = model("users", { ...generatedSchema, name: t.string().required() }, native);
+    const Users = new Collection<typeof usersSchema>("users", fieldsOf(usersSchema), native);
     const { error } = await Users.update({ id: "1" }, { $set: { name: "Bob" } });
     assert.ok(error);
     assert.equal((error as Error & { code?: string }).code, "UNIQUE_VIOLATION");
@@ -59,7 +62,7 @@ describe("native error .code preservation", () => {
     const native = makeFailingNative(
       Object.assign(new Error("permission denied"), { code: "PERMISSION_DENIED" }),
     );
-    const Users = model("users", { ...generatedSchema, name: t.string().required() }, native);
+    const Users = new Collection<typeof usersSchema>("users", fieldsOf(usersSchema), native);
     const { error } = await Users.find({});
     assert.ok(error);
     assert.equal((error as Error & { code?: string }).code, "PERMISSION_DENIED");

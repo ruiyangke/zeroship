@@ -287,8 +287,6 @@ working app deployed to their subdomain, can iterate via chat.
 - Agent: Claude Opus with system prompt + tool definitions
 - Tool definitions: write_file, run_migration, run_test, get_preview_url,
   describe_error
-- Sandbox per session: ephemeral container running `zeroship serve` against
-  a PGlite
 - On "publish": deploy pipeline from Phase 1 takes over
 - Context management: session state is the file tree + chat history +
   summary of intent

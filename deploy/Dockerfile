@@ -13,10 +13,6 @@
 # of which migrate anything. So the one-shot gets its OWN stage (`migrate`,
 # below) and the compose `migrate` service builds that target.
 #
-# NOTE: the sandbox/preview backend (zeroship-sandbox + agent + nomad-driver-ch)
-# now lives in the standalone `zeroship-sandbox` project and is built/shipped
-# there. The control plane talks to it over HTTP (SANDBOX_URL / SANDBOX_TOKEN).
-#
 # Native services are built after the Node workspace. The Node stage emits the
 # database SDK facade embedded by `zeroship-data-v8` and builds the migration
 # add-on and CLI. The Rust builder copies those SDK outputs with the native
@@ -56,13 +52,6 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 # importers for both. `pnpm install --frozen-lockfile` validates the on-disk
 # workspace against the lockfile, so every workspace package must be present
 # or the install fails. examples/ is tiny (no committed node_modules).
-#
-# apps/ USED to be copied here. apps/zeroship-builder - the creator console -
-# was extracted out of this repo by 8dbe4a8d4 and the COPY was left behind, so
-# this image could not build AT ALL until 2026-08-11 (task #318): the build
-# died with `"/apps": not found`. The console is NOT part of this image any
-# more and control no longer gets --bootstrap-console. Restoring it means
-# fetching the extracted builder repo, not re-adding this COPY.
 COPY examples/ examples/
 # pnpm-workspace.yaml lists packages/* and crates/zeroship-migrate-node as workspace
 # members, and the lockfile pins them as importers - so --frozen-lockfile needs

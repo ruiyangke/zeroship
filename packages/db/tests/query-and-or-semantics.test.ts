@@ -15,9 +15,10 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { model } from "../../../crates/zeroship-data-v8/js/testing.js";
+import { Collection } from "../../../crates/zeroship-data-v8/js/runtime/collection.js";
 import { t } from "../src/index.js";
 import { naming } from "../src/index.js";
+import { fieldsOf } from "./_install-helper.js";
 import type { NativeDb } from "../src/native.js";
 
 type AnyRec = Record<string, unknown>;
@@ -40,17 +41,18 @@ function makeMockNative() {
 describe("Filter AND/OR semantics (Mongo-compatible)", () => {
   test("sibling keys + $or compose as AND( field=x , OR(...) )", async () => {
     const { native, calls } = makeMockNative();
-    const Users = model(
+    const schema = {
+      id: t.string().required().primaryKey(),
+      email: t.string().required().unique(),
+      active: t.boolean(),
+    };
+    const Users = new Collection<typeof schema>(
       "users",
-      {
-        id: t.string().required().primaryKey(),
-        email: t.string().required().unique(),
-        active: t.boolean(),
-      },
+      fieldsOf(schema),
       native,
       // asIs naming so the column key in the dispatched filter equals the
       // schema field — easier to assert without snake/camel conversion.
-      naming.asIs,
+      { naming: naming.asIs },
     );
     await Users.find({
       email: "x",
@@ -70,16 +72,17 @@ describe("Filter AND/OR semantics (Mongo-compatible)", () => {
 
   test("nested $and inside $or preserves grouping", async () => {
     const { native, calls } = makeMockNative();
-    const Users = model(
+    const schema = {
+      id: t.string().required().primaryKey(),
+      name: t.string().required(),
+      age: t.double(),
+      role: t.string(),
+    };
+    const Users = new Collection<typeof schema>(
       "users",
-      {
-        id: t.string().required().primaryKey(),
-        name: t.string().required(),
-        age: t.double(),
-        role: t.string(),
-      },
+      fieldsOf(schema),
       native,
-      naming.asIs,
+      { naming: naming.asIs },
     );
     await Users.find({
       $or: [
@@ -97,11 +100,12 @@ describe("Filter AND/OR semantics (Mongo-compatible)", () => {
 
   test("bare $or with no sibling keys passes through unchanged", async () => {
     const { native, calls } = makeMockNative();
-    const Users = model(
+    const schema = { id: t.string().required().primaryKey(), active: t.boolean() };
+    const Users = new Collection<typeof schema>(
       "users",
-      { id: t.string().required().primaryKey(), active: t.boolean() },
+      fieldsOf(schema),
       native,
-      naming.asIs,
+      { naming: naming.asIs },
     );
     await Users.find({ $or: [{ active: true }, { active: false }] });
     const dispatched = calls[0].filter;

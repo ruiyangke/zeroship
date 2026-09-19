@@ -1,4 +1,4 @@
-import { generatedSchema } from "./_install-helper.js";
+import { fieldsOf, generatedSchema } from "./_install-helper.js";
 /**
  * get(idOrFilter, { select }) narrowing — compile-time assertions
  * dressed as runtime tests. The bodies are trivial; the value is that
@@ -7,11 +7,17 @@ import { generatedSchema } from "./_install-helper.js";
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { model } from "../../../crates/zeroship-data-v8/js/testing.js";
+import { Collection } from "../../../crates/zeroship-data-v8/js/runtime/collection.js";
 import { t, type Row } from "../src/index.js";
 import type { NativeDb } from "../src/native.js";
 
 type AnyRec = Record<string, unknown>;
+
+const baseUsersSchema = {
+  ...generatedSchema,
+  email: t.string().required().unique(),
+  name: t.string().required(),
+};
 
 function makeMockNative(row: AnyRec | null) {
   const native = {
@@ -35,13 +41,10 @@ function makeMockNative(row: AnyRec | null) {
 
 describe("get(...) select narrowing", () => {
   test("get with select returns Pick<Row, K> | null", async () => {
-    const Users = model(
+    const schema = { ...baseUsersSchema, age: t.double() };
+    const Users = new Collection<typeof schema>(
       "users",
-      { ...generatedSchema,
-        email: t.string().required().unique(),
-        name: t.string().required(),
-        age: t.double(),
-      },
+      fieldsOf(schema),
       makeMockNative({ id: "usr_01", email: "a@b.com" }),
     );
 
@@ -62,12 +65,9 @@ describe("get(...) select narrowing", () => {
   });
 
   test("get without select returns Row<S> | null", async () => {
-    const Users = model(
+    const Users = new Collection<typeof baseUsersSchema>(
       "users",
-      { ...generatedSchema,
-        email: t.string().required().unique(),
-        name: t.string().required(),
-      },
+      fieldsOf(baseUsersSchema),
       makeMockNative({ id: "usr_01", email: "a@b.com", name: "Alice" }),
     );
 
@@ -82,12 +82,9 @@ describe("get(...) select narrowing", () => {
   });
 
   test("get with orderBy but no select still returns Row<S> | null", async () => {
-    const Users = model(
+    const Users = new Collection<typeof baseUsersSchema>(
       "users",
-      { ...generatedSchema,
-        email: t.string().required().unique(),
-        name: t.string().required(),
-      },
+      fieldsOf(baseUsersSchema),
       makeMockNative({ id: "usr_01", email: "a@b.com", name: "Alice" }),
     );
 
@@ -99,12 +96,9 @@ describe("get(...) select narrowing", () => {
   });
 
   test("get returns null when nothing matched", async () => {
-    const Users = model(
+    const Users = new Collection<typeof baseUsersSchema>(
       "users",
-      { ...generatedSchema,
-        email: t.string().required().unique(),
-        name: t.string().required(),
-      },
+      fieldsOf(baseUsersSchema),
       makeMockNative(null),
     );
 

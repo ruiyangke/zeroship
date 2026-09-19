@@ -27,4 +27,5 @@ export default defineConfig({
   clean: true,
   external: ["zeroship"],
   noExternal: [/^@zeroship\/schema$/],
+  minify: true,
 });

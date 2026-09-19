@@ -9,8 +9,8 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { t } from "../src/index.js";
-import { validateDoc } from "../src/validate.js";
-import { normalizeSchema } from "../../../crates/zeroship-data-v8/js/testing.js";
+import { validateDoc } from "../../../crates/zeroship-data-v8/js/runtime/validate.js";
+import { fieldsOf } from "./_install-helper.js";
 
 type ErrorWithCode = Error & { code?: string };
 
@@ -43,24 +43,24 @@ describe(".default / .clientDefault split", () => {
   });
 
   test("validateDoc evaluates a client default at insert", () => {
-    const schema = normalizeSchema({ token: t.string().clientDefault(() => "tok") });
+    const schema = fieldsOf({ token: t.string().clientDefault(() => "tok") });
     assert.equal(validateDoc({}, schema).token, "tok");
   });
 
   test("a required field with a client default is not missing", () => {
-    const schema = normalizeSchema({
+    const schema = fieldsOf({
       token: t.string().required().clientDefault(() => "tok"),
     });
     assert.equal(validateDoc({}, schema).token, "tok");
   });
 
   test("a provided value wins over the client default", () => {
-    const schema = normalizeSchema({ token: t.string().clientDefault(() => "tok") });
+    const schema = fieldsOf({ token: t.string().clientDefault(() => "tok") });
     assert.equal(validateDoc({ token: "given" }, schema).token, "given");
   });
 
   test("a nested required field with a client default is not rejected", () => {
-    const schema = normalizeSchema({
+    const schema = fieldsOf({
       profile: t.object({ token: t.string().required().clientDefault(() => "tok") }),
     });
     assert.doesNotThrow(() => validateDoc({ profile: {} }, schema));

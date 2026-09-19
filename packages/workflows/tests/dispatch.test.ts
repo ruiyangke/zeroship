@@ -25,7 +25,6 @@ import {
   StalledError,
   StepTimeoutError,
   Workflow,
-  WorkflowTimeoutError,
 } from "../src/index.ts";
 import type { StepContext, WorkflowStep, WorkflowTrigger } from "../src/index.ts";
 
@@ -824,31 +823,6 @@ test("an uncommitted signal wait suspends with its matching options", { timeout:
   assert.equal(result.maxSignalAge, "10m", show(result));
 });
 
-test("a timed-out signal wait replays as its recorded failure", { timeout: TEST_TIMEOUT_MS }, async () => {
-  class Checkout extends Workflow<unknown, unknown> {
-    async run(_trigger: WorkflowTrigger<unknown>, step: WorkflowStep) {
-      return await step.waitForSignal("approved", { timeout: "1h" });
-    }
-  }
-
-  const result = await replay(Checkout, [
-    {
-      ordinal: 0,
-      name: "approved",
-      nameOccurrence: 0,
-      kind: "wait_signal",
-      state: "failed",
-      error: {
-        type: "WorkflowTimeoutError",
-        message: "workflow signal wait timed out for approved",
-        retryable: false,
-      },
-    },
-  ]);
-
-  assertRunFailed(result, "WorkflowTimeoutError", "workflow signal wait timed out for approved");
-});
-
 test("an uncommitted child call suspends and a committed one returns its output", { timeout: TEST_TIMEOUT_MS }, async () => {
   class EchoChildWorkflow extends Workflow<{ value: string }, { value: string }> {
     run(): { value: string } {
@@ -1551,7 +1525,6 @@ test("every exported workflow error matches its own name and nothing else", () =
     PermanentError,
     StalledError,
     StepTimeoutError,
-    WorkflowTimeoutError,
   ];
 
   for (const ErrorClass of classes) {

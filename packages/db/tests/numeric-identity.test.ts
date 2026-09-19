@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Collection } from "../src/collection.js";
+import { Collection } from "../../../crates/zeroship-data-v8/js/runtime/collection.js";
 import { t, type InferId, type PlainObject } from "../src/types.js";
 import type { NativeDb } from "../src/native.js";
 import type { TxCollection } from "../src/db-types.js";

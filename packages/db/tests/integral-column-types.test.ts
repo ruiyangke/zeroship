@@ -20,7 +20,7 @@ import assert from "node:assert/strict";
 
 import { t, type UpdateExpression } from "../src/types";
 
-import { validateDoc } from "../src/validate";
+import { validateDoc } from "../../../crates/zeroship-data-v8/js/runtime/validate";
 
 function validate(type: string, value: unknown): { ok: true; doc: unknown } | { ok: false; message: string } {
   try {
