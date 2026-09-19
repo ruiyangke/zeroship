@@ -95,6 +95,18 @@ pub const CAPABILITY_READONLY: &str = "readonly";
 /// writes any other value.
 const STATUS_PROVISIONING: &str = "provisioning";
 
+/// The status a database stops at when a caller deletes it.
+///
+/// The ROW SURVIVES the delete, because the schema and its data survive it. No
+/// process here can drop them, and the cluster reconciler that can must be told
+/// to rather than left to infer it: a reconciler cannot tell a failed read of
+/// the declarations from an empty one, so a rule of "drop whatever no row
+/// names" turns a network error into data loss. Roles are reaped by absence
+/// because the next pass re-grants them; a schema is dropped only against this
+/// value. The reconciler removes the row once the drop has committed, which is
+/// also what frees the name under `databases_project_name_key`.
+const STATUS_DELETING: &str = "deleting";
+
 /// The status a freshly declared binding stops at, for the same reason.
 const BINDING_STATUS_PENDING: &str = "pending";
 
@@ -221,6 +233,13 @@ pub enum DatabaseError {
     /// this is not a policy layered over a permissive schema; it is the same
     /// rule stated where the caller can read it, with the remedy named.
     DatabaseHasBindings(Vec<BoundApp>),
+    /// The database is being deleted, so a new binding must not be admitted.
+    ///
+    /// Bind and delete serialize on the same organization lock, so without this
+    /// a bind arriving just after the mark would hand an app a binding to a
+    /// schema the reconciler is about to drop - and the binding would outlive
+    /// the schema it names.
+    DatabaseDeleting,
     /// This app already binds this database
     /// (`database_bindings_natural_key`). Carries the capability the live
     /// binding holds, because that is the fact a caller re-binding is usually
@@ -263,7 +282,10 @@ impl DatabaseError {
                 .json(&json!({"error": "invalid request", "detail": detail})),
             Self::NameTaken(name) => web::HttpResponse::Conflict().json(&json!({
                 "error": "name taken",
-                "detail": format!("this project already has a database called {name:?}"),
+                "detail": format!(
+                    "this project already has a database called {name:?}. A database being \
+                     deleted still holds its name until its schema has been dropped"
+                ),
                 "name": name,
             })),
             Self::ReservedName(detail) => web::HttpResponse::Conflict()
@@ -284,6 +306,11 @@ impl DatabaseError {
                     "execution_zone_id": execution_zone_id,
                 }))
             }
+            Self::DatabaseDeleting => web::HttpResponse::Conflict().json(&json!({
+                "error": "database is being deleted",
+                "detail": "this database is being deleted and its schema is being dropped, so \
+                           it cannot take a new binding. Create a database and bind that one",
+            })),
             Self::DatabaseHasBindings(bound) => {
                 let apps = bound
                     .iter()
@@ -816,17 +843,27 @@ async fn project_zone<C: GenericClient + Sync>(
         .ok_or(DatabaseError::ProjectNotFound)
 }
 
-/// Delete a database, refusing while any app binds it.
+/// Mark a database for deletion, refusing while any app binds it.
 ///
-/// # The refusal names the apps, and the constraint is the backstop
+/// # The row survives; the status changes
 ///
-/// `database_bindings_database_project_fkey` is `ON DELETE RESTRICT`, so the
-/// rule holds whether or not this statement carries it. Leaning on the
-/// constraint alone would surface a constraint name; the `NOT EXISTS` clause is
-/// the same rule under the organization row lock, and
-/// [`classify_delete_refusal`] turns zero rows into the list of apps to unbind.
-/// The error mapper still turns a raced `23503` into the same typed refusal, so
-/// a binding inserted concurrently cannot surface as a 500.
+/// The schema and its data outlive this call, so the declaration that they
+/// should go has to outlive it too. The cluster reconciler is the only process
+/// that can drop them, and it must be TOLD to: it cannot tell a failed read of
+/// the declarations from an empty one, so a rule of "drop whatever no row
+/// names" would turn a network error into data loss. It removes the row once
+/// the drop has committed, which is what frees the name under
+/// `databases_project_name_key`.
+///
+/// Repeating the call is a no-op that succeeds: re-marking a `deleting`
+/// database writes the value it already holds.
+///
+/// # The refusal names the apps
+///
+/// The `NOT EXISTS` clause is the rule, evaluated under the organization row
+/// lock, and [`classify_delete_refusal`] turns zero rows into the list of apps
+/// to unbind. `bind_database` takes the same lock and refuses a `deleting`
+/// database, so a binding cannot be admitted between the check and the commit.
 ///
 /// No schema and no role is dropped here, for the reason
 /// [`crate::registry::Registry::archive_app`] already gives: Control holds no
@@ -851,9 +888,10 @@ pub async fn delete_database(
     let (organization_id, project_id) = lock_database_organization(&tx, database_id).await?;
 
     let sql = format!(
-        "DELETE FROM zeroship.databases d \
-          USING zeroship.projects p \
-          {joins} \
+        "UPDATE zeroship.databases d \
+            SET status = $3, updated_at = NOW() \
+           FROM zeroship.projects p \
+           {joins} \
           WHERE d.id = $1 AND p.id = d.project_id AND {rank} >= {developer} \
             AND NOT EXISTS (SELECT 1 FROM zeroship.database_bindings b \
                              WHERE b.database_id = d.id) \
@@ -863,19 +901,16 @@ pub async fn delete_database(
         developer = ladder_rank_of(ROLE_DEVELOPER),
     );
     let rows = tx
-        .query(&sql, &[&database_id.as_str(), &principal.as_str()])
+        .query(
+            &sql,
+            &[
+                &database_id.as_str(),
+                &principal.as_str(),
+                &STATUS_DELETING,
+            ],
+        )
         .await
-        .map_err(|err| {
-            if is_foreign_key_violation(&err) {
-                // A binding committed between the NOT EXISTS above and this
-                // statement's constraint check. The transaction is now aborted,
-                // so the app list cannot be read here; the caller gets the rule
-                // with an empty list rather than a 500.
-                DatabaseError::DatabaseHasBindings(Vec::new())
-            } else {
-                db_error(&err, "delete database")
-            }
-        })?;
+        .map_err(|err| db_error(&err, "delete database"))?;
     let Some(row) = rows.first() else {
         return Err(classify_delete_refusal(&tx, database_id, &project_id, principal).await);
     };
@@ -1005,7 +1040,7 @@ pub async fn bind_database(
            JOIN zeroship.projects p ON p.id = d.project_id \
            JOIN zeroship.apps a ON a.id = $2 AND a.project_id = d.project_id \
            {joins} \
-          WHERE d.id = $3 AND {rank} >= {developer} \
+          WHERE d.id = $3 AND d.status <> $7 AND {rank} >= {developer} \
             AND NOT EXISTS (SELECT 1 FROM zeroship.database_bindings existing \
                              WHERE existing.app_id = a.id AND existing.database_id = d.id) \
          RETURNING id, app_id, \
@@ -1026,6 +1061,7 @@ pub async fn bind_database(
                 &capability,
                 &BINDING_STATUS_PENDING,
                 &principal.as_str(),
+                &STATUS_DELETING,
             ],
         )
         .await
@@ -1112,6 +1148,18 @@ async fn classify_bind_refusal<C: GenericClient + Sync>(
             }
         }
         Err(err) => return db_error(&err, "classify bind: read existing binding"),
+    }
+
+    let deleting = tx
+        .query(
+            "SELECT 1 FROM zeroship.databases WHERE id = $1 AND status = $2",
+            &[&database_id.as_str(), &STATUS_DELETING],
+        )
+        .await;
+    match deleting {
+        Ok(rows) if rows.is_empty() => {}
+        Ok(_) => return DatabaseError::DatabaseDeleting,
+        Err(err) => return db_error(&err, "classify bind: read database status"),
     }
 
     let placed = tx
