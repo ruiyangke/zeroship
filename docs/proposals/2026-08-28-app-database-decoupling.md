@@ -1769,6 +1769,26 @@ Each records something that was tried or specified and broke.
   refused, so a value added to `databases_status_check` later is non-bindable until someone decides
   it should be; the refusing spelling named `deleting` and let `draining` through.
 
+- **Do not bind the fence assertion by deleting `SET LOCAL ROLE`.** It reddens every arm at its
+  CONTROL rather than at the refusal, and the reason is structural: `cluster::grant_binding` issues
+  `GRANT <binding> TO <worker> WITH INHERIT FALSE`, so the shared login carries nothing at all until
+  the batch narrows. Removing the narrowing removes reach, and the permitted read dies before the
+  refused one is attempted. The mutation that lands on the refusal is to widen the cluster instead -
+  `GRANT USAGE ON SCHEMA <schema> TO PUBLIC` beside the capability grants in
+  `cluster::converge_database` - which leaves both controls passing and the neighbours green.
+
+- **Do not let a fence arm settle for `is_err()`.** Under the widening mutation above, the read is
+  STILL refused, by a second guard: the per-column ACL an apply issues. `expect_err` alone prints
+  green over a removed schema fence. The arm survives only because it asserts PostgreSQL's schema
+  denial specifically rather than any error, which is the disjunction rule stated where it bites.
+
+- **Do not trust a mutation that compiled and appeared in the diff.** `dbd-datapath` mutated
+  `DbRoute::new` to drop the database and the suite printed green - not because the guard was
+  unbound, but because `DbBinding::route` builds the struct literally and `DbRoute::new` has no
+  caller outside its own unit tests. The mutation was applied and still measured nothing. Mutating
+  `DbBinding::route` itself reddens the two-database lane arm at its lane assertion. Before reading
+  a green as evidence, confirm the mutated symbol is on the path the test exercises.
+
 ---
 
 ## History
