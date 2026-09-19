@@ -1,8 +1,9 @@
 # Decoupling app identity from database identity
 
-**Status.** PARTLY BUILT, on `feat/app-database-decoupling`. What exists is the identity and
-the entities; nothing on the data path has moved yet, so no app can reach a second database and
-no fence is enforced at runtime.
+**Status.** PARTLY BUILT, on `feat/app-database-decoupling`. What exists is the identity, the
+entities, the control-plane surface that declares them and the cluster reconciler that makes a
+cluster match. The data path has not moved: the worker still composes a per-app role name, so
+no app reaches a second database and no fence is enforced at runtime yet.
 
 Built:
 
@@ -25,16 +26,24 @@ Built:
   constructs that Cedar resource. Control writes no `datastores` row: placement READS that
   table, and a cluster registers itself through the service holding its credential.
 
+- the cluster reconciler (`crates/zeroship-migrate-server/src/datastore/`), one loop per
+  datastore inside the migration service: a cluster self-registers on its own
+  `pg_control_system()` identity, the bootstrap corpus creates the platform logins and the
+  admin schema, each declared database becomes a schema and its three roles, each declared
+  binding becomes the two grant edges, and a binding role no declaration names is reaped. A
+  cluster below PostgreSQL 16 is refused by version. `crates/zeroship-migrate-server/tests/
+  datastore_reconciler_pg.rs` drives it against a live control plane and a live tenant cluster,
+  including the fence end to end through a real worker login.
+
 Not built, and this is the whole data path: `zeroship_core::app_derivation::schema_name`
 (`crates/zeroship-core/src/app_derivation.rs`) still returns the app id itself; `DbBinding`
 (`crates/zeroship-data-orm/src/binding.rs`) still carries `{ app_id, deploy_token, schema }`;
-no role chain is provisioned and no epoch is produced.
+the worker still composes the per-app role name, and no apply advances an epoch.
 
-**Nothing reaches `active`.** The cluster reconciler does not exist, so no schema and no role is
-created for anything the management surface declares: a database stops at `provisioning` and a
-binding at `pending`. Placement admits `active` datastores only, so nothing downstream can
-consume a row this surface writes. That ceiling is asserted from the stored rows in
-`crates/zeroship-control/tests/database_surface_test.rs`, not left to inspection.
+**Control still never writes `active` itself.** The management surface declares and stops: a
+database it creates stops at `provisioning` and a binding at `pending` until a reconciler holding
+that cluster's credential has made the cluster match. That ceiling is asserted from the stored
+rows in `crates/zeroship-control/tests/database_surface_test.rs`, not left to inspection.
 
 Four things this design depends on HAVE landed and are relied on below: the organization and
 project ladder with its composite ownership keys

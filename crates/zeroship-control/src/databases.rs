@@ -27,11 +27,11 @@
 //!
 //! # NOTHING HERE REACHES `status = 'active'`
 //!
-//! Control DECLARES; a per-cluster reconciler converges. That reconciler does
-//! not exist yet, so no schema and no role is ever created, and a row created
-//! here stops at `provisioning` while a binding stops at `pending`. Placement
-//! admits `active` datastores only, so nothing downstream can consume what this
-//! module writes. That is deliberate: a transition written here would be a
+//! Control DECLARES; a per-cluster reconciler converges
+//! (`zeroship_migrate_server::datastore`), inside the service that holds the
+//! cluster's privileged credential. A row created here therefore stops at
+//! `provisioning`, and a binding at `pending`, until that loop has made the
+//! cluster match. That is deliberate: a transition written here would be a
 //! claim about a cluster this process cannot reach and holds no credential for.
 //!
 //! # Control never inserts a datastore

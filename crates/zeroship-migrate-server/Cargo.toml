@@ -80,6 +80,11 @@ base64 = { workspace = true }
 ed25519-dalek = { workspace = true, features = ["pkcs8", "pem", "rand_core"] }
 jsonwebtoken = { workspace = true }
 testcontainers = { version = "0.28", default-features = false, features = ["blocking"] }
+# The reconciler target reaches one tenant cluster as three different logins -
+# the privileged provisioning role, the shared worker login, and a probe role
+# that may not read one control table - so it rewrites the fixture DSN's
+# userinfo rather than composing three DSN strings that could drift apart.
+url = { workspace = true }
 # Authoring proof: run the zero-migrate recorder inside zeroship-runtime's V8 isolate
 # to author an ir_version:1 envelope from a `.ts` migration - the platform's own V8
 # (no Node in the loop). Dev-only: the library surface stays V8-free.

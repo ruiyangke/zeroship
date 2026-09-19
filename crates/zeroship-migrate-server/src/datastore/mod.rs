@@ -263,7 +263,7 @@ impl Reconciler {
         }
 
         if report.failures.is_empty() {
-            self.control.record_datastore_error(&datastore, "").await.ok();
+            self.control.clear_datastore_error(&datastore).await?;
         }
         Ok((datastore, report))
     }

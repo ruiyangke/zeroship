@@ -281,6 +281,32 @@ impl ControlStore {
         datastore: &DatastoreId,
         message: &str,
     ) -> Result<(), ControlError> {
+        self.set_datastore_error(datastore, Some(message)).await
+    }
+
+    /// Withdraw a recorded failure once a pass completed cleanly.
+    ///
+    /// Writes NULL rather than an empty string: `last_error` is read as "is
+    /// there a failure", and an empty string is a value, so clearing to one
+    /// would leave every recovered cluster looking like it had failed with a
+    /// message nobody wrote.
+    ///
+    /// # Errors
+    /// [`ControlError::Query`] on any database failure.
+    pub async fn clear_datastore_error(
+        &self,
+        datastore: &DatastoreId,
+    ) -> Result<(), ControlError> {
+        self.set_datastore_error(datastore, None).await
+    }
+
+    /// Guarded on the value actually changing, so a converged pass writes
+    /// nothing.
+    async fn set_datastore_error(
+        &self,
+        datastore: &DatastoreId,
+        message: Option<&str>,
+    ) -> Result<(), ControlError> {
         self.client
             .execute(
                 "UPDATE zeroship.datastores \
