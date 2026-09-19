@@ -11,7 +11,6 @@ use super::{PolicyObservation, PolicySource};
 use crate::Error;
 use std::{
     future::Future,
-    num::NonZeroUsize,
     pin::Pin,
     time::{Duration, Instant},
 };
@@ -19,6 +18,7 @@ use std::{
 mod cache;
 mod models;
 mod store;
+pub use cache::PolicyObservations;
 pub use store::{ControlPolicyStore, RolloutPolicy};
 
 /// Native metadata for the Control binding. Source projections contain only
@@ -32,25 +32,31 @@ pub fn collections() -> Result<zeroship_data_orm::schema::Schema, Error> {
     Ok(schema)
 }
 
-/// Runtime-local cache whose entries never renew their original source validity.
+/// A thread's store bound to the process-wide observations every thread shares.
 ///
-/// Concurrent misses for the same app return a retryable failure while its
-/// bounded database observation is pending. No detached refresh survives cancellation.
+/// Entries never renew their original source validity. Concurrent misses for
+/// the same app return a retryable failure while its bounded database
+/// observation is pending. No detached refresh survives cancellation.
 #[derive(Debug)]
 pub struct ControlPolicies {
     store: ControlPolicyStore,
-    cache: cache::Cache,
+    observations: PolicyObservations,
     read_timeout: Duration,
 }
 
 impl ControlPolicies {
-    /// Bind a native store with finite I/O and cache-memory bounds.
+    /// Bind a native store with finite I/O to this process's observations.
+    ///
+    /// The observations are supplied rather than created here: every thread of
+    /// one manager must answer for an app from the same observation, or the
+    /// deadline a host is granted moves backwards whenever its lease lands on
+    /// another thread.
     ///
     /// # Errors
     /// Rejects zero or unrepresentable timeouts.
     pub fn new(
         store: ControlPolicyStore,
-        capacity: NonZeroUsize,
+        observations: PolicyObservations,
         read_timeout: Duration,
     ) -> Result<Self, Error> {
         if read_timeout.is_zero() || Instant::now().checked_add(read_timeout).is_none() {
@@ -58,7 +64,7 @@ impl ControlPolicies {
         }
         Ok(Self {
             store,
-            cache: cache::Cache::new(capacity),
+            observations,
             read_timeout,
         })
     }
@@ -67,7 +73,7 @@ impl ControlPolicies {
     /// A delayed refresh cannot restore the removed entry. Other replicas remain
     /// bounded by their original observations; this is not a fleet-wide barrier.
     pub fn invalidate(&self, app: &zeroship_core::app_id::AppId) {
-        self.cache.invalidate(app);
+        self.observations.cache().invalidate(app);
     }
 }
 
@@ -77,7 +83,7 @@ impl PolicySource for ControlPolicies {
         app: &'a zeroship_core::app_id::AppId,
     ) -> Pin<Box<dyn Future<Output = Result<PolicyObservation, Error>> + 'a>> {
         Box::pin(async move {
-            match self.cache.reserve(app)? {
+            match self.observations.cache().reserve(app)? {
                 cache::Reservation::Cached(observation) => Ok(observation),
                 cache::Reservation::Refresh(ticket) => {
                     let observation =
@@ -91,6 +97,6 @@ impl PolicySource for ControlPolicies {
     }
 
     fn revalidate(&self, observation: &PolicyObservation) -> Result<Instant, Error> {
-        self.cache.revalidate(observation)
+        self.observations.cache().revalidate(observation)
     }
 }
