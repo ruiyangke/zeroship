@@ -667,7 +667,60 @@ async fn inline_output_limit_commits_a_terminal_workflow_failure() {
     let error = fixture.app.status(&run.id).await.unwrap().error.unwrap();
     assert_eq!(error["type"], "LimitExceededError");
     assert_eq!(error["retryable"], false);
+    assert_eq!(
+        error["message"],
+        "workflow step output exceeds the configured payload limits"
+    );
     fixture.assert_disposed().await;
+}
+
+/// Drive one body that catches whatever its own step raises, over an output of
+/// the given length, and report where the run rested and what it returned.
+async fn caught_step_output(length: usize) -> (RunState, Option<serde_json::Value>) {
+    let fixture = Fixture::new(&format!(
+        r"
+        export class Example {{
+            async run(_trigger,step) {{
+                try {{
+                    return await step.run('large',{{output:'inline'}},()=>'x'.repeat({length}));
+                }} catch (e) {{
+                    return e.name;
+                }}
+            }}
+        }}
+    "
+    ))
+    .await;
+    let run = fixture
+        .app
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let mut runner = fixture.runner_with_output_limits(Duration::from_secs(5), OUTPUT_LIMITS);
+    let state = advance_until_suspended(&mut runner).await.state;
+    let output = fixture.app.status(&run.id).await.unwrap().output;
+    fixture.assert_disposed().await;
+    (state, output)
+}
+
+#[compio::test]
+async fn an_oversized_step_output_reaches_the_body_as_that_step_failing() {
+    // The refusal is recorded against the step, so the body resumes at that row
+    // and a catch around it can take another path the run completes on.
+    assert_eq!(
+        caught_step_output(64).await,
+        (RunState::Completed, Some(json!("LimitExceededError")))
+    );
+}
+
+#[compio::test]
+async fn a_step_output_inside_the_inline_budget_never_reaches_the_catch() {
+    // The control for the case above: the same body and the same catch site,
+    // differing only in whether the output clears the inline budget.
+    assert_eq!(
+        caught_step_output(8).await,
+        (RunState::Completed, Some(json!("xxxxxxxx")))
+    );
 }
 
 /// How long a deadline test gives the host before its watchdog must fire.
