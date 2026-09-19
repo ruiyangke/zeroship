@@ -477,8 +477,15 @@ const outputs = await step.startMany(SendReceipt, [
 });
 ```
 
-Results are returned in issue order. The shipped batch cap is 1,000 items; over
-the cap throws `LimitExceededError`.
+Results are returned in issue order. Every item joins the single frontier that
+dispatch submits, so one batch shares a budget with every other step issued in
+the same turn. The app plan sets that budget as `maxFrontier`, and the platform
+is what holds it: the value reaches no isolate, so the SDK cannot measure a
+batch against it before issuing one. A dispatch whose frontier exceeds the
+plan's budget is refused rather than journaled, so no step is recorded, the run
+does not advance, and the body has nothing to catch. Size a fan-out against the
+plan the app runs under, and split a wider one across successive batches,
+awaiting each before issuing the next.
 
 ### `step.continueAsNew`
 
@@ -876,7 +883,7 @@ The SDK exports these workflow error classes:
 | `StalledError` | The platform reclaimed 4 consecutive dispatches of one frontier without the run reporting an outcome. | Not raised in your body: it is the platform's verdict. On a forward frontier it is recorded on the run, which rests `stalled`. On a rollback frontier it is recorded as `compensation.reason` and the run rests `failed` with the rollback abandoned. Terminal either way. No rollback. |
 | `ChildCancelledError` | A `step.call` child is cancelled before the parent join completes. | Yes around `step.call`; if uncaught, normal failure handling applies. |
 | `ChildTimeoutError` | A `step.call` child exceeds `ChildWorkflowOptions.timeout`. | Yes around `step.call`; if uncaught, normal failure handling applies. |
-| `LimitExceededError` | A platform cap is exceeded, such as `step.startMany` over the batch cap or output over the blob cap. | Once recorded, yes. The `step.startMany` cap cannot be caught in the dispatch that raises it: the catch resumes the body outside the replay boundary and the run fails `NondeterministicError` instead. |
+| `LimitExceededError` | A platform cap is exceeded, such as an output over the blob cap. | Once recorded, yes. A cap the platform applies to a dispatch rather than to a step, such as `maxFrontier`, refuses the dispatch without recording anything and raises no class here. |
 | `NestedStepError` | A `step.*` method is called from inside a step body or compensator. | Treat as terminal misuse. Fix the body rather than handling it. |
 | `CompensableCarryError` | `step.continueAsNew` is requested while the current generation still has pending compensators. | No. It is the platform's verdict: the transition is refused, no successor generation is created, the pending compensators run, and the generation rests `failed` carrying this name. |
 | `InvalidScheduleError` | A schedule registration is invalid — a malformed or unsupported cron expression, an unknown IANA timezone, or a non-positive interval count or backfill. Thrown when the schedule is compiled at build/deploy time, never at fire time or on a run. Exported from `@zeroship/workflows/schedule`. | Yes, at registration time; catch it beside the `schedule(...)` call that raised it. |
