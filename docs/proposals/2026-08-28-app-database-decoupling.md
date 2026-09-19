@@ -1106,11 +1106,11 @@ row today:
 **Provenance.** Claims marked RE-DERIVED were measured during this revision against the running
 `postgres:16.15` container, which matches the `deploy/compose/docker-compose.yml` pin; the
 instrument is named with each. Claims marked CARRIED were measured on earlier majors during the
-original drafting and have NOT been re-measured. Claims marked GATED name a test that re-runs them:
-six behaviour claims are arms of `crates/zeroship-data-orm/tests/postgres_tenant_fence.rs`, each on
-its own throwaway container that refuses a server below the deploy pin, and each paired with the
-control that keeps it from passing over a fixture which granted nothing. Two claims stay rationale
-rather than becoming arms; Open 5 says which and why.
+original drafting and have NOT been re-measured. Claims marked GATED name the arm of
+`crates/zeroship-data-orm/tests/postgres_tenant_fence.rs` that re-runs them, each on its own
+throwaway container that refuses a server below the deploy pin, and each paired with the control
+that keeps it from passing over a fixture which granted nothing. The catalog-cost claims stay
+rationale rather than becoming arms; Open 5 says why.
 
 **Self-hostability decides where topology lives, not convenience.** The table under Where a fact
 lives sorts each fact by who owns it, and the load-bearing asymmetry is that a migration is not
