@@ -53,7 +53,7 @@ mod tests {
     #[test]
     fn invalid_identity_cannot_replace_installed_collections() {
         crate::tests::fixtures::reset_engine();
-        let binding = DbBinding::cold_start("app_identity_contract");
+        let binding = crate::tests::fixtures::harness_binding("app_identity_contract");
         let valid = value!({"id":{"type":"string", "required":true, "primaryKey":true}});
         install_artifact(&binding, vec![("entries".into(), valid.clone())]).unwrap();
         let corpus = identity_corpus();
@@ -108,7 +108,7 @@ mod tests {
     #[test]
     fn invalid_relation_metadata_cannot_replace_installed_collections() {
         crate::tests::fixtures::reset_engine();
-        let binding = DbBinding::cold_start("app_relation_contract");
+        let binding = crate::tests::fixtures::harness_binding("app_relation_contract");
         let valid = value!({
             "id":{"type":"string", "required":true, "primaryKey":true},
             "owner_id":{"type":"string", "refTarget":"people", "refColumn":"id", "relation":"owner"}
@@ -185,7 +185,7 @@ mod tests {
     #[test]
     fn valid_identity_descriptors_are_installed_as_native_contracts() {
         crate::tests::fixtures::reset_engine();
-        let binding = DbBinding::cold_start("app_explicit_identity");
+        let binding = crate::tests::fixtures::harness_binding("app_explicit_identity");
         let corpus = identity_corpus();
         let cases = corpus["valid"].as_object().unwrap();
         assert!(!cases.is_empty(), "valid fixtures must not be empty");
@@ -206,7 +206,7 @@ mod tests {
     #[test]
     fn an_undeclared_collection_is_a_typed_error_not_a_missing_schema() {
         crate::tests::fixtures::reset_engine();
-        let binding = DbBinding::cold_start("app_descriptor_miss");
+        let binding = crate::tests::fixtures::harness_binding("app_descriptor_miss");
         let err = collection_schema(&binding, "users").expect_err("must not resolve");
         assert!(
             format!("{err:?}").contains("collection_not_declared"),
@@ -227,16 +227,24 @@ mod tests {
     #[test]
     fn two_deploys_of_one_app_hold_separate_descriptor_entries() {
         crate::tests::fixtures::reset_engine();
-        let pinned = DbBinding::new(
-            "app_two_deploys",
+        let base = crate::tests::fixtures::harness_binding("app_two_deploys");
+        let edge = base.edge().expect("a harness binding addresses a database");
+        let pinned = DbBinding::to_database(
+            base.app_id(),
             "deploy_pinned",
-            crate::sql::SchemaName::new("app_two_deploys").unwrap(),
-        );
-        let current = DbBinding::new(
-            "app_two_deploys",
+            edge.database().clone(),
+            edge.binding().clone(),
+            edge.epoch(),
+        )
+        .expect("the harness ids compose");
+        let current = DbBinding::to_database(
+            base.app_id(),
             "deploy_current",
-            crate::sql::SchemaName::new("app_two_deploys").unwrap(),
-        );
+            edge.database().clone(),
+            edge.binding().clone(),
+            edge.epoch(),
+        )
+        .expect("the harness ids compose");
         zeroship_data_orm::schema_cache::with_mut(|c| {
             c.insert_one(
                 &pinned,

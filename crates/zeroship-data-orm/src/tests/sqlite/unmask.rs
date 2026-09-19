@@ -7,7 +7,6 @@ use std::rc::Rc;
 
 use zeroship_data_orm::backend::sqlite::SqliteBackend;
 
-use zeroship_data_orm::binding::DbBinding;
 
 use crate::sql::mapping::raw_column_name;
 
@@ -36,7 +35,7 @@ async fn unmask_backend(host: &Host) -> zeroship_data_orm::backend::BackendHandl
 
 /// Bind a route from the fixture’s backend and current transaction scope.
 async fn unmask_route(host: &Host, app: &str) -> zeroship_data_orm::tx_route::TxRoute {
-    zeroship_data_orm::exec::ambient_route_for_tests(app, unmask_backend(host).await)
+    zeroship_data_orm::exec::ambient_route_for_tests(&crate::tests::fixtures::harness_binding(app), unmask_backend(host).await)
 }
 
 /// Drop the fixture-installed backend while preserving its on-disk databases,
@@ -54,7 +53,7 @@ fn configure_cold_sqlite_unmask_fixture(
     let url = format!("sqlite:{}", dir.path().join("zs-control.sqlite").display());
     host.set_database_url(&url);
     crate::tests::fixtures::cache_schema(app_id, collection, schema);
-    mask_policy::install_mask_policy(&DbBinding::cold_start(app_id), policy)
+    mask_policy::install_mask_policy(&crate::tests::fixtures::harness_binding(app_id), policy)
         .expect("reinstall the app declaration during startup");
 }
 
@@ -288,7 +287,7 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
             };
             let result = unmask::dispatch_unmask(
                 &unmask_route(host, app_id).await,
-                &DbBinding::cold_start(app_id),
+                &crate::tests::fixtures::harness_binding(app_id),
                 args,
             )
             .await
@@ -379,7 +378,7 @@ fn unmask_with_user_actor_returns_forbidden_audit_logged() {
             };
             let err = unmask::dispatch_unmask(
                 &unmask_route(host, app_id).await,
-                &DbBinding::cold_start(app_id),
+                &crate::tests::fixtures::harness_binding(app_id),
                 args,
             )
             .await
@@ -431,7 +430,7 @@ fn unmask_column_not_masked_returns_typed_error() {
             };
             let err = unmask::dispatch_unmask(
                 &unmask_route(host, app_id).await,
-                &DbBinding::cold_start(app_id),
+                &crate::tests::fixtures::harness_binding(app_id),
                 args,
             )
             .await
@@ -481,7 +480,7 @@ fn unmask_writes_audit_row_with_correct_classification() {
             };
             let _err = unmask::dispatch_unmask(
                 &unmask_route(host, app_id).await,
-                &DbBinding::cold_start(app_id),
+                &crate::tests::fixtures::harness_binding(app_id),
                 args,
             )
             .await
@@ -569,7 +568,7 @@ fn unmask_reads_the_raw_column_the_descriptor_declares() {
             };
             let result = unmask::dispatch_unmask(
                 &unmask_route(host, app_id).await,
-                &DbBinding::cold_start(app_id),
+                &crate::tests::fixtures::harness_binding(app_id),
                 args,
             )
             .await
@@ -618,7 +617,7 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
             let policy_v = crate::value!({
                 "user": ["public", "pii"],
             });
-            mask_policy::install_mask_policy(&DbBinding::cold_start(app_id), policy_v)
+            mask_policy::install_mask_policy(&crate::tests::fixtures::harness_binding(app_id), policy_v)
                 .expect("set_mask_policy must succeed");
 
             // Post-storage-flip layout: the raw column (named via
@@ -698,7 +697,7 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
             };
             let result = unmask::dispatch_unmask(
                 &unmask_route(host, app_id).await,
-                &DbBinding::cold_start(app_id),
+                &crate::tests::fixtures::harness_binding(app_id),
                 args,
             )
             .await
@@ -758,7 +757,7 @@ fn unmask_with_user_role_not_in_policy_denied() {
             let policy_v = crate::value!({
                 "user": ["public"],
             });
-            mask_policy::install_mask_policy(&DbBinding::cold_start(app_id), policy_v)
+            mask_policy::install_mask_policy(&crate::tests::fixtures::harness_binding(app_id), policy_v)
                 .expect("set_mask_policy must succeed");
 
             let args = unmask::UnmaskFieldArgs {
@@ -771,7 +770,7 @@ fn unmask_with_user_role_not_in_policy_denied() {
             };
             let err = unmask::dispatch_unmask(
                 &unmask_route(host, app_id).await,
-                &DbBinding::cold_start(app_id),
+                &crate::tests::fixtures::harness_binding(app_id),
                 args,
             )
             .await
@@ -823,7 +822,7 @@ fn unmask_default_deny_when_no_policy() {
             };
             let err = unmask::dispatch_unmask(
                 &unmask_route(host, app_id).await,
-                &DbBinding::cold_start(app_id),
+                &crate::tests::fixtures::harness_binding(app_id),
                 args,
             )
             .await
@@ -860,7 +859,7 @@ fn unmask_invalid_classification_rejected_at_dispatch_time() {
             let bad_policy = crate::value!({
                 "admin": ["public", "badclass"],
             });
-            let err = mask_policy::install_mask_policy(&DbBinding::cold_start(app_id), bad_policy)
+            let err = mask_policy::install_mask_policy(&crate::tests::fixtures::harness_binding(app_id), bad_policy)
                 .expect_err("rust validator must refuse unknown classification");
             match err {
                 zeroship_data_orm::error::DbError::ValidationFailed { code, .. } => {
@@ -885,7 +884,7 @@ fn policy_cannot_change_after_startup() {
             "id": { "type": "string" },
             "data": { "type": "string", "mask": { "kind": "full", "classification": "internal" } },
         })).await;
-            let binding = DbBinding::cold_start(app_id);
+            let binding = crate::tests::fixtures::harness_binding(app_id);
             mask_policy::install_mask_policy(&binding, crate::value!({ "support": ["public"] }))
                 .unwrap();
             let args = unmask::UnmaskFieldArgs {
@@ -953,7 +952,7 @@ fn unmask_ignores_policy_sidecar_files() {
                 std::fs::write(&path, contents).unwrap();
                 let error = unmask::dispatch_unmask(
                     &unmask_route(host, app_id).await,
-                    &DbBinding::cold_start(app_id),
+                    &crate::tests::fixtures::harness_binding(app_id),
                     unmask::UnmaskFieldArgs {
                         collection: "items".into(),
                         row_pk: "any".into(),
@@ -1004,11 +1003,7 @@ fn malformed_mask_sentinel_skipped_on_sqlite() {
             .await
             .expect("CREATE garbled");
             let live = backend
-                .introspect_schema(
-                    "app_demo",
-                    &crate::sql::SchemaName::new("app_demo").unwrap(),
-                    None,
-                )
+                .introspect_schema(&crate::tests::fixtures::harness_binding("app_demo"), None)
                 .await
                 .expect("introspect garbled");
             let parent = live
@@ -1052,7 +1047,7 @@ fn cold_bulk_unmask_open_comes_from_ensure_backend_not_the_fixture() {
                 unmask_setup_with_schema(host, app_id, collection, schema.clone()).await;
             host.clear_mask_policy_cache(app_id);
             mask_policy::install_mask_policy(
-                &DbBinding::cold_start(app_id),
+                &crate::tests::fixtures::harness_binding(app_id),
                 crate::value!({ "user": ["pii"] }),
             )
             .expect("set_mask_policy");
@@ -1131,7 +1126,7 @@ fn cold_bulk_unmask_attaches_before_read() {
 
             // Policy: `user` can unmask pii AND spi.
             let policy_v = crate::value!({ "user": ["pii", "spi"] });
-            mask_policy::install_mask_policy(&DbBinding::cold_start(app_id), policy_v.clone())
+            mask_policy::install_mask_policy(&crate::tests::fixtures::harness_binding(app_id), policy_v.clone())
                 .expect("set_mask_policy");
 
             // A fresh startup reinstalls the app declaration without a sidecar.
@@ -1157,7 +1152,7 @@ fn cold_bulk_unmask_attaches_before_read() {
             };
             let result = dispatch_bulk_unmask(
                 &unmask_route(host, app_id).await,
-                &DbBinding::cold_start(app_id),
+                &crate::tests::fixtures::harness_binding(app_id),
                 args,
             )
             .await
@@ -1245,7 +1240,7 @@ fn bulk_unmask_authorization_atomic_one_unauthorized_fails_all() {
 
             // Policy: `user` can ONLY unmask pii; spi is forbidden.
             let policy_v = crate::value!({ "user": ["pii"] });
-            mask_policy::install_mask_policy(&DbBinding::cold_start(app_id), policy_v)
+            mask_policy::install_mask_policy(&crate::tests::fixtures::harness_binding(app_id), policy_v)
                 .expect("set_mask_policy");
 
             let args = BulkUnmaskArgs {
@@ -1262,7 +1257,7 @@ fn bulk_unmask_authorization_atomic_one_unauthorized_fails_all() {
             };
             let err = dispatch_bulk_unmask(
                 &unmask_route(host, app_id).await,
-                &DbBinding::cold_start(app_id),
+                &crate::tests::fixtures::harness_binding(app_id),
                 args,
             )
             .await
@@ -1316,7 +1311,7 @@ fn bulk_unmask_unknown_column_returns_typed_error_e2e() {
             };
             let err = dispatch_bulk_unmask(
                 &unmask_route(host, app_id).await,
-                &DbBinding::cold_start(app_id),
+                &crate::tests::fixtures::harness_binding(app_id),
                 args,
             )
             .await
@@ -1360,7 +1355,7 @@ fn cold_query_unmask_hint_open_comes_from_ensure_backend_not_the_fixture() {
                 unmask_setup_with_schema(host, app_id, collection, schema.clone()).await;
             host.clear_mask_policy_cache(app_id);
             mask_policy::install_mask_policy(
-                &DbBinding::cold_start(app_id),
+                &crate::tests::fixtures::harness_binding(app_id),
                 crate::value!({ "user": ["spi"] }),
             )
             .expect("set_mask_policy");
@@ -1439,7 +1434,7 @@ fn cold_query_unmask_hint_attaches_before_read() {
 
             // Policy: `user` can unmask both pii and spi.
             let policy_v = crate::value!({ "user": ["pii", "spi"] });
-            mask_policy::install_mask_policy(&DbBinding::cold_start(app_id), policy_v.clone())
+            mask_policy::install_mask_policy(&crate::tests::fixtures::harness_binding(app_id), policy_v.clone())
                 .expect("set_mask_policy");
 
             // A fresh startup reinstalls the declaration before the first query.
@@ -1457,8 +1452,8 @@ fn cold_query_unmask_hint_attaches_before_read() {
 
             // Step 1 — upfront auth fence.
             authorize_query_hint(
-                &crate::exec::ambient_route_for_tests(app_id, unmask_backend(host).await),
-                &DbBinding::cold_start(app_id),
+                &crate::exec::ambient_route_for_tests(&crate::tests::fixtures::harness_binding(app_id), unmask_backend(host).await),
+                &crate::tests::fixtures::harness_binding(app_id),
                 collection,
                 &["ssn".to_string()],
                 &actor,
@@ -1486,7 +1481,7 @@ fn cold_query_unmask_hint_attaches_before_read() {
             })];
             dispatch_unmask_for_query(
                 &unmask_route(host, app_id).await,
-                &DbBinding::cold_start(app_id),
+                &crate::tests::fixtures::harness_binding(app_id),
                 collection,
                 &["ssn".to_string()],
                 &mut rows,
@@ -1514,8 +1509,8 @@ fn cold_query_unmask_hint_attaches_before_read() {
 
             // Step 3 — granted audit row lands.
             audit_query_hint_granted(
-                &crate::exec::ambient_route_for_tests(app_id, unmask_backend(host).await),
-                &DbBinding::cold_start(app_id),
+                &crate::exec::ambient_route_for_tests(&crate::tests::fixtures::harness_binding(app_id), unmask_backend(host).await),
+                &crate::tests::fixtures::harness_binding(app_id),
                 collection,
                 &["ssn".to_string()],
                 &actor,
@@ -1571,13 +1566,13 @@ fn per_query_unmask_hint_rejects_unauthorized_actor() {
             host.clear_mask_policy_cache(app_id);
             // Policy: `user` can only unmask `pii`, NOT `spi`.
             let policy_v = crate::value!({ "user": ["pii"] });
-            mask_policy::install_mask_policy(&DbBinding::cold_start(app_id), policy_v)
+            mask_policy::install_mask_policy(&crate::tests::fixtures::harness_binding(app_id), policy_v)
                 .expect("set_mask_policy");
 
             let actor = Some(crate::value!({ "kind": "user", "id": "actor_x" }));
             let err = authorize_query_hint(
-                &crate::exec::ambient_route_for_tests(app_id, unmask_backend(host).await),
-                &DbBinding::cold_start(app_id),
+                &crate::exec::ambient_route_for_tests(&crate::tests::fixtures::harness_binding(app_id), unmask_backend(host).await),
+                &crate::tests::fixtures::harness_binding(app_id),
                 collection,
                 &["ssn".to_string()],
                 &actor,
@@ -1621,8 +1616,8 @@ fn per_query_unmask_hint_unknown_column_returns_typed_error() {
             host.clear_mask_policy_cache(app_id);
             let actor = Some(crate::value!({ "kind": "auto" }));
             let err = authorize_query_hint(
-                &crate::exec::ambient_route_for_tests(app_id, unmask_backend(host).await),
-                &DbBinding::cold_start(app_id),
+                &crate::exec::ambient_route_for_tests(&crate::tests::fixtures::harness_binding(app_id), unmask_backend(host).await),
+                &crate::tests::fixtures::harness_binding(app_id),
                 collection,
                 &["does_not_exist".to_string()],
                 &actor,

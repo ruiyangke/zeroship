@@ -1,5 +1,5 @@
 //! Protection services supplied by the host, independent of connection drivers.
-use crate::{driver::Session, encryption::KeyStore, error::DbError, sql::SchemaName};
+use crate::{binding::DbBinding, driver::Session, encryption::KeyStore, error::DbError};
 use async_trait::async_trait;
 use crate::sql::catalog::LiveSchema;
 
@@ -11,8 +11,7 @@ pub trait Catalog {
     /// A transaction must not compete with its own lease for pool capacity.
     async fn introspect_schema(
         &self,
-        app_id: &str,
-        schema: &SchemaName,
+        binding: &DbBinding,
         session: Option<&Session>,
     ) -> Result<LiveSchema, DbError>;
 }

@@ -70,8 +70,7 @@ async fn direct_backend_handles_have_stable_distinct_connection_identities() {
 
     let captured = crate::tx_route::CapturedRoute::capture(
         None,
-        "app_direct_backend_route",
-        crate::sql::SchemaName::new("app_direct_backend_route").unwrap(),
+        &crate::tests::fixtures::harness_binding("app_direct_backend_route"),
         first.sql_registration().clone(),
         first.connection_identity(),
         None,
@@ -159,8 +158,7 @@ async fn a_captured_route_refuses_a_replacement_connection_with_the_same_sql_bun
     );
     let captured = crate::tx_route::CapturedRoute::capture(
         None,
-        "app_route_connection",
-        crate::sql::SchemaName::new("app_route_connection").unwrap(),
+        &crate::tests::fixtures::harness_binding("app_route_connection"),
         first.sql_registration().clone(),
         first.identity(),
         None,
@@ -247,7 +245,7 @@ fn configuration_identity_and_debug_follow_the_connection_contract() {
     let limit = ConnectionFactory::for_url_with_limit(
         first.url().unwrap(),
         NonZeroUsize::new(1),
-        SessionAuthority::PerAppRole,
+        SessionAuthority::PerBindingRole,
     )
     .unwrap();
     assert_ne!(first.identity(), limit.identity());

@@ -66,12 +66,12 @@ struct Fixture {
     generation: BackendGeneration,
 }
 
-fn admitted(app: &str) -> Fixture {
+fn admitted(app: &crate::binding::DbRoute) -> Fixture {
     crate::tx_lanes::with_mut(|l| assert!(l.try_claim_tx(app)));
     admitted_on_claim(app)
 }
 
-fn admitted_on_claim(app: &str) -> Fixture {
+fn admitted_on_claim(app: &crate::binding::DbRoute) -> Fixture {
     admit_in_preparing(app);
     let expected = expected_authority(app);
     let actions = apply(
@@ -117,7 +117,7 @@ fn admitted_on_claim(app: &str) -> Fixture {
     }
 }
 
-fn in_flight(app: &str) -> CommandToken {
+fn in_flight(app: &crate::binding::DbRoute) -> CommandToken {
     apply(app, TxEvent::OperationRequested)
         .unwrap()
         .into_iter()
@@ -135,7 +135,7 @@ fn assert_pending<F: Future>(future: std::pin::Pin<&mut F>) {
     ));
 }
 
-fn deadline(app: &str) -> (DeadlineKind, DeadlineGeneration) {
+fn deadline(app: &crate::binding::DbRoute) -> (DeadlineKind, DeadlineGeneration) {
     crate::tx_lanes::with(
         |l| match l.transaction_reducer(app).unwrap().deadline().state() {
             super::super::reducer::deadline::DeadlineState::Armed {
@@ -152,7 +152,7 @@ async fn settlement_waits_for_operation_and_terminal_and_survives_lane_replaceme
         let owner = crate::OrmContext::new();
         owner
             .scope(async {
-                let app = "settlement_wait";
+                let app = &crate::tests::fixtures::harness_route("settlement_wait");
                 let fixture = admitted(app);
                 let token = in_flight(app);
                 let mut first = Box::pin(settle_root(app, intent));
@@ -204,7 +204,7 @@ async fn settlement_waits_for_operation_and_terminal_and_survives_lane_replaceme
 async fn deferred_terminal_failure_reaches_every_settlement_waiter() {
     crate::OrmContext::new()
         .scope(async {
-            let app = "failed_settlement";
+            let app = &crate::tests::fixtures::harness_route("failed_settlement");
             let fixture = admitted(app);
             let token = in_flight(app);
             let mut settle = Box::pin(settle_root(app, SettleIntent::Rollback));
@@ -237,7 +237,7 @@ async fn deferred_terminal_failure_reaches_every_settlement_waiter() {
 async fn terminal_deadline_wakes_waiter_and_late_answer_cannot_restore_old_session() {
     crate::OrmContext::new()
         .scope(async {
-            let app = "deadline_settlement";
+            let app = &crate::tests::fixtures::harness_route("deadline_settlement");
             let fixture = admitted(app);
             let token = in_flight(app);
             let mut settle = Box::pin(settle_root(app, SettleIntent::Commit));
@@ -272,7 +272,7 @@ async fn cancellation_and_execution_deadline_publish_only_after_cleanup() {
     for forced_by_deadline in [false, true] {
         crate::OrmContext::new()
             .scope(async {
-                let app = "cancel_settlement";
+                let app = &crate::tests::fixtures::harness_route("cancel_settlement");
                 let fixture = admitted(app);
                 in_flight(app);
                 let mut settle = Box::pin(settle_root(app, SettleIntent::Rollback));
@@ -305,7 +305,7 @@ async fn cancellation_and_execution_deadline_publish_only_after_cleanup() {
 async fn dropping_waiter_does_not_cancel_accepted_settlement() {
     crate::OrmContext::new()
         .scope(async {
-            let app = "dropped_settlement";
+            let app = &crate::tests::fixtures::harness_route("dropped_settlement");
             let fixture = admitted(app);
             let mut first = Box::pin(settle_root(app, SettleIntent::Rollback));
             assert_pending(first.as_mut());
@@ -328,8 +328,8 @@ async fn dropping_waiter_does_not_cancel_accepted_settlement() {
 async fn dropped_native_admission_stays_owned_until_cleanup_acknowledges_rollback() {
     crate::OrmContext::new()
         .scope(async {
-            let app = "dropped_native_admission";
-            let admission = super::super::TxAdmission::acquire(app.into())
+            let app = &crate::tests::fixtures::harness_route("dropped_native_admission");
+            let admission = super::super::TxAdmission::acquire(app.clone())
                 .await
                 .expect("the fixture claims a free lane");
             let fixture = admitted_on_claim(app);
@@ -338,7 +338,7 @@ async fn dropped_native_admission_stays_owned_until_cleanup_acknowledges_rollbac
                 crate::tx_lanes::with(|l| l.transaction_reducer(app).map(TxReducer::state)),
                 Some(super::super::reducer::TxState::Cancelling)
             );
-            let mut next = Box::pin(super::super::TxAdmission::acquire(app.into()));
+            let mut next = Box::pin(super::super::TxAdmission::acquire(app.clone()));
             assert_pending(next.as_mut());
             compio::time::sleep(Duration::from_millis(1)).await;
             assert_eq!(fixture.wire.cleanup_calls.get(), 1);
@@ -360,8 +360,8 @@ async fn dropped_native_admission_stays_owned_until_cleanup_acknowledges_rollbac
 async fn dropped_retired_native_admission_cannot_cancel_a_replacement() {
     crate::OrmContext::new()
         .scope(async {
-            let app = "retired_native_admission";
-            let old_admission = super::super::TxAdmission::acquire(app.into())
+            let app = &crate::tests::fixtures::harness_route("retired_native_admission");
+            let old_admission = super::super::TxAdmission::acquire(app.clone())
                 .await
                 .expect("the fixture claims a free lane");
             let old = admitted_on_claim(app);
@@ -393,8 +393,8 @@ async fn dropped_retired_native_admission_cannot_cancel_a_replacement() {
 async fn startup_cancellation_without_an_installed_session_is_indeterminate() {
     crate::OrmContext::new()
         .scope(async {
-            let app = "cancel_native_startup";
-            let admission = super::super::TxAdmission::acquire(app.into())
+            let app = &crate::tests::fixtures::harness_route("cancel_native_startup");
+            let admission = super::super::TxAdmission::acquire(app.clone())
                 .await
                 .expect("the fixture claims a free lane");
             admit_in_preparing(app);
@@ -457,7 +457,7 @@ async fn startup_cancellation_without_an_installed_session_is_indeterminate() {
 async fn retiring_lane_resolves_waiter_without_claiming_success() {
     crate::OrmContext::new()
         .scope(async {
-            let app = "retired_settlement";
+            let app = &crate::tests::fixtures::harness_route("retired_settlement");
             let _fixture = admitted(app);
             in_flight(app);
             let mut settle = Box::pin(settle_root(app, SettleIntent::Rollback));

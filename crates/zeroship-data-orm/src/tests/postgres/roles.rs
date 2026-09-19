@@ -7,7 +7,6 @@ use crate::tests::fixtures::{self};
 
 use compio_postgres::{NoTls, Pool};
 
-use zeroship_data_orm::binding::DbBinding;
 
 use crate::value::{value, Value};
 
@@ -36,7 +35,7 @@ fn per_app_role_created_at_provision() {
             let role = provision_app_with_role(&pool, app).await;
 
             // First provision creates the role.
-            let first = crate::tests::fixtures::roles::ensure_per_app_role(&pool, app)
+            let first = crate::tests::fixtures::roles::ensure_binding_ladder(&pool, &crate::tests::fixtures::harness_binding(app))
                 .await
                 .expect("provision per-app role");
             assert!(first.created_role, "first provision must create the role");
@@ -53,7 +52,7 @@ fn per_app_role_created_at_provision() {
 
             // Idempotent: a second provision is a no-op create (GRANTs re-run
             // harmlessly).
-            let second = crate::tests::fixtures::roles::ensure_per_app_role(&pool, app)
+            let second = crate::tests::fixtures::roles::ensure_binding_ladder(&pool, &crate::tests::fixtures::harness_binding(app))
                 .await
                 .expect("re-provision per-app role");
             assert!(
@@ -81,7 +80,7 @@ fn per_app_role_has_no_replication_attr() {
             let app = crate::tests::fixtures::test_app_id!();
             let app = app.as_str();
             let role = provision_app_with_role(&pool, app).await;
-            crate::tests::fixtures::roles::ensure_per_app_role(&pool, app)
+            crate::tests::fixtures::roles::ensure_binding_ladder(&pool, &crate::tests::fixtures::harness_binding(app))
                 .await
                 .unwrap();
 
@@ -120,7 +119,7 @@ fn per_app_role_grant_scoped_to_schema() {
             let app = crate::tests::fixtures::test_app_id!();
             let app = app.as_str();
             let role = provision_app_with_role(&pool, app).await;
-            crate::tests::fixtures::roles::ensure_per_app_role(&pool, app)
+            crate::tests::fixtures::roles::ensure_binding_ladder(&pool, &crate::tests::fixtures::harness_binding(app))
                 .await
                 .unwrap();
 
@@ -137,7 +136,7 @@ fn per_app_role_grant_scoped_to_schema() {
             )
             .await
             .unwrap();
-            fixtures::grant_all_runtime_table_columns(&pool, app, "widgets").await;
+            fixtures::grant_all_runtime_table_columns(&pool, &crate::tests::fixtures::harness_binding(app), "widgets").await;
 
             // SET ROLE to the per-app role and CRUD its own schema — must work.
             pool.execute(&format!(r#"SET ROLE "{role}""#), &[])
@@ -197,10 +196,10 @@ fn per_app_role_cannot_read_sibling_schema_or_touch_slots() {
                 .await
                 .unwrap();
 
-            crate::tests::fixtures::roles::ensure_per_app_role(&pool, app_a)
+            crate::tests::fixtures::roles::ensure_binding_ladder(&pool, &crate::tests::fixtures::harness_binding(app_a))
                 .await
                 .unwrap();
-            crate::tests::fixtures::roles::ensure_per_app_role(&pool, app_b)
+            crate::tests::fixtures::roles::ensure_binding_ladder(&pool, &crate::tests::fixtures::harness_binding(app_b))
                 .await
                 .unwrap();
             pool.execute(
@@ -293,7 +292,7 @@ fn client_sql_runs_under_per_app_role() {
             let app = crate::tests::fixtures::test_app_id!();
             let app = app.as_str();
             let role = provision_app_with_role(&pool, app).await;
-            crate::tests::fixtures::roles::ensure_per_app_role(&pool, app)
+            crate::tests::fixtures::roles::ensure_binding_ladder(&pool, &crate::tests::fixtures::harness_binding(app))
                 .await
                 .unwrap();
 
@@ -306,7 +305,7 @@ fn client_sql_runs_under_per_app_role() {
             .detach();
 
             client.execute("BEGIN", &[]).await.unwrap();
-            let set_sql = crate::tests::fixtures::roles::set_local_role_sql(app)
+            let set_sql = crate::tests::fixtures::roles::set_local_role_sql(&crate::tests::fixtures::harness_binding(app))
                 .expect("integration app id must produce valid SET LOCAL ROLE SQL");
             client.execute(&set_sql, &[]).await.unwrap();
 
@@ -356,7 +355,7 @@ fn exec_autocommit_query_runs_under_per_app_role() {
             let app = crate::tests::fixtures::test_app_id!();
             let app = app.as_str();
             let role = provision_app_with_role(&pool, app).await;
-            crate::tests::fixtures::roles::ensure_per_app_role(&pool, app)
+            crate::tests::fixtures::roles::ensure_binding_ladder(&pool, &crate::tests::fixtures::harness_binding(app))
                 .await
                 .unwrap();
             host.set_database_url(&url);
@@ -416,7 +415,7 @@ fn vector_search_runs_under_per_app_role_via_rls() {
             let app = app.as_str();
             let coll = "docs";
             let role = provision_app_with_role(&admin_pool, app).await;
-            crate::tests::fixtures::roles::ensure_per_app_role(&admin_pool, app)
+            crate::tests::fixtures::roles::ensure_binding_ladder(&admin_pool, &crate::tests::fixtures::harness_binding(app))
                 .await
                 .unwrap();
             admin_pool
@@ -451,7 +450,7 @@ fn vector_search_runs_under_per_app_role_via_rls() {
                 )
                 .await
                 .unwrap();
-            fixtures::grant_all_runtime_table_columns(&admin_pool, app, coll).await;
+            fixtures::grant_all_runtime_table_columns(&admin_pool, &crate::tests::fixtures::harness_binding(app), coll).await;
             install_role_bound_select_policy(&admin_pool, app, coll, &role).await;
             let login_role = "p6a_vector_login";
             let (login_url, login_pool) =
@@ -472,7 +471,7 @@ fn vector_search_runs_under_per_app_role_via_rls() {
                 login_url,
                 host.key_source(),
             );
-            let binding = DbBinding::cold_start(app);
+            let binding = crate::tests::fixtures::harness_binding(app);
             let schema = zeroship_data_orm::descriptor::collection_schema(&binding, coll)
                 .expect("descriptor slice for the search fixture");
             let registration = zeroship_data_orm::sql::registration::SqlRegistration::postgres();
@@ -528,7 +527,7 @@ fn spatial_near_runs_under_per_app_role_via_rls() {
             let app = app.as_str();
             let coll = "places";
             let role = provision_app_with_role(&admin_pool, app).await;
-            crate::tests::fixtures::roles::ensure_per_app_role(&admin_pool, app)
+            crate::tests::fixtures::roles::ensure_binding_ladder(&admin_pool, &crate::tests::fixtures::harness_binding(app))
                 .await
                 .unwrap();
             admin_pool
@@ -564,7 +563,7 @@ fn spatial_near_runs_under_per_app_role_via_rls() {
                 )
                 .await
                 .unwrap();
-            fixtures::grant_all_runtime_table_columns(&admin_pool, app, coll).await;
+            fixtures::grant_all_runtime_table_columns(&admin_pool, &crate::tests::fixtures::harness_binding(app), coll).await;
             install_role_bound_select_policy(&admin_pool, app, coll, &role).await;
             let login_role = "p6a_spatial_login";
             let (login_url, login_pool) =
@@ -585,7 +584,7 @@ fn spatial_near_runs_under_per_app_role_via_rls() {
                 login_url,
                 host.key_source(),
             );
-            let binding = DbBinding::cold_start(app);
+            let binding = crate::tests::fixtures::harness_binding(app);
             let schema = zeroship_data_orm::descriptor::collection_schema(&binding, coll).unwrap();
             let registration = zeroship_data_orm::sql::registration::SqlRegistration::postgres();
             let rows = zeroship_data_orm::search::Search::spatial_near(

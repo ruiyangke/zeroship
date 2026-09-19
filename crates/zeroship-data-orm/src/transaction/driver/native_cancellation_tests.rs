@@ -1,5 +1,5 @@
 use crate::{
-    binding::DbBinding, encryption::ProjectKeySource, error::DbError, orm::Database, value,
+    encryption::ProjectKeySource, error::DbError, orm::Database, value,
     ConnectOptions,
 };
 use futures::{
@@ -34,7 +34,7 @@ async fn dropping_native_transaction_interrupts_postgres_before_releasing_admiss
         .unwrap();
     let blocker_pid = blocker.process_id();
     let db = Database::connect(
-        DbBinding::cold_start(app.as_str()),
+        crate::tests::fixtures::harness_binding(app.as_str()),
         ConnectOptions::new(server.url(), ProjectKeySource::unavailable())
             .max_connections(NonZeroUsize::new(1).unwrap())
             .connection_authority(),

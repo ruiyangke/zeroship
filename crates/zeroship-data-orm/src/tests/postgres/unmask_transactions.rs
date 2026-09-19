@@ -12,7 +12,6 @@ use std::rc::Rc;
 
 use crate::value::{value, Value};
 use compio_postgres::{NoTls, Pool};
-use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
 use zeroship_data_orm::protection::mask_policy::install_mask_policy;
 use zeroship_data_orm::tx_route::{CapturedRoute, TxRoute};
@@ -91,10 +90,10 @@ async fn fixture_with_schema(host: &Host, pool: &Rc<Pool>, url: &str, app: &str,
     pool.batch_execute(&zeroship_migrate_server::provisioning::audit_unmask_table_sql(app))
         .await
         .expect("the audit table the deploy provisions");
-    crate::tests::fixtures::roles::ensure_per_app_role(pool, app)
+    crate::tests::fixtures::roles::ensure_binding_ladder(pool, &crate::tests::fixtures::harness_binding(app))
         .await
         .expect("per-app role, as the deploy would provision it");
-    fixtures::grant_all_runtime_table_columns(pool, app, "people").await;
+    fixtures::grant_all_runtime_table_columns(pool, &crate::tests::fixtures::harness_binding(app), "people").await;
 
     host.install_postgres_pool(Rc::clone(pool), url);
     crate::tests::fixtures::cache_schema(app, "people", schema);
@@ -111,7 +110,7 @@ async fn backend(host: &Host) -> zeroship_data_orm::backend::BackendHandle {
 /// A route that claims the app's open transaction — what `CapturedRoute::capture`
 /// produces for a dispatch issued inside `db.transaction(fn)`.
 async fn tx_route(host: &Host, app: &str) -> TxRoute {
-    CapturedRoute::tx_for_tests(app, crate::sql::registration::SqlRegistration::postgres())
+    CapturedRoute::tx_on_binding_for_tests(&crate::tests::fixtures::harness_binding(app), crate::sql::registration::SqlRegistration::postgres())
         .bind(backend(host).await)
         .unwrap()
 }
@@ -127,7 +126,7 @@ async fn pool_route(host: &Host, app: &str) -> TxRoute {
 /// id the platform minted.
 async fn insert_on(route: TxRoute, app: &str, doc: Value) -> String {
     let result = zeroship_data_orm::crud::run_insert(
-        DbBinding::cold_start(app),
+        crate::tests::fixtures::harness_binding(app),
         "people".to_string(),
         route,
         doc,
@@ -148,7 +147,7 @@ async fn find_on(
     filter: Value,
     opts: Value,
 ) -> Result<Vec<Value>, DbError> {
-    let binding = DbBinding::cold_start(app);
+    let binding = crate::tests::fixtures::harness_binding(app);
     let plan = zeroship_data_orm::crud::plan_find(&binding, "people", &filter, &opts).unwrap();
     zeroship_data_orm::crud::run_find(binding, "people".to_string(), route, filter, plan)
         .await
@@ -188,7 +187,7 @@ fn a_find_unmask_inside_a_transaction_reaches_the_row_that_transaction_inserted(
             fixture(host, &pool, &url, app).await;
             // A policy the request's actor satisfies, so the fence GRANTS and the
             // failure below cannot be an authorization refusal wearing another code.
-            install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pci"] }))
+            install_mask_policy(&crate::tests::fixtures::harness_binding(app), value!({ "support": ["pci"] }))
                 .expect("install the app's declared mask policy");
 
             host.begin_transaction(app, &url).await;
@@ -300,7 +299,7 @@ fn a_denied_unmask_audit_row_survives_the_rollback_of_its_transaction() {
             fixture(host, &pool, &url, app).await;
             // The policy grants `support` and nothing else, so `intern` below is
             // refused by the policy path rather than by the no-policy fallback.
-            install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pci"] }))
+            install_mask_policy(&crate::tests::fixtures::harness_binding(app), value!({ "support": ["pci"] }))
                 .expect("install the app's declared mask policy");
 
             // A committed row for the denied attempt to name. Committed so the arm
@@ -415,7 +414,7 @@ fn an_encrypted_unmask_inside_a_transaction_reaches_the_row_that_transaction_ins
             // encrypts with it and the unmask fetch decrypts with it.
             let _keys = host.supply_project_key(&[app], &"c".repeat(64));
             fixture_with_schema(host, &pool, &url, app, encrypted_schema()).await;
-            install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pci"] }))
+            install_mask_policy(&crate::tests::fixtures::harness_binding(app), value!({ "support": ["pci"] }))
                 .expect("install the app's declared mask policy");
 
             host.begin_transaction(app, &url).await;
@@ -439,7 +438,7 @@ fn an_encrypted_unmask_inside_a_transaction_reaches_the_row_that_transaction_ins
             // ---- CONTROL: outside the transaction the row is genuinely unreachable.
             let outside = zeroship_data_orm::protection::unmask::dispatch_unmask(
                 &pool_route(host, app).await,
-                &DbBinding::cold_start(app),
+                &crate::tests::fixtures::harness_binding(app),
                 args(),
             )
             .await
@@ -453,7 +452,7 @@ fn an_encrypted_unmask_inside_a_transaction_reaches_the_row_that_transaction_ins
             // ---- SUBJECT: the same call on the transaction's own lane.
             let inside = zeroship_data_orm::protection::unmask::dispatch_unmask(
                 &tx_route(host, app).await,
-                &DbBinding::cold_start(app),
+                &crate::tests::fixtures::harness_binding(app),
                 args(),
             )
             .await;

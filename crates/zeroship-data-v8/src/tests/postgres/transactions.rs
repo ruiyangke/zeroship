@@ -141,7 +141,7 @@ CREATE INDEX IF NOT EXISTS "notes_created_by_idx" ON "{app}"."notes" ("created_b
         // `DROP SCHEMA CASCADE` there destroys the per-app grants AND the
         // schema's `ALTER DEFAULT PRIVILEGES` entries, and `pg_restore
         // --no-privileges` puts none back.
-        crate::tests::fixtures::roles::ensure_per_app_role(&pool, &app)
+        crate::tests::fixtures::roles::ensure_binding_ladder(&pool, &crate::tests::fixtures::harness_binding(&app))
             .await
             .expect("per-app role must be re-established after the CASCADE");
         fixtures::grant_all_runtime_table_columns(&pool, &app, "notes").await;
@@ -220,7 +220,7 @@ CREATE INDEX "users_created_by_idx" ON "{app}"."users" (created_by);"#
         ))
         .await
         .expect("deploy stand-in must create encrypted users");
-        crate::tests::fixtures::roles::ensure_per_app_role(&pool, &app)
+        crate::tests::fixtures::roles::ensure_binding_ladder(&pool, &crate::tests::fixtures::harness_binding(&app))
             .await
             .expect("per-app role must exist for encrypted users");
         fixtures::grant_all_runtime_table_columns(&pool, &app, "users").await;

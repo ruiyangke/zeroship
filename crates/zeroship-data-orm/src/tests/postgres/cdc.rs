@@ -65,8 +65,8 @@ fn gap_b_commit_drains_pending_emits_to_broker() {
         let app = app.as_str();
         let sub = zeroship_data_orm::cdc::broker::subscribe(app, "users");
 
-        host.push_pending_emit(gapb_ev(app, "users", 1));
-        host.push_pending_emit(gapb_ev(app, "users", 2));
+        host.push_pending_emit(app, gapb_ev(app, "users", 1));
+        host.push_pending_emit(app, gapb_ev(app, "users", 2));
         // Pre-drain: subscriber must observe nothing (events still queued).
         assert!(sub.pop().is_none(), "events must not leak before commit");
 
@@ -94,8 +94,8 @@ fn gap_b_rollback_clears_pending_emits_silently() {
         let app = app.as_str();
         let sub = zeroship_data_orm::cdc::broker::subscribe(app, "users");
 
-        host.push_pending_emit(gapb_ev(app, "users", 42));
-        host.push_pending_emit(gapb_ev(app, "users", 43));
+        host.push_pending_emit(app, gapb_ev(app, "users", 42));
+        host.push_pending_emit(app, gapb_ev(app, "users", 43));
         host.clear_pending_emits(app);
 
         assert!(
@@ -189,7 +189,7 @@ fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
 
             // Settlement commits the row before publishing its buffered event.
             assert!(matches!(
-                zeroship_data_orm::transaction::exec_settle(app, true, None).await,
+                zeroship_data_orm::transaction::exec_settle(&crate::tests::fixtures::harness_route(app), true, None).await,
                 zeroship_data_orm::transaction::SettleOutcome::Ok
             ));
 

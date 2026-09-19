@@ -116,7 +116,7 @@ async fn write_notes(database: &Database) -> Result<Vec<Value>, DbError> {
 }
 
 fn main_binding() -> DbBinding {
-    DbBinding::new(
+    DbBinding::platform(
         "platform",
         "platform-deploy",
         SchemaName::new(MAIN).expect("main is a schema name"),
@@ -153,7 +153,7 @@ async fn an_app_binding_addresses_its_attached_file() {
     create_tables(&app_file);
     let opened = directory.path().join("control.sqlite");
     let database = connect(
-        DbBinding::new(APP, "app-deploy", SchemaName::new(APP).unwrap()),
+        crate::tests::fixtures::harness_binding_at_deploy(APP, "app-deploy"),
         &opened,
     )
     .await;

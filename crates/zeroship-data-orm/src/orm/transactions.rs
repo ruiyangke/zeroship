@@ -67,10 +67,10 @@ impl Database {
                 let mut transaction = self.clone();
                 transaction.scope = Some(active.clone());
                 transaction.transaction_scope = Some(
-                    crate::transaction::scope::TransactionScope::current(self.binding.app_id())?,
+                    crate::transaction::scope::TransactionScope::current(&self.binding.route())?,
                 );
                 let result =
-                    crate::transaction::in_callback(self.binding.app_id(), body(transaction)).await;
+                    crate::transaction::in_callback(&self.binding.route(), body(transaction)).await;
                 active.set(false);
                 frame.finish(result).await
             })

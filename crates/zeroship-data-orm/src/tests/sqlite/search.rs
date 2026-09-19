@@ -5,7 +5,6 @@ use crate::tests::fixtures::Host;
 
 use zeroship_data_orm::backend::BackendHandle;
 
-use zeroship_data_orm::binding::DbBinding;
 
 use zeroship_data_orm::error::DbError;
 
@@ -106,7 +105,7 @@ fn vector_search_returns_k_nearest_sqlite() {
             // the top-10. Assert MEMBERSHIP (not strict order) to mirror
             // the PG arm's relaxed expectation.
             let query = mk_unit_vec(0, dims);
-            let binding = DbBinding::cold_start("vector_topk");
+            let binding = crate::tests::fixtures::harness_binding("vector_topk");
             let schema = zeroship_data_orm::descriptor::collection_schema(&binding, "docs")
                 .expect("descriptor slice for the search fixture");
             let registration = zeroship_data_orm::sql::registration::SqlRegistration::sqlite();
@@ -283,7 +282,7 @@ fn vector_search_respects_filter_sqlite() {
             // SDK already emits.
             let query = mk_unit_vec(0, 4);
             let filter = crate::value!({ "tenant": { "$eq": "a" } });
-            let binding = DbBinding::cold_start("vector_filter");
+            let binding = crate::tests::fixtures::harness_binding("vector_filter");
             let schema = zeroship_data_orm::descriptor::collection_schema(&binding, "docs")
                 .expect("descriptor slice for the search fixture");
             let registration = zeroship_data_orm::sql::registration::SqlRegistration::sqlite();
@@ -387,7 +386,7 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
                 .expect("INSERT v2");
 
             // Query the cosine distance from row 1 (v1) to v2.
-            let binding = DbBinding::cold_start("vector_math");
+            let binding = crate::tests::fixtures::harness_binding("vector_math");
             let schema = zeroship_data_orm::descriptor::collection_schema(&binding, "docs")
                 .expect("descriptor slice for the search fixture");
             let registration = zeroship_data_orm::sql::registration::SqlRegistration::sqlite();
@@ -539,7 +538,7 @@ fn near_returns_within_radius() {
                 }
             }
 
-            let binding = DbBinding::cold_start("near_radius");
+            let binding = crate::tests::fixtures::harness_binding("near_radius");
             let schema = zeroship_data_orm::descriptor::collection_schema(&binding, "places")
                 .expect("descriptor slice for the search fixture");
             let registration = zeroship_data_orm::sql::registration::SqlRegistration::sqlite();
@@ -655,21 +654,22 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
             };
 
             let handle = BackendHandle::new(std::rc::Rc::new(backend));
-            let admission = zeroship_data_orm::transaction::TxAdmission::acquire(app.to_owned())
+            let admission = zeroship_data_orm::transaction::TxAdmission::acquire(
+                crate::tests::fixtures::harness_route(app),
+            )
                 .await
                 .expect("the fixture claims a free lane");
             zeroship_data_orm::transaction::exec_begin_or_savepoint(
                 false,
                 None,
-                app,
-                crate::sql::SchemaName::new(app).unwrap(),
+                &crate::tests::fixtures::harness_binding(app),
                 handle.clone(),
             )
             .await
             .unwrap();
             admission.handed_to_reducer();
             zeroship_data_orm::transaction::driver::run_operation(
-                app,
+                &crate::tests::fixtures::harness_route(app),
                 &format!(
                     "INSERT INTO \"{app}\".\"places\" (location) VALUES ({})",
                     point_to_hex_lit(london)
@@ -679,7 +679,7 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
             .await
             .expect("write inside the transaction");
 
-            let binding = DbBinding::cold_start(app);
+            let binding = crate::tests::fixtures::harness_binding(app);
             let args = crate::value!({
                 "field": "location",
                 "point": { "lat": london.lat, "lng": london.lng },
@@ -724,8 +724,8 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
 
             // ---- SUBJECT: the same near on the transaction's own lane.
             let inside = near_on(
-                zeroship_data_orm::tx_route::CapturedRoute::tx_for_tests(
-                    app,
+                zeroship_data_orm::tx_route::CapturedRoute::tx_on_binding_for_tests(
+                    &crate::tests::fixtures::harness_binding(app),
                     crate::sql::registration::SqlRegistration::sqlite(),
                 )
                 .bind(handle.clone())
@@ -751,7 +751,7 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
             );
 
             assert!(matches!(
-                zeroship_data_orm::transaction::exec_settle(app, false, None).await,
+                zeroship_data_orm::transaction::exec_settle(&crate::tests::fixtures::harness_route(app), false, None).await,
                 zeroship_data_orm::transaction::SettleOutcome::Ok
             ));
         });
@@ -791,7 +791,7 @@ fn near_uses_an_unreadable_identity_without_returning_it() {
                 .await
                 .unwrap();
 
-            let binding = DbBinding::cold_start(app);
+            let binding = crate::tests::fixtures::harness_binding(app);
             let schema = crate::value!({
                 "id":{
                     "type":"integer",
@@ -873,7 +873,7 @@ fn low_level_near_preserves_public_aliases_and_hides_ranking_identity() {
                 .await
                 .unwrap();
 
-            let binding = DbBinding::cold_start(app);
+            let binding = crate::tests::fixtures::harness_binding(app);
             let registration = zeroship_data_orm::sql::registration::SqlRegistration::sqlite();
             let compile = |column: &str, alias: &str| {
                 let table = Table::aliased(

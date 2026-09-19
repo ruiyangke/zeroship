@@ -19,7 +19,6 @@ use crate::sql::mapping::{raw_column_name, read_surface_columns, validate_field_
 use crate::sql::{registration::SqlRegistration, SchemaName};
 use crate::value::{value, Value};
 use compio_postgres::{NoTls, Pool};
-use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
 use zeroship_data_orm::protection::mask_policy::install_mask_policy;
 use zeroship_data_orm::protection::unmask::{
@@ -37,7 +36,7 @@ async fn unmask_backend(host: &Host) -> zeroship_data_orm::backend::BackendHandl
 
 /// Bind a route from the fixture’s backend and current transaction scope.
 async fn unmask_route(host: &Host, app: &str) -> zeroship_data_orm::tx_route::TxRoute {
-    zeroship_data_orm::exec::ambient_route_for_tests(app, unmask_backend(host).await)
+    zeroship_data_orm::exec::ambient_route_for_tests(&crate::tests::fixtures::harness_binding(app), unmask_backend(host).await)
 }
 
 /// Connect, or fail the test.
@@ -429,14 +428,14 @@ fn the_real_value_is_still_stored_and_still_reachable_by_the_audited_path() {
             // The unmask fetch runs `SET LOCAL ROLE app_<id>_role`, so the per-app role
             // and its grants have to exist - the deploy's `zeroship migrate` creates
             // them, and this stands in for it.
-            crate::tests::fixtures::roles::ensure_per_app_role(&pool, app)
+            crate::tests::fixtures::roles::ensure_binding_ladder(&pool, &crate::tests::fixtures::harness_binding(app))
                 .await
                 .expect("per-app role, as the deploy would provision it");
-            fixtures::grant_runtime_select_columns(&pool, app, "people", &["id", &raw_col]).await;
+            fixtures::grant_runtime_select_columns(&pool, &crate::tests::fixtures::harness_binding(app), "people", &["id", &raw_col]).await;
 
             let result = zeroship_data_orm::protection::unmask::dispatch_unmask(
                 &unmask_route(host, app).await,
-                &zeroship_data_orm::binding::DbBinding::cold_start(app),
+                &crate::tests::fixtures::harness_binding(app),
                 zeroship_data_orm::protection::unmask::UnmaskFieldArgs {
                     collection: "people".to_string(),
                     row_pk: person.id.clone(),
@@ -545,7 +544,7 @@ async fn audited_unmask_fixture_with(
     // The audit INSERT and value SELECT both run under the per-app role. The
     // deploy provisions that role after creating the schema tables; this
     // fixture follows the same order.
-    crate::tests::fixtures::roles::ensure_per_app_role(pool, app)
+    crate::tests::fixtures::roles::ensure_binding_ladder(pool, &crate::tests::fixtures::harness_binding(app))
         .await
         .expect("per-app role, as the deploy would provision it");
     let raw_columns: Vec<String> = masked
@@ -554,7 +553,7 @@ async fn audited_unmask_fixture_with(
         .collect();
     let mut readable: Vec<&str> = vec!["id"];
     readable.extend(raw_columns.iter().map(String::as_str));
-    fixtures::grant_runtime_select_columns(pool, app, "people", &readable).await;
+    fixtures::grant_runtime_select_columns(pool, &crate::tests::fixtures::harness_binding(app), "people", &readable).await;
 
     // Control zero, read as the admin principal: the plaintext really is on
     // disk under the minted id. Every refusal asserted below is therefore a
@@ -652,7 +651,7 @@ fn an_actor_the_policy_does_not_permit_is_refused_and_the_refusal_is_audited() {
             // fallback denies it. This is the case `mask_flip` never had.
             let err = dispatch_unmask(
                 &unmask_route(host, app).await,
-                &DbBinding::cold_start(app),
+                &crate::tests::fixtures::harness_binding(app),
                 unmask_args(
                     &person.id,
                     Some(value!({ "kind": "support", "id": "usr_support_1" })),
@@ -702,11 +701,7 @@ fn an_actor_the_policy_does_not_permit_is_refused_and_the_refusal_is_audited() {
             );
 
             // A new deployment declares the grant; the same actor can now unmask.
-            let redeployed = DbBinding::new(
-                app,
-                "granted_policy",
-                DbBinding::cold_start(app).schema().clone(),
-            );
+            let redeployed = crate::tests::fixtures::harness_binding_at_deploy(app, "granted_policy");
             crate::tests::fixtures::cache_schema_for_deploy(
                 &redeployed,
                 "people",
@@ -781,7 +776,7 @@ fn an_unmask_with_no_usable_actor_is_refused_and_audited() {
             let ssn = "987-65-4321";
             let person = audited_unmask_fixture(host, &pool, &url, app, &schema, ssn).await;
 
-            install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pci"] }))
+            install_mask_policy(&crate::tests::fixtures::harness_binding(app), value!({ "support": ["pci"] }))
                 .expect("install the app's declared mask policy");
 
             // `None` is exactly what `sanitize_app_actor` produces from an app-JS
@@ -794,7 +789,7 @@ fn an_unmask_with_no_usable_actor_is_refused_and_audited() {
             ] {
                 let err = match dispatch_unmask(
                     &unmask_route(host, app).await,
-                    &DbBinding::cold_start(app),
+                    &crate::tests::fixtures::harness_binding(app),
                     unmask_args(&person.id, actor),
                 )
                 .await
@@ -836,7 +831,7 @@ fn an_unmask_with_no_usable_actor_is_refused_and_audited() {
             // ---- THE CONTROL: the same fixture DOES hand out the plaintext ----
             let result = dispatch_unmask(
                 &unmask_route(host, app).await,
-                &DbBinding::cold_start(app),
+                &crate::tests::fixtures::harness_binding(app),
                 unmask_args(
                     &person.id,
                     Some(value!({ "kind": "support", "id": "usr_2" })),
@@ -932,7 +927,7 @@ fn app_js_claiming_the_auto_system_actor_is_refused_by_the_parser() {
             let ssn = "123-45-6789";
             let person = audited_unmask_fixture(host, &pool, &url, app, &schema, ssn).await;
 
-            install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pci"] }))
+            install_mask_policy(&crate::tests::fixtures::harness_binding(app), value!({ "support": ["pci"] }))
                 .expect("install the app's declared mask policy");
 
             // ---- the forged system actor, parsed from the JSON a handler sends ----
@@ -947,7 +942,7 @@ fn app_js_claiming_the_auto_system_actor_is_refused_by_the_parser() {
             );
             let err = match dispatch_unmask(
                 &unmask_route(host, app).await,
-                &DbBinding::cold_start(app),
+                &crate::tests::fixtures::harness_binding(app),
                 forged,
             )
             .await
@@ -1012,7 +1007,7 @@ fn app_js_claiming_the_auto_system_actor_is_refused_by_the_parser() {
             .expect("the same payload shape must parse");
             let result = dispatch_unmask(
                 &unmask_route(host, app).await,
-                &DbBinding::cold_start(app),
+                &crate::tests::fixtures::harness_binding(app),
                 permitted,
             )
             .await
@@ -1063,7 +1058,7 @@ fn app_js_claiming_the_auto_system_actor_is_refused_by_the_bulk_parser() {
             let ssn = "987-65-4321";
             let person = audited_unmask_fixture(host, &pool, &url, app, &schema, ssn).await;
 
-            install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pci"] }))
+            install_mask_policy(&crate::tests::fixtures::harness_binding(app), value!({ "support": ["pci"] }))
                 .expect("install the app's declared mask policy");
 
             // ---- the forged system actor, parsed from the JSON a handler sends ----
@@ -1075,7 +1070,7 @@ fn app_js_claiming_the_auto_system_actor_is_refused_by_the_bulk_parser() {
             .expect("the payload must PARSE; DB-3 is an authorization fence");
             let err = match dispatch_bulk_unmask(
                 &unmask_route(host, app).await,
-                &DbBinding::cold_start(app),
+                &crate::tests::fixtures::harness_binding(app),
                 forged,
             )
             .await
@@ -1133,7 +1128,7 @@ fn app_js_claiming_the_auto_system_actor_is_refused_by_the_bulk_parser() {
             .expect("the same payload shape must parse");
             let granted = dispatch_bulk_unmask(
                 &unmask_route(host, app).await,
-                &DbBinding::cold_start(app),
+                &crate::tests::fixtures::harness_binding(app),
                 permitted,
             )
             .await
@@ -1191,7 +1186,7 @@ fn a_rejected_impersonation_is_distinguishable_from_an_absent_actor() {
             let person =
                 audited_unmask_fixture(host, &pool, &url, app, &schema, "123-45-6789").await;
 
-            install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pci"] }))
+            install_mask_policy(&crate::tests::fixtures::harness_binding(app), value!({ "support": ["pci"] }))
                 .expect("install the app's declared mask policy");
 
             // ---- (1) a forged claim on the reserved system kind, naming a real user
@@ -1202,7 +1197,7 @@ fn a_rejected_impersonation_is_distinguishable_from_an_absent_actor() {
             .expect("the forged payload must parse; DB-3 is a fence, not a shape check");
             dispatch_unmask(
                 &unmask_route(host, app).await,
-                &DbBinding::cold_start(app),
+                &crate::tests::fixtures::harness_binding(app),
                 forged,
             )
             .await
@@ -1213,7 +1208,7 @@ fn a_rejected_impersonation_is_distinguishable_from_an_absent_actor() {
                 .expect("an actor-less payload must parse");
             dispatch_unmask(
                 &unmask_route(host, app).await,
-                &DbBinding::cold_start(app),
+                &crate::tests::fixtures::harness_binding(app),
                 anonymous,
             )
             .await
@@ -1322,14 +1317,14 @@ fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
 
             // The policy grants `support` exactly ONE of the two classifications:
             // `email` is pii and permitted, `ssn` is pci and is not.
-            install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pii"] }))
+            install_mask_policy(&crate::tests::fixtures::harness_binding(app), value!({ "support": ["pii"] }))
                 .expect("install the app's declared mask policy");
             let actor = value!({ "kind": "support", "id": "usr_support_1" });
 
             // ---- the half-authorised batch ----
             let err = dispatch_bulk_unmask(
                 &unmask_route(host, app).await,
-                &DbBinding::cold_start(app),
+                &crate::tests::fixtures::harness_binding(app),
                 bulk_args(&person.id, &["email", "ssn"], Some(actor.clone())),
             )
             .await
@@ -1398,7 +1393,7 @@ fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
             // which is what makes the fence ATOMIC rather than merely right per column.
             let granted = dispatch_bulk_unmask(
                 &unmask_route(host, app).await,
-                &DbBinding::cold_start(app),
+                &crate::tests::fixtures::harness_binding(app),
                 bulk_args(&person.id, &["email"], Some(actor.clone())),
             )
             .await
@@ -1455,7 +1450,7 @@ fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
             };
             let err = dispatch_bulk_unmask(
                 &unmask_route(host, app).await,
-                &DbBinding::cold_start(app),
+                &crate::tests::fixtures::harness_binding(app),
                 two_rows.clone(),
             )
             .await
@@ -1516,7 +1511,7 @@ fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
             };
             let err = dispatch_bulk_unmask(
                 &unmask_route(host, app).await,
-                &DbBinding::cold_start(app),
+                &crate::tests::fixtures::harness_binding(app),
                 both_denied,
             )
             .await
@@ -1552,11 +1547,7 @@ fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
             );
 
             // A new deployment grants both classifications. The same batch now passes.
-            let redeployed = DbBinding::new(
-                app,
-                "wider_policy",
-                DbBinding::cold_start(app).schema().clone(),
-            );
+            let redeployed = crate::tests::fixtures::harness_binding_at_deploy(app, "wider_policy");
             crate::tests::fixtures::cache_schema_for_deploy(&redeployed, "people", schema.clone());
             install_mask_policy(&redeployed, value!({ "support": ["pii", "pci"] }))
                 .expect("install the new deployment's policy");
@@ -1618,15 +1609,15 @@ fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
             )
             .await;
 
-            install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pii"] }))
+            install_mask_policy(&crate::tests::fixtures::harness_binding(app), value!({ "support": ["pii"] }))
                 .expect("install the app's declared mask policy");
             let actor = Some(value!({ "kind": "support", "id": "usr_support_2" }));
             let reason = Some("mask_flip integration test".to_string());
             let both = ["email".to_string(), "ssn".to_string()];
 
             let err = authorize_query_hint(
-                &crate::exec::ambient_route_for_tests(app, unmask_backend(host).await),
-                &DbBinding::cold_start(app),
+                &crate::exec::ambient_route_for_tests(&crate::tests::fixtures::harness_binding(app), unmask_backend(host).await),
+                &crate::tests::fixtures::harness_binding(app),
                 "people",
                 &both,
                 &actor,
@@ -1701,8 +1692,8 @@ fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
             // `audit_query_hint_granted` so a failing SELECT leaves no ghost, which is
             // why the count staying at 1 is the assertion here.
             authorize_query_hint(
-                &crate::exec::ambient_route_for_tests(app, unmask_backend(host).await),
-                &DbBinding::cold_start(app),
+                &crate::exec::ambient_route_for_tests(&crate::tests::fixtures::harness_binding(app), unmask_backend(host).await),
+                &crate::tests::fixtures::harness_binding(app),
                 "people",
                 &["email".to_string()],
                 &actor,
@@ -1718,16 +1709,12 @@ fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
             );
 
             // A new deployment grants both classifications, allowing the same hint.
-            let redeployed = DbBinding::new(
-                app,
-                "wider_policy",
-                DbBinding::cold_start(app).schema().clone(),
-            );
+            let redeployed = crate::tests::fixtures::harness_binding_at_deploy(app, "wider_policy");
             crate::tests::fixtures::cache_schema_for_deploy(&redeployed, "people", schema.clone());
             install_mask_policy(&redeployed, value!({ "support": ["pii", "pci"] }))
                 .expect("install the new deployment's policy");
             authorize_query_hint(
-                &crate::exec::ambient_route_for_tests(app, unmask_backend(host).await),
+                &crate::exec::ambient_route_for_tests(&crate::tests::fixtures::harness_binding(app), unmask_backend(host).await),
                 &redeployed,
                 "people",
                 &both,
@@ -1755,7 +1742,7 @@ fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
             );
             assert_eq!(rows[0]["email"], value!(email));
             audit_query_hint_granted(
-                &crate::exec::ambient_route_for_tests(app, unmask_backend(host).await),
+                &crate::exec::ambient_route_for_tests(&crate::tests::fixtures::harness_binding(app), unmask_backend(host).await),
                 &redeployed,
                 "people",
                 &both,
@@ -1826,7 +1813,7 @@ fn a_query_hint_reads_the_column_its_alias_resolved_to() {
             )
             .await;
 
-            install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pii"] }))
+            install_mask_policy(&crate::tests::fixtures::harness_binding(app), value!({ "support": ["pii"] }))
                 .expect("install the app's declared mask policy");
             let actor = Some(value!({ "kind": "support", "id": "usr_support_3" }));
             let reason = Some("mask_flip integration test".to_string());
@@ -1834,8 +1821,8 @@ fn a_query_hint_reads_the_column_its_alias_resolved_to() {
             let hinted = ["contactEmail".to_string()];
 
             authorize_query_hint(
-                &crate::exec::ambient_route_for_tests(app, unmask_backend(host).await),
-                &DbBinding::cold_start(app),
+                &crate::exec::ambient_route_for_tests(&crate::tests::fixtures::harness_binding(app), unmask_backend(host).await),
+                &crate::tests::fixtures::harness_binding(app),
                 "people",
                 &hinted,
                 &actor,
@@ -1856,7 +1843,7 @@ fn a_query_hint_reads_the_column_its_alias_resolved_to() {
             })];
             dispatch_unmask_for_query(
                 &unmask_route(host, app).await,
-                &DbBinding::cold_start(app),
+                &crate::tests::fixtures::harness_binding(app),
                 "people",
                 &hinted,
                 &mut rows,

@@ -172,10 +172,10 @@ fn apply_matrix_schema_ahead_of_postgres(url: &str, app_id: &str, collection: &s
             .unwrap_or_else(|e| panic!("matrix DDL failed: {e}\n{ddl}"));
 
         // Provision the scoped runtime role and its column grants after admin-created DDL.
-        crate::tests::fixtures::roles::ensure_per_app_role(&pool, app_id)
+        crate::tests::fixtures::roles::ensure_binding_ladder(&pool, &crate::tests::fixtures::harness_binding(app_id))
             .await
             .expect("provision the matrix app's runtime role");
-        crate::tests::fixtures::grant_all_runtime_table_columns(&pool, app_id, collection).await;
+        crate::tests::fixtures::grant_all_runtime_table_columns(&pool, &crate::tests::fixtures::harness_binding(app_id), collection).await;
     });
 }
 
