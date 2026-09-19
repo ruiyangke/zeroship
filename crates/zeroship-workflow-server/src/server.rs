@@ -31,7 +31,7 @@ use zeroship_workflow_manager::{
     capacity::{Options as CapacityOptions, StaticPool},
     driver::{Driver, Options as DriverOptions, TickReport},
     lifecycle::{self, ControlLifecycle},
-    policy::control::{self, ControlPolicies, ControlPolicyStore},
+    policy::control::{self, ControlPolicies, ControlPolicyStore, PolicyObservations},
     recovery::Options as RecoveryOptions,
     retention::HoldClient,
     Error as ManagerError,
@@ -173,9 +173,14 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
     let control_url = settings.control_url.get().clone();
     let migrate_url = settings.migrate_url.get().clone();
     let holds = ControlHolds::new(&control_url, outbound.clone(), options.coordinator)?;
+    // ONE observation store for the whole process, cloned into every HTTP
+    // thread's state. A thread's database pool is its own; the observation an
+    // app's policy is granted from is not, because the deadline a worker
+    // receives must not depend on which thread accepted its connection.
+    let observations = PolicyObservations::new(options.policy_cache_entries);
     // Verify migration readiness before accepting connections. Each HTTP thread
     // constructs its own bounded pool and retention transport in the state factory.
-    let driver = driver(&url, &options, holds).await?;
+    let driver = driver(&url, &options, holds, observations.clone()).await?;
     compio::time::timeout(options.coordinator.command_timeout, replay.purge_expired()).await??;
     let auth = Arc::new(WorkflowAuth::new(
         verifier,
@@ -190,13 +195,13 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
     ));
     let coordinator = options.coordinator;
     let max_request_bytes = options.max_request_bytes;
-    let policy_cache_entries = options.policy_cache_entries;
     let server = web::HttpServer::new(move || {
         let url = url.clone();
         let auth = auth.clone();
         let outbound = outbound.clone();
         let control_url = control_url.clone();
         let migrate_url = migrate_url.clone();
+        let observations = observations.clone();
         async move {
             web::App::new()
                 .state_factory(async move || {
@@ -224,7 +229,7 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
                         .await?,
                         auth,
                         policy_source: Some(Rc::new(
-                            connect_policies(&url, coordinator, policy_cache_entries).await?,
+                            connect_policies(&url, coordinator, observations).await?,
                         )),
                         journal,
                     }))
@@ -264,7 +269,12 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
 /// Verify migration readiness before accepting connections, then compose the
 /// maintenance driver. Each HTTP thread constructs its own bounded pool and
 /// retention transport in the state factory.
-async fn driver(url: &str, options: &ServerOptions, holds: ControlHolds) -> Result<Driver, Error> {
+async fn driver(
+    url: &str,
+    options: &ServerOptions,
+    holds: ControlHolds,
+    observations: PolicyObservations,
+) -> Result<Driver, Error> {
     let startup = Coordinator::connect(
         url,
         options.coordinator,
@@ -272,7 +282,7 @@ async fn driver(url: &str, options: &ServerOptions, holds: ControlHolds) -> Resu
         Rc::new(connect_eligibility(url, options.coordinator).await?),
     )
     .await?;
-    connect_policies(url, options.coordinator, options.policy_cache_entries).await?;
+    connect_policies(url, options.coordinator, observations).await?;
     let lifecycle = connect_lifecycle(url, options.coordinator).await?;
     // A deployment that starts workers itself (compose replicas, a single
     // host) is a static pool: the manager never starts processes and reports
@@ -288,7 +298,7 @@ async fn driver(url: &str, options: &ServerOptions, holds: ControlHolds) -> Resu
 async fn connect_policies(
     url: &str,
     options: Options,
-    capacity: NonZeroUsize,
+    observations: PolicyObservations,
 ) -> Result<ControlPolicies, ManagerError> {
     use zeroship_core::schema_name::SchemaName;
     use zeroship_data_orm::{
@@ -311,7 +321,7 @@ async fn connect_policies(
         .await?;
         let store = ControlPolicyStore::new(database)?;
         store.ready().await?;
-        ControlPolicies::new(store, capacity, options.command_timeout)
+        ControlPolicies::new(store, observations, options.command_timeout)
     })
     .await
     .map_err(|_| ManagerError::Unavailable)?

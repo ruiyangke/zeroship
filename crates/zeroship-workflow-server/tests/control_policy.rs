@@ -23,7 +23,7 @@ use zeroship_workflow_manager::{
     Error,
     policy::{
         PolicySource,
-        control::{self, ControlPolicies, ControlPolicyStore, RolloutPolicy},
+        control::{self, ControlPolicies, ControlPolicyStore, PolicyObservations, RolloutPolicy},
     },
 };
 
@@ -456,7 +456,7 @@ async fn cached_authority_cannot_be_renewed_from_its_own_ledger() {
     fixture.provision(&AppPolicy::default()).await;
     let source = ControlPolicies::new(
         fixture.source.clone(),
-        NonZeroUsize::new(2).unwrap(),
+        PolicyObservations::new(NonZeroUsize::new(2).unwrap()),
         Duration::from_secs(5),
     )
     .unwrap();
@@ -482,4 +482,43 @@ async fn cached_authority_cannot_be_renewed_from_its_own_ledger() {
     assert!(!restored.same_observation(&original));
     assert!(source.revalidate(&original).is_err());
     assert!(source.revalidate(&restored).is_ok());
+}
+
+/// Two policy sources built the way two HTTP threads build theirs grant from
+/// one observation, so the deadline a worker receives does not depend on which
+/// thread accepted its connection.
+#[compio::test]
+async fn threads_of_one_manager_grant_from_one_observation() {
+    let fixture = Fixture::new().await;
+    fixture.provision(&AppPolicy::default()).await;
+    let observations = PolicyObservations::new(NonZeroUsize::new(2).unwrap());
+    let first = ControlPolicies::new(
+        fixture.source.clone(),
+        observations.clone(),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    let second =
+        ControlPolicies::new(fixture.source.clone(), observations, Duration::from_secs(5)).unwrap();
+
+    let observed = first.observe(&fixture.app).await.unwrap();
+    let shared = second.observe(&fixture.app).await.unwrap();
+    assert!(shared.same_observation(&observed));
+    assert_eq!(shared.expires_at(), observed.expires_at());
+    assert_eq!(second.revalidate(&observed).unwrap(), observed.expires_at());
+
+    // The control: a source holding observations of its own reads Control for
+    // itself and opens a window of its own, which neither source will recheck
+    // the other's grant against.
+    let separate = ControlPolicies::new(
+        fixture.source.clone(),
+        PolicyObservations::new(NonZeroUsize::new(2).unwrap()),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    let independent = separate.observe(&fixture.app).await.unwrap();
+    assert!(!independent.same_observation(&observed));
+    assert_ne!(independent.expires_at(), observed.expires_at());
+    assert!(first.revalidate(&independent).is_err());
+    assert!(separate.revalidate(&observed).is_err());
 }
