@@ -23,7 +23,7 @@ fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
             let alias = binding.schema().as_str();
             let (backend, _dir) = fresh_backend(host);
             backend
-                .attach_alias_file(alias)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("attach app file");
 
@@ -62,7 +62,7 @@ fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
                 .await
                 .expect("insert row A via the emitted column default");
 
-            let client = backend.fixture_session(app).await.expect("acquire client");
+            let client = backend.fixture_session(&crate::tests::fixtures::harness_alias(app)).await.expect("acquire client");
 
             // Row B: through the RUNTIME's builder, which converts a Unix-ms bind
             // for a declared timestamp column.

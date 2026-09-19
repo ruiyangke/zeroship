@@ -284,6 +284,7 @@ mod routed_read_tests {
         let runtime = compio::runtime::Runtime::new().expect("compio runtime");
         runtime.block_on(async {
             let app = "sqlite_routed_raw_read";
+            let alias = crate::tests::fixtures::harness_alias(app);
             let dir = tempfile::tempdir().expect("tempdir");
             let backend = Rc::new(
                 crate::backend_selection::new_sqlite_backend(
@@ -293,13 +294,13 @@ mod routed_read_tests {
                 .expect("open sqlite backend"),
             );
             backend
-                .attach_alias_file(&crate::tests::fixtures::harness_alias(app))
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("attach the app file");
             backend
                 .execute_fixture(
                     &format!(
-                        r#"CREATE TABLE "{app}"."people" (
+                        r#"CREATE TABLE "{alias}"."people" (
                                id TEXT PRIMARY KEY,
                                ssn TEXT,
                                "__zs_raw__ssn" TEXT
@@ -336,7 +337,7 @@ mod routed_read_tests {
             admission.handed_to_reducer();
             crate::transaction::driver::run_operation(
                 &crate::tests::fixtures::harness_route(app),
-                &format!(r#"INSERT INTO "{app}"."people" (id, ssn, "__zs_raw__ssn") VALUES ('p1', '***', '123-45-6789')"#), &[])
+                &format!(r#"INSERT INTO "{alias}"."people" (id, ssn, "__zs_raw__ssn") VALUES ('p1', '***', '123-45-6789')"#), &[])
                 .await.expect("INSERT on the transaction connection");
 
             // CONTROL: a pool-lane read cannot see the uncommitted row.

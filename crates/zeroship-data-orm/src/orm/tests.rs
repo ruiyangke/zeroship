@@ -161,7 +161,7 @@ async fn sqlite_search_values_round_trip_through_the_rust_orm() {
     let fixture = rusqlite::Connection::open(
         directory
             .path()
-            .join(format!("zs-{}.sqlite", db.binding.app_id())),
+            .join(format!("zs-{}.sqlite", db.binding.schema().as_str())),
     )
     .unwrap();
     fixture.execute_batch(&sql).unwrap();

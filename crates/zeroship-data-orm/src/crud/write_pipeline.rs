@@ -1199,7 +1199,7 @@ mod tests {
                     .expect("open sqlite backend"),
             );
             backend
-                .attach_alias_file(&crate::tests::fixtures::harness_alias(app_id))
+                .attach_binding(&crate::tests::fixtures::harness_binding(app_id))
                 .await
                 .expect("ensure schema");
             let handle = crate::backend::BackendHandle::new(Rc::clone(&backend));
@@ -1258,7 +1258,7 @@ mod tests {
             .await;
 
             let insert_built = crate::crud::insert::build_one(
-                &crate::sql::SchemaName::new(app_id).expect("fixture schema name"),
+                binding.schema(),
                 collection,
                 &schema,
                 insert_doc.clone(),
@@ -1267,7 +1267,7 @@ mod tests {
             .expect("build insert");
             let insert_params = &insert_built.params;
             let client = backend
-                .fixture_session(app_id)
+                .fixture_session(&crate::tests::fixtures::harness_alias(app_id))
                 .await
                 .expect("acquire client");
             client
@@ -1443,7 +1443,7 @@ mod tests {
                 )
                 .expect("open sqlite backend"),
             );
-            backend.attach_alias_file(&crate::tests::fixtures::harness_alias(app_id)).await.expect("attach app");
+            backend.attach_binding(&crate::tests::fixtures::harness_binding(app_id)).await.expect("attach app");
             let handle = crate::backend::BackendHandle::new(Rc::clone(&backend));
             let route = crate::exec::ambient_route_for_tests(&crate::tests::fixtures::harness_binding(app_id), handle);
 

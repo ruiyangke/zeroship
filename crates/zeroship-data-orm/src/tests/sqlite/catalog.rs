@@ -15,7 +15,7 @@ fn estimate_row_count_missing_table_returns_zero() {
             let (backend, _dir) = fresh_backend(host);
             let alias = crate::tests::fixtures::harness_alias("app_demo");
             backend
-                .attach_alias_file(&alias)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
 
@@ -34,7 +34,7 @@ fn introspect_empty_schema_yields_empty_live_schema() {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
             backend
-                .attach_alias_file(&crate::tests::fixtures::harness_alias("app_demo"))
+                .attach_binding(&crate::tests::fixtures::harness_binding("app_demo"))
                 .await
                 .expect("ensure_app_schema");
             let live = backend
@@ -67,7 +67,7 @@ fn introspect_after_create_table_round_trip() {
             let (backend, _dir) = fresh_backend(host);
             let alias = crate::tests::fixtures::harness_alias("app_demo");
             backend
-                .attach_alias_file(&alias)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
 
@@ -75,7 +75,7 @@ fn introspect_after_create_table_round_trip() {
             // columns, plus a non-PK index, so the introspect output
             // exercises every PRAGMA branch.
             let client = backend
-                .fixture_session("app_demo")
+                .fixture_session(&crate::tests::fixtures::harness_alias("app_demo"))
                 .await
                 .expect("acquire client");
             backend
@@ -177,7 +177,7 @@ fn introspection_includes_prefixed_creator_schema_tables() {
             let (backend, _dir) = fresh_backend(host);
             let alias = crate::tests::fixtures::harness_alias("app_demo");
             backend
-                .attach_alias_file(&alias)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("attach creator database");
             backend

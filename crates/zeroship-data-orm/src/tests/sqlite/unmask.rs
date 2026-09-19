@@ -253,7 +253,7 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
             )
             .expect("compile insert");
             let client = backend
-                .fixture_session(app_id)
+                .fixture_session(&crate::tests::fixtures::harness_alias(app_id))
                 .await
                 .expect("acquire client");
             let param_refs = &bq.params;
@@ -681,7 +681,7 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
             )
             .expect("compile insert");
             let client = backend
-                .fixture_session(app_id)
+                .fixture_session(&crate::tests::fixtures::harness_alias(app_id))
                 .await
                 .expect("acquire client");
             let param_refs = &bq.params;
@@ -994,7 +994,7 @@ fn malformed_mask_sentinel_skipped_on_sqlite() {
             let (backend, _dir) = fresh_backend(host);
             let alias = crate::tests::fixtures::harness_alias("app_demo");
             backend
-                .attach_alias_file(&alias)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
             backend
@@ -1189,7 +1189,7 @@ fn cold_bulk_unmask_attaches_before_read() {
             // pipeline would see) must still be the mask placeholder, never
             // the plaintext bulk_unmask returned above.
             let client = backend
-                .fixture_session(app_id)
+                .fixture_session(&crate::tests::fixtures::harness_alias(app_id))
                 .await
                 .expect("acquire client");
             let direct = client
@@ -1536,7 +1536,7 @@ fn cold_query_unmask_hint_attaches_before_read() {
             // passed above - a direct read of the fields' own columns must
             // still show the mask, never the plaintext it just returned.
             let client = backend
-                .fixture_session(app_id)
+                .fixture_session(&crate::tests::fixtures::harness_alias(app_id))
                 .await
                 .expect("acquire client");
             let direct = client

@@ -90,7 +90,7 @@ impl CollectionFixture {
         let (original, directory) = database_with_keys(key_source).await;
         let file = directory
             .path()
-            .join(format!("zs-{}.sqlite", original.binding.app_id()));
+            .join(format!("zs-{}.sqlite", original.binding.schema().as_str()));
         let fixture = rusqlite::Connection::open(&file).unwrap();
         for statement in zeroship_migrate_sqlite::backend::audit_unmask_ddl("main") {
             fixture.execute_batch(&statement).unwrap();
@@ -137,7 +137,7 @@ impl CollectionFixture {
         let binding = crate::tests::fixtures::harness_binding(zeroship_core::app_id::AppId::mint().as_str());
         let file = directory
             .path()
-            .join(format!("zs-{}.sqlite", binding.app_id()));
+            .join(format!("zs-{}.sqlite", binding.schema().as_str()));
         rusqlite::Connection::open(&file)
             .unwrap()
             .execute_batch(&format!(

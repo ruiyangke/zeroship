@@ -55,7 +55,7 @@ fn insert_publishes_via_preupdate_hook() {
             let (backend, _dir) = fresh_backend(host);
             let alias = crate::tests::fixtures::harness_alias("cdc_insert");
             backend
-                .attach_alias_file(&alias)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
 
@@ -135,7 +135,7 @@ fn attached_creator_databases_with_the_same_table_name_are_isolated() {
             let alias_b = crate::tests::fixtures::harness_alias("cdc_app_b");
             for alias in [&alias_a, &alias_b] {
                 backend
-                    .attach_alias_file(alias)
+                    .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                     .await
                     .expect("attach creator database");
                 backend
@@ -178,7 +178,7 @@ fn publisher_observes_columns_added_after_first_event() {
             let (backend, _dir) = fresh_backend(host);
             let alias = crate::tests::fixtures::harness_alias("cdc_schema_refresh");
             backend
-                .attach_alias_file(&alias)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("attach app file");
             backend
@@ -244,7 +244,7 @@ fn insert_publishes_logical_typed_id_not_sqlite_rowid() {
             let (backend, _dir) = fresh_backend(host);
             let alias = crate::tests::fixtures::harness_alias("cdc_typed_id");
             backend
-                .attach_alias_file(&alias)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
 
@@ -298,7 +298,7 @@ fn update_publishes_change_event_with_pre_image() {
             let (backend, _dir) = fresh_backend(host);
             let alias = crate::tests::fixtures::harness_alias("cdc_update");
             backend
-                .attach_alias_file(&alias)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
             backend
@@ -387,7 +387,7 @@ fn rollback_does_not_publish() {
             let (backend, _dir) = fresh_backend(host);
             let alias = crate::tests::fixtures::harness_alias("cdc_rollback");
             backend
-                .attach_alias_file(&alias)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
             backend
@@ -440,7 +440,7 @@ fn mixed_ops_in_one_tx_ordered_by_buffer_index() {
             let (backend, _dir) = fresh_backend(host);
             let alias = crate::tests::fixtures::harness_alias("cdc_mixed");
             backend
-                .attach_alias_file(&alias)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
             backend
@@ -541,7 +541,7 @@ fn subscription_fanout_under_load() {
             let (backend, _dir) = fresh_backend(host);
             let alias = crate::tests::fixtures::harness_alias("app_fanout");
             backend
-                .attach_alias_file(&alias)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
             backend
@@ -639,7 +639,7 @@ fn prefixed_shadow_table_emits_change_events() {
             let (backend, _dir) = fresh_backend(host);
             let alias = crate::tests::fixtures::harness_alias("app_mv");
             backend
-                .attach_alias_file(&alias)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
             backend
@@ -687,7 +687,7 @@ fn mixed_transaction_emits_events_for_ordinary_and_prefixed_tables() {
             let (backend, _dir) = fresh_backend(host);
             let alias = crate::tests::fixtures::harness_alias("app_mv_mixed");
             backend
-                .attach_alias_file(&alias)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
             backend
@@ -784,7 +784,7 @@ fn audit_table_writes_emit_events() {
             let (backend, _dir) = fresh_backend(host);
             let alias = crate::tests::fixtures::harness_alias("app_audit");
             backend
-                .attach_alias_file(&alias)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
             backend
@@ -840,7 +840,7 @@ fn backfill_run_pauses_broker_and_emits_one_resync() {
             let (backend, _dir) = fresh_backend(host);
             let alias = crate::tests::fixtures::harness_alias("app_backfill");
             backend
-                .attach_alias_file(&alias)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
             backend
@@ -937,7 +937,7 @@ fn schema_pending_decoder_drops_then_resyncs() {
             let (backend, _dir) = fresh_backend(host);
             let alias = crate::tests::fixtures::harness_alias("app_pending");
             backend
-                .attach_alias_file(&alias)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
             backend
@@ -1060,7 +1060,7 @@ fn backfill_pauses_broker_for_a_type_erased_backend_and_resyncs() {
             let (backend, _dir) = fresh_backend(host);
             let alias = crate::tests::fixtures::harness_alias("app_orch");
             backend
-                .attach_alias_file(&alias)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
             backend
@@ -1161,7 +1161,7 @@ fn writes_on_both_connections_reach_the_broker() {
             let (backend, _dir) = fresh_backend(host);
             let alias = crate::tests::fixtures::harness_alias("cdc_connections");
             backend
-                .attach_alias_file(&alias)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
             backend
@@ -1190,7 +1190,7 @@ fn writes_on_both_connections_reach_the_broker() {
 
             // tx_conn: a write inside an explicit creator transaction, committed.
             let tx = backend
-                .fixture_session("cdc_connections")
+                .fixture_session(&crate::tests::fixtures::harness_alias("cdc_connections"))
                 .await
                 .expect("acquire tx client");
             backend

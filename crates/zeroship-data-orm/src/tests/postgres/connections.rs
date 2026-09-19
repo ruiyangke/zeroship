@@ -129,7 +129,7 @@ fn a_dedicated_client_is_a_pool_checkout_and_returns_on_drop() {
             let client = {
                 use crate::tests::fixtures::DatabaseFixture;
                 backend
-                    .fixture_session("app_pool_probe")
+                    .fixture_session(&crate::tests::fixtures::harness_alias("app_pool_probe"))
                     .await
                     .expect("dedicated client")
             };
@@ -187,7 +187,7 @@ fn concurrent_dedicated_clients_are_bounded_by_the_pool() {
 
             use crate::tests::fixtures::DatabaseFixture;
             let first = backend
-                .fixture_session("app_pool_probe")
+                .fixture_session(&crate::tests::fixtures::harness_alias("app_pool_probe"))
                 .await
                 .expect("first dedicated client");
 
@@ -196,7 +196,7 @@ fn concurrent_dedicated_clients_are_bounded_by_the_pool() {
             // Conservative policy, and OWED a real decision: queue on the pool's
             // acquire timeout rather than refuse immediately, no per-app fairness, and
             // the ceiling is whatever the shared data pool is sized to.
-            let second = backend.fixture_session("app_pool_probe").await;
+            let second = backend.fixture_session(&crate::tests::fixtures::harness_alias("app_pool_probe")).await;
             let err = second.expect_err(
                 "a second dedicated client must be bounded by the pool, not opened \
          directly - an unbounded model is how one worker exhausts max_connections",
@@ -213,7 +213,7 @@ fn concurrent_dedicated_clients_are_bounded_by_the_pool() {
             // And the ceiling is a queue, not a wall: once the lease returns, the next
             // checkout succeeds.
             let third = backend
-                .fixture_session("app_pool_probe")
+                .fixture_session(&crate::tests::fixtures::harness_alias("app_pool_probe"))
                 .await
                 .expect("checkout after the first lease returned");
             drop(third);

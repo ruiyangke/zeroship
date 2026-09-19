@@ -109,7 +109,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
                 .expect("build insertMany");
             let params = &built.params;
             let client = backend
-                .fixture_session(app_id)
+                .fixture_session(&crate::tests::fixtures::harness_alias(app_id))
                 .await
                 .expect("acquire client");
             client
@@ -202,7 +202,7 @@ fn encrypted_column_round_trip_sqlite_randomised() {
             let (backend, _dir) = fresh_backend(host);
             let alias = crate::tests::fixtures::harness_alias("app_demo");
             backend
-                .attach_alias_file(&alias)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
             backend
@@ -248,7 +248,7 @@ fn encrypted_column_round_trip_sqlite_randomised() {
             // simplest cross-test path: re-encode the BLOB as hex via SQL
             // (`hex(ssn)`) and parse back to bytes here.
             let client = backend
-                .fixture_session("app_demo")
+                .fixture_session(&crate::tests::fixtures::harness_alias("app_demo"))
                 .await
                 .expect("acquire client");
             let rows = client
@@ -286,7 +286,7 @@ fn randomised_ciphertext_row_swap_rejected_sqlite() {
             let (backend, _dir) = fresh_backend(host);
             let alias = crate::tests::fixtures::harness_alias("app_demo");
             backend
-                .attach_alias_file(&alias)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
             backend
@@ -334,7 +334,7 @@ fn randomised_ciphertext_row_swap_rejected_sqlite() {
 
             // Read row B's ssn back and try to decrypt with row B's AAD.
             let client = backend
-                .fixture_session("app_demo")
+                .fixture_session(&crate::tests::fixtures::harness_alias("app_demo"))
                 .await
                 .expect("acquire client");
             let rows = client
@@ -413,7 +413,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
             let binding = crate::tests::fixtures::harness_binding("app_demo");
             let alias = binding.schema().as_str();
             backend
-                .attach_alias_file(alias)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
             // Only ciphertext binding is under test, so this fixture omits catalog sentinels.
@@ -478,7 +478,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
             // Execute the compiled INSERT through the typed RETURNING surface.
             let param_refs = &bq.params;
             let client = backend
-                .fixture_session("app_demo")
+                .fixture_session(&crate::tests::fixtures::harness_alias("app_demo"))
                 .await
                 .expect("acquire client");
             let _affected = client
