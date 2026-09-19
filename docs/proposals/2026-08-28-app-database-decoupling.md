@@ -1789,6 +1789,16 @@ Each records something that was tried or specified and broke.
   `DbBinding::route` itself reddens the two-database lane arm at its lane assertion. Before reading
   a green as evidence, confirm the mutated symbol is on the path the test exercises.
 
+- **Do not filter CDC relations on publication membership.** The publication is ONE RELAY-OWNED
+  SHARED OBJECT PER DATASTORE whose members are the union of every Database's safe table
+  projections, so `pg_publication_tables WHERE pubname = $1` spans every tenant on the cluster.
+  Filtering on that set would admit a co-tenant's relations to any subscriber while looking like a
+  guard and passing a single-tenant test. For the same reason the namespace check in
+  `zeroship_data_cdc_server::source::capture` must NOT be deleted in favour of trusting the
+  publication: against a deliberately tenant-spanning object it stops being defence in depth and
+  becomes the only separation in the stream. The check is right; its operand is the schema of the
+  one database the subscriber is entitled to, resolved from that app's binding, never the app id.
+
 ---
 
 ## History
