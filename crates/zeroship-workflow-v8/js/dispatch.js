@@ -1293,16 +1293,15 @@ export async function dispatch(userNamespace, envelope, _ctx) {
                     { mode: "body" },
                     () => Promise.resolve(workflow.run(trigger, step)),
                 );
-            } catch (e) {
-                if (
-                    !(e instanceof ZsWorkflowCompensationReplayReady) &&
-                    !(e instanceof ZsWorkflowSuspendSignal) &&
-                    !(e instanceof ZsWorkflowContinueAsNewSignal)
-                ) {
-                    // Terminal forward errors are expected while rebuilding the registry.
-                    // Corrupt prefixes still fail closed if no pending compensator
-                    // reconstructs from the replayed journal.
-                }
+            } catch {
+                // The rebuild's only product is the registry each `step.*` call fills
+                // as the body reaches it, so every way out of the body is equivalent
+                // here and none is inspected: the forward failure being rolled back,
+                // the signal that ends the replay at the journal frontier, and a fault
+                // in the body alike. A prefix that registered nothing fails closed,
+                // because `runNextCompensator` then has no pending entry to run, and a
+                // prefix that registered the wrong one is refused by the engine, which
+                // matches the reported obligation against its own journal.
             }
             return workflowTerminalResult(envelope, await step.runNextCompensator());
         }
