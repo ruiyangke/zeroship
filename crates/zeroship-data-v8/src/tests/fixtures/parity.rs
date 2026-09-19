@@ -81,18 +81,21 @@ fn apply_matrix_schema_ahead_of_runtime(url: &str, app_id: &str, collection: &st
         .parent()
         .expect("the sqlite parity url names a file inside a directory")
         .to_path_buf();
+    let alias = crate::tests::fixtures::harness_alias(app_id);
     crate::tests::fixtures::tables::create_sqlite_table(
         &db_dir,
-        app_id,
-        &matrix_ddl_sqlite(app_id, collection),
+        &alias,
+        &matrix_ddl_sqlite(&alias, collection),
     );
 }
 
 /// Hand-authored SQLite storage for [`matrix_schema`]. Keep it equivalent to
 /// [`matrix_ddl_postgres`] so parity checks compare the same logical data.
-fn matrix_ddl_sqlite(app_id: &str, collection: &str) -> String {
+///
+/// `alias` is the binding's schema, which on SQLite is the `ATTACH` alias.
+fn matrix_ddl_sqlite(alias: &str, collection: &str) -> String {
     format!(
-        r#"CREATE TABLE IF NOT EXISTS "{app_id}"."{collection}" (
+        r#"CREATE TABLE IF NOT EXISTS "{alias}"."{collection}" (
   id TEXT PRIMARY KEY,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -109,9 +112,9 @@ fn matrix_ddl_sqlite(app_id: &str, collection: &str) -> String {
   "payload_bytes" TEXT,
   "payload_json" TEXT DEFAULT '{{}}'
 );
-CREATE INDEX IF NOT EXISTS "{app_id}"."{collection}_deleted_at_idx" ON "{collection}" ("deleted_at");
-CREATE INDEX IF NOT EXISTS "{app_id}"."{collection}_updated_at_idx" ON "{collection}" ("updated_at");
-CREATE INDEX IF NOT EXISTS "{app_id}"."{collection}_created_by_idx" ON "{collection}" ("created_by");
+CREATE INDEX IF NOT EXISTS "{alias}"."{collection}_deleted_at_idx" ON "{collection}" ("deleted_at");
+CREATE INDEX IF NOT EXISTS "{alias}"."{collection}_updated_at_idx" ON "{collection}" ("updated_at");
+CREATE INDEX IF NOT EXISTS "{alias}"."{collection}_created_by_idx" ON "{collection}" ("created_by");
 "#
     )
 }
@@ -122,10 +125,13 @@ CREATE INDEX IF NOT EXISTS "{app_id}"."{collection}_created_by_idx" ON "{collect
 /// downstream: `TIMESTAMPTZ`/`NOW()` for SQLite's `TEXT`/`CURRENT_TIMESTAMP`,
 /// `BOOLEAN` for `INTEGER`, `JSONB` for `TEXT`. Note the index targets flip -
 /// PostgreSQL qualifies the TABLE, SQLite qualifies the INDEX NAME, because on
-/// SQLite the app file is an ATTACHed database rather than a schema.
-fn matrix_ddl_postgres(app_id: &str, collection: &str) -> String {
+/// SQLite the database file is ATTACHed under the schema name rather than being
+/// a schema.
+///
+/// `alias` is the binding's schema.
+fn matrix_ddl_postgres(alias: &str, collection: &str) -> String {
     format!(
-        r#"CREATE TABLE IF NOT EXISTS "{app_id}"."{collection}" (
+        r#"CREATE TABLE IF NOT EXISTS "{alias}"."{collection}" (
   id TEXT PRIMARY KEY,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -142,9 +148,9 @@ fn matrix_ddl_postgres(app_id: &str, collection: &str) -> String {
   "payload_bytes" BYTEA,
   "payload_json" JSONB DEFAULT '{{}}'::jsonb
 );
-CREATE INDEX IF NOT EXISTS "{collection}_deleted_at_idx" ON "{app_id}"."{collection}" ("deleted_at");
-CREATE INDEX IF NOT EXISTS "{collection}_updated_at_idx" ON "{app_id}"."{collection}" ("updated_at");
-CREATE INDEX IF NOT EXISTS "{collection}_created_by_idx" ON "{app_id}"."{collection}" ("created_by");
+CREATE INDEX IF NOT EXISTS "{collection}_deleted_at_idx" ON "{alias}"."{collection}" ("deleted_at");
+CREATE INDEX IF NOT EXISTS "{collection}_updated_at_idx" ON "{alias}"."{collection}" ("updated_at");
+CREATE INDEX IF NOT EXISTS "{collection}_created_by_idx" ON "{alias}"."{collection}" ("created_by");
 "#
     )
 }
@@ -152,8 +158,10 @@ CREATE INDEX IF NOT EXISTS "{collection}_created_by_idx" ON "{app_id}"."{collect
 /// Reset this fixture’s PostgreSQL schema and install the matrix table before startup.
 /// This checks runtime behavior against hand-authored storage, not migration lowering.
 fn apply_matrix_schema_ahead_of_postgres(url: &str, app_id: &str, collection: &str) {
-    // This fixture binds the app to a physical schema with the same name.
-    let ddl = matrix_ddl_postgres(app_id, collection);
+    // The physical schema comes off the binding, which is where the ORM
+    // qualifies its statements.
+    let alias = crate::tests::fixtures::harness_alias(app_id);
+    let ddl = matrix_ddl_postgres(&alias, collection);
 
     block_on(async move {
         let pool = compio_postgres::Pool::connect(url, 2)
@@ -161,8 +169,8 @@ fn apply_matrix_schema_ahead_of_postgres(url: &str, app_id: &str, collection: &s
             .expect("admin pool for the parity schema");
 
         pool.batch_execute(&format!(
-            "DROP SCHEMA IF EXISTS \"{app_id}\" CASCADE; \
-             CREATE SCHEMA \"{app_id}\""
+            "DROP SCHEMA IF EXISTS \"{alias}\" CASCADE; \
+             CREATE SCHEMA \"{alias}\""
         ))
         .await
         .expect("reset the parity app schema");
@@ -423,7 +431,7 @@ pub fn dispatch_zs_metered(
     }];
     let plugins: Vec<Arc<dyn NativePlugin>> = vec![
         DbService::new(DbServiceConfig {
-            app_bindings: Default::default(),
+            app_bindings: crate::tests::fixtures::harness_app_bindings([app_id]),
             project_keys: crate::tests::fixtures::project_keys(),
             connection: crate::tests::fixtures::recording::connection(url),
             cdc_relay: None,
@@ -472,9 +480,9 @@ pub fn dispatch_zs_metered(
 
 /// Run the whole matrix against `url` as `app_id`.
 ///
-/// `app_id` is the caller's, not a constant. On PostgreSQL it names the schema
-/// this run drops and rebuilds, so a shared server needs it to be per-test;
-/// SQLite callers pass [`DEV_APP_ID`] on purpose (see its note).
+/// `app_id` is the caller's, not a constant. On PostgreSQL it selects the
+/// binding whose schema this run drops and rebuilds, so a shared server needs it
+/// to be per-test; SQLite callers pass [`DEV_APP_ID`] on purpose (see its note).
 pub fn run_matrix(url: &str, app_id: &str) -> MatrixSnapshot {
     // Keep each matrix run isolated even when the backend URL is reused
     // across tests or legs.

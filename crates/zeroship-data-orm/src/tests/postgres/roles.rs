@@ -32,7 +32,8 @@ fn per_app_role_created_at_provision() {
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let app = crate::tests::fixtures::test_app_id!();
             let app = app.as_str();
-            let role = provision_app_with_role(&pool, app).await;
+            let alias = crate::tests::fixtures::harness_alias(app);
+            let role = provision_binding_schema(&pool, app).await;
 
             // First provision creates the role.
             let first = crate::tests::fixtures::roles::ensure_binding_ladder(&pool, &crate::tests::fixtures::harness_binding(app))
@@ -61,7 +62,7 @@ fn per_app_role_created_at_provision() {
             );
 
             let _ = pool
-                .execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+                .execute(&format!("DROP SCHEMA IF EXISTS \"{alias}\" CASCADE"), &[])
                 .await;
             let _ = pool
                 .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
@@ -79,7 +80,8 @@ fn per_app_role_has_no_replication_attr() {
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let app = crate::tests::fixtures::test_app_id!();
             let app = app.as_str();
-            let role = provision_app_with_role(&pool, app).await;
+            let alias = crate::tests::fixtures::harness_alias(app);
+            let role = provision_binding_schema(&pool, app).await;
             crate::tests::fixtures::roles::ensure_binding_ladder(&pool, &crate::tests::fixtures::harness_binding(app))
                 .await
                 .unwrap();
@@ -100,7 +102,7 @@ fn per_app_role_has_no_replication_attr() {
             );
 
             let _ = pool
-                .execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+                .execute(&format!("DROP SCHEMA IF EXISTS \"{alias}\" CASCADE"), &[])
                 .await;
             let _ = pool
                 .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
@@ -118,20 +120,21 @@ fn per_app_role_grant_scoped_to_schema() {
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let app = crate::tests::fixtures::test_app_id!();
             let app = app.as_str();
-            let role = provision_app_with_role(&pool, app).await;
+            let alias = crate::tests::fixtures::harness_alias(app);
+            let role = provision_binding_schema(&pool, app).await;
             crate::tests::fixtures::roles::ensure_binding_ladder(&pool, &crate::tests::fixtures::harness_binding(app))
                 .await
                 .unwrap();
 
             // Create a table in the app schema (as superuser), insert a row.
             pool.execute(
-                &format!(r#"CREATE TABLE "{app}".widgets (id SERIAL PRIMARY KEY, name TEXT)"#),
+                &format!(r#"CREATE TABLE "{alias}".widgets (id SERIAL PRIMARY KEY, name TEXT)"#),
                 &[],
             )
             .await
             .unwrap();
             pool.execute(
-                &format!(r#"INSERT INTO "{app}".widgets (name) VALUES ('seed')"#),
+                &format!(r#"INSERT INTO "{alias}".widgets (name) VALUES ('seed')"#),
                 &[],
             )
             .await
@@ -143,7 +146,7 @@ fn per_app_role_grant_scoped_to_schema() {
                 .await
                 .unwrap();
             let sel = pool
-                .query_text_params(&format!(r#"SELECT name FROM "{app}".widgets"#), &[])
+                .query_text_params(&format!(r#"SELECT name FROM "{alias}".widgets"#), &[])
                 .await;
             assert!(
                 sel.is_ok(),
@@ -151,7 +154,7 @@ fn per_app_role_grant_scoped_to_schema() {
             );
             let ins = pool
                 .execute(
-                    &format!(r#"INSERT INTO "{app}".widgets (name) VALUES ('by_role')"#),
+                    &format!(r#"INSERT INTO "{alias}".widgets (name) VALUES ('by_role')"#),
                     &[],
                 )
                 .await;
@@ -162,7 +165,7 @@ fn per_app_role_grant_scoped_to_schema() {
             pool.execute("RESET ROLE", &[]).await.unwrap();
 
             let _ = pool
-                .execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+                .execute(&format!("DROP SCHEMA IF EXISTS \"{alias}\" CASCADE"), &[])
                 .await;
             let _ = pool
                 .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
@@ -180,36 +183,28 @@ fn per_app_role_cannot_read_sibling_schema_or_touch_slots() {
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let app_a = crate::tests::fixtures::test_app_id!("a");
             let app_a = app_a.as_str();
+            let alias_a = crate::tests::fixtures::harness_alias(app_a);
             let app_b = crate::tests::fixtures::test_app_id!("b");
             let app_b = app_b.as_str();
-            let role_a = provision_app_with_role(&pool, app_a).await;
-            // Provision a sibling schema B (and its role) with a table.
-            pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app_b}\" CASCADE"), &[])
-                .await
-                .unwrap();
-            let role_b = zeroship_core::database_role::per_app_role_name(app_b)
-                .expect("sibling fixture app id must produce a valid PostgreSQL role name");
-            let _ = pool
-                .execute(&format!("DROP ROLE IF EXISTS \"{role_b}\""), &[])
-                .await;
-            pool.execute(&format!("CREATE SCHEMA \"{app_b}\""), &[])
-                .await
-                .unwrap();
+            let alias_b = crate::tests::fixtures::harness_alias(app_b);
+            let role_a = provision_binding_schema(&pool, app_a).await;
 
             crate::tests::fixtures::roles::ensure_binding_ladder(&pool, &crate::tests::fixtures::harness_binding(app_a))
                 .await
                 .unwrap();
+            // Sibling B gets no fixture schema of its own: its ladder creates
+            // the schema its binding addresses.
             crate::tests::fixtures::roles::ensure_binding_ladder(&pool, &crate::tests::fixtures::harness_binding(app_b))
                 .await
                 .unwrap();
             pool.execute(
-                &format!(r#"CREATE TABLE "{app_b}".secrets (id SERIAL PRIMARY KEY, val TEXT)"#),
+                &format!(r#"CREATE TABLE "{alias_b}".secrets (id SERIAL PRIMARY KEY, val TEXT)"#),
                 &[],
             )
             .await
             .unwrap();
             pool.execute(
-                &format!(r#"INSERT INTO "{app_b}".secrets (val) VALUES ('app_b_secret')"#),
+                &format!(r#"INSERT INTO "{alias_b}".secrets (val) VALUES ('app_b_secret')"#),
                 &[],
             )
             .await
@@ -221,7 +216,7 @@ fn per_app_role_cannot_read_sibling_schema_or_touch_slots() {
                 .await
                 .unwrap();
             let cross = pool
-                .query_text_params(&format!(r#"SELECT val FROM "{app_b}".secrets"#), &[])
+                .query_text_params(&format!(r#"SELECT val FROM "{alias_b}".secrets"#), &[])
                 .await;
             assert!(
                 cross.is_err(),
@@ -264,16 +259,13 @@ fn per_app_role_cannot_read_sibling_schema_or_touch_slots() {
             pool.execute("RESET ROLE", &[]).await.unwrap();
 
             let _ = pool
-                .execute(&format!("DROP SCHEMA IF EXISTS \"{app_a}\" CASCADE"), &[])
+                .execute(&format!("DROP SCHEMA IF EXISTS \"{alias_a}\" CASCADE"), &[])
                 .await;
             let _ = pool
-                .execute(&format!("DROP SCHEMA IF EXISTS \"{app_b}\" CASCADE"), &[])
+                .execute(&format!("DROP SCHEMA IF EXISTS \"{alias_b}\" CASCADE"), &[])
                 .await;
             let _ = pool
                 .execute(&format!("DROP ROLE IF EXISTS \"{role_a}\""), &[])
-                .await;
-            let _ = pool
-                .execute(&format!("DROP ROLE IF EXISTS \"{role_b}\""), &[])
                 .await;
             release_pg(host, pool).await;
         })
@@ -291,7 +283,8 @@ fn client_sql_runs_under_per_app_role() {
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let app = crate::tests::fixtures::test_app_id!();
             let app = app.as_str();
-            let role = provision_app_with_role(&pool, app).await;
+            let alias = crate::tests::fixtures::harness_alias(app);
+            let role = provision_binding_schema(&pool, app).await;
             crate::tests::fixtures::roles::ensure_binding_ladder(&pool, &crate::tests::fixtures::harness_binding(app))
                 .await
                 .unwrap();
@@ -334,7 +327,7 @@ fn client_sql_runs_under_per_app_role() {
 
             drop(client);
             let _ = pool
-                .execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+                .execute(&format!("DROP SCHEMA IF EXISTS \"{alias}\" CASCADE"), &[])
                 .await;
             let _ = pool
                 .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
@@ -354,7 +347,8 @@ fn exec_autocommit_query_runs_under_per_app_role() {
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let app = crate::tests::fixtures::test_app_id!();
             let app = app.as_str();
-            let role = provision_app_with_role(&pool, app).await;
+            let alias = crate::tests::fixtures::harness_alias(app);
+            let role = provision_binding_schema(&pool, app).await;
             crate::tests::fixtures::roles::ensure_binding_ladder(&pool, &crate::tests::fixtures::harness_binding(app))
                 .await
                 .unwrap();
@@ -390,7 +384,7 @@ fn exec_autocommit_query_runs_under_per_app_role() {
             );
 
             let _ = pool
-                .execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+                .execute(&format!("DROP SCHEMA IF EXISTS \"{alias}\" CASCADE"), &[])
                 .await;
             let _ = pool
                 .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
@@ -413,15 +407,16 @@ fn vector_search_runs_under_per_app_role_via_rls() {
             let app = crate::tests::fixtures::test_app_id!();
 
             let app = app.as_str();
+            let alias = crate::tests::fixtures::harness_alias(app);
             let coll = "docs";
-            let role = provision_app_with_role(&admin_pool, app).await;
+            let role = provision_binding_schema(&admin_pool, app).await;
             crate::tests::fixtures::roles::ensure_binding_ladder(&admin_pool, &crate::tests::fixtures::harness_binding(app))
                 .await
                 .unwrap();
             admin_pool
                 .execute(
                     &format!(
-                        "CREATE TABLE \"{app}\".\"{coll}\" (\
+                        "CREATE TABLE \"{alias}\".\"{coll}\" (\
                id SERIAL PRIMARY KEY, \
                embedding vector(2) NOT NULL, \
                created_at TIMESTAMPTZ DEFAULT NOW(), \
@@ -444,7 +439,7 @@ fn vector_search_runs_under_per_app_role_via_rls() {
             admin_pool
                 .execute(
                     &format!(
-                        "INSERT INTO \"{app}\".\"{coll}\" (embedding) VALUES ($1::text::vector)"
+                        "INSERT INTO \"{alias}\".\"{coll}\" (embedding) VALUES ($1::text::vector)"
                     ),
                     &[&"[1,0]" as &(dyn compio_postgres::types::ToSql + Sync)],
                 )
@@ -458,7 +453,7 @@ fn vector_search_runs_under_per_app_role_via_rls() {
                     .await;
 
             let blocked = login_pool
-                .query_text_params(&format!("SELECT id FROM \"{app}\".\"{coll}\""), &[])
+                .query_text_params(&format!("SELECT id FROM \"{alias}\".\"{coll}\""), &[])
                 .await
                 .unwrap();
             assert!(
@@ -498,7 +493,7 @@ fn vector_search_runs_under_per_app_role_via_rls() {
 
             drop(login_pool);
             let _ = admin_pool
-                .execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+                .execute(&format!("DROP SCHEMA IF EXISTS \"{alias}\" CASCADE"), &[])
                 .await;
             let _ = admin_pool
                 .execute(&format!("DROP ROLE IF EXISTS \"{login_role}\""), &[])
@@ -525,15 +520,16 @@ fn spatial_near_runs_under_per_app_role_via_rls() {
             let app = crate::tests::fixtures::test_app_id!();
 
             let app = app.as_str();
+            let alias = crate::tests::fixtures::harness_alias(app);
             let coll = "places";
-            let role = provision_app_with_role(&admin_pool, app).await;
+            let role = provision_binding_schema(&admin_pool, app).await;
             crate::tests::fixtures::roles::ensure_binding_ladder(&admin_pool, &crate::tests::fixtures::harness_binding(app))
                 .await
                 .unwrap();
             admin_pool
                 .execute(
                     &format!(
-                        "CREATE TABLE \"{app}\".\"{coll}\" (\
+                        "CREATE TABLE \"{alias}\".\"{coll}\" (\
                id SERIAL PRIMARY KEY, \
                location geography(POINT, 4326) NOT NULL, \
                created_at TIMESTAMPTZ DEFAULT NOW(), \
@@ -556,7 +552,7 @@ fn spatial_near_runs_under_per_app_role_via_rls() {
             admin_pool
                 .execute(
                     &format!(
-                        "INSERT INTO \"{app}\".\"{coll}\" (location) \
+                        "INSERT INTO \"{alias}\".\"{coll}\" (location) \
              VALUES (ST_GeogFromText('POINT(-0.1278 51.5074)'))"
                     ),
                     &[],
@@ -571,7 +567,7 @@ fn spatial_near_runs_under_per_app_role_via_rls() {
                     .await;
 
             let blocked = login_pool
-                .query_text_params(&format!("SELECT id FROM \"{app}\".\"{coll}\""), &[])
+                .query_text_params(&format!("SELECT id FROM \"{alias}\".\"{coll}\""), &[])
                 .await
                 .unwrap();
             assert!(
@@ -613,7 +609,7 @@ fn spatial_near_runs_under_per_app_role_via_rls() {
 
             drop(login_pool);
             let _ = admin_pool
-                .execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+                .execute(&format!("DROP SCHEMA IF EXISTS \"{alias}\" CASCADE"), &[])
                 .await;
             let _ = admin_pool
                 .execute(&format!("DROP ROLE IF EXISTS \"{login_role}\""), &[])

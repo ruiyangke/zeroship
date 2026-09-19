@@ -41,6 +41,8 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
             let _keys = host.supply_project_key(&["app_demo"], &"d".repeat(64));
             let app_id = "app_demo";
             let collection = "bulk_people";
+            let binding = crate::tests::fixtures::harness_binding(app_id);
+            let alias = binding.schema().as_str();
             let schema = crate::tests::fixtures::schema::generated_fields(crate::value!({
                 "name": { "type": "string" },
                 "ssn": {
@@ -52,7 +54,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
             let (backend, _dir) =
                 unmask_setup_with_schema(host, app_id, collection, schema.clone()).await;
             let ddl = fixture_table_sql_sqlite(
-                &crate::sql::SchemaName::new(app_id).expect("fixture schema name"),
+                binding.schema(),
                 collection,
                 &schema,
                 &FkEmission::Inline,
@@ -103,13 +105,8 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
                 .collect();
 
             let schema = crate::tests::fixtures::native_fields(schema);
-            let built = compile_insert_many(
-                &crate::sql::SchemaName::new(app_id).expect("fixture schema name"),
-                collection,
-                &schema,
-                &docs,
-            )
-            .expect("build insertMany");
+            let built = compile_insert_many(binding.schema(), collection, &schema, &docs)
+                .expect("build insertMany");
             let params = &built.params;
             let client = backend
                 .fixture_session(app_id)
@@ -124,7 +121,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
             let typed = client
                 .query_typed(
                     &format!(
-                        r#"SELECT id, "{raw_ssn}", ssn FROM "{app_id}"."{collection}" ORDER BY id"#
+                        r#"SELECT id, "{raw_ssn}", ssn FROM "{alias}"."{collection}" ORDER BY id"#
                     ),
                     &[],
                 )
@@ -203,16 +200,19 @@ fn encrypted_column_round_trip_sqlite_randomised() {
         let _keys = host.supply_project_key(&["app1"], &"a".repeat(64));
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
+            let alias = crate::tests::fixtures::harness_alias("app_demo");
             backend
-                .attach_app_file("app_demo")
+                .attach_alias_file(&alias)
                 .await
                 .expect("ensure_app_schema");
             backend
                 .execute_fixture(
-                    "CREATE TABLE \"app_demo\".\"enc_notes\" (\
-                     id  TEXT PRIMARY KEY, \
-                     ssn BLOB\
-                 )",
+                    &format!(
+                        "CREATE TABLE \"{alias}\".\"enc_notes\" (\
+                         id  TEXT PRIMARY KEY, \
+                         ssn BLOB\
+                     )"
+                    ),
                     &[],
                 )
                 .await
@@ -234,7 +234,7 @@ fn encrypted_column_round_trip_sqlite_randomised() {
             // protocol.
             let blob_lit = sqlite_blob_literal(&ct);
             let insert_sql =
-                format!("INSERT INTO \"app_demo\".\"enc_notes\" (id, ssn) VALUES (?, {blob_lit})");
+                format!("INSERT INTO \"{alias}\".\"enc_notes\" (id, ssn) VALUES (?, {blob_lit})");
             backend
                 .execute_fixture(&insert_sql, &[("row_a").into()])
                 .await
@@ -253,7 +253,7 @@ fn encrypted_column_round_trip_sqlite_randomised() {
                 .expect("acquire client");
             let rows = client
                 .query(
-                    "SELECT hex(ssn) FROM \"app_demo\".\"enc_notes\" WHERE id = ?",
+                    &format!("SELECT hex(ssn) FROM \"{alias}\".\"enc_notes\" WHERE id = ?"),
                     &["row_a"],
                 )
                 .await
@@ -284,16 +284,19 @@ fn randomised_ciphertext_row_swap_rejected_sqlite() {
         let _keys = host.supply_project_key(&["app1"], &"d".repeat(64));
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
+            let alias = crate::tests::fixtures::harness_alias("app_demo");
             backend
-                .attach_app_file("app_demo")
+                .attach_alias_file(&alias)
                 .await
                 .expect("ensure_app_schema");
             backend
                 .execute_fixture(
-                    "CREATE TABLE \"app_demo\".\"enc_notes\" (\
-                     id  TEXT PRIMARY KEY, \
-                     ssn BLOB\
-                 )",
+                    &format!(
+                        "CREATE TABLE \"{alias}\".\"enc_notes\" (\
+                         id  TEXT PRIMARY KEY, \
+                         ssn BLOB\
+                     )"
+                    ),
                     &[],
                 )
                 .await
@@ -316,14 +319,14 @@ fn randomised_ciphertext_row_swap_rejected_sqlite() {
             for (id, ct) in [("row_a", &ct_a), ("row_b", &ct_b)] {
                 let blob_lit = sqlite_blob_literal(ct);
                 let sql = format!(
-                    "INSERT INTO \"app_demo\".\"enc_notes\" (id, ssn) VALUES (?, {blob_lit})"
+                    "INSERT INTO \"{alias}\".\"enc_notes\" (id, ssn) VALUES (?, {blob_lit})"
                 );
                 backend.execute_fixture(&sql, &[(id).into()]).await.unwrap();
             }
 
             // Attacker move: UPDATE row_b's ssn slot with row_a's ciphertext.
             let blob_a = sqlite_blob_literal(&ct_a);
-            let sql = format!("UPDATE \"app_demo\".\"enc_notes\" SET ssn = {blob_a} WHERE id = ?");
+            let sql = format!("UPDATE \"{alias}\".\"enc_notes\" SET ssn = {blob_a} WHERE id = ?");
             backend
                 .execute_fixture(&sql, &[("row_b").into()])
                 .await
@@ -336,7 +339,7 @@ fn randomised_ciphertext_row_swap_rejected_sqlite() {
                 .expect("acquire client");
             let rows = client
                 .query(
-                    "SELECT hex(ssn) FROM \"app_demo\".\"enc_notes\" WHERE id = ?",
+                    &format!("SELECT hex(ssn) FROM \"{alias}\".\"enc_notes\" WHERE id = ?"),
                     &["row_b"],
                 )
                 .await
@@ -407,17 +410,21 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
         let _keys = host.supply_project_key(&["app_demo"], &"c".repeat(64));
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
+            let binding = crate::tests::fixtures::harness_binding("app_demo");
+            let alias = binding.schema().as_str();
             backend
-                .attach_app_file("app_demo")
+                .attach_alias_file(alias)
                 .await
                 .expect("ensure_app_schema");
             // Only ciphertext binding is under test, so this fixture omits catalog sentinels.
             backend
                 .execute_fixture(
-                    "CREATE TABLE \"app_demo\".\"users\" (\
-                     id  TEXT PRIMARY KEY, \
-                     ssn BLOB\
-                 )",
+                    &format!(
+                        "CREATE TABLE \"{alias}\".\"users\" (\
+                         id  TEXT PRIMARY KEY, \
+                         ssn BLOB\
+                     )"
+                    ),
                     &[],
                 )
                 .await
@@ -455,13 +462,8 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
             let ciphertext = doc["ssn"].as_bytes().expect("native ciphertext").to_vec();
 
             // Bind the ciphertext directly.
-            let bq = compile_insert(
-                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
-                "users",
-                &schema,
-                &doc,
-            )
-            .expect("compile insert");
+            let bq =
+                compile_insert(binding.schema(), "users", &schema, &doc).expect("compile insert");
             assert!(
                 !bq.sql.contains("decode("),
                 "SQLite dialect must not emit `decode(...)::bytea`: {}",
@@ -490,7 +492,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
             // `query_typed` helper.
             let typed = client
                 .query_typed(
-                    "SELECT id, ssn FROM \"app_demo\".\"users\" WHERE id = ?",
+                    &format!("SELECT id, ssn FROM \"{alias}\".\"users\" WHERE id = ?"),
                     &[row_pk.into()],
                 )
                 .await

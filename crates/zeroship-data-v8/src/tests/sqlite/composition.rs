@@ -5,10 +5,11 @@ use zeroship_data_orm::value;
 fn nested_query_refuses_writes_after_await_and_restores_mutation() {
     run(async {
         let dir = tempfile::tempdir().unwrap();
+        let alias = crate::tests::fixtures::harness_alias(LOCAL_DEV_APP_ID);
         apply_schema_ahead_of_runtime(
             &dir,
             &format!(
-                "CREATE TABLE \"{LOCAL_DEV_APP_ID}\".notes ({SYSTEM_COLUMNS_SQLITE}, title TEXT NOT NULL);"
+                "CREATE TABLE \"{alias}\".notes ({SYSTEM_COLUMNS_SQLITE}, title TEXT NOT NULL);"
             ),
         );
         let source = sqlite_runtime_source(

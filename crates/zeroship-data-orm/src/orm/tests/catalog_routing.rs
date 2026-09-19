@@ -57,11 +57,7 @@ async fn sqlite_catalog_reads_transaction_local_protection() {
         .get_rc::<crate::backend::sqlite::SqliteBackend>()
         .expect("SQLite fixture backend");
     let binding = owner.database.binding.clone();
-    let alias = crate::backend::sqlite::SqliteBackend::database_alias(
-        binding.app_id(),
-        binding.schema(),
-    )
-    .to_owned();
+    let alias = crate::backend::sqlite::SqliteBackend::database_alias(&binding).to_owned();
     let database = Database::from_schema(
         owner.database.binding.clone(),
         owner.database.backend.clone(),

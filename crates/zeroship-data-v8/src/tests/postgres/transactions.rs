@@ -89,6 +89,7 @@ async fn drain_open_connections() {
 /// in for the migration service's deploy-time apply.
 fn reset_schema(url: &str, app: &str) {
     let url = url.to_string();
+    let alias = crate::tests::fixtures::harness_alias(app);
     let app = app.to_string();
     block_on(async move {
         let (client, connection) = compio_postgres::connect(&url, NoTls).await.unwrap();
@@ -97,7 +98,7 @@ fn reset_schema(url: &str, app: &str) {
         })
         .detach();
         client
-            .execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+            .execute(&format!("DROP SCHEMA IF EXISTS \"{alias}\" CASCADE"), &[])
             .await
             .unwrap();
         drop(client);
@@ -109,8 +110,8 @@ fn reset_schema(url: &str, app: &str) {
         crate::tests::fixtures::set_database_url(&url);
         let pool = std::rc::Rc::new(compio_postgres::Pool::connect(&url, 2).await.unwrap());
         pool.batch_execute(&format!(
-            r#"CREATE SCHEMA IF NOT EXISTS "{app}";
-CREATE TABLE "{app}"."notes" (
+            r#"CREATE SCHEMA IF NOT EXISTS "{alias}";
+CREATE TABLE "{alias}"."notes" (
   id TEXT PRIMARY KEY,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -120,9 +121,9 @@ CREATE TABLE "{app}"."notes" (
   deleted_at TIMESTAMPTZ NULL,
   "title" TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS "notes_deleted_at_idx" ON "{app}"."notes" ("deleted_at");
-CREATE INDEX IF NOT EXISTS "notes_updated_at_idx" ON "{app}"."notes" ("updated_at");
-CREATE INDEX IF NOT EXISTS "notes_created_by_idx" ON "{app}"."notes" ("created_by");"#
+CREATE INDEX IF NOT EXISTS "notes_deleted_at_idx" ON "{alias}"."notes" ("deleted_at");
+CREATE INDEX IF NOT EXISTS "notes_updated_at_idx" ON "{alias}"."notes" ("updated_at");
+CREATE INDEX IF NOT EXISTS "notes_created_by_idx" ON "{alias}"."notes" ("created_by");"#
         ))
         .await
         .expect("deploy stand-in must create the notes table");
@@ -153,14 +154,14 @@ CREATE INDEX IF NOT EXISTS "notes_created_by_idx" ON "{app}"."notes" ("created_b
 
 fn count_notes(url: &str, app: &str) -> i64 {
     let url = url.to_string();
-    let app = app.to_string();
+    let alias = crate::tests::fixtures::harness_alias(app);
     block_on(async move {
         let (client, connection) = compio_postgres::connect(&url, NoTls).await.unwrap();
         compio::runtime::spawn(async move {
             let _ = connection.run().await;
         })
         .detach();
-        let sql = format!("SELECT COUNT(*)::bigint AS c FROM \"{app}\".\"notes\"");
+        let sql = format!("SELECT COUNT(*)::bigint AS c FROM \"{alias}\".\"notes\"");
         let rows = client.query(&sql, &[]).await.unwrap();
         let count = rows[0].get::<_, i64>("c");
         drop(client);
@@ -196,12 +197,13 @@ fn exec_owner_sql(url: &str, sql: &str) {
 /// The runtime descriptor supplies its logical encryption metadata.
 fn create_encrypted_users_table(url: &str, app: &str) {
     let url = url.to_string();
+    let alias = crate::tests::fixtures::harness_alias(app);
     let app = app.to_string();
     block_on(async move {
         crate::tests::fixtures::set_database_url(&url);
         let pool = std::rc::Rc::new(compio_postgres::Pool::connect(&url, 2).await.unwrap());
         pool.batch_execute(&format!(
-            r#"CREATE TABLE "{app}"."users" (
+            r#"CREATE TABLE "{alias}"."users" (
   id TEXT PRIMARY KEY,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -213,10 +215,10 @@ fn create_encrypted_users_table(url: &str, app: &str) {
   name TEXT NOT NULL,
   ssn BYTEA NULL
 );
-CREATE UNIQUE INDEX "users_email_key" ON "{app}"."users" (email);
-CREATE INDEX "users_deleted_at_idx" ON "{app}"."users" (deleted_at);
-CREATE INDEX "users_updated_at_idx" ON "{app}"."users" (updated_at);
-CREATE INDEX "users_created_by_idx" ON "{app}"."users" (created_by);"#
+CREATE UNIQUE INDEX "users_email_key" ON "{alias}"."users" (email);
+CREATE INDEX "users_deleted_at_idx" ON "{alias}"."users" (deleted_at);
+CREATE INDEX "users_updated_at_idx" ON "{alias}"."users" (updated_at);
+CREATE INDEX "users_created_by_idx" ON "{alias}"."users" (created_by);"#
         ))
         .await
         .expect("deploy stand-in must create encrypted users");
@@ -232,7 +234,7 @@ CREATE INDEX "users_created_by_idx" ON "{app}"."users" (created_by);"#
 
 fn user_email_versions(url: &str, app: &str) -> Vec<(String, i32)> {
     let url = url.to_string();
-    let app = app.to_string();
+    let alias = crate::tests::fixtures::harness_alias(app);
     block_on(async move {
         let (client, connection) = compio_postgres::connect(&url, NoTls).await.unwrap();
         compio::runtime::spawn(async move {
@@ -242,7 +244,7 @@ fn user_email_versions(url: &str, app: &str) -> Vec<(String, i32)> {
         let rows = client
             .query(
                 &format!(
-                    "SELECT email, version FROM \"{app}\".users \
+                    "SELECT email, version FROM \"{alias}\".users \
                      WHERE name = 'Red Team' ORDER BY email"
                 ),
                 &[],
@@ -348,7 +350,7 @@ fn dispatch_zs_for_app_with_descriptor(
         source: source.into(),
     }];
     let plugins: Vec<Arc<dyn NativePlugin>> = vec![DbService::new(DbServiceConfig {
-        app_bindings: Default::default(),
+        app_bindings: crate::tests::fixtures::harness_app_bindings(app_id),
         project_keys: crate::tests::fixtures::project_keys(),
         connection: crate::tests::fixtures::recording::connection(url),
         cdc_relay: None,
@@ -648,6 +650,7 @@ fn revoked_grant_transaction_surfaces_grant_revoked() {
     let password = "ZsTxGrant9";
     let app_role = zeroship_core::database_role::per_app_role_name(&app_id)
         .expect("grant-revocation app id must produce a valid PostgreSQL role name");
+    let alias = crate::tests::fixtures::harness_alias(&app_id);
     let (scheme, address) = admin_url
         .split_once("://")
         .and_then(|(scheme, rest)| rest.rsplit_once('@').map(|(_, address)| (scheme, address)))
@@ -669,7 +672,7 @@ fn revoked_grant_transaction_surfaces_grant_revoked() {
                    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT; \
                  CREATE ROLE \"{app_role}\" NOLOGIN NOSUPERUSER NOCREATEDB \
                    NOCREATEROLE NOREPLICATION; \
-                 CREATE SCHEMA \"{app_id}\"; \
+                 CREATE SCHEMA \"{alias}\"; \
                  GRANT \"{app_role}\" TO \"{login}\""
             ))
             .await
@@ -775,7 +778,7 @@ const _procedures = {
         .detach();
         admin
             .batch_execute(&format!(
-                "DROP SCHEMA IF EXISTS \"{app_id}\" CASCADE; \
+                "DROP SCHEMA IF EXISTS \"{alias}\" CASCADE; \
                  DROP ROLE IF EXISTS \"{app_role}\"; \
                  DROP ROLE IF EXISTS \"{login}\""
             ))
@@ -856,12 +859,13 @@ fn native_bytes_and_bigints_round_trip_through_worker_transactions() {
     let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
+    let alias = crate::tests::fixtures::harness_alias(app);
     let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
     exec_owner_sql(
         &url,
         &format!(
-            "ALTER TABLE \"{app}\".notes ADD COLUMN payload BYTEA, ADD COLUMN counter BIGINT; \
-         GRANT SELECT, INSERT, UPDATE ON \"{app}\".notes TO \"{role}\""
+            "ALTER TABLE \"{alias}\".notes ADD COLUMN payload BYTEA, ADD COLUMN counter BIGINT; \
+         GRANT SELECT, INSERT, UPDATE ON \"{alias}\".notes TO \"{role}\""
         ),
     );
     let mut descriptor: serde_json::Value =
@@ -904,12 +908,13 @@ fn native_json_types_round_trip_through_worker_transactions() {
     let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
+    let alias = crate::tests::fixtures::harness_alias(app);
     let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
     exec_owner_sql(
         &url,
         &format!(
-            "ALTER TABLE \"{app}\".notes ADD COLUMN payload JSONB; \
-             GRANT SELECT, INSERT, UPDATE ON \"{app}\".notes TO \"{role}\""
+            "ALTER TABLE \"{alias}\".notes ADD COLUMN payload JSONB; \
+             GRANT SELECT, INSERT, UPDATE ON \"{alias}\".notes TO \"{role}\""
         ),
     );
     let mut descriptor: serde_json::Value =
@@ -953,12 +958,13 @@ fn timestamps_round_trip_through_worker_transactions() {
     let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
+    let alias = crate::tests::fixtures::harness_alias(app);
     let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
     exec_owner_sql(
         &url,
         &format!(
-            "ALTER TABLE \"{app}\".notes ADD COLUMN instant TIMESTAMPTZ; \
-             GRANT SELECT, INSERT, UPDATE ON \"{app}\".notes TO \"{role}\""
+            "ALTER TABLE \"{alias}\".notes ADD COLUMN instant TIMESTAMPTZ; \
+             GRANT SELECT, INSERT, UPDATE ON \"{alias}\".notes TO \"{role}\""
         ),
     );
     let mut descriptor: serde_json::Value =
@@ -1031,12 +1037,13 @@ fn nested_timestamps_follow_worker_descriptors() {
     let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
+    let alias = crate::tests::fixtures::harness_alias(app);
     let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
     exec_owner_sql(
         &url,
         &format!(
-            "ALTER TABLE \"{app}\".notes ADD COLUMN instants JSONB, ADD COLUMN profile JSONB, ADD COLUMN payload JSONB; \
-         GRANT SELECT, INSERT, UPDATE ON \"{app}\".notes TO \"{role}\""
+            "ALTER TABLE \"{alias}\".notes ADD COLUMN instants JSONB, ADD COLUMN profile JSONB, ADD COLUMN payload JSONB; \
+         GRANT SELECT, INSERT, UPDATE ON \"{alias}\".notes TO \"{role}\""
         ),
     );
     let mut descriptor: serde_json::Value =
@@ -1104,12 +1111,13 @@ fn array_updates_preserve_worker_json_elements() {
     let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
+    let alias = crate::tests::fixtures::harness_alias(app);
     let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
     exec_owner_sql(
         &url,
         &format!(
-            "ALTER TABLE \"{app}\".notes ADD COLUMN items JSONB; \
-         GRANT SELECT, INSERT, UPDATE ON \"{app}\".notes TO \"{role}\""
+            "ALTER TABLE \"{alias}\".notes ADD COLUMN items JSONB; \
+         GRANT SELECT, INSERT, UPDATE ON \"{alias}\".notes TO \"{role}\""
         ),
     );
     let mut descriptor: serde_json::Value =
@@ -1157,12 +1165,13 @@ fn update_validation_is_shared_by_native_and_sdk_worker_calls() {
     let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
+    let alias = crate::tests::fixtures::harness_alias(app);
     let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
     exec_owner_sql(
         &url,
         &format!(
-            "ALTER TABLE \"{app}\".notes ADD COLUMN balance DOUBLE PRECISION, ADD COLUMN payload JSONB; \
-         GRANT SELECT, INSERT, UPDATE ON \"{app}\".notes TO \"{role}\""
+            "ALTER TABLE \"{alias}\".notes ADD COLUMN balance DOUBLE PRECISION, ADD COLUMN payload JSONB; \
+         GRANT SELECT, INSERT, UPDATE ON \"{alias}\".notes TO \"{role}\""
         ),
     );
     let mut descriptor: serde_json::Value =
@@ -1218,12 +1227,13 @@ fn native_worker_calls_validate_array_item_types() {
     let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
+    let alias = crate::tests::fixtures::harness_alias(app);
     let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
     exec_owner_sql(
         &url,
         &format!(
-            "ALTER TABLE \"{app}\".notes ADD COLUMN names JSONB; \
-         GRANT SELECT, INSERT, UPDATE ON \"{app}\".notes TO \"{role}\""
+            "ALTER TABLE \"{alias}\".notes ADD COLUMN names JSONB; \
+         GRANT SELECT, INSERT, UPDATE ON \"{alias}\".notes TO \"{role}\""
         ),
     );
     let mut descriptor: serde_json::Value =
@@ -1276,12 +1286,13 @@ fn calendar_dates_round_trip_through_worker_transactions() {
     let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
+    let alias = crate::tests::fixtures::harness_alias(app);
     let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
     exec_owner_sql(
         &url,
         &format!(
-            "ALTER TABLE \"{app}\".notes ADD COLUMN birthday DATE; \
-         GRANT SELECT, INSERT, UPDATE ON \"{app}\".notes TO \"{role}\""
+            "ALTER TABLE \"{alias}\".notes ADD COLUMN birthday DATE; \
+         GRANT SELECT, INSERT, UPDATE ON \"{alias}\".notes TO \"{role}\""
         ),
     );
     let mut descriptor: serde_json::Value =
@@ -1333,9 +1344,10 @@ fn worker_upserts_preserve_platform_identity_and_reject_invalid_conflict_keys() 
     let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
+    let alias = crate::tests::fixtures::harness_alias(app);
     exec_owner_sql(
         &url,
-        &format!("CREATE UNIQUE INDEX notes_identity_title ON \"{app}\".notes (title)"),
+        &format!("CREATE UNIQUE INDEX notes_identity_title ON \"{alias}\".notes (title)"),
     );
     let source = build_src(
         r#"
@@ -2008,13 +2020,14 @@ fn commit_that_postgres_rolled_back_must_not_report_success_l8() {
     let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
+    let alias = crate::tests::fixtures::harness_alias(app);
 
     // The poison. `title` is creator data and survives the write path intact, so
     // a duplicate here is a real 23505 - unlike a duplicate `id`, which the
     // platform silently makes unique.
     exec_owner_sql(
         &url,
-        &format!("CREATE UNIQUE INDEX \"notes_title_l8_uniq\" ON \"{app}\".\"notes\" (\"title\")"),
+        &format!("CREATE UNIQUE INDEX \"notes_title_l8_uniq\" ON \"{alias}\".\"notes\" (\"title\")"),
     );
 
     let src = build_src(

@@ -590,7 +590,6 @@ async fn run_attempt(
                         let disposition = setup.disposition();
                         driven.error = Some(setup.into_db_error());
                         match disposition {
-                            SessionSetupDisposition::Preserve => BeginOutcome::SetupFailed,
                             SessionSetupDisposition::ReResolve => BeginOutcome::ReResolve,
                             SessionSetupDisposition::Denied(reason) => BeginOutcome::Denied(reason),
                             SessionSetupDisposition::Failed => BeginOutcome::Failed,

@@ -1337,7 +1337,7 @@ convenience; the code is the contract, and `isOptimisticLockError(e)` matches on
 | `OPTIMISTIC_CONCURRENCY` | `update` with a CAS version that didn't match. |
 | `NOT_FOUND` | A unique-row lookup matched no row. |
 | `NOT_UNIQUE` | A unique-row lookup matched more than one row. |
-| `SCHEMA_NOT_PROVISIONED` | The app's database was never provisioned. Run `zeroship migrate`. An app that carries a descriptor is refused earlier at deploy with `409 schema_not_applied` (see [Migrate before you deploy](#migrate-before-you-deploy)). |
+| `SCHEMA_EPOCH_STALE` | The binding role for the schema epoch this build was resolved at does not exist on the cluster, so the request is refused before any statement runs. Retry; a redeploy resolves the binding afresh. |
 | `GRANT_REVOKED` | The database refused the app's role; a terminal HTTP 403. Restore the grant before retrying. |
 | `LIVE_IN_TRANSACTION` | `db.live()` was called inside a transaction. |
 | `SCHEMA_INVALID` | A schema declaration is malformed (empty or duplicate index name, unknown field). |

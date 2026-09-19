@@ -49,7 +49,7 @@ async fn admin(url: &str) -> Client {
     client
 }
 
-/// Provision the schema and per-app role the transaction session's
+/// Provision the schema and binding role the transaction session's
 /// `SET LOCAL ROLE` needs, and install the pool the driver checks out from.
 ///
 /// The pool is sized to **one** connection deliberately: with a single slot,

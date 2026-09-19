@@ -953,7 +953,7 @@ mod tests {
                 .expect("open sqlite backend"),
             );
             backend
-                .attach_app_file("app_exec")
+                .attach_alias_file(&crate::tests::fixtures::harness_alias("app_exec"))
                 .await
                 .expect("ensure app schema");
             backend
@@ -1158,7 +1158,7 @@ mod tests {
                 .expect("open sqlite backend"),
             );
             backend
-                .attach_app_file(app_id)
+                .attach_alias_file(&crate::tests::fixtures::harness_alias(app_id))
                 .await
                 .expect("ensure app schema");
             backend
@@ -1370,7 +1370,7 @@ mod tests {
                 .expect("open sqlite backend"),
             );
             backend
-                .attach_app_file("app_exec_cancel")
+                .attach_alias_file(&crate::tests::fixtures::harness_alias("app_exec_cancel"))
                 .await
                 .expect("ensure app schema");
             backend

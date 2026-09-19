@@ -366,11 +366,12 @@ pub enum DbError {
 /// it by matching a creator-visible error code string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionSetupDisposition {
-    /// Preserve the classified [`DbError`] as-is while ending this attempt.
-    Preserve,
-    /// End this attempt and re-resolve its authority. No producer selects this
-    /// yet; an epoch fence can use it without changing the begin event again.
-    #[allow(dead_code, reason = "reserved for the schema-epoch producer task")]
+    /// End this attempt and re-resolve its authority.
+    ///
+    /// The binding role names the schema epoch, so a role that does not exist
+    /// says the shape this build was resolved against is not the shape the
+    /// cluster has. Nothing local can repair that and retrying the same
+    /// statement cannot either; the binding has to be resolved again.
     ReResolve,
     /// End this attempt with a specific terminal denial.
     Denied(DenyReason),

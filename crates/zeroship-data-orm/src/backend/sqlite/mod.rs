@@ -4,6 +4,7 @@
 //! isolate transaction callbacks; the actor publishes committed change events
 //! through the supplied change sink. Migrations own the physical schema.
 
+use crate::binding::DbBinding;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::Path;
@@ -18,7 +19,6 @@ use zeroship_data_orm::error::DbError;
 use zeroship_data_orm::storage::LockManager;
 
 use crate::cdc::ChangeSink;
-use crate::sql::SchemaName;
 
 /// No-op change sink for backend tests.
 #[cfg(test)]
@@ -343,30 +343,36 @@ const MAIN_DATABASE: &str = "main";
 impl SqliteBackend {
     /// The database a binding's statements address.
     ///
-    /// A binding on schema `main` addresses the file this backend opened. Every
-    /// other binding addresses its app's own file, attached under the app id.
-    pub(crate) fn database_alias<'a>(app_id: &'a str, schema: &'a SchemaName) -> &'a str {
-        if schema.as_str() == MAIN_DATABASE {
+    /// **It is the SCHEMA, and it has to be.** SQLite's ATTACH alias occupies
+    /// the schema-name position of a qualified table and every query builder
+    /// qualifies with `binding.schema()`. An alias minted from the tenant would
+    /// name something nothing attached the moment the schema stopped being the
+    /// app id, which is what a database identity makes it.
+    ///
+    /// A binding on schema `main` addresses the file this backend opened.
+    pub(crate) fn database_alias<'a>(binding: &'a DbBinding) -> &'a str {
+        if binding.schema().as_str() == MAIN_DATABASE {
             MAIN_DATABASE
         } else {
-            app_id
+            binding.schema().as_str()
         }
     }
 
     /// Make a binding's database addressable on this backend's connections.
     ///
-    /// A binding on schema `main` needs no attachment, so no app file is
-    /// created for it.
-    pub async fn attach_binding(&self, app_id: &str, schema: &SchemaName) -> Result<(), DbError> {
-        if Self::database_alias(app_id, schema) == MAIN_DATABASE {
+    /// A binding on schema `main` needs no attachment, so no file is created
+    /// for it.
+    pub async fn attach_binding(&self, binding: &DbBinding) -> Result<(), DbError> {
+        let alias = Self::database_alias(binding);
+        if alias == MAIN_DATABASE {
             return Ok(());
         }
-        self.attach_app_file(app_id).await
+        self.attach_alias_file(alias).await
     }
 
-    /// Attach the app’s database file under its schema alias, caching successful attaches.
+    /// Attach one database file under `alias`, caching successful attaches.
     /// Schema changes are owned by the migration engine.
-    pub async fn attach_app_file(&self, app_id: &str) -> Result<(), DbError> {
+    pub async fn attach_alias_file(&self, app_id: &str) -> Result<(), DbError> {
         // Idempotent guard. The cache must be checked before the
         // ATTACH because SQLite hard-errors on a duplicate ATTACH of
         // the same alias ("database <alias> is already in use"); the

@@ -22,6 +22,7 @@ use crate::tests::fixtures::DatabaseFixture;
 #[test]
 fn a_raw_column_is_emitted_for_a_masked_field_sqlite() {
     Host::test(|_| {
+        let binding = crate::tests::fixtures::harness_binding("app_demo");
         let schema = crate::value!({
             "ssn": {
                 "type": "string",
@@ -29,13 +30,8 @@ fn a_raw_column_is_emitted_for_a_masked_field_sqlite() {
             },
             "name": { "type": "string" }
         });
-        let sql = fixture_table_sql(
-            &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
-            "users",
-            &schema,
-            &FkEmission::Inline,
-        )
-        .unwrap();
+        let sql =
+            fixture_table_sql(binding.schema(), "users", &schema, &FkEmission::Inline).unwrap();
         let raw_ssn = raw_column_name("ssn");
         assert!(
             sql.contains(&format!("\"{raw_ssn}\" TEXT")),
@@ -66,15 +62,17 @@ fn masked_insert_persists_visible_and_raw_columns_sqlite() {
     Host::test(|host| {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
+            let binding = crate::tests::fixtures::harness_binding("app_demo");
+            let alias = binding.schema().as_str();
             backend
-                .attach_app_file("app_demo")
+                .attach_alias_file(alias)
                 .await
                 .expect("ensure_app_schema");
             let raw = raw_column_name("ssn");
             backend
                 .execute_fixture(
                     &format!(
-                        "CREATE TABLE \"app_demo\".\"users\" (\
+                        "CREATE TABLE \"{alias}\".\"users\" (\
                      id    INTEGER PRIMARY KEY, \
                      ssn   TEXT, \
                      \"{raw}\" TEXT NOT NULL\
@@ -95,7 +93,7 @@ fn masked_insert_persists_visible_and_raw_columns_sqlite() {
                 }
             });
             let bq = compile_insert(
-                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                binding.schema(),
                 "users",
                 &crate::tests::fixtures::native_fields(schema.clone()),
                 &doc,
@@ -119,7 +117,7 @@ fn masked_insert_persists_visible_and_raw_columns_sqlite() {
 
             let rows = client
                 .query(
-                    &format!("SELECT ssn, \"{raw}\" FROM \"app_demo\".\"users\""),
+                    &format!("SELECT ssn, \"{raw}\" FROM \"{alias}\".\"users\""),
                     &[],
                 )
                 .await
@@ -138,15 +136,17 @@ fn a_select_serves_the_masked_column_sqlite() {
     Host::test(|host| {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
+            let binding = crate::tests::fixtures::harness_binding("app_demo");
+            let alias = binding.schema().as_str();
             backend
-                .attach_app_file("app_demo")
+                .attach_alias_file(alias)
                 .await
                 .expect("ensure_app_schema");
             let raw_ssn = raw_column_name("ssn");
             backend
                 .execute_fixture(
                     &format!(
-                        "CREATE TABLE \"app_demo\".\"users\" (\
+                        "CREATE TABLE \"{alias}\".\"users\" (\
                          id    TEXT PRIMARY KEY, \
                          \"{raw_ssn}\" TEXT, \
                          ssn   TEXT NOT NULL, \
@@ -180,7 +180,7 @@ fn a_select_serves_the_masked_column_sqlite() {
                 .expect("doc object")
                 .insert(raw_ssn.clone(), crate::value!("123-45-6789"));
             let bq = compile_insert(
-                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                binding.schema(),
                 "users",
                 &crate::tests::fixtures::native_fields(schema.clone()),
                 &doc,
@@ -201,7 +201,7 @@ fn a_select_serves_the_masked_column_sqlite() {
             // raw column at all. Verify the SQL shape BEFORE running the
             // query - this is the load-bearing assertion this test pins.
             let bq = compile_find(
-                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                binding.schema(),
                 "users",
                 &crate::value!({ "id": "usr_01" }),
                 None,
@@ -264,6 +264,7 @@ fn a_select_serves_the_masked_column_sqlite() {
 #[test]
 fn aliased_select_skips_kind_none_sqlite() {
     Host::test(|_| {
+        let binding = crate::tests::fixtures::harness_binding("app_demo");
         let schema = crate::value!({
             "id": { "type": "string" },
             "ssn": {
@@ -274,7 +275,7 @@ fn aliased_select_skips_kind_none_sqlite() {
             "name": { "type": "string" }
         });
         let bq = compile_find(
-            &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
+            binding.schema(),
             "users",
             &crate::value!({}),
             None,

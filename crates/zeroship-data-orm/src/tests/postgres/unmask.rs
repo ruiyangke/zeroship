@@ -45,8 +45,10 @@ fn unmask_fetch_runs_under_per_app_role_via_rls() {
             let app = crate::tests::fixtures::test_app_id!();
 
             let app = app.as_str();
+            let binding = crate::tests::fixtures::harness_binding(app);
+            let alias = crate::tests::fixtures::harness_alias(app);
             let coll = "users";
-            let role = provision_app_with_role(&admin_pool, app).await;
+            let role = provision_binding_schema(&admin_pool, app).await;
             crate::tests::fixtures::roles::ensure_binding_ladder(&admin_pool, &crate::tests::fixtures::harness_binding(app))
                 .await
                 .unwrap();
@@ -61,7 +63,7 @@ fn unmask_fetch_runs_under_per_app_role_via_rls() {
             // cannot drift from the runtime's DDL shape: `ssn` gets the bare-TEXT mask
             // column and `__zs_raw__ssn` gets the declared type for the real value.
             let create_table = fixture_table_sql(
-                &crate::sql::SchemaName::new(app).expect("fixture schema name"),
+                binding.schema(),
                 coll,
                 &schema,
                 &FkEmission::Inline,
@@ -71,7 +73,7 @@ fn unmask_fetch_runs_under_per_app_role_via_rls() {
             admin_pool
                 .execute(
                     &format!(
-                        "INSERT INTO \"{app}\".\"{coll}\" (id, \"{ssn_raw}\", ssn) \
+                        "INSERT INTO \"{alias}\".\"{coll}\" (id, \"{ssn_raw}\", ssn) \
              VALUES ('u1', '123-45-6789', '***-**-6789')"
                     ),
                     &[],
@@ -87,10 +89,10 @@ fn unmask_fetch_runs_under_per_app_role_via_rls() {
 
             // The SENSITIVE value now lives in the raw sibling column (the storage
             // flip), so that is the column this proof must show is unreachable by
-            // direct SQL before `dispatch_unmask` narrows to the per-app role.
+            // direct SQL before `dispatch_unmask` narrows to the binding role.
             let blocked = login_pool
                 .query_text_params(
-                    &format!("SELECT \"{ssn_raw}\" FROM \"{app}\".\"{coll}\" WHERE id = 'u1'"),
+                    &format!("SELECT \"{ssn_raw}\" FROM \"{alias}\".\"{coll}\" WHERE id = 'u1'"),
                     &[],
                 )
                 .await
@@ -123,7 +125,7 @@ fn unmask_fetch_runs_under_per_app_role_via_rls() {
 
             drop(login_pool);
             let _ = admin_pool
-                .execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+                .execute(&format!("DROP SCHEMA IF EXISTS \"{alias}\" CASCADE"), &[])
                 .await;
             let _ = admin_pool
                 .execute(&format!("DROP ROLE IF EXISTS \"{login_role}\""), &[])
@@ -151,9 +153,11 @@ fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
             let app = crate::tests::fixtures::test_app_id!();
 
             let app = app.as_str();
+            let binding = crate::tests::fixtures::harness_binding(app);
+            let alias = crate::tests::fixtures::harness_alias(app);
             let _keys = host.supply_project_key(&[app], &"b".repeat(64));
             let coll = "users";
-            let role = provision_app_with_role(&admin_pool, app).await;
+            let role = provision_binding_schema(&admin_pool, app).await;
             crate::tests::fixtures::roles::ensure_binding_ladder(&admin_pool, &crate::tests::fixtures::harness_binding(app))
                 .await
                 .unwrap();
@@ -169,7 +173,7 @@ fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
             // is BYTEA, which is the whole point of this test - so build the DDL rather
             // than hand-spelling it, or the fixture proves nothing about the runtime.
             let create_table = fixture_table_sql(
-                &crate::sql::SchemaName::new(app).expect("fixture schema name"),
+                binding.schema(),
                 coll,
                 &schema,
                 &FkEmission::Inline,
@@ -192,7 +196,7 @@ fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
             admin_pool
                 .execute(
                     &format!(
-                        "INSERT INTO \"{app}\".\"{coll}\" (id, \"{ssn_raw}\", ssn) \
+                        "INSERT INTO \"{alias}\".\"{coll}\" (id, \"{ssn_raw}\", ssn) \
                  VALUES ('u1', decode($1, 'base64')::bytea, '***-**-6789')"
                     ),
                     &[&b64.as_str()],
@@ -234,7 +238,7 @@ fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
 
             drop(login_pool);
             let _ = admin_pool
-                .execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+                .execute(&format!("DROP SCHEMA IF EXISTS \"{alias}\" CASCADE"), &[])
                 .await;
             let _ = admin_pool
                 .execute(&format!("DROP ROLE IF EXISTS \"{login_role}\""), &[])
@@ -278,8 +282,10 @@ fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
             let app = crate::tests::fixtures::test_app_id!();
 
             let app = app.as_str();
+            let binding = crate::tests::fixtures::harness_binding(app);
+            let alias = crate::tests::fixtures::harness_alias(app);
             let coll = "patients";
-            let role = provision_app_with_role(&admin_pool, app).await;
+            let role = provision_binding_schema(&admin_pool, app).await;
             crate::tests::fixtures::roles::ensure_binding_ladder(&admin_pool, &crate::tests::fixtures::harness_binding(app))
                 .await
                 .unwrap();
@@ -294,7 +300,7 @@ fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
             // cannot drift from the runtime's DDL shape: `ssn` gets the bare-TEXT mask
             // column and `__zs_raw__ssn` gets the declared type for the real value.
             let create_table = fixture_table_sql(
-                &crate::sql::SchemaName::new(app).expect("fixture schema name"),
+                binding.schema(),
                 coll,
                 &schema,
                 &FkEmission::Inline,
@@ -304,7 +310,7 @@ fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
             admin_pool
                 .execute(
                     &format!(
-                        "INSERT INTO \"{app}\".\"{coll}\" (id, \"{ssn_raw}\", ssn) \
+                        "INSERT INTO \"{alias}\".\"{coll}\" (id, \"{ssn_raw}\", ssn) \
                  VALUES ('p1', '555-44-3333', '***-**-3333')"
                     ),
                     &[],
@@ -345,7 +351,7 @@ fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
             // out, so the success below can only come from narrowing.
             let ambient = login_pool
                 .query_text_params(
-                    &format!("SELECT ssn FROM \"{app}\".\"{coll}\" WHERE id = 'p1'"),
+                    &format!("SELECT ssn FROM \"{alias}\".\"{coll}\" WHERE id = 'p1'"),
                     &[],
                 )
                 .await;
@@ -384,7 +390,7 @@ fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
             let audited = admin_pool
                 .query_text_params(
                     &format!(
-                        "SELECT outcome FROM \"{app}\".\"__zeroship_audit_unmask\" \
+                        "SELECT outcome FROM \"{alias}\".\"__zeroship_audit_unmask\" \
                   WHERE collection = $1 AND row_pk = 'p1' AND \"column\" = 'ssn'"
                     ),
                     &[coll],
@@ -400,7 +406,7 @@ fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
 
             drop(login_pool);
             let _ = admin_pool
-                .execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+                .execute(&format!("DROP SCHEMA IF EXISTS \"{alias}\" CASCADE"), &[])
                 .await;
             let _ = admin_pool
                 .execute(&format!("DROP ROLE IF EXISTS \"{login_role}\""), &[])
@@ -426,13 +432,15 @@ fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let app = crate::tests::fixtures::test_app_id!();
             let app = app.as_str();
+            let binding = crate::tests::fixtures::harness_binding(app);
+            let alias = crate::tests::fixtures::harness_alias(app);
             let coll = "patients";
 
-            // Drops the schema and the cluster-scoped per-app role, then
-            // recreates the schema. `ensure_per_app_role` below creates the role
-            // the read path checks for -- without it the unmask SELECT refuses
-            // with `schema_epoch_stale` before authorization is ever reached.
-            let role = provision_app_with_role(&pool, app).await;
+            // Resets the schema this binding addresses. The ladder below creates
+            // the role the read path checks for -- without it the unmask SELECT
+            // refuses with `schema_epoch_stale` before authorization is ever
+            // reached.
+            let role = provision_binding_schema(&pool, app).await;
             crate::tests::fixtures::roles::ensure_binding_ladder(&pool, &crate::tests::fixtures::harness_binding(app))
                 .await
                 .unwrap();
@@ -448,7 +456,7 @@ fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
             // cannot drift from the runtime's DDL shape: `ssn` gets the bare-TEXT mask
             // column and `__zs_raw__ssn` gets the declared type for the real value.
             let create_table = fixture_table_sql(
-                &crate::sql::SchemaName::new(app).expect("fixture schema name"),
+                binding.schema(),
                 coll,
                 &schema,
                 &FkEmission::Inline,
@@ -457,7 +465,7 @@ fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
             pool.batch_execute(&create_table).await.unwrap();
             pool.execute(
                 &format!(
-                    "INSERT INTO \"{app}\".\"{coll}\" (id, \"{ssn_raw}\", ssn) \
+                    "INSERT INTO \"{alias}\".\"{coll}\" (id, \"{ssn_raw}\", ssn) \
              VALUES ('u1', '123-45-6789', '***-**-6789')"
                 ),
                 &[],
@@ -523,7 +531,7 @@ fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
             // server fail at `CREATE ROLE` with 42710, in a database that looks
             // pristine. Drop the schema first so the role owns nothing.
             let _ = pool
-                .execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+                .execute(&format!("DROP SCHEMA IF EXISTS \"{alias}\" CASCADE"), &[])
                 .await;
             let _ = pool
                 .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])

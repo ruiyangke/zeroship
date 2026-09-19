@@ -111,7 +111,7 @@ async fn read_audit_rows(backend: &SqliteBackend, app_id: &str) -> Vec<(String, 
     // reservation. Asking for the transaction lane here contends with whatever
     // the unmask dispatch itself is holding.
     let client = backend.autocommit_client();
-    let q_app = crate::sql::mapping::quote_ident(app_id);
+    let q_app = crate::sql::mapping::quote_ident(&crate::tests::fixtures::harness_alias(app_id));
     let sql = format!(
         r#"SELECT outcome, actor_role, classification
            FROM {q_app}."__zeroship_audit_unmask"
@@ -187,6 +187,7 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
             },
         });
         let app_id = "app_unmask_auto";
+        let alias = crate::tests::fixtures::harness_alias(app_id);
         let collection = "users";
 
         host.run(async {
@@ -203,7 +204,7 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
             backend
                 .execute_fixture(
                     &format!(
-                        "CREATE TABLE \"app_unmask_auto\".\"users\" (\
+                        "CREATE TABLE \"{alias}\".\"users\" (\
                          id  TEXT PRIMARY KEY, \
                          \"{raw_ssn}\" BLOB, \
                          ssn TEXT NOT NULL DEFAULT '***-**-XXXX'\
@@ -245,7 +246,7 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
                 obj.insert("ssn".to_string(), crate::value!("***-**-6789"));
             }
             let bq = compile_insert(
-                &crate::sql::SchemaName::new(app_id).expect("fixture schema name"),
+                crate::tests::fixtures::harness_binding(app_id).schema(),
                 collection,
                 &crate::tests::fixtures::native_fields(schema.clone()),
                 &doc,
@@ -313,7 +314,7 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
             // is the only way to recover it.
             let direct = client
                 .query(
-                    "SELECT ssn FROM \"app_unmask_auto\".\"users\" WHERE id = 'usr_auto_01'",
+                    &format!("SELECT ssn FROM \"{alias}\".\"users\" WHERE id = 'usr_auto_01'"),
                     &[],
                 )
                 .await
@@ -348,6 +349,7 @@ fn unmask_with_user_actor_returns_forbidden_audit_logged() {
             },
         });
         let app_id = "app_unmask_user";
+        let alias = crate::tests::fixtures::harness_alias(app_id);
         let collection = "users";
 
         host.run(async {
@@ -355,10 +357,10 @@ fn unmask_with_user_actor_returns_forbidden_audit_logged() {
                 unmask_setup_with_schema(host, app_id, collection, schema.clone()).await;
             backend
                 .execute_fixture(
-                    "CREATE TABLE \"app_unmask_user\".\"users\" (\
+                    &format!("CREATE TABLE \"{alias}\".\"users\" (\
                      id  TEXT PRIMARY KEY, \
                      ssn BLOB\
-                 )",
+                 )"),
                     &[],
                 )
                 .await
@@ -527,6 +529,7 @@ fn unmask_reads_the_raw_column_the_descriptor_declares() {
             },
         });
         let app_id = "app_unmask_declared_raw";
+        let alias = crate::tests::fixtures::harness_alias(app_id);
         let collection = "people";
 
         host.run(async {
@@ -540,7 +543,7 @@ fn unmask_reads_the_raw_column_the_descriptor_declares() {
             backend
                 .execute_fixture(
                     &format!(
-                        "CREATE TABLE \"{app_id}\".\"{collection}\" (\
+                        "CREATE TABLE \"{alias}\".\"{collection}\" (\
                          id TEXT PRIMARY KEY, \"{declared_raw}\" TEXT, ssn TEXT)"
                     ),
                     &[],
@@ -550,7 +553,7 @@ fn unmask_reads_the_raw_column_the_descriptor_declares() {
             backend
                 .execute_fixture(
                     &format!(
-                        "INSERT INTO \"{app_id}\".\"{collection}\" (id, \"{declared_raw}\", ssn) \
+                        "INSERT INTO \"{alias}\".\"{collection}\" (id, \"{declared_raw}\", ssn) \
                      VALUES ('per_01', '123-45-6789', '***-**-6789')"
                     ),
                     &[],
@@ -608,6 +611,7 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
             },
         });
         let app_id = "app_unmask_policy_grant";
+        let alias = crate::tests::fixtures::harness_alias(app_id);
         let collection = "users";
 
         host.run(async {
@@ -628,7 +632,7 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
             backend
                 .execute_fixture(
                     &format!(
-                        "CREATE TABLE \"app_unmask_policy_grant\".\"users\" (\
+                        "CREATE TABLE \"{alias}\".\"users\" (\
                          id    TEXT PRIMARY KEY, \
                          \"{raw_email}\" BLOB, \
                          email TEXT NOT NULL DEFAULT 'x***@***'\
@@ -670,7 +674,7 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
                 obj.insert("email".to_string(), crate::value!("a****@example.com"));
             }
             let bq = compile_insert(
-                &crate::sql::SchemaName::new(app_id).expect("fixture schema name"),
+                crate::tests::fixtures::harness_binding(app_id).schema(),
                 collection,
                 &crate::tests::fixtures::native_fields(schema.clone()),
                 &doc,
@@ -715,7 +719,7 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
             // still be the mask, never the plaintext.
             let direct = client
             .query(
-                "SELECT email FROM \"app_unmask_policy_grant\".\"users\" WHERE id = 'usr_grant_01'",
+                &format!("SELECT email FROM \"{alias}\".\"users\" WHERE id = 'usr_grant_01'"),
                 &[],
             )
             .await
@@ -988,16 +992,17 @@ fn malformed_mask_sentinel_skipped_on_sqlite() {
     Host::test(|host| {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
+            let alias = crate::tests::fixtures::harness_alias("app_demo");
             backend
-                .attach_app_file("app_demo")
+                .attach_alias_file(&alias)
                 .await
                 .expect("ensure_app_schema");
             backend
             .execute_fixture(
-                "CREATE TABLE \"app_demo\".\"users\" (\
+                &format!("CREATE TABLE \"{alias}\".\"users\" (\
                      \"id\" INTEGER PRIMARY KEY, \
                      \"ssn\" TEXT NOT NULL /* zero-migrate:mask:kind=cosmic_radiation,classification=spi */\
-                 )",
+                 )"),
                 &[],
             )
             .await
@@ -1085,6 +1090,7 @@ fn cold_bulk_unmask_attaches_before_read() {
             },
         });
         let app_id = "app_bulk_unmask_e2e";
+        let alias = crate::tests::fixtures::harness_alias(app_id);
         let collection = "users";
 
         host.run(async {
@@ -1100,7 +1106,7 @@ fn cold_bulk_unmask_attaches_before_read() {
             backend
                 .execute_fixture(
                     &format!(
-                        "CREATE TABLE \"app_bulk_unmask_e2e\".\"users\" (\
+                        "CREATE TABLE \"{alias}\".\"users\" (\
                          id             TEXT PRIMARY KEY, \
                          \"{raw_email}\" TEXT, \
                          email          TEXT NOT NULL, \
@@ -1117,7 +1123,7 @@ fn cold_bulk_unmask_attaches_before_read() {
                 ("u2", "bob@example.com", "987-65-4321"),
             ] {
                 let sql = format!(
-                    "INSERT INTO \"app_bulk_unmask_e2e\".\"users\" \
+                    "INSERT INTO \"{alias}\".\"users\" \
                  (id, \"{raw_email}\", email, \"{raw_ssn}\", ssn) VALUES \
                  ('{id}', '{email}', 'masked', '{ssn}', 'masked')"
                 );
@@ -1188,7 +1194,7 @@ fn cold_bulk_unmask_attaches_before_read() {
                 .expect("acquire client");
             let direct = client
                 .query(
-                    "SELECT email, ssn FROM \"app_bulk_unmask_e2e\".\"users\" WHERE id = 'u1'",
+                    &format!("SELECT email, ssn FROM \"{alias}\".\"users\" WHERE id = 'u1'"),
                     &[],
                 )
                 .await
@@ -1219,6 +1225,7 @@ fn bulk_unmask_authorization_atomic_one_unauthorized_fails_all() {
             },
         });
         let app_id = "app_bulk_atomic_refuse";
+        let alias = crate::tests::fixtures::harness_alias(app_id);
         let collection = "users";
 
         host.run(async {
@@ -1226,13 +1233,13 @@ fn bulk_unmask_authorization_atomic_one_unauthorized_fails_all() {
             host.clear_mask_policy_cache(app_id);
             backend
                 .execute_fixture(
-                    "CREATE TABLE \"app_bulk_atomic_refuse\".\"users\" (\
+                    &format!("CREATE TABLE \"{alias}\".\"users\" (\
                      id              TEXT PRIMARY KEY, \
                      __zs_raw__email TEXT, \
                      email           TEXT NOT NULL, \
                      __zs_raw__ssn   TEXT, \
                      ssn             TEXT NOT NULL\
-                 )",
+                 )"),
                     &[],
                 )
                 .await
@@ -1393,6 +1400,7 @@ fn cold_query_unmask_hint_attaches_before_read() {
             },
         });
         let app_id = "app_qhint_e2e";
+        let alias = crate::tests::fixtures::harness_alias(app_id);
         let collection = "users";
 
         host.run(async {
@@ -1408,7 +1416,7 @@ fn cold_query_unmask_hint_attaches_before_read() {
             backend
                 .execute_fixture(
                     &format!(
-                        "CREATE TABLE \"app_qhint_e2e\".\"users\" (\
+                        "CREATE TABLE \"{alias}\".\"users\" (\
                          id             TEXT PRIMARY KEY, \
                          \"{raw_email}\" TEXT, \
                          email          TEXT NOT NULL, \
@@ -1423,7 +1431,7 @@ fn cold_query_unmask_hint_attaches_before_read() {
             backend
                 .execute_fixture(
                     &format!(
-                        "INSERT INTO \"app_qhint_e2e\".\"users\" \
+                        "INSERT INTO \"{alias}\".\"users\" \
                      (id, \"{raw_email}\", email, \"{raw_ssn}\", ssn) VALUES \
                      ('u1', 'alice@example.com', 'a***@example.com', '123-45-6789', '***-**-6789')"
                     ),
@@ -1533,7 +1541,7 @@ fn cold_query_unmask_hint_attaches_before_read() {
                 .expect("acquire client");
             let direct = client
                 .query(
-                    "SELECT email, ssn FROM \"app_qhint_e2e\".\"users\" WHERE id = 'u1'",
+                    &format!("SELECT email, ssn FROM \"{alias}\".\"users\" WHERE id = 'u1'"),
                     &[],
                 )
                 .await

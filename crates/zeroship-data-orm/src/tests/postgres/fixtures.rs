@@ -79,11 +79,12 @@ pub(super) async fn drain_pg(host: &Host) {
 
 /// The three system indexes every confined table carries.
 pub(super) fn pg_system_indexes(app: &str, coll: &str) -> String {
+    let alias = crate::tests::fixtures::harness_alias(app);
     format!(
         r#"
-CREATE INDEX IF NOT EXISTS "{coll}_deleted_at_idx" ON "{app}"."{coll}" ("deleted_at");
-CREATE INDEX IF NOT EXISTS "{coll}_updated_at_idx" ON "{app}"."{coll}" ("updated_at");
-CREATE INDEX IF NOT EXISTS "{coll}_created_by_idx" ON "{app}"."{coll}" ("created_by");
+CREATE INDEX IF NOT EXISTS "{coll}_deleted_at_idx" ON "{alias}"."{coll}" ("deleted_at");
+CREATE INDEX IF NOT EXISTS "{coll}_updated_at_idx" ON "{alias}"."{coll}" ("updated_at");
+CREATE INDEX IF NOT EXISTS "{coll}_created_by_idx" ON "{alias}"."{coll}" ("created_by");
 "#
     )
 }
@@ -115,32 +116,36 @@ pub(super) async fn require_pgvector(pool: &Pool) {
     );
 }
 
-/// Provision a schema + its per-app role for a test. Returns the role
-/// name. Idempotent re-runs are exercised by `per_app_role_created_at_provision`.
-pub(super) async fn provision_app_with_role(pool: &std::rc::Rc<Pool>, app: &str) -> String {
-    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+/// Reset the physical schema a binding addresses and create the audit table
+/// its unmask writes land in. Returns the binding role a session narrows to.
+///
+/// The roles themselves belong to
+/// `crate::tests::fixtures::roles::ensure_binding_ladder`, which every caller
+/// runs next; the schema is created here because the audit table needs a
+/// namespace to land in, and the ladder's `CREATE SCHEMA IF NOT EXISTS` takes
+/// it as it finds it.
+pub(super) async fn provision_binding_schema(pool: &std::rc::Rc<Pool>, app: &str) -> String {
+    let binding = crate::tests::fixtures::harness_binding(app);
+    let alias = binding.schema().as_str().to_owned();
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{alias}\" CASCADE"), &[])
         .await
         .unwrap();
-    let role = zeroship_core::database_role::per_app_role_name(app)
-        .expect("integration fixture app id must produce a valid PostgreSQL role name");
-    let _ = pool
-        .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
-        .await;
-    // `ensure_per_app_role` creates the __zeroship_app_role_template
-    // anchor itself, so no separate bootstrap step is needed.
-    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+    pool.execute(&format!("CREATE SCHEMA \"{alias}\""), &[])
         .await
         .unwrap();
-    // Stand in for the migration service by creating the audit table before
-    // provisioning the app role and its schema-wide data grants.
+    // Stand in for the migration service by creating the audit table before the
+    // ladder issues its schema-wide data grants.
     //
     // `batch_execute`, not `execute`: this is multi-statement DDL and the
     // extended protocol refuses it with "cannot insert multiple commands into a
     // prepared statement".
-    pool.batch_execute(&zeroship_migrate_server::provisioning::audit_unmask_table_sql(app))
+    pool.batch_execute(&zeroship_migrate_server::provisioning::audit_unmask_table_sql(&alias))
         .await
         .unwrap();
-    role
+    binding
+        .session_role()
+        .expect("a harness binding names the role its sessions narrow to")
+        .to_owned()
 }
 
 pub(super) async fn install_role_bound_select_policy(
@@ -149,27 +154,28 @@ pub(super) async fn install_role_bound_select_policy(
     collection: &str,
     role: &str,
 ) {
+    let alias = crate::tests::fixtures::harness_alias(app);
     pool.execute(
-        &format!("ALTER TABLE \"{app}\".\"{collection}\" ENABLE ROW LEVEL SECURITY"),
+        &format!("ALTER TABLE \"{alias}\".\"{collection}\" ENABLE ROW LEVEL SECURITY"),
         &[],
     )
     .await
     .unwrap();
     pool.execute(
-        &format!("ALTER TABLE \"{app}\".\"{collection}\" FORCE ROW LEVEL SECURITY"),
+        &format!("ALTER TABLE \"{alias}\".\"{collection}\" FORCE ROW LEVEL SECURITY"),
         &[],
     )
     .await
     .unwrap();
     pool.execute(
-        &format!("DROP POLICY IF EXISTS role_gate ON \"{app}\".\"{collection}\""),
+        &format!("DROP POLICY IF EXISTS role_gate ON \"{alias}\".\"{collection}\""),
         &[],
     )
     .await
     .unwrap();
     pool.execute(
         &format!(
-            "CREATE POLICY role_gate ON \"{app}\".\"{collection}\" \
+            "CREATE POLICY role_gate ON \"{alias}\".\"{collection}\" \
              FOR SELECT USING (current_user = '{role}')"
         ),
         &[],
@@ -211,14 +217,18 @@ pub(super) async fn provision_platform_login_pool(
         .unwrap();
     admin_pool
         .execute(
-            &format!("GRANT USAGE ON SCHEMA \"{app}\" TO \"{login_role}\""),
+            &format!(
+                "GRANT USAGE ON SCHEMA \"{}\" TO \"{login_role}\"",
+                crate::tests::fixtures::harness_alias(app)
+            ),
             &[],
         )
         .await
         .unwrap();
-    // The membership edge inherits the app role's explicit column grants.
-    // Giving the login a table-level SELECT would bypass that column fence and
-    // make this RLS control unlike the production login.
+    // The membership edge reaches the column grants the capability role holds,
+    // through the binding role the login is a member of. Giving the login a
+    // table-level SELECT would bypass that column fence and make this RLS
+    // control unlike the production login.
     let login_url = login_role_test_url(base_url, login_role, password);
     let login_pool = std::rc::Rc::new(Pool::connect(&login_url, 4).await.unwrap());
     (login_url, login_pool)

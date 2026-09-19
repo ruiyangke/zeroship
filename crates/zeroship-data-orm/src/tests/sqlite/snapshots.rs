@@ -25,22 +25,23 @@ fn snapshot_restore_round_trip_sqlite() {
     Host::test(|host| {
         host.run(async {
             let (backend, dir) = fresh_backend(host);
+            let alias = crate::tests::fixtures::harness_alias("app_demo");
             backend
-                .attach_app_file("app_demo")
+                .attach_alias_file(&alias)
                 .await
                 .expect("ensure_app_schema");
 
             // Seed deterministic rows.
             backend
                 .execute_fixture(
-                    "CREATE TABLE \"app_demo\".\"notes\" (id INTEGER PRIMARY KEY, body TEXT)",
+                    &format!("CREATE TABLE \"{alias}\".\"notes\" (id INTEGER PRIMARY KEY, body TEXT)"),
                     &[],
                 )
                 .await
                 .expect("CREATE TABLE notes");
             const ROW_COUNT: i64 = 10;
             for i in 0..ROW_COUNT {
-                let sql = format!("INSERT INTO \"app_demo\".\"notes\" VALUES ({i}, 'row-{i}')");
+                let sql = format!("INSERT INTO \"{alias}\".\"notes\" VALUES ({i}, 'row-{i}')");
                 backend
                     .execute_fixture(&sql, &[])
                     .await
@@ -52,7 +53,7 @@ fn snapshot_restore_round_trip_sqlite() {
                 .await
                 .expect("acquire client");
             let rows = client
-                .query("SELECT COUNT(*) FROM \"app_demo\".\"notes\"", &[])
+                .query(&format!("SELECT COUNT(*) FROM \"{alias}\".\"notes\""), &[])
                 .await
                 .expect("count rows pre-snapshot");
             assert_eq!(rows[0][0].as_deref(), Some(ROW_COUNT.to_string().as_str()));
@@ -64,7 +65,7 @@ fn snapshot_restore_round_trip_sqlite() {
             let snap_uri = format!("file://{}", snap_path.to_string_lossy());
             let handle = backend
                 .snapshot(
-                    "app_demo",
+                    &alias,
                     &snap_uri,
                     SnapshotOpts {
                         if_busy: BackupBusyPolicy::Retry,
@@ -88,11 +89,11 @@ fn snapshot_restore_round_trip_sqlite() {
 
             // Clear the live rows so the restore is a meaningful recovery.
             backend
-                .execute_fixture("DELETE FROM \"app_demo\".\"notes\"", &[])
+                .execute_fixture(&format!("DELETE FROM \"{alias}\".\"notes\""), &[])
                 .await
                 .expect("DELETE rows");
             let rows_after_delete = client
-                .query("SELECT COUNT(*) FROM \"app_demo\".\"notes\"", &[])
+                .query(&format!("SELECT COUNT(*) FROM \"{alias}\".\"notes\""), &[])
                 .await
                 .expect("count rows post-delete");
             assert_eq!(rows_after_delete[0][0].as_deref(), Some("0"));
@@ -100,11 +101,11 @@ fn snapshot_restore_round_trip_sqlite() {
             // Restore. After this call the per-app file is replaced with
             // the snapshot content and the session re-ATTACHed against
             // the new file.
-            backend.restore("app_demo", &handle).await.expect("restore");
+            backend.restore(&alias, &handle).await.expect("restore");
 
             // Rows are back.
             let rows_restored = client
-                .query("SELECT COUNT(*) FROM \"app_demo\".\"notes\"", &[])
+                .query(&format!("SELECT COUNT(*) FROM \"{alias}\".\"notes\""), &[])
                 .await
                 .expect("count rows post-restore");
             assert_eq!(
@@ -142,13 +143,14 @@ fn vacuum_into_snapshot_consistent_under_concurrent_writer() {
 
         host.run(async {
             let (backend, dir) = fresh_backend(host);
+            let alias = crate::tests::fixtures::harness_alias("app_demo");
             backend
-                .attach_app_file("app_demo")
+                .attach_alias_file(&alias)
                 .await
                 .expect("ensure_app_schema");
             backend
                 .execute_fixture(
-                    "CREATE TABLE \"app_demo\".\"notes\" (id INTEGER PRIMARY KEY, body TEXT)",
+                    &format!("CREATE TABLE \"{alias}\".\"notes\" (id INTEGER PRIMARY KEY, body TEXT)"),
                     &[],
                 )
                 .await
@@ -156,7 +158,7 @@ fn vacuum_into_snapshot_consistent_under_concurrent_writer() {
             // Seed an initial baseline so the snapshot is not empty.
             const INITIAL_ROWS: usize = 50;
             for i in 0..INITIAL_ROWS {
-                let sql = format!("INSERT INTO \"app_demo\".\"notes\" VALUES ({i}, 'initial-{i}')");
+                let sql = format!("INSERT INTO \"{alias}\".\"notes\" VALUES ({i}, 'initial-{i}')");
                 backend
                     .execute_fixture(&sql, &[])
                     .await
@@ -172,7 +174,7 @@ fn vacuum_into_snapshot_consistent_under_concurrent_writer() {
             // exists to fence.
             let stop = Arc::new(AtomicBool::new(false));
             let writes_observed = Arc::new(AtomicUsize::new(0));
-            let app_file = dir.path().join("zs-app_demo.sqlite");
+            let app_file = dir.path().join(format!("zs-{alias}.sqlite"));
             let writer_stop = stop.clone();
             let writer_observed = writes_observed.clone();
             let writer = std::thread::spawn(move || {
@@ -222,7 +224,7 @@ fn vacuum_into_snapshot_consistent_under_concurrent_writer() {
             let snap_uri = format!("file://{}", snap_path.to_string_lossy());
             let snap_result = backend
                 .snapshot(
-                    "app_demo",
+                    &alias,
                     &snap_uri,
                     SnapshotOpts {
                         if_busy: BackupBusyPolicy::Retry,
@@ -259,7 +261,7 @@ fn vacuum_into_snapshot_consistent_under_concurrent_writer() {
                 .await
                 .expect("acquire client");
             let live_rows = client
-                .query("SELECT COUNT(*) FROM \"app_demo\".\"notes\"", &[])
+                .query(&format!("SELECT COUNT(*) FROM \"{alias}\".\"notes\""), &[])
                 .await
                 .expect("count live rows");
             let live_count: i64 = live_rows[0][0]
@@ -368,20 +370,21 @@ fn restore_hash_mismatch_rejected_sqlite() {
         use std::io::Write;
         host.run(async {
             let (backend, dir) = fresh_backend(host);
+            let alias = crate::tests::fixtures::harness_alias("app_demo");
             backend
-                .attach_app_file("app_demo")
+                .attach_alias_file(&alias)
                 .await
                 .expect("ensure_app_schema");
             backend
                 .execute_fixture(
-                    "CREATE TABLE \"app_demo\".\"notes\" (id INTEGER PRIMARY KEY, body TEXT)",
+                    &format!("CREATE TABLE \"{alias}\".\"notes\" (id INTEGER PRIMARY KEY, body TEXT)"),
                     &[],
                 )
                 .await
                 .expect("CREATE TABLE notes");
             backend
                 .execute_fixture(
-                    "INSERT INTO \"app_demo\".\"notes\" VALUES (1, 'sentinel')",
+                    &format!("INSERT INTO \"{alias}\".\"notes\" VALUES (1, 'sentinel')"),
                     &[],
                 )
                 .await
@@ -392,7 +395,7 @@ fn restore_hash_mismatch_rejected_sqlite() {
             let snap_uri = format!("file://{}", snap_path.to_string_lossy());
             let handle = backend
                 .snapshot(
-                    "app_demo",
+                    &alias,
                     &snap_uri,
                     SnapshotOpts {
                         if_busy: BackupBusyPolicy::Retry,
@@ -415,7 +418,7 @@ fn restore_hash_mismatch_rejected_sqlite() {
 
             // Restore must reject with the typed code.
             let err = backend
-                .restore("app_demo", &handle)
+                .restore(&alias, &handle)
                 .await
                 .expect_err("restore must refuse on hash mismatch");
             match err {
@@ -441,7 +444,7 @@ fn restore_hash_mismatch_rejected_sqlite() {
                 .await
                 .expect("acquire client");
             let rows = client
-                .query("SELECT body FROM \"app_demo\".\"notes\" WHERE id = 1", &[])
+                .query(&format!("SELECT body FROM \"{alias}\".\"notes\" WHERE id = 1"), &[])
                 .await
                 .expect("post-refuse query");
             assert_eq!(rows.len(), 1);
