@@ -305,8 +305,7 @@ impl LocalHost {
         let stopping = Arc::new(AtomicBool::new(false));
         let host_stopping = stopping.clone();
         zeroship_runtime::init_v8();
-        let thread = std::thread::Builder::new()
-            .name("workflow-host".into())
+        let thread = zeroship_workflow::service::runner::host::thread()
             .spawn(move || {
                 let runtime = match compio::runtime::Runtime::new() {
                     Ok(runtime) => runtime,
