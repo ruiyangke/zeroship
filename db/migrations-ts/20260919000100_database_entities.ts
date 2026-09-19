@@ -50,7 +50,7 @@ export default {
     // ---- projects gains the zone ------------------------------------------
     table("projects", { schema: "zeroship" })
       .column("execution_zone_id")
-      .add({ type: t.text().notNull().default("ezn_default000000000000000000") });
+      .add({ type: t.text().required().default("ezn_default000000000000000000") });
     table("projects", { schema: "zeroship" })
       .foreignKey("projects_execution_zone_fkey")
       .add({
@@ -115,13 +115,13 @@ export default {
     // ---- datastores --------------------------------------------------------
     table("datastores", { schema: "zeroship" }).create({
       columns: {
-        id: t.text().notNull(),
-        system_identifier: t.bigInt().notNull(),
-        execution_zone_id: t.text().notNull(),
-        status: t.text().notNull().default("pending"),
+        id: t.text().required(),
+        system_identifier: t.bigInt().required(),
+        execution_zone_id: t.text().required(),
+        status: t.text().required().default("pending"),
         last_error: t.text(),
-        created_at: t.timestamp().notNull().default(now()),
-        updated_at: t.timestamp().notNull().default(now()),
+        created_at: t.timestamp().required().default(now()),
+        updated_at: t.timestamp().required().default(now()),
       },
       primaryKey: ["id"],
     });
@@ -160,11 +160,11 @@ export default {
     // ---- databases ---------------------------------------------------------
     table("databases", { schema: "zeroship" }).create({
       columns: {
-        id: t.text().notNull(),
-        project_id: t.text().notNull(),
-        execution_zone_id: t.text().notNull(),
-        datastore_id: t.text().notNull(),
-        name: t.text().notNull(),
+        id: t.text().required(),
+        project_id: t.text().required(),
+        execution_zone_id: t.text().required(),
+        datastore_id: t.text().required(),
+        name: t.text().required(),
         // A ROLE-NAME INPUT, NOT A RECORD OF THE SCHEMA. It answers which
         // zs_bind_<binding>_e<epoch> Control should compose, and nothing else.
         // Its authority is the epoch row on the cluster, written inside the
@@ -174,10 +174,10 @@ export default {
         // the caller re-resolves - fail-closed and self-correcting. Reading it
         // as a description of shape rebuilds the deleted deploy gate under
         // another name.
-        schema_epoch: t.int().notNull().default(0),
-        status: t.text().notNull().default("provisioning"),
-        created_at: t.timestamp().notNull().default(now()),
-        updated_at: t.timestamp().notNull().default(now()),
+        schema_epoch: t.int().required().default(0),
+        status: t.text().required().default("provisioning"),
+        created_at: t.timestamp().required().default(now()),
+        updated_at: t.timestamp().required().default(now()),
       },
       primaryKey: ["id"],
     });
@@ -257,21 +257,21 @@ export default {
     // catalog, which is authoritative, and a stored copy could only be wrong.
     table("database_bindings", { schema: "zeroship" }).create({
       columns: {
-        id: t.text().notNull(),
-        app_id: t.text().notNull(),
-        database_id: t.text().notNull(),
-        project_id: t.text().notNull(),
-        capability: t.text().notNull(),
-        status: t.text().notNull().default("pending"),
+        id: t.text().required(),
+        app_id: t.text().required(),
+        database_id: t.text().required(),
+        project_id: t.text().required(),
+        capability: t.text().required(),
+        status: t.text().required().default("pending"),
         // Control declares; a per-cluster reconciler converges. Nothing spans
         // the control database and a tenant cluster, so the row and its roles
         // cannot be written in one transaction and `observed_generation` is how
         // a reader tells a declared binding from a live one.
-        generation: t.int().notNull().default(1),
-        observed_generation: t.int().notNull().default(0),
+        generation: t.int().required().default(1),
+        observed_generation: t.int().required().default(0),
         last_error: t.text(),
-        created_at: t.timestamp().notNull().default(now()),
-        updated_at: t.timestamp().notNull().default(now()),
+        created_at: t.timestamp().required().default(now()),
+        updated_at: t.timestamp().required().default(now()),
       },
       primaryKey: ["id"],
     });
