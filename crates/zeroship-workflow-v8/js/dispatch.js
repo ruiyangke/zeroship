@@ -131,8 +131,6 @@ class ZsWorkflowCompensationReplayReady extends Error {
     }
 }
 
-const ZS_MAX_START_MANY_BATCH = 1000;
-
 // Misuse of the step API. Deterministic by construction: the same body raises
 // it again, so re-executing the step cannot clear it.
 //
@@ -717,14 +715,13 @@ class ZsJournalBackedStep {
         });
     }
 
+    // Every item joins the single frontier this dispatch submits, so the batch
+    // shares one budget with every other step issued in the same turn. The app
+    // plan holds that budget, it reaches no isolate, and creator code could drop
+    // any copy kept here, so the platform is where it is decided.
     startMany(WorkflowClass, items, options) {
         this.#assertNotNested();
         const materialized = Array.from(items);
-        if (materialized.length > ZS_MAX_START_MANY_BATCH) {
-            return brandStepPromise(Promise.reject(new ZsLimitExceededError(
-                `startMany batch exceeds maxStartManyBatch (${materialized.length} > ${ZS_MAX_START_MANY_BATCH})`,
-            )));
-        }
         return brandStepPromise(Promise.all(materialized.map((raw) => {
             const item = raw || {};
             const itemOptions = item.options && typeof item.options === "object" ? item.options : {};

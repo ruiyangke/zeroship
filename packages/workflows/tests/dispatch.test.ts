@@ -1344,11 +1344,14 @@ test("Promise combinators over step promises are not refused", { timeout: TEST_T
   }
 });
 
-test("startMany past its batch bound fails as nondeterministic rather than by limit", { timeout: TEST_TIMEOUT_MS }, async () => {
-  // The refusal itself is a LimitExceededError, but it rejects a step promise
-  // that was never observed, so the drain barrier reaches its verdict first and
-  // the engine is told the body awaited non-step work. The bound holds; the
-  // reason the engine records for it does not name the bound.
+test("startMany forwards a wide batch without bounding it", { timeout: TEST_TIMEOUT_MS }, async () => {
+  // The batch the bridge emits is the batch the body issued. How wide a
+  // frontier may be is the app plan's `maxFrontier`, which reaches no isolate;
+  // a ceiling kept here would have to guess it, and would wave through every
+  // batch under the guess while the platform refused the same dispatch. The
+  // size below is wide enough that a ceiling added here fails this case rather
+  // than hiding behind the platform's refusal.
+  const size = 1_024;
   class EchoChildWorkflow extends Workflow<{ value: string }, { value: string }> {
     run(): { value: string } {
       return { value: "unused" };
@@ -1358,18 +1361,21 @@ test("startMany past its batch bound fails as nondeterministic rather than by li
     async run(_trigger: WorkflowTrigger<unknown>, step: WorkflowStep) {
       return await step.startMany(
         EchoChildWorkflow,
-        Array.from({ length: 1_001 }, (_, index) => ({ input: { value: String(index) } })),
+        Array.from({ length: size }, (_, index) => ({ input: { value: String(index) } })),
       );
     }
   }
 
   const result = await replay(Checkout, [], { children: [EchoChildWorkflow] });
 
-  assertRunFailed(
-    result,
-    "NondeterministicError",
-    "awaited non-step work outside the microtask replay boundary",
-  );
+  assert.equal(result.kind, undefined, show(result));
+  assert.equal(result.outcomes.length, size, show(result));
+  const outcomes = result.outcomes as Outcome[];
+  for (const [index, outcome] of outcomes.entries()) {
+    assert.equal(outcome.kind, "Child", show(result));
+    assert.equal(outcome.ordinal, index, show(result));
+    assert.deepEqual(outcome.input, { value: String(index) }, show(result));
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -1491,10 +1497,9 @@ test("a nested step call is catchable as NestedStepError", { timeout: TEST_TIMEO
 });
 
 test("a recorded limit failure is catchable as LimitExceededError", { timeout: TEST_TIMEOUT_MS }, async () => {
-  // The reachable limit path is the recorded one. A body cannot catch the
-  // `startMany` cap in the dispatch that raises it: the catch resumes the body
-  // outside the microtask replay boundary and the drain barrier fails the run
-  // first, which the `startMany` cap case at the end of this file pins.
+  // A journaled failure is rebuilt from its row rather than rethrown, so what a
+  // creator can branch on is the recorded `type`. This pins that a row typed
+  // `LimitExceededError` reaches the body as one the SDK class matches.
   class Checkout extends Workflow<unknown, unknown> {
     async run(_trigger: WorkflowTrigger<unknown>, step: WorkflowStep) {
       try {
@@ -1510,7 +1515,7 @@ test("a recorded limit failure is catchable as LimitExceededError", { timeout: T
   const result = await replay(Checkout, [
     failedRow(0, "fanout", {
       type: "LimitExceededError",
-      message: "startMany batch exceeds maxStartManyBatch",
+      message: "workflow result exceeds the configured payload limits",
     }),
   ]);
 
