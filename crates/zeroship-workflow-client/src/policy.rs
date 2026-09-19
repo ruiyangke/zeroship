@@ -56,9 +56,6 @@ impl LeasedPolicy {
         self.lease.ingress_epoch
     }
 
-    /// Install this original deadline; sampling remaining time and adding it
-    /// to a later instant would extend authority.
-    #[must_use]
     /// How far this deadline may under-state the granted expiry, measured as
     /// the round trip that produced it. A later lease whose deadline is earlier
     /// by no more than this is the SAME window re-anchored, not a shortening.
@@ -67,6 +64,8 @@ impl LeasedPolicy {
         self.anchor_slack
     }
 
+    /// Install this original deadline; sampling remaining time and adding it
+    /// to a later instant would extend authority.
     #[must_use]
     pub const fn expires_at(&self) -> Instant {
         self.expires_at
