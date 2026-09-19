@@ -116,10 +116,28 @@ creator-facing surface, `crates/zeroship-workflow/src/engine.rs` is "Pure durabl
 and DTO contracts" with no storage in it, and the V8 binding is already built to take a backend
 rather than a database.
 
-**The journal becomes ordinary service schema.** It is installed into `workflow_manager` at
-service boot, by the same mechanism any service installs its own schema, with one stamp row for
-the whole installation. That is what `STAMP_ROW_ID` already describes, now over a set of apps
-scoped by the service rather than by a creator database.
+**The journal becomes ordinary service schema.** It is installed into `workflow_manager` by a
+platform migration, with one stamp row for the whole installation. That is what `STAMP_ROW_ID`
+already describes, now over a set of apps scoped by the service rather than by a creator
+database.
+
+Not at service boot. The service has no installer - `run` in
+`crates/zeroship-workflow-server/src/server.rs` connects, verifies and serves - and its login is
+forbidden the DDL it would need: `Coordinator::verify` in
+`crates/zeroship-workflow-server/src/coordinator.rs` refuses to start when
+`has_schema_privilege(current_user,'workflow_manager','CREATE')` is true, and
+`crates/zeroship-workflow-server/tests/platform_schema.rs` asserts that granting CREATE makes
+`verify` fail. Installing at boot would mean deleting a shipped security contract. A platform
+migration is also the route `workflow_manager` itself arrives by, in
+`db/migrations-ts/20260911000000_workflow_coordination.ts`; the journal joins it there.
+
+The other installer this workspace owns cannot target this schema either. `apply_schema_bundle`
+in `crates/zeroship-migrate-server/src/bundle.rs` calls `provision_database` unconditionally,
+and `provision_migrator` reassigns schema ownership before `provision_runtime_app_role` mints a
+login holding DML on every table in the schema. Pointed at `workflow_manager` that would take
+the schema from `zeroship_workflow_migrator` and give a runtime login full reach over the
+manager's queue. It stays the installer for a journal in a creator schema, which is a different
+target with different owners.
 
 **The worker holds no journal credential**, which is the property that makes the whole thing
 safe without building anything. See Why it is this way.
@@ -132,10 +150,18 @@ safe without building anything. See Why it is this way.
   JournalManager, JournalError          crates/zeroship-control/src/publication/journal.rs
   the journal ensure at app registration control's deploy path
   the worker's journal repair path      crates/zeroship-worker/src/workflow_creator.rs
-  SCHEMA_PLACEHOLDER substitution        one fixed schema needs no placeholder,
-                                         except on the dev tier - see SQLite
   zeroship-data-orm from the engine      crates/zeroship-workflow/Cargo.toml
 ```
+
+`SCHEMA_PLACEHOLDER` stays. A fixed target schema does not remove the need for it: the generated
+PostgreSQL artifact carries the placeholder quoted, and the platform migration substitutes
+`"workflow_manager"` into it exactly as a creator bundle substitutes a creator schema. The
+quoting matters, because substituting the bare word would also rewrite the stamp table's name.
+
+The first four entries are not available yet. Step 1 left `ensure_journal` and
+`Journal`/`bundle_for`/`journal_bundle` byte-identical on purpose, and they stay until a reader
+exists in `workflow_manager` to replace what they serve. Read this list as the end state, not as
+work unlocked by the installation.
 
 That last one is a dependency-boundary improvement the AGENTS.md invariant already gestures at:
 `zeroship-workflow-schema` is a leaf so a service can install the journal without depending on
@@ -329,15 +355,30 @@ stall the defect fixes that motivate the move.
 
 ## Open
 
-1. **Latency, and whether transitions batch.** A durable workflow makes many small journal
-   appends, and each one that crosses the boundary becomes a round trip. This is less open than
-   it looks: transitions already batch. `apply` in `crates/zeroship-workflow/src/service/frontier.rs`
-   consumes a dispatch's whole outcome set and refuses one wider than the app policy's
-   `max_frontier`, so a dispatch already submits many transitions in a single fold rather than
-   one call per step. What remains open is whether the batch a dispatch produces is the right
-   unit for the wire, and what an activation costs when it is not - which is design work, not a
-   given. Nothing here asserts a number; the instrument is a benchmark against the surface once
-   it exists.
+1. **ANSWERED - latency is not the gate; payload is.** Measured before anything was built, by
+   `crates/zeroship-workflow-client/tests/round_trip_cost.rs`, which exercises the shipped
+   transport with a real assertion minted per call and a peer that really verifies it. Re-run it
+   rather than trusting this paragraph.
+
+   Three findings changed the design. First, a round trip is far cheaper than the work a
+   dispatch already does, and most of a small one is the credential, which pooling does not
+   remove. Second, **the realistic outcome count is one.** `ZsFrontierCoordinator` in
+   `crates/zeroship-workflow-v8/js/dispatch.js` seals shortly after creation and always rejects
+   with a suspend signal, so only steps issued in one synchronous turn share a batch; sequential
+   `await`s become separate dispatches. The corpus agrees - the widest construction anywhere is
+   far below `max_frontier`, which is exercised nowhere. So "transitions already batch" is
+   mechanically true and operationally misleading: a run still costs a crossing per dispatch,
+   spread out rather than concentrated. Third, and decisively, **all three crossings already sit
+   beside a call that is remote today.** Merge them and the relocation adds no round trip; bolt
+   them on as separate endpoints and it doubles the manager's request rate. That is a capacity
+   decision, not a latency one, and it is why Plan step 4 is written as a merge.
+
+   **Where the sign flips.** The assignment carries the whole replay journal on every dispatch,
+   so a run's bytes grow with the square of its steps. Two shipped bounds already disagree about
+   that: `AppPolicy::max_journal_bytes` against the client's `max_response_bytes`, and
+   `AppPolicy::max_input_bytes` against `max_request_bytes` - and the worker takes the client
+   defaults. Deciding how the journal crosses is the real design work behind this move. See
+   Open 2, which is the same question seen from the payload side.
 
 2. **Payload size on the wire.** `read_step_output` and step inputs cross the boundary.
    `WorkflowOutputRef` in `crates/zeroship-workflow/src/engine.rs` suggests large outputs are already referenced rather than
@@ -349,10 +390,12 @@ stall the defect fixes that motivate the move.
    control plane, which is the coupling `docs/proposals/2026-09-05-gateway-central-database-decoupling.md`
    is fighting on a different axis. The promotion is contained; the question is when.
 
-4. **Is the service zone-local?** If the workflow service is global, every journal append from
-   a remote zone is a wide-area round trip. It should be zone-local, which means one workflow
-   store per zone and an app's runs living in its own zone - consistent with the decoupling's
-   co-location rule, and worth stating rather than inheriting.
+4. **Is the service zone-local? This is half of Open 1's answer, not a footnote.** Every number
+   behind Open 1 was taken over loopback. A crossing per dispatch is free at that distance and
+   is not free across a wide area, so if the service is global the term Open 1 dismisses becomes
+   the dominant one. It should be zone-local - one workflow store per zone, an app's runs living
+   in its own zone - consistent with the decoupling's co-location rule, and worth deciding
+   before the cutover rather than inheriting.
 
 5. **What happens to in-flight runs at cutover?** Pre-launch, nothing: there are no runs. That
    answer expires, and the design should say so rather than let a later reader assume a
@@ -362,6 +405,28 @@ stall the defect fixes that motivate the move.
    engine and can therefore observe and advance any run it is executing. Server-side, the
    service decides what a worker is told. That is a stronger boundary and probably a better
    one, but it is a change in authority that should be described rather than arrived at.
+
+7. **BLOCKS STEP 2. Does creator payload belong in the platform schema?**
+   `metadata_schema_has_no_customer_authority_and_ids_are_bytewise` in
+   `crates/zeroship-workflow-server/tests/coordinator.rs` asserts that no column in
+   `workflow_manager` is json, jsonb or bytea, or named `input`, `output`, `history`,
+   `payload_url`, `database_url` or `task_token`. It reads `information_schema.columns` and
+   requires the result empty. The journal installed by step 1 declares `input` and `output` on
+   `__zeroship_workflow_generations`.
+
+   It passes today only because that fixture builds `workflow_manager` from the manager's own
+   generated artifact rather than from the migration corpus, and because step 1 writes nothing.
+   Step 2 is where a reader appears and the columns stop being empty.
+
+   This is a tenancy statement, not a naming rule, so re-scoping the assertion to the manager's
+   own tables is a decision about where creator payload may live rather than a fixture repair.
+   Settle it before a reader is built: either the platform-schema journal is structurally
+   payload-free and `input`/`output` live only in creator schemas, or the assertion is narrowed
+   deliberately and the reason recorded here.
+
+   Decide it here rather than inside the slice that trips it. This assertion is the kind that
+   reads as protection: narrowing it to make a step land would look like housekeeping in a diff,
+   and the property would be gone with nothing marking its departure.
 
 ---
 
