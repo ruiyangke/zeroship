@@ -1006,6 +1006,8 @@ pub async fn bind_database(
            JOIN zeroship.apps a ON a.id = $2 AND a.project_id = d.project_id \
            {joins} \
           WHERE d.id = $3 AND {rank} >= {developer} \
+            AND NOT EXISTS (SELECT 1 FROM zeroship.database_bindings existing \
+                             WHERE existing.app_id = a.id AND existing.database_id = d.id) \
          RETURNING id, app_id, \
                    (SELECT name FROM zeroship.apps WHERE id = $2) AS app_name, \
                    database_id, project_id, capability, status, generation, \
@@ -1029,10 +1031,14 @@ pub async fn bind_database(
         .await
         .map_err(|err| {
             if is_unique_violation(&err) {
-                // `database_bindings_natural_key` is the only uniqueness this
-                // statement can violate. The live capability cannot be read
-                // here - the transaction is aborted - so it is reported as
-                // unknown and the caller is told to unbind first either way.
+                // A RACE ONLY. `database_bindings_natural_key` is the one
+                // uniqueness this statement can violate, and the `NOT EXISTS`
+                // above already turns an existing binding into zero rows, which
+                // [`classify_bind_refusal`] answers with the live capability.
+                // Reaching here means a concurrent bind committed in between,
+                // and the aborted transaction can no longer read that
+                // capability - so it is reported empty rather than guessed, and
+                // the caller is told to unbind first either way.
                 DatabaseError::AlreadyBound {
                     app_id: app_id.as_str().to_owned(),
                     capability: String::new(),
