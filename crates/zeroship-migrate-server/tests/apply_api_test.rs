@@ -1777,8 +1777,10 @@ async fn project_lock_spans_every_file_and_the_terminal_ledger_write_pg() {
     apply_ir_documents(
         &dsn(),
         &tmp,
-        &app_id,
-        &database,
+        zeroship_migrate_server::apply::ApplyTarget {
+            app_id: &app_id,
+            database_id: &database,
+        },
         &initial,
         &policy_config,
         &schema_apply_store,
@@ -1810,8 +1812,10 @@ async fn project_lock_spans_every_file_and_the_terminal_ledger_write_pg() {
         apply_ir_documents(
             &apply_dsn,
             &apply_tmp,
-            &apply_app_id,
-            &apply_database,
+            zeroship_migrate_server::apply::ApplyTarget {
+                app_id: &apply_app_id,
+                database_id: &apply_database,
+            },
             &request,
             &policy_config,
             &schema_apply_store,

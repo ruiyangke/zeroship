@@ -968,12 +968,18 @@ fn as_str<'a>(v: &'a Value, at: &str) -> Result<&'a str, String> {
         .ok_or_else(|| format!("`{at}` must be a string"))
 }
 
+/// One label and the entry it names, out of a label-keyed map.
+///
+/// Named because the pair is returned from several checks and a bare tuple of
+/// two references reads as noise at each of them.
+type LabelledEntry<'a> = (&'a str, &'a Map<String, Value>);
+
 /// Read one label map, checking every key against the rule the schema states.
 fn check_label_map<'a>(
     value: &'a Value,
     at: &str,
     map_path: &str,
-) -> Result<Vec<(&'a str, &'a Map<String, Value>)>, String> {
+) -> Result<Vec<LabelledEntry<'a>>, String> {
     let entries = value
         .as_object()
         .ok_or_else(|| format!("`{at}` must be an object keyed by LOCAL LABELS"))?;

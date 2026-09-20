@@ -314,8 +314,10 @@ async fn a_table_migrates_into_the_named_database_and_not_into_the_other() {
     let report = apply_ir_documents(
         cluster_fixture.url(),
         &tmp,
-        &app,
-        &second,
+        zeroship_migrate_server::apply::ApplyTarget {
+            app_id: &app,
+            database_id: &second,
+        },
         &request,
         &policy_config(),
         &SchemaApplyStore::new(fixture::migrated_url()),
