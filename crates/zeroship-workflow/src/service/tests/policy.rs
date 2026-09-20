@@ -436,7 +436,7 @@ async fn retired_app_handles(store: Rc<OrmStore>) {
     let (service, app, other, _deployments) = registered_service(store).await;
     let binding = service.policies.current_binding(&app).unwrap();
     let scope = service.bind_app(&binding).unwrap();
-    let backend = scope.clone().into_backend(1024).unwrap();
+    let backend = scope.clone().into_backend(&service, 1024).unwrap();
     let unrelated = service.fixture_app(other);
     scope
         .start(&RequestId::mint(), "Example", StartOptions::default())

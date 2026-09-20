@@ -280,7 +280,7 @@ mod tests {
                 .register_app(&binding)
                 .await
                 .unwrap()
-                .into_backend(1024)
+                .into_backend(&service, 1024)
                 .unwrap();
             let context = WorkflowAppContext {
                 schema: SchemaName::new(&tenant).unwrap(),
@@ -455,7 +455,7 @@ mod tests {
             .service
             .bind_app(&foreign)
             .unwrap()
-            .into_backend(1024)
+            .into_backend(&fixture.service, 1024)
             .unwrap();
         assert!(matches!(
             WorkerWorkflowRuntimeLoader::new(fixture.contexts.clone(), foreign_backend)
@@ -591,7 +591,7 @@ mod tests {
             .register_app(&replacement)
             .await
             .unwrap()
-            .into_backend(1024)
+            .into_backend(&fixture.service, 1024)
             .unwrap();
         fixture.contexts.0.borrow_mut().env = EnvSnapshot::vars_only(json!({"COLOR":"green"}));
 

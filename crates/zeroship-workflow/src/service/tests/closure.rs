@@ -839,7 +839,7 @@ async fn sqlite_fenced_acceptance_establishes_a_newer_epoch_and_retries_once() {
     // call; its retry captures the binding's newly installed epoch instead.
     epochs.fails.set(false);
     epochs.installs.set(true);
-    let backend = scope.clone().into_backend(1024).unwrap();
+    let backend = scope.clone().into_backend(&fixture.service, 1024).unwrap();
     backend
         .signal(started.id.clone(), approved())
         .await
