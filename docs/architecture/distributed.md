@@ -6,17 +6,17 @@ Current zeroship deployment is multi-process and single-region. The platform is 
 
 ```text
 creator / CLI
-  -> control plane (`crates/control`)
+  -> control plane (`crates/zeroship-control`)
      -> PostgreSQL
      -> bundle/blob root
 
 end user
-  -> gateway (`crates/gateway`)
+  -> gateway (`crates/zeroship-gateway`)
      -> route cache from control
      -> static bytes from blob root
      -> CHWBL proxy to worker
 
-worker (`crates/worker`)
+worker (`crates/zeroship-worker`)
   -> version map from control
   -> env snapshots from control
   -> worker-entry blobs from blob root

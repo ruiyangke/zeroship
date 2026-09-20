@@ -177,7 +177,7 @@ MEASURED. The request path reads only `name` and `manifest`.
 
 The remaining fields ride this feed for a reason unrelated to routing: it is the
 only push channel from the control plane to the edge. `api_key_hash` is a
-credential the gateway validates offline (`crates/zeroship-gateway/src/auth.rs`,
+credential the gateway validates offline (`crates/zeroship-gateway/src/router/auth.rs`,
 `check_api_key`). `plan_id` is pricing. `oauth_client_id` and `sector_identifier`
 are OAuth identity. `spend_state` and `account_state` are billing enforcement
 applied before dispatch. `deploy_hash` names the live deploy.
@@ -586,7 +586,7 @@ derives each and states precisely what survives.
 ## `oauth_client_id` is a copy of a computable value
 
 MEASURED. The per-app OAuth `client_id` is a prefix swap on the app UUID. The
-mint and its exact inverse are, from `crates/zeroship-core/src/typed_id.rs`:
+mint and its exact inverse are, from `crates/zeroship-id/src/typed_id.rs`:
 
 ```rust
 pub fn app_oauth_client_id(app_id: &uuid::Uuid) -> String {
@@ -1349,7 +1349,7 @@ ordering is what decides anything:
 `deploy_hash` earns its place: it is the manifest address and the whole immutable
 half hangs off it. **`api_key_hash` is the one to interrogate.** MEASURED, it has
 exactly ONE production consumer, `check_api_key`
-(`crates/zeroship-gateway/src/auth.rs`), on a header-bearing request path. Moving
+(`crates/zeroship-gateway/src/router/auth.rs`), on a header-bearing request path. Moving
 it out of the directory and into a lazily-fetched per-app credential object
 removes one of the two digests from every entry on every node. That is a real
 decision with a real cost - the first `X-Api-Key` request against a cold app would
@@ -2105,7 +2105,7 @@ number of name-handling sites ruled on, ENUMERATED by the arm, so a site added
 later breaks the gate. Tracks open issue #208.
 
 **A7. `api_key_hash` has one consumer.** Enumerates readers of `api_key_hash` and
-callers of `check_api_key` (`crates/zeroship-gateway/src/auth.rs`), explicitly
+callers of `check_api_key` (`crates/zeroship-gateway/src/router/auth.rs`), explicitly
 INCLUDING the defining file, since this repo has a recorded failure mode where a
 caller search excluding the definer hides internal calls. Rules the count against
 a declared floor. A second consumer must break it, because the decision to move
@@ -2436,10 +2436,10 @@ example.
 `zeroship.apps.id` is `t.uuid().notNull().default(uuidV4())`
 (`db/migrations-ts/20260702000200_control_tables.ts`) and the only production
 insert omits `id` entirely (`Registry::create_app`), so the database default
-supplies it. `new_app_id()` exists in `crates/zeroship-core/src/typed_id.rs` and
+supplies it. `new_app_id()` exists in `crates/zeroship-id/src/typed_id.rs` and
 mints `app_<base62(uuidv7)>`, but grep finds no caller outside that module's own
 test. That function has since been DELETED, on the strength of this measurement:
-the app id's one minter is now `AppId::mint` in `crates/zeroship-core/src/app_id.rs`,
+the app id's one minter is now `AppId::mint` in `crates/zeroship-id/src/app_id.rs`,
 which is typed and still unwired, so the observation above stands unchanged as a
 statement about the column. So the identity flowing through every wire type carries no time ordering and
 no locality hint, and `oac_<base62>` inherits that. Relevant to chunking only in
