@@ -48,14 +48,12 @@ pub fn run(filter: Option<&str>) -> Result<()> {
     if let Some(filter) = filter {
         nextest.args(["--filter-expr", filter]);
     }
-    nextest.env("RUST_MIN_STACK", "33554432");
     // Preserve a failed nextest verdict while still checking Rust documentation.
     let tests = checked(&mut nextest, "nextest data suite");
     let docs = if filter.is_none() {
         let mut command = cargo();
         command.args(["test", "--doc", "--no-fail-fast"]);
         packages(&mut command);
-        command.env("RUST_MIN_STACK", "33554432");
         checked(&mut command, "data doctests")
     } else {
         Ok(())
