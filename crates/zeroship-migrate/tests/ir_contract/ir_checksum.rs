@@ -5,10 +5,20 @@
 //! then `fold_common`; `Checksum::of_ir` folds the canonical op-list (RFC 8785
 //! JCS per op, length-prefixed, in op order) then the SAME `fold_common`.
 //!
-//! The GOLDEN-HASH test below is the load-bearing fixture: it pins the
-//! byte-for-byte output of `Checksum::of` over a fixed input. It was generated
-//! against the PRE-`fold_common`-extraction code and MUST stay equal after the
-//! pure refactor — proving the `fold_common` lift is byte-preserving.
+//! The GOLDEN-HASH tests below pin the byte-for-byte output of `Checksum::of`
+//! and `Checksum::of_ir` over a fixed input. What they bind is FORWARD value:
+//! a checksum that changes silently invalidates every stored migration record,
+//! so any edit that moves these bytes has to be a deliberate one.
+//!
+//! They do NOT prove the `fold_common` lift was byte-preserving, and cannot.
+//! The frozen ids below were base62 literals, 22 characters wide; the encoding
+//! moved to base36 at 25. `fold_version_list` folds each id as a
+//! LENGTH-PREFIXED STRING rather than as a decoded value, so ids of the same
+//! UUID at two widths hash differently by construction. The goldens were
+//! regenerated once when the ids were corrected, which converts them from a
+//! proof about a past refactor into a tripwire on future ones. That is a real
+//! loss and it is recorded here because the alternative was impossible, not
+//! merely harder.
 
 use zeroship_migrate::model::ir::{
     CanonicalOpList, ColType, IndexElement, IrColumn, IrConstraint, IrConstraintKind, IrScalar,
@@ -23,8 +33,8 @@ use zeroship_migrate::{
 // so we use frozen literals (NOT `generate()`) to keep the golden hash stable
 // across runs.
 // ---------------------------------------------------------------------------
-const DEP_A: &str = "mig_000000000000000000000A";
-const SUP_A: &str = "mig_000000000000000000000B";
+const DEP_A: &str = "mig_000000000000000000000000a";
+const SUP_A: &str = "mig_000000000000000000000000b";
 
 fn dep() -> MigrationId {
     MigrationId::parse(DEP_A).expect("frozen dep id parses")
@@ -33,10 +43,12 @@ fn sup() -> MigrationId {
     MigrationId::parse(SUP_A).expect("frozen sup id parses")
 }
 
-/// THE byte-stability golden fixture. The expected hex was captured by running
-/// `Checksum::of` on the PRE-refactor code over this exact input; after the
-/// `fold_common` extraction it MUST remain equal — that equality is the proof
-/// the refactor is byte-preserving (a pure lift, not a behaviour change).
+/// THE byte-stability golden fixture. It pins `Checksum::of`'s output over this
+/// exact input so that a change to the checksum wire format fails here rather
+/// than silently invalidating every stored migration record. The hex is a
+/// tripwire on future edits, not evidence about a past one — see the module
+/// header for why the original pre-refactor capture could not be carried
+/// forward.
 #[test]
 fn checksum_of_byte_stable_golden() {
     let flags = MigrationFlags {
@@ -67,11 +79,11 @@ fn checksum_of_byte_stable_golden() {
     // allowed and every golden is updated in the SAME patch). If this ever
     // changes WITHOUT a corresponding flags-shape change, the checksum wire
     // format drifted unintentionally.
-    const EXPECTED: &str = "5724f4f8c2c511421186d84989f40b872943c1fc4fd27aa1069e7a610de39394";
+    const EXPECTED: &str = "b9224a9dfef317338a514aca94212708ba4c752989b9ed0dd132af2735f98d0e";
     assert_eq!(
         Checksum::of(&input).as_str(),
         EXPECTED,
-        "Checksum::of byte output drifted — fold_common extraction must be byte-preserving"
+        "Checksum::of byte output drifted — the checksum wire format must stay frozen"
     );
 }
 
@@ -162,7 +174,7 @@ fn checksum_of_ir_byte_stable_golden() {
     // be51301392288399d3622b7a5156b48931dfd1a8472049299a783b017623f64f ->
     // d069260d3e01ca458fff6db9f5cb8d4e25b1394e1cf2ae722c942db515643d9b.
     // The INPUT changed; the assertion did not.
-    const EXPECTED: &str = "d069260d3e01ca458fff6db9f5cb8d4e25b1394e1cf2ae722c942db515643d9b";
+    const EXPECTED: &str = "f2d5f3ab0fae5ca883a408cf2b5325b071b30ff6b69885aafdb8afd810de8120";
     assert_eq!(
         Checksum::of_ir(
             &CanonicalOpList(&ops),
