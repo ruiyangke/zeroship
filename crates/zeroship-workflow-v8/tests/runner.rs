@@ -74,6 +74,7 @@ const BURN: &str = r"
 
 struct Loader {
     app: AppWorkflows,
+    journal: WorkflowService,
     probes: RefCell<Vec<InnerProbe>>,
     cpu_limit: Option<Duration>,
     markers: Markers,
@@ -112,7 +113,7 @@ impl WorkflowRuntimeLoader for Loader {
                 Arc::new(self.markers.clone()),
                 Arc::new(WorkflowBinding::service(
                     // Replay reads must use task authority and its own read budget.
-                    self.app.clone().into_backend(1).unwrap(),
+                    self.app.clone().into_backend(&self.journal, 1).unwrap(),
                 )),
             ])
             .app_id(app);
@@ -191,6 +192,7 @@ impl Fixture {
             service: service.clone(),
             loader: Rc::new(Loader {
                 app: api,
+                journal: service,
                 probes: RefCell::new(Vec::new()),
                 cpu_limit,
                 markers: Markers::default(),
@@ -994,6 +996,7 @@ async fn replay_loads_retained_dependencies_after_redeploy_and_host_restart() {
     fixture.service = service;
     fixture.loader = Rc::new(Loader {
         app: fixture.app.clone(),
+        journal: fixture.service.clone(),
         probes: RefCell::new(Vec::new()),
         cpu_limit: Some(Duration::from_millis(100)),
         markers: Markers::default(),

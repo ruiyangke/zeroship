@@ -204,8 +204,9 @@ impl<P: WorkflowResourceProvider> WorkflowCreatorFactory<P> {
                 let app = service.register_app(policy).await?.with_ingress(ingress);
                 let tasks = Rc::new(app.tasks(self.worker.clone()));
                 // Workflow and request isolates share one client of this app's
-                // engine, bound to the generation being prepared.
-                let backend = app.clone().into_backend(self.payloads.max_payload_bytes)?;
+                // engine, bound to the generation being prepared. Its journal
+                // is the creator database this service was opened over.
+                let backend = app.clone().into_backend(&service, self.payloads.max_payload_bytes)?;
                 let loader = Rc::new(WorkerWorkflowRuntimeLoader::new(contexts, backend.clone()));
                 let executor = Rc::new(V8TaskExecutor::new(loader, tasks, self.payloads)?);
                 Ok(CreatorRuntime {

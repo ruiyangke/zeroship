@@ -637,13 +637,13 @@ impl CreatorFactory for Factory {
                     1.try_into().unwrap(),
                     AppPolicy::default(),
                 )?)?;
-            creator(self.0.directory.path(), &scope.app_id, policies)
-                .await
+            let foreign = creator(self.0.directory.path(), &scope.app_id, policies).await;
+            foreign
                 .register_app(&binding)
                 .await?
-                .into_backend(1024)?
+                .into_backend(&foreign, 1024)?
         } else {
-            app.clone().into_backend(1024)?
+            app.clone().into_backend(&service, 1024)?
         };
         let runtime = CreatorRuntime {
             app: app.with_ingress(ingress),

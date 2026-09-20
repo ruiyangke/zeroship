@@ -52,7 +52,7 @@ async fn queued_backend(store: Rc<OrmStore>) {
     let backend = service
         .bind_app(&binding)
         .unwrap()
-        .into_backend(1024)
+        .into_backend(&service, 1024)
         .unwrap();
     let before = ingress_state(&service, &app).await;
     let mut blocker = service.begin().await.unwrap();
