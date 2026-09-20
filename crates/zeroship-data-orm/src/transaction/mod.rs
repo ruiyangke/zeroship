@@ -1039,25 +1039,29 @@ mod tests {
         });
     }
 
-    /// **The divergence SC-2 Decision 1 retires**, stated as an assertion.
+    /// **SC-2 Decision 1, stated as an assertion**: `op_conn` and `tx_conn` are
+    /// different connections, so autocommit work is not inside the app's own
+    /// explicit transaction.
     ///
-    /// `tx_route.rs` used to carry: "SQLite runs the whole app on one
-    /// connection ... so a correctly pool-routed write still executes inside
-    /// whatever transaction that connection is holding." That is what this
-    /// test measures: an autocommit write issued while the app's OWN explicit
-    /// transaction is open, followed by that transaction's `ROLLBACK`.
+    /// This is bound through a READ. The write formulation it replaces is no
+    /// longer expressible: `BEGIN IMMEDIATE` (`a160c4179`) takes the write lock
+    /// at BEGIN, so a concurrent autocommit WRITE is refused whether the
+    /// connections are split or not, and the refusal tells you nothing about
+    /// which. `a_transaction_holds_the_write_lock_from_begin_before_any_statement`
+    /// in `src/tests/sqlite/transactions.rs` binds that refusal; this binds the
+    /// separation the refusal hides.
     ///
-    /// On one connection the autocommit row is destroyed - the pre-SC-2 tree
-    /// leaves `0` rows. With `op_conn` and `tx_conn` split it survives and the
-    /// transaction's own row does not.
+    /// **The read proceeds because the app file is in DELETE journal mode, not
+    /// because of WAL.** `enter_wal` sets `journal_mode` unqualified, which
+    /// reaches only `main`; an app database arrives through `ATTACH` and keeps
+    /// SQLite's default. A reader continues while a writer holds `RESERVED`,
+    /// and that is the rule this test rests on.
     ///
-    /// It says autocommit **write** and issues it before the transaction takes
-    /// the write lock, deliberately. WAL gives concurrent readers, not
-    /// concurrent writers: an autocommit write racing a `tx_conn` that already
-    /// holds the write lock still waits out `busy_timeout`, and no number of
-    /// connections changes that.
+    /// On ONE connection the read would observe the transaction's own
+    /// uncommitted row, because a connection always sees its own writes. Seeing
+    /// only the committed row is the split.
     #[test]
-    fn an_autocommit_write_survives_the_apps_own_transaction_rollback() {
+    fn autocommit_work_does_not_run_inside_the_apps_own_transaction() {
         run(async {
             let (backend, _dir, _reset) = install_sqlite_backend_for_test();
             let probe = backend.autocommit_client();
@@ -1070,40 +1074,58 @@ mod tests {
                 .await
                 .expect("create table");
 
+            // A committed baseline, so the read below has something to return
+            // and an empty result cannot pass for a correct one.
+            backend
+                .execute_fixture_on(&probe, "INSERT INTO notes (title) VALUES ('committed')", &[])
+                .await
+                .expect("seed a committed row");
+
             exec_begin_or_savepoint(false, None, &test_binding(), test_backend())
                 .await
                 .expect("begin sqlite tx");
 
-            // No transaction anywhere in this call's async scope.
-            backend
-                .execute_fixture_on(
-                    &probe,
-                    "INSERT INTO notes (title) VALUES ('autocommit')",
-                    &[],
-                )
-                .await
-                .expect("autocommit insert while a transaction is open");
+            run_on_tx_conn(
+                &crate::tests::fixtures::harness_route("app_sqlite"),
+                "INSERT INTO notes (title) VALUES ('uncommitted')",
+            )
+            .await
+            .expect("insert inside sqlite tx");
 
-            run_on_tx_conn(&crate::tests::fixtures::harness_route("app_sqlite"), "INSERT INTO notes (title) VALUES ('doomed')")
+            let during = probe
+                .query("SELECT title FROM notes ORDER BY id", &[])
                 .await
-                .expect("insert inside sqlite tx");
+                .expect("autocommit read while a transaction is open");
+            assert_eq!(
+                during.len(),
+                1,
+                "autocommit work ran inside the app's transaction - it observed an \
+                 uncommitted row, so op_conn and tx_conn are the same connection; got {during:?}"
+            );
+            assert_eq!(during[0][0].as_deref(), Some("committed"));
 
-            match exec_settle(&crate::tests::fixtures::harness_route("app_sqlite"), false, None).await {
+            // COMMIT, not rollback, and that is deliberate. It makes the read
+            // below serve twice: as the control for the arm above - one variable
+            // moves, the transaction ends - and as the NONEMPTY-INPUT proof.
+            // Under a rollback both a real insert and an insert that silently
+            // did nothing leave one row, so the isolation arm would pass over an
+            // empty transaction.
+            match exec_settle(&crate::tests::fixtures::harness_route("app_sqlite"), true, None).await {
                 SettleOutcome::Ok => {}
                 other => panic!("expected Ok settle outcome, got {other:?}"),
             }
 
-            let rows = probe
+            let after = probe
                 .query("SELECT title FROM notes ORDER BY id", &[])
                 .await
-                .expect("read notes after rollback");
+                .expect("read notes after settle");
             assert_eq!(
-                rows.len(),
-                1,
-                "the autocommit write must survive the transaction's ROLLBACK \
-                 and the transaction's own write must not; got {rows:?}"
+                after.len(),
+                2,
+                "the transaction's row must appear once committed - if it does not, \
+                 the insert never happened and the isolation arm above proved nothing; \
+                 got {after:?}"
             );
-            assert_eq!(rows[0][0].as_deref(), Some("autocommit"));
         });
     }
 
