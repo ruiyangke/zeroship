@@ -5,7 +5,7 @@ Open items track macro extensions consumers can't currently express.
 
 Audit doc: `docs/archive/reviews/v8-class-audit-2026-05-04.md` (Part B = macro
 gaps; cross-referenced as `[B.N]` below). Archived 2026-05-07; consumers since migrated to `#[v8_class]`.
-Consumer-side migrations: `crates/runtime/TODO.md`.
+Consumer-side migrations: `crates/zeroship-runtime/TODO.md`.
 
 ---
 
@@ -157,7 +157,7 @@ Consumer-side migrations: `crates/runtime/TODO.md`.
   - Lands: commit `1e4e0b6` (macro feature + 9 smoke tests in
     `tests/v8_fastcall_smoke.rs`); follow-up `9721a76` migrates
     `Headers.has` (Tier 1 candidate). Bench-validation results in
-    `crates/runtime/benches/results-2026-05-04-after-fastcall.txt`.
+    `crates/zeroship-runtime/benches/results-2026-05-04-after-fastcall.txt`.
   - **Migration status of Tier 1 ROI candidates** (from the original
     spec):
     - `Headers.has(name)` — **MIGRATED** (commit `9721a76`).
@@ -221,7 +221,7 @@ Consumer-side migrations: `crates/runtime/TODO.md`.
 
 ## Consumer migration pointers
 
-Tracked in `crates/runtime/TODO.md` "V8 class macro migration follow-ups"
+Tracked in `crates/zeroship-runtime/TODO.md` "V8 class macro migration follow-ups"
 — not duplicated here. Highlights:
 
 - **Whole-class migrations** (blocked on MAC-01 / MAC-02): Request,

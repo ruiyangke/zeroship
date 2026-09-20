@@ -1,6 +1,6 @@
 # Control plane
 
-`crates/control` owns the creator API, auth endpoints, deploy ingest, env/secrets, and the registry feeds that gateway and worker poll.
+`crates/zeroship-control` owns the creator API, auth endpoints, deploy ingest, env/secrets, and the registry feeds that gateway and worker poll.
 
 There is no platform admin surface. The staff role table, the four staff Cedar
 policies and every `/admin/*` route are deleted; what those routes managed is
@@ -225,7 +225,7 @@ The blob-store ingest path is current. The older raw bundle upload path is gone.
 ## Auth flow
 
 End-user auth does **not** terminate in control. The gateway is the OIDC
-RP of the native auth service (`crates/auth`); control is a pure API
+RP of the native auth service (`crates/zeroship-auth`); control is a pure API
 resource server with no RP of its own — the bespoke `ConsoleOidcRp` +
 `console_sessions` surface was removed in the R5 cutover
 (`crates/zeroship-control/src/lib.rs`).
