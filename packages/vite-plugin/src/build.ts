@@ -595,7 +595,15 @@ export function buildPlugin(
           // Production: generated-artifact check (a HARD drift gate — no binary to be
           // absent, so drift is always caught). Non-production: regenerate (write) so a
           // local `vite build --mode development` refreshes the committed types.
-          await genTypesFromMigrations(migrationsAbs, outDir, { check: isProd });
+          // The LABEL and the PRIMARY FLAG come from `zeroship.jsonc` through
+          // `selectBuildTarget`, not from the fold: the emitted module keys
+          // `EnvDatabases` on the label, and only the primary declares
+          // `Env.db`.
+          await genTypesFromMigrations(migrationsAbs, outDir, {
+            label: database.label,
+            primary: database.primary,
+            check: isProd,
+          });
           console.log(
             isProd
               ? `[zeroship] gen-types --check: ${database.label} env.db.ts + schema.runtime.json track the migrations`

@@ -141,6 +141,35 @@ export function selectBuildTarget(
 }
 
 /**
+ * The database whose gen-types directory is `outDir`, as the emitter needs it.
+ *
+ * A workspace has one artifact directory per DATABASE (`databases.<label>.out`,
+ * which `checkDatabaseOutputs` refuses to share), so a directory identifies a
+ * database. `undefined` when no declaration claims it: the caller decides
+ * whether that is a refusal or a skip.
+ *
+ * `primary` is a WORKSPACE fact here, not a per-app one, because that single
+ * directory holds the single `env.db.ts` every app using the database is typed
+ * from. `checkPrimacyIsUniform` refuses a workspace whose apps disagree, so
+ * "some app names it primary" and "every app using it names it primary" are
+ * the same answer.
+ */
+export function databaseForOutDir(
+  config: ResolvedProjectConfig,
+  root: string,
+  outDir: string,
+): TargetDatabase | undefined {
+  const target = resolve(outDir);
+  const found = Object.entries(declaredDatabases(config)).find(
+    ([, declared]) => resolve(root, declared.out) === target,
+  );
+  if (found == null) return undefined;
+  const [label, declared] = found;
+  const primary = Object.values(declaredApps(config)).some((app) => app.primary === label);
+  return { ...declared, label, primary };
+}
+
+/**
  * Which database a single-database tool addresses: the one named, or the app's
  * primary. `undefined` when the app declares none, which is a schema-less app
  * rather than an error.
@@ -320,6 +349,11 @@ function joinOrNone(names: readonly string[]): string {
  */
 function checkAppWiring(path: string, root: Json): void {
   const declared = labelsOf(root, "databases");
+  // Which apps make each database their `env.db`, and which merely use it.
+  // Collected across the whole file because ONE database has ONE gen-types
+  // directory - see the refusal below.
+  const primaryOf = new Map<string, string>();
+  const secondaryOf = new Map<string, string>();
   for (const [label, raw] of Object.entries((root.apps ?? {}) as Json)) {
     const entry = raw as Json;
     const used = (entry.databases ?? []) as string[];
@@ -354,6 +388,44 @@ function checkAppWiring(path: string, root: Json): void {
           `so it cannot be inferred.`,
       );
     }
+    for (const name of used) {
+      const bucket = name === primary ? primaryOf : secondaryOf;
+      if (!bucket.has(name)) bucket.set(name, label);
+    }
+  }
+  checkPrimacyIsUniform(path, primaryOf, secondaryOf);
+}
+
+/**
+ * A database is the `env.db` of every app that uses it, or of none of them.
+ *
+ * ONE DATABASE HAS ONE GEN-TYPES DIRECTORY (`databases.<label>.out`, which
+ * `checkDatabaseOutputs` already refuses to share), so it has ONE `env.db.ts`.
+ * That module declares the database's entry on `EnvDatabases` under its label
+ * always, and declares `Env.db` only when it is the primary. A workspace where
+ * one app makes `analytics` its primary and another merely uses it is asking
+ * that single file to be two different files: whichever app built last wins,
+ * and the other's `env.db` is typed as the wrong database or not at all.
+ *
+ * Refused here rather than discovered as a drift-gate failure, because a
+ * `--check` complaining that `env.db.ts` drifted names the artifact and not
+ * the two lines of configuration that cannot both hold.
+ */
+function checkPrimacyIsUniform(
+  path: string,
+  primaryOf: ReadonlyMap<string, string>,
+  secondaryOf: ReadonlyMap<string, string>,
+): void {
+  for (const [database, app] of primaryOf) {
+    const other = secondaryOf.get(database);
+    if (other == null) continue;
+    throw new Error(
+      `${path}: \`apps.${app}\` makes \`${database}\` its \`primary\` while \`apps.${other}\` ` +
+        `uses it without naming it. A database has ONE generated \`env.db.ts\` ` +
+        `(\`databases.${database}.out\`), and that file declares \`Env.db\` only for a ` +
+        `primary, so the two apps cannot both be typed from it. Give one of them its own ` +
+        `database, or make \`${database}\` the primary of both.`,
+    );
   }
 }
 

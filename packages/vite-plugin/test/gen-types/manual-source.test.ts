@@ -22,6 +22,15 @@ import {
 } from "../../src/gen-types/index.js";
 import { fieldDefToDto } from "../../src/gen-types/manual.js";
 
+/**
+ * The database a fixture's emitted `env.db.ts` belongs to.
+ *
+ * These fixtures are bare `schema.ts` files with no `zeroship.jsonc`, so the
+ * emitter is told directly what a config file would otherwise say: a database
+ * labelled `main` that is the app's `env.db`.
+ */
+const MAIN = { label: "main", primary: true } as const;
+
 async function makeFixture(
   files: Record<string, string>,
 ): Promise<{ root: string; cleanup: () => Promise<void> }> {
@@ -112,7 +121,7 @@ describe("manual schema source", () => {
     });
     try {
       await assert.rejects(
-        () => genTypesFromSchemaFile(join(fx.root, "schema.ts"), join(fx.root, "src"), {}),
+        () => genTypesFromSchemaFile(join(fx.root, "schema.ts"), join(fx.root, "src"), MAIN),
         /refusing to overwrite.*env\.db\.ts/,
       );
       assert.equal(
@@ -132,7 +141,7 @@ describe("manual schema source", () => {
     });
     try {
       await assert.rejects(
-        () => genTypesFromSchemaFile(join(fx.root, "schema.ts"), join(fx.root, "src"), {}),
+        () => genTypesFromSchemaFile(join(fx.root, "schema.ts"), join(fx.root, "src"), MAIN),
         /refusing to overwrite.*env\.db\.ts/,
       );
       assert.equal(await fs.readFile(join(fx.root, "src/env.db.ts"), "utf8"), foreignSource);
@@ -145,7 +154,7 @@ describe("manual schema source", () => {
     const fx = await makeFixture({ "schema.ts": TWO_COLLECTION_SCHEMA });
     const outDir = join(fx.root, "generated/zeroship");
     try {
-      const res = await genTypesFromSchemaFile(join(fx.root, "schema.ts"), outDir, {});
+      const res = await genTypesFromSchemaFile(join(fx.root, "schema.ts"), outDir, MAIN);
       assert.equal(res.status, "written");
       assert.deepEqual([...res.files], [ENV_DB_FILE, RUNTIME_DESCRIPTOR_FILE]);
 
@@ -193,14 +202,13 @@ describe("manual schema source", () => {
     const fx = await makeFixture({ "schema.ts": TWO_COLLECTION_SCHEMA });
     const outDir = join(fx.root, "generated/zeroship");
     try {
-      await genTypesFromSchemaFile(join(fx.root, "schema.ts"), outDir, {});
+      await genTypesFromSchemaFile(join(fx.root, "schema.ts"), outDir, MAIN);
       const envDb = await fs.readFile(join(outDir, ENV_DB_FILE), "utf8");
       assert.match(envDb, /DO NOT EDIT/, "carries the DO NOT EDIT banner");
       assert.match(envDb, /import \{ type Db \} from "@zeroship\/db";/, "imports Db");
       // Relative import to the author's schema.ts (out dir is generated/zeroship,
       // schema.ts is two levels up).
       assert.match(envDb, /import \{ schema \} from "\.\.\/\.\.\/schema";/, "imports author schema");
-      assert.match(envDb, /db: Db<typeof schema>;/, "augments Env.db");
       assert.match(envDb, /declare module "zeroship"/, "module augmentation");
       // It is NOT the inline generated literal (that is the GENERATED path).
       assert.doesNotMatch(envDb, /const schema = \{/, "manual env.db.ts has no inline schema literal");
@@ -209,11 +217,11 @@ describe("manual schema source", () => {
     }
   });
 
-  test("the emitted env.db.ts type-checks and Db<typeof schema> resolves", async () => {
+  test("the emitted env.db.ts types env.db and env.databases.<label> as the same handle", async () => {
     const fx = await makeFixture({ "schema.ts": TWO_COLLECTION_SCHEMA });
     const outDir = join(fx.root, "generated/zeroship");
     try {
-      await genTypesFromSchemaFile(join(fx.root, "schema.ts"), outDir, {});
+      await genTypesFromSchemaFile(join(fx.root, "schema.ts"), outDir, MAIN);
       // A probe module that reaches into the augmented `Env.db` type. It resolves
       // the same @zeroship/db this monorepo builds (via a path alias), asserting
       // `Db<typeof schema>` is a real, resolvable type — not `any`/`never`.
@@ -226,11 +234,23 @@ describe("manual schema source", () => {
         `type _assertResolved = UsersColl extends never ? never : true;`,
         `const _ok: _assertResolved = true;`,
         `void _ok;`,
+        `// The label is reachable too, and it is the SAME handle: the runtime`,
+        `// gives \`env.db === env.databases[primary]\` by object identity, and`,
+        `// the augmentation says so by declaring \`db\` AS the labelled entry.`,
+        `type ByLabel = Env["databases"]["main"];`,
+        `type _assertSameHandle = Env["db"] extends ByLabel`,
+        `  ? ByLabel extends Env["db"] ? true : never`,
+        `  : never;`,
+        `const _same: _assertSameHandle = true;`,
+        `void _same;`,
       ].join("\n");
       await fs.writeFile(join(outDir, "probe.ts"), probe);
 
-      // A minimal `zeroship` module shim so the augmentation target exists.
-      const zeroshipShim = `export interface Env {}\n`;
+      // A minimal `zeroship` module shim so the augmentation target exists, in
+      // the shape the real package declares it: a separate `EnvDatabases` the
+      // generated modules augment, hung off `Env` exactly once.
+      const zeroshipShim =
+        `export interface EnvDatabases {}\nexport interface Env { databases: EnvDatabases }\n`;
       await fs.mkdir(join(fx.root, "node_modules/zeroship"), { recursive: true });
       await fs.writeFile(join(fx.root, "node_modules/zeroship/index.d.ts"), zeroshipShim);
       await fs.writeFile(
@@ -268,10 +288,11 @@ describe("manual schema source", () => {
     const fx = await makeFixture({ "schema.ts": TWO_COLLECTION_SCHEMA });
     const outDir = join(fx.root, "generated/zeroship");
     try {
-      await genTypesFromSchemaFile(join(fx.root, "schema.ts"), outDir, {});
+      await genTypesFromSchemaFile(join(fx.root, "schema.ts"), outDir, MAIN);
 
       // Clean re-derive.
       const checked = await genTypesFromSchemaFile(join(fx.root, "schema.ts"), outDir, {
+        ...MAIN,
         check: true,
       });
       assert.equal(checked.status, "checked");
@@ -282,7 +303,7 @@ describe("manual schema source", () => {
         `{ "version": 2, "collections": {} }\n`,
       );
       await assert.rejects(
-        () => genTypesFromSchemaFile(join(fx.root, "schema.ts"), outDir, { check: true }),
+        () => genTypesFromSchemaFile(join(fx.root, "schema.ts"), outDir, { ...MAIN, check: true }),
         /STALE|drift/i,
       );
     } finally {
@@ -295,7 +316,7 @@ describe("manual schema source", () => {
     const outDir = join(fx.root, "generated/zeroship");
     try {
       await assert.rejects(
-        () => genTypesFromSchemaFile(join(fx.root, "schema.ts"), outDir, { check: true }),
+        () => genTypesFromSchemaFile(join(fx.root, "schema.ts"), outDir, { ...MAIN, check: true }),
         /missing/i,
       );
     } finally {

@@ -93,11 +93,16 @@ export interface DevServerOptions {
  * drift from the others.
  */
 /**
- * Where ONE database keeps its migration sources and its fold. A database, not
- * the project: the three gen-types filenames are fixed, so each database owns
- * its own pair.
+ * Where ONE database keeps its migration sources and its fold, and which
+ * database that is. A database, not the project: the three gen-types filenames
+ * are fixed, so each database owns its own pair.
+ *
+ * `label` and `primary` ride along because the emitted `env.db.ts` keys
+ * `EnvDatabases` on the label and only the primary declares `Env.db`. A
+ * `TargetDatabase` from `selectDatabase` satisfies this shape, so the dev
+ * server passes the same record it already resolved.
  */
-type MigrationPaths = { migrations: string; out: string };
+type MigrationPaths = { migrations: string; out: string; label: string; primary: boolean };
 
 type FetchMethod = "fetchModule" | "getBuiltins";
 
@@ -337,7 +342,11 @@ async function regenTypesDev(
   const outDir = resolve(root, migrations.out);
   let generated = false;
   try {
-    await genTypesFromMigrations(migrationsDir, outDir, { check: false });
+    await genTypesFromMigrations(migrationsDir, outDir, {
+      label: migrations.label,
+      primary: migrations.primary,
+      check: false,
+    });
     generated = true;
     console.log(
       "[zeroship] gen-types: regenerated env.db.ts + schema.runtime.json from the migrations"
