@@ -421,9 +421,13 @@ impl From<OrganizationError> for DatabaseError {
 /// It deliberately does NOT classify. Which constraint fired is knowable only
 /// at the call site, and each caller that can produce one maps it there
 /// ([`create_database`] for the name key, [`bind_database`] for the natural key
-/// and the two composite edges, [`delete_database`] for the RESTRICT on the
-/// edge). A caller reaching this with a constraint violation has a case nobody
-/// has thought about, and reporting that as a 500 is the honest answer.
+/// and the two composite edges). [`delete_database`] maps none: it sets
+/// `status = 'deleting'` rather than removing the row, so the RESTRICT on
+/// `database_bindings_database_project_fkey` cannot fire there. That edge is
+/// restricted when the cluster reconciler removes the row, in
+/// `zeroship_migrate_server::datastore::control`. A caller reaching this with a
+/// constraint violation has a case nobody has thought about, and reporting that
+/// as a 500 is the honest answer.
 fn db_error(err: &compio_postgres::Error, context: &str) -> DatabaseError {
     tracing::error!(error = %err, context, "control: database statement failed");
     DatabaseError::Db
