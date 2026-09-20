@@ -384,6 +384,32 @@ against stand-in tables it creates itself. Read the gate before concluding a
 service writes a table; the difference decides whether step 2 is one read or
 three tables.
 
+There is a second instrument for the assignment itself, which this document
+should be checked against rather than trusted over.
+`policies/platform-table-owners.json` is a tracked registry mapping every
+platform table to an owning role, and today every entry names the single owner
+`zeroship_platform` - it is the machine-readable form of the status quo this
+document proposes to break apart, and the artifact a split has to rewrite. The
+tables the corpus actually creates come from the corpus:
+
+    grep -rhoE 'table\("[a-z_]+", \{ schema: "[a-z_]+" \}\)\.create' db/migrations-ts/*.ts \
+      | sed -E 's/table\("([a-z_]+)", \{ schema: "([a-z_]+)".*/\2.\1/' | sort -u
+
+Diffed against the registry's keys, the `zeroship` schema agrees in both
+directions: the registry omits no table the corpus creates. The registry also
+carries entries beyond that schema. Most are real and live elsewhere - the
+workflow journal is installed into creator databases under a substituted schema
+name, which is why its tables are unqualified here, and
+`service_assertion_replay` belongs to `service_authn`.
+
+Four are not real anywhere. `workflow_blobs`,
+`workflow_deploy_notifications`, `workflow_scheduler_inflight` and
+`workflow_scheduler_timers` appear in no tracked file but the registry itself,
+which `git grep -w` confirms. They are what a consolidated corpus left behind,
+and they matter here because a registry is the one artifact a reader would
+trust to enumerate the tables - a split planned from it would assign four
+tables that do not exist.
+
 The same caution applies to a comment that states an invariant.
 `crates/zeroship-control/src/databases.rs` carries a header asserting that
 nothing in the file reaches `status = 'active'`. It is true - the writers bind
@@ -442,5 +468,11 @@ and it was the wrong measure.
    weaker than its header claims.
 4. **Which database holds an auth-domain row written only by control?**
    `identity_links` is the case; both answers cost something.
-5. **`cron_state` and `dpop_jti` have no reader or writer in any crate.** Drop
-   them before assigning them.
+5. **`cron_state` and `dpop_jti` are created and never used.** Neither name
+   appears in any crate, in `src` or in tests, qualified or bare; outside the
+   corpus and the owners registry they occur only in test-run Postgres logs.
+   Drop them rather than assign them.
+6. **Does `policies/platform-table-owners.json` get pruned before or as part of
+   the split?** It carries four entries naming tables no tracked file creates.
+   A split planned from the registry rather than from the corpus would assign
+   them.
