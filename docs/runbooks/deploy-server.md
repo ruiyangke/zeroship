@@ -272,9 +272,9 @@ rule before its control catch-all. Do not proxy or redirect migrations through
 control: `zeroship migrate` reuses the control URL, but the edge selects
 migrate-server directly.
 
-The complete namespace matcher includes the current
-`/v1/apps/{app_id}/migrations/apply` route and remains valid if that route is
-later re-keyed by database id. Control must not declare a `/v1` route.
+The complete namespace matcher includes the
+`/v1/apps/{app_id}/databases/{database_id}/migrations/apply` route. Control must
+not declare a `/v1` route.
 
 Verify a migration through the public ingress and inspect both the HTTP response
 and `applied_versions`. A successful idempotent request can write a

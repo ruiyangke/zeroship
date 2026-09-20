@@ -5,6 +5,7 @@ use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::{runners::SyncRunner, Container, GenericImage, ImageExt};
 
 mod migrations;
+pub mod world;
 
 pub struct Postgres {
     _container: Container<GenericImage>,
