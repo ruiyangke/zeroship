@@ -340,9 +340,15 @@ and has no public production record. The techniques transfer. The architecture d
    a missing fact.
 
    It also surfaced three gaps that belong to the current code rather than to this proposal, and
-   that anyone touching these tables should close first. No test resumes an unsettled page with
-   a different `page_size`, which is the one mutation that would bind the frozen item list, and
-   no test aborts the reserve transaction itself rather than the finalization that follows it.
+   that anyone touching these tables should close first. No COLLECTION or RECONCILIATION test
+   resumes an unsettled page with a different `page_size`, which is the one mutation that would
+   bind the frozen item list, and none aborts the reserve transaction itself rather than the
+   finalization that follows it. Fan-out is the counterexample worth copying rather than a gap:
+   `tests/fanout/ordering.rs` delivers a page at size one, retries the unsettled page at a
+   larger size, and asserts both the identical receipt and an unchanged snapshot, so the larger
+   page delivered nothing more. The same body also binds replay duplication by counting a
+   subscriber's signal rows, and carries a foreign app asserted at zero as its cross-tenant
+   control. The collection path needs what fan-out already has.
    `subscription_sequence_unique` has no stated purpose anywhere, and the schema comment that
    appears to justify it describes standing in for a foreign key's supporting index, which does
    not apply because nothing references `subscriptions`. And `ingress::target_epoch` states in a
