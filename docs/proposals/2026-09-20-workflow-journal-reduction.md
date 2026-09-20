@@ -453,6 +453,19 @@ and has no public production record. The techniques transfer. The architecture d
    deletion below put together. This proposal should not be read as arguing otherwise; it argues
    only that if the state is reduced, these are the reductions that hold up.
 
+   That comparison was written as a choice between two things and there are now three, with the
+   deletion side smaller than when it was posed. The per-kind publication tables left the delete
+   list when the derived id was refuted, so what remains to delete is an unread event log, two
+   page tables and a conditional edge. Against that sits the concurrency work: making the four
+   read-modify-write sites refuse a lost update is a handful of compare-and-set filters and one
+   shared helper, and the consequence it addresses is a credential outliving the revocation that
+   was meant to refuse it. Small, cheap, and about correctness rather than size.
+
+   So the honest ordering is probably query and visibility first, the concurrency fixes second,
+   and the deletions last - which is the inverse of the order this document spends its length on.
+   A proposal is not obliged to be about the most valuable thing, but it should say when it is
+   not.
+
 1. **Does the SQLite dev tier take the same shape?** It should, and pre-launch there is no
    reason it cannot. Worth settling before the first table is deleted rather than after, because
    a second shape is how the delivery group came back last time.
