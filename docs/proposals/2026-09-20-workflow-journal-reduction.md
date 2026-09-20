@@ -733,3 +733,42 @@ assumption. This section records where to look, not what to conclude.
 amount of reading either schema alone would surface this. It appears only when the two are
 compared under the name the relocation will give them - which is an argument for doing this
 comparison for every pair before step 1 rather than discovering the overlaps one at a time after.
+
+## The reduction is bilateral, and this document has been looking at one side
+
+`deployment_holds` is named on both sides too, and comparing them changes what this proposal is
+about. The overlap is near-total - `id`, `app_id`, the deploy identifier, `deploy_hash`,
+`holder_id`, `generation` and `state` appear in both. What the manager adds is the finding:
+
+    held_at
+    journal_state          NOT NULL DEFAULT 'pending'
+    journal_job_id
+    journal_published_at
+
+**Three of those columns have the journal as their subject.**
+`crates/zeroship-workflow-manager/src/retention.rs` describes itself as "Durable queue dependency
+intents over Control's deployment retention ledger" and runs them as a state machine - `pending`,
+`releasing`, `released` - with an invariant that `journal_job_id` is present exactly when the
+state is `releasing`.
+
+So the manager keeps a row per hold, the journal keeps a row per hold, and the manager carries
+three further columns tracking whether the journal's row has been released yet, through a queue
+job, because it cannot see that row and cannot commit with it.
+
+**That is the same transactional outbox this document already identifies, viewed from the other
+end.** The delivery group exists in the journal because a transition cannot commit its own queue
+effect. `journal_state` exists in the manager for the mirror-image reason: a release cannot
+observe its own effect on the journal. One boundary, two sets of bookkeeping, and this proposal
+had only counted one.
+
+**So the thesis is broader than the title.** "Most of what the journal carries exists to solve a
+problem the move deletes" is true and incomplete - state in `workflow_manager` exists for the
+same problem and the same move deletes it. A reduction that only empties the journal leaves the
+manager holding a ledger about a boundary that is gone, which is the shape of leftover machinery
+that outlives its reason and gets maintained by people who assume it was load bearing.
+
+**What this does NOT license.** Nothing here says those columns are removable today, and the
+release path presumably has ordering requirements that survive the move in some form. The claim
+is narrower: their REASON is the boundary, so the move is the moment to re-derive them rather
+than to carry them across unexamined. Whoever takes step 6 should read `retention.rs` before
+assuming its ledger is still earning its place.
