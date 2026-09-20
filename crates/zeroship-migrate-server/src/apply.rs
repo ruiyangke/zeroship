@@ -4,9 +4,10 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
-use zeroship_core::app_derivation;
+use zeroship_core::database_derivation;
 use zeroship_core::database_role::{per_app_role_name, PerAppRoleNameError};
 use zeroship_core::schema_name::SchemaName;
+use zeroship_core::DatabaseId;
 use zeroship_id::AppId;
 use zeroship_id::UserId;
 use zeroship_migrate::apply::journal::DeployRecoveryScope;
@@ -40,10 +41,10 @@ use crate::policy::{
 #[cfg(test)]
 use crate::provisioning::AUDIT_UNMASK_TABLE;
 use crate::provisioning::{
-    exec_retry, migrator_executor_config, provision_audit_unmask_table, provision_migrator,
+    exec_retry, migrator_executor_config_for_role, provision_audit_unmask_table, provision_migrator,
     ProvisionRoleError,
 };
-use crate::publication::{reconcile_app_publication, PublicationError};
+use crate::publication::{reconcile_database_publication, PublicationError};
 use crate::schema_apply_store::{
     SchemaApplyInput, SchemaApplyStore, SchemaApplyStoreError, TerminalTransition,
 };
@@ -208,16 +209,40 @@ pub enum ApplyRequestError {
     #[error("inspect migration database schema: {0}")]
     InspectSchema(compio_postgres::Error),
     /// The derived physical schema name was invalid.
-    #[error("app schema name {schema:?} is not a legal identifier: {reason}")]
+    #[error("database schema name {schema:?} is not a legal identifier: {reason}")]
     SchemaName { schema: String, reason: String },
-    /// Rendered through `as_str` rather than `Display`: [`AppId`] deliberately
-    /// implements no `Display`, so every place an id becomes text is greppable.
-    #[error("database {} has not been created", database_id.as_str())]
-    DatabaseNotCreated { database_id: AppId },
+    /// The database has no schema on this cluster.
+    ///
+    /// Control declares a database at `provisioning` and the per-cluster
+    /// reconciler creates its schema and roles; nothing on the apply path may
+    /// create either, because a schema this service invented would be owned by
+    /// a role no binding inherits. So the answer is to wait for convergence,
+    /// not to retry with a different request.
+    ///
+    /// Rendered through `as_str` rather than `Display`: [`DatabaseId`]
+    /// deliberately implements no `Display`, so every place an id becomes text
+    /// is greppable.
+    #[error(
+        "database {} has no schema on this cluster yet; its reconciler has not converged it",
+        database_id.as_str()
+    )]
+    DatabaseNotCreated { database_id: DatabaseId },
+    /// The requesting app holds no LIVE binding to the database it named.
+    ///
+    /// Distinct from every authorization refusal above it: the principal may
+    /// deploy this app and the app simply does not reach this database, which
+    /// is a different remedy - bind it - and a different audience.
+    #[error(
+        "app {} holds no live binding to database {}",
+        app_id.as_str(),
+        database_id.as_str()
+    )]
+    DatabaseNotBound {
+        app_id: AppId,
+        database_id: DatabaseId,
+    },
     #[error("migration role provision: {0}")]
     ProvisionRole(#[from] ProvisionRoleError),
-    #[error("runtime app role provision: {0}")]
-    ProvisionRuntimeRole(ProvisionRuntimeRoleError),
     #[error("unmask audit table provision: {0}")]
     ProvisionAuditUnmask(compio_postgres::Error),
     #[error("app publication provision: {0}")]
@@ -269,6 +294,7 @@ pub async fn apply_ir_documents(
     provision_dsn: &str,
     tmp_root: &Path,
     app_id: &AppId,
+    database_id: &DatabaseId,
     request: &ApplyMigrationsRequest,
     policy_config: &ManagedPolicyConfig,
     schema_apply_store: &SchemaApplyStore,
@@ -285,13 +311,16 @@ pub async fn apply_ir_documents(
         return Err(ApplyRequestError::Empty);
     }
 
-    // THE SERVICE'S ONE APP-ID-TO-SCHEMA DERIVATION. Everything downstream that
-    // means "the physical schema" takes the [`SchemaName`], and everything that
-    // means "the tenant" keeps taking `app_id`. `schema_name` is the identity on
-    // the printed id today, so `SchemaName::new` cannot refuse it; the refusal is
-    // handled rather than unwrapped because the day the schema stops being the
-    // app id, this line is where the new derivation - and its failure - lands.
-    let schema_text = app_derivation::schema_name(app_id);
+    // THE SERVICE'S ONE DATABASE-TO-SCHEMA DERIVATION. Everything downstream
+    // that means "the physical schema" takes the [`SchemaName`]; `app_id` stays
+    // for the POLICY CEILING and the apply ledger, which are facts about the
+    // caller's app rather than about the schema being written.
+    //
+    // It is derived from the DATABASE the request named, never from the app:
+    // an app may hold several databases and a database may be held by several
+    // apps, so an app-derived schema would either write the wrong tenant's
+    // tables or make every database after the first unmigratable.
+    let schema_text = database_derivation::schema_name(database_id);
     let schema = SchemaName::new(&schema_text).map_err(|reason| ApplyRequestError::SchemaName {
         schema: schema_text.clone(),
         reason: reason.to_string(),
@@ -316,7 +345,7 @@ pub async fn apply_ir_documents(
         .get(0);
     if !schema_exists {
         return Err(ApplyRequestError::DatabaseNotCreated {
-            database_id: app_id.clone(),
+            database_id: database_id.clone(),
         });
     }
 
@@ -330,12 +359,21 @@ pub async fn apply_ir_documents(
     // carry the same no-inject confined guard charter as guarded lower. The composed
     // inject-bearing policy remains separate and is passed explicitly to shape
     // resolution and `IrAuthor` below.
-    // SCHEMA, still spelled `&str`. `migrator_executor_config`,
+    // SCHEMA, still spelled `&str`. `migrator_executor_config_for_role`,
     // `provision_audit_unmask_table` and `prepare_ir_documents` all mean the
     // physical schema, and typing them reaches the engine`s `ExecutorConfig`,
     // which takes owned `String`s. The downgrade is explicit and greppable
     // (`schema.as_str()`) rather than a `&str` that either identity satisfies.
-    let (exec_cfg, role) = migrator_executor_config(schema.as_str())?;
+    //
+    // THE OWNER IS THE RECONCILER'S ROLE, NOT ONE DERIVED HERE. The cluster
+    // reconciler minted `zs_db_<dbs>_mig` and handed it this schema; an apply
+    // running as anything else would either be refused by the schema's owner or
+    // - worse, with `CREATEROLE` in hand - take ownership away from the role
+    // the reconciler re-asserts on its next pass.
+    let migrator = database_derivation::migrator_role_name(database_id).map_err(|reason| {
+        ApplyRequestError::ProvisionRole(ProvisionRoleError::BadRoleName(reason.to_string()))
+    })?;
+    let exec_cfg = migrator_executor_config_for_role(schema.as_str(), &migrator);
     // THE MIGRATION JOURNAL LIVES IN THE APP'S OWN SCHEMA. `ExecutorConfig::new`
     // derives `meta_schema` as `<project_schema>_migrations`; this host points it at
     // the project schema itself, so the engine writes
@@ -349,8 +387,6 @@ pub async fn apply_ir_documents(
     // silently ADOPTED as the journal. The prefix moves the names into a namespace
     // creator-declared collections are refused from.
     provision_migrator(session.client(), &exec_cfg).await?;
-    // Create the audit table before role provisioning so the schema-wide table
-    // and sequence grants make the ORM audit writer immediately usable.
     provision_audit_unmask_table(session.client(), schema.as_str())
         .await
         .map_err(ApplyRequestError::ProvisionAuditUnmask)?;
@@ -393,16 +429,16 @@ pub async fn apply_ir_documents(
             .await?;
 
         let apply_result = run_apply(
-            &session,
             &backend,
             policy_config,
             &policy,
             app_id,
+            database_id,
             &schema,
             &prepared,
             &exec_cfg,
-            &role,
             principal_id,
+            session.client(),
         )
         .await;
 
@@ -477,16 +513,16 @@ pub async fn apply_ir_documents(
 /// cannot create a new unclosed return path in [`apply_ir_documents`].
 #[allow(clippy::result_large_err, clippy::too_many_arguments)]
 async fn run_apply(
-    session: &CompioPgSession,
     backend: &PostgresBackend<'_, CompioPgSession>,
     policy_config: &ManagedPolicyConfig,
     apply_policy: &EffectivePolicy,
     app_id: &AppId,
+    database_id: &DatabaseId,
     schema: &SchemaName,
     prepared: &[PreparedIrDocument],
     exec_cfg: &ExecutorConfig,
-    role: &str,
     principal_id: &UserId,
+    admin: &compio_postgres::Client,
 ) -> Result<SealedApplyOutcome, ApplyRequestError> {
     // (d) POLICY: seal the effective policy with the zeroship-migrate-policy HMAC so
     // the apply carries an authenticated, ceiling-stamped integrity token.
@@ -502,10 +538,16 @@ async fn run_apply(
         "migrate-server: applying IR under sealed managed migration policy"
     );
     let applied_by = format!("migrate-server:{}", principal_id.as_str());
-    provision_runtime_app_role(session.client(), schema, role)
-        .await
-        .map_err(ApplyRequestError::ProvisionRuntimeRole)?;
-    let applied = apply_sealed(
+    // NO SCHEMA-WIDE RUNTIME ROLE IS ESTABLISHED HERE, and its absence is the
+    // change rather than a gap. A role carrying `SELECT, INSERT, UPDATE,
+    // DELETE ON ALL TABLES IN SCHEMA` and granted to the ONE shared worker
+    // login would be assumable by every app that login serves - including
+    // every co-tenant of this database - which is precisely the reach
+    // `GRANT ... WITH SET FALSE` on the binding-to-database edge exists to
+    // deny. What an app may read and write on this database is carried by the
+    // two capability roles the reconciler minted, narrowed per column from the
+    // owner's own IR.
+    let outcome = apply_sealed(
         backend,
         sealed_policy.sealed,
         &sealed_policy.verifier,
@@ -515,18 +557,11 @@ async fn run_apply(
         Approval::None,
         &applied_by,
     )
-    .await;
-    // Re-run provisioning after the apply attempt so tables and sequences
-    // created during it receive the runtime role's schema-wide DML grants.
-    let reprovisioned = provision_runtime_app_role(session.client(), schema, role)
-        .await
-        .map_err(ApplyRequestError::ProvisionRuntimeRole);
-    let outcome = applied?;
-    reprovisioned?;
-    // `reconcile_app_publication` takes the tenant and derives each name it needs:
-    // the publication name is tenant-keyed, the `pg_namespace.nspname` filter is
-    // schema-keyed.
-    reconcile_app_publication(session.client(), app_id).await?;
+    .await?;
+    // The publication reconciliation takes the DATABASE: the object is the
+    // datastore's one shared publication and the membership being edited is the
+    // set of relations in this database's schema.
+    reconcile_database_publication(admin, database_id).await?;
     Ok(outcome)
 }
 
@@ -1063,12 +1098,19 @@ pub fn apply_error_kind(err: &ApplyRequestError) -> (ntex::http::StatusCode, &'s
         ApplyRequestError::DatabaseNotCreated { .. } => {
             (ntex::http::StatusCode::CONFLICT, "database_not_created")
         }
-        // Not a creator fault and not retryable: the caller supplied an app id,
-        // the service derived a schema name from it, and the derivation produced
-        // something PostgreSQL cannot name. That is a platform defect.
+        // A DISTINCT KIND from every refusal around it, on purpose. The
+        // principal may deploy this app; the app does not reach this database.
+        // A caller that could not tell this from `database_not_created` would
+        // be told to wait for a reconciler that has nothing to do.
+        ApplyRequestError::DatabaseNotBound { .. } => {
+            (ntex::http::StatusCode::CONFLICT, "database_not_bound")
+        }
+        // Not a creator fault and not retryable: the caller supplied a database
+        // id, the service derived a schema name from it, and the derivation
+        // produced something PostgreSQL cannot name. That is a platform defect.
         ApplyRequestError::SchemaName { .. } => (
             ntex::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "app_schema_name_invalid",
+            "database_schema_name_invalid",
         ),
         ApplyRequestError::HistoryAttestation(
             StatusError::Ordering(_) | StatusError::PlanManifest(_),
@@ -1086,7 +1128,6 @@ pub fn apply_error_kind(err: &ApplyRequestError) -> (ntex::http::StatusCode, &'s
         | ApplyRequestError::Connect(_)
         | ApplyRequestError::InspectSchema(_)
         | ApplyRequestError::ProvisionRole(_)
-        | ApplyRequestError::ProvisionRuntimeRole(_)
         | ApplyRequestError::ProvisionAuditUnmask(_)
         | ApplyRequestError::ProvisionPublication(_)
         | ApplyRequestError::ProjectLock { .. }
@@ -1279,30 +1320,21 @@ impl RuntimeRoleProvisioningSql {
 ///
 /// The durable fix is to stop pre-interpolating and let the block quote its own
 /// identifiers with `format('%I', ...)`.
-/// The tenant is not an input: every statement below is derived from the SCHEMA
-/// and the migrator role. The parameter stays so a caller that holds an app
-/// identity keeps naming the app it is provisioning for; a caller that holds only
-/// a schema reaches [`runtime_role_provisioning_sql_for_schema`] instead.
-pub fn runtime_role_provisioning_sql(
-    _app_id: &AppId,
-    schema: &SchemaName,
-    migrator_role: &str,
-) -> Result<RuntimeRoleProvisioningSql, PerAppRoleNameError> {
-    runtime_role_provisioning_sql_for_schema(schema, migrator_role)
-}
-
-/// The same plan, composed from the SCHEMA alone.
 ///
-/// This is where every statement is actually built, and it takes what the
-/// statements actually need. The schema-addressed platform paths - the schema
-/// bundle applier above all - have no app identity to hand over and must not
-/// invent one.
+/// # There is no tenant parameter
+///
+/// Every statement below is derived from the SCHEMA and the migrator role, and
+/// every caller is a PLATFORM schema path - the schema-bundle applier - which
+/// holds no app identity. A creator database is not provisioned this way: its
+/// schema is shared by every app bound to it, so a role carrying schema-wide
+/// DML and granted to the shared worker login would be reachable by every one
+/// of them.
 ///
 /// # Errors
 ///
 /// Returns an error rather than allowing PostgreSQL to truncate an overlong
 /// authorization-role identifier.
-pub(crate) fn runtime_role_provisioning_sql_for_schema(
+pub fn runtime_role_provisioning_sql(
     schema: &SchemaName,
     migrator_role: &str,
 ) -> Result<RuntimeRoleProvisioningSql, PerAppRoleNameError> {
@@ -1359,7 +1391,7 @@ pub(crate) async fn provision_runtime_app_role(
     schema: &SchemaName,
     migrator_role: &str,
 ) -> Result<(), ProvisionRuntimeRoleError> {
-    let provisioning = runtime_role_provisioning_sql_for_schema(schema, migrator_role)?;
+    let provisioning = runtime_role_provisioning_sql(schema, migrator_role)?;
     for statement in provisioning.statements() {
         exec_retry(conn, statement).await?;
     }
@@ -1383,17 +1415,12 @@ mod tests {
     }
 
     fn fixture_schema() -> SchemaName {
-        SchemaName::new(&app_derivation::schema_name(&fixture_app_id()))
-            .expect("an app id is a legal schema identifier")
+        SchemaName::new(FIXTURE_APP_ID).expect("the fixture is a legal schema identifier")
     }
 
     #[test]
     fn runtime_provisioning_does_not_narrow_table_access_by_name() {
-        let provisioning = runtime_role_provisioning_sql(
-            &fixture_app_id(),
-            &fixture_schema(),
-            "zs_migrator_fixture",
-        )
+        let provisioning = runtime_role_provisioning_sql(&fixture_schema(), "zs_migrator_fixture")
         .expect("test runtime role name");
         let statements = provisioning.statements();
         assert!(
@@ -1416,11 +1443,7 @@ mod tests {
 
     #[test]
     fn runtime_provisioning_delegates_only_precreated_narrow_roles() {
-        let provisioning = runtime_role_provisioning_sql(
-            &fixture_app_id(),
-            &fixture_schema(),
-            "zs_migrator_fixture",
-        )
+        let provisioning = runtime_role_provisioning_sql(&fixture_schema(), "zs_migrator_fixture")
         .expect("test runtime role name");
         let sql = provisioning.dependents;
         assert!(sql.contains("IF EXISTS (SELECT 1 FROM pg_roles"));
@@ -1451,7 +1474,6 @@ mod tests {
         let overlong_schema = "a".repeat(55);
         assert_eq!(
             runtime_role_provisioning_sql(
-                &fixture_app_id(),
                 &SchemaName::new(&overlong_schema).expect("fixture schema"),
                 "zs_migrator_fixture",
             ),
@@ -1598,6 +1620,7 @@ mod tests {
                 "postgres://unused",
                 Path::new("/tmp"),
                 &AppId::mint(),
+                &DatabaseId::mint(),
                 &request,
                 &policy_config,
                 &SchemaApplyStore::new("postgres://unused"),
@@ -1630,6 +1653,7 @@ mod tests {
                 "postgres://unused",
                 Path::new("/tmp"),
                 &AppId::mint(),
+                &DatabaseId::mint(),
                 &request,
                 &policy_config,
                 &SchemaApplyStore::new("postgres://unused"),
@@ -1679,11 +1703,13 @@ mod live_audit_unmask_provisioning {
         crate::test_database::connect().await
     }
 
-    /// A scratch app schema derived from a real minted [`AppId`], because
-    /// `provision_migrator` derives the migrator role from it and production
-    /// only ever passes a schema spelled this way.
+    /// A scratch PLATFORM schema, unique per case.
+    ///
+    /// Unique because `pg_authid` is cluster-shared: `provision_migrator`
+    /// derives the migrator role from the schema, so two cases on one name
+    /// would create and drop each other.s role.
     fn scratch_schema() -> String {
-        app_derivation::schema_name(&AppId::mint())
+        format!("zs_scratch_{}", uuid::Uuid::new_v4().simple())
     }
 
     fn audit_table_ref(schema: &str) -> String {
@@ -2018,6 +2044,15 @@ mod live_creator_schema_table_privileges {
         crate::test_database::url().to_owned()
     }
 
+    /// A scratch PLATFORM schema, unique per case.
+    ///
+    /// Unique because `pg_authid` is cluster-shared: `provision_migrator`
+    /// derives the migrator role from the schema, so two cases on one name
+    /// would create and drop each other's role.
+    fn scratch_schema() -> String {
+        format!("zs_scratch_{}", uuid::Uuid::new_v4().simple())
+    }
+
     async fn admin_client() -> compio_postgres::Client {
         crate::test_database::connect().await
     }
@@ -2122,20 +2157,23 @@ mod live_creator_schema_table_privileges {
             .expect("read has_table_privilege")
     }
 
-    /// The full production sequence: create the database, bootstrap the engine's
-    /// journal, create the audit table, provision the runtime role. Returns the
-    /// migrator role name.
-    async fn provision_through_the_apply_path(
+    /// The full production sequence for a PLATFORM schema: create it and its
+    /// migrator, bootstrap the engine's journal, create the audit table,
+    /// provision the runtime role. Returns the migrator role name.
+    ///
+    /// This is the schema-bundle applier's sequence
+    /// (`crate::bundle::apply_schema_bundle`), which is the one caller that
+    /// establishes a runtime role. The migrator is derived from the SCHEMA
+    /// here, because a platform schema is named by no database entity.
+    async fn provision_through_the_bundle_path(
         admin: &compio_postgres::Client,
         schema: &str,
     ) -> String {
         crate::provisioning::provision_database(admin, schema)
             .await
-            .expect("create scratch app database");
-        let (exec_cfg, migrator) =
-            migrator_executor_config(schema).expect("derive the migrator executor config");
-        // The real producer. `attest_complete_history` calls exactly this before
-        // the apply path's first `provision_runtime_app_role`.
+            .expect("create scratch platform schema");
+        let (exec_cfg, migrator) = crate::provisioning::migrator_executor_config(schema)
+            .expect("derive the migrator executor config");
         let session = CompioPgSession::connect(&test_dsn())
             .await
             .expect("open an engine session");
@@ -2159,9 +2197,9 @@ mod live_creator_schema_table_privileges {
     #[compio::test]
     async fn the_runtime_role_can_use_every_table_in_its_bound_schema() {
         let admin = admin_client().await;
-        let schema = app_derivation::schema_name(&AppId::mint());
+        let schema = scratch_schema();
         teardown(&admin, &schema).await;
-        let migrator = provision_through_the_apply_path(&admin, &schema).await;
+        let migrator = provision_through_the_bundle_path(&admin, &schema).await;
 
         // A creator table, created by the migrator exactly as an apply would.
         admin
@@ -2323,9 +2361,9 @@ mod live_creator_schema_table_privileges {
     #[compio::test]
     async fn a_prefixed_table_created_later_keeps_schema_wide_dml() {
         let admin = admin_client().await;
-        let schema = app_derivation::schema_name(&AppId::mint());
+        let schema = scratch_schema();
         teardown(&admin, &schema).await;
-        let migrator = provision_through_the_apply_path(&admin, &schema).await;
+        let migrator = provision_through_the_bundle_path(&admin, &schema).await;
 
         // A prefixed table created by the migrator after initial provisioning.
         admin

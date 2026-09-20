@@ -18,7 +18,7 @@ pub(crate) struct Limits {
     pub max_relations: usize,
 }
 
-pub(crate) const SLOT_PREFIX: &str = "__zs_relay_";
+pub(crate) use zeroship_core::replication_names::SLOT_PREFIX;
 
 /// The physical schema of the one database this app is bound to.
 ///
@@ -29,25 +29,23 @@ pub(crate) const SLOT_PREFIX: &str = "__zs_relay_";
 /// against the pool this process already reads `zeroship.worker_instances`
 /// from when it verifies a worker.
 ///
-/// **An app holds exactly one database today, so "the app.s binding" is
-/// unambiguous.** When an app can hold several, the subscribe request has to
-/// name WHICH database, and that is a wire-contract change: every producer,
-/// consumer, fixture and doc in one patch. Until then this REFUSES a second
-/// live binding rather than ordering and taking the first: picking silently
-/// would stream one database to a subscriber expecting another, and the day
-/// that becomes possible is the day nobody is looking at this function.
+/// **The subscribe request names only the app, so a second live binding is
+/// REFUSED rather than ordered and taken.** Carrying a database on that wire is
+/// a wire-contract change - every producer, consumer, fixture and doc in one
+/// patch. Picking silently would stream one database to a subscriber expecting
+/// another, and the day that becomes possible is the day nobody is looking at
+/// this function.
+///
+/// The predicate is [`zeroship_core::live_binding::LIVE_BINDINGS_FROM_WHERE`],
+/// the one Control serves bindings from and the one the migration service
+/// admits an apply against.
 async fn bound_database_schema(pool: &Pool, app: &str) -> Result<String, Error> {
     let rows = pool
         .query(
-            "SELECT b.database_id \
-               FROM zeroship.database_bindings b \
-               JOIN zeroship.databases d ON d.id = b.database_id \
-              WHERE b.app_id = $1 \
-                AND b.status = 'active' \
-                AND b.observed_generation >= b.generation \
-                AND d.status = 'active' \
-              ORDER BY b.id \
-              LIMIT 2",
+            &format!(
+                "SELECT b.database_id {} ORDER BY b.id LIMIT 2",
+                zeroship_core::live_binding::LIVE_BINDINGS_FROM_WHERE
+            ),
             &[&app],
         )
         .await?;
@@ -63,11 +61,7 @@ async fn bound_database_schema(pool: &Pool, app: &str) -> Result<String, Error> 
 }
 
 pub(crate) fn slot_name(app: &str) -> Result<String, Error> {
-    let publication = zeroship_core::replication_names::publication_name(app)?;
-    let token = publication
-        .strip_prefix("__zs_pub_")
-        .ok_or("unexpected publication name")?;
-    Ok(format!("{SLOT_PREFIX}{token}"))
+    Ok(zeroship_core::replication_names::relay_slot_name(app)?)
 }
 
 /// The caller holds the relay's database advisory lock for this task's life.
@@ -118,7 +112,10 @@ async fn capture(
         max_changes,
         max_relations,
     } = limits;
-    let publication = zeroship_core::replication_names::publication_name(app)?;
+    // THE DATASTORE'S ONE PUBLICATION. It is created and kept in membership by
+    // the migration service, one entry set per database, so a relay that found
+    // it absent is looking at a cluster no apply has ever reached.
+    let publication = zeroship_core::replication_names::DATASTORE_PUBLICATION;
     if pool
         .query(
             "SELECT 1 FROM pg_publication WHERE pubname = $1",
@@ -127,7 +124,7 @@ async fn capture(
         .await?
         .is_empty()
     {
-        return Err("app publication is absent".into());
+        return Err("the datastore publication is absent".into());
     }
     // THE TENANT BOUNDARY IN THIS STREAM. The publication is relay-owned and
     // spans every database on the datastore, so its membership is NOT a filter:
@@ -339,7 +336,7 @@ mod tests {
         let pool = Pool::connect(&url, 4).await.expect("required PostgreSQL");
         let app = zeroship_core::typed_id::generate(zeroship_core::typed_id::APP_PREFIX);
         let sibling = zeroship_core::typed_id::generate(zeroship_core::typed_id::APP_PREFIX);
-        let publication = zeroship_core::replication_names::publication_name(&app).unwrap();
+        let publication = zeroship_core::replication_names::DATASTORE_PUBLICATION;
         // Two DATABASES, one subscriber. The sibling stands in for a co-tenant
         // whose tables are in the same publication, which is the shape the
         // relay-owned per-datastore publication has: membership is not a fence,
