@@ -2041,3 +2041,97 @@ that the engine journal is the only record of what ran,
 creator schemas, which this design requires before its column grants land, and
 `docs/proposals/2026-09-05-gateway-central-database-decoupling.md` for the edge's own
 central-database coupling.
+
+---
+
+## What the landing gate measured
+
+Recorded here because a 200-character commit message cannot hold it and a
+channel transcript is not a record. Every figure below is re-derivable from the
+command beside it; none is carried from prose.
+
+### The branch's own defects: three, all found by the gate, all fixed
+
+1. **The live-stream test passed a bare schema descriptor where the runtime
+   requires the document envelope.** The plurality slice made the runtime take
+   `{version, databases}`; the wrapping helper is `pub(crate)`, and a `tests/`
+   target is a separate crate, so the one caller that structurally could not
+   reach it was the one still passing a bare descriptor. Production was never
+   affected - worker, workflow-v8 and cli all wrap.
+   The trap worth keeping: `"version": 2` is the SCHEMA's and `"version": 1` is
+   the DOCUMENT's, so the error reads as a downgrade when it is a nesting
+   change.
+
+2. **A zoned fixture app's project was seeded in a different zone than the app.**
+   `apps_project_zone_fkey`, added by this branch, requires the pair to agree,
+   and both freeze on write - so they must agree at INSERT. Fixing the seed
+   moved the failure to teardown, because the project then held the zone under
+   RESTRICT; the teardown deletes projects before zones now.
+
+3. **`ConnectionFactory` could not express a platform connection at all.**
+   The per-binding narrowing this branch introduced defaulted to
+   `PerBindingRole`, and a `DbBinding::platform` names no database - so the
+   pairing could only ever refuse with `binding_not_resolved`. Production sites
+   used `ConnectOptions::connection_authority()` and were correct; every caller
+   holding a `ConnectionFactory` had no way to say so.
+
+   Measured, on one instrument, same worktree and target directory:
+
+       pre-fix   372 passed, 227 failed   postgres   0 ok / 223 FAILED
+       post-fix  599 passed,   0 failed   postgres 223 ok /   0 FAILED
+       main      599 passed,   0 failed
+
+   and the 223 that failed are the IDENTICAL SET BY NAME to the 223 that pass
+   on main - a matching count could have been two different sets.
+
+   `for_url` is deleted. `for_app_url` and `for_platform_url` name the choice,
+   with no default, because a tenant-boundary decision with an implicit side is
+   one nobody reviews.
+
+### What binds the fix
+
+The compiler proves every call site STATES an authority. It cannot prove any
+site states the RIGHT one, and the two ways of being wrong are not symmetric: a
+platform connection given per-binding authority refuses loudly, while an app
+connection given platform authority WORKS and silently stops narrowing.
+
+So the fix is bound from three sides:
+
+    tests/postgres/provisioning.rs   the function: a platform binding composes
+                                     no role statement, an app binding does
+    pg_session_sql.rs                the authority: PerBindingRole emits
+                                     SET LOCAL ROLE, Connection must not
+    connection/tests.rs              the constructors: built from one URL they
+                                     must remain distinguishable
+
+The third is the one that matters longest. It converts "did each of 45 sites
+choose correctly" into "do the two constructors stay distinct" - one assertion
+covering every site that will ever exist, rather than the sites present today.
+
+### What the gate found that was NOT this branch
+
+Twelve findings, none of them introduced here, several of which no check in the
+repository was running:
+
+- `t.int()` renders `int4` and the DSL has no `smallInt` builder, so every Rust
+  `i16` reading a platform column is a defect. Two instances found by accident
+  (`secret_key_version`, `segment_no`), ~71 failures across two crates.
+- Four `xtask` gate lines with environment or ordering defects: a stack the
+  harness never raises (seven of eight areas), a line consuming an artifact a
+  later line produces, a line rebuilding an earlier line's source mid-run, and
+  a suite whose DSN nothing in the repository supplies.
+- A refusal test that cannot currently fail, and twelve more like it: under a
+  pre-existing encoding defect they pass on an error that has nothing to do
+  with the refusal they name.
+- CI has not reached its clippy or architecture steps since 2026-09-17.
+
+### The instrument lesson, stated once
+
+Most of the day went to measurements that were true about something adjacent to
+the question: a summary that reports zero for a target that died before it could
+speak, a count taken from a file still being written, a label matched instead of
+a log read, a name that says which module a test is in rather than which binary
+ran it, a grep for one spelling of a concept reported as the absence of the
+concept. The gate now counts inline failures independently of summaries and
+flags aborts, because **a check that cannot say what happened must say that,
+not say zero.**
