@@ -63,6 +63,19 @@ jobs:
         run: |
           node --test schema/codegen.test.mjs
           node schema/codegen.mjs --check
+      # The same kind of check as the step above, for generators no job ran.
+      # These artifacts are TRACKED, so the build-input walker cannot hold them:
+      # it compares mtimes, and checkout order makes an mtime meaningless for a
+      # tracked file. `--check` compares content instead, which is the question
+      # actually being asked - does the committed artifact still match what its
+      # sources generate. `cargo xtask test workflow` runs these; nothing in CI
+      # invoked that area, so a schema edited without regenerating reached main
+      # unreported.
+      - name: Workflow schema artifacts match their sources
+        run: |
+          node crates/zeroship-workflow-schema/schema/generate.mjs --check
+          node crates/zeroship-workflow-manager/schema/generate.mjs --check
+          node crates/zeroship-workflow-manager/schema/deployments/generate.mjs --check
       - name: Project config Rust behavior
         run: |
           cargo test --locked -p zeroship-cli --bin zeroship project_config::tests
