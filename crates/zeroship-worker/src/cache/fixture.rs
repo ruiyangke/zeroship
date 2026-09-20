@@ -65,6 +65,37 @@ impl Drop for Kernel {
     }
 }
 
+/// Resolve one database binding for `app_id`, the step
+/// [`crate::sync::fetch_app_env_supplying`] performs before the worker builds
+/// an isolate for an app Control serves a live binding for.
+///
+/// A host that installs the `db` namespace and resolves nothing for an app has
+/// no `env.db` to hand it: `zeroship_data_v8` refuses to mint the handle, so
+/// the deployment's startup mask policy has no binding to seal. A fixture that
+/// means to exercise a working `env.db` therefore has to resolve a binding
+/// first, exactly as the sync path does.
+///
+/// Returns the database's id, which a caller naming this database in a runtime
+/// descriptor document needs.
+pub(crate) fn bind_app(
+    service: &zeroship_data_v8::service::DbService,
+    app_id: &AppId,
+) -> zeroship_core::DatabaseId {
+    let database = zeroship_core::DatabaseId::mint();
+    service
+        .app_bindings()
+        .supply(
+            app_id.as_str(),
+            zeroship_data_orm::resolved_bindings::ResolvedBinding {
+                database: database.clone(),
+                binding: zeroship_core::BindingId::mint(),
+                epoch: 1,
+            },
+        )
+        .expect("a fresh store accepts this app's first binding");
+    database
+}
+
 pub(crate) fn database_service(url: &str) -> Arc<zeroship_data_v8::service::DbService> {
     zeroship_data_v8::service::DbService::new(zeroship_data_v8::service::DbServiceConfig {
         app_bindings: Default::default(),
