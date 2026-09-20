@@ -192,6 +192,26 @@ This list is the answer to Open 2, worked per table against `schema.ts` and the 
 enforces each property rather than in aggregate. It is shorter than the list this proposal
 started with, because the per-table pass refuted most of it.
 
+**Naming a home is not evidence that the home holds.** No table below is deleted on a claimed
+invariant home that a mutation has not proven. For each deletion: neutralize the claimed OTHER
+home, and require the test that binds the property to go RED there. A green under that mutation
+means the claimed home does not bind the property, and the deletion would remove the last one
+silently. A deletion lands with that evidence in its commit or it does not land.
+
+This is not caution for its own sake. Every claim on this list is of one class - a reading about
+where a property is bound - and that class was wrong three times in a single day, always in the
+same direction, always understating what is bound. The audit reported nothing binds the frozen
+scan plan; `tests/fanout/ordering.rs` turned out to bind the resume-at-a-different-page-size
+half; `collection/rollback.rs` turned out to bind part of the frozen plan itself. Each was found
+by looking, none by the previous reading.
+
+One refinement, or the standard fails open. A mutation that leaves the suite green does not
+distinguish "the claimed home does not bind this" from "a second guard is also refusing". Both
+read as a quiet pass, and that is not hypothetical: `expect_err` passing over a REMOVED fence
+because a second guard still refused is one of the things that bit the decoupling branch today.
+So enumerate every enforcement point of the property BEFORE mutating, and mutate each arm. One
+mutation cannot refute a disjunction.
+
 **Deletable, with the invariant named.**
 
 ```
