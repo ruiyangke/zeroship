@@ -376,6 +376,24 @@ transaction replaces the reason it exists; it does not automatically replace eve
 provides. The advance intent is the worked example: it reads as a projection of the intent row,
 and it is the dedup key.
 
+**Do not put creator values in the platform schema.** This is a constraint on everything here,
+not an open question. A platform schema is not an at-rest home for creator data, which is why
+the sibling proposal sequences the payload promotion BEFORE any reader exists in
+`workflow_manager` rather than beside it: a reader is what puts creator payload at rest there.
+The same rule appears at the crypto boundary, where a platform binding addresses no database and
+`encryption::encryption_database` refuses it rather than defaulting one, so an encrypted column
+on a platform schema stops at that refusal. Treat the refusal as the rule restated, not as an
+obstacle to route around.
+
+The gate on this has a trap worth naming, because the gate is a test and the test can pass
+without the property. `journal_payload_columns_are_a_closed_set` selects a column whose type is
+json, jsonb or bytea, or whose NAME is one of a short list. Creator payload in a text column
+under another name is invisible to it: `steps.record` serialising a `StepCheckpoint`,
+`signals.payload`, `broadcasts.payload`, `generations.error`, and the schedule inputs inside
+`deploys.manifest`. Emptying the set as the predicate is written today turns the assertion green
+and leaves the property false. The predicate widens and the set empties in one change, or
+neither happens.
+
 **Do not let a grouping carry the argument.** Every table above was deleted by the sentence
 written against its group, not against it. `propagations` was filed under delivery and inherited
 "transitions commit their own effects", which is true of delivery and says nothing about a
