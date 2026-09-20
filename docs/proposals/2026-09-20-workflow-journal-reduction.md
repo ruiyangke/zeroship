@@ -231,6 +231,20 @@ contract or an assertion that breaks when the set changes - forcing a new kind t
 it is a page cursor - rather than a search for `impl PageCursor`, which answers spelling. The
 general rule: NEGATIVES DO NOT SURVIVE REFACTORS UNLESS SOMETHING ASSERTS THEM.
 
+**A deletion slice is verified by the CALLERS of what it removed, not by the survivors.** A suite
+run after a deletion covers the tables that remain, and passes. That green is about breadth of
+execution, not breadth of coverage, and the two read identically in a summary line.
+
+"It compiles" is not the check either, though it is tempting here because removing a model breaks
+its Rust callers loudly. What the compiler cannot see: a table named as a string in a generated
+SQL artifact, a migration, a JSON fixture, a `paired!` registration, or a test that asserts on a
+row count from a table that no longer exists. Those fail at runtime or, worse, pass vacuously.
+
+So the slice states which paths USED the removed table and exercises them, and a reviewer asks
+what ran rather than what passed. The neighbouring track found the same shape in its own gate
+this afternoon: a line that BUILDS twenty crates and exits zero, whose green was read as breadth
+by everyone including the people who wrote it.
+
 **Naming a home is not evidence that the home holds.** No table below is deleted on a claimed
 invariant home that a mutation has not proven. For each deletion: neutralize the claimed OTHER
 home, and require the test that binds the property to go RED there. A green under that mutation
