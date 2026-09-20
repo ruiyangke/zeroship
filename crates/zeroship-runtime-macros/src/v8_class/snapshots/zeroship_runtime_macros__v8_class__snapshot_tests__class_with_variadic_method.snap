@@ -1,5 +1,5 @@
 ---
-source: crates/runtime-macros/src/v8_class/snapshot_tests.rs
+source: crates/zeroship-runtime-macros/src/v8_class/snapshot_tests.rs
 expression: format_expansion(out)
 ---
 impl Spreader {
@@ -73,7 +73,7 @@ pub struct __BrandSlot_Spreader(::v8::Eternal<::v8::Object>);
 /// pathological case for which "false" is the conservative
 /// answer.
 ///
-/// The cost is dwarfed by the ~100ns V8 callback overhead —
+/// The cost is dwarfed by the V8 callback overhead —
 /// the brand check itself is O(depth) Local pointer
 /// comparisons.
 ///
