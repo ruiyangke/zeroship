@@ -2587,8 +2587,7 @@ mod live_worker_role_fence {
             sql.matches(WORKER_ROLE).count() >= 2,
             "expected the worker role as both a quoted ident and a literal: {sql}"
         );
-        let retargeted = sql.replace(WORKER_ROLE, &fx.worker);
-        retargeted
+        sql.replace(WORKER_ROLE, &fx.worker)
     }
 
     /// Read `pg_auth_members.inherit_option` for one (granted role, member)

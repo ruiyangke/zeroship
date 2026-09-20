@@ -826,7 +826,7 @@ fn dispatch(spec: Dispatch) -> (u16, Json) {
                 let runtime = Runtime::builder()
                     .modules(vec![ModuleEntry {
                         specifier: "index.js".into(),
-                        source: spec.source.clone().into(),
+                        source: spec.source.clone(),
                     }])
                     .env_vars(HashMap::from([(
                         "APP_ID".to_string(),
