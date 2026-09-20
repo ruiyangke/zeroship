@@ -32,7 +32,12 @@ async fn fixture(store: &dyn BlobStore) -> Manifest {
             modules,
         }),
         workflows: Some(json!(["Example"])),
-        runtime_descriptor: Some(RuntimeDescriptorEntry { hash }),
+        runtime_descriptor: vec![RuntimeDescriptorEntry {
+            label: "main".into(),
+            database_id: zeroship_core::DatabaseId::mint(),
+            primary: true,
+            hash,
+        }],
         ..Manifest::default()
     }
 }
@@ -63,7 +68,7 @@ async fn executable_loading_preserves_code_schema_and_declarations() {
     assert_eq!(registration.hash, "a".repeat(64));
     let mut changes = vec![];
     let mut schema = manifest.clone();
-    schema.runtime_descriptor = None;
+    schema.runtime_descriptor = vec![];
     changes.push(schema);
     let mut code = manifest.clone();
     let source = b"export default 'replacement';";
