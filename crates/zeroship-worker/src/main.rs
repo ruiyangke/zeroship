@@ -778,6 +778,9 @@ fn main() -> std::io::Result<()> {
                 db_service: db_service
                     .clone()
                     .expect("the boot refused a workflow host without a database"),
+                // The relocation moves this to the service's own schema at its
+                // cutover step; until then each app journals beside its tables.
+                journal: zeroship_worker::workflow_host::JournalLocation::CreatorSchema,
                 storage: config
                     .storage_backend
                     .clone()

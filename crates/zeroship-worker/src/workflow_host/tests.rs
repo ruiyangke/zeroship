@@ -117,9 +117,52 @@ fn an_app_with_no_running_host_is_never_ready() {
 /// schema, which nothing points at afterwards - not deleted, not read, and not
 /// named by any other test. Decide where the journal belongs before re-keying
 /// the derivation rather than discovering it here.
+/// The journal's schema is a choice the host carries, not a fact about the app.
+///
+/// This is the assertion that separates a change from a rename: a parameter
+/// every caller filled with the same value would pass a test that only checked
+/// the parameter exists. Here ONE configured schema answers for TWO different
+/// apps, and the inequality of the apps is asserted beside it so "both got the
+/// same schema" cannot pass over two apps that were secretly the same.
+///
+/// What this does NOT catch: it binds the decision, not the wiring. A future
+/// edit that made `resolve` derive the schema itself again would leave this
+/// green. The compiler is what ties them together today - `resolve` has no
+/// other way to reach a schema.
 #[test]
-fn the_journal_schema_is_derived_from_the_app_not_from_a_database_binding() {
-    let app = AppId::mint();
-    let schema = app_schema(&app).expect("app schema");
-    assert_eq!(schema.as_str(), app.as_str());
+fn a_service_journal_answers_one_schema_for_every_app() {
+    let one = AppId::mint();
+    let two = AppId::mint();
+    assert_ne!(one.as_str(), two.as_str(), "the two apps must differ");
+
+    let shared = SchemaName::new("workflow_manager").expect("a legal schema name");
+    let service = JournalLocation::Service(shared.clone());
+
+    assert_eq!(
+        service.schema(&one).expect("service journal schema").as_str(),
+        shared.as_str()
+    );
+    assert_eq!(
+        service.schema(&two).expect("service journal schema").as_str(),
+        shared.as_str()
+    );
+}
+
+/// The creator arm keeps today's behaviour, and keeps it DIFFERENT from the
+/// service arm: each app journals in its own schema. Without this the two arms
+/// could answer identically and the choice above would be decorative.
+#[test]
+fn a_creator_journal_answers_each_app_its_own_schema() {
+    let one = AppId::mint();
+    let two = AppId::mint();
+    let creator = JournalLocation::CreatorSchema;
+
+    assert_eq!(
+        creator.schema(&one).expect("creator journal schema").as_str(),
+        one.as_str()
+    );
+    assert_ne!(
+        creator.schema(&one).expect("creator journal schema").as_str(),
+        creator.schema(&two).expect("creator journal schema").as_str()
+    );
 }
