@@ -935,3 +935,54 @@ by `local.rs`'s `CONTENTION_BOUND`.
 Neither is an argument against the relocation. Both are work it creates, on
 sides that have to be reasoned about separately, and only one of them is
 visible from the PostgreSQL schema this document has been reading.
+
+## Step 1's premise is already exercised, and the dependency graph names the wrong crate
+
+`AGENTS.md` states the invariant step 1 rests on:
+
+> `zeroship-workflow-schema` is a leaf, so a service can install the journal
+> without depending on the engine.
+
+That is not only true, it is already done, and the proposal should point at the
+service that does it rather than argue from the invariant.
+
+`crates/zeroship-workflow-schema/Cargo.toml` declares exactly one dependency,
+`serde_json`. No engine, no ORM, no driver, no V8. **The edge step 1 adds costs
+one leaf crate with one dependency of its own.**
+
+And `crates/zeroship-workflow-server/src/journal.rs` already installs the
+journal from that leaf. Its crate's manifest declares
+`zeroship-workflow-manager`, `zeroship-workflow-schema` and
+`zeroship-workflow-client`, and **no dependency on `zeroship-workflow`, the
+engine**. The install is a migration bundle whose scope is built by substituting
+the schema name:
+
+    const SCHEMA_PLACEHOLDER: &str = "__ZEROSHIP_BUNDLE_SCHEMA__";
+
+So a service that is not the engine, already depending on the manager, already
+installs the journal into a schema it chooses at install time. **Step 1 is that,
+pointed at `workflow_manager`.** It is not a new capability and it should not be
+argued as one.
+
+### One dependency in that graph is not what it looks like
+
+Reading the manifests alone suggests two non-engine services install the
+journal. `crates/zeroship-migrate-server/Cargo.toml` declares
+
+    zeroship-workflow-schema = { workspace = true }
+
+under `[dependencies]`, and does not depend on the engine either - which is
+exactly the shape that makes a crate look like an installer. **No source file in
+that crate references it under any spelling, and the crate has no `build.rs`.**
+The edge is declared and unused.
+
+Two consequences, both small and both worth writing down before someone repeats
+the reading. First, `zeroship-migrate-server` is not a second precedent, so
+`workflow-server` is the one to copy. Second, a dependency edge is not evidence
+of use, and the check that distinguishes them is reading the source rather than
+the manifest - the same distinction as a declared test target that is never
+built.
+
+`zeroship-control` also appears in a search for dependents and is a third false
+positive of a different kind: its edge is under `[dev-dependencies]`, so it is a
+test-only user and ships nothing.
