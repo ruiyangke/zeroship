@@ -346,11 +346,11 @@ impl NativeRegistrar {
 /// collides with a plugin namespace, the plugin wins (platform primitives
 /// override user config) — the overlay order below enforces this.
 ///
-/// The returned object is shallow-frozen (via `Object.freeze`), so user code
-/// can't monkey-patch `env.db = null` at runtime. Namespace sub-objects
-/// remain mutable by reference, but their registered methods are attached as
-/// own properties at build time — replacing them would require reassigning
-/// through the frozen parent.
+/// The returned object is NOT yet frozen: a plugin's companion namespaces are
+/// published onto it afterwards, by `crate::init::prepare_application`, which
+/// seals it with [`seal_env_object`] once every plugin has contributed. Sealing
+/// here instead would silently drop every companion, because a `Set` on a
+/// frozen object is refused rather than raised.
 pub(crate) fn build_env_object(
     scope: &mut v8::PinScope,
     plugins: &[Arc<dyn NativePlugin>],
@@ -423,22 +423,34 @@ pub(crate) fn build_env_object(
         env_obj.set(scope, ns_key.into(), ns_obj.into());
     }
 
-    // Shallow freeze via Object.freeze. Prevents user code from reassigning
-    // `env.db = null` or adding `env.foo`. Namespace sub-objects stay
-    // unfrozen — their methods are already attached, and freezing them
-    // would be a minor defensive-in-depth gain at the cost of breaking any
-    // future plugin that expects to extend its namespace after registration.
-    let freeze_source = "(obj) => Object.freeze(obj)";
-    let code = v8::String::new(scope, freeze_source).unwrap();
-    if let Some(script) = v8::Script::compile(scope, code, None)
-        && let Some(func_val) = script.run(scope)
-        && let Ok(freeze_fn) = v8::Local::<v8::Function>::try_from(func_val)
-    {
-        let undefined = v8::undefined(scope).into();
-        let _ = freeze_fn.call(scope, undefined, &[env_obj.into()]);
-    }
-
     v8::Global::new(scope, env_obj)
+}
+
+/// Shallow-freeze `env` once every plugin has published what it owns.
+///
+/// Prevents user code from reassigning `env.db = null` or adding `env.foo`.
+/// Namespace sub-objects stay unfrozen — their methods are already attached,
+/// and freezing them would be a minor defence-in-depth gain at the cost of
+/// breaking any future plugin that expects to extend its namespace after
+/// registration.
+///
+/// # Ordering is the contract
+///
+/// This runs AFTER [`publish_env_member`] has placed every companion
+/// namespace. A `Set` on a frozen object is REFUSED rather than raised, so a
+/// seal that ran earlier would drop each companion without an error anywhere -
+/// the member would simply be `undefined` in creator code.
+///
+/// # Errors
+/// When `env` is not initialized.
+pub(crate) fn seal_env_object(scope: &mut v8::PinScope<'_, '_>) -> Result<(), String> {
+    let env_global = scope
+        .get_slot::<crate::state::SharedState>()
+        .and_then(|state| state.borrow().env_obj.clone())
+        .ok_or_else(|| "runtime: env is not initialized".to_string())?;
+    let env = v8::Local::new(scope, env_global);
+    env.set_integrity_level(scope, v8::IntegrityLevel::Frozen);
+    Ok(())
 }
 
 #[cfg(test)]

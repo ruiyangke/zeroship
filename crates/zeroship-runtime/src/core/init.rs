@@ -344,6 +344,9 @@ pub(crate) fn prepare_application(
             crate::plugin::publish_env_member(scope, name, value)?;
         }
     }
+    // Seal `env` only now. Every plugin has contributed its namespace and its
+    // companions, and a seal before this point refuses those writes silently.
+    crate::plugin::seal_env_object(scope)?;
 
     // Order matters here:
     //
