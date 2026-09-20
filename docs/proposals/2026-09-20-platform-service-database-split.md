@@ -226,15 +226,45 @@ rather than a refactor - and it is the reason the sequencing puts it last.
 
 **3. Auth takes a row lock on control's `organizations` while deleting `users`.**
 `refuse_if_it_strands_an_organization` holds `SELECT ... FOR UPDATE` on a
-control table inside the transaction that deletes an auth row, and the argument
-for its correctness rests on PostgreSQL's own `FOR KEY SHARE` referential
-locking. Neither survives a split.
+control table inside the transaction that deletes an auth row, and discards the
+result - the query exists only to take the locks.
+
+**Two races, closed two different ways, and only one is visible in the SQL.** A
+brand-new seat is closed for free: an `INSERT` into `organization_members` takes
+`FOR KEY SHARE` on the referenced `zeroship.users` row for its foreign key, and
+the reaper already holds `FOR UPDATE` on exactly that row. A PROMOTION is not -
+`transfer_ownership` raises a sitting member with a plain `UPDATE ... SET role`,
+which touches no key column and therefore takes no lock on `users`. That is why
+the lock covers every seat and `role = 'owner'` is asked only in the re-check,
+which runs in a later snapshot.
+
+A split loses both the free referential interlock and the deterministic lock
+order (`ORDER BY o.id` with `LockRows` above `Sort`) that stops two reapers
+erasing two co-owners from deadlocking. A read-plus-retry can be built, but it
+is optimistic concurrency replacing pessimistic serialization the database was
+providing at no cost.
 
 **4. Three data-modifying CTEs write across service boundaries in one
 statement.** `password_reset::complete`,
 `revoke_user_app_credentials_in_transaction`, and
-`platform_cli::materialize_default_grants`. A CTE cannot become a saga without
-changing its semantics.
+`platform_cli::materialize_default_grants`.
+
+**The writes are not what forbids decomposition - two of the three are already
+idempotent.** `token_revocations` upserts `ON CONFLICT ... DO UPDATE SET
+revoked_after = GREATEST(existing, EXCLUDED)`, which is monotonic and safe to
+replay; the session revocation is guarded `WHERE revoked_at IS NULL`.
+
+What forbids it is the ENTRY GATE. The whole statement hangs off a `candidate`
+that selects a magic link only `WHERE consumed_at IS NULL AND expires_at >
+NOW()`, and consumes it in the same statement: a single-shot token. Decomposed,
+a crash after the token is spent and before the gateway's
+`app_session_anchors` write leaves the password changed, the token gone, and the
+app sessions live - with nothing left to re-drive from. The idempotent writes do
+not help, because they have become unreachable.
+
+*Replacement:* the gate has to outlive the statement - a reservation the
+authorising service can re-issue against, rather than a row consumed in the same
+breath as the work it authorises.
 
 ---
 
@@ -284,8 +314,20 @@ this split should reuse rather than reinvent:
 - **Subset tests, never equality.** Equality coupled every app on a database to
   every other; the same trap waits for any cross-service version check.
 
-**What does not transfer:** that split had a natural fault line, because creator
-data holds no foreign key into the platform schema. This one has no equivalent.
+**What does not transfer:** that split had a clean fault line, because creator
+data holds no foreign key into the platform schema. This one has a narrower one
+that has to be found rather than assumed.
+
+Counting foreign keys that REFERENCE `users` and `apps` overstates it badly -
+that population includes keys whose child table never leaves the referenced
+table's own service, and they cannot cross a boundary they never reach. The
+question is how many point at `users` FROM A TABLE ANOTHER SERVICE OWNS, and on
+the `users` side that is at most five: `app_session_anchors`,
+`app_user_identities`, `oauth_grants`, `organization_members`, `identity_links`.
+Most of the cascades never leave auth.
+
+Five named tables is a design problem with a shape. The FK count was a wall,
+and it was the wrong measure.
 
 ---
 
