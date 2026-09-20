@@ -2078,14 +2078,11 @@ command beside it; none is carried from prose.
    used `ConnectOptions::connection_authority()` and were correct; every caller
    holding a `ConnectionFactory` had no way to say so.
 
-   Measured, on one instrument, same worktree and target directory:
-
-       pre-fix   372 passed, 227 failed   postgres   0 ok / 223 FAILED
-       post-fix  599 passed,   0 failed   postgres 223 ok /   0 FAILED
-       main      599 passed,   0 failed
-
-   and the 223 that failed are the IDENTICAL SET BY NAME to the 223 that pass
-   on main - a matching count could have been two different sets.
+   Measured on one instrument, same worktree and target directory: the
+   PostgreSQL set failed entirely before the fix, passes entirely after it, and
+   passes on main. The set that failed is the IDENTICAL SET BY NAME to the set
+   that passes on main - matching counts could have been two different sets,
+   which is why the closure is by name and not by tally.
 
    `for_url` is deleted. `for_app_url` and `for_platform_url` name the choice,
    with no default, because a tenant-boundary decision with an implicit side is
@@ -2110,7 +2107,7 @@ So the fix is bound from three sides:
                                      the constructors: built from one URL they
                                      must remain distinguishable
 
-The third is the one that matters longest. It converts "did each of 45 sites
+The third is the one that matters longest. It converts "did every call site
 choose correctly" into "do the two constructors stay distinct" - one assertion
 covering every site that will ever exist, rather than the sites present today.
 
