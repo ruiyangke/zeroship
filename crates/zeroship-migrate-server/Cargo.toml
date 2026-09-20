@@ -60,13 +60,6 @@ zeroship-migrate-backend = { workspace = true }
 # PostgreSQL host, so it names the vendor it wants rather than reaching for a
 # re-export the facade deliberately no longer carries.
 zeroship-migrate-postgres = { workspace = true }
-# The workflow journal's generated artifacts. A LEAF crate: it embeds the
-# compiled DDL, its fingerprints and its stamp descriptor, and depends on
-# nothing else in the workspace, so naming it here does not pull the creator
-# workflow engine into this service. It replaces an `include_str!` that reached
-# out of this crate's directory into the engine's - a dependency Cargo could not
-# see, and which made moving the engine break the build as a missing FILE.
-zeroship-workflow-schema = { workspace = true }
 toml = { workspace = true }
 
 [dev-dependencies]
