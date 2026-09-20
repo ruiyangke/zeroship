@@ -258,7 +258,7 @@ pub struct PlanChange {
 /// a frozen `invoice_lines` row (and one Stripe item).
 #[derive(Debug, Clone)]
 pub struct BilledSegment {
-    pub segment_no: i16,
+    pub segment_no: i32,
     /// The segment's plan (NOT NULL on the line).
     pub plan_id: String,
     /// `max(0, end − start)` per metric (MAJOR-3 floor) — the segment's metered slice.
@@ -426,7 +426,7 @@ fn finalize_boundaries(
         let base_fee_cents = day_weight(base_full, u64::from(segment_days), u64::from(dim));
 
         segments.push(BilledSegment {
-            segment_no: seg_idx as i16,
+            segment_no: seg_idx as i32,
             plan_id: boundaries[b].plan_id.clone(),
             usage_delta,
             included_units,
