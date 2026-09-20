@@ -39,6 +39,10 @@ interface Argv {
   root: string;
   migrationsDir: string;
   outDir: string;
+  /** The database's LOCAL label, and whether it is the app's `env.db`. Both
+   *  come from the file; `env.db.ts` keys `EnvDatabases` on the label. */
+  label: string;
+  primary: boolean;
   /** The zeroship.jsonc that supplied the paths, or null when none was found. */
   configPath: string | null;
 }
@@ -93,26 +97,35 @@ function parseArgv(argv: string[]): Argv {
   // `parseArgv`. The flags survive as overrides; only the fallback moved.
   const { config, path: configPath } = readProjectConfig(root);
   const selected = selectDatabase(config, { app, database });
-  const resolveMember = (override: string | undefined, member: "migrations" | "out") => {
-    const configured = override ?? selected?.[member];
-    if (configured == null) {
-      throw new Error(
-        `[zeroship] no database to migrate: pass --${member === "migrations" ? "dir" : "out"}=, ` +
-          `or declare one under \`databases\` and name it in the app's \`databases\``,
-      );
-    }
-    return resolve(root, configured);
-  };
+  // THE DIR FLAGS OVERRIDE PATHS, NOT IDENTITY. This command regenerates
+  // `env.db.ts`, which declares the database's entry on `EnvDatabases` under
+  // its LABEL and declares `Env.db` only when it is the app's PRIMARY. Neither
+  // fact is recoverable from a pair of directories, so an invocation with
+  // nothing declaring the database says so rather than inventing a label.
+  if (selected == null) {
+    throw new Error(
+      "[zeroship] no database to migrate. --migrations/--out override where the schema is " +
+        "read and written, not WHICH database it is: the regenerated env.db.ts names the " +
+        "database's label and whether it is the app's primary. Declare it under " +
+        "`databases` and name that label in the app's `databases`.",
+    );
+  }
+  const resolveMember = (override: string | undefined, member: "migrations" | "out") =>
+    resolve(root, override ?? selected[member]);
   return {
     root,
     migrationsDir: resolveMember(dir, "migrations"),
     outDir: resolveMember(out, "out"),
+    label: selected.label,
+    primary: selected.primary,
     configPath,
   };
 }
 
 async function main(): Promise<number> {
-  const { root, migrationsDir, outDir, configPath } = parseArgv(process.argv.slice(2));
+  const { root, migrationsDir, outDir, label, primary, configPath } = parseArgv(
+    process.argv.slice(2),
+  );
   console.log(
     `[zeroship] migrations=${migrationsDir} out=${outDir}` +
       (configPath == null ? " (no zeroship.jsonc; schema defaults)" : ` (from ${configPath})`),
@@ -128,7 +141,7 @@ async function main(): Promise<number> {
   //    what keeps them from disagreeing. Unlike the dev server, a failure here is
   //    fatal: this command's whole job is the schema, so a bad migration must
   //    stop it rather than be logged past.
-  await genTypesFromMigrations(migrationsDir, outDir, { check: false });
+  await genTypesFromMigrations(migrationsDir, outDir, { label, primary, check: false });
   console.log("[zeroship] gen-types: regenerated env.db.ts + schema.runtime.json");
 
   const collections = collectionNamesFrom(readGeneratedRuntimeDescriptorAt(outDir));

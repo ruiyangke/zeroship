@@ -1133,6 +1133,57 @@ fn the_primary_must_be_stated_and_must_be_one_of_the_apps_own_databases() {
     cfg(BARE);
 }
 
+/// A workspace where one app makes `analytics` its `env.db` and another merely
+/// uses it. Both are typed from that database's SINGLE generated `env.db.ts`,
+/// which declares `Env.db` for a primary and not otherwise.
+const SPLIT_PRIMACY: &str = r#"{
+  "$schema": "https://zeroship.ai/schema/project-v1.json",
+  "name": "demo-app",
+  "control": "https://control.zeroship.ai",
+  "runtime_date": "2026-08-14",
+  "build": { "mode": "full", "dist": "dist", "output": "dist/app.zship" },
+  "databases": {
+    "main": { "id": "dbs_03evr3oqx1200yyd6zj2cebfw", "migrations": "migrations", "out": "generated/zeroship/main" },
+    "analytics": { "id": "dbs_03evr3oqx1200qyvgmdnjrsla", "migrations": "migrations/analytics", "out": "generated/zeroship/analytics" }
+  },
+  "apps": {
+    "storefront": { "databases": ["main", "analytics"], "primary": "main" },
+    "reporting": { "databases": ["analytics"], "primary": "analytics" }
+  },
+  "secrets": []
+}"#;
+
+/// A database is the `env.db` of every app that uses it, or of none of them.
+/// One database has one gen-types directory, so it has one `env.db.ts`, and
+/// that file cannot both declare `Env.db` and not declare it.
+#[test]
+fn a_database_that_is_one_apps_primary_and_anothers_secondary_is_refused() {
+    let err = ProjectConfig::parse(
+        PathBuf::from("zeroship.jsonc"),
+        SPLIT_PRIMACY.to_string(),
+    )
+    .expect_err("split primacy must not parse");
+    assert!(err.contains("makes `analytics` its `primary`"), "{err}");
+    assert!(err.contains("uses it without naming it"), "{err}");
+    assert!(err.contains("databases.analytics.out"), "{err}");
+
+    // THE CONTROL, differing in one variable: the same two apps, the same
+    // shared database, agreeing that it is the primary. Two apps sharing a
+    // database is the ordinary shape and must stay accepted, or the rule would
+    // refuse every multi-app workspace rather than the contradiction.
+    let agreed = SPLIT_PRIMACY.replace(
+        "\"storefront\": { \"databases\": [\"main\", \"analytics\"], \"primary\": \"main\" }",
+        "\"storefront\": { \"databases\": [\"analytics\"], \"primary\": \"analytics\" }",
+    );
+    assert_ne!(agreed, SPLIT_PRIMACY, "storefront's wiring must actually change");
+    let resolved = ProjectConfig::parse(PathBuf::from("zeroship.jsonc"), agreed)
+        .expect("agreeing apps must parse")
+        .resolve(None)
+        .expect("and resolve");
+    assert_eq!(resolved.app_primary("storefront"), Some("analytics"));
+    assert_eq!(resolved.app_primary("reporting"), Some("analytics"));
+}
+
 /// A label is a member name on `env.databases` as well as a key here, so it is
 /// constrained to what reads as one. `__proto__` is the case that makes the
 /// rule load-bearing rather than cosmetic.

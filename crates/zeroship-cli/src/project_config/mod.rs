@@ -292,6 +292,11 @@ impl ProjectConfig {
             .labelled(&self.root, "databases")
             .map(|(label, _)| label)
             .collect();
+        // Which app makes each database its `env.db`, and which merely uses
+        // it. Collected across the whole file, because one database has ONE
+        // gen-types directory - see `check_primacy_is_uniform`.
+        let mut primary_of: Vec<(&str, &str)> = Vec::new();
+        let mut secondary_of: Vec<(&str, &str)> = Vec::new();
         for (label, entry) in self.labelled(&self.root, "apps") {
             let used: Vec<&str> = entry
                 .get("databases")
@@ -341,6 +346,51 @@ impl ProjectConfig {
                     )));
                 }
             }
+            let primary = entry.get("primary").and_then(Value::as_str);
+            for name in used {
+                let bucket = if Some(name) == primary {
+                    &mut primary_of
+                } else {
+                    &mut secondary_of
+                };
+                if !bucket.iter().any(|(database, _)| *database == name) {
+                    bucket.push((name, label));
+                }
+            }
+        }
+        self.check_primacy_is_uniform(&primary_of, &secondary_of)
+    }
+
+    /// A database is the `env.db` of every app that uses it, or of none.
+    ///
+    /// ONE DATABASE HAS ONE GEN-TYPES DIRECTORY (`databases.<label>.out`,
+    /// which [`Self::check_database_outputs`] already refuses to share), so it
+    /// has ONE `env.db.ts`. That module declares the database's entry on
+    /// `EnvDatabases` under its label always, and declares `Env.db` only when
+    /// it is the primary. A workspace where one app makes `analytics` its
+    /// primary and another merely uses it is asking that single file to be two
+    /// different files: whichever app built last wins, and the other's
+    /// `env.db` is typed as the wrong database or not at all.
+    ///
+    /// Refused here rather than discovered as a drift-gate failure, because a
+    /// `--check` complaining that `env.db.ts` drifted names the artifact and
+    /// not the two lines of configuration that cannot both hold.
+    fn check_primacy_is_uniform(
+        &self,
+        primary_of: &[(&str, &str)],
+        secondary_of: &[(&str, &str)],
+    ) -> Result<(), String> {
+        for (database, app) in primary_of {
+            let Some((_, other)) = secondary_of.iter().find(|(name, _)| name == database) else {
+                continue;
+            };
+            return Err(self.err(format!(
+                "`apps.{app}` makes `{database}` its `primary` while `apps.{other}` uses it \
+                 without naming it. A database has ONE generated `env.db.ts` \
+                 (`databases.{database}.out`), and that file declares `Env.db` only for a \
+                 primary, so the two apps cannot both be typed from it. Give one of them its \
+                 own database, or make `{database}` the primary of both."
+            )));
         }
         Ok(())
     }

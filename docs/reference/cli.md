@@ -220,6 +220,49 @@ what it resolved, how many operations it applied and skipped — the
 `applied`/`skipped` counts are operations, not migration files — and the
 migration id.
 
+## `zeroship db`
+
+Creates the databases an app uses, and grants an app access to one.
+
+```
+zeroship db create   <name> --project=prj_...
+zeroship db list     --project=prj_...
+zeroship db bind     <label> --app=<label> --capability=<capability>
+zeroship db unbind   <label> --app=<label>
+zeroship db bindings <label>
+zeroship db delete   <label> [--yes]
+```
+
+A database belongs to a **project**, not to an app. It outlives the apps that
+use it, and several apps in the same project may share one.
+
+- **`<label>`** names a `databases` entry of `zeroship.jsonc`, which this
+  command dereferences to its `dbs_` id before it makes any request. Two
+  workspaces may both call a database `main`, so the word never travels; what
+  travels is the id under it, and `--env=<name>` moves that id without moving
+  the label. With no config file in the directory there are no labels and the
+  argument is the id itself. `--app` follows the same rule against `apps`.
+- **`create`** prints the new database's `id`. Record it in `zeroship.jsonc`
+  under a label of your choosing, name that label in the app's `databases`, and
+  bind it. The `name` you pass is display text for a listing; nothing resolves
+  a database by it, and a name starting with `dbs_` is refused so a name and an
+  id can never be mistaken for one another.
+- **`bind`** is what grants access. Declaring a database in `zeroship.jsonc`
+  grants nothing: `zeroship deploy` refuses an app whose manifest names a
+  database it holds no active binding to. `--capability` is passed through to
+  the control plane, which names the accepted set if you pass one it does not
+  have.
+- **`create` and `bind` declare and stop.** A new database is `provisioning`
+  and a new binding is `pending` until the service holding that cluster's
+  credential has made the cluster match. `zeroship db bindings` shows where
+  each one is.
+- **`delete`** is refused while any app still binds the database, and the
+  refusal names them; unbind each first. It needs `--yes` when the selected
+  environment is marked `"protected": true`.
+
+Reads print the control plane's JSON on stdout, so they pipe; every
+explanation goes to stderr.
+
 ## `zeroship secret` and `zeroship var`
 
 Both commands manage per-app configuration. `secret` values are encrypted at

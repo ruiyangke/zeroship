@@ -15,6 +15,32 @@ import {
   MIGRATIONS_IR_FILE,
   RUNTIME_DESCRIPTOR_FILE,
 } from "../../src/gen-types/index.js";
+import { databaseForOutDir, readProjectConfig } from "../../src/project-config/index.js";
+
+/**
+ * The database a synthetic fixture's emitted `env.db.ts` belongs to.
+ *
+ * These fixtures are bare migration directories with no `zeroship.jsonc`, so
+ * the emitter is told directly what a config file would otherwise say: a
+ * database labelled `main` that is the app's `env.db`.
+ */
+const MAIN = { label: "main", primary: true } as const;
+
+/**
+ * What a REAL app's own `zeroship.jsonc` says about the database whose
+ * artifacts live in `outDir`.
+ *
+ * Derived rather than hardcoded, through the same `databaseForOutDir` the
+ * repo-wide runner uses: a label written out here could disagree with the one
+ * regeneration would produce, and the golden would then pass while every
+ * regeneration drifted it.
+ */
+function declaredFor(appRoot: string, outDir: string): { label: string; primary: boolean } {
+  const { config } = readProjectConfig(appRoot);
+  const database = databaseForOutDir(config, appRoot, outDir);
+  assert.ok(database, `${appRoot} must declare the database whose out dir is ${outDir}`);
+  return { label: database.label, primary: database.primary };
+}
 
 /** The db-hitcounter example — the golden generated app. */
 const HITCOUNTER = resolve(import.meta.dirname, "../../../../examples/db-hitcounter");
@@ -93,7 +119,7 @@ export default {
   const fx = await makeFixture({ "migrations/20260711000000_create_secrets.ts": migration });
   const outDir = join(fx.root, "generated/zeroship");
   try {
-    await genTypesFromMigrations(join(fx.root, "migrations"), outDir, {});
+    await genTypesFromMigrations(join(fx.root, "migrations"), outDir, MAIN);
     const descriptor = JSON.parse(await fs.readFile(join(outDir, RUNTIME_DESCRIPTOR_FILE), "utf8"));
     for (const [field, type] of [["message", "string"], ["amount", "int"], ["payload", "bytes"]]) {
       const def = descriptor.collections.secrets.fields[field];
@@ -134,7 +160,7 @@ describe("generated schema source (record -> genArtifacts)", () => {
       };
     }
     try {
-      const res = await genTypesFromMigrations(join(fx.root, "migrations"), outDir, {});
+      const res = await genTypesFromMigrations(join(fx.root, "migrations"), outDir, MAIN);
       assert.equal(res.status, "written");
       assert.deepEqual([...res.files], [
         ENV_DB_FILE,
@@ -172,7 +198,7 @@ describe("generated schema source (record -> genArtifacts)", () => {
     const fx = await makeFixture({ "migrations/20260711000000_create_hits.ts": CREATE_HITS });
     const outDir = join(fx.root, "generated/zeroship");
     try {
-      await genTypesFromMigrations(join(fx.root, "migrations"), outDir, {});
+      await genTypesFromMigrations(join(fx.root, "migrations"), outDir, MAIN);
       const envDb = await fs.readFile(join(outDir, ENV_DB_FILE), "utf8");
 
       // Every `from "..."` / bare `import "..."` specifier in the emitted module.
@@ -198,7 +224,10 @@ describe("generated schema source (record -> genArtifacts)", () => {
     // memory and diffs against the committed files; a byte drift throws.
     const outDir = join(HITCOUNTER, "generated/zeroship");
     const migDir = join(HITCOUNTER, "migrations");
-    const res = await genTypesFromMigrations(migDir, outDir, { check: true });
+    const res = await genTypesFromMigrations(migDir, outDir, {
+      ...declaredFor(HITCOUNTER, outDir),
+      check: true,
+    });
     assert.equal(res.status, "checked", "committed db-hitcounter artifacts reproduce from migrations");
   });
 
@@ -212,7 +241,7 @@ describe("generated schema source (record -> genArtifacts)", () => {
     const res = await genTypesFromMigrations(
       join(SCAFFOLD, "migrations"),
       join(SCAFFOLD, "generated/zeroship"),
-      { check: true },
+      { ...declaredFor(SCAFFOLD, join(SCAFFOLD, "generated/zeroship")), check: true },
     );
     assert.equal(res.status, "checked", "committed scaffold artifacts reproduce from migrations");
   });
