@@ -19,6 +19,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 use zeroship_authz::{Action, Scope};
 use zeroship_core::device_grant::{PLATFORM_CLI_CLIENT_ID, PLATFORM_CLI_ISSUABLE_SCOPES};
+use zeroship_core::database_role::DatabaseCapability;
 use zeroship_core::{database_derivation, BindingId, DatabaseId};
 use zeroship_id::{AppId, OrganizationId, ProjectId, UserId};
 use zeroship_migrate::{
@@ -1146,11 +1147,16 @@ async fn probe_bool(conn: &Client, sql: &str) -> bool {
 
 /// An apply is not a database-creation operation.
 ///
-/// This is deliberately a live PostgreSQL case because the refusal's important
+/// A database whose cluster reconciler has not converged it has no schema, and
+/// the apply refuses rather than creating one: a schema this service invented
+/// would be owned by a role no binding inherits. The refusal therefore names no
+/// remedy - there is no call a creator can make to hurry a reconciler.
+///
+/// This is deliberately a live PostgreSQL case because the refusal.s important
 /// property is absence of catalog side effects: `provision_migrator` creates a
-/// cluster-global role and grants membership before it first touches the missing
-/// schema. A mocked handler can prove the 409 body but cannot prove those objects
-/// were never created, or that the deploy ledger stayed untouched.
+/// cluster-global role and grants membership before it first touches the
+/// missing schema. A mocked handler can prove the 409 body but cannot prove
+/// those objects were never created, or that the ledger stayed untouched.
 #[ntex::test]
 async fn apply_refuses_an_uncreated_database_before_provisioning_or_ledger_pg() {
     let conn = admin_conn().await;
@@ -1160,7 +1166,7 @@ async fn apply_refuses_an_uncreated_database_before_provisioning_or_ledger_pg() 
 
     let schema = database_derivation::schema_name(&database);
     let migrator_role =
-        zeroship_migrate_postgres::role::migrator_role_name(&schema).expect("migrator role name");
+        database_derivation::migrator_role_name(&database).expect("migrator role name");
     let auth = Arc::new(StaticAuthenticator::new());
     auth.insert(
         "good-token",
@@ -1234,10 +1240,15 @@ async fn apply_refuses_an_uncreated_database_before_provisioning_or_ledger_pg() 
         "an absent database must be a creator-recoverable 409, never a 404 or 5xx: {body}"
     );
     assert_eq!(body["error"], "database_not_created", "{body}");
-    assert_eq!(
-        body["remedy"],
-        format!("POST /v1/databases/{}", app_id.as_str()),
-        "the body must name the explicit operation that makes a retry valid: {body}"
+    assert!(
+        body["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains(database.as_str())),
+        "the refusal must name the database it is about: {body}"
+    );
+    assert!(
+        body["remedy"].is_null(),
+        "a database waiting on its reconciler has no call to name: {body}"
     );
     assert!(!schema_exists, "a refused apply created schema {schema}");
     assert!(
@@ -1254,74 +1265,40 @@ async fn apply_refuses_an_uncreated_database_before_provisioning_or_ledger_pg() 
     );
 }
 
-async fn table_privileges(conn: &Client, grantee: &str, schema: &str, table: &str) -> Vec<String> {
-    conn.query(
-        "SELECT privilege_type \
-           FROM information_schema.table_privileges \
-          WHERE grantee = $1 AND table_schema = $2 AND table_name = $3 \
-          ORDER BY privilege_type",
-        &[&grantee, &schema, &table],
-    )
-    .await
-    .expect("read exact table privileges")
-    .iter()
-    .map(|row| row.get(0))
-    .collect()
-}
 
-/// Run `sql` under the PRODUCTION runtime identity for `app_schema` and switch
-/// back, whatever happened.
+/// Run `sql` as one of a database's CAPABILITY roles and switch back, whatever
+/// happened.
 ///
-/// The chain is the worker's, not a shortcut to the app role: `SET SESSION
-/// AUTHORIZATION zeroship_worker` (the one login role every worker process
-/// connects as) then `SET ROLE app_<id>_role`. `runtime_dependents_sql` grants
-/// that membership `WITH INHERIT FALSE`, so the `SET ROLE` is load-bearing -
-/// without it the worker holds no reach into the app schema at all - and the
-/// two-step is exactly what `zeroship-data-v8` does per request.
-///
-/// Needs a superuser DSN for `SET SESSION AUTHORIZATION`. The migrate service's
-/// own provisioning DSN is that principal (it creates roles and schemas), so a
-/// target that cannot run this could not run the apply above either; the
-/// `expect` names the requirement rather than skipping.
-async fn as_app_runtime_identity(
+/// A production session reaches a capability through its binding role, which is
+/// what `crates/zeroship-data-orm/tests/postgres_binding_fence.rs` measures.
+/// What is under test here is the GRANT the apply left on the audit table, so
+/// this assumes the capability directly: an intermediate role that inherits it
+/// would prove the same privilege through one more hop.
+async fn as_capability_role(
     conn: &Client,
-    app_schema: &str,
+    role: &str,
     sql: &str,
 ) -> Result<(), compio_postgres::Error> {
-    let worker = quote_ident(zeroship_migrate_server::apply::WORKER_ROLE);
-    let runtime = quote_ident(
-        &zeroship_core::database_role::per_app_role_name(app_schema).expect("test app role name"),
-    );
-    conn.batch_execute(&format!(
-        "SET SESSION AUTHORIZATION {worker}; SET ROLE {runtime};"
-    ))
-    .await
-    .expect(
-        "assuming the worker identity needs a superuser connection and a \
-         zeroship_worker granted membership in the app runtime role - the first \
-         comes from the test DSN, the second from provision_runtime_app_role",
-    );
+    conn.batch_execute(&format!("SET ROLE {}", quote_ident(role)))
+        .await
+        .expect("a superuser connection may assume any role");
     let out = conn.batch_execute(sql).await;
-    let restored = conn
-        .batch_execute("RESET ROLE; RESET SESSION AUTHORIZATION;")
-        .await;
-    assert!(
-        restored.is_ok(),
-        "the admin identity must come back on this connection or every later \
-         assertion in this case is measuring the wrong principal: {restored:?}"
-    );
+    conn.batch_execute("RESET ROLE")
+        .await
+        .expect("the admin identity must come back or every later assertion measures the wrong principal");
     out
 }
 
-/// Explicit database creation followed by a real apply must leave the creator
-/// table usable through the production worker-to-app role chain.
+/// A converged database keeps ITS OWN migrator as the schema owner across an
+/// apply, and the apply publishes that schema's tables.
 ///
-/// There is deliberately no fixture grant here. The create endpoint and apply
-/// endpoint are the complete public lifecycle that must establish runtime
-/// authority. A test that grants columns itself proves only that PostgreSQL
-/// honors the test's grant, not that the migration service produced one.
+/// Ownership is the load-bearing half. The cluster reconciler hands
+/// `db_<dbs>` to `zs_db_<dbs>_mig` and re-asserts that on every pass, so an
+/// apply that ran as any other role would either be refused by the owner or -
+/// holding `CREATEROLE` - take ownership away and have the next pass take it
+/// back, leaving objects owned by one role inside a schema owned by another.
 #[ntex::test]
-async fn a_created_then_migrated_database_is_usable_by_the_runtime_role_pg() {
+async fn an_apply_keeps_the_reconcilers_migrator_as_the_schema_owner_pg() {
     let conn = admin_conn().await;
     let app_id = AppId::mint();
     let owner_id = UserId::mint();
@@ -1344,36 +1321,30 @@ async fn a_created_then_migrated_database_is_usable_by_the_runtime_role_pg() {
     converge_database_schema(&database).await;
 
     let schema = database_derivation::schema_name(&database);
-    let migrator = zeroship_migrate_postgres::role::migrator_role_name(&schema).unwrap();
-    let posture = conn
+    let migrator =
+        database_derivation::migrator_role_name(&database).expect("the migrator role name fits");
+    let before: String = conn
         .query_one(
-            "SELECT pg_get_userbyid(n.nspowner) AS owner, \
-                    has_schema_privilege($1, $2, 'USAGE') AS can_use, \
-                    has_schema_privilege($1, $2, 'CREATE') AS can_create, \
-                    pg_has_role(current_user, $1, 'SET') AS can_set \
-               FROM pg_namespace n WHERE n.nspname = $2",
-            &[&migrator, &schema],
+            "SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname = $1",
+            &[&schema],
         )
         .await
-        .expect("inspect explicit database ownership");
-    assert_eq!(posture.get::<_, String>("owner"), migrator);
-    assert!(posture.get::<_, bool>("can_use"));
-    assert!(posture.get::<_, bool>("can_create"));
-    assert!(posture.get::<_, bool>("can_set"));
-    conn.batch_execute(&format!(
-        "BEGIN; SET LOCAL ROLE {}; CREATE TABLE {}.__fixture_role_probe(id bigint); ROLLBACK",
-        quote_ident(&migrator),
-        quote_ident(&schema),
-    ))
-    .await
-    .expect("the provisioned migrator must create objects in its schema");
+        .expect("the converged schema must exist")
+        .get("owner");
+    assert_eq!(
+        before, migrator,
+        "the control: the reconciler owns this schema before the apply"
+    );
 
-    let req = test::TestRequest::post()
-        .uri(&apply_uri(&app_id, &database))
-        .header("authorization", "Bearer good-token")
-        .set_json(&create_notes_request())
-        .to_request();
-    let resp = test::call_service(&svc, req).await;
+    let resp = test::call_service(
+        &svc,
+        test::TestRequest::post()
+            .uri(&apply_uri(&app_id, &database))
+            .header("authorization", "Bearer good-token")
+            .set_json(&create_notes_request())
+            .to_request(),
+    )
+    .await;
     let status = resp.status();
     let body = test::read_body(resp).await;
     assert_eq!(
@@ -1383,40 +1354,33 @@ async fn a_created_then_migrated_database_is_usable_by_the_runtime_role_pg() {
         String::from_utf8_lossy(&body)
     );
 
-    let table = format!("{}.{}", quote_ident(&schema), quote_ident("notes"));
-    let runtime_role =
-        zeroship_core::database_role::per_app_role_name(&schema).expect("test app role name");
-    let app_table_privileges = table_privileges(&conn, &runtime_role, &schema, "notes").await;
-    let audit_name = zeroship_migrate_server::provisioning::AUDIT_UNMASK_TABLE;
-    let audit_table_privileges = table_privileges(&conn, &runtime_role, &schema, audit_name).await;
-    let audit = format!("{}.{}", quote_ident(&schema), quote_ident(audit_name));
-    let sequence_privileges = conn
-        .query(
-            "SELECT \
-                has_sequence_privilege($1, pg_get_serial_sequence($2, 'id'), 'USAGE'), \
-                has_sequence_privilege($1, pg_get_serial_sequence($2, 'id'), 'SELECT'), \
-                has_sequence_privilege($1, pg_get_serial_sequence($2, 'id'), 'UPDATE')",
-            &[&runtime_role, &audit],
+    let after: String = conn
+        .query_one(
+            "SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname = $1",
+            &[&schema],
         )
         .await
-        .expect("read exact audit sequence privileges");
-    let sequence_privileges = (
-        sequence_privileges[0].get::<_, bool>(0),
-        sequence_privileges[0].get::<_, bool>(1),
-        sequence_privileges[0].get::<_, bool>(2),
+        .expect("the schema must still exist")
+        .get("owner");
+    assert_eq!(
+        after, migrator,
+        "the apply must not move the schema's owner off the role the reconciler minted"
     );
-    let schema_privileges = conn
-        .query(
-            "SELECT has_schema_privilege($1, $2, 'USAGE'), \
-                    has_schema_privilege($1, $2, 'CREATE')",
-            &[&runtime_role, &schema],
+    let table_owner: String = conn
+        .query_one(
+            "SELECT pg_get_userbyid(c.relowner) AS owner FROM pg_class c \
+               JOIN pg_namespace n ON n.oid = c.relnamespace \
+              WHERE n.nspname = $1 AND c.relname = 'notes'",
+            &[&schema],
         )
         .await
-        .expect("read exact runtime schema privileges");
-    let schema_privileges = (
-        schema_privileges[0].get::<_, bool>(0),
-        schema_privileges[0].get::<_, bool>(1),
+        .expect("the apply must have created the table")
+        .get("owner");
+    assert_eq!(
+        table_owner, migrator,
+        "a table owned by anything but the schema's owner is a split the reconciler cannot repair"
     );
+
     let publication = zeroship_core::replication_names::DATASTORE_PUBLICATION;
     let published_tables = conn
         .query(
@@ -1434,59 +1398,6 @@ async fn a_created_then_migrated_database_is_usable_by_the_runtime_role_pg() {
         .iter()
         .map(|row| row.get::<_, String>(0))
         .collect::<Vec<_>>();
-    println!(
-        "information_schema.table_privileges for {runtime_role}.notes: \
-         {app_table_privileges:?}"
-    );
-    println!(
-        "audit privileges for {runtime_role}: table={audit_table_privileges:?}, \
-         sequence={sequence_privileges:?}, schema={schema_privileges:?}"
-    );
-    let insert = as_app_runtime_identity(
-        &conn,
-        &schema,
-        &format!(
-            "INSERT INTO {table} (id, title, body) \
-             VALUES ('note-1', 'runtime write', 'created then migrated')"
-        ),
-    )
-    .await;
-    let select = as_app_runtime_identity(
-        &conn,
-        &schema,
-        &format!("SELECT title, body FROM {table} WHERE id = 'note-1'"),
-    )
-    .await;
-    println!("runtime INSERT result: {insert:?}");
-    println!("runtime SELECT result: {select:?}");
-
-    let _ = std::fs::remove_dir_all(tmp);
-    cleanup_app(&conn, &app_id).await;
-    cleanup_user(&conn, &owner_id).await;
-
-    assert!(
-        insert.is_ok(),
-        "created-then-migrated runtime role could not INSERT its own table: {insert:?}"
-    );
-    assert!(
-        select.is_ok(),
-        "created-then-migrated runtime role could not SELECT its own table: {select:?}"
-    );
-    assert_eq!(
-        audit_table_privileges,
-        vec!["DELETE", "INSERT", "SELECT", "UPDATE"],
-        "every table in the app schema must receive ordinary DML"
-    );
-    assert_eq!(
-        sequence_privileges,
-        (true, true, false),
-        "the app role must be able to use and read its schema sequences"
-    );
-    assert_eq!(
-        schema_privileges,
-        (true, false),
-        "the runtime role must enter its schema but cannot author objects"
-    );
     for required in [
         "notes",
         zeroship_migrate_server::provisioning::AUDIT_UNMASK_TABLE,
@@ -1494,21 +1405,35 @@ async fn a_created_then_migrated_database_is_usable_by_the_runtime_role_pg() {
     ] {
         assert!(
             published_tables.iter().any(|table| table == required),
-            "successful apply omitted {required} from publication {publication}: {published_tables:?}"
+            "a successful apply omitted {required} from {publication}: {published_tables:?}"
         );
     }
+
+    let _ = std::fs::remove_dir_all(tmp);
+    cleanup_app(&conn, &app_id).await;
+    cleanup_user(&conn, &owner_id).await;
 }
 
-/// A real apply leaves the audit writer operational through the runtime role.
+/// A real apply leaves the unmask audit table writable by the CAPABILITY roles
+/// a bound session narrows through, and by nobody else's.
 ///
-/// The catalog probes diagnose missing table or sequence grants. The write uses
-/// the worker-to-app identity chain and is the binding correctness check.
+/// The audit table is platform DDL inside a creator schema, so the apply owes
+/// it a grant: without one the table exists and every unmask fails on the audit
+/// write rather than on the unmask. The co-tenant control is what makes the
+/// grant mean something - a `GRANT ... TO PUBLIC`, or one issued against the
+/// wrong database's roles, would satisfy the first half alone.
 #[ntex::test]
-async fn a_real_apply_leaves_the_runtime_role_able_to_write_the_unmask_audit_row_pg() {
+async fn an_apply_leaves_the_audit_table_writable_by_its_own_capability_roles_pg() {
     let conn = admin_conn().await;
     let app_id = AppId::mint();
     let owner_id = UserId::mint();
     let database = seed_app(&conn, &app_id, &owner_id).await;
+    // A SECOND database, converged and never applied to. Its readwrite role is
+    // the control: it exists, it is a legal grantee, and it must hold nothing
+    // on the first database's audit table.
+    let neighbour_app = AppId::mint();
+    let neighbour_owner = UserId::mint();
+    let neighbour = seed_app(&conn, &neighbour_app, &neighbour_owner).await;
 
     let auth = Arc::new(StaticAuthenticator::new());
     auth.insert(
@@ -1525,55 +1450,95 @@ async fn a_real_apply_leaves_the_runtime_role_able_to_write_the_unmask_audit_row
     )
     .await;
     converge_database_schema(&database).await;
+    converge_database_schema(&neighbour).await;
 
-    let req = test::TestRequest::post()
-        .uri(&apply_uri(&app_id, &database))
-        .header("authorization", "Bearer good-token")
-        .set_json(&create_notes_request())
-        .to_request();
-    let resp = test::call_service(&svc, req).await;
+    let resp = test::call_service(
+        &svc,
+        test::TestRequest::post()
+            .uri(&apply_uri(&app_id, &database))
+            .header("authorization", "Bearer good-token")
+            .set_json(&create_notes_request())
+            .to_request(),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::OK);
 
     let schema = database_derivation::schema_name(&database);
     let table = zeroship_migrate_server::provisioning::AUDIT_UNMASK_TABLE;
     let audit = format!("{}.{}", quote_ident(&schema), quote_ident(table));
-    let runtime_role =
-        zeroship_core::database_role::per_app_role_name(&schema).expect("test app role name");
-
     assert!(
         relation_exists(&conn, &audit).await,
         "a successful apply must leave {audit} in place"
     );
 
+    let capability = |database: &DatabaseId, capability| {
+        database_derivation::capability_role_name(database, capability)
+            .expect("the capability role name fits")
+    };
+    let readwrite = capability(&database, DatabaseCapability::ReadWrite);
+    let readonly = capability(&database, DatabaseCapability::ReadOnly);
+    let co_tenant = capability(&neighbour, DatabaseCapability::ReadWrite);
+
     let lit = |s: &str| s.replace('\'', "''");
+    // BOTH capabilities, including read-only: an unmask is a READ that produced
+    // plaintext, so a read-only binding performs them and its row has to land.
+    for role in [&readwrite, &readonly] {
+        assert!(
+            probe_bool(
+                &conn,
+                &format!(
+                    "SELECT has_table_privilege('{}', '{}', 'INSERT')",
+                    lit(role),
+                    lit(&audit)
+                ),
+            )
+            .await,
+            "{role} must hold INSERT on {audit}"
+        );
+        assert!(
+            probe_bool(
+                &conn,
+                &format!(
+                    "SELECT has_sequence_privilege('{}', pg_get_serial_sequence('{}', 'id'), 'USAGE')",
+                    lit(role),
+                    lit(&audit)
+                ),
+            )
+            .await,
+            "{role} must hold USAGE on the BIGSERIAL sequence behind {audit}"
+        );
+        // The grant is INSERT and the sequence, and nothing else: a session that
+        // could SELECT here would read every other actor's audit trail back
+        // through the app.
+        assert!(
+            !probe_bool(
+                &conn,
+                &format!(
+                    "SELECT has_table_privilege('{}', '{}', 'SELECT')",
+                    lit(role),
+                    lit(&audit)
+                ),
+            )
+            .await,
+            "{role} must not be able to read {audit} back"
+        );
+    }
     assert!(
-        probe_bool(
+        !probe_bool(
             &conn,
             &format!(
                 "SELECT has_table_privilege('{}', '{}', 'INSERT')",
-                lit(&runtime_role),
+                lit(&co_tenant),
                 lit(&audit)
             ),
         )
         .await,
-        "the runtime role must hold INSERT on {audit}"
-    );
-    assert!(
-        probe_bool(
-            &conn,
-            &format!(
-                "SELECT has_sequence_privilege('{}', pg_get_serial_sequence('{}', 'id'), 'USAGE')",
-                lit(&runtime_role),
-                lit(&audit)
-            ),
-        )
-        .await,
-        "the runtime role must hold USAGE on the BIGSERIAL sequence behind {audit}"
+        "the control: {co_tenant} belongs to another database and must hold nothing on {audit}"
     );
 
-    let write = as_app_runtime_identity(
+    let write = as_capability_role(
         &conn,
-        &schema,
+        &readwrite,
         &format!(
             "INSERT INTO {audit} (collection, row_pk, \"column\", classification, outcome) \
              VALUES ('notes', 'row-1', 'body', 'pii', 'granted')"
@@ -1582,19 +1547,20 @@ async fn a_real_apply_leaves_the_runtime_role_able_to_write_the_unmask_audit_row
     .await;
     assert!(
         write.is_ok(),
-        "the worker must be able to write an unmask audit row after apply: {write:?}"
+        "a bound session must be able to write an unmask audit row after apply: {write:?}"
     );
-
     let rows: i64 = conn
         .query(&format!("SELECT count(*)::int8 FROM {audit}"), &[])
         .await
         .expect("count audit rows")[0]
         .get(0);
-    assert_eq!(rows, 1, "the audit row must be readable after the write");
+    assert_eq!(rows, 1, "the audit row must be readable by the owner");
 
     let _ = std::fs::remove_dir_all(tmp);
     cleanup_app(&conn, &app_id).await;
     cleanup_user(&conn, &owner_id).await;
+    cleanup_app(&conn, &neighbour_app).await;
+    cleanup_user(&conn, &neighbour_owner).await;
 }
 
 #[ntex::test]
