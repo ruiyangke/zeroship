@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 use zeroship_core::database_derivation;
-use zeroship_core::database_role::{per_app_role_name, PerAppRoleNameError};
+use zeroship_core::database_role::{per_app_role_name, DatabaseCapability, PerAppRoleNameError};
 use zeroship_core::schema_name::SchemaName;
 use zeroship_core::DatabaseId;
 use zeroship_id::AppId;
@@ -41,7 +41,8 @@ use crate::policy::{
 #[cfg(test)]
 use crate::provisioning::AUDIT_UNMASK_TABLE;
 use crate::provisioning::{
-    exec_retry, migrator_executor_config_for_role, provision_audit_unmask_table, provision_migrator,
+    exec_retry, grant_audit_unmask_to_capabilities, migrator_executor_config_for_role,
+    provision_audit_unmask_table, provision_migrator,
     ProvisionRoleError,
 };
 use crate::publication::{reconcile_database_publication, PublicationError};
@@ -395,6 +396,28 @@ pub async fn apply_ir_documents(
     provision_audit_unmask_table(session.client(), schema.as_str())
         .await
         .map_err(ApplyRequestError::ProvisionAuditUnmask)?;
+    // The audit table is reached by the SESSION ROLE a binding narrows to,
+    // which inherits one of this database's two capability roles. Without this
+    // grant the table exists and no bound session can write it, so every
+    // unmask would fail on the audit write rather than on the unmask.
+    grant_audit_unmask_to_capabilities(
+        session.client(),
+        schema.as_str(),
+        &database_derivation::capability_role_name(database_id, DatabaseCapability::ReadWrite)
+            .map_err(|reason| {
+                ApplyRequestError::ProvisionRole(ProvisionRoleError::BadRoleName(
+                    reason.to_string(),
+                ))
+            })?,
+        &database_derivation::capability_role_name(database_id, DatabaseCapability::ReadOnly)
+            .map_err(|reason| {
+                ApplyRequestError::ProvisionRole(ProvisionRoleError::BadRoleName(
+                    reason.to_string(),
+                ))
+            })?,
+    )
+    .await
+    .map_err(ApplyRequestError::ProvisionAuditUnmask)?;
     let backend = PostgresBackend::new_generic(&session);
     backend
         .acquire_project_lock(&exec_cfg)

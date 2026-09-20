@@ -350,6 +350,76 @@ pub fn audit_unmask_table_sql(app_schema: &str) -> String {
     )
 }
 
+/// The grants that let a bound session write an unmask audit row.
+///
+/// # Why the audit table is granted here and creator tables are not
+///
+/// This table is PLATFORM DDL inside a creator schema: its shape is fixed, it
+/// carries no classified column, and the data plane writes it through the same
+/// narrowed session that read the row being unmasked. Which COLUMNS of a
+/// CREATOR table each capability may touch is derived from the owner's own
+/// migration IR, so those grants are per column and belong with the DDL that
+/// creates them. This one is per table and belongs with the DDL above.
+///
+/// **Both capabilities, including read-only.** An unmask is a READ that
+/// produced plaintext, so a read-only binding performs them and its audit row
+/// has to land. `INSERT` and the sequence are the whole grant: no `SELECT`, so
+/// no session can read another actor's audit trail back through the app.
+#[must_use]
+pub fn audit_unmask_capability_grants_sql(
+    schema: &str,
+    readwrite: &str,
+    readonly: &str,
+) -> String {
+    let schema_q = quote_ident(schema);
+    let table_q = quote_ident(AUDIT_UNMASK_TABLE);
+    let readwrite_q = quote_ident(readwrite);
+    let readonly_q = quote_ident(readonly);
+    let schema_lit = quote_lit(schema);
+    let table_lit = quote_lit(AUDIT_UNMASK_TABLE);
+    let readwrite_lit = quote_lit(readwrite);
+    let readonly_lit = quote_lit(readonly);
+    format!(
+        r#"GRANT INSERT ON {schema_q}.{table_q} TO {readwrite_q}, {readonly_q};
+        DO $audit_unmask_grant$
+        DECLARE
+            audit_sequence text;
+        BEGIN
+            audit_sequence := pg_get_serial_sequence(
+                format('%I.%I', '{schema_lit}', '{table_lit}'),
+                'id'
+            );
+            IF audit_sequence IS NULL THEN
+                RAISE EXCEPTION 'serial sequence missing for %.%.id',
+                    '{schema_lit}', '{table_lit}';
+            END IF;
+            EXECUTE format(
+                'GRANT USAGE, SELECT ON SEQUENCE %s TO %I, %I',
+                audit_sequence, '{readwrite_lit}', '{readonly_lit}'
+            );
+        END
+        $audit_unmask_grant$;"#
+    )
+}
+
+/// Idempotently give a database's capability roles the audit-write grant.
+///
+/// # Errors
+/// Any database error, including a missing identity sequence on a table that
+/// predates the contract above.
+pub async fn grant_audit_unmask_to_capabilities(
+    admin: &Client,
+    schema: &str,
+    readwrite: &str,
+    readonly: &str,
+) -> Result<(), compio_postgres::Error> {
+    exec_retry(
+        admin,
+        &audit_unmask_capability_grants_sql(schema, readwrite, readonly),
+    )
+    .await
+}
+
 /// Idempotently establish an app's unmask audit table, as an admin principal.
 ///
 /// Runs [`audit_unmask_table_sql`], the one generator for this DDL. Exported so a
