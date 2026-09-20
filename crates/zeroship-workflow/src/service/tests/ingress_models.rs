@@ -1,5 +1,7 @@
 use super::*;
 use crate::service::{app, capability::SignalTarget, models, SignalAuthority, SignalTokenRequest};
+use futures::{stream::FuturesUnordered, StreamExt};
+use std::time::Duration;
 use zeroship_core::service_assertion::{ServiceSigningKey, ServiceTrustBundle};
 use zeroship_data_orm::{
     orm::{Entity, Output},
@@ -180,4 +182,169 @@ async fn revocation_contract(store: Rc<OrmStore>) {
         assert!(matches!(receipts, Output::Count(0)));
         tx.commit().await.unwrap();
     }
+}
+
+/// Two independent hosts revoking one app's signal authority at the same time.
+///
+/// Each revocation reads the epoch it raises and names that reading in its own
+/// write filter, so the host that commits second cannot store a successor of a
+/// reading the first has already replaced. Both revocations land and every
+/// token minted before them stays refused.
+///
+/// The contention is PostgreSQL's. A SQLite journal reserves its writer as a
+/// transaction opens, so two hosts never hold one app's state row at once.
+#[compio::test]
+async fn postgres_concurrent_app_revocations_each_advance_the_signal_epoch() {
+    let fixture = PostgresFixture::start().await;
+    let worker_url = fixture
+        .admin_url
+        .replacen("postgres@", "customer_worker@", 1);
+    let schema = || crate::service::store::SchemaName::new("customer").unwrap();
+    let policies = Arc::new(HostPolicies::default());
+    let authority = Arc::new(
+        SignalAuthority::new(
+            Arc::new(ServiceSigningKey::generate()),
+            ServiceTrustBundle::new(),
+        )
+        .unwrap(),
+    );
+    let mut hosts = Vec::new();
+    for store in [
+        fixture.store.clone(),
+        orm_store(&worker_url, schema()).await,
+        orm_store(&worker_url, schema()).await,
+    ] {
+        hosts.push(
+            WorkflowService::open(Rc::new(store), policies.clone())
+                .await
+                .unwrap()
+                .with_signal_authority(authority.clone()),
+        );
+    }
+    let holder = hosts.pop().unwrap();
+    let second = hosts.pop().unwrap();
+    let first = hosts.pop().unwrap();
+
+    let app = AppId::mint();
+    first
+        .fixture_register(&app, leased_policy(1, AppPolicy::default()))
+        .await
+        .unwrap();
+    let target = SignalTarget::Topic {
+        topic: "updates".into(),
+    };
+    let token = first
+        .fixture_app(app.clone())
+        .issue_signal_token(
+            &RequestId::mint(),
+            SignalTokenRequest {
+                target: target.clone(),
+                types: ["ready".into()].into(),
+                lifetime_seconds: 60,
+            },
+        )
+        .await
+        .unwrap();
+    let opening = app_signal_epoch(&first, &app).await;
+
+    // Hold the app's state row so both hosts reach their revocation write
+    // before either of them commits one.
+    let observer = connect(&fixture.admin_url).await;
+    let mut blocker = holder.begin().await.unwrap();
+    app::lock_app(&mut blocker, &app).await.unwrap();
+    let pending = [&first, &second]
+        .into_iter()
+        .map(|service| {
+            let scope = service.fixture_app(app.clone());
+            async move {
+                scope
+                    .revoke_signal_tokens(&RequestId::mint(), None)
+                    .await
+            }
+        })
+        .collect::<FuturesUnordered<_>>()
+        .collect::<Vec<_>>();
+    futures::pin_mut!(pending);
+    let contended = async {
+        loop {
+            let waiting: i64 = observer
+                .query_one(
+                    "SELECT count(*) FROM pg_stat_activity \
+                     WHERE usename='customer_worker' AND wait_event_type='Lock'",
+                    &[],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            if waiting == 2 {
+                return;
+            }
+            compio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    futures::pin_mut!(contended);
+    // The journal's lock budget bounds how long the held row may block a host,
+    // so the blocker releases as soon as both are demonstrably waiting on it.
+    let pending = match compio::time::timeout(
+        Duration::from_millis(u64::from(
+            zeroship_data_orm::budgets::DB_LOCK_TIMEOUT_MS / 2,
+        )),
+        futures::future::select(pending, contended),
+    )
+    .await
+    .expect("both revocations must reach the held app state row")
+    {
+        futures::future::Either::Left(_) => {
+            panic!("a revocation settled before the app state row was released")
+        }
+        futures::future::Either::Right(((), pending)) => pending,
+    };
+    blocker.commit().await.unwrap();
+    let mut epochs = compio::time::timeout(Duration::from_secs(10), pending)
+        .await
+        .expect("both revocations must settle once the app state row is released")
+        .into_iter()
+        .map(|revoked| revoked.expect("a revocation refused its own epoch").epoch)
+        .collect::<Vec<_>>();
+    epochs.sort_unstable();
+    assert_eq!(epochs, [opening + 1, opening + 2]);
+    assert_eq!(app_signal_epoch(&first, &app).await, opening + 2);
+    assert_eq!(
+        second
+            .fixture_app(app.clone())
+            .ingest_signal(
+                &RequestId::mint(),
+                token.as_str(),
+                &target,
+                SignalOptions {
+                    signal_type: "ready".into(),
+                    payload: json!("accepted"),
+                },
+            )
+            .await,
+        Err(WorkflowServiceError::Unauthenticated)
+    );
+}
+
+async fn app_signal_epoch(service: &WorkflowService, app: &AppId) -> i64 {
+    let tx = service.begin().await.unwrap();
+    let epoch = tx
+        .database()
+        .entity::<models::app_state::Entity>()
+        .unwrap()
+        .find::<models::AppSignalEpoch>(
+            models::app_state::app_id.eq(app.as_str()).unwrap(),
+            zeroship_data_orm::orm::FindOptions {
+                limit: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("the registered app keeps a state row")
+        .signal_epoch;
+    tx.commit().await.unwrap();
+    epoch
 }
