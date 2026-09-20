@@ -570,8 +570,10 @@ impl Fleet {
         zeroship_migrate_server::apply::apply_ir_documents(
             &fleet.database.creator_url(),
             &schema_work,
-            &fleet.app_id,
-            &database,
+            zeroship_migrate_server::apply::ApplyTarget {
+                app_id: &fleet.app_id,
+                database_id: &database,
+            },
             &request,
             &policy,
             &ledger,
