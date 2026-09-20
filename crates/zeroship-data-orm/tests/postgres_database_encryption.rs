@@ -230,7 +230,7 @@ impl Cluster {
         }
     }
 
-    fn binding(&self, app: &str, database: &DatabaseId, edge: &BindingId) -> DbBinding {
+    fn binding(app: &str, database: &DatabaseId, edge: &BindingId) -> DbBinding {
         DbBinding::to_database(
             app,
             "deploy_fixture",
@@ -288,8 +288,12 @@ impl Cluster {
 
     /// Plant `bytes` into `database` at the same collection, column and row.
     async fn plant(&self, database: &DatabaseId, bytes: &[u8]) {
+        use std::fmt::Write as _;
         let schema = database_derivation::schema_name(database);
-        let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        let mut hex = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            write!(&mut hex, "{byte:02x}").expect("writing to a String cannot fail");
+        }
         self.admin
             .execute(
                 &format!(
@@ -367,7 +371,7 @@ async fn two_apps_bound_to_one_database_read_each_others_encrypted_rows() {
     let cluster = Cluster::build(postgres.url()).await;
 
     let writer = cluster
-        .open(cluster.binding(APP_A, &cluster.shared, &cluster.a_on_shared))
+        .open(Cluster::binding(APP_A, &cluster.shared, &cluster.a_on_shared))
         .await;
     write_row(&writer).await;
 
@@ -401,7 +405,7 @@ async fn two_apps_bound_to_one_database_read_each_others_encrypted_rows() {
     // THE SUBJECT, differing in one variable: a different tenant, its own
     // binding, the same database.
     let reader = cluster
-        .open(cluster.binding(APP_B, &cluster.shared, &cluster.b_on_shared))
+        .open(Cluster::binding(APP_B, &cluster.shared, &cluster.b_on_shared))
         .await;
     assert_eq!(
         read_column(&reader)
@@ -446,7 +450,7 @@ async fn a_ciphertext_lifted_into_another_database_does_not_verify() {
     let cluster = Cluster::build(postgres.url()).await;
 
     let here = cluster
-        .open(cluster.binding(APP_A, &cluster.shared, &cluster.a_on_shared))
+        .open(Cluster::binding(APP_A, &cluster.shared, &cluster.a_on_shared))
         .await;
     write_row(&here).await;
     let lifted = cluster.stored_ciphertext(&cluster.shared).await;
@@ -462,7 +466,7 @@ async fn a_ciphertext_lifted_into_another_database_does_not_verify() {
 
     // THE SUBJECT: the SAME app, its OWN second database, the planted bytes.
     let there = cluster
-        .open(cluster.binding(APP_A, &cluster.other, &cluster.a_on_other))
+        .open(Cluster::binding(APP_A, &cluster.other, &cluster.a_on_other))
         .await;
     let refused = read_column(&there)
         .await

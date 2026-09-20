@@ -418,7 +418,7 @@ fn cross_backend_ciphertext_decrypt_via_shared_key() {
                 .unwrap();
             assert_ne!(key_a.k_enc, key_elsewhere.k_enc);
         });
-    })
+    });
 }
 
 /// Round-trip encryption through SQLite SQL binding and typed decoding.

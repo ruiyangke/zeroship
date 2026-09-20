@@ -38,6 +38,12 @@ const COLUMN_KEY_INFO: &[u8] = b"zeroship:at-rest-column-key:v2";
 /// Every app the project binds to one database expands the SAME key from it,
 /// which is the point: encryption is at-rest protection, not the fence between
 /// co-binding-holders.
+///
+/// # Panics
+///
+/// If HKDF-SHA256 refuses to expand 32 bytes, which it does only past
+/// `255 * 32`. The length is a constant here, so the failure is unreachable and
+/// is not turned into a `Result` a caller would have to pretend to handle.
 #[must_use]
 pub fn derive_key(project_root: &AeadKey, database: &DatabaseId) -> AeadKey {
     let expander = Hkdf::<Sha256>::new(
