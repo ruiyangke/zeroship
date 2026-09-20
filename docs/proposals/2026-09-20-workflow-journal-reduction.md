@@ -212,6 +212,25 @@ This list is the answer to Open 2, worked per table against `schema.ts` and the 
 enforces each property rather than in aggregate. It is shorter than the list this proposal
 started with, because the per-table pass refuted most of it.
 
+**A deletion that makes a property accidentally true of every survivor must pin that property
+in the same slice.** This is the mirror of the standard below, and the page tables are the worked
+example. `receipt_extension!` in `service/delivery.rs` lists four tables - `collection_pages`,
+`fanout_pages`, `propagation_pages`, `reconciliation_pages` - while `impl PageCursor` covers only
+`collection_pages` and `reconciliation_pages`. The distinction is real and load bearing: a page
+cursor stores a frozen plan and the index it reserves next, and the other two do not.
+
+Delete `fanout_pages` and `propagation_pages` and the macro list becomes EXACTLY the set that
+implements `PageCursor`. At that instant "every receipt extension is a page cursor" is true of
+every survivor, the distinction stops being visible, and the next person to add a paged kind sees
+that every neighbour is both and makes it both - inheriting a reservation cursor for a kind whose
+plan is not frozen. Nothing fails, because the property is currently true only BY OMISSION and
+no test asserts it.
+
+So the pin lands in the slice that does the deleting, not after it. It must be a compiler
+contract or an assertion that breaks when the set changes - forcing a new kind to STATE whether
+it is a page cursor - rather than a search for `impl PageCursor`, which answers spelling. The
+general rule: NEGATIVES DO NOT SURVIVE REFACTORS UNLESS SOMETHING ASSERTS THEM.
+
 **Naming a home is not evidence that the home holds.** No table below is deleted on a claimed
 invariant home that a mutation has not proven. For each deletion: neutralize the claimed OTHER
 home, and require the test that binds the property to go RED there. A green under that mutation
@@ -237,7 +256,8 @@ mutation cannot refute a disjunction.
 ```
   outbox                      nothing reads it
   fanout_pages,
-  propagation_pages           the frozen page result moves with its receipt
+  propagation_pages           the frozen page result moves with its receipt,
+                              AND the PageCursor set is pinned in the same slice
   subscriptions               an edge on the thing waited on, carrying its sequence
 ```
 
