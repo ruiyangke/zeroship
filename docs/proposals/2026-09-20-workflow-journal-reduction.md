@@ -19,8 +19,10 @@ as the new one.
 
 ```
   execution        runs, generations, steps, tasks, waits, signals, payloads, payload_refs
-  delivery         outbox, job_publications, advance_publications, fanout_publications,
-                   propagation_publications, fanout_pages, propagations, propagation_pages
+  delivery         job_publications, advance_publications, fanout_publications,
+                   propagation_publications, fanout_pages, propagation_pages
+  cancellation     propagations
+  event log        outbox
   bookkeeping      job_receipts, management_receipts, requests,
                    collection_pages, reconciliation_pages
   pub/sub          topics, broadcasts, subscriptions
@@ -30,7 +32,7 @@ as the new one.
   housekeeping     schema_version, app_state
 ```
 
-**The delivery group is the largest, and it is there for one reason.**
+**The delivery group is there for one reason.**
 `crates/zeroship-workflow/src/service/publication.rs` opens by saying so:
 
 > Creator-owned, immutable queue publication intents. Journal transitions write intents before
@@ -88,9 +90,9 @@ uniqueness constraint over the identifying tuple, and a design that drops the pe
 to say where that tuple goes.
 
 This is worth stating plainly because the relocation has been argued as a safety change: a
-creator should not be able to drop the log the platform is executing against. It is also the
-largest simplification available, and the system's biggest group of tables is a direct
-consequence of the split it closes.
+creator should not be able to drop the log the platform is executing against. It is also a
+simplification, because the delivery group exists as a direct consequence of the split it
+closes rather than as something workflow execution needs.
 
 ---
 
@@ -233,9 +235,11 @@ compensation that itself fails and a rollback interrupted partway, are undocumen
 systems that take that approach. Server-orchestrated compensation answers both. It costs
 columns, not tables.
 
-**The fence stays.** Refusing an operation whose authority has lapsed is not machinery to be
-simplified away; it is the property the machinery exists for. Any reduction has to say where
-each invariant lands, not merely which table disappears.
+**The authority fence stays.** Refusing an operation whose authority has lapsed is not machinery
+to be simplified away; it is the property the machinery exists for. Any reduction has to say
+where each invariant lands, not merely which table disappears. This is a different fence from
+the cascade fence on `propagations` above, which is about a cancelled parent's running children;
+the two share a word and nothing else.
 
 **Single writer per execution stays**, for the same reason.
 
