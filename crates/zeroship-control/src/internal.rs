@@ -552,15 +552,12 @@ pub async fn get_app_data_key(
 /// session narrows to, and all three are Control facts. A worker that derived
 /// any of them would address a schema and assume a role no reconciler created.
 ///
-/// Only a LIVE binding is served, and both halves of "live" are predicates
-/// here rather than judgement at the caller:
-///
-/// - `database_bindings.status = 'active'` and `observed_generation` caught up
-///   to `generation`. Control declares and a per-cluster reconciler converges;
-///   nothing spans the control database and a tenant cluster, so a declared
-///   binding whose roles are not there yet must not be handed out.
-/// - `databases.status = 'active'`. A database still provisioning has a schema
-///   epoch that no cluster has minted roles for.
+/// Only a LIVE binding is served, and "live" is a predicate rather than
+/// judgement at the caller:
+/// [`zeroship_core::live_binding::LIVE_BINDINGS_FROM_WHERE`], which carries
+/// each conjunct and why it is there. It is shared with the CDC relay and the
+/// migration service because a binding one of them calls live and another does
+/// not is a tenant-boundary disagreement.
 ///
 /// A stale epoch is not a failure of this read: the cluster's own epoch row is
 /// the authority, so composing a retired one makes `SET LOCAL ROLE` fail and
@@ -589,14 +586,10 @@ pub async fn get_app_bindings(
     let rows = match state
         .control_pg
         .query(
-            "SELECT b.id AS binding_id, b.database_id, d.schema_epoch \
-               FROM zeroship.database_bindings b \
-               JOIN zeroship.databases d ON d.id = b.database_id \
-              WHERE b.app_id = $1 \
-                AND b.status = 'active' \
-                AND b.observed_generation >= b.generation \
-                AND d.status = 'active' \
-              ORDER BY b.id",
+            &format!(
+                "SELECT b.id AS binding_id, b.database_id, d.schema_epoch {} ORDER BY b.id",
+                zeroship_core::live_binding::LIVE_BINDINGS_FROM_WHERE
+            ),
             &[&id.as_str()],
         )
         .await

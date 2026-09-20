@@ -22,6 +22,7 @@ pub mod database_role;
 pub mod db_url;
 pub mod device_grant;
 pub mod dispatch_frame;
+pub mod live_binding;
 pub mod logout_token;
 pub mod net_policy;
 pub mod observability;

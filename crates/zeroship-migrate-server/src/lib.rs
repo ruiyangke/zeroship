@@ -17,6 +17,7 @@
 pub mod api;
 pub mod apply;
 pub mod auth;
+pub mod bindings;
 pub mod bundle;
 pub mod config;
 pub mod datastore;
@@ -34,6 +35,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use auth::Authenticator;
+use bindings::BindingStore;
 use policy::ManagedPolicyConfig;
 use rate_limit::MutationRateLimiter;
 use schema_apply_store::SchemaApplyStore;
@@ -56,6 +58,10 @@ pub struct MigrationServiceState {
     pub trust_proxy: bool,
     pub policy_config: ManagedPolicyConfig,
     pub schema_apply_store: SchemaApplyStore,
+    /// Whether the app a request authorizes as still reaches the database it
+    /// named. Same DSN as the apply ledger, different question: the ledger
+    /// records what this service did, this decides whether it may.
+    pub bindings: BindingStore,
     /// Bounds `/readyz`. The probe opens a connection (this service has no
     /// shared client to reuse - see `SchemaApplyStore::connect`), so the gate's
     /// TTL is what keeps an unauthenticated probe flood from becoming a
@@ -82,6 +88,7 @@ impl MigrationServiceState {
             mutation_rate_limiter,
             trust_proxy,
             policy_config,
+            bindings: BindingStore::new(control_dsn.clone()),
             schema_apply_store: SchemaApplyStore::new(control_dsn),
             readiness: ReadinessGate::with_defaults(),
         }

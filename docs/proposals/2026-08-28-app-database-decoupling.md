@@ -5,9 +5,9 @@ entities, the control-plane surface that declares them, the cluster reconciler t
 cluster match, the data path that narrows to what the reconciler granted, the creator config and
 manifest made plural, `env.databases` reaching every bound database and typed under its label,
 the `zeroship db` commands, deploy verifying a live binding rather than comparing schemas, and
-at-rest column encryption keyed on the database. What remains is the migration service's own
-app-id re-key, the subscribe request naming a database, capacity-aware placement, and an apply
-advancing an epoch.
+at-rest column encryption keyed on the database, and the migration service applying into the
+schema of the database the request names. What remains is the subscribe request naming a
+database, capacity-aware placement, and an apply advancing an epoch.
 
 Built:
 
@@ -111,17 +111,55 @@ Not built: the migration service's own app-id-to-database re-key, and capacity-a
 apply advances an epoch. Open 11's subset test at isolate build does
 not exist, so a build reaching a column the database lacks fails at query time with
 `42703 undefined_column`.
+- the migration service's re-key onto the database. The apply route is
+  `POST /v1/apps/{app_id}/databases/{database_id}/migrations/apply`: the DATABASE is the target
+  and the APP is the authorization subject, and both are in the path because the CLI posts the
+  build's `migrations.ir.json` VERBATIM and must not splice a target into a body it does not
+  parse. `zeroship_migrate_server::api::apply` admits on
+  `zeroship_core::live_binding::LIVE_BINDINGS_FROM_WHERE` - the one predicate Control serves
+  bindings from and the CDC relay resolves a schema with - before any side effect, and refuses
+  `database_not_bound` naming the binding call. `apply_ir_documents` derives its schema from
+  `database_derivation::schema_name` and runs as `zs_db_<dbs>_mig`, the owner the reconciler
+  minted, so the project advisory lock and the engine journal are per database too. The ceiling
+  is bound to that schema rather than to the app's, because a charter bound to the wrong name
+  grants nothing and refuses every creator statement as out-of-scope.
+  `crates/zeroship-migrate-server/tests/apply_database_target_pg.rs` drives both halves against
+  a converged cluster: a table lands in the named database and not in the other live-bound one,
+  and an apply naming an unbound database is refused with the identical request succeeding once
+  the binding converges.
 
-Three things are narrower than "built" and are recorded here rather than discovered later. The CDC
+  **The apply establishes no per-app runtime role.** A role carrying
+  `SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA` and granted to the ONE shared worker
+  login is assumable by every app that login serves - every co-tenant of the database included -
+  which is the reach `GRANT ... WITH SET FALSE` on the binding-to-database edge exists to deny.
+  What an app may touch is carried by the two capability roles the reconciler minted.
+  `runtime_role_provisioning_sql` survives for PLATFORM schemas, whose one caller is the
+  schema-bundle applier.
+
+  **The publication is the datastore's one shared object.**
+  `zeroship_core::replication_names::DATASTORE_PUBLICATION` names it; a database's apply takes
+  the advisory lock keyed on THAT name and issues `ALTER PUBLICATION ... ADD TABLE` /
+  `DROP TABLE` for its own schema's delta, never `SET TABLE`, which names the whole object and
+  would drop every co-tenant's tables with no error anywhere. The relay reads the same shared
+  name; its slot stays per app through `replication_names::relay_slot_name`.
+
+Not built: the encryption salt and AAD, and capacity-aware placement. No apply advances an epoch.
+Open 11's subset test at isolate build does not exist, so a build reaching a column the database
+lacks fails at query time with `42703 undefined_column`.
+
+Two things are narrower than "built" and are recorded here rather than discovered later. The CDC
 relay DOES filter on the bound database's schema
 (`zeroship_data_cdc_server::source::bound_database_schema`) and refuses a second live binding
 rather than picking one, but the subscribe request still names only the app, so carrying a database
-on that wire is the routing key's remaining half.
-`zeroship_core::app_derivation::schema_name` still returns the app id for the migration service,
-Control's publication journal and the CLI; no data crate calls it. And `ThreadDbContext` holds one
+on that wire is the routing key's remaining half. And `ThreadDbContext` holds one
 connection plus a per-app binding map rather than a connection map keyed `(app_id, database_id)`,
 because keying it that way needs per-database datastore coordinates that arrive with
 `env.databases`.
+
+`zeroship.app_schema_applies` is still keyed on the app alone, so the ledger records THAT an app
+applied a set and not WHICH database it went to. Nothing reads it - the deploy gate that did is
+deleted - so it is an audit gap rather than a correctness one, and closing it is a platform
+migration.
 
 **Control still never writes `active` itself.** The management surface declares and stops: a
 database it creates stops at `provisioning` and a binding at `pending` until a reconciler holding
@@ -888,22 +926,29 @@ and the migrator role `zs_db_<dbs>_mig` is named by no app. There is no `owner` 
 can hold, so there is no ownership transfer, no ping-pong between apps, and nothing for an app
 deletion to cascade into.
 
-**One route, and the control plane is not on the apply.** The CLI addresses the database by id:
+**One route, and the control plane is not on the apply.** The CLI addresses the database by id
+and the app by id:
 
 ```
-creator -> POST /v1/databases/{database_id}/migrations/apply   (zeroship-migrate-server)
+creator -> POST /v1/apps/{app_id}/databases/{database_id}/migrations/apply
 ```
 
-`crates/zeroship-migrate-server/src/api.rs` already registers `/v1/databases/{database_id}`, and
-its `ControlPlaneAuthenticator` (`crates/zeroship-migrate-server/src/auth.rs`) already authorizes
-against the creator's own bearer rather than the platform control key. What changes is the
-identity: the handler's path type is `AppId` and `provision_app_database`
-(`crates/zeroship-migrate-server/src/provisioning.rs`) derives its schema with
-`app_derivation::schema_name`. The URL was renamed; the identity was not.
+`crates/zeroship-migrate-server/src/api.rs` registers it, and its `ControlPlaneAuthenticator`
+(`crates/zeroship-migrate-server/src/auth.rs`) authorizes `Action::AppsDeploy` against the
+creator's own bearer rather than the platform control key. Both ids are in the PATH because the
+CLI posts the build's `migrations.ir.json` verbatim: it parses and rewrites nothing, so a target
+it had to splice into that body is a target it could get wrong.
 
-`Resource::Database` gains the policy "principal may migrate N iff principal holds a qualifying
-seat on N's project", resolved the way app authority already resolves. That is the load-bearing
-change in the re-key, not the mechanical `app_id` occurrences across the service.
+**Authority is the app's live binding, and it is a different question from authorization.** The
+bearer decides whether this principal may deploy this app;
+`zeroship_core::live_binding::LIVE_BINDINGS_FROM_WHERE` decides whether that app reaches this
+database. Neither implies the other and the remedies differ, so the refusals are distinct:
+`database_not_bound` names the database and the call that grants a binding.
+
+A project-seat policy on `Resource::Database` - "principal may migrate N iff principal holds a
+qualifying seat on N's project" - would let the app leave the route entirely. It is not built:
+the binding predicate already answers who may write which schema, and the Cedar band is a
+separate change with its own schema edit.
 
 **With many zones the migration service is zone-local.** A single global instance would hold a
 session advisory lock across a whole multi-file apply over a wide-area link. So `migrate-server`
@@ -911,12 +956,14 @@ runs per zone, and the CLI resolves a `dbs_` to its zone's endpoint once before 
 a real weakening of "the control plane is not in the path" and is recorded as such rather than
 discovered: control answers one resolution request, and no control code runs during the apply.
 
-**The apply lock moves to the database and stays SESSION-scoped.** The engine already takes a
-session lock around a whole plan and releases it explicitly; the host acquires once on its pinned
-session (`crates/zeroship-migrate-server/src/session.rs`) and passes `LockMode::AlreadyHeld` for
-every IR file. Only the logical key changes. The publication reconciler's own advisory lock
-(`crates/zeroship-migrate-server/src/publication.rs`) is keyed on an app-derived publication name
-and is replaced, not reused.
+**The apply lock is on the database and stays SESSION-scoped.** The engine takes a session lock
+around a whole plan and releases it explicitly; the host acquires once on its pinned session
+(`crates/zeroship-migrate-server/src/session.rs`) and passes `LockMode::AlreadyHeld` for every IR
+file. The key is the executor's `project_id`, which is the physical schema `db_<dbs>`, so the
+lock follows the database rather than the app. The publication reconciler's lock
+(`crates/zeroship-migrate-server/src/publication.rs`) is a DIFFERENT lock on a different key: it
+is keyed on the datastore publication, because that is the object being edited and every
+database on the cluster contends for it.
 
 **The deploy gate stops comparing schemas.** `crates/zeroship-control/src/registry.rs` today
 predicates the deploy UPDATE on one `descriptor_sha256` matching the newest applied row and
@@ -1813,12 +1860,17 @@ Each records something that was tried or specified and broke.
   not transfer here.
 
 - **Do not re-key `app_derivation::schema_name` without deciding where the workflow journal
-  goes.** It still returns the app id, and `workflow_host::app_schema` composes the journal's home
+  goes.** It returns the app id, and `workflow_host::app_schema` composes the journal's home
   from it through `DbBinding::platform` - the trusted-service constructor, which carries no
   database edge and never consults `SuppliedAppBindings`. So plurality cannot split the journal
   today, and that is an accident of the derivation rather than a decision. Re-keying it to a
   database MOVES the journal: rows already written stay in a schema nothing points at afterwards,
   not deleted and not read, with no compile error to say so.
+
+  **The migration service's re-key went around this, not through it.** The apply derives its
+  schema from `database_derivation::schema_name`, so a creator's tables follow the database
+  while the journal stays where the app id puts it. That is why the tripwire below did not fire
+  and why the journal's home is still an open decision rather than one this change made.
   `the_journal_schema_is_derived_from_the_app_not_from_a_database_binding`
   (`crates/zeroship-worker/src/workflow_host/tests.rs`) trips on exactly that change and explains
   the consequence where the person doing the re-key will meet it. The reasoning lives in that

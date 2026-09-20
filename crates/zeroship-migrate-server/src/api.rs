@@ -7,6 +7,7 @@ use serde_json::json;
 use uuid::Uuid;
 use zeroship_authn::rate_limit::RateLimitDecision;
 use zeroship_authz::Action;
+use zeroship_core::DatabaseId;
 use zeroship_id::AppId;
 
 use zeroship_core::schema_bundle::{SchemaBundle, MIGRATE_AUDIENCE};
@@ -18,8 +19,6 @@ use crate::apply::{
 };
 use crate::auth::AuthError;
 use crate::bundle::{apply_schema_bundle, BundleError};
-use crate::provisioning::provision_app_database;
-use crate::session::CompioPgSession;
 use crate::MigrationServiceState;
 
 /// JSON extractor budget for a migration apply request.
@@ -49,10 +48,7 @@ const SCHEMA_BUNDLE_BODY_BYTES: usize = 4 * 1024 * 1024;
 /// and nothing to mutate at runtime.
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
-        web::resource("/v1/databases/{database_id}").route(web::post().to(create_database)),
-    )
-    .service(
-        web::resource("/v1/apps/{app_id}/migrations/apply")
+        web::resource("/v1/apps/{app_id}/databases/{database_id}/migrations/apply")
             .state(web::types::JsonConfig::default().limit(APPLY_REQUEST_BODY_BYTES))
             .route(web::post().to(apply)),
     )
@@ -164,64 +160,6 @@ fn schema_bundle_error_response(error: &BundleError) -> web::HttpResponse {
     }))
 }
 
-/// Explicitly create an app's database: its data schema, the migrator role that
-/// owns it, and the runtime role the worker opens it under.
-///
-/// The path segment IS the app id, which is why it authorizes against the app
-/// and provisions the app's derived schema. Keeping the database route lets the
-/// later database-entity change replace only id resolution, without moving
-/// lifecycle authority or adding a compatibility route.
-///
-/// The segment is typed, so a uuid-rendered id is a 404 from the extractor
-/// rather than a request that authorizes against an app the roster does not
-/// hold. The schema comes from [`app_derivation::schema_name`], never from a
-/// second rendering of the id spelled here.
-pub async fn create_database(
-    req: web::HttpRequest,
-    state: State<Arc<MigrationServiceState>>,
-    database_id: Path<AppId>,
-) -> web::HttpResponse {
-    let database_id = database_id.into_inner();
-    let caller = match authorize_mutation(&req, &state, &database_id).await {
-        Ok(caller) => caller,
-        Err(response) => return response,
-    };
-    let session = match CompioPgSession::connect(&state.provision_dsn).await {
-        Ok(session) => session,
-        Err(error) => {
-            tracing::error!(
-                error = %error,
-                database_id = database_id.as_str(),
-                "migrate-server: database create connection failed"
-            );
-            return database_infrastructure_response();
-        }
-    };
-    if let Err(error) = provision_app_database(session.client(), &database_id).await {
-        tracing::error!(
-            error = %error,
-            database_id = database_id.as_str(),
-            principal_id = caller.principal_id.as_str(),
-            "migrate-server: database create failed"
-        );
-        return database_infrastructure_response();
-    }
-
-    tracing::info!(
-        database_id = database_id.as_str(),
-        principal_id = caller.principal_id.as_str(),
-        "migrate-server: database created"
-    );
-    web::HttpResponse::Ok().json(&json!({"database_id": database_id}))
-}
-
-fn database_infrastructure_response() -> web::HttpResponse {
-    web::HttpResponse::ServiceUnavailable().json(&json!({
-        "error": "database_infrastructure",
-        "detail": "database service unavailable",
-    }))
-}
-
 /// Liveness. Constant 200 by design: it must not touch Postgres, or a database
 /// blip would get this container killed on top of the outage.
 pub async fn healthz() -> web::HttpResponse {
@@ -262,22 +200,72 @@ pub async fn readyz(state: State<Arc<MigrationServiceState>>) -> web::HttpRespon
     }
 }
 
+/// Apply a creator's frozen IR into the schema of the DATABASE the request
+/// names.
+///
+/// # Both ids are in the path, and neither is redundant
+///
+/// The DATABASE is the target: its schema is what the DDL writes, and an app
+/// may hold several databases, so a target derived from the app could only
+/// address one of them. It rides in the path rather than the body because the
+/// CLI posts the build's `migrations.ir.json` VERBATIM - it does not parse or
+/// rewrite that file, and a target it had to splice in would be a target it
+/// could get wrong.
+///
+/// The APP is the authorization subject: the bearer is checked for
+/// [`Action::AppsDeploy`] on it, exactly as every other mutation here is. It is
+/// also what [`MigrationServiceState::bindings`] asks about - whether that app
+/// still reaches that database - which is a separate question from whether the
+/// principal may deploy the app, with a separate remedy.
+///
+/// Both segments are typed, so a uuid-rendered id or a `dbs_` where an `app_`
+/// belongs is a 404 from the extractor rather than a request that authorizes
+/// against something the roster does not hold.
 pub async fn apply(
     req: web::HttpRequest,
     state: State<Arc<MigrationServiceState>>,
-    app_id: Path<AppId>,
+    path: Path<(AppId, DatabaseId)>,
     body: Json<ApplyMigrationsRequest>,
 ) -> web::HttpResponse {
-    let app_id = app_id.into_inner();
+    let (app_id, database_id) = path.into_inner();
     let caller = match authorize_mutation(&req, &state, &app_id).await {
         Ok(caller) => caller,
         Err(response) => return response,
     };
+    // ADMISSION, above every side effect. A refused apply must leave no
+    // temporary directory, no role, no ledger row and no lock behind.
+    match state
+        .bindings
+        .holds_live_binding(&app_id, &database_id)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            return apply_error_response(ApplyRequestError::DatabaseNotBound {
+                app_id,
+                database_id,
+            })
+        }
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                app_id = app_id.as_str(),
+                database_id = database_id.as_str(),
+                "migrate-server: binding admission read failed"
+            );
+            return web::HttpResponse::ServiceUnavailable().json(&json!({
+                "error": "binding_admission_unavailable",
+                "detail": "the control plane could not be asked whether this app holds this \
+                           database",
+            }));
+        }
+    }
 
     match apply_ir_documents(
         &state.provision_dsn,
         &state.tmp_dir,
         &app_id,
+        &database_id,
         &body,
         &state.policy_config,
         &state.schema_apply_store,
@@ -288,6 +276,7 @@ pub async fn apply(
         Ok(report) => {
             tracing::info!(
                 app_id = app_id.as_str(),
+                database_id = database_id.as_str(),
                 principal_id = caller.principal_id.as_str(),
                 applied = report.applied.len(),
                 skipped = report.skipped.len(),
@@ -448,11 +437,14 @@ fn apply_error_response(err: ApplyRequestError) -> web::HttpResponse {
     } else {
         tracing::debug!(error = %err, "migrated: migration request rejected");
     }
-    if let ApplyRequestError::DatabaseNotCreated { database_id } = &err {
+    // THE REMEDY NAMES THE CALL, and only where there is one to name. A
+    // database with no schema is waiting on the cluster reconciler, which no
+    // creator request can hurry, so that refusal carries none.
+    if let ApplyRequestError::DatabaseNotBound { database_id, .. } = &err {
         return web::HttpResponse::build(status).json(&json!({
             "error": kind,
             "detail": err.to_string(),
-            "remedy": format!("POST /v1/databases/{}", database_id.as_str()),
+            "remedy": format!("POST /api/databases/{}/bindings", database_id.as_str()),
         }));
     }
     // `migration_id` and `gated_versions` used to ride along here, and both existed
