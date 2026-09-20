@@ -107,6 +107,26 @@ at all: queue readers keep positions in memory and checkpoint an ack level into 
 record. Child workflows and external signals are not special cases; both are an event, an entry
 in a per-execution map, and one outbox row, written atomically.
 
+Two consequences for this proposal, and the second corrects it.
+
+The per-category shape Temporal keeps only for compatibility is the shape we have, with nothing
+to keep it for: we are pre-launch and owe no one a migration. That is the fold described below.
+
+An ack level works for Temporal because its queue is APPEND-ONLY, so an item stays selectable
+until acknowledged. Our sweeps read a MUTABLE set, and processing an item removes it from the
+query that would re-derive the list. That is why "checkpoint a cursor, not a row per scan"
+fails here and a frozen list is load bearing. The honest fix is not to substitute a cursor for
+the page row. It is to make what the sweep reads append-only, at which point the page tables go
+for Temporal's reason rather than by a substitution that converts at most once into at least
+once.
+
+**Temporal also lacks things this journal carries**, which is the other half of the comparison
+and the reason table count alone is a poor score. Server-orchestrated compensation, topic
+broadcast with subscriber fan-out, and payload offload with a collection lifecycle have no
+counterpart there. Cascade cancellation exists but runs inside the history service with no
+durable obligation row, so it does not survive that service dying mid-cascade. Any claim that
+this system spends more state for less capability has to account for those first.
+
 **Resonate keeps no outbox.** The header of its only migration, in
 `crates/resonate-server-postgres/migrations/0001_initial.sql`, states the principle:
 
@@ -121,9 +141,11 @@ named CHECK constraints named identically to properties in a machine-checked spe
 
 ## The design
 
-Four techniques, each of which a system in this class already ships without the tables we spend.
-Two of them survived the per-table pass below unchanged. Two did not, and are written here with
-the objection attached rather than removed, because the objection is the useful part.
+Five techniques, each of which a system in this class already ships without the tables we spend.
+Two of the first four survived the per-table pass below unchanged. Two did not, and are written
+here with the objection attached rather than removed, because the objection is the useful part.
+The fifth came out of the comparison rather than the pass, and is the one with the most code
+behind it.
 
 **1. A transition returns its messages; the caller delivers them.** This removes the network hop
 and the receipt matching: nothing is stored because nothing needs draining. It does NOT by
@@ -151,6 +173,16 @@ fails with that property's name. The obstacle is dialect parity: `step_child_lin
 CHECK the journal declares and it exists only in the PostgreSQL artifact, so today this technique
 has no enforcement at all on the SQLite tier. That is Open 1, and it is a precondition for this
 technique rather than a detail under it.
+
+**5. One discriminated mechanism instead of per-kind machinery.** This is the largest remaining
+structural change and it was not in the first version of this proposal. `fanout` and
+`propagation` are two implementations of one idea: take an obligation, page through the entities
+it reaches, record what each page did, and refuse to run a page out of order. Each has its own
+publication table, its own page table, its own history module and its own receipt validation.
+Temporal's position is that a child workflow and an external signal are not special cases, and
+the same argument applies here with more force, because our two cases are nearer to each other
+than those two are. Collapsing them removes more code than deleting any table on the list above,
+and unlike the deletions it does not require the relocation first.
 
 ---
 
@@ -289,6 +321,14 @@ and has no public production record. The techniques transfer. The architecture d
 
 ## Open
 
+0. **Is reduction even the right work?** Asked first because it outranks the rest. This journal
+   has no synchronous query of a running workflow's state and no visibility or search surface,
+   and the comparable systems treat both as core. On a platform where agents build the apps,
+   "what is this run doing right now" is a question that will be asked constantly, and today the
+   only answer is reading journal rows directly. Adding that probably delivers more than every
+   deletion below put together. This proposal should not be read as arguing otherwise; it argues
+   only that if the state is reduced, these are the reductions that hold up.
+
 1. **Does the SQLite dev tier take the same shape?** It should, and pre-launch there is no
    reason it cannot. Worth settling before the first table is deleted rather than after, because
    a second shape is how the delivery group came back last time.
@@ -300,9 +340,15 @@ and has no public production record. The techniques transfer. The architecture d
    a missing fact.
 
    It also surfaced three gaps that belong to the current code rather than to this proposal, and
-   that anyone touching these tables should close first. No test resumes an unsettled page with
-   a different `page_size`, which is the one mutation that would bind the frozen item list, and
-   no test aborts the reserve transaction itself rather than the finalization that follows it.
+   that anyone touching these tables should close first. No COLLECTION or RECONCILIATION test
+   resumes an unsettled page with a different `page_size`, which is the one mutation that would
+   bind the frozen item list, and none aborts the reserve transaction itself rather than the
+   finalization that follows it. Fan-out is the counterexample worth copying rather than a gap:
+   `tests/fanout/ordering.rs` delivers a page at size one, retries the unsettled page at a
+   larger size, and asserts both the identical receipt and an unchanged snapshot, so the larger
+   page delivered nothing more. The same body also binds replay duplication by counting a
+   subscriber's signal rows, and carries a foreign app asserted at zero as its cross-tenant
+   control. The collection path needs what fan-out already has.
    `subscription_sequence_unique` has no stated purpose anywhere, and the schema comment that
    appears to justify it describes standing in for a foreign key's supporting index, which does
    not apply because nothing references `subscriptions`. And `ingress::target_epoch` states in a
@@ -329,6 +375,24 @@ deduplication state that `publication.rs` says explicitly nothing may retire. Co
 transaction replaces the reason it exists; it does not automatically replace every guarantee it
 provides. The advance intent is the worked example: it reads as a projection of the intent row,
 and it is the dedup key.
+
+**Do not put creator values in the platform schema.** This is a constraint on everything here,
+not an open question. A platform schema is not an at-rest home for creator data, which is why
+the sibling proposal sequences the payload promotion BEFORE any reader exists in
+`workflow_manager` rather than beside it: a reader is what puts creator payload at rest there.
+The same rule appears at the crypto boundary, where a platform binding addresses no database and
+`encryption::encryption_database` refuses it rather than defaulting one, so an encrypted column
+on a platform schema stops at that refusal. Treat the refusal as the rule restated, not as an
+obstacle to route around.
+
+The gate on this has a trap worth naming, because the gate is a test and the test can pass
+without the property. `journal_payload_columns_are_a_closed_set` selects a column whose type is
+json, jsonb or bytea, or whose NAME is one of a short list. Creator payload in a text column
+under another name is invisible to it: `steps.record` serialising a `StepCheckpoint`,
+`signals.payload`, `broadcasts.payload`, `generations.error`, and the schedule inputs inside
+`deploys.manifest`. Emptying the set as the predicate is written today turns the assertion green
+and leaves the property false. The predicate widens and the set empties in one change, or
+neither happens.
 
 **Do not let a grouping carry the argument.** Every table above was deleted by the sentence
 written against its group, not against it. `propagations` was filed under delivery and inherited
