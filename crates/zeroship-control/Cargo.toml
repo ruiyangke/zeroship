@@ -157,6 +157,12 @@ rusqlite = { workspace = true, features = ["bundled"] }
 tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }
 
+# `database_decoupling_e2e` runs CREATOR JAVASCRIPT through the real V8
+# database plugin, so the one exercise that drives the whole app/database
+# path reaches `env.db` and `env.databases.<label>` the way a deploy does
+# rather than asserting the ORM layer underneath them.
+zeroship-data-v8 = { workspace = true }
+
 # Database verification is mandatory in ordinary cargo test runs. Each test
 # binary owns and migrates its PostgreSQL instance.
 
@@ -186,3 +192,10 @@ path = "tests/deployment_holds.rs"
 [[test]]
 name = "control_boot_test"
 path = "tests/control_boot_test.rs"
+
+# The one exercise that drives the whole app/database path in a single run. It
+# owns TWO servers - the control plane's and a tenant cluster - so it gets its
+# own binary rather than joining `live_db`, whose fixture is one shared server.
+[[test]]
+name = "database_decoupling_e2e"
+path = "tests/database_decoupling_e2e.rs"
