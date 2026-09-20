@@ -106,6 +106,24 @@ caller is in another process. Whether the service enforces these writes with the
 guard type, or by continuing to trust a convention is a decision the relocation has to make, and
 silence makes it by default at the moment the boundary moves.
 
+The same decision was made the other way inside this repository, and the cost is recorded rather
+than estimated. The example is NOT on main: it is
+`crates/zeroship-migrate-server/src/datastore/control.rs` on the
+`feat/app-database-decoupling` branch, added in `9067e6367`, so the path above does not resolve
+in a checkout of main and a reader has to look there for it. Its cluster reconciler
+puts a compare-and-set on `activate_database` and `observe_binding` - two writes whose realistic
+concurrent-writer count is one, since a cluster reconciler is a single loop. On the likelihood
+axis both would have taken a convention. `observe_binding`'s predicate names the generation
+rather than only assigning it, so a declaration that moved mid-pass cannot be reported as
+observed, and its price was one `WHERE` clause per statement plus a rows-affected the caller
+already branched on.
+
+What that example does NOT settle is the part this journal has to decide: both of those return
+`bool`, so a caller that discards the result re-introduces the silent loss the predicate was
+added to prevent. A database predicate removes the race; it does not remove the obligation to
+read the answer. That is the argument for a guard type rather than against the database, and it
+is why "enforce it in the database" is a floor here rather than a resolution.
+
 **Lease validity has two representations and they are not kept apart.** The durable form is
 already right: `__zeroship_workflow_tasks.deadline` is an absolute integer, as are the manager's
 `assignments.expires_at` and `workers.expires_at`, and `Clock::sample` in
