@@ -63,9 +63,29 @@ construction, so two replicas holding one cannot compare them at all.
 ## What the relocation already removes
 
 Once the journal and the queue are in `workflow_manager`, a transition and its queue effect
-commit in one transaction. There is no remote to publish to, so there is no intent to record, no
-receipt to match, and no deduplication state to keep. The delivery group is not reduced by the
-move. It is made unnecessary by it.
+commit in one transaction. There is no remote to publish to, so there is no intent to record and
+no receipt to match.
+
+What the move does not do on its own is retire the deduplication identity, and that difference
+decides how much of the delivery group can go. `publication.rs::record_job` mints a job id with
+`JobId::mint`, then looks for an earlier job for the same frontier by selecting on
+`(app_id, run_id, generation, frontier_revision, available_at)` and reusing the id it finds. The
+identity of a publishable job is that tuple of business columns, not its key, and the tuple lives
+only in the per-kind table: the intent row carries an opaque encoded `specification` and nothing
+to match on. The unique index over the tuple is what makes select-then-insert correct when two
+transactions run it at once, because both can select nothing and both can insert. Each commits
+atomically and the frontier still gets two jobs unless something refuses the second.
+
+Nothing on the manager side reconstructs that mapping. `Queue::existing` in
+`crates/zeroship-workflow-manager/src/queue.rs` loads by job id and compares a digest, so it can
+tell that a job with a given id has the content it should; it cannot find a job with the same
+content under a different id. The `jobs` table carries scope, dispatch and management-request
+keys and no content-keyed unique index. Both halves of the identity question therefore rest on
+the creator-side read-then-mint and the per-kind index behind it.
+
+So one transaction removes the network hop and the receipt. It does not remove the need for a
+uniqueness constraint over the identifying tuple, and a design that drops the per-kind tables has
+to say where that tuple goes.
 
 This is worth stating plainly because the relocation has been argued as a safety change: a
 creator should not be able to drop the log the platform is executing against. It is also the
@@ -187,9 +207,15 @@ and has no public production record. The techniques transfer. The architecture d
    before deletion, not in aggregate. A table that turns out to be the only writer of a
    uniqueness constraint is not a table whose capability survives its removal.
 
-3. **Does removing the publication intents lose idempotency that the single transaction does not
-   replace?** The intents carry per-kind uniqueness. One transaction gives atomicity, which is
-   not the same property.
+3. **Where does the identifying tuple live once the per-kind tables are gone?** Answered far
+   enough to reject the easy version: it cannot simply go, because the job id is minted and the
+   tuple is the only identity a publishable job has. Two shapes remain open. Constrain the queue
+   row on the same columns, which keeps the constraint and moves it. Or derive the job id from
+   `(kind, entity, revision, available_at)` so the primary key carries the identity and
+   select-then-insert becomes an insert that collides. The second is what lets the per-kind tables
+   go rather than move, and it is the one to cost out. `available_at` is part of the tuple today,
+   so a derived id has to include it, and rescheduling a frontier to a new due time has to keep
+   producing a new job.
 
 ---
 
@@ -198,7 +224,8 @@ and has no public production record. The techniques transfer. The architecture d
 **Do not delete a table before naming where its invariant lands.** The delivery group is
 deduplication state that `publication.rs` says explicitly nothing may retire. Committing in one
 transaction replaces the reason it exists; it does not automatically replace every guarantee it
-provides.
+provides. The advance intent is the worked example: it reads as a projection of the intent row,
+and it is the dedup key.
 
 **Do not let `Instant` back across a boundary.** It is the representation that made two replicas
 disagree, and it is comfortable to use because it is what the standard library hands you.
