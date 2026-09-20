@@ -60,7 +60,7 @@ fn dispatch_zs(source: &str, name: &str) -> (u16, serde_json::Value) {
             DbService::new(DbServiceConfig {
                 app_bindings,
                 project_keys: Default::default(),
-                connection: zeroship_data_orm::connection::ConnectionFactory::for_url("postgres://_capability_test_unused")
+                connection: zeroship_data_orm::connection::ConnectionFactory::for_app_url("postgres://_capability_test_unused")
                     .expect("valid database configuration"),
                 cdc_relay: None,
                 meter: None,

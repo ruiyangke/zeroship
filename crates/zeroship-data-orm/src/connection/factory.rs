@@ -115,9 +115,27 @@ impl ConnectionFactory {
             url: None,
         }
     }
-    /// Validate built-in configuration without opening a database.
-    pub fn for_url(url: &str) -> Result<Self, DbError> {
+    /// An APP connection: sessions narrow to the binding's role.
+    ///
+    /// There is deliberately no `for_url`. Whether a session narrows to a
+    /// tenant is a boundary decision, and a boundary with a default has an
+    /// implicit side that nobody reviews. The two constructors name the
+    /// decision so the reader sees it without looking up an argument.
+    ///
+    /// # Errors
+    /// [`DbError`] when the URL names no supported backend.
+    pub fn for_app_url(url: &str) -> Result<Self, DbError> {
         Self::for_url_with_limit(url, None, SessionAuthority::PerBindingRole)
+    }
+
+    /// A PLATFORM connection: it keeps the authority its credentials already
+    /// established, because a `DbBinding::platform` names no database and has
+    /// nothing to narrow to.
+    ///
+    /// # Errors
+    /// [`DbError`] when the URL names no supported backend.
+    pub fn for_platform_url(url: &str) -> Result<Self, DbError> {
+        Self::for_url_with_limit(url, None, SessionAuthority::Connection)
     }
     pub(super) fn for_url_with_limit(
         url: &str,

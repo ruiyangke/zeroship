@@ -234,7 +234,7 @@ fn cmd_serve(args: &[String]) {
         zeroship_core::declared_env!(external, "DATABASE_URL", crate::ZeroshipCliConsumer)
             .filter(|url| !url.is_empty())
             .unwrap_or_else(|| "sqlite:.zeroship/dev.sqlite".into());
-    let database = zeroship_data_orm::connection::ConnectionFactory::for_url(&database_url)
+    let database = zeroship_data_orm::connection::ConnectionFactory::for_app_url(&database_url)
         .and_then(|connection| {
             zeroship_data_v8::service::DbService::new(zeroship_data_v8::service::DbServiceConfig {
                 project_keys: project_keys::load(

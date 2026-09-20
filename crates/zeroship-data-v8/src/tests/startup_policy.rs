@@ -53,7 +53,7 @@ fn runtime_for(
     let plugin = DbService::new(DbServiceConfig {
         app_bindings,
         project_keys: Default::default(),
-        connection: ConnectionFactory::for_url(url).unwrap(),
+        connection: ConnectionFactory::for_app_url(url).unwrap(),
         cdc_relay: None,
         meter: None,
     })

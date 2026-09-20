@@ -100,7 +100,7 @@ pub(crate) fn database_service(url: &str) -> Arc<zeroship_data_v8::service::DbSe
     zeroship_data_v8::service::DbService::new(zeroship_data_v8::service::DbServiceConfig {
         app_bindings: Default::default(),
         project_keys: Default::default(),
-        connection: zeroship_data_orm::connection::ConnectionFactory::for_url(url)
+        connection: zeroship_data_orm::connection::ConnectionFactory::for_app_url(url)
             .expect("valid database configuration"),
         cdc_relay: None,
         meter: None,

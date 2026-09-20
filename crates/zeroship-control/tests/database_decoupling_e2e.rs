@@ -815,7 +815,7 @@ fn dispatch(spec: Dispatch) -> (u16, Json) {
                 let plugins: Vec<Arc<dyn NativePlugin>> = vec![DbService::new(DbServiceConfig {
                     app_bindings,
                     project_keys,
-                    connection: ConnectionFactory::for_url(&spec.worker_url)
+                    connection: ConnectionFactory::for_app_url(&spec.worker_url)
                         .expect("the worker DSN is usable"),
                     cdc_relay: None,
                     meter: None,

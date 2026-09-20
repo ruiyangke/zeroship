@@ -240,6 +240,34 @@ mod tests {
             .expect("control: the same binding composes under the login's own authority");
     }
 
+    /// The PERMISSIVE direction, which nothing else in the tree asserts.
+    ///
+    /// Its sibling above binds the LOUD direction: a platform binding under
+    /// `PerBindingRole` refuses, and you find that immediately. A creator
+    /// binding under `Connection` does the opposite - it SUCCEEDS, and drops
+    /// the `SET LOCAL ROLE` that is the tenant fence. Nothing fails, the data
+    /// reads, and the boundary is simply not enforced.
+    ///
+    /// That is why the two constructors are named rather than defaulted, and
+    /// this asserts the difference they name, so a call site that picks the
+    /// wrong one is caught by a test rather than by a reviewer's attention.
+    #[test]
+    fn connection_authority_drops_the_narrowing_a_creator_binding_would_get() {
+        let creator = creator_binding();
+        let narrowed = tx_session_setup_sql(&creator, SessionAuthority::PerBindingRole)
+            .expect("a creator binding names a role to narrow to");
+        assert!(
+            narrowed.contains("SET LOCAL ROLE"),
+            "per-binding authority must narrow: {narrowed}"
+        );
+        let kept = tx_session_setup_sql(&creator, SessionAuthority::Connection)
+            .expect("connection authority composes with no role of its own");
+        assert!(
+            !kept.contains("SET LOCAL ROLE"),
+            "connection authority keeps the login's role, so it must NOT narrow: {kept}"
+        );
+    }
+
     /// Every value must be transaction scoped so it cannot survive pool reuse.
     #[test]
     fn every_setting_is_transaction_scoped() {

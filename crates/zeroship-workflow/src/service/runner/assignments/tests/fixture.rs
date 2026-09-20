@@ -667,7 +667,7 @@ async fn creator(directory: &Path, app: &AppId, policies: Arc<HostPolicies>) -> 
             "assignment-fixture",
             SchemaName::new(app.as_str()).unwrap(),
         ),
-        &ConnectionFactory::for_url(&format!(
+        &ConnectionFactory::for_platform_url(&format!(
             "sqlite:{}",
             directory.join("orm.sqlite").display()
         ))

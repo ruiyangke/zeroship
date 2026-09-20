@@ -695,7 +695,7 @@ fn main() -> std::io::Result<()> {
                 zeroship_data_v8::service::DbServiceConfig {
                     project_keys: Default::default(),
                     app_bindings: Default::default(),
-                    connection: zeroship_data_orm::connection::ConnectionFactory::for_url(url)
+                    connection: zeroship_data_orm::connection::ConnectionFactory::for_app_url(url)
                         .map_err(|error| std::io::Error::other(error.to_string()))?,
                     cdc_relay: Some({
                         let relay = zeroship_data_orm::cdc::relay::RelayConfig::new(

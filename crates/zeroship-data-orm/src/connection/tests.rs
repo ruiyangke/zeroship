@@ -120,7 +120,7 @@ fn controlled(
     tempfile::TempDir,
 ) {
     let dir = tempfile::tempdir().unwrap();
-    let inner = ConnectionFactory::for_url(&format!(
+    let inner = ConnectionFactory::for_app_url(&format!(
         "sqlite:{}",
         dir.path().join("connection.sqlite").display()
     ))
@@ -142,12 +142,12 @@ fn controlled(
 #[compio::test]
 async fn a_captured_route_refuses_a_replacement_connection_with_the_same_sql_bundle() {
     let directory = tempfile::tempdir().unwrap();
-    let first = ConnectionFactory::for_url(&format!(
+    let first = ConnectionFactory::for_app_url(&format!(
         "sqlite:{}",
         directory.path().join("first.sqlite").display()
     ))
     .unwrap();
-    let second = ConnectionFactory::for_url(&format!(
+    let second = ConnectionFactory::for_app_url(&format!(
         "sqlite:{}",
         directory.path().join("second.sqlite").display()
     ))
@@ -236,9 +236,9 @@ async fn a_failed_open_preserves_its_error_and_allows_retry() {
 }
 #[test]
 fn configuration_identity_and_debug_follow_the_connection_contract() {
-    let first = ConnectionFactory::for_url("postgres://user:secret@host/db").unwrap();
-    let same = ConnectionFactory::for_url("postgres://user:secret@host/db").unwrap();
-    let other = ConnectionFactory::for_url("postgres://user:different@host/db").unwrap();
+    let first = ConnectionFactory::for_app_url("postgres://user:secret@host/db").unwrap();
+    let same = ConnectionFactory::for_app_url("postgres://user:secret@host/db").unwrap();
+    let other = ConnectionFactory::for_app_url("postgres://user:different@host/db").unwrap();
     assert_eq!(first.identity(), same.identity());
     assert_ne!(first.identity(), other.identity());
     assert!(!format!("{first:?}").contains("secret"));
@@ -377,4 +377,38 @@ async fn a_late_failed_waiter_cannot_clear_a_new_attempt() {
     let (retry, joined) = futures::join!(retry, joined);
     assert!(retry.is_ok() && joined.is_ok());
     assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+/// The two constructors must not be the same thing wearing two names.
+///
+/// `tests/postgres/provisioning.rs` proves the composition FUNCTION narrows an
+/// app binding and refuses a platform one. That is the mechanism. It says
+/// nothing about which authority a given CONSTRUCTION SITE asks for, and every
+/// one of those tests would still pass if every call site in the tree named
+/// platform authority - the function would behave impeccably and simply be
+/// asked the wrong question everywhere.
+///
+/// This is the bridge across that seam: the authority is hashed into the
+/// connection identity, so two factories built from one URL by the two
+/// constructors must differ. A future edit that points `for_platform_url` at
+/// per-binding authority, or `for_app_url` at connection authority, collapses
+/// them and fails here rather than silently widening a tenant boundary.
+#[test]
+fn the_app_and_platform_constructors_do_not_collapse_onto_one_authority() {
+    let url = "sqlite:authority-probe.sqlite";
+    let app = ConnectionFactory::for_app_url(url).expect("app factory");
+    let platform = ConnectionFactory::for_platform_url(url).expect("platform factory");
+    assert_ne!(
+        app.identity(),
+        platform.identity(),
+        "same URL, opposite authorities: the identities must differ or the \
+         authority is not reaching the connection at all"
+    );
+    let app_again = ConnectionFactory::for_app_url(url).expect("app factory again");
+    assert_eq!(
+        app.identity(),
+        app_again.identity(),
+        "control: the same constructor on the same URL is stable, so the \
+         inequality above is the authority and not noise"
+    );
 }

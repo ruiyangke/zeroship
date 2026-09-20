@@ -102,7 +102,7 @@ fn publish(root: &Path, version: &str, cooldown: &str) -> PathBuf {
 
 fn test_storage(root: &Path, app: &AppId) -> HostStorage {
     HostStorage {
-        connection: zeroship_data_orm::connection::ConnectionFactory::for_url(&format!(
+        connection: zeroship_data_orm::connection::ConnectionFactory::for_app_url(&format!(
             "sqlite:{}",
             root.join(".zeroship/dev.sqlite").display()
         ))
@@ -169,7 +169,7 @@ fn metered_database(
     let meter = Arc::new(zeroship_metering::Meter::new());
     let service =
         zeroship_data_v8::service::DbService::new(zeroship_data_v8::service::DbServiceConfig {
-            connection: zeroship_data_orm::connection::ConnectionFactory::for_url(&format!(
+            connection: zeroship_data_orm::connection::ConnectionFactory::for_app_url(&format!(
                 "sqlite:{}",
                 root.join(".zeroship/dev.sqlite").display()
             ))

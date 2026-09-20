@@ -38,7 +38,7 @@ impl Host {
     }
 
     pub(crate) fn set_database_url(&self, url: &str) {
-        let factory = ConnectionFactory::for_url(url).expect("fixture connection configuration");
+        let factory = ConnectionFactory::for_app_url(url).expect("fixture connection configuration");
         let mut slot = self.connection.borrow_mut();
         if slot
             .as_ref()
@@ -49,7 +49,7 @@ impl Host {
     }
 
     pub(crate) fn install_backend(&self, backend: backend::BackendHandle, url: &str) {
-        let factory = ConnectionFactory::for_url(url).expect("fixture configuration");
+        let factory = ConnectionFactory::for_app_url(url).expect("fixture configuration");
         *self.connection.borrow_mut() =
             Some(LocalConnection::from_backend(factory, backend).expect("fixture backend"));
     }
