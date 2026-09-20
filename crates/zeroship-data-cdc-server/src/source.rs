@@ -147,7 +147,7 @@ async fn capture(
         .start_logical_replication(StartReplicationOptions {
             slot_name: slot,
             start_lsn: &lsn,
-            publication_names: &[&publication],
+            publication_names: &[publication],
             ..Default::default()
         })
         .await?;
