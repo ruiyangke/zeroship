@@ -696,3 +696,40 @@ The third is an ABSENCE claim and should not be left as one. A creator schema ke
 table, so the check has a positive form: read a creator schema's stamp row before and after, and
 require the version and fingerprint to be unchanged. That distinguishes "the creator path was not
 touched" from "the creator path was not looked at", which no absence check can.
+
+## A reduction candidate the move makes visible, found by comparing the two schemas
+
+Strip the `__zeroship_workflow_` prefix from the journal's tables and compare the names against
+`crates/zeroship-workflow-manager/schema/postgres.sql`. Three concepts are named on both sides:
+`schema_version`, `deployment_holds`, and `schedules`. The first is expected - each schema stamps
+itself, and the two stamp tables have different names so they coexist. The third is the
+interesting one.
+
+    journal   schedules   id, app_id, name, and a foreign key to app_state
+    manager   schedules   id, app_id, name, activation_id, revision, definition,
+                          next_at, anchor_at, catch_up_until, catch_up_remaining, ...
+
+**The journal's table holds the manager's key columns and none of its state.** What it is for is
+visible in `__zeroship_workflow_occurrences`, which carries three composite foreign keys, each
+tenant-scoped and each `ON DELETE RESTRICT`: to `job_receipts`, to `runs`, and to `schedules` on
+`(app_id, schedule_id)`. So the journal's `schedules` exists as an FK TARGET - an identity anchor
+that lets an occurrence reference a schedule without leaving the journal's own schema.
+
+Under two databases that is not redundancy, it is the only option: a foreign key cannot cross to
+`workflow_manager`. **The relocation removes the reason.** Once both tables live in one schema,
+an occurrence could reference the manager's row directly and the shadow has no remaining job.
+
+**Stated as the question rather than the answer**, because one fact is missing: the manager's
+`schedules` declares `id` as its primary key, and the journal's foreign key is composite on
+`(app_id, id)`. Pointing occurrences at it needs a unique constraint over that pair, which the
+manager's DDL does not currently carry. So the candidate is real and its cost is one constraint,
+not zero - and whether the two tables describe the same thing closely enough to merge is a
+question for whoever owns scheduling, not one this document should answer by deleting a row.
+
+`deployment_holds` appears on both sides too and deserves the same treatment rather than the same
+assumption. This section records where to look, not what to conclude.
+
+**The method is the transferable half.** Neither table looks redundant in its own file, and no
+amount of reading either schema alone would surface this. It appears only when the two are
+compared under the name the relocation will give them - which is an argument for doing this
+comparison for every pair before step 1 rather than discovering the overlaps one at a time after.
