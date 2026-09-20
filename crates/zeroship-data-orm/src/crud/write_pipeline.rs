@@ -228,7 +228,7 @@ pub async fn apply(
             }
             let row_pk = row_pk_from_doc(payload);
             stages
-                .apply_to_doc(keys, app_id, collection, &row_pk, payload)
+                .apply_to_doc(keys, binding, collection, &row_pk, payload)
                 .await?;
             Ok(())
         }
@@ -264,14 +264,14 @@ pub async fn apply(
             for doc in docs.iter_mut() {
                 let row_pk = row_pk_from_doc(doc);
                 stages
-                    .apply_to_doc(keys, app_id, collection, &row_pk, doc)
+                    .apply_to_doc(keys, binding, collection, &row_pk, doc)
                     .await?;
             }
             Ok(())
         }
         ApplyMode::Update { row_pk } => {
             stages
-                .apply_to_update(keys, app_id, collection, row_pk, payload)
+                .apply_to_update(keys, binding, collection, row_pk, payload)
                 .await?;
             Ok(())
         }
@@ -312,7 +312,7 @@ pub async fn apply(
             }
             let row_pk = row_pk_from_doc(payload);
             stages
-                .apply_to_doc(keys, app_id, collection, &row_pk, payload)
+                .apply_to_doc(keys, binding, collection, &row_pk, payload)
                 .await?;
             Ok(())
         }
@@ -345,7 +345,7 @@ impl<'a> WriteStages<'a> {
     async fn apply_to_doc(
         &self,
         keys: &crate::encryption::KeyStore,
-        app_id: &str,
+        binding: &DbBinding,
         collection: &str,
         row_pk: &str,
         row: &mut Value,
@@ -359,7 +359,7 @@ impl<'a> WriteStages<'a> {
         if self.has_encrypted {
             super::encryption_pass_dispatch(
                 keys,
-                app_id,
+                binding,
                 collection,
                 schema,
                 row_pk,
@@ -391,7 +391,7 @@ impl<'a> WriteStages<'a> {
     async fn apply_to_update(
         &self,
         keys: &crate::encryption::KeyStore,
-        app_id: &str,
+        binding: &DbBinding,
         collection: &str,
         row_pk: &str,
         patch: &mut Value,
@@ -406,7 +406,7 @@ impl<'a> WriteStages<'a> {
         if self.has_encrypted {
             super::encryption_pass_dispatch(
                 keys,
-                app_id,
+                binding,
                 collection,
                 schema,
                 row_pk,
@@ -1145,12 +1145,13 @@ mod tests {
         assert_ne!(ciphertext, expected_plaintext.as_bytes());
         assert!(row.get(format!("__zsbin__{raw_col}").as_str()).is_none());
 
+        let database = crate::tests::fixtures::harness_database(app_id);
         let key = backend
             .key_store()
-            .resolve(app_id)
+            .resolve(app_id, &database)
             .await
             .expect("resolve key");
-        let aad = encryption::canonical_aad(app_id, collection, "ssn", id.as_bytes());
+        let aad = encryption::canonical_aad(&database, collection, "ssn", id.as_bytes());
         let plaintext = crate::encryption::aead::decrypt(&key, ciphertext, &aad)
             .expect("decrypt prepared ciphertext");
         assert_eq!(
@@ -1367,15 +1368,21 @@ mod tests {
                 .get(crate::sql::mapping::raw_column_name("ssn").as_str())
                 .and_then(Value::as_bytes)
                 .expect("update ssn ciphertext in the raw column");
+            let update_database = crate::tests::fixtures::harness_database(app_id);
             let update_key = backend
                 .key_store()
-                .resolve(app_id)
+                .resolve(app_id, &update_database)
                 .await
                 .expect("resolve update key");
             let update_plaintext = crate::encryption::aead::decrypt(
                 &update_key,
                 update_ciphertext,
-                &encryption::canonical_aad(app_id, collection, "ssn", seeded_id.as_bytes()),
+                &encryption::canonical_aad(
+                    &update_database,
+                    collection,
+                    "ssn",
+                    seeded_id.as_bytes(),
+                ),
             )
             .expect("decrypt update ciphertext");
             assert_eq!(

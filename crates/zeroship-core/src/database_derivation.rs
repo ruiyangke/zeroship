@@ -91,6 +91,30 @@ pub fn binding_role_name(binding: &BindingId, epoch: u32) -> Result<String, Role
     database_role::binding_role_name(binding.as_str(), epoch)
 }
 
+/// The HKDF salt this database's at-rest column key is derived from.
+///
+/// It is the DATABASE and not the app because the rows belong to the database:
+/// every app the project binds to it is entitled to the same plaintext, so two
+/// co-binding-holders must expand the same key, and one app reaching two
+/// databases must expand two. At-rest encryption is therefore not what fences
+/// one app from another - a column-level `GRANT` is.
+///
+/// It is the database and not the datastore so that ciphertext survives a
+/// cluster being replaced underneath a datastore: the database id does not
+/// change when the storage does.
+///
+/// **Changing what this returns is not a migration.** The column key is
+/// expanded from the project root key salted by these bytes, so a new salt
+/// yields a new key and existing ciphertext no longer decrypts. A deterministic
+/// half would be worse still - lookup tokens stop matching, so an equality
+/// search over an encrypted column returns FEWER ROWS AND NO ERROR. Pre-launch
+/// the answer is to drop and recreate every encrypted column, not to migrate
+/// it.
+#[must_use]
+pub fn encryption_salt(database: &DatabaseId) -> &[u8] {
+    database.as_str().as_bytes()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,6 +190,22 @@ mod tests {
             database_role::binding_role_name(BINDING_FIXTURE, 3).expect("untyped"),
             "the seam must compose the role the grant statements name"
         );
+
+        // The salt the at-rest column key is expanded from. It has no text
+        // composer, so the literal is its only oracle - and it is the
+        // database's own canonical spelling, never the schema name, because a
+        // schema is a rendering of the id and the id is the identity.
+        assert_eq!(
+            encryption_salt(&database),
+            DATABASE_FIXTURE.as_bytes(),
+            "the salt is the canonical database id"
+        );
+        assert_ne!(
+            encryption_salt(&database),
+            schema_name(&database).as_bytes(),
+            "salting by the rendered schema name would move the key \
+             if the schema spelling ever changed"
+        );
     }
 
     /// Every derivation is a function OF THE ID, not of a constant.
@@ -193,6 +233,13 @@ mod tests {
                 "{capability:?} must name one database"
             );
         }
+
+        assert_ne!(
+            encryption_salt(&first),
+            encryption_salt(&second),
+            "two databases must expand two column keys, or a ciphertext \
+             lifted between them would verify"
+        );
 
         let one_binding = BindingId::mint();
         let other_binding = BindingId::mint();
