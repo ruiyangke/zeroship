@@ -656,3 +656,43 @@ disagree, and it is comfortable to use because it is what the standard library h
 
 **Do not treat compensation as machinery to reduce.** It is the one place the extra state is the
 point.
+
+---
+
+## The journal is already shaped for the relocation, and that is checkable
+
+Recorded here rather than in the relocation because I do not edit that file, and because it
+bears on this proposal too: the concurrency unit this document argues about is the same row the
+relocation makes platform-owned.
+
+`crates/zeroship-workflow-schema/src/lib.rs` states it and
+`crates/zeroship-workflow-schema/schema/postgres.sql` carries it out:
+
+- The generated DDL names its schema with `SCHEMA_PLACEHOLDER`, which the installer substitutes.
+  So the stamp table is PER SCHEMA, and a schema is not a tenant.
+- `__zeroship_workflow_schema_version` is keyed by `id` alone - no `app_id` column. `STAMP_ROW_ID`
+  is `workflow`: one row per journal, describing every app whose workflows live in that schema.
+- `__zeroship_workflow_app_state` carries `app_id` with a UNIQUE index on it, and
+  `__zeroship_workflow_deploys` holds a FOREIGN KEY to it `ON DELETE RESTRICT`.
+
+**So the tenant discriminator is a column and the tenant root is a row, and the schema was built
+to hold many apps before anyone proposed moving it.** Installing it into `workflow_manager` uses
+an affordance already present rather than stretching one. That is a cheaper argument for the
+relocation than any of the safety ones, and it is the only one a reader can check by opening the
+DDL.
+
+It also closes a loop in this document. `lock_app_state` locks the `app_state` row for an app,
+and that row is the tenant root the foreign keys point at. **The concurrency unit is not an
+arbitrary row someone chose; it is the row the schema already designates as the tenant.** The
+question this proposal raises - whether one row should be the concurrency unit for every module -
+is therefore a question about the tenant boundary, not about a lock.
+
+**What Plan step 1's gate can assert, stated positively.** Step 1 asks to verify that the schema
+installs, that one stamp row covers the installation, and that the creator-schema path is
+untouched. The first two are direct: after installing into `workflow_manager`, its stamp table
+holds exactly one row and that row's id is `workflow`.
+
+The third is an ABSENCE claim and should not be left as one. A creator schema keeps its own stamp
+table, so the check has a positive form: read a creator schema's stamp row before and after, and
+require the version and fingerprint to be unchanged. That distinguishes "the creator path was not
+touched" from "the creator path was not looked at", which no absence check can.
