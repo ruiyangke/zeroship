@@ -122,19 +122,35 @@ named CHECK constraints named identically to properties in a machine-checked spe
 ## The design
 
 Four techniques, each of which a system in this class already ships without the tables we spend.
+Two of them survived the per-table pass below unchanged. Two did not, and are written here with
+the objection attached rather than removed, because the objection is the useful part.
 
-**1. A transition returns its messages; the caller delivers them.** This removes the delivery
-group outright rather than compressing it. Nothing is stored because nothing needs draining.
+**1. A transition returns its messages; the caller delivers them.** This removes the network hop
+and the receipt matching: nothing is stored because nothing needs draining. It does NOT by
+itself remove the delivery group, which is what this section originally claimed. The intent rows
+carry a dedup identity that one transaction does not reproduce, and the group goes only if
+something else carries it. See Open 3, which is where the real work is.
 
 **2. Queues and timer sets become partial indexes on the entity they describe.** Membership of a
-sweep is a predicate over the row, not a row of its own.
+sweep is a predicate over the row, not a row of its own. This survives, with one boundary: it
+applies to deciding WHO is due, not to a sweep already in flight, whose frozen item list is not
+a predicate over current rows. The page tables below are that distinction.
 
 **3. Small fan-out edges become array columns with a containment index.** The access pattern is
-"who is waiting on me", which an array answers without a second table to keep consistent.
+"who is waiting on me", which an array answers without a second table to keep consistent. This
+does not work for `subscriptions`, the table it was aimed at. Each edge carries an allocated
+`sequence` that `recipients::select` pages by, ordered and bounded by the broadcast's cutoff,
+with a unique index that is also the only guard against a lost update in `signals::subscribe`.
+An array of run ids on the topic carries no per-edge sequence and no index over it. Either the
+technique is wrong here or fan-out paging has to change, and this proposal has not made that
+case.
 
 **4. Invariants become named CHECK constraints.** A state machine encoded structurally across
 tables is a state machine nobody can read. A constraint that names the property it protects
-fails with that property's name.
+fails with that property's name. The obstacle is dialect parity: `step_child_linkage` is the only
+CHECK the journal declares and it exists only in the PostgreSQL artifact, so today this technique
+has no enforcement at all on the SQLite tier. That is Open 1, and it is a precondition for this
+technique rather than a detail under it.
 
 ---
 
