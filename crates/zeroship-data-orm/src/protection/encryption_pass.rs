@@ -316,9 +316,10 @@ mod tests {
             crate::sql::SchemaName::new("zeroship").expect("a legal schema name"),
         );
         let mut refused = crate::value!({ "id": "usr_01HX", "ssn": "123-45-6789" });
-        let error = encrypt_row_on_write(&keys, &platform, "users", &schema, "usr_01HX", &mut refused)
-            .await
-            .expect_err("a platform store must not encrypt");
+        let error =
+            encrypt_row_on_write(&keys, &platform, "users", &schema, "usr_01HX", &mut refused)
+                .await
+                .expect_err("a platform store must not encrypt");
         match error {
             DbError::Configuration { code, .. } => {
                 assert_eq!(code, "encryption_requires_a_database");
