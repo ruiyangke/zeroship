@@ -390,9 +390,30 @@ mod tests {
             );
             assert_eq!(state.env_vars.len(), 2);
             assert_eq!(state.net_policy, policy);
+            // The slot carries the descriptor DOCUMENT of the pinned deploy:
+            // one entry per database it declares, each holding that database's
+            // own schema. The pinned schema is what a replay must see, and the
+            // entry it arrives in is what names the database it belongs to -
+            // so both are asserted, against the manifest the executable was
+            // loaded from rather than against a second copy of the literal.
             assert_eq!(
-                serde_json::from_str::<Value>(state.runtime_descriptor.as_ref().unwrap()).unwrap(),
-                descriptor
+                crate::executable::primary_schema_json(state.runtime_descriptor.as_deref()),
+                descriptor,
+                "the pinned deploy's own schema reaches the isolate"
+            );
+            let document =
+                serde_json::from_str::<Value>(state.runtime_descriptor.as_ref().unwrap()).unwrap();
+            let declared = executable.databases();
+            assert_eq!(declared.len(), 1, "the fixture declares one database");
+            assert_eq!(
+                document["databases"],
+                json!([{
+                    "label": declared[0].label,
+                    "database_id": declared[0].database_id.as_str(),
+                    "primary": true,
+                    "schema": descriptor,
+                }]),
+                "the document entry names the database the manifest declared"
             );
             let meter = state.meter.as_ref().unwrap();
             assert_eq!(meter.app_id(), &fixture.contexts.0.borrow().app);

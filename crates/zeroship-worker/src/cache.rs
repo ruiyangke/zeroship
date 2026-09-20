@@ -879,6 +879,14 @@ mod tests {
             let parses = url_parse_count();
             let opens = backend_open_count();
 
+            // Resolving Control's binding is inside the measured window on
+            // purpose: it is host work that happens per app, and the two
+            // assertions below then rule on it too. An app the host resolved
+            // nothing for has no `env.db`, so the runtime this arm needs would
+            // not build at all.
+            let app_id = AppId::mint();
+            fixture::bind_app(&service, &app_id);
+
             init_cache(
                 4,
                 KernelConfig {
@@ -913,7 +921,7 @@ mod tests {
                 .expect("compio runtime")
                 .block_on(async {
                     let runtime = build_runtime(
-                        &AppId::mint(),
+                        &app_id,
                         crate::cache::test_modules(
                             br#"export default { fetch() { return new Response("ok"); } }"#,
                         ),
@@ -1595,6 +1603,41 @@ mod tests {
         }).join().unwrap();
     }
 
+    /// A runtime descriptor document whose one database carries a corrupt v2
+    /// schema, for the two arms that assert a load refuses it.
+    ///
+    /// Three properties are load-bearing, and each was wrong here once. The
+    /// envelope MUST be a document: the runtime checks the document before it
+    /// reaches any entry's schema, so a bare schema is refused for the wrong
+    /// reason and never gets near `indexes`. The schema MUST be `version` 2,
+    /// or the entry's own version check refuses it first. And the corruption
+    /// MUST be the `indexes` entry, because that is what both arms name.
+    fn corrupt_descriptor_document() -> String {
+        let database = zeroship_core::DatabaseId::mint();
+        zeroship_runtime::databases::RuntimeDatabases::single(
+            "main",
+            database.as_str(),
+            r#"{"version":2,"collections":{"notes":{"fields":{"title":{"type":"string"}},"options":{"softDelete":false,"versioning":false},"indexes":[{"name":"bad","fields":[123]}]}}}"#,
+        )
+        .expect("a corrupt schema is still valid JSON")
+    }
+
+    /// The refusal names the descriptor, the corrupt member, and the database
+    /// entry it was reached through.
+    ///
+    /// The third clause is what distinguishes "the document was opened and its
+    /// entry's schema rejected" from "the envelope was rejected and no schema
+    /// was ever read" - which is how these arms passed on the wrong error
+    /// before.
+    fn assert_descriptor_refusal(error: &str) {
+        assert!(
+            error.contains("manifest.runtime_descriptor")
+                && error.contains("indexes")
+                && error.contains(r#"database "main""#),
+            "error should surface descriptor validation inside the document entry, got: {error}"
+        );
+    }
+
     #[test]
     fn load_app_preserves_last_good_isolate_when_descriptor_validation_fails() {
         std::thread::spawn(|| {
@@ -1629,29 +1672,19 @@ mod tests {
                 let before = get_runtime(&app_id).expect("initial runtime cached");
                 assert_eq!(fetch_body(&before).await, (200, "last-good".to_string()));
 
+                let corrupt = corrupt_descriptor_document();
                 let err = load_app(
                     app_id.clone(),
                     crate::cache::test_modules(br#"export default { fetch() { return new Response("bad-new"); } }"#),
                     AppRuntimeLimits::default(),
                     AppNetPolicy::default(),
                     Some("deploy-bad"),
-                    Some(
-                        // `version` MUST be 2, and the corruption MUST be the
-                        // `indexes` entry below. Both arms assert the error
-                        // names `indexes`, so a v1 fixture would fail the
-                        // version check FIRST and the arm would pass on the
-                        // wrong error - which is exactly what happened when the
-                        // descriptor went to v2 and these fixtures did not.
-                        r#"{"version":2,"collections":{"notes":{"fields":{"title":{"type":"string"}},"options":{"softDelete":false,"versioning":false},"indexes":[{"name":"bad","fields":[123]}]}}}"#,
-                    ),
+                    Some(corrupt.as_str()),
                     &zeroship_bundle::Manifest::default(),
                     &EnvSnapshot::empty(),
                 ).await
                 .expect_err("corrupt descriptor must fail the reload");
-                assert!(
-                    err.contains("manifest.runtime_descriptor") && err.contains("indexes"),
-                    "error should surface descriptor validation, got: {err}"
-                );
+                assert_descriptor_refusal(&err);
 
                 let after = get_runtime(&app_id).expect("last-good runtime must remain cached");
                 assert_eq!(
@@ -1727,29 +1760,19 @@ mod tests {
                     },
                 );
 
+                let corrupt = corrupt_descriptor_document();
                 let err = load_app(
                     app_id.clone(),
                     crate::cache::test_modules(br#"export default { fetch() { return new Response("bad-first"); } }"#),
                     AppRuntimeLimits::default(),
                     AppNetPolicy::default(),
                     Some("deploy-bad"),
-                    Some(
-                        // `version` MUST be 2, and the corruption MUST be the
-                        // `indexes` entry below. Both arms assert the error
-                        // names `indexes`, so a v1 fixture would fail the
-                        // version check FIRST and the arm would pass on the
-                        // wrong error - which is exactly what happened when the
-                        // descriptor went to v2 and these fixtures did not.
-                        r#"{"version":2,"collections":{"notes":{"fields":{"title":{"type":"string"}},"options":{"softDelete":false,"versioning":false},"indexes":[{"name":"bad","fields":[123]}]}}}"#,
-                    ),
+                    Some(corrupt.as_str()),
                     &zeroship_bundle::Manifest::default(),
                     &EnvSnapshot::empty(),
                 ).await
                 .expect_err("first corrupt descriptor load must hard-error");
-                assert!(
-                    err.contains("manifest.runtime_descriptor") && err.contains("indexes"),
-                    "error should surface descriptor validation, got: {err}"
-                );
+                assert_descriptor_refusal(&err);
                 assert!(
                     get_runtime(&app_id).is_none(),
                     "first failed load has no previous isolate to preserve"
