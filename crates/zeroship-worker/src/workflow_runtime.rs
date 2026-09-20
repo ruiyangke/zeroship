@@ -249,7 +249,7 @@ mod tests {
             let tenant = app_derivation::schema_name(&app);
             let store = OrmStore::connect(
                 DbBinding::platform(&tenant, "fixture", SchemaName::new(&tenant).unwrap()),
-                &ConnectionFactory::for_url(&format!(
+                &ConnectionFactory::for_platform_url(&format!(
                     "sqlite:{}",
                     directory.path().join("app.sqlite").display()
                 ))

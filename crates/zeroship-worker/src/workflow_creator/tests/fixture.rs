@@ -177,7 +177,7 @@ impl Fixture {
             calls: Cell::new(0),
         });
         let storage = HostStorage {
-            connection: ConnectionFactory::for_url(&format!(
+            connection: ConnectionFactory::for_platform_url(&format!(
                 "sqlite:{}",
                 directory.path().join("creator.sqlite").display()
             ))

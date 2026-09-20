@@ -62,7 +62,7 @@ pub(crate) fn id_probes() -> Vec<RecordedQuery> {
 }
 
 pub(crate) fn connection(url: &str) -> ConnectionFactory {
-    let inner = ConnectionFactory::for_url(url).expect("valid fixture database configuration");
+    let inner = ConnectionFactory::for_app_url(url).expect("valid fixture database configuration");
     ConnectionFactory::new(url, RecordingFactory(inner))
 }
 struct RecordingFactory(ConnectionFactory);

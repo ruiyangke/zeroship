@@ -14,9 +14,8 @@ pub enum BackendUrl {
 /// connection already authenticates as its provisioned database role can use
 /// [`Self::Connection`] to retain that role while the ORM still installs its
 /// transaction-scoped resource limits.
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-pub(crate) enum SessionAuthority {
-    #[default]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum SessionAuthority {
     PerBindingRole,
     Connection,
 }

@@ -305,7 +305,7 @@ fn runtime_for(
     let plugins: Vec<Arc<dyn NativePlugin>> = vec![DbService::new(DbServiceConfig {
         app_bindings,
         project_keys: Default::default(),
-        connection: zeroship_data_orm::connection::ConnectionFactory::for_url(url)
+        connection: zeroship_data_orm::connection::ConnectionFactory::for_app_url(url)
             .expect("valid database configuration"),
         cdc_relay: Some(relay.clone()),
         meter: None,
@@ -1073,7 +1073,7 @@ fn db_live_stream_crosses_relay_and_v8_isolates_without_worker_replication() {
         let service = DbService::new(DbServiceConfig {
             app_bindings: app_bindings.clone(),
             project_keys: Default::default(),
-            connection: zeroship_data_orm::connection::ConnectionFactory::for_url(&url)
+            connection: zeroship_data_orm::connection::ConnectionFactory::for_app_url(&url)
                 .expect("valid database configuration"),
             cdc_relay: None,
             meter: None,

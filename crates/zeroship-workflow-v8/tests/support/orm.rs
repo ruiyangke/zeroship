@@ -14,7 +14,7 @@ pub async fn store(directory: &Path) -> OrmStore {
             "test-deployment",
             SchemaName::new("workflow").unwrap(),
         ),
-        &ConnectionFactory::for_url(&format!(
+        &ConnectionFactory::for_platform_url(&format!(
             "sqlite:{}",
             directory.join("app.sqlite").display()
         ))

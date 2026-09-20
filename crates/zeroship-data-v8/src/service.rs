@@ -84,7 +84,7 @@ mod tests {
     #[compio::test]
     async fn app_teardown_needs_no_database_connection() {
         let connection =
-            ConnectionFactory::for_url("postgres://unused:unused@127.0.0.1:1/unused").unwrap();
+            ConnectionFactory::for_app_url("postgres://unused:unused@127.0.0.1:1/unused").unwrap();
         let service = DbService::new(DbServiceConfig {
             app_bindings: Default::default(),
             project_keys: Default::default(),
@@ -105,7 +105,7 @@ mod tests {
         let config = DbServiceConfig {
             app_bindings: Default::default(),
             project_keys: Default::default(),
-            connection: ConnectionFactory::for_url("postgres://user:secret@host/db").unwrap(),
+            connection: ConnectionFactory::for_app_url("postgres://user:secret@host/db").unwrap(),
             cdc_relay: None,
             meter: None,
         };

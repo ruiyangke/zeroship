@@ -156,14 +156,14 @@ mod tests {
     fn configuration_replacement_does_not_open_a_database() {
         let mut context = ThreadDbContext::new();
         assert!(context.connection().is_none());
-        let first = ConnectionFactory::for_url("postgres://first/db").unwrap();
+        let first = ConnectionFactory::for_app_url("postgres://first/db").unwrap();
         context.install_connection(first.clone());
         assert_eq!(
             context.connection().unwrap().factory().identity(),
             first.identity()
         );
         assert!(context.backend().is_none());
-        let second = ConnectionFactory::for_url("sqlite:context.sqlite").unwrap();
+        let second = ConnectionFactory::for_app_url("sqlite:context.sqlite").unwrap();
         context.install_connection(second.clone());
         assert_eq!(
             context.connection().unwrap().factory().identity(),
@@ -192,7 +192,7 @@ mod tests {
         }
         crate::tests::fixtures::reset_context();
         let directory = tempfile::tempdir().unwrap();
-        let old = ConnectionFactory::for_url(&format!(
+        let old = ConnectionFactory::for_app_url(&format!(
             "sqlite:{}",
             directory.path().join("old.sqlite").display()
         ))
@@ -202,7 +202,7 @@ mod tests {
         with_mut(|context| context.install_connection(old));
         let mut opening = crate::tx_scope::ensure_backend().boxed_local();
         assert!(futures::poll!(&mut opening).is_pending());
-        let next = ConnectionFactory::for_url(&format!(
+        let next = ConnectionFactory::for_app_url(&format!(
             "sqlite:{}",
             directory.path().join("new.sqlite").display()
         ))

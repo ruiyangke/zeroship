@@ -9,7 +9,7 @@ pub(crate) fn key_source() -> encryption::ProjectKeySource {
 }
 
 pub(crate) fn set_database_url(url: &str) {
-    let connection = ConnectionFactory::for_url(url).expect("valid fixture configuration");
+    let connection = ConnectionFactory::for_app_url(url).expect("valid fixture configuration");
     ctx_mut(|context| context.install_connection(connection));
 }
 
