@@ -644,3 +644,120 @@ fn manifest_schema_path_global_no_longer_set() {
     .unwrap();
     assert!(body.contains(r#""json":"undefined""#), "got: {body}");
 }
+
+// ---------------------------------------------------------------------------
+// Companion namespaces
+// ---------------------------------------------------------------------------
+
+/// A plugin that owns `env.probe` and publishes a SECOND member beside it.
+///
+/// `env.databases` is exactly this shape: the database plugin owns `env.db` and
+/// publishes a companion map of one handle per database the deployment
+/// declares.
+struct CompanionPlugin;
+
+impl NativePlugin for CompanionPlugin {
+    fn namespace(&self) -> &str {
+        "probe"
+    }
+
+    fn name(&self) -> &str {
+        "companion-probe"
+    }
+
+    fn register(&self, _r: &mut NativeRegistrar) {}
+
+    fn companion_namespaces<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        _app_id: &str,
+        _namespace: v8::Local<'s, v8::Object>,
+        _descriptor: Option<&serde_json::Value>,
+    ) -> Result<Vec<(&'static str, v8::Local<'s, v8::Value>)>, String> {
+        let map = v8::Object::new(scope);
+        let key = v8::String::new(scope, "main").ok_or("allocate the companion key")?;
+        let value = v8::String::new(scope, "reached").ok_or("allocate the companion value")?;
+        map.set(scope, key.into(), value.into())
+            .ok_or("set the companion member")?;
+        Ok(vec![("companions", map.into())])
+    }
+}
+
+/// A companion namespace a plugin publishes reaches creator code, and `env` is
+/// still sealed against creator writes.
+///
+/// The two halves are one property and must be asserted together. `env` is
+/// sealed with `Object.freeze`, and a `Set` on a frozen object is REFUSED
+/// rather than raised - so a seal that runs before the companions are published
+/// drops every one of them with no error anywhere, and the member is simply
+/// `undefined` in JavaScript. Dropping the seal to fix that would trade one
+/// defect for another, which is why the same dispatch reports both.
+#[test]
+fn a_published_companion_namespace_reaches_creator_code_on_a_sealed_env() {
+    init_v8();
+    let runtime = Runtime::builder()
+        .plugin(CompanionPlugin)
+        .modules(vec![ModuleEntry {
+            specifier: "index.js".into(),
+            source: r#"
+import { env } from "zeroship";
+export default {
+    fetch() {
+        let assignmentRefused = false;
+        try {
+            env.injected = "creator";
+        } catch (_) {
+            assignmentRefused = true;
+        }
+        return Response.json({
+            companion: env.companions?.main ?? null,
+            namespace: typeof env.probe,
+            frozen: Object.isFrozen(env),
+            // A frozen object refuses the write in sloppy mode and throws in
+            // strict mode; a module body is strict, so either answer here
+            // means the seal held.
+            injected: env.injected ?? null,
+            assignmentRefused,
+        });
+    },
+};
+"#
+            .into(),
+        }])
+        .build();
+    let outcome = runtime.call_fetch_handler(
+        "GET",
+        "http://localhost/",
+        &[],
+        "",
+        &EnvSnapshot::empty(),
+        RequestCtx::new(CancelFlag::new()),
+    );
+    let FetchOutcome::Response { status, body, .. } = outcome else {
+        panic!("expected a synchronous response from the companion probe");
+    };
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    let observed: serde_json::Value =
+        serde_json::from_slice(&body).expect("the probe answers with JSON");
+    assert_eq!(
+        observed["companion"],
+        serde_json::json!("reached"),
+        "a companion namespace must be readable from creator code: {observed}"
+    );
+    assert_eq!(
+        observed["namespace"],
+        serde_json::json!("object"),
+        "the control: the plugin's own namespace is there too, so a missing \
+         companion is about the companion and not about the plugin: {observed}"
+    );
+    assert_eq!(
+        observed["frozen"],
+        serde_json::json!(true),
+        "env must still be sealed once every plugin has published: {observed}"
+    );
+    assert_eq!(
+        observed["injected"],
+        serde_json::Value::Null,
+        "creator code must not be able to add a member to env: {observed}"
+    );
+}
