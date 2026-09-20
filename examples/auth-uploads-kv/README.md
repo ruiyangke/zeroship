@@ -69,7 +69,7 @@ existing only for the test.
 ## Measured limits (not guessed)
 
 `MAX_UPLOAD_BYTES` is 512 KiB because the runtime's HTTP server caps a request
-body at 1 MiB (`MAX_BODY_BYTES`, `crates/runtime/src/core/serve.rs`) and base64
+body at 1 MiB (`MAX_BODY_BYTES`, `crates/zeroship-runtime/src/core/serve.rs`) and base64
 inflates by 4/3. The buffered `env.storage.put` would allow 16 MiB, but that
 ceiling is unreachable over the JSON RPC wire - a limit the transport eats
 before the handler sees it is not a limit the app can be said to enforce.

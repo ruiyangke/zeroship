@@ -1,6 +1,6 @@
 # Gateway routing
 
-Current request dispatch lives in `crates/gateway`. The hot path is the compiled resource tree from `zeroship_bundle::Manifest`, not the older rule walker.
+Current request dispatch lives in `crates/zeroship-gateway`. The hot path is the compiled resource tree from `zeroship_bundle::Manifest`, not the older rule walker.
 That compile step replaced the rule walker so inheritance flattening and RPC/path indexing happen once during route-cache updates instead of being recomputed on every request.
 
 ## Relevant files

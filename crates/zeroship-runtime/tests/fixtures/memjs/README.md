@@ -7,6 +7,6 @@ The bundle preserves runtime-owned Node builtins as `node:*` imports via
 fixture-only shims for `net`, `events`, and `util`. The driver package source
 is not patched.
 
-The e2e test is `crates/runtime/tests/node_memjs_e2e.rs`. It brings up
+The e2e test is `crates/zeroship-runtime/tests/node_memjs_e2e.rs`. It brings up
 `memcached:1.6` on `127.0.0.1:11212` when no compatible server is already
 reachable.

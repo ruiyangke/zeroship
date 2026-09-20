@@ -21,7 +21,7 @@ breaking changes via this file plus `runtime-macros/TODO.md`.
 | `<ClassTy>` impl `V8ClassInstance` | trait impl | stable since Wave 5c | Generic-over-class bound. Sealed; only the macro can satisfy it. |
 | `<ClassTy>` impl `__private::Sealed` | trait impl | private | Sealing supertrait of `V8ClassInstance`. User code MUST NOT impl this. |
 | ~~`__zs_is_<ClassTy>` (free fn)~~ | ~~`pub` `#[doc(hidden)]`~~ | **removed in Wave 8** | Pre-Wave-5c grep target. Removed per the deprecation policy below. Any remaining call site MUST migrate to `<ClassTy>::is_instance`. |
-| `__InstallSlot_<ClassTy>` (newtype) | `pub` `#[doc(hidden)]` | private; do not grep | Per-isolate slot wrapper for the cached `Global<FunctionTemplate>`. The hand-rolled `EventTarget` mirror in `crates/runtime/src/web/dom/event_target.rs` is the only known external consumer; new consumers MUST go through `<ClassTy>::install`. |
+| `__InstallSlot_<ClassTy>` (newtype) | `pub` `#[doc(hidden)]` | private; do not grep | Per-isolate slot wrapper for the cached `Global<FunctionTemplate>`. The hand-rolled `EventTarget` mirror in `crates/zeroship-runtime/src/web/dom/event_target.rs` is the only known external consumer; new consumers MUST go through `<ClassTy>::install`. |
 | `__BrandSlot_<ClassTy>` (newtype) | `pub` `#[doc(hidden)]` | private; do not grep | Per-isolate slot for the cached prototype handle (used by `__brand_check_<ClassTy>`). Internal to the macro; never call. |
 | `__brand_check_<ClassTy>` | `pub(crate)` | private | Inner brand-check walker. Operates on `Local<Object>` (no value-shape gate). Internal helper for `<ClassTy>::is_instance`. |
 
@@ -53,7 +53,7 @@ refactor.md` §3.10):
 2. **Waves 6 / 7** — production code stayed migrated; only
    `v8_brand_pub_smoke.rs` still exercised the legacy symbol.
 3. **Wave 8 (this wave)** — `__zs_is_<ClassTy>` deleted from emit
-   (`crates/runtime-macros/src/v8_class/emit/public_is.rs`).
+   (`crates/zeroship-runtime-macros/src/v8_class/emit/public_is.rs`).
    `<ClassTy>::is_instance` now owns the `Local<Value>::try_into`
    gate that used to live in the shim. The single remaining test
    caller in `v8_brand_pub_smoke.rs` migrated to
@@ -92,7 +92,7 @@ Every emit path goes through `::zeroship_runtime::macro_runtime::*`
 since Wave 5b. **The macro never references `::zeroship_runtime::<m>::<Item>`
 directly.** When the macro starts emitting a new type:
 
-1. Add a re-export under `crates/runtime/src/macro_runtime.rs`
+1. Add a re-export under `crates/zeroship-runtime/src/macro_runtime.rs`
    (matching the canonical sub-module shape — see the existing
    sub-modules for the convention).
 2. Update the macro emit to use `::zeroship_runtime::macro_runtime::<m>::<Item>`.
@@ -154,7 +154,7 @@ When breaking-changing an emitted symbol, the workflow is:
 2. Migrate every internal caller in the same PR.
 3. Update the snapshot fixtures (`crates/runtime-macros/src/v8_class/snapshots/`).
 4. If the change adds a new emitted path, add the corresponding
-   re-export in `crates/runtime/src/macro_runtime.rs`.
+   re-export in `crates/zeroship-runtime/src/macro_runtime.rs`.
 
 For the formal change-classifier (path-swap auto-accept vs structural
 emit manual review), see `docs/proposals/runtime-macros-refactor.md`

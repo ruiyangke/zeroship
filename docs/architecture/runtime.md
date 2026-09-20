@@ -1,6 +1,6 @@
 # V8 runtime
 
-`crates/runtime` is the embedder layer for app code. `src/lib.rs` is mostly a re-export surface; the implementation now lives under `src/core/`, `src/transport/`, and `src/web/`.
+`crates/zeroship-runtime` is the embedder layer for app code. `src/lib.rs` is mostly a re-export surface; the implementation now lives under `src/core/`, `src/transport/`, and `src/web/`.
 
 ## Request model
 
@@ -52,7 +52,7 @@ Plugins register namespaces on `env` through `NativePlugin`:
 - `env.kv.*` -> `crates/zeroship-kv-v8`
 - `env.storage.*` -> `crates/zeroship-storage-v8`
 
-The `#[v8_class]` macro support lives in `crates/runtime-macros`.
+The `#[v8_class]` macro support lives in `crates/zeroship-runtime-macros`.
 
 ## Web APIs and streams
 
