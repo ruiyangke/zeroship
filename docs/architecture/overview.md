@@ -7,15 +7,15 @@ zeroship is two systems that share storage, auth, and PostgreSQL. This page is t
 ```text
 Creator platform
   Creator UI / CLI
-    -> control plane (`crates/control`)
+    -> control plane (`crates/zeroship-control`)
     -> PostgreSQL
-    -> bundle/blob root (`crates/bundle`, current impl: `LocalDiskBlobStore`)
+    -> bundle/blob root (`crates/zeroship-bundle`; `--blob-store` selects `S3BlobStore` for `s3://`, `LocalDiskBlobStore` otherwise)
 
 App runtime
   End users
-    -> gateway (`crates/gateway`)
-    -> worker (`crates/worker`)
-    -> runtime (`crates/runtime`)
+    -> gateway (`crates/zeroship-gateway`)
+    -> worker (`crates/zeroship-worker`)
+    -> runtime (`crates/zeroship-runtime`)
     -> env.{db,kv,storage} plugins
 ```
 
@@ -23,12 +23,12 @@ App runtime
 
 | Component | Crate | Current responsibility |
 | --- | --- | --- |
-| Control plane | `crates/control` | App CRUD, deploy ingest, auth routes, env/secrets, Stripe state, route/version registry |
-| Gateway | `crates/gateway` | App lookup, compiled-manifest dispatch, JWT/cookie auth gate, static asset serving, worker proxying |
-| Worker | `crates/worker` | Per-thread V8 runtime cache, bundle/env sync, request execution, usage reporting |
-| Runtime | `crates/runtime` | V8 embedder, Web APIs, RPC/HTTP bridge, async pump, native plugin host |
-| Bundle | `crates/bundle` | `.zship` manifest types, blob store trait, ingest path, legacy bundle store types |
-| Core | `crates/core` | Shared wire types, auth helpers, typed IDs, observability helpers |
+| Control plane | `crates/zeroship-control` | App CRUD, deploy ingest, auth routes, env/secrets, Stripe state, route/version registry |
+| Gateway | `crates/zeroship-gateway` | App lookup, compiled-manifest dispatch, JWT/cookie auth gate, static asset serving, worker proxying |
+| Worker | `crates/zeroship-worker` | Per-thread V8 runtime cache, bundle/env sync, request execution, usage reporting |
+| Runtime | `crates/zeroship-runtime` | V8 embedder, Web APIs, RPC/HTTP bridge, async pump, native plugin host |
+| Bundle | `crates/zeroship-bundle` | `.zship` manifest types, blob store trait, ingest path, legacy bundle store types |
+| Core | `crates/zeroship-core` | Shared wire types, auth helpers, typed IDs, observability helpers |
 | DB ORM | `crates/zeroship-data-orm` | Backend-independent Rust API, SQL compilation, transactions, and database adapters |
 | DB V8 adapter | `crates/zeroship-data-v8` | `env.db.*` |
 | KV storage | `crates/zeroship-kv` | Backend contract and Redis/redb implementations |
