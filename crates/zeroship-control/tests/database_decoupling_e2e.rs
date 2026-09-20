@@ -430,8 +430,10 @@ async fn apply_into(
     let report = apply_ir_documents(
         tenant_url,
         &tmp,
-        app,
-        database,
+        zeroship_migrate_server::apply::ApplyTarget {
+            app_id: app,
+            database_id: database,
+        },
         &request,
         &policy_config(),
         &SchemaApplyStore::new(control_url.to_owned()),

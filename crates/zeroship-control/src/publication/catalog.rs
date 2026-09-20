@@ -12,7 +12,7 @@ use super::command::{
 };
 use super::models::catalog::{
     app_deploy_commands as commands, app_lifecycle_intents as intents,
-    app_schema_applies as applies, apps, database_bindings as bindings,
+    app_schema_applies as applies, apps, database_bindings as bindings, databases,
 };
 use std::{future::Future, num::NonZeroUsize, pin::Pin};
 use zeroship_core::{
@@ -184,6 +184,12 @@ struct LiveBinding {
     database_id: String,
     generation: i32,
     observed_generation: i32,
+}
+
+#[derive(FromRow)]
+#[orm(entity = databases)]
+struct LiveDatabase {
+    id: String,
 }
 
 #[derive(FromRow)]
@@ -606,12 +612,27 @@ async fn admit_bindings(
         )
         .all::<LiveBinding>()
         .await?;
+    // A binding is not live unless its DATABASE is live too. Omitting this
+    // conjunct is what `zeroship_core::live_binding::LIVE_BINDINGS_FROM_WHERE`
+    // spells as `d.status = 'active'`, and without it a deploy is admitted
+    // against a database being deleted - admitted here, refused by Control's
+    // binding endpoint, and dropped by the reconciler under a live deployment.
+    let live_databases = tx
+        .entity::<databases::Entity>()?
+        .query()
+        .filter(databases::status.eq("active")?)
+        .all::<LiveDatabase>()
+        .await?;
     let missing: Vec<String> = databases
         .iter()
         .filter(|database| {
-            !live.iter().any(|row| {
+            let bound = live.iter().any(|row| {
                 row.database_id == database.as_str() && row.observed_generation >= row.generation
-            })
+            });
+            let database_live = live_databases
+                .iter()
+                .any(|row| row.id == database.as_str());
+            !(bound && database_live)
         })
         .map(|database| database.as_str().to_owned())
         .collect();

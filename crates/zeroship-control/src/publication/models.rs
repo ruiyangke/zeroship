@@ -43,6 +43,15 @@ zeroship_data_orm::orm::schema! {
             observed_generation: Integer,
         }
 
+        // Only the two columns admission reads. A binding is not live unless
+        // its DATABASE is live too, and omitting that conjunct admitted a
+        // deploy against a database being deleted.
+        databases {
+            #[orm(primary_key)]
+            id: Text,
+            status: Text,
+        }
+
         app_deploy_commands {
             #[orm(primary_key)]
             id: Text,
