@@ -1,22 +1,46 @@
-//! Migration-owned logical publication reconciliation.
+//! Migration-owned membership in the datastore's ONE shared publication.
+//!
+//! # The object is shared and the edit is not
+//!
+//! A datastore carries a single relay-owned publication
+//! ([`DATASTORE_PUBLICATION`]) whose membership is the union of every database's
+//! published tables. An apply therefore reconciles ONLY the member entries
+//! whose relations live in its own schema, and it does so under the datastore
+//! publication mutex - an advisory lock keyed on the publication, which is the
+//! object being edited, not on the database, which is only one contributor to
+//! it.
+//!
+//! `ALTER PUBLICATION ... SET TABLE` names the WHOLE object. One database
+//! issuing it would drop every co-tenant database's tables out of the shared
+//! stream, with no error from `PostgreSQL` and nothing in the relay to notice
+//! until a subscriber silently stopped receiving changes. So the reconciliation
+//! below computes a delta and issues `ADD TABLE` / `DROP TABLE`, and never
+//! `SET TABLE`.
+//!
+//! # Membership is not the tenant filter
+//!
+//! Because the publication spans every database on the datastore, its
+//! membership says nothing about who may read what. The relay separates
+//! subscribers by comparing each decoded relation's namespace against the
+//! schema of the one database that subscriber is bound to
+//! (`zeroship_data_cdc_server::source`). Keying or filtering on publication
+//! membership is the attractive wrong answer here precisely because a shared
+//! publication deliberately spans tenants.
 
 use compio_postgres::Client;
-use zeroship_core::app_derivation;
-use zeroship_id::AppId;
+use zeroship_core::database_derivation;
+use zeroship_core::replication_names::DATASTORE_PUBLICATION;
+use zeroship_core::DatabaseId;
 
-/// A failure to reconcile an app publication after its schema migration.
-///
-/// There is no invalid-name arm any more. The publication used to be named from
-/// an untyped `&str` through `zeroship_core::replication_names::publication_name`,
-/// whose two refusals are an empty id and an embedded NUL; an [`AppId`] can be
-/// neither, so [`app_derivation::publication_name`] is infallible and the arm
-/// had no producer left.
+/// A failure to reconcile a database's entries in the datastore publication.
 #[derive(Debug, thiserror::Error)]
 pub enum PublicationError {
     #[error("publication reconciliation database error: {0}")]
     Database(#[from] compio_postgres::Error),
 }
 
+/// Every top-level table in one database's schema: the membership this
+/// database is entitled to contribute.
 const fn creator_table_query() -> &'static str {
     "SELECT c.relname
        FROM pg_class AS c
@@ -27,58 +51,90 @@ const fn creator_table_query() -> &'static str {
       ORDER BY c.relname"
 }
 
+/// The publication's CURRENT members drawn from one database's schema.
+///
+/// Scoped by `nspname` in the query rather than filtered afterwards: an
+/// unscoped read would hand this reconciliation every co-tenant's relations and
+/// the delta would then propose dropping them.
+const fn published_member_query() -> &'static str {
+    "SELECT c.relname
+       FROM pg_publication_rel AS pr
+       JOIN pg_publication AS p ON p.oid = pr.prpubid
+       JOIN pg_class AS c ON c.oid = pr.prrelid
+       JOIN pg_namespace AS n ON n.oid = c.relnamespace
+      WHERE p.pubname = $1
+        AND n.nspname = $2
+      ORDER BY c.relname"
+}
+
 fn quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
 }
 
-fn publication_membership_sql(
-    publication: &str,
-    schema: &str,
-    tables: &[String],
-    exists: bool,
-) -> String {
-    let publication = quote_ident(publication);
-    let members = tables
-        .iter()
-        .map(|table| format!("{}.{}", quote_ident(schema), quote_ident(table)))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    match (exists, members.is_empty()) {
-        (false, true) => {
-            format!("CREATE PUBLICATION {publication} WITH (publish_via_partition_root = true)")
-        }
-        (false, false) => format!(
-            "CREATE PUBLICATION {publication} FOR TABLE {members} \
-             WITH (publish_via_partition_root = true)"
-        ),
-        (true, false) => format!(
-            "ALTER PUBLICATION {publication} SET (publish_via_partition_root = true); \
-             ALTER PUBLICATION {publication} SET TABLE {members}"
-        ),
-        // PostgreSQL has no empty SET TABLE form. Recreate the publication
-        // inside this transaction to clear every stale member.
-        (true, true) => format!(
-            "DROP PUBLICATION {publication}; \
-             CREATE PUBLICATION {publication} WITH (publish_via_partition_root = true)"
-        ),
-    }
+fn qualified(schema: &str, table: &str) -> String {
+    format!("{}.{}", quote_ident(schema), quote_ident(table))
 }
 
-/// Reconcile an app's publication to its top-level tables.
+/// The statements that move this database's entries from `current` to
+/// `desired`, and nothing else.
 ///
-/// This runs on the privileged migration connection after a successful apply.
-/// Membership is scoped only by the app schema. Table names do not alter CDC
-/// visibility; partition children remain represented by their top-level table.
-pub async fn reconcile_app_publication(
+/// Returns an empty string when the two agree, so a converged database issues
+/// no write at all against an object every other database on the cluster is
+/// also publishing through.
+fn membership_delta_sql(
+    publication: &str,
+    schema: &str,
+    desired: &[String],
+    current: &[String],
+) -> String {
+    let publication = quote_ident(publication);
+    let added = desired
+        .iter()
+        .filter(|table| !current.contains(table))
+        .map(|table| qualified(schema, table))
+        .collect::<Vec<_>>();
+    let removed = current
+        .iter()
+        .filter(|table| !desired.contains(table))
+        .map(|table| qualified(schema, table))
+        .collect::<Vec<_>>();
+
+    let mut statements = Vec::new();
+    if !added.is_empty() {
+        statements.push(format!(
+            "ALTER PUBLICATION {publication} ADD TABLE {}",
+            added.join(", ")
+        ));
+    }
+    if !removed.is_empty() {
+        statements.push(format!(
+            "ALTER PUBLICATION {publication} DROP TABLE {}",
+            removed.join(", ")
+        ));
+    }
+    statements.join("; ")
+}
+
+/// Reconcile one database's entries in the datastore publication.
+///
+/// Runs on the privileged migration connection after a successful apply.
+/// Membership is scoped by this database's schema and by relation kind; names
+/// and prefixes do not narrow it, and partition children stay represented by
+/// their top-level table.
+///
+/// # Errors
+///
+/// [`PublicationError::Database`] on any statement failure. The whole
+/// reconciliation is one transaction, so a failure leaves the shared object
+/// exactly as it was.
+pub async fn reconcile_database_publication(
     client: &Client,
-    app: &AppId,
+    database: &DatabaseId,
 ) -> Result<(), PublicationError> {
-    let publication = app_derivation::publication_name(app);
-    let schema = app_derivation::schema_name(app);
+    let schema = database_derivation::schema_name(database);
     client.batch_execute("BEGIN").await?;
 
-    let result = reconcile_in_transaction(client, &schema, &publication).await;
+    let result = reconcile_in_transaction(client, &schema).await;
     match result {
         Ok(()) => {
             client.batch_execute("COMMIT").await?;
@@ -91,33 +147,63 @@ pub async fn reconcile_app_publication(
     }
 }
 
-async fn reconcile_in_transaction(
-    client: &Client,
-    schema: &str,
-    publication: &str,
-) -> Result<(), PublicationError> {
+async fn reconcile_in_transaction(client: &Client, schema: &str) -> Result<(), PublicationError> {
+    // THE DATASTORE PUBLICATION MUTEX. Keyed on the object being edited, so
+    // two databases reconciling at once serialise against each other; a key on
+    // the database would let them interleave `ADD TABLE`s against one
+    // publication and observe each other's half-applied deltas.
     client
         .query_text_params(
             "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-            &[publication],
+            &[DATASTORE_PUBLICATION],
         )
         .await?;
 
-    let rows = client
-        .query_text_params(creator_table_query(), &[schema])
+    let publication_q = quote_ident(DATASTORE_PUBLICATION);
+    let existing = client
+        .query_text_params(
+            "SELECT pubviaroot FROM pg_publication WHERE pubname = $1",
+            &[DATASTORE_PUBLICATION],
+        )
         .await?;
-    let tables = rows
+    match existing.first() {
+        None => {
+            client
+                .batch_execute(&format!(
+                    "CREATE PUBLICATION {publication_q} \
+                     WITH (publish_via_partition_root = true)"
+                ))
+                .await?;
+        }
+        Some(row) => {
+            // Re-asserted only when it is wrong. The parameter is a datastore-
+            // wide invariant rather than this database's business, so the
+            // converged path writes nothing to the shared row.
+            if !row.get::<_, bool>("pubviaroot") {
+                client
+                    .batch_execute(&format!(
+                        "ALTER PUBLICATION {publication_q} \
+                         SET (publish_via_partition_root = true)"
+                    ))
+                    .await?;
+            }
+        }
+    }
+
+    let desired = client
+        .query_text_params(creator_table_query(), &[schema])
+        .await?
         .iter()
         .map(|row| row.get::<_, String>("relname"))
         .collect::<Vec<_>>();
-    let exists = !client
-        .query_text_params(
-            "SELECT 1 FROM pg_publication WHERE pubname = $1",
-            &[publication],
-        )
+    let current = client
+        .query_text_params(published_member_query(), &[DATASTORE_PUBLICATION, schema])
         .await?
-        .is_empty();
-    let sql = publication_membership_sql(publication, schema, &tables, exists);
+        .iter()
+        .map(|row| row.get::<_, String>("relname"))
+        .collect::<Vec<_>>();
+
+    let sql = membership_delta_sql(DATASTORE_PUBLICATION, schema, &desired, &current);
     if !sql.is_empty() {
         client.batch_execute(&sql).await?;
     }
@@ -127,10 +213,9 @@ async fn reconcile_in_transaction(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uuid::Uuid;
 
     #[test]
-    fn catalog_query_includes_every_top_level_table_in_the_app_schema() {
+    fn catalog_query_includes_every_top_level_table_in_the_database_schema() {
         let sql = creator_table_query();
         assert!(sql.contains("c.relkind IN ('r', 'p')"));
         assert!(sql.contains("NOT c.relispartition"));
@@ -138,77 +223,115 @@ mod tests {
         assert!(sql.contains("ORDER BY c.relname"));
     }
 
+    /// The member read is scoped to ONE schema inside the query. Read
+    /// unscoped, the delta below would propose dropping every co-tenant
+    /// database's tables out of the shared object.
     #[test]
-    fn publication_ddl_names_each_creator_table_explicitly() {
-        let tables = ["notes".to_string(), "odd\"name".to_string()];
-        let sql = publication_membership_sql("__zs_pub_deadbeef", "app-one", &tables, false);
+    fn the_member_read_is_scoped_to_one_schema() {
+        assert!(published_member_query().contains("n.nspname = $2"));
+    }
+
+    /// The delta names only this schema's relations, and never `SET TABLE`.
+    #[test]
+    fn membership_edits_are_deltas_and_never_replace_the_shared_object() {
+        let desired = ["notes".to_string(), "odd\"name".to_string()];
+        let sql = membership_delta_sql("__zs_pub_datastore", "db_one", &desired, &[]);
         assert_eq!(
             sql,
-            "CREATE PUBLICATION \"__zs_pub_deadbeef\" FOR TABLE \"app-one\".\"notes\", \"app-one\".\"odd\"\"name\" WITH (publish_via_partition_root = true)"
+            "ALTER PUBLICATION \"__zs_pub_datastore\" ADD TABLE \"db_one\".\"notes\", \"db_one\".\"odd\"\"name\""
         );
+        assert!(!sql.contains("SET TABLE"));
         assert!(!sql.contains("FOR TABLES IN SCHEMA"));
 
-        let alter = publication_membership_sql("__zs_pub_deadbeef", "app-one", &tables, true);
+        let removal = membership_delta_sql("__zs_pub_datastore", "db_one", &[], &desired);
         assert_eq!(
-            alter,
-            "ALTER PUBLICATION \"__zs_pub_deadbeef\" SET (publish_via_partition_root = true); ALTER PUBLICATION \"__zs_pub_deadbeef\" SET TABLE \"app-one\".\"notes\", \"app-one\".\"odd\"\"name\""
+            removal,
+            "ALTER PUBLICATION \"__zs_pub_datastore\" DROP TABLE \"db_one\".\"notes\", \"db_one\".\"odd\"\"name\""
         );
+        assert!(!removal.contains("SET TABLE"));
+        assert!(!removal.contains("DROP PUBLICATION"));
+    }
+
+    /// A converged database writes nothing. That is what keeps a busy cluster
+    /// from serialising every apply behind a write to one catalog row.
+    #[test]
+    fn a_converged_database_issues_no_statement() {
+        let members = ["notes".to_string()];
         assert_eq!(
-            publication_membership_sql("__zs_pub_deadbeef", "app-one", &[], true),
-            "DROP PUBLICATION \"__zs_pub_deadbeef\"; CREATE PUBLICATION \"__zs_pub_deadbeef\" WITH (publish_via_partition_root = true)"
+            membership_delta_sql("__zs_pub_datastore", "db_one", &members, &members),
+            ""
         );
     }
 
     #[compio::test]
-    async fn reconciliation_publishes_prefixed_tables_but_not_partition_children() {
+    async fn one_database_s_reconciliation_leaves_a_co_tenant_s_members_alone() {
         let client = crate::test_database::connect().await;
 
-        let app = AppId::mint();
-        let schema = app_derivation::schema_name(&app);
-        let schema_q = quote_ident(&schema);
-        let publication = app_derivation::publication_name(&app);
-        let publication_q = quote_ident(&publication);
+        let first = DatabaseId::mint();
+        let second = DatabaseId::mint();
+        let first_schema = database_derivation::schema_name(&first);
+        let second_schema = database_derivation::schema_name(&second);
+        let first_q = quote_ident(&first_schema);
+        let second_q = quote_ident(&second_schema);
         client
             .batch_execute(&format!(
-                "CREATE SCHEMA {schema_q};
-                 CREATE TABLE {schema_q}.notes (id bigint PRIMARY KEY);
-                 CREATE TABLE {schema_q}.__zeroship_journal (id bigint PRIMARY KEY);
-                 CREATE TABLE {schema_q}.events (id bigint, bucket integer) PARTITION BY LIST (bucket);
-                 CREATE TABLE {schema_q}.events_default PARTITION OF {schema_q}.events DEFAULT;
-                 CREATE VIEW {schema_q}.note_ids AS SELECT id FROM {schema_q}.notes;"
+                "CREATE SCHEMA {first_q};
+                 CREATE SCHEMA {second_q};
+                 CREATE TABLE {first_q}.notes (id bigint PRIMARY KEY);
+                 CREATE TABLE {first_q}.__zeroship_journal (id bigint PRIMARY KEY);
+                 CREATE TABLE {first_q}.events (id bigint, bucket integer) PARTITION BY LIST (bucket);
+                 CREATE TABLE {first_q}.events_default PARTITION OF {first_q}.events DEFAULT;
+                 CREATE VIEW {first_q}.note_ids AS SELECT id FROM {first_q}.notes;
+                 CREATE TABLE {second_q}.orders (id bigint PRIMARY KEY);"
             ))
             .await
             .expect("create publication fixtures");
 
-        reconcile_app_publication(&client, &app)
+        reconcile_database_publication(&client, &first)
             .await
-            .expect("reconcile app publication");
-        let initial_tables = client
-            .query_text_params(
-                "SELECT c.relname
-                   FROM pg_publication_rel AS pr
-                   JOIN pg_publication AS p ON p.oid = pr.prpubid
-                   JOIN pg_class AS c ON c.oid = pr.prrelid
-                   JOIN pg_namespace AS n ON n.oid = c.relnamespace
-                  WHERE p.pubname = $1 AND n.nspname = $2
-                  ORDER BY c.relname",
-                &[&publication, &schema],
-            )
+            .expect("reconcile the first database");
+        reconcile_database_publication(&client, &second)
             .await
-            .expect("read publication membership")
-            .iter()
-            .map(|row| row.get::<_, String>("relname"))
-            .collect::<Vec<_>>();
+            .expect("reconcile the second database");
 
         assert_eq!(
-            initial_tables,
+            published(&client, &first_schema).await,
             ["__zeroship_journal", "events", "notes"],
-            "publication membership must follow schema and relation kind only"
+            "membership must follow schema and relation kind only"
         );
+        assert_eq!(
+            published(&client, &second_schema).await,
+            ["orders"],
+            "the second database contributes its own entries to the same object"
+        );
+
+        // THE SHARED-OBJECT ARM. Re-reconciling the first database after it
+        // grew a table must not disturb the second's entries. `SET TABLE` here
+        // would empty them with no error.
+        client
+            .batch_execute(&format!(
+                "CREATE TABLE {first_q}.__zeroship_late (id bigint PRIMARY KEY)"
+            ))
+            .await
+            .expect("create a table after the publication exists");
+        reconcile_database_publication(&client, &first)
+            .await
+            .expect("re-reconcile the first database");
+        assert_eq!(
+            published(&client, &first_schema).await,
+            ["__zeroship_journal", "__zeroship_late", "events", "notes"],
+            "a later table joins without filtering prefixes"
+        );
+        assert_eq!(
+            published(&client, &second_schema).await,
+            ["orders"],
+            "a co-tenant database's membership survives another database's apply"
+        );
+
         let publishes_via_root = client
             .query_one_scalar::<bool, _>(
                 "SELECT pubviaroot FROM pg_publication WHERE pubname = $1",
-                &[&publication],
+                &[&DATASTORE_PUBLICATION],
             )
             .await
             .expect("read publication partition behavior");
@@ -217,84 +340,48 @@ mod tests {
             "partition writes must be emitted under the declared root collection"
         );
 
+        // An emptied schema withdraws its own entries and, again, only its own.
         client
             .batch_execute(&format!(
-                "CREATE TABLE {schema_q}.__zeroship_late (id bigint PRIMARY KEY)"
+                "DROP VIEW {first_q}.note_ids;
+                 DROP TABLE {first_q}.notes, {first_q}.__zeroship_journal,
+                            {first_q}.__zeroship_late, {first_q}.events CASCADE;"
             ))
             .await
-            .expect("create a table after publication creation");
-        reconcile_app_publication(&client, &app)
+            .expect("empty the first database's schema");
+        reconcile_database_publication(&client, &first)
             .await
-            .expect("reconcile existing app publication");
-        let reconciled_tables = client
-            .query_text_params(
-                "SELECT c.relname
-                   FROM pg_publication_rel AS pr
-                   JOIN pg_publication AS p ON p.oid = pr.prpubid
-                   JOIN pg_class AS c ON c.oid = pr.prrelid
-                   JOIN pg_namespace AS n ON n.oid = c.relnamespace
-                  WHERE p.pubname = $1 AND n.nspname = $2
-                  ORDER BY c.relname",
-                &[&publication, &schema],
-            )
-            .await
-            .expect("read reconciled publication membership")
-            .iter()
-            .map(|row| row.get::<_, String>("relname"))
-            .collect::<Vec<_>>();
-
-        assert_eq!(
-            reconciled_tables,
-            ["__zeroship_journal", "__zeroship_late", "events", "notes"],
-            "reconciliation must update an existing publication without filtering prefixes"
-        );
-
-        let sibling = Uuid::new_v4().to_string();
-        let sibling_q = quote_ident(&sibling);
-        client
-            .batch_execute(&format!(
-                "DROP VIEW {schema_q}.note_ids;
-                 DROP TABLE {schema_q}.notes, {schema_q}.__zeroship_journal,
-                            {schema_q}.__zeroship_late, {schema_q}.events CASCADE;
-                 CREATE SCHEMA {sibling_q};
-                 CREATE TABLE {sibling_q}.stale_member (id bigint PRIMARY KEY);
-                 ALTER PUBLICATION {publication_q} ADD TABLE {sibling_q}.stale_member;
-                 ALTER PUBLICATION {publication_q} SET (publish_via_partition_root = false);"
-            ))
-            .await
-            .expect("seed stale publication membership");
-        reconcile_app_publication(&client, &app)
-            .await
-            .expect("reconcile an empty creator schema");
-        let empty_membership = client
-            .query_text_params(
-                "SELECT 1 FROM pg_publication_rel AS pr
-                   JOIN pg_publication AS p ON p.oid = pr.prpubid
-                  WHERE p.pubname = $1",
-                &[&publication],
-            )
-            .await
-            .expect("read empty publication membership");
+            .expect("reconcile an empty database schema");
         assert!(
-            empty_membership.is_empty(),
-            "an empty creator schema must clear stale publication members"
+            published(&client, &first_schema).await.is_empty(),
+            "an empty schema must carry no members"
         );
-        let publishes_via_root = client
-            .query_one_scalar::<bool, _>(
-                "SELECT pubviaroot FROM pg_publication WHERE pubname = $1",
-                &[&publication],
-            )
-            .await
-            .expect("read reconciled partition behavior");
-        assert!(publishes_via_root);
+        assert_eq!(
+            published(&client, &second_schema).await,
+            ["orders"],
+            "emptying one database must not empty the shared publication"
+        );
 
         client
             .batch_execute(&format!(
-                "DROP PUBLICATION {publication_q};
-                 DROP SCHEMA {schema_q} CASCADE;
-                 DROP SCHEMA {sibling_q} CASCADE;"
+                "DROP SCHEMA {first_q} CASCADE; DROP SCHEMA {second_q} CASCADE;"
             ))
             .await
             .expect("remove publication fixtures");
+        // The publication itself is NOT dropped. It is the datastore's one
+        // shared object and every other apply on this server publishes through
+        // it; a teardown that removed it would be this test doing to its
+        // neighbours exactly what the arm above proves an apply must not do.
+    }
+
+    /// The publication's members drawn from one schema, sorted.
+    async fn published(client: &Client, schema: &str) -> Vec<String> {
+        client
+            .query_text_params(published_member_query(), &[DATASTORE_PUBLICATION, schema])
+            .await
+            .expect("read publication membership")
+            .iter()
+            .map(|row| row.get::<_, String>("relname"))
+            .collect()
     }
 }
