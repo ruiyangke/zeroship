@@ -1617,7 +1617,7 @@ async fn prepare_upsert_doc_for_write(
 /// zeroizing sidechannel; it performs no SQL or backend resolution.
 async fn encryption_pass_dispatch(
     keys: &crate::encryption::KeyStore,
-    app_id: &str,
+    binding: &DbBinding,
     collection: &str,
     schema: &FieldMap,
     row_pk: &str,
@@ -1626,7 +1626,7 @@ async fn encryption_pass_dispatch(
 ) -> Result<(), DbError> {
     crate::protection::encryption_pass::encrypt_row_on_write_with_sidechannel(
         keys,
-        app_id,
+        binding,
         collection,
         schema,
         row_pk,

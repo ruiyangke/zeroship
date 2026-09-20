@@ -1,17 +1,55 @@
-//! Host-supplied project encryption keys and app-to-project bindings.
+//! Host-supplied project root keys, and the per-database column key expanded
+//! from one.
 //!
-//! The host supplies the project key and its authorized app bindings. Column
-//! metadata cannot select a key. This module performs no environment or database
-//! reads; control-plane provisioning is responsible for delivering key material.
+//! The host supplies the project ROOT key and its authorized app bindings; the
+//! key a column is actually encrypted under is [`derive_key`] of that root and
+//! the database the row lives in. Column metadata cannot select a key. This
+//! module performs no environment or database reads; control-plane provisioning
+//! is responsible for delivering key material.
+//!
+//! **The root stays on the project and the salt is the database.** A project is
+//! pinned to one execution zone, so serving its root no further than that zone
+//! bounds the blast radius the root itself carries; the derived key is
+//! nonetheless per database, which is what lets two apps bound to one database
+//! read the same rows and keeps one app's two databases apart.
 
 use super::aead::AeadKey;
 use crate::error::DbError;
+use hkdf::Hkdf;
+use sha2::Sha256;
 use std::{
     cell::Cell,
     collections::HashMap,
     sync::{Arc, RwLock},
 };
 use zeroize::Zeroizing;
+use zeroship_core::{DatabaseId, database_derivation};
+
+/// HKDF `info` for the at-rest column key, separating it from any other
+/// expansion of the same project root.
+const COLUMN_KEY_INFO: &[u8] = b"zeroship:at-rest-column-key:v2";
+
+/// Expand one database's at-rest column key from its project's root key.
+///
+/// The salt is [`database_derivation::encryption_salt`], so the reconciler's
+/// notion of which database a schema is and this expansion cannot disagree
+/// about which id is being keyed on.
+///
+/// Every app the project binds to one database expands the SAME key from it,
+/// which is the point: encryption is at-rest protection, not the fence between
+/// co-binding-holders.
+#[must_use]
+pub fn derive_key(project_root: &AeadKey, database: &DatabaseId) -> AeadKey {
+    let expander = Hkdf::<Sha256>::new(
+        Some(database_derivation::encryption_salt(database)),
+        &project_root.k_enc,
+    );
+    let mut k_enc = Zeroizing::new([0u8; 32]);
+    expander
+        .expand(COLUMN_KEY_INFO, k_enc.as_mut())
+        .expect("HKDF-SHA256 expands 32 bytes");
+    AeadKey { k_enc: *k_enc }
+}
 
 /// Project keys supplied through the trusted Rust host boundary.
 #[derive(Default)]
@@ -170,9 +208,11 @@ impl ProjectKeySource {
     }
 }
 
-/// Resolve the same project key for every encrypted column of a bound app.
-/// Supplied keys are already usable AEAD keys; no per-column or per-app key
-/// derivation is performed. App identity is authenticated by the ciphertext AAD.
+/// Resolve one database's column key for every encrypted column in it.
+///
+/// The app names which project's root key the host supplied; the database names
+/// what that root is expanded with. No per-column derivation is performed, and
+/// the database - not the app - is what the ciphertext AAD authenticates.
 #[derive(Debug)]
 pub struct KeyStore {
     source: ProjectKeySource,
@@ -190,10 +230,21 @@ impl KeyStore {
     pub fn lookups_count(&self) -> u64 {
         self.lookups.get()
     }
+
+    /// The key `app_id`'s rows in `database` are encrypted under.
+    ///
+    /// # Errors
+    ///
+    /// [`DbError::Configuration`] when the host supplied no project root key
+    /// for this app.
     #[allow(clippy::unused_async)]
-    pub async fn resolve(&self, app_id: &str) -> Result<AeadKey, DbError> {
+    pub async fn resolve(
+        &self,
+        app_id: &str,
+        database: &DatabaseId,
+    ) -> Result<AeadKey, DbError> {
         self.lookups.set(self.lookups.get() + 1);
-        self.source.0.lookup(app_id)
+        Ok(derive_key(&self.source.0.lookup(app_id)?, database))
     }
 }
 
@@ -223,15 +274,53 @@ fn parse_project_key(hex: &str) -> Result<[u8; 32], DbError> {
 mod tests {
     use super::*;
 
+    /// **The expansion is a function of BOTH inputs.** A root that never
+    /// reached HKDF, or a salt that did not, would leave one of the two axes
+    /// unkeyed - and neither shows up as an error, only as a read that
+    /// succeeds or fails in the wrong place.
+    #[test]
+    fn the_column_key_varies_with_the_root_and_with_the_database() {
+        let root = AeadKey { k_enc: [1; 32] };
+        let other_root = AeadKey { k_enc: [2; 32] };
+        let here = DatabaseId::mint();
+        let there = DatabaseId::mint();
+        assert_ne!(here, there, "the control: two mints are two databases");
+
+        let derived = derive_key(&root, &here);
+        assert_eq!(
+            derived.k_enc,
+            derive_key(&root, &here).k_enc,
+            "the expansion must be deterministic or no row ever decrypts twice"
+        );
+        assert_ne!(
+            derived.k_enc,
+            derive_key(&root, &there).k_enc,
+            "the database must reach the expansion"
+        );
+        assert_ne!(
+            derived.k_enc,
+            derive_key(&other_root, &here).k_enc,
+            "the project root must reach the expansion"
+        );
+        assert_ne!(
+            derived.k_enc, root.k_enc,
+            "the root itself must never be handed to AES-GCM"
+        );
+    }
+
     #[compio::test]
     async fn an_existing_key_store_observes_host_delivery_from_another_thread() {
         let source = Arc::new(SuppliedProjectKeys::new());
         let store = KeyStore::new(ProjectKeySource::supplied(source.clone()));
-        assert!(store.resolve("app").await.is_err());
+        let database = DatabaseId::mint();
+        assert!(store.resolve("app", &database).await.is_err());
         std::thread::spawn(move || source.supply("app", "project", [9; 32]).unwrap())
             .join()
             .unwrap();
-        assert_eq!(store.resolve("app").await.unwrap().k_enc, [9; 32]);
+        assert_eq!(
+            store.resolve("app", &database).await.unwrap().k_enc,
+            derive_key(&AeadKey { k_enc: [9; 32] }, &database).k_enc
+        );
     }
 
     #[test]
@@ -255,8 +344,14 @@ mod tests {
         assert!(keys.bindings.read().unwrap().projects.is_empty());
     }
 
+    /// Two apps of one project reading ONE database expand one column key, and
+    /// an app of another project reading the same database expands another.
+    ///
+    /// The database is held constant across all three, so the only variable is
+    /// which root the app's project supplied - which is what makes the first
+    /// equality evidence about co-binding-holders rather than about the salt.
     #[compio::test]
-    async fn project_key_is_shared_only_by_bound_apps() {
+    async fn co_binding_holders_of_one_project_expand_one_column_key() {
         let supplied = Arc::new(SuppliedProjectKeys::new());
         supplied.insert_hex("project_a", &"11".repeat(32)).unwrap();
         supplied.insert_hex("project_b", &"22".repeat(32)).unwrap();
@@ -264,10 +359,26 @@ mod tests {
         supplied.bind_app("app_b", "project_a").unwrap();
         supplied.bind_app("app_c", "project_b").unwrap();
         let keys = KeyStore::new(ProjectKeySource::supplied(supplied));
-        let a = keys.resolve("app_a").await.unwrap();
-        assert_eq!(a.k_enc, keys.resolve("app_b").await.unwrap().k_enc);
-        assert_ne!(a.k_enc, keys.resolve("app_c").await.unwrap().k_enc);
-        assert!(keys.resolve("unbound").await.is_err());
+        let shared = DatabaseId::mint();
+        let elsewhere = DatabaseId::mint();
+
+        let a = keys.resolve("app_a", &shared).await.unwrap();
+        assert_eq!(
+            a.k_enc,
+            keys.resolve("app_b", &shared).await.unwrap().k_enc,
+            "two apps bound to one database must read each other's rows"
+        );
+        assert_ne!(
+            a.k_enc,
+            keys.resolve("app_c", &shared).await.unwrap().k_enc,
+            "another project's root must not expand this project's key"
+        );
+        assert_ne!(
+            a.k_enc,
+            keys.resolve("app_a", &elsewhere).await.unwrap().k_enc,
+            "one app's two databases must not share a key"
+        );
+        assert!(keys.resolve("unbound", &shared).await.is_err());
     }
 
     #[test]
@@ -294,7 +405,7 @@ mod tests {
     async fn lookup_counter_includes_failed_resolves() {
         let keys = KeyStore::new(ProjectKeySource::unavailable());
         assert_eq!(keys.lookups_count(), 0);
-        assert!(keys.resolve("app").await.is_err());
+        assert!(keys.resolve("app", &DatabaseId::mint()).await.is_err());
         assert_eq!(keys.lookups_count(), 1);
     }
 }

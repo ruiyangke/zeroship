@@ -8104,6 +8104,7 @@ dependencies = [
  "criterion",
  "flume 0.11.1",
  "futures",
+ "hkdf",
  "hmac 0.12.1",
  "indexmap 2.14.0",
  "num-bigint",
