@@ -157,7 +157,7 @@ pub fn run(root: &Path, args: &Args) -> i32 {
     let holders = sweep::scan_holders(&candidates, self_pid);
 
     println!();
-    println!("{:<46} {:<10} {}", "DATABASE", "VERDICT", "WHY");
+    println!("{:<46} {:<10} WHY", "DATABASE", "VERDICT");
     println!("{}", "-".repeat(81));
 
     let mut doomed: Vec<String> = Vec::new();
