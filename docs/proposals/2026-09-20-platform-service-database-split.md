@@ -241,6 +241,13 @@ it is written and silently wrong afterwards, and it goes stale with no write to
 replicate - there is no invalidation signal to miss, because nothing happened.
 Control has to hold the timestamp and evaluate the comparison itself.
 
+The rule generalises past this column, and is worth stating as a rule because
+the next projection will face it too: **a projection may carry facts; it must
+not carry a conclusion computed against the current time.** A fact goes stale
+only when something writes, which is a problem replication is built to solve. A
+clock-derived conclusion goes stale when nothing happens at all, which no
+replication topology and no invalidation signal can address.
+
 *Lag on it is a security window, not a latency budget.* The crate states the
 property it buys by not caching. `crates/zeroship-authz/src/authority.rs`: "its
 result is never stored: a membership row removed by a committed transaction is
