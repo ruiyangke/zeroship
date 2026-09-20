@@ -8501,7 +8501,6 @@ dependencies = [
  "zeroship-migrate-policy",
  "zeroship-migrate-postgres",
  "zeroship-runtime",
- "zeroship-workflow-schema",
 ]
 
 [[package]]
