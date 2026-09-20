@@ -922,8 +922,17 @@ mod tests {
                 .block_on(async {
                     let runtime = build_runtime(
                         &app_id,
+                        // The module refuses a placeholder `env.db` so the
+                        // counters below rule on a build that REACHED the
+                        // resolved binding. Without it the arm still passes
+                        // when the db plugin short-circuits on an unresolved
+                        // app, having measured the path it does not mean.
                         crate::cache::test_modules(
-                            br#"export default { fetch() { return new Response("ok"); } }"#,
+                            br#"import { env } from "zeroship";
+                                if (typeof env.db.collection !== "function") {
+                                    throw new Error("env.db never reached its resolved binding");
+                                }
+                                export default { fetch() { return new Response("ok"); } }"#,
                         ),
                         AppRuntimeLimits::default(),
                         AppNetPolicy::default(),
