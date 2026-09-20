@@ -118,9 +118,9 @@ created app my-app (app_034klb07lrb9jgma6imvmx000)
 ```
 
 That id is an `app_...` identity. zeroship ids are prefixed by entity: `app_`
-an app, `dep_` a deployment, `dcm_` a deploy command, `org_` an organization,
-`prj_` a project, `ivt_` an organization invitation, `usr_` a user. Each is an
-opaque value; pass it back unchanged.
+an app, `dbs_` a database, `dep_` a deployment, `dcm_` a deploy command,
+`org_` an organization, `prj_` a project, `ivt_` an organization invitation,
+`usr_` a user. Each is an opaque value; pass it back unchanged.
 
 Only `deploy` takes the `name` fallback. `migrate`, `secret` and `var` require
 an app id, which is why `deploy` runs first. The writeback and its limits — an
@@ -133,7 +133,9 @@ database access that `env.db` depends on. For a brand-new database app the first
 `deploy` ships the code and `migrate` applies the schema; deploy does not
 check that you ran it, so a build reaching a column the database lacks fails at
 query time naming that column. What deploy DOES refuse is a database the app
-holds no live binding to - see [`db.md`](db.md).
+holds no live binding to: create the database with
+[`zeroship db`](#zeroship-db) and bind the app to it before the first deploy
+(see also [`db.md`](db.md)).
 
 ## `zeroship deploy`
 

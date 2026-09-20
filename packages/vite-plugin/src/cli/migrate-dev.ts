@@ -43,8 +43,9 @@ interface Argv {
    *  come from the file; `env.db.ts` keys `EnvDatabases` on the label. */
   label: string;
   primary: boolean;
-  /** The zeroship.jsonc that supplied the paths, or null when none was found. */
-  configPath: string | null;
+  /** The zeroship.jsonc that supplied them. Never null: the database has to
+   *  be declared somewhere, and `databases` lives only in that file. */
+  configPath: string;
 }
 
 function parseArgv(argv: string[]): Argv {
@@ -102,7 +103,7 @@ function parseArgv(argv: string[]): Argv {
   // its LABEL and declares `Env.db` only when it is the app's PRIMARY. Neither
   // fact is recoverable from a pair of directories, so an invocation with
   // nothing declaring the database says so rather than inventing a label.
-  if (selected == null) {
+  if (selected == null || configPath == null) {
     throw new Error(
       "[zeroship] no database to migrate. --migrations/--out override where the schema is " +
         "read and written, not WHICH database it is: the regenerated env.db.ts names the " +
@@ -126,10 +127,7 @@ async function main(): Promise<number> {
   const { root, migrationsDir, outDir, label, primary, configPath } = parseArgv(
     process.argv.slice(2),
   );
-  console.log(
-    `[zeroship] migrations=${migrationsDir} out=${outDir}` +
-      (configPath == null ? " (no zeroship.jsonc; schema defaults)" : ` (from ${configPath})`),
-  );
+  console.log(`[zeroship] migrations=${migrationsDir} out=${outDir} (from ${configPath})`);
 
   if (!existsSync(migrationsDir)) {
     console.error(`[zeroship] no migrations directory at ${migrationsDir} — nothing to apply`);
