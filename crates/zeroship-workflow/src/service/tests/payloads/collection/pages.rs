@@ -377,3 +377,71 @@ pub(super) async fn lost_update(store: Rc<OrmStore>) {
     assert!(settled.collection_after_id.is_none() && settled.collection_upper_id.is_none());
     assert_eq!(fixture.scan_for(&fixture.other).await, untouched);
 }
+
+/// An unsettled page resumes on the item list its first attempt froze, even when
+/// the retry asks for a different page size. Collecting an item takes it out of
+/// the query the list was derived from, so a list re-derived at the retry's size
+/// starts at a different item than the one the stored cursor counts to.
+pub(super) async fn frozen_plan(store: Rc<OrmStore>) {
+    let fixture = Fixture::new(store).await;
+    let mut old = Vec::new();
+    for _ in 0..3 {
+        let id = fixture.stage().await;
+        fixture.expire(&id).await;
+        old.push(id);
+    }
+    old.sort();
+    let (entered, resume) = fixture.backend.gate(&old[1]);
+    let grant = Grant::new(fixture.scope.app_id());
+    let replace = async {
+        entered.recv_async().await.unwrap();
+        fixture
+            .service
+            .policies
+            .bind(fixture.scope.app_id().clone())
+            .unwrap()
+            .begin_refresh()
+            .unwrap()
+            .install(leased_policy(2, AppPolicy::default()))
+            .unwrap();
+    };
+    let (result, ()) = futures::join!(fixture.scope.collect_job(&grant, options(3)), replace);
+    assert!(
+        matches!(result, Err(WorkflowServiceError::Unavailable(_))),
+        "{result:?}"
+    );
+    assert!(resume.is_disconnected());
+    assert_eq!(fixture.backend.calls(), old[..2]);
+    let frozen = fixture.page(&grant.delivery.job).await;
+    let plan: serde_json::Value = serde_json::from_str(&frozen.plan).unwrap();
+    assert_eq!(plan["ids"], json!(old));
+    assert_eq!(plan["more"], json!(false));
+    assert_eq!(frozen.next_index, 2);
+    // What makes the retry's page size observable: the collected item has left
+    // the derivation and the reserved one has not, so a list re-derived at one
+    // item opens on `old[1]` while the frozen cursor points at `old[2]`.
+    let cutoff = plan["observed_at"].as_i64().unwrap();
+    let collected = fixture.payload(&old[0]).await;
+    assert_eq!(collected.state, "deleted");
+    assert!(collected.expires_at > cutoff, "{collected:?}");
+    let reserved = fixture.payload(&old[1]).await;
+    assert_eq!(reserved.state, "deleting");
+    assert!(reserved.expires_at <= cutoff, "{reserved:?}");
+    let reopened = fixture.reopen(true).await;
+    assert_eq!(
+        reopened
+            .collect_job(&grant.retry(), options(1))
+            .await
+            .unwrap()
+            .outcome,
+        JobOutcome::Completed {}
+    );
+    assert_eq!(fixture.backend.calls(), old);
+    let settled = fixture.page(&grant.delivery.job).await;
+    assert_eq!(settled.plan, frozen.plan);
+    assert_eq!(settled.next_index, 3);
+    assert_eq!(fixture.payload(&old[1]).await, reserved);
+    assert!(fixture.exists(fixture.scope.app_id(), &old[1]).await);
+    assert_eq!(fixture.payload(&old[2]).await.state, "deleted");
+    assert!(!fixture.exists(fixture.scope.app_id(), &old[2]).await);
+}
