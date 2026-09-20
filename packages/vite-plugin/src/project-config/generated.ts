@@ -14,44 +14,58 @@ export const CONFIG_ENV_VAR = "ZEROSHIP_CONFIG";
 export const SCHEMA_ID = "https://zeroship.ai/schema/project-v1.json";
 
 /** Fields the Rust CLI also reads. The `config` escape hatch may not touch these. */
-export const CLI_READ_FIELDS: readonly string[] = ["name","app","control","runtime_date","build.output","migrations.dir","migrations.out","secrets","protected"];
+export const CLI_READ_FIELDS: readonly string[] = ["name","control","runtime_date","build.output","databases.*.id","databases.*.migrations","databases.*.out","apps.*.app","apps.*.databases","apps.*.primary","secrets","protected"];
 
 /** Key names that must never appear anywhere in the file. */
 export const FORBIDDEN_KEY_NAMES: readonly string[] = ["password","token","secret","key","apiKey","credentials"];
 
-export const ROOT_KNOWN_KEYS: readonly string[] = ["$schema","name","app","control","runtime_date","build","migrations","secrets","environments"];
-export const ROOT_REQUIRED_KEYS: readonly string[] = ["name","control","runtime_date","build","migrations"];
+export const ROOT_KNOWN_KEYS: readonly string[] = ["$schema","name","control","runtime_date","build","databases","apps","secrets","environments"];
+export const ROOT_REQUIRED_KEYS: readonly string[] = ["name","control","runtime_date","build","databases","apps"];
 export const BUILD_KNOWN_KEYS: readonly string[] = ["mode","serverEntry","dist","output"];
 export const BUILD_REQUIRED_KEYS: readonly string[] = ["mode","dist","output"];
-export const MIGRATIONS_KNOWN_KEYS: readonly string[] = ["dir","out"];
-export const MIGRATIONS_REQUIRED_KEYS: readonly string[] = ["dir","out"];
-export const ENVIRONMENT_KNOWN_KEYS: readonly string[] = ["app","control","protected","build","migrations","secrets"];
-export const ENVIRONMENT_REQUIRED_KEYS: readonly string[] = ["app","control"];
+export const DATABASE_KNOWN_KEYS: readonly string[] = ["id","migrations","out"];
+export const DATABASE_REQUIRED_KEYS: readonly string[] = ["id","migrations","out"];
+export const APP_KNOWN_KEYS: readonly string[] = ["app","databases","primary"];
+export const APP_REQUIRED_KEYS: readonly string[] = ["databases"];
+export const ENVIRONMENT_APP_KNOWN_KEYS: readonly string[] = ["app"];
+export const ENVIRONMENT_APP_REQUIRED_KEYS: readonly string[] = ["app"];
+export const ENVIRONMENT_DATABASE_KNOWN_KEYS: readonly string[] = ["id"];
+export const ENVIRONMENT_DATABASE_REQUIRED_KEYS: readonly string[] = ["id"];
+export const ENVIRONMENT_KNOWN_KEYS: readonly string[] = ["apps","databases","control","protected","build","secrets"];
+export const ENVIRONMENT_REQUIRED_KEYS: readonly string[] = ["apps","control","databases"];
 
 /** Every string field carrying a `pattern` or an `enum`, for validation. */
 export const FIELD_RULES: readonly {
   path: string; type: "string" | "boolean" | "string[]";
   enum?: readonly string[]; pattern?: string; itemPattern?: string;
-}[] = [{"path":"$schema","type":"string"},{"path":"name","type":"string","pattern":"^[a-z0-9][a-z0-9-]{0,62}$"},{"path":"app","type":"string"},{"path":"control","type":"string"},{"path":"runtime_date","type":"string","pattern":"^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},{"path":"build.mode","type":"string","enum":["full","static"]},{"path":"build.serverEntry","type":"string"},{"path":"build.dist","type":"string","pattern":"^(?!\\.{1,2}$).+$"},{"path":"build.output","type":"string"},{"path":"migrations.dir","type":"string"},{"path":"migrations.out","type":"string"},{"path":"secrets","type":"string[]","itemPattern":"^[A-Z][A-Z0-9_]{0,63}$"},{"path":"protected","type":"boolean"}];
+}[] = [{"path":"$schema","type":"string"},{"path":"name","type":"string","pattern":"^[a-z0-9][a-z0-9-]{0,62}$"},{"path":"control","type":"string"},{"path":"runtime_date","type":"string","pattern":"^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},{"path":"build.mode","type":"string","enum":["full","static"]},{"path":"build.serverEntry","type":"string"},{"path":"build.dist","type":"string","pattern":"^(?!\\.{1,2}$).+$"},{"path":"build.output","type":"string"},{"path":"databases.*.id","type":"string","pattern":"^dbs_[0-9a-z]{25}$"},{"path":"databases.*.migrations","type":"string"},{"path":"databases.*.out","type":"string"},{"path":"apps.*.app","type":"string"},{"path":"apps.*.databases","type":"string[]"},{"path":"apps.*.primary","type":"string"},{"path":"secrets","type":"string[]","itemPattern":"^[A-Z][A-Z0-9_]{0,63}$"},{"path":"protected","type":"boolean"}];
+
+/** The rule a creator-chosen LABEL must match, by the map it keys. */
+export const LABEL_RULES: readonly { path: string; pattern: string }[] = [{"path":"databases.*","pattern":"^[a-z][a-z0-9_]{0,31}$"},{"path":"apps.*","pattern":"^[a-z][a-z0-9_]{0,31}$"}];
 
 /** Every schema `default`, by dotted path. The ONLY copy in the TS tree. */
 export const DEFAULTS: Readonly<Record<string, unknown>> = {
   "build.mode": "full",
   "build.dist": "dist",
   "build.output": "dist/app.zship",
-  "migrations.dir": "migrations",
-  "migrations.out": "generated/zeroship",
   "secrets": [],
 };
+
+/** One workspace database, keyed by its LOCAL LABEL. */
+export interface ResolvedDatabase { id: string; migrations: string; out: string }
+
+/** One workspace app, keyed by its LOCAL LABEL. */
+export interface ResolvedApp { app?: string; databases: string[]; primary?: string }
 
 /** The shape a fully-resolved config takes. */
 export interface ResolvedProjectConfig {
   name: string;
-  app?: string;
   control: string;
   runtime_date: string;
   build: { mode: "full" | "static"; serverEntry?: string; dist: string; output: string };
-  migrations: { dir: string; out: string };
+  /** Absent only when there is no file: the schema requires it in one. */
+  databases?: Record<string, ResolvedDatabase>;
+  apps?: Record<string, ResolvedApp>;
   secrets: string[];
   protected?: boolean;
 }

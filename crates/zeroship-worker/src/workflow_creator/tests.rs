@@ -59,7 +59,7 @@ async fn foreign_storage_app_is_refused_before_context_or_database_open() {
     let fixture = Fixture::new().await;
     let mut resources = fixture.provider.resources();
     let other = AppId::mint();
-    resources.storage.binding = DbBinding::new(
+    resources.storage.binding = DbBinding::platform(
         other.as_str(),
         "foreign-fixture",
         SchemaName::new(other.as_str()).unwrap(),

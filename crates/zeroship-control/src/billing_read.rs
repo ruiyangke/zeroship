@@ -321,7 +321,7 @@ pub async fn list_invoices_for_organization(
 #[derive(Debug, Clone, Serialize)]
 pub struct InvoiceLineDetail {
     pub app_id: AppId,
-    pub segment_no: i16,
+    pub segment_no: i32,
     pub plan_id: String,
     pub included_units: i64,
     pub fx_pico_cents_per_unit: i64,

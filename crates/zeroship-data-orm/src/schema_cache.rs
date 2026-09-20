@@ -131,8 +131,7 @@ mod tests {
     }
 
     fn binding(app: &str, deploy: &str) -> DbBinding {
-        let schema = crate::sql::SchemaName::new(app).expect("fixture schema name");
-        DbBinding::new(app, deploy, schema)
+        crate::tests::fixtures::harness_binding_at_deploy(app, deploy)
     }
 
     #[test]

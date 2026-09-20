@@ -356,16 +356,8 @@ mod tests {
     /// resolved answer.
     #[test]
     fn the_floor_key_carries_the_deploy_token() {
-        let pinned = DbBinding::new(
-            "app_floor",
-            "deploy_1",
-            crate::sql::SchemaName::new("app_floor").unwrap(),
-        );
-        let current = DbBinding::new(
-            "app_floor",
-            "deploy_2",
-            crate::sql::SchemaName::new("app_floor").unwrap(),
-        );
+        let pinned = crate::tests::fixtures::harness_binding_at_deploy("app_floor", "deploy_1");
+        let current = crate::tests::fixtures::harness_binding_at_deploy("app_floor", "deploy_2");
         assert_ne!(
             floor_key(&pinned),
             floor_key(&current),

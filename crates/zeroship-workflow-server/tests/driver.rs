@@ -56,7 +56,7 @@ struct Seed {
 
 async fn seed(platform: &platform::Platform) -> Seed {
     let queue = Queue::connect(
-        DbBinding::new(
+        DbBinding::platform(
             "workflow_manager",
             "workflow_manager",
             SchemaName::new("workflow_manager").unwrap(),

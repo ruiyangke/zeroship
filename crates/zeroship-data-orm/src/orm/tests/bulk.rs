@@ -292,7 +292,7 @@ async fn postgres_bulk_counts_do_not_require_unrelated_column_reads() {
         crate::sql::mapping::quote_ident(db.binding.schema().as_str())
     );
     let role = crate::sql::mapping::quote_ident(
-        &zeroship_core::database_role::per_app_role_name(db.binding.schema().as_str()).unwrap(),
+        &crate::tests::fixtures::harness_capability_role(&db.binding),
     );
     backend.pool().batch_execute(&format!(
         "REVOKE SELECT ON {table} FROM {role}; GRANT SELECT (id, status, version, deleted_at) ON {table} TO {role}"

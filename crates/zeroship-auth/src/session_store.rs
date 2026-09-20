@@ -192,8 +192,8 @@ pub struct SessionRow {
     pub revoked_at: Option<DateTime<Utc>>,
     pub idem_response_enc: Option<Vec<u8>>,
     pub idem_expires_at: Option<DateTime<Utc>>,
-    pub secret_key_version: Option<i16>,
-    pub prev_secret_key_version: Option<i16>,
+    pub secret_key_version: Option<i32>,
+    pub prev_secret_key_version: Option<i32>,
     /// The stored HMACs, never the secrets. They are here so a caller holding
     /// the row under a lock can re-decide which slot a presented secret matches
     /// - see [`SessionRow::slot_for`].
@@ -253,7 +253,7 @@ pub struct PeekedSession {
     pub client_id: Option<String>,
     slot: SecretSlot,
     hash: Vec<u8>,
-    version: i16,
+    version: i32,
 }
 
 impl PeekedSession {
@@ -291,14 +291,14 @@ pub struct CachedResponse {
 
 #[derive(Debug, Clone)]
 struct SecretHashKey {
-    version: i16,
+    version: i32,
     key: Vec<u8>,
 }
 
 /// A hash and the keyring version that produced it.
 #[derive(Debug, Clone)]
 pub struct SecretHash {
-    pub version: i16,
+    pub version: i32,
     pub hash: Vec<u8>,
 }
 
@@ -325,7 +325,7 @@ impl SessionSecretKeys {
     /// group- or world-accessible, or yields no usable key.
     pub fn from_files(hash_file: &Path, idem_file: &Path) -> std::result::Result<Self, String> {
         let mut verify = load_hash_keyring(hash_file)?;
-        verify.sort_by(|a, b| b.version.cmp(&a.version));
+        verify.sort_by_key(|key| std::cmp::Reverse(key.version));
         let Some(active) = verify.first().cloned() else {
             return Err(format!(
                 "REFRESH_HASH_KEY_FILE {} yielded no keys",
@@ -433,7 +433,7 @@ fn load_hash_keyring(path: &Path) -> std::result::Result<Vec<SecretHashKey>, Str
                 idx + 1
             ));
         };
-        let version: i16 = version.trim().parse().map_err(|_| {
+        let version: i32 = version.trim().parse().map_err(|_| {
             format!(
                 "REFRESH_HASH_KEY_FILE {} line {} has invalid version {:?}",
                 path.display(),

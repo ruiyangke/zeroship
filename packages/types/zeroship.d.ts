@@ -26,6 +26,26 @@
 
 declare module "zeroship" {
   /**
+   * Every database this app declares, by its LOCAL LABEL — the key of a
+   * `databases` entry in `zeroship.jsonc`, which is also the member name the
+   * runtime publishes the handle under.
+   *
+   * IT IS A SEPARATE INTERFACE, AND THAT IS THE WHOLE DESIGN. Each database
+   * gets its own generated `env.db.ts`, and each one augments THIS interface
+   * with ITS label. A `databases` property declared inline on `Env` could not
+   * work: two generated modules would each declare the same property with a
+   * different shape, and declaration merging calls that a conflict, not a
+   * union. One interface with one property per label merges; one property
+   * redeclared per database does not.
+   *
+   * EMPTY BY DESIGN, with no index signature. A label the app does not declare
+   * is not on `env.databases` at runtime either — the runtime publishes an
+   * entry per database the deployment carries and nothing else — so reading
+   * one is a mistake TypeScript should name rather than hand back `unknown`.
+   */
+  export interface EnvDatabases {}
+
+  /**
    * Composite per-request env — same object as the `env` arg of
    * `fetch(request, env, ctx)`. Plugin namespaces appear under their
    * declared keys ("db", "kv", "storage", ...); app-scoped secrets and
@@ -43,6 +63,16 @@ declare module "zeroship" {
     // Keeping them out of the base declaration lets narrower SDK
     // augmentations be the source of truth.
     [key: string]: unknown;
+    /**
+     * Every database the app declares. `env.db` is the primary one and
+     * `env.db === env.databases[primary]` by object identity, so there is one
+     * concept and one code path; a single-database app never has to look here.
+     *
+     * Declared HERE rather than in a generated module because the generated
+     * modules augment `EnvDatabases`, and something has to hang it off `Env`
+     * exactly once.
+     */
+    databases: EnvDatabases;
   }
   export const env: Env;
 

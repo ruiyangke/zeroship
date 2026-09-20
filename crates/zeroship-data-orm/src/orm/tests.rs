@@ -161,7 +161,7 @@ async fn sqlite_search_values_round_trip_through_the_rust_orm() {
     let fixture = rusqlite::Connection::open(
         directory
             .path()
-            .join(format!("zs-{}.sqlite", db.binding.app_id())),
+            .join(format!("zs-{}.sqlite", db.binding.schema().as_str())),
     )
     .unwrap();
     fixture.execute_batch(&sql).unwrap();
@@ -231,19 +231,15 @@ async fn postgres_native_models_round_trip() {
         .unwrap(),
     );
     let app = format!("zsorm_{}", uuid::Uuid::new_v4().simple());
-    let binding = DbBinding::cold_start(&app);
-    let quoted_schema = crate::sql::mapping::quote_ident(&app);
-    backend
-        .execute_fixture(&format!("CREATE SCHEMA {quoted_schema}"), &[])
+    let binding = crate::tests::fixtures::harness_binding(&app);
+    let quoted_schema = crate::sql::mapping::quote_ident(binding.schema().as_str());
+    crate::tests::fixtures::roles::ensure_binding_ladder(backend.pool(), &binding)
         .await
         .unwrap();
-    for sql in table_statements(&app, &zeroship_migrate_postgres::DIALECT) {
+    for sql in table_statements(binding.schema().as_str(), &zeroship_migrate_postgres::DIALECT) {
         backend.execute_fixture(&sql, &[]).await.unwrap();
     }
-    crate::tests::fixtures::roles::ensure_per_app_role(backend.pool(), &app)
-        .await
-        .unwrap();
-    let role = zeroship_core::database_role::per_app_role_name(&app).unwrap();
+    let role = crate::tests::fixtures::harness_capability_role(&binding);
     let quoted_role = crate::sql::mapping::quote_ident(&role);
     backend
         .execute_fixture(
@@ -345,7 +341,7 @@ async fn platform_service_credentials_drive_orm_authority() {
     let options = crate::ConnectOptions::new(service_url.as_str(), ProjectKeySource::unavailable())
         .max_connections(NonZeroUsize::new(1).unwrap())
         .connection_authority();
-    let binding = DbBinding::new(
+    let binding = DbBinding::platform(
         "zeroship_control",
         "platform_fixture",
         crate::sql::SchemaName::new(&service_schema).unwrap(),
@@ -368,7 +364,7 @@ async fn platform_service_credentials_drive_orm_authority() {
         .unwrap();
     let cancelled = compio::time::timeout(
         Duration::from_millis(50),
-        backend.query_scoped_values(db.binding.schema(), "SELECT pg_sleep(1)", &[]),
+        backend.query_scoped_values(&db.binding, "SELECT pg_sleep(1)", &[]),
     )
     .await;
     assert!(
@@ -393,7 +389,7 @@ async fn platform_service_credentials_drive_orm_authority() {
     drop(client);
 
     let creator_db = Database::connect(
-        DbBinding::new(
+        DbBinding::platform(
             "creator_journal",
             "platform_fixture",
             crate::sql::SchemaName::new(&creator_schema).unwrap(),
@@ -417,7 +413,7 @@ async fn platform_service_credentials_drive_orm_authority() {
     assert!(!matches!(
         denied,
         DbError::Configuration {
-            code: crate::error::SCHEMA_NOT_PROVISIONED,
+            code: crate::error::SCHEMA_EPOCH_STALE,
             ..
         }
     ));
@@ -670,7 +666,7 @@ async fn database() -> (Database, tempfile::TempDir) {
 
 async fn database_with_keys(key_source: ProjectKeySource) -> (Database, tempfile::TempDir) {
     database_with_binding(
-        DbBinding::cold_start(zeroship_core::app_id::AppId::mint().as_str()),
+        crate::tests::fixtures::harness_binding(zeroship_core::app_id::AppId::mint().as_str()),
         key_source,
     )
     .await
@@ -685,7 +681,7 @@ async fn database_with_binding(
     let migration_backend = zeroship_migrate_sqlite::SqliteBackend::open(
         &directory
             .path()
-            .join(format!("zs-{}.sqlite", binding.app_id())),
+            .join(format!("zs-{}.sqlite", binding.schema().as_str())),
         &directory.path().join("migrations.sqlite"),
     )
     .unwrap();
@@ -973,52 +969,47 @@ struct RegisteredBackend {
 impl crate::executor::ScopedExecutor for RegisteredBackend {
     async fn prepare_for_app(
         &self,
-        app_id: &str,
-        schema: &crate::sql::SchemaName,
+        binding: &crate::binding::DbBinding,
     ) -> Result<(), DbError> {
-        self.inner.prepare_for_app(app_id, schema).await
+        self.inner.prepare_for_app(binding).await
     }
     async fn query(
         &self,
-        app_id: &str,
-        schema: &crate::sql::SchemaName,
+        binding: &crate::binding::DbBinding,
         sql: &str,
         params: &[Value],
     ) -> Result<Vec<Value>, DbError> {
         self.queries.set(self.queries.get() + 1);
-        self.inner.query(app_id, schema, sql, params).await
+        self.inner.query(binding, sql, params).await
     }
     async fn exec(
         &self,
-        app_id: &str,
-        schema: &crate::sql::SchemaName,
+        binding: &crate::binding::DbBinding,
         sql: &str,
         params: &[Value],
     ) -> Result<u64, DbError> {
-        self.inner.exec(app_id, schema, sql, params).await
+        self.inner.exec(binding, sql, params).await
     }
     async fn check_connection(&self) -> Result<(), DbError> {
         self.inner.check_connection().await
     }
     async fn open_tx_session(
         &self,
-        app_id: &str,
-        schema: &crate::sql::SchemaName,
+        binding: &crate::binding::DbBinding,
         begin: crate::error::BeginIntent,
     ) -> Result<crate::driver::Session, crate::error::OpenSessionError> {
         self.transactions.set(self.transactions.get() + 1);
-        self.inner.open_tx_session(app_id, schema, begin).await
+        self.inner.open_tx_session(binding, begin).await
     }
 }
 #[async_trait::async_trait(?Send)]
 impl crate::protection::Catalog for RegisteredBackend {
     async fn introspect_schema(
         &self,
-        app_id: &str,
-        schema: &crate::sql::SchemaName,
+        binding: &crate::binding::DbBinding,
         session: Option<&crate::driver::Session>,
     ) -> Result<crate::sql::catalog::LiveSchema, DbError> {
-        self.inner.introspect_schema(app_id, schema, session).await
+        self.inner.introspect_schema(binding, session).await
     }
 }
 #[async_trait::async_trait(?Send)]
@@ -1177,7 +1168,7 @@ use crate::tests::fixtures::DatabaseFixture;
 
 #[compio::test]
 async fn independent_databases_keep_schema_policy_and_transactions_isolated() {
-    let binding = DbBinding::cold_start(zeroship_core::app_id::AppId::mint().as_str());
+    let binding = crate::tests::fixtures::harness_binding(zeroship_core::app_id::AppId::mint().as_str());
     let (first, _first_files) =
         database_with_binding(binding.clone(), ProjectKeySource::unavailable()).await;
     let (second, _second_files) =

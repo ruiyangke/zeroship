@@ -16,8 +16,12 @@ pub fn run() -> Result<()> {
 }
 
 pub fn build_host() -> Result<()> {
+    // Dependency order, and the whole chain: `@zeroship/migrate` bundles
+    // `@zeroship/schema`, so in a checkout whose `dist` directories are absent
+    // esbuild cannot resolve the import and the host never gets built.
     for package in [
         "zeroship-migrate-node",
+        "@zeroship/schema",
         "@zeroship/migrate",
         "zero-migrate-cli",
     ] {

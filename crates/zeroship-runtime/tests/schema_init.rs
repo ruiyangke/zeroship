@@ -47,8 +47,14 @@ export function installSchema(env, descriptor, options) {
         namespace: v8::Local<'s, v8::Object>,
         descriptor: Option<&serde_json::Value>,
     ) -> Result<Option<v8::Global<v8::Promise>>, String> {
+        // The hook receives the DOCUMENT; the adapter installs one database's
+        // schema, so this probe mirrors the real plugin and passes the
+        // PRIMARY's.
         let Some(descriptor) = descriptor else { return Ok(None); };
-        let json = v8::String::new(scope, &descriptor.to_string()).unwrap();
+        let Some(primary) = zeroship_runtime::databases::primary_of(descriptor) else {
+            return Ok(None);
+        };
+        let json = v8::String::new(scope, &primary.schema.to_string()).unwrap();
         let descriptor = v8::json::parse(scope, json).unwrap();
         zeroship_runtime::modules::invoke_module_export(
             scope,
@@ -123,6 +129,17 @@ fn dummy_db_noop(
     rv.set_undefined();
 }
 
+/// The runtime descriptor DOCUMENT for one database, the primary. Every host
+/// hands the runtime this envelope; a bare v2 schema is what goes inside it.
+fn document(schema: &str) -> String {
+    zeroship_runtime::databases::RuntimeDatabases::single(
+        "main",
+        "dbs_03evr3oqx1200yyd6zj2cebfw",
+        schema,
+    )
+    .expect("a test schema is valid JSON")
+}
+
 fn descriptor_hook_observed(runtime_descriptor: Option<String>) -> String {
     init_v8();
     let modules = vec![ModuleEntry {
@@ -163,8 +180,10 @@ export default {
 #[test]
 fn native_descriptor_hook_receives_validated_descriptor_before_module_evaluation() {
     let descriptor = r#"{"version":2,"collections":{"posts":{"fields":{"title":{"type":"string"}},"options":{"softDelete":false,"versioning":false},"indexes":[]}}}"#;
-    let observed = descriptor_hook_observed(Some(descriptor.to_string()));
-    let expected: serde_json::Value = serde_json::from_str(descriptor).unwrap();
+    let observed = descriptor_hook_observed(Some(document(descriptor)));
+    // The hook receives the DOCUMENT, envelope and all: one entry per database
+    // the deployment declares, each carrying that database's schema.
+    let expected: serde_json::Value = serde_json::from_str(&document(descriptor)).unwrap();
     let observed: serde_json::Value = serde_json::from_str(&observed).unwrap();
     assert_eq!(observed, expected);
 }
@@ -334,7 +353,7 @@ export default {
     let runtime = Runtime::builder()
         .modules(modules)
         .plugin(DummyDbPlugin)
-        .runtime_descriptor(Some(descriptor.to_string()))
+        .runtime_descriptor(Some(document(descriptor)))
         .build();
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());
@@ -418,7 +437,7 @@ export default defaultExport;
     let runtime = Runtime::builder()
         .modules(modules)
         .plugin(DummyDbPlugin)
-        .runtime_descriptor(Some(descriptor.to_string()))
+        .runtime_descriptor(Some(document(descriptor)))
         .build();
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());
@@ -547,7 +566,7 @@ fn corrupt_runtime_descriptor_json_fails_isolate_init() {
         .now_or_never().expect("invalid descriptor fails before async work")
         .expect_err("invalid descriptor JSON must fail isolate init");
     assert!(
-        err.contains("manifest.runtime_descriptor is not valid JSON"),
+        err.contains("the runtime descriptor document is not valid JSON"),
         "error should name corrupt runtime descriptor JSON, got: {err}"
     );
 }
@@ -566,7 +585,7 @@ fn non_v2_runtime_descriptor_fails_isolate_init() {
     // would panic.
     let runtime = Runtime::builder()
         .modules(modules)
-        .runtime_descriptor(Some(r#"{"version":1,"collections":{}}"#.to_string()))
+        .runtime_descriptor(Some(document(r#"{"version":1,"collections":{}}"#)))
         .build();
 
     let err = runtime
@@ -624,4 +643,121 @@ fn manifest_schema_path_global_no_longer_set() {
     )
     .unwrap();
     assert!(body.contains(r#""json":"undefined""#), "got: {body}");
+}
+
+// ---------------------------------------------------------------------------
+// Companion namespaces
+// ---------------------------------------------------------------------------
+
+/// A plugin that owns `env.probe` and publishes a SECOND member beside it.
+///
+/// `env.databases` is exactly this shape: the database plugin owns `env.db` and
+/// publishes a companion map of one handle per database the deployment
+/// declares.
+struct CompanionPlugin;
+
+impl NativePlugin for CompanionPlugin {
+    fn namespace(&self) -> &str {
+        "probe"
+    }
+
+    fn name(&self) -> &str {
+        "companion-probe"
+    }
+
+    fn register(&self, _r: &mut NativeRegistrar) {}
+
+    fn companion_namespaces<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        _app_id: &str,
+        _namespace: v8::Local<'s, v8::Object>,
+        _descriptor: Option<&serde_json::Value>,
+    ) -> Result<Vec<(&'static str, v8::Local<'s, v8::Value>)>, String> {
+        let map = v8::Object::new(scope);
+        let key = v8::String::new(scope, "main").ok_or("allocate the companion key")?;
+        let value = v8::String::new(scope, "reached").ok_or("allocate the companion value")?;
+        map.set(scope, key.into(), value.into())
+            .ok_or("set the companion member")?;
+        Ok(vec![("companions", map.into())])
+    }
+}
+
+/// A companion namespace a plugin publishes reaches creator code, and `env` is
+/// still sealed against creator writes.
+///
+/// The two halves are one property and must be asserted together. `env` is
+/// sealed with `Object.freeze`, and a `Set` on a frozen object is REFUSED
+/// rather than raised - so a seal that runs before the companions are published
+/// drops every one of them with no error anywhere, and the member is simply
+/// `undefined` in JavaScript. Dropping the seal to fix that would trade one
+/// defect for another, which is why the same dispatch reports both.
+#[test]
+fn a_published_companion_namespace_reaches_creator_code_on_a_sealed_env() {
+    init_v8();
+    let runtime = Runtime::builder()
+        .plugin(CompanionPlugin)
+        .modules(vec![ModuleEntry {
+            specifier: "index.js".into(),
+            source: r#"
+import { env } from "zeroship";
+export default {
+    fetch() {
+        let assignmentRefused = false;
+        try {
+            env.injected = "creator";
+        } catch (_) {
+            assignmentRefused = true;
+        }
+        return Response.json({
+            companion: env.companions?.main ?? null,
+            namespace: typeof env.probe,
+            frozen: Object.isFrozen(env),
+            // A frozen object refuses the write in sloppy mode and throws in
+            // strict mode; a module body is strict, so either answer here
+            // means the seal held.
+            injected: env.injected ?? null,
+            assignmentRefused,
+        });
+    },
+};
+"#
+            .into(),
+        }])
+        .build();
+    let outcome = runtime.call_fetch_handler(
+        "GET",
+        "http://localhost/",
+        &[],
+        "",
+        &EnvSnapshot::empty(),
+        RequestCtx::new(CancelFlag::new()),
+    );
+    let FetchOutcome::Response { status, body, .. } = outcome else {
+        panic!("expected a synchronous response from the companion probe");
+    };
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    let observed: serde_json::Value =
+        serde_json::from_slice(&body).expect("the probe answers with JSON");
+    assert_eq!(
+        observed["companion"],
+        serde_json::json!("reached"),
+        "a companion namespace must be readable from creator code: {observed}"
+    );
+    assert_eq!(
+        observed["namespace"],
+        serde_json::json!("object"),
+        "the control: the plugin's own namespace is there too, so a missing \
+         companion is about the companion and not about the plugin: {observed}"
+    );
+    assert_eq!(
+        observed["frozen"],
+        serde_json::json!(true),
+        "env must still be sealed once every plugin has published: {observed}"
+    );
+    assert_eq!(
+        observed["injected"],
+        serde_json::Value::Null,
+        "creator code must not be able to add a member to env: {observed}"
+    );
 }

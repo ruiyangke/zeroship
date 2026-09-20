@@ -311,6 +311,10 @@ pub(crate) fn prepare_application(
     crate::core::plugin_modules::register(scope, plugins, modules)?;
     let runtime_descriptor = setup_globals_with_descriptor(scope)?;
     let app_id = crate::plugin::runtime_app_id(scope);
+    // A companion a plugin publishes is a second `env.*` member it owns, and
+    // the names are collected across plugins so two cannot silently fight over
+    // one member.
+    let mut published: Vec<&'static str> = Vec::new();
     for plugin in plugins {
         let namespace = crate::plugin::runtime_plugin_namespace(scope, plugin.namespace())?;
         plugin
@@ -321,7 +325,28 @@ pub(crate) fn prepare_application(
                     plugin.name()
                 )
             })?;
+        let companions = plugin
+            .companion_namespaces(scope, &app_id, namespace, runtime_descriptor.as_ref())
+            .map_err(|error| {
+                format!(
+                    "runtime: plugin '{}' could not build its companion namespaces: {error}",
+                    plugin.name()
+                )
+            })?;
+        for (name, value) in companions {
+            if published.contains(&name) || plugins.iter().any(|other| other.namespace() == name) {
+                return Err(format!(
+                    "runtime: plugin '{}' publishes `env.{name}`, which is already taken",
+                    plugin.name()
+                ));
+            }
+            published.push(name);
+            crate::plugin::publish_env_member(scope, name, value)?;
+        }
     }
+    // Seal `env` only now. Every plugin has contributed its namespace and its
+    // companions, and a seal before this point refuses those writes silently.
+    crate::plugin::seal_env_object(scope)?;
 
     // Order matters here:
     //
@@ -1522,9 +1547,82 @@ fn setup_globals_with_descriptor(
 
 fn validate_runtime_descriptor_json(json: &str) -> Result<serde_json::Value, String> {
     let value: serde_json::Value = serde_json::from_str(json)
-        .map_err(|e| format!("runtime: manifest.runtime_descriptor is not valid JSON: {e}"))?;
-    validate_runtime_descriptor_value(&value)?;
+        .map_err(|e| format!("runtime: the runtime descriptor document is not valid JSON: {e}"))?;
+    validate_runtime_databases(&value)?;
     Ok(value)
+}
+
+/// The document the host hands the runtime: one entry per database the
+/// deployment declares, each carrying that database's v2 schema descriptor.
+///
+/// Exactly one entry is the primary when the set is non-empty, because
+/// `env.db` is the primary and `env.db === env.databases[primary]` holds by
+/// object identity: a document with none or several has no `env.db` to mint.
+/// Labels and database ids are each distinct, or a lookup by either could
+/// answer with an arbitrary one of them.
+fn validate_runtime_databases(value: &serde_json::Value) -> Result<(), String> {
+    let Some(root) = value.as_object() else {
+        return Err("runtime: the runtime descriptor document must be a JSON object".into());
+    };
+    if root.get("version").and_then(serde_json::Value::as_u64)
+        != Some(crate::databases::DOCUMENT_VERSION)
+    {
+        return Err(format!(
+            "runtime: the runtime descriptor document must be version {}",
+            crate::databases::DOCUMENT_VERSION
+        ));
+    }
+    let Some(databases) = root
+        .get("databases")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Err(
+            "runtime: the runtime descriptor document requires array field `databases`".into(),
+        );
+    };
+    let mut labels: Vec<&str> = Vec::with_capacity(databases.len());
+    let mut ids: Vec<&str> = Vec::with_capacity(databases.len());
+    let mut primaries = 0usize;
+    for (index, entry) in databases.iter().enumerate() {
+        let Some(entry) = entry.as_object() else {
+            return Err(format!("runtime: databases[{index}] must be an object"));
+        };
+        let label = entry
+            .get("label")
+            .and_then(serde_json::Value::as_str)
+            .filter(|label| !label.is_empty())
+            .ok_or_else(|| format!("runtime: databases[{index}] requires string field `label`"))?;
+        let id = entry
+            .get("database_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                format!("runtime: databases[{index}] requires string field `database_id`")
+            })?;
+        if entry.get("primary").and_then(serde_json::Value::as_bool) == Some(true) {
+            primaries += 1;
+        }
+        if labels.contains(&label) {
+            return Err(format!("runtime: databases declares label {label:?} twice"));
+        }
+        if ids.contains(&id) {
+            return Err(format!("runtime: databases declares database {id} twice"));
+        }
+        labels.push(label);
+        ids.push(id);
+        let schema = entry.get("schema").ok_or_else(|| {
+            format!("runtime: databases[{index}] requires object field `schema`")
+        })?;
+        validate_runtime_descriptor_value(schema)
+            .map_err(|error| format!("{error} (database {label:?})"))?;
+    }
+    if !databases.is_empty() && primaries != 1 {
+        return Err(format!(
+            "runtime: the runtime descriptor document must declare exactly one primary \
+             database, the one `env.db` reaches (found {primaries})"
+        ));
+    }
+    Ok(())
 }
 
 fn validate_runtime_descriptor_value(value: &serde_json::Value) -> Result<(), String> {

@@ -45,6 +45,10 @@ pub(super) fn dispatch_operation<'s>(
     operation: Operation,
     mode: OutputMode,
 ) -> v8::Local<'s, v8::Promise> {
+    // The rows will have come from THIS binding, so their masked columns
+    // rehydrate against its schema. An app on two databases would otherwise
+    // resolve one database's column metadata out of the other.
+    let result_binding = binding.clone();
     let state = runtime_state(scope);
     let policy_ready = match &operation {
         Operation::Find { options, .. }
@@ -90,10 +94,10 @@ pub(super) fn dispatch_operation<'s>(
             }
             Output::Count(count) => ResolveValue::F64(count as f64),
             Output::Rows { rows, has_masked } if matches!(mode, OutputMode::One) => {
-                crate::v8_bridge::first_row_or_null_masked(rows, has_masked)
+                crate::v8_bridge::first_row_or_null_masked(rows, has_masked, result_binding)
             }
             Output::Rows { rows, has_masked } => {
-                crate::v8_bridge::rows_as_array_masked(rows, has_masked)
+                crate::v8_bridge::rows_as_array_masked(rows, has_masked, result_binding)
             }
         },
     )));
@@ -514,7 +518,6 @@ pub(crate) fn dispatch_unmask_field<'s>(
                 // SDK base64-decodes on its side.
                 crate::v8_values::resolve(
                     zeroship_data_orm::value!({ "plaintext": result.plaintext }),
-                    false,
                 )
             },
         )));
@@ -574,7 +577,6 @@ pub(crate) fn dispatch_bulk_unmask_field<'s>(
                 }
                 crate::v8_values::resolve(
                     zeroship_data_orm::value!({ "results": Value::Object(obj) }),
-                    false,
                 )
             },
         )));

@@ -65,8 +65,8 @@ fn gap_b_commit_drains_pending_emits_to_broker() {
         let app = app.as_str();
         let sub = zeroship_data_orm::cdc::broker::subscribe(app, "users");
 
-        host.push_pending_emit(gapb_ev(app, "users", 1));
-        host.push_pending_emit(gapb_ev(app, "users", 2));
+        host.push_pending_emit(app, gapb_ev(app, "users", 1));
+        host.push_pending_emit(app, gapb_ev(app, "users", 2));
         // Pre-drain: subscriber must observe nothing (events still queued).
         assert!(sub.pop().is_none(), "events must not leak before commit");
 
@@ -94,8 +94,8 @@ fn gap_b_rollback_clears_pending_emits_silently() {
         let app = app.as_str();
         let sub = zeroship_data_orm::cdc::broker::subscribe(app, "users");
 
-        host.push_pending_emit(gapb_ev(app, "users", 42));
-        host.push_pending_emit(gapb_ev(app, "users", 43));
+        host.push_pending_emit(app, gapb_ev(app, "users", 42));
+        host.push_pending_emit(app, gapb_ev(app, "users", 43));
         host.clear_pending_emits(app);
 
         assert!(
@@ -122,17 +122,21 @@ fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
             let app = crate::tests::fixtures::test_app_id!();
 
             let app = app.as_str();
-            // Fresh schema with one collection table.
-            pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+            let binding = crate::tests::fixtures::harness_binding(app);
+            let alias = crate::tests::fixtures::harness_alias(app);
+            // Fresh schema with one collection table. The table has to exist
+            // before `begin_transaction` runs the binding ladder, so the schema
+            // is created here rather than by the ladder.
+            pool.execute(&format!("DROP SCHEMA IF EXISTS \"{alias}\" CASCADE"), &[])
                 .await
                 .unwrap();
-            pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+            pool.execute(&format!("CREATE SCHEMA \"{alias}\""), &[])
                 .await
                 .unwrap();
             pool.execute(
                 &format!(
                     // Match the descriptor because writes use an explicit returning list.
-                    r#"CREATE TABLE "{app}"."users" (
+                    r#"CREATE TABLE "{alias}"."users" (
                 id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
                 name TEXT NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -154,8 +158,8 @@ fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
             // Open the production transaction protocol.
             host.begin_transaction(app, &url).await;
 
-            let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
-            pool.batch_execute(&format!(r#"GRANT SELECT, INSERT ON "{app}"."users" TO "{role}"; GRANT USAGE ON ALL SEQUENCES IN SCHEMA "{app}" TO "{role}""#)).await.unwrap();
+            let role = crate::tests::fixtures::harness_capability_role(&binding);
+            pool.batch_execute(&format!(r#"GRANT SELECT, INSERT ON "{alias}"."users" TO "{role}"; GRANT USAGE ON ALL SEQUENCES IN SCHEMA "{alias}" TO "{role}""#)).await.unwrap();
 
             let schema = crate::tests::fixtures::schema::generated_fields(crate::value!({
                 "id": {"type":"bigInt", "assign":{"by":"identity", "on":"insert"}},
@@ -165,7 +169,7 @@ fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
             let schema = crate::tests::fixtures::native_fields(schema);
             // Insert via the production helper.
             let bq = crate::crud::insert::build_one(
-                &crate::sql::SchemaName::new(app).expect("fixture schema name"),
+                binding.schema(),
                 "users",
                 &schema,
                 crate::value!({ "name": "alice" }),
@@ -189,7 +193,7 @@ fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
 
             // Settlement commits the row before publishing its buffered event.
             assert!(matches!(
-                zeroship_data_orm::transaction::exec_settle(app, true, None).await,
+                zeroship_data_orm::transaction::exec_settle(&crate::tests::fixtures::harness_route(app), true, None).await,
                 zeroship_data_orm::transaction::SettleOutcome::Ok
             ));
 

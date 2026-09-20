@@ -310,13 +310,13 @@ impl Fixture {
 
     async fn build(policy: AppPolicy, leased: Option<Duration>) -> Self {
         let directory = tempfile::tempdir().unwrap();
-        let factory = ConnectionFactory::for_url(&format!(
+        let factory = ConnectionFactory::for_platform_url(&format!(
             "sqlite:{}",
             directory.path().join("creator.sqlite").display()
         ))
         .unwrap();
         let store = OrmStore::connect(
-            DbBinding::new("workflow", "fixture", SchemaName::new("workflow").unwrap()),
+            DbBinding::platform("workflow", "fixture", SchemaName::new("workflow").unwrap()),
             &factory,
             ProjectKeySource::unavailable(),
         )

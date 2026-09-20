@@ -374,9 +374,8 @@ async fn postgres_for_update_of_locks_only_the_selected_alias() {
 async fn postgres_for_update_of_needs_update_privilege_only_on_the_locked_source() {
     let owner = fixture(true).await;
     let backend = postgres_backend(&owner);
-    let schema = owner.database.binding.schema().as_str().to_owned();
     let role = crate::sql::mapping::quote_ident(
-        &zeroship_core::database_role::per_app_role_name(&schema).unwrap(),
+        &crate::tests::fixtures::harness_capability_role(&owner.database.binding),
     );
     let views = qualified(&owner, "lock_views");
     backend
@@ -399,7 +398,7 @@ async fn postgres_for_update_of_needs_update_privilege_only_on_the_locked_source
                 "SELECT has_table_privilege($1, '{views}', 'SELECT'), \
                  has_table_privilege($1, '{views}', 'UPDATE')"
             ),
-            &[&zeroship_core::database_role::per_app_role_name(&schema).unwrap()],
+            &[&crate::tests::fixtures::harness_capability_role(&owner.database.binding)],
         )
         .await
         .map(|row| (row.get(0), row.get(1)))

@@ -330,7 +330,7 @@ async fn set_local_requires_the_transaction_receiver_and_postgres() {
 
     let directory = tempfile::tempdir().unwrap();
     let sqlite = Database::connect(
-        DbBinding::cold_start(zeroship_core::app_id::AppId::mint().as_str()),
+        crate::tests::fixtures::harness_binding(zeroship_core::app_id::AppId::mint().as_str()),
         crate::ConnectOptions::new(
             directory.path().join("settings.sqlite").to_string_lossy(),
             ProjectKeySource::unavailable(),

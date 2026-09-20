@@ -21,14 +21,15 @@ fn users_encrypted_secret_schema() -> zeroship_data_orm::value::Value {
 
 /// Raw DDL matching [`users_encrypted_secret_schema`].
 fn users_encrypted_secret_ddl() -> String {
+    let alias = crate::tests::fixtures::harness_alias(LOCAL_DEV_APP_ID);
     format!(
-        r#"CREATE TABLE IF NOT EXISTS "{LOCAL_DEV_APP_ID}"."users" ({SYSTEM_COLUMNS_SQLITE},
+        r#"CREATE TABLE IF NOT EXISTS "{alias}"."users" ({SYSTEM_COLUMNS_SQLITE},
   "email" TEXT NOT NULL,
   "name" TEXT NOT NULL,
   "secret" BLOB /* zero-migrate:enc:string */
 );
 {}
-CREATE UNIQUE INDEX IF NOT EXISTS "{LOCAL_DEV_APP_ID}"."users_email_key" ON "users" ("email");
+CREATE UNIQUE INDEX IF NOT EXISTS "{alias}"."users_email_key" ON "users" ("email");
 "#,
         system_indexes_sqlite(LOCAL_DEV_APP_ID, "users")
     )
@@ -79,10 +80,11 @@ const _procedures = { upsertInsert };
         );
 
         let client = crate::tests::fixtures::sqlite::Inspector::open(dir.path());
+        let alias = crate::tests::fixtures::harness_alias(LOCAL_DEV_APP_ID);
         let rows = client
             .query(
                 &format!(
-                    r#"SELECT id, version FROM "{LOCAL_DEV_APP_ID}"."users" WHERE email = 'mint@example.com'"#
+                    r#"SELECT id, version FROM "{alias}"."users" WHERE email = 'mint@example.com'"#
                 ),
                 &[],
             )
@@ -195,12 +197,13 @@ const _procedures = { upsertConflict };
         );
 
         let client = crate::tests::fixtures::sqlite::Inspector::open(dir.path());
+        let alias = crate::tests::fixtures::harness_alias(LOCAL_DEV_APP_ID);
         let raw_ssn = raw_column_name("ssn");
         let typed = client
             .query_typed(
                 &format!(
                     r#"SELECT id, created_by, updated_by, version, "{raw_ssn}", ssn
-                   FROM "{LOCAL_DEV_APP_ID}"."users"
+                   FROM "{alias}"."users"
                    WHERE email = 'alice@example.com'"#
                 ),
                 &[],
@@ -257,11 +260,15 @@ const _procedures = { upsertConflict };
 
         let keys =
             zeroship_data_orm::encryption::KeyStore::new(crate::tests::fixtures::key_source());
-        let key = keys.resolve(LOCAL_DEV_APP_ID).await.expect("resolve key");
+        let database = crate::tests::fixtures::harness_database(LOCAL_DEV_APP_ID);
+        let key = keys
+            .resolve(LOCAL_DEV_APP_ID, &database)
+            .await
+            .expect("resolve key");
         let plaintext = zeroship_data_orm::encryption::aead::decrypt(
             &key,
             &stored_blob,
-            &encryption::canonical_aad(LOCAL_DEV_APP_ID, "users", "ssn", first_id.as_bytes()),
+            &encryption::canonical_aad(&database, "users", "ssn", first_id.as_bytes()),
         )
         .expect("decrypt stored conflict ciphertext");
         assert_eq!(

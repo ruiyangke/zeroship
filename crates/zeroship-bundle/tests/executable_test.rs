@@ -46,7 +46,12 @@ impl Fixture {
         let raw = json!({
             "version":1,
             "worker":{"entry":"entry.js", "modules":{"entry.js":entry_hash, "part.js":part_hash}},
-            "runtime_descriptor":{"hash":descriptor_hash},
+            "runtime_descriptor":[{
+                "label":"main",
+                "database_id":"dbs_03evr3oqx1200yyd6zj2cebfw",
+                "primary":true,
+                "hash":descriptor_hash,
+            }],
             "metadata":{"built_at":"fixture"},
             "build_metadata":{"origin":"creator"},
         });
@@ -91,8 +96,15 @@ async fn normal_deployments_load_their_own_modules_and_descriptor() {
     assert_eq!(loaded.entry(), "entry.js");
     assert_eq!(loaded.modules()["part.js"], "export default 'original';");
     assert_eq!(
-        loaded.runtime_descriptor(),
+        loaded.primary_schema(),
         Some(&json!({"version":2,"collections":{}}))
+    );
+    assert_eq!(loaded.databases().len(), 1);
+    assert_eq!(loaded.databases()[0].label, "main");
+    assert_eq!(
+        loaded.databases()[0].database_id.as_str(),
+        "dbs_03evr3oqx1200yyd6zj2cebfw",
+        "the label is the creator's name; the id is what the host keys on"
     );
 
     let mut newer: Value = serde_json::from_str(&fixture.manifest_json).unwrap();
@@ -100,7 +112,7 @@ async fn normal_deployments_load_their_own_modules_and_descriptor() {
     let replacement_hash = sha256_hex(replacement);
     newer["worker"]["modules"]["part.js"] = json!(replacement_hash);
     let entry_hash = newer["worker"]["modules"]["entry.js"].as_str().unwrap();
-    let descriptor_hash = newer["runtime_descriptor"]["hash"].as_str().unwrap();
+    let descriptor_hash = newer["runtime_descriptor"][0]["hash"].as_str().unwrap();
     let entry = fixture.store.get_blob(entry_hash).await.unwrap();
     let descriptor = fixture.store.get_blob(descriptor_hash).await.unwrap();
     let installed = ingest(
@@ -143,7 +155,7 @@ async fn normal_deployments_load_their_own_modules_and_descriptor() {
         .await
         .unwrap();
     assert_eq!(replay.modules(), loaded.modules());
-    assert_eq!(replay.runtime_descriptor(), loaded.runtime_descriptor());
+    assert_eq!(replay.databases(), loaded.databases());
 }
 
 #[compio::test]
@@ -247,7 +259,7 @@ async fn worker_loading_rejects_invalid_paths_text_and_descriptor_json() {
         Err(ExecutableError::InvalidExecutable)
     ));
     changed = fixture.manifest.clone();
-    changed.runtime_descriptor.as_mut().unwrap().hash = hash.clone();
+    changed.runtime_descriptor[0].hash = hash.clone();
     assert!(matches!(
         LoadedWorker::load(&changed, fixture.store.as_ref(), fixture.budget).await,
         Err(ExecutableError::InvalidExecutable)

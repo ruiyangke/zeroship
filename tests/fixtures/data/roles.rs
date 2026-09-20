@@ -1,18 +1,26 @@
-//! Test-host helpers for provisioning per-app PostgreSQL roles.
+//! Test-host helpers for provisioning one binding's `PostgreSQL` role ladder.
 //!
-//! The helper keeps schema isolation and DDL authority separate from table
-//! names. Production role provisioning belongs to the migration service.
+//! The ladder is the production one, composed through the same
+//! `zeroship_core::database_derivation` functions the cluster reconciler
+//! (`zeroship_migrate_server::datastore::cluster`) creates it with. A fixture
+//! that hand-spelled a role name would provision an object the data plane never
+//! asks for, and every narrow would fail at `SET LOCAL ROLE` instead of
+//! measuring what the test is about.
+//!
+//! Which COLUMNS a capability role may touch is the apply path's business in
+//! production; here the helper grants the whole schema, which is what a fixture
+//! that creates its own tables needs.
 #![allow(dead_code)]
 
 use compio_postgres::Pool;
-use zeroship_core::database_role::per_app_role_name;
+use zeroship_core::database_derivation;
+use zeroship_core::database_role::DatabaseCapability;
+use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::{backend::pg_error, error::DbError};
-
-pub(crate) const APP_ROLE_TEMPLATE: &str = "__zeroship_app_role_template";
 
 /// Add database context while preserving the driver's SQLSTATE classification.
 pub(crate) fn coded_sql(context: &str, error: compio_postgres::Error) -> DbError {
-    pg_error::coded_sql(&format!("auth/bootstrap: {context}"), error)
+    pg_error::coded_sql(&format!("fixture/roles: {context}"), error)
 }
 
 pub(crate) async fn create_role_if_missing(
@@ -34,81 +42,122 @@ pub(crate) async fn create_role_if_missing(
     Ok(true)
 }
 
-/// Build the transaction-scoped role switch used on checked-out connections.
-pub fn set_local_role_sql(app_id: &str) -> Result<String, DbError> {
-    let role = per_app_role_name(app_id)?;
+/// Build the transaction-scoped role switch the data plane sends.
+pub fn set_local_role_sql(binding: &DbBinding) -> Result<String, DbError> {
+    let role = binding.session_role().ok_or_else(|| {
+        DbError::config(
+            "binding_not_resolved",
+            "a fixture narrowing to a role needs a binding that names one",
+        )
+    })?;
     Ok(format!(
         "SET LOCAL ROLE {}",
-        zeroship_data_orm::sql::mapping::quote_ident(&role)
+        zeroship_data_orm::sql::mapping::quote_ident(role)
     ))
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct PerAppRoleOutcome {
-    /// Whether this call created the role.
+pub struct BindingLadderOutcome {
+    /// Whether this call created the binding role.
     pub created_role: bool,
 }
 
-/// Provision a runtime role with ordinary DML across its creator schema.
+/// Provision one binding's whole ladder: the schema, the capability role that
+/// carries its privileges, the binding role that inherits exactly that one
+/// role, and the membership the connecting login assumes it through.
 ///
-/// The role may use the schema and its sequences, but it cannot create schema
-/// objects. Default privileges give later tables the same DML surface.
-pub async fn ensure_per_app_role(pool: &Pool, app_id: &str) -> Result<PerAppRoleOutcome, DbError> {
-    let role = per_app_role_name(app_id)?;
-    let schema = zeroship_data_orm::sql::mapping::quote_ident(app_id);
-    let quoted_role = zeroship_data_orm::sql::mapping::quote_ident(&role);
+/// The two grant options are the fence and are spelled here the way
+/// `zeroship_migrate_server::datastore::cluster::grant_binding` spells them:
+/// `WITH SET FALSE` on the binding-to-database edge so no session can assume
+/// the capability role itself, and `WITH INHERIT FALSE` on the login edge so
+/// the binding's privileges are never ambient on the connection.
+pub async fn ensure_binding_ladder(
+    pool: &Pool,
+    binding: &DbBinding,
+) -> Result<BindingLadderOutcome, DbError> {
+    let database = binding.database().ok_or_else(|| {
+        DbError::config(
+            "binding_not_resolved",
+            "a fixture ladder needs a binding that addresses a database",
+        )
+    })?;
+    let binding_role = binding.session_role().ok_or_else(|| {
+        DbError::config(
+            "binding_not_resolved",
+            "a fixture ladder needs a binding that names a role",
+        )
+    })?;
+    let capability = database_derivation::capability_role_name(database, DatabaseCapability::ReadWrite)?;
+
+    let schema = zeroship_data_orm::sql::mapping::quote_ident(binding.schema().as_str());
+    let capability_q = zeroship_data_orm::sql::mapping::quote_ident(&capability);
+    let binding_q = zeroship_data_orm::sql::mapping::quote_ident(binding_role);
 
     create_role_if_missing(
         pool,
-        APP_ROLE_TEMPLATE,
-        "NOLOGIN NOREPLICATION NOCREATEDB NOCREATEROLE NOINHERIT",
+        &capability,
+        "NOLOGIN NOREPLICATION NOCREATEDB NOCREATEROLE INHERIT",
     )
     .await?;
     let created = create_role_if_missing(
         pool,
-        &role,
-        &format!(
-            "NOLOGIN NOREPLICATION NOCREATEDB NOCREATEROLE INHERIT IN ROLE \"{APP_ROLE_TEMPLATE}\""
-        ),
+        binding_role,
+        "NOLOGIN NOREPLICATION NOCREATEDB NOCREATEROLE INHERIT",
     )
     .await?;
 
     for statement in [
-        format!("GRANT USAGE ON SCHEMA {schema} TO {quoted_role}"),
+        format!("CREATE SCHEMA IF NOT EXISTS {schema}"),
+        format!("GRANT USAGE ON SCHEMA {schema} TO {capability_q}"),
         format!(
-            "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {schema} TO {quoted_role}"
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {schema} TO {capability_q}"
         ),
-        format!("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {schema} TO {quoted_role}"),
-        format!(
-            "ALTER DEFAULT PRIVILEGES IN SCHEMA {schema} \
-             GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {quoted_role}"
-        ),
+        format!("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {schema} TO {capability_q}"),
         format!(
             "ALTER DEFAULT PRIVILEGES IN SCHEMA {schema} \
-             GRANT USAGE, SELECT ON SEQUENCES TO {quoted_role}"
+             GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {capability_q}"
         ),
+        format!(
+            "ALTER DEFAULT PRIVILEGES IN SCHEMA {schema} \
+             GRANT USAGE, SELECT ON SEQUENCES TO {capability_q}"
+        ),
+        format!("GRANT {capability_q} TO {binding_q} WITH SET FALSE"),
+        format!("GRANT {binding_q} TO CURRENT_USER WITH INHERIT FALSE"),
     ] {
         pool.execute(&statement, &[])
             .await
-            .map_err(|error| coded_sql(&format!("provision app role {app_id}"), error))?;
+            .map_err(|error| {
+                coded_sql(&format!("provision ladder for {}", binding.app_id()), error)
+            })?;
     }
 
-    Ok(PerAppRoleOutcome {
+    Ok(BindingLadderOutcome {
         created_role: created,
     })
 }
 
-/// Drop a runtime role after its creator schema has been removed.
-pub async fn drop_per_app_role(pool: &Pool, app_id: &str) -> Result<(), DbError> {
-    let role = per_app_role_name(app_id)?;
-    pool.execute(
-        &format!(
-            "DROP ROLE IF EXISTS {}",
-            zeroship_data_orm::sql::mapping::quote_ident(&role)
-        ),
-        &[],
-    )
-    .await
-    .map_err(|error| coded_sql(&format!("DROP ROLE {role}"), error))?;
+/// Drop a binding's roles after its schema has been removed.
+pub async fn drop_binding_ladder(pool: &Pool, binding: &DbBinding) -> Result<(), DbError> {
+    let mut roles = Vec::new();
+    if let Some(role) = binding.session_role() {
+        roles.push(role.to_owned());
+    }
+    if let Some(database) = binding.database() {
+        roles.push(database_derivation::capability_role_name(
+            database,
+            DatabaseCapability::ReadWrite,
+        )?);
+    }
+    for role in roles {
+        pool.execute(
+            &format!(
+                "DROP ROLE IF EXISTS {}",
+                zeroship_data_orm::sql::mapping::quote_ident(&role)
+            ),
+            &[],
+        )
+        .await
+        .map_err(|error| coded_sql(&format!("DROP ROLE {role}"), error))?;
+    }
     Ok(())
 }

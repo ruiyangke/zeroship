@@ -92,7 +92,7 @@ mode to target running servers without provisioning them.
 
 The dev runtime uses redb by default at `examples/kv-dashboard/.zeroship/kv.redb`.
 Set `ZEROSHIP_KV_CONFIG_FILE` to a Redis TOML configuration to select Redis;
-see the [configuration reference](../../docs/reference/kv-configuration.md).
+see the [configuration reference](../../docs/architecture/kv-configuration.md).
 
 The Vite app runs on Vite's selected port. The zeroship runtime API defaults
 to `http://localhost:3011`; set `KV_DASHBOARD_API_PORT` to use another port.

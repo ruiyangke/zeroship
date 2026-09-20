@@ -19,21 +19,22 @@ fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
         host.run(async {
             let app = "t134_spelling";
             let coll = "events";
+            let binding = crate::tests::fixtures::harness_binding(app);
+            let alias = binding.schema().as_str();
             let (backend, _dir) = fresh_backend(host);
-            backend.attach_app_file(app).await.expect("attach app file");
+            backend
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(alias))
+                .await
+                .expect("attach app file");
 
             // Build the DDL through the EMITTER, not by hand. An earlier draft of
             // this test wrote `DEFAULT CURRENT_TIMESTAMP` as a literal, which meant
             // it could never observe a change to the emitter it claimed to test -
             // the comment asserted a mechanism the code did not drive.
             let schema = crate::value!({ "occurred_at": { "type": "timestamp" } });
-            let ddl = fixture_table_sql_sqlite(
-                &crate::sql::SchemaName::new(app).expect("fixture schema name"),
-                coll,
-                &schema,
-                &FkEmission::Inline,
-            )
-            .expect("build DDL");
+            let ddl =
+                fixture_table_sql_sqlite(binding.schema(), coll, &schema, &FkEmission::Inline)
+                    .expect("build DDL");
             for stmt in ddl.split(";\n") {
                 let trimmed = stmt.trim();
                 if trimmed.is_empty() {
@@ -55,13 +56,13 @@ fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
             // Row A: id only, so `created_at` is written BY THE EMITTED DEFAULT.
             backend
                 .execute_fixture(
-                    &format!("INSERT INTO \"{app}\".\"{coll}\" (id) VALUES ('a_default')"),
+                    &format!("INSERT INTO \"{alias}\".\"{coll}\" (id) VALUES ('a_default')"),
                     &[],
                 )
                 .await
                 .expect("insert row A via the emitted column default");
 
-            let client = backend.fixture_session(app).await.expect("acquire client");
+            let client = backend.fixture_session(&crate::tests::fixtures::harness_alias(app)).await.expect("acquire client");
 
             // Row B: through the RUNTIME's builder, which converts a Unix-ms bind
             // for a declared timestamp column.
@@ -70,13 +71,8 @@ fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
                 "occurred_at": 1_756_700_000_000_i64,
             });
             let runtime_schema = crate::tests::fixtures::generated_schema(schema.clone());
-            let bq = compile_insert(
-                &crate::sql::SchemaName::new(app).expect("fixture schema name"),
-                coll,
-                &runtime_schema,
-                &doc,
-            )
-            .expect("compile insert");
+            let bq = compile_insert(binding.schema(), coll, &runtime_schema, &doc)
+                .expect("compile insert");
             assert_eq!(
                 bq.params[1],
                 crate::value!("2025-09-01T04:13:20.000Z"),
@@ -93,7 +89,9 @@ fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
 
             let a_stamp = client
                 .query(
-                    &format!("SELECT created_at FROM \"{app}\".\"{coll}\" WHERE id = 'a_default'"),
+                    &format!(
+                        "SELECT created_at FROM \"{alias}\".\"{coll}\" WHERE id = 'a_default'"
+                    ),
                     &[],
                 )
                 .await
@@ -102,7 +100,7 @@ fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
                 .expect("created_at is NOT NULL");
             let b_stamp = client
                 .query(
-                    &format!("SELECT occurred_at FROM \"{app}\".\"{coll}\" WHERE id = 'b_bind'"),
+                    &format!("SELECT occurred_at FROM \"{alias}\".\"{coll}\" WHERE id = 'b_bind'"),
                     &[],
                 )
                 .await

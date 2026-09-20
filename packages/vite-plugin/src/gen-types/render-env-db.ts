@@ -69,6 +69,22 @@ export interface RuntimeDescriptor {
 }
 
 /**
+ * Which database an `env.db.ts` is the typing for.
+ *
+ * A descriptor says what the SCHEMA is; it says nothing about which of an
+ * app's databases carries it, and `env.databases` is keyed by exactly that.
+ * So the label and the primary flag are threaded in from the caller that read
+ * `zeroship.jsonc` rather than recovered from the fold.
+ */
+export interface GeneratedDatabase {
+  /** The LOCAL label this database is declared under, and its member name on
+   *  `env.databases`. */
+  label: string;
+  /** Whether this database is the app's `env.db`. Exactly one is. */
+  primary: boolean;
+}
+
+/**
  * The banner both schema sources carry. It names the toolchain, not a source,
  * so the two artifacts read identically to a creator.
  */
@@ -89,13 +105,44 @@ export const GENERATED_ENV_DB_BANNER =
   "// preserved, while the migration source remains the authority for DDL.\n";
 
 /**
- * Render the generated `env.db.ts` from a parsed v2 runtime descriptor.
+ * The `declare module "zeroship"` block a generated or manual `env.db.ts`
+ * ends with, given the TypeScript expression naming the database's handle.
+ *
+ * ONE PRODUCER FOR BOTH SOURCES. The generated source hands in
+ * `Db<typeof schema>` over its inlined literal and the manual source hands in
+ * `Db<typeof schema>` over the author's import, but the SHAPE of the
+ * augmentation is the same contract either way, and two spellings of it would
+ * be two answers the day `EnvDatabases` moves.
+ *
+ * `EnvDatabases` is augmented with this database's label, always. `Env.db` is
+ * declared only by the PRIMARY, and it is declared as
+ * `EnvDatabases["<label>"]` rather than as the handle type again, so the
+ * identity the runtime gives (`env.db === env.databases[primary]`, the SAME
+ * object) is what the types say too.
+ */
+export function renderEnvAugmentation(database: GeneratedDatabase, handle: string): string {
+  const label = jsKey(database.label);
+  let body = `declare module "zeroship" {\n`;
+  body += `  interface EnvDatabases {\n    ${label}: ${handle};\n  }\n`;
+  if (database.primary) {
+    body += `  interface Env {\n    db: EnvDatabases[${jsStr(database.label)}];\n  }\n`;
+  }
+  body += `}\n\n`;
+  return body;
+}
+
+/**
+ * Render the generated `env.db.ts` from a parsed v2 runtime descriptor and the
+ * database it belongs to.
  *
  * Collection and field order follow the descriptor's key order, which the
  * emitter produces deterministically - so the output is stable and the
  * `--check` drift gate is meaningful.
  */
-export function renderGeneratedEnvDb(descriptor: RuntimeDescriptor): string {
+export function renderGeneratedEnvDb(
+  descriptor: RuntimeDescriptor,
+  database: GeneratedDatabase,
+): string {
   let body = GENERATED_ENV_DB_BANNER;
   body += 'import { t, schema as defineSchema, type Db } from "@zeroship/db";\n\n';
 
@@ -114,9 +161,8 @@ export function renderGeneratedEnvDb(descriptor: RuntimeDescriptor): string {
   }
   body += "} as const;\n\n";
 
-  body +=
-    'declare module "zeroship" {\n  interface Env {\n    db: Db<typeof schema>;\n  }\n}\n\n' +
-    "export {};\n";
+  body += renderEnvAugmentation(database, "Db<typeof schema>");
+  body += "export {};\n";
   return body;
 }
 

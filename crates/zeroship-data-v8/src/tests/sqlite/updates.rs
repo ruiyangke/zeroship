@@ -74,6 +74,7 @@ fn update_non_id_filter_keeps_randomised_ciphertext_readable_sqlite_runtime() {
         use zeroship_data_orm::encryption;
 
         let dir = tempfile::tempdir().expect("tempdir");
+        let alias = crate::tests::fixtures::harness_alias(LOCAL_DEV_APP_ID);
         let schema = users_encrypted_ssn_schema();
         apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl());
         let source = sqlite_runtime_source(
@@ -121,7 +122,7 @@ const _procedures = { seed, updateByEmail };
             .query_typed(
                 &format!(
                     r#"SELECT id, "{raw_ssn}", ssn
-                   FROM "{LOCAL_DEV_APP_ID}"."users"
+                   FROM "{alias}"."users"
                    WHERE email = 'alice@example.com'"#
                 ),
                 &[],
@@ -152,11 +153,15 @@ const _procedures = { seed, updateByEmail };
 
         let keys =
             zeroship_data_orm::encryption::KeyStore::new(crate::tests::fixtures::key_source());
-        let key = keys.resolve(LOCAL_DEV_APP_ID).await.expect("resolve key");
+        let database = crate::tests::fixtures::harness_database(LOCAL_DEV_APP_ID);
+        let key = keys
+            .resolve(LOCAL_DEV_APP_ID, &database)
+            .await
+            .expect("resolve key");
         let plaintext = zeroship_data_orm::encryption::aead::decrypt(
             &key,
             &stored_blob,
-            &encryption::canonical_aad(LOCAL_DEV_APP_ID, "users", "ssn", row_id.as_bytes()),
+            &encryption::canonical_aad(&database, "users", "ssn", row_id.as_bytes()),
         )
         .expect("decrypt updated ciphertext");
         assert_eq!(
@@ -176,6 +181,7 @@ fn update_many_non_id_filter_encrypts_per_row_sqlite_runtime() {
         use zeroship_data_orm::encryption;
 
         let dir = tempfile::tempdir().expect("tempdir");
+        let alias = crate::tests::fixtures::harness_alias(LOCAL_DEV_APP_ID);
         let schema = users_encrypted_ssn_schema();
         apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl());
         let source = sqlite_runtime_source(
@@ -260,7 +266,7 @@ const _procedures = { seed, updateManyByName };
             .query_typed(
                 &format!(
                     r#"SELECT id, name, "{raw_ssn}", ssn
-                   FROM "{LOCAL_DEV_APP_ID}"."users"
+                   FROM "{alias}"."users"
                    WHERE name = 'Red Team'
                    ORDER BY id"#
                 ),
@@ -272,7 +278,11 @@ const _procedures = { seed, updateManyByName };
 
         let keys =
             zeroship_data_orm::encryption::KeyStore::new(crate::tests::fixtures::key_source());
-        let key = keys.resolve(LOCAL_DEV_APP_ID).await.expect("resolve key");
+        let database = crate::tests::fixtures::harness_database(LOCAL_DEV_APP_ID);
+        let key = keys
+            .resolve(LOCAL_DEV_APP_ID, &database)
+            .await
+            .expect("resolve key");
         for row in &typed.rows {
             let row_id = match &row[0] {
                 TypedCell::Text(id) => id.clone(),
@@ -299,7 +309,7 @@ const _procedures = { seed, updateManyByName };
             let plaintext = zeroship_data_orm::encryption::aead::decrypt(
                 &key,
                 &stored_blob,
-                &encryption::canonical_aad(LOCAL_DEV_APP_ID, "users", "ssn", row_id.as_bytes()),
+                &encryption::canonical_aad(&database, "users", "ssn", row_id.as_bytes()),
             )
             .expect("decrypt updated ciphertext");
             assert_eq!(
@@ -319,6 +329,7 @@ fn update_many_randomised_target_cap_rejects_without_writes_sqlite_runtime() {
         use rusqlite::types::Value as TypedCell;
 
         let dir = tempfile::tempdir().expect("tempdir");
+        let alias = crate::tests::fixtures::harness_alias(LOCAL_DEV_APP_ID);
         let target_cap = zeroship_data_orm::budgets::MAX_PER_ROW_UPDATE_TARGETS;
         let seeded = target_cap + 1;
         let values = (0..seeded)
@@ -327,7 +338,7 @@ fn update_many_randomised_target_cap_rejects_without_writes_sqlite_runtime() {
         assert!(!values.is_empty(), "overflow fixture must seed target rows");
         let mut ddl = users_encrypted_ssn_ddl();
         ddl.push_str(&format!(
-            "INSERT INTO \"{LOCAL_DEV_APP_ID}\".\"users\" (id, email, name) VALUES {};",
+            "INSERT INTO \"{alias}\".\"users\" (id, email, name) VALUES {};",
             values.join(",")
         ));
         apply_schema_ahead_of_runtime(&dir, &ddl);
@@ -387,7 +398,7 @@ const _procedures = { overflow };
             .query_typed(
                 &format!(
                     r#"SELECT COUNT(*), SUM(version), COUNT(ssn)
-                   FROM "{LOCAL_DEV_APP_ID}"."users"
+                   FROM "{alias}"."users"
                    WHERE name = 'Red Team'"#
                 ),
                 &[],
@@ -424,6 +435,7 @@ fn update_many_randomised_failure_rolls_back_committed_prefix_sqlite_runtime() {
         use rusqlite::types::Value as TypedCell;
 
         let dir = tempfile::tempdir().expect("tempdir");
+        let alias = crate::tests::fixtures::harness_alias(LOCAL_DEV_APP_ID);
         let schema = users_encrypted_ssn_schema();
         apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl());
         let source = sqlite_runtime_source(
@@ -550,7 +562,7 @@ const _procedures = { seed, failBulk, failBulkInsideTransaction };
             .query_typed(
                 &format!(
                     r#"SELECT email, version
-                   FROM "{LOCAL_DEV_APP_ID}"."users"
+                   FROM "{alias}"."users"
                    WHERE name = 'Red Team'
                    ORDER BY id"#
                 ),
@@ -606,7 +618,7 @@ const _procedures = { seed, failBulk, failBulkInsideTransaction };
             .query_typed(
                 &format!(
                     r#"SELECT email, version
-                   FROM "{LOCAL_DEV_APP_ID}"."users"
+                   FROM "{alias}"."users"
                    WHERE name = 'Red Team'
                    ORDER BY id"#
                 ),
@@ -633,7 +645,7 @@ const _procedures = { seed, failBulk, failBulkInsideTransaction };
             .query_typed(
                 // Find the control insert by its unique fixture email.
                 &format!(
-                    r#"SELECT COUNT(*) FROM "{LOCAL_DEV_APP_ID}"."users" WHERE email = 'control@example.com'"#
+                    r#"SELECT COUNT(*) FROM "{alias}"."users" WHERE email = 'control@example.com'"#
                 ),
                 &[],
             )
@@ -736,6 +748,7 @@ fn update_rejects_nested_version_filter_without_mutating_sqlite_row() {
 
     run(async {
         let dir = tempfile::tempdir().expect("tempdir");
+        let alias = crate::tests::fixtures::harness_alias(LOCAL_DEV_APP_ID);
         let schema = users_encrypted_ssn_schema();
         apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl());
         let mut source = sqlite_runtime_source(
@@ -801,7 +814,7 @@ const _procedures = { seed, nestedCasUpdate };
         let rows = client
             .query(
                 &format!(
-                    r#"SELECT name, version FROM "{LOCAL_DEV_APP_ID}"."users" WHERE email = 'alice@example.com'"#
+                    r#"SELECT name, version FROM "{alias}"."users" WHERE email = 'alice@example.com'"#
                 ),
                 &[],
             )
@@ -827,6 +840,7 @@ fn update_many_rejects_nested_version_filter_without_mutating_sqlite_row() {
 
     run(async {
         let dir = tempfile::tempdir().expect("tempdir");
+        let alias = crate::tests::fixtures::harness_alias(LOCAL_DEV_APP_ID);
         let schema = users_encrypted_ssn_schema();
         apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl());
         let mut source = sqlite_runtime_source(
@@ -886,7 +900,7 @@ const _procedures = { seed, nestedCasUpdateMany };
         let rows = client
             .query(
                 &format!(
-                    r#"SELECT name, version FROM "{LOCAL_DEV_APP_ID}"."users" WHERE email = 'alice@example.com'"#
+                    r#"SELECT name, version FROM "{alias}"."users" WHERE email = 'alice@example.com'"#
                 ),
                 &[],
             )

@@ -16,6 +16,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use zeroship_data_orm::resolved_bindings::{ResolvedBinding, SuppliedAppBindings};
 use zeroship_data_v8::service::{DbService, DbServiceConfig};
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::plugin::NativePlugin;
@@ -39,11 +40,27 @@ fn dispatch_zs(source: &str, name: &str) -> (u16, serde_json::Value) {
     }];
     // Use a dummy URL — the capability gate fires BEFORE the pool is
     // touched, so the URL is never dialed.
+    // This runtime sets neither `env_vars` nor `app_id`, so the id the plugin
+    // resolves its binding under is the dev fallback. Keying the store on
+    // anything else leaves `bind_runtime_descriptor` refusing at startup,
+    // before any capability gate is reached.
+    let app_bindings = Arc::new(SuppliedAppBindings::new());
+    app_bindings
+        .supply(
+            zeroship_core::app_id::LOCAL_DEV_APP_ID,
+            ResolvedBinding {
+                database: zeroship_core::DatabaseId::mint(),
+                binding: zeroship_core::BindingId::mint(),
+                epoch: 1,
+            },
+        )
+        .expect("a fresh store accepts its first binding");
     let plugins: Vec<Arc<dyn NativePlugin>> =
         vec![
             DbService::new(DbServiceConfig {
+                app_bindings,
                 project_keys: Default::default(),
-                connection: zeroship_data_orm::connection::ConnectionFactory::for_url("postgres://_capability_test_unused")
+                connection: zeroship_data_orm::connection::ConnectionFactory::for_app_url("postgres://_capability_test_unused")
                     .expect("valid database configuration"),
                 cdc_relay: None,
                 meter: None,

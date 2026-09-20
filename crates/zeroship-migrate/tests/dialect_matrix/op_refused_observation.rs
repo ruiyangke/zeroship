@@ -437,9 +437,9 @@ fn table_ops(subject: Subject, dialect: &DialectId) -> Vec<Value> {
 /// The trigger the live red drops, and it MUST be created AFTER the seed row.
 ///
 /// MySQL refuses structured DML against a table that carries a trigger - "zero-migrate
-/// cannot prove transactional side effects, so structured data migrations fail closed"
-/// - so a fixture that created the trigger first could never seed its row there, and
-/// the leg would die before observing anything.
+/// cannot prove transactional side effects, so structured data migrations fail closed" -
+/// so a fixture that created the trigger first could never seed its row there, and the
+/// leg would die before observing anything.
 ///
 /// The grammar genuinely differs three ways: PostgreSQL EXECUTES A FUNCTION, SQLite
 /// and MySQL carry a BODY, and MySQL refuses a body that returns a result set, so its

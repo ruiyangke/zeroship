@@ -22,7 +22,13 @@ async fn dispatch_resolves_full_kernel_kv_storage_db_auth() {
     export default {
       async fetch(req, env) {
         const present = {
+          // `db` alone cannot tell a resolved database from an empty
+          // placeholder: the runtime falls back to a bare object for any
+          // plugin that mints no namespace instance, and that object is
+          // `typeof "object"` too. `collection` is on the Db handle itself,
+          // so it is the member that separates the two.
           db: typeof env.db,
+          dbCollection: typeof env.db.collection,
           kv: typeof env.kv,
           storage: typeof env.storage,
           auth: typeof env.auth,
@@ -92,6 +98,10 @@ async fn dispatch_resolves_full_kernel_kv_storage_db_auth() {
     let v: serde_json::Value = serde_json::from_slice(&body).expect("handler returned JSON");
 
     assert_eq!(v["present"]["db"], "object", "env.db must resolve");
+    assert_eq!(
+        v["present"]["dbCollection"], "function",
+        "env.db must be the handle for a resolved binding, not a placeholder"
+    );
     assert_eq!(v["present"]["kv"], "object", "env.kv must resolve");
     assert_eq!(
         v["present"]["storage"], "object",

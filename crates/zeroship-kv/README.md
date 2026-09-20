@@ -17,7 +17,7 @@ fallback. Disable default features to supply a custom `Backend` through
 Hosts translate their settings into `KvConfig::Redis { redis }` or
 `KvConfig::Redb { path }`; this crate does not read environment variables.
 The same configuration can be parsed with `KvConfig::from_toml`. See the
-[configuration reference](../../docs/reference/kv-configuration.md) for host
+[configuration reference](../../docs/architecture/kv-configuration.md) for host
 settings, topology examples, authentication, TLS, and recovery.
 Open the store at startup and inject scoped handles into application state:
 

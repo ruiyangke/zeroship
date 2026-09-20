@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use zeroship_core::service_assertion::{ServiceIssuer, ServiceSigningKey, ServiceTrustBundle};
 use zeroship_core::service_peers::{ServiceAuth, ServiceKeyring};
+use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::cdc::relay::RelayConfig;
 
 pub struct RelayFixture {
@@ -26,17 +27,29 @@ impl Drop for RelayFixture {
 }
 
 impl RelayFixture {
-    pub async fn start(admin: &Pool, admin_url: &str, app: &str) -> Self {
+    /// Start the relay and mint the two logins the exercise connects as.
+    ///
+    /// `binding` is the edge the caller provisioned the cluster for. The worker
+    /// login is admitted to that binding's role and to nothing else, so a
+    /// session that narrows with `SET LOCAL ROLE` reaches exactly the schema
+    /// the ladder granted and the connection itself carries none of it.
+    pub async fn start(admin: &Pool, admin_url: &str, binding: &DbBinding) -> Self {
         let suffix = zeroship_core::typed_id::generate("tst");
         let relay_role = format!("relay_{suffix}");
         let worker_role = format!("worker_{suffix}");
         let instance = zeroship_core::typed_id::generate("wkr");
         let key = ServiceSigningKey::generate();
-        let app_role = zeroship_core::database_role::per_app_role_name(app).unwrap();
+        let binding_role = binding
+            .session_role()
+            .expect("the worker login assumes a binding that names a role");
+        // `WITH INHERIT FALSE` alone, spelled the way
+        // `zeroship_migrate_server::datastore::cluster::grant_binding` spells
+        // the worker edge. A fixture that added `SET TRUE` would provision an
+        // option the reconciler never emits.
         admin.batch_execute(&format!(
             "CREATE ROLE \"{relay_role}\" LOGIN REPLICATION NOSUPERUSER NOCREATEROLE NOCREATEDB NOINHERIT NOBYPASSRLS PASSWORD 'fixture';
              CREATE ROLE \"{worker_role}\" LOGIN NOREPLICATION NOSUPERUSER NOCREATEROLE NOCREATEDB NOINHERIT NOBYPASSRLS PASSWORD 'fixture';
-             GRANT \"{app_role}\" TO \"{worker_role}\" WITH INHERIT FALSE, SET TRUE;
+             GRANT \"{binding_role}\" TO \"{worker_role}\" WITH INHERIT FALSE;
              CREATE SCHEMA IF NOT EXISTS zeroship;
              CREATE TABLE IF NOT EXISTS zeroship.worker_instances (
                id text PRIMARY KEY, ring_key bytea NOT NULL, public_key bytea NOT NULL,
@@ -50,6 +63,47 @@ impl RelayFixture {
             "INSERT INTO zeroship.worker_instances (id, ring_key, public_key, advertise_host, advertise_port, status) VALUES ($1, $2, $2, '127.0.0.1'::inet, 8080, 'active')",
             &[&instance, &key.verifying_key_bytes().to_vec()],
         ).await.unwrap();
+        // Stand-ins for the two Control tables the relay reads to learn which
+        // schema a subscriber is entitled to. The relay composes no schema from
+        // the app id, so without these rows its capture refuses rather than
+        // streaming a namespace it guessed.
+        let edge = binding
+            .edge()
+            .expect("the fixture binding addresses a database");
+        let database = edge.database().as_str().to_owned();
+        admin.batch_execute(&format!(
+            "CREATE TABLE IF NOT EXISTS zeroship.databases (
+               id text PRIMARY KEY, status text NOT NULL, schema_epoch int NOT NULL DEFAULT 1
+             );
+             CREATE TABLE IF NOT EXISTS zeroship.database_bindings (
+               id text PRIMARY KEY, app_id text NOT NULL, database_id text NOT NULL,
+               status text NOT NULL, generation bigint NOT NULL DEFAULT 1,
+               observed_generation bigint NOT NULL DEFAULT 1
+             );
+             GRANT SELECT (id, status, schema_epoch) ON zeroship.databases TO \"{relay_role}\";
+             GRANT SELECT (id, app_id, database_id, status, generation, observed_generation)
+               ON zeroship.database_bindings TO \"{relay_role}\";"
+        )).await.unwrap();
+        admin
+            .execute(
+                "INSERT INTO zeroship.databases (id, status) VALUES ($1, 'active') \
+                 ON CONFLICT (id) DO NOTHING",
+                &[&database],
+            )
+            .await
+            .unwrap();
+        admin
+            .execute(
+                "INSERT INTO zeroship.database_bindings (id, app_id, database_id, status) \
+                 VALUES ($1, $2, $3, 'active') ON CONFLICT (id) DO NOTHING",
+                &[
+                    &edge.binding().as_str().to_owned(),
+                    &binding.app_id().to_owned(),
+                    &database,
+                ],
+            )
+            .await
+            .unwrap();
         let files = tempfile::tempdir().unwrap();
         let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let cert = files.path().join("cert.pem");
