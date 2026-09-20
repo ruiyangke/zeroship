@@ -1716,8 +1716,11 @@ app's requests and cannot protect a shared cluster from an app under its limit. 
    Its control is the same batch under an assumable role, with every setting it applied read back.
 
 7. **Re-prove the pooled-connection reset against a narrowed role.** BUILDABLE.
-    `crates/zeroship-data-orm/src/exec.rs` runs the role and timeout guards via `SET LOCAL` inside an
-    explicit transaction so they revert at COMMIT and at the implicit ROLLBACK on drop. That
+    `crates/zeroship-data-orm/src/backend/postgres/executor.rs` issues `BEGIN` and then applies the
+    role and timeout guards on the same client through `apply_session_authority`, which runs the
+    `SET LOCAL` statements `crates/zeroship-data-orm/src/backend/postgres/pg_session_sql.rs`
+    composes. One call site, and the `BEGIN` precedes it, so the guards sit inside an explicit
+    transaction and revert at COMMIT and at the implicit ROLLBACK on drop. That
     reasoning does not change when the role names a database, but the residue it prevents does: a
     leaked role today is one app's own schema and under sharing it is a co-tenant's. Needs a test
     that checks out, narrows, cancels mid-flight, and asserts the next checkout cannot reach the
