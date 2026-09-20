@@ -264,8 +264,10 @@ pub async fn apply(
     match apply_ir_documents(
         &state.provision_dsn,
         &state.tmp_dir,
-        &app_id,
-        &database_id,
+        crate::apply::ApplyTarget {
+            app_id: &app_id,
+            database_id: &database_id,
+        },
         &body,
         &state.policy_config,
         &state.schema_apply_store,

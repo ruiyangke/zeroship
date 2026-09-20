@@ -290,16 +290,30 @@ pub enum ProvisionRuntimeRoleError {
 /// death or terminal store failure can leave it `submitted`: the ledger and app
 /// schema may live on different DSNs, so no transaction spans them. No serving
 /// path reads an open row; the deploy gate reads only `applied` rows.
+/// The app whose IR this is, and the database it lands in.
+///
+/// Carried together because they are one fact: an apply targets a database
+/// THROUGH an app's live binding to it, and a caller that could pass one
+/// without the other could post an IR at a database the app does not hold.
+#[derive(Debug, Clone, Copy)]
+pub struct ApplyTarget<'a> {
+    pub app_id: &'a AppId,
+    pub database_id: &'a DatabaseId,
+}
+
 pub async fn apply_ir_documents(
     provision_dsn: &str,
     tmp_root: &Path,
-    app_id: &AppId,
-    database_id: &DatabaseId,
+    target: ApplyTarget<'_>,
     request: &ApplyMigrationsRequest,
     policy_config: &ManagedPolicyConfig,
     schema_apply_store: &SchemaApplyStore,
     principal_id: &UserId,
 ) -> Result<ApplyMigrationsResponse, ApplyRequestError> {
+    let ApplyTarget {
+        app_id,
+        database_id,
+    } = target;
     validate_request_shape(request)?;
     let migration_id = Uuid::now_v7();
 
@@ -1648,8 +1662,10 @@ mod tests {
             .block_on(apply_ir_documents(
                 "postgres://unused",
                 Path::new("/tmp"),
-                &AppId::mint(),
-                &DatabaseId::mint(),
+                ApplyTarget {
+                    app_id: &AppId::mint(),
+                    database_id: &DatabaseId::mint(),
+                },
                 &request,
                 &policy_config,
                 &SchemaApplyStore::new("postgres://unused"),
@@ -1681,8 +1697,10 @@ mod tests {
             .block_on(apply_ir_documents(
                 "postgres://unused",
                 Path::new("/tmp"),
-                &AppId::mint(),
-                &DatabaseId::mint(),
+                ApplyTarget {
+                    app_id: &AppId::mint(),
+                    database_id: &DatabaseId::mint(),
+                },
                 &request,
                 &policy_config,
                 &SchemaApplyStore::new("postgres://unused"),
