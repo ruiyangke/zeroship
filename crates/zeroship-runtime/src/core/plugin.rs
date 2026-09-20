@@ -443,7 +443,7 @@ pub(crate) fn build_env_object(
 ///
 /// # Errors
 /// When `env` is not initialized.
-pub(crate) fn seal_env_object(scope: &mut v8::PinScope<'_, '_>) -> Result<(), String> {
+pub(crate) fn seal_env_object(scope: &v8::PinScope<'_, '_>) -> Result<(), String> {
     let env_global = scope
         .get_slot::<crate::state::SharedState>()
         .and_then(|state| state.borrow().env_obj.clone())
