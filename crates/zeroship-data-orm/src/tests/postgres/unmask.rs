@@ -182,14 +182,19 @@ fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
             admin_pool.batch_execute(&create_table).await.unwrap();
 
             // Real ciphertext from the platform's own encryptor, under the AAD the read
-            // path recomputes: canonical_aad(collection, column, row_pk).
+            // path recomputes: canonical_aad(database, collection, column, row_pk).
             let backend = zeroship_data_orm::backend::PostgresBackend::new(
                 admin_pool.clone(),
                 url.clone(),
                 host.key_source(),
             );
-            let key = backend.key_store().resolve(app).await.expect("resolve_key");
-            let aad = encryption::canonical_aad(app, coll, "ssn", b"u1");
+            let database = crate::tests::fixtures::harness_database(app);
+            let key = backend
+                .key_store()
+                .resolve(app, &database)
+                .await
+                .expect("resolve_key");
+            let aad = encryption::canonical_aad(&database, coll, "ssn", b"u1");
             let ct = zeroship_data_orm::encryption::aead::encrypt(&key, b"123-45-6789", &aad)
                 .expect("encrypt");
             let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &ct);

@@ -217,6 +217,24 @@ pub fn harness_route(app_id: &str) -> zeroship_data_orm::binding::DbRoute {
     harness_binding(app_id).route()
 }
 
+/// The database a harness's encrypted columns for `app_id` are keyed on.
+///
+/// At-rest keys and the ciphertext AAD are derived from the DATABASE, so a
+/// fixture that composed ciphertext by hand has to name the same one the
+/// pipeline will, and that is whatever [`harness_binding`] minted for this app
+/// on this thread.
+///
+/// # Panics
+///
+/// Panics for a binding that addresses no database. A harness binding always
+/// does; a platform store never encrypts.
+pub fn harness_database(app_id: &str) -> zeroship_core::DatabaseId {
+    harness_binding(app_id)
+        .database()
+        .expect("a harness binding addresses a database")
+        .clone()
+}
+
 /// The schema epoch every harness binding is minted at.
 ///
 /// Named rather than spelled at each site so a fixture that provisions the

@@ -131,7 +131,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
 
             let key = backend
                 .key_store()
-                .resolve(app_id)
+                .resolve(app_id, binding.database().expect("a harness binding addresses a database"))
                 .await
                 .expect("resolve key");
             for row in &typed.rows {
@@ -178,7 +178,12 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
                 let plaintext = zeroship_data_orm::encryption::aead::decrypt(
                     &key,
                     &stored_blob,
-                    &encryption::canonical_aad(app_id, collection, "ssn", id.as_bytes()),
+                    &encryption::canonical_aad(
+                        binding.database().expect("a harness binding addresses a database"),
+                        collection,
+                        "ssn",
+                        id.as_bytes(),
+                    ),
                 )
                 .expect("decrypt stored blob");
                 assert!(
@@ -200,6 +205,9 @@ fn encrypted_column_round_trip_sqlite_randomised() {
         let _keys = host.supply_project_key(&["app1"], &"a".repeat(64));
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
+            // Key and AAD both derive from the DATABASE, so the fixture must
+            // compose ciphertext against the one this app's binding addresses.
+            let database = crate::tests::fixtures::harness_database("app1");
             let alias = crate::tests::fixtures::harness_alias("app_demo");
             backend
                 .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
@@ -220,11 +228,11 @@ fn encrypted_column_round_trip_sqlite_randomised() {
 
             let key = backend
                 .key_store()
-                .resolve("app1")
+                .resolve("app1", &database)
                 .await
                 .expect("resolve_key");
             let plaintext = b"123-45-6789";
-            let aad = encryption::canonical_aad("app1", "enc_notes", "ssn", b"row_a");
+            let aad = encryption::canonical_aad(&database, "enc_notes", "ssn", b"row_a");
             let ct = zeroship_data_orm::encryption::aead::encrypt(&key, plaintext, &aad)
                 .expect("encrypt");
 
@@ -284,6 +292,9 @@ fn randomised_ciphertext_row_swap_rejected_sqlite() {
         let _keys = host.supply_project_key(&["app1"], &"d".repeat(64));
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
+            // Key and AAD both derive from the DATABASE, so the fixture must
+            // compose ciphertext against the one this app's binding addresses.
+            let database = crate::tests::fixtures::harness_database("app1");
             let alias = crate::tests::fixtures::harness_alias("app_demo");
             backend
                 .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
@@ -302,18 +313,18 @@ fn randomised_ciphertext_row_swap_rejected_sqlite() {
                 .await
                 .expect("CREATE TABLE enc_notes");
 
-            let key = backend.key_store().resolve("app1").await.unwrap();
+            let key = backend.key_store().resolve("app1", &database).await.unwrap();
             // Insert row A and row B, each with its OWN AAD (binds row_pk).
             let ct_a = zeroship_data_orm::encryption::aead::encrypt(
                 &key,
                 b"sensitive-A",
-                &encryption::canonical_aad("app1", "enc_notes", "ssn", b"row_a"),
+                &encryption::canonical_aad(&database, "enc_notes", "ssn", b"row_a"),
             )
             .unwrap();
             let ct_b = zeroship_data_orm::encryption::aead::encrypt(
                 &key,
                 b"sensitive-B",
-                &encryption::canonical_aad("app1", "enc_notes", "ssn", b"row_b"),
+                &encryption::canonical_aad(&database, "enc_notes", "ssn", b"row_b"),
             )
             .unwrap();
             for (id, ct) in [("row_a", &ct_a), ("row_b", &ct_b)] {
@@ -349,7 +360,7 @@ fn randomised_ciphertext_row_swap_rejected_sqlite() {
                 .step_by(2)
                 .map(|i| u8::from_str_radix(&hex_str[i..i + 2], 16).unwrap())
                 .collect();
-            let aad_b = encryption::canonical_aad("app1", "enc_notes", "ssn", b"row_b");
+            let aad_b = encryption::canonical_aad(&database, "enc_notes", "ssn", b"row_b");
             let err = zeroship_data_orm::encryption::aead::decrypt(&key, &raw, &aad_b)
                 .expect_err("row-swap must fail AAD verification");
             match err {
@@ -362,8 +373,9 @@ fn randomised_ciphertext_row_swap_rejected_sqlite() {
     })
 }
 
-/// Backend instances with the same supplied project key can decrypt each other’s
-/// ciphertext when the app, field and row identity also match.
+/// Backend instances with the same supplied project key decrypt each other's
+/// ciphertext when the database, field and row identity also match - and do
+/// NOT when the database differs.
 #[test]
 fn cross_backend_ciphertext_decrypt_via_shared_key() {
     Host::test(|host| {
@@ -377,13 +389,14 @@ fn cross_backend_ciphertext_decrypt_via_shared_key() {
 
             // Both backends receive the same explicit app-to-project binding.
             let app_id = "app_shared";
-            let key_a = backend_a.key_store().resolve(app_id).await.unwrap();
-            let key_b = backend_b.key_store().resolve(app_id).await.unwrap();
-            // Both handles must resolve the supplied project key.
+            let database = crate::tests::fixtures::harness_database(app_id);
+            let key_a = backend_a.key_store().resolve(app_id, &database).await.unwrap();
+            let key_b = backend_b.key_store().resolve(app_id, &database).await.unwrap();
+            // Both handles must expand the same column key from the supplied root.
             assert_eq!(key_a.k_enc, key_b.k_enc);
 
             let plaintext = b"cross-instance-payload";
-            let aad = encryption::canonical_aad(app_id, "enc_notes", "ssn", b"row_a");
+            let aad = encryption::canonical_aad(&database, "enc_notes", "ssn", b"row_a");
             let ct = zeroship_data_orm::encryption::aead::encrypt(&key_a, plaintext, &aad)
                 .expect("encrypt on A");
 
@@ -392,8 +405,20 @@ fn cross_backend_ciphertext_decrypt_via_shared_key() {
             let recovered = zeroship_data_orm::encryption::aead::decrypt(&key_b, &ct, &aad)
                 .expect("decrypt on B");
             assert_eq!(recovered, plaintext);
+
+            // The variable the equality above holds constant: another database
+            // of the SAME project expands another key, so the two backends
+            // agreeing is about the root and not about the salt being ignored.
+            let elsewhere = crate::tests::fixtures::harness_database("app_shared_elsewhere");
+            assert_ne!(database, elsewhere, "the control: two harness apps, two databases");
+            let key_elsewhere = backend_b
+                .key_store()
+                .resolve(app_id, &elsewhere)
+                .await
+                .unwrap();
+            assert_ne!(key_a.k_enc, key_elsewhere.k_enc);
         });
-    })
+    });
 }
 
 /// Round-trip encryption through SQLite SQL binding and typed decoding.
@@ -451,7 +476,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
             // The encryption pass replaces ssn with native ciphertext bytes.
             encrypt_row_on_write(
                 backend.key_store(),
-                "app_demo",
+                &binding,
                 "users",
                 &schema,
                 row_pk,
@@ -525,7 +550,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
 
             decrypt_row_on_read(
                 backend.key_store(),
-                "app_demo",
+                &binding,
                 "users",
                 &schema,
                 &mut row_value,

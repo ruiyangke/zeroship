@@ -111,8 +111,12 @@ Three ideas, and the whole design is the consequence of separating them:
 
 Runtime bindings carry app identity separately from the physical schema. App identity
 keys transaction lanes and metering; the schema selects SQL qualification and PostgreSQL
-roles. The host supplies project encryption keys and authorized app bindings through
-`crates/zeroship-data-orm/src/encryption/keys.rs`.
+roles. The host supplies project ROOT keys and authorized app bindings through
+`crates/zeroship-data-orm/src/encryption/keys.rs`; the key a column is encrypted under is
+`derive_key` of that root and the DATABASE the row lives in, and
+`crates/zeroship-data-orm/src/encryption/aad.rs` binds the same database into every tag. At-rest
+encryption is therefore not what separates two apps bound to one database - a column-level GRANT
+is.
 
 The independently managed Database and Grant records described below remain planned.
 

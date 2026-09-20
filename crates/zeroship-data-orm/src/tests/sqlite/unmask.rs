@@ -225,7 +225,7 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
             });
             encrypt_row_on_write(
                 backend.key_store(),
-                app_id,
+                &crate::tests::fixtures::harness_binding(app_id),
                 collection,
                 &crate::tests::fixtures::native_fields(schema.clone()),
                 row_pk,
@@ -653,7 +653,7 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
             });
             encrypt_row_on_write(
                 backend.key_store(),
-                app_id,
+                &crate::tests::fixtures::harness_binding(app_id),
                 collection,
                 &crate::tests::fixtures::native_fields(schema.clone()),
                 row_pk,
