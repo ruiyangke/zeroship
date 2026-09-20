@@ -51,6 +51,26 @@ receipt, and deduplication state that nothing is allowed to retire.
 `tasks`, `signals` and `continuations`. As much of the engine moves messages and resumes scans
 as runs workflows.
 
+**One row is the concurrency unit for every workflow operation an app performs.**
+`lock_app_state` in `crates/zeroship-workflow/src/service/app.rs` is an UPDATE against the single
+`app_state` row for an app, so it takes that row's lock, and it is called from `delivery`,
+`ingress`, `app`, `reconciliation`, `management`, `hold_release`, `cron`, `control`, `collection`,
+`activation`, `tasks`, `signals`, `propagation`, `fanout` and `closure`. Those subsystems were
+designed separately and every one of them converges on the same row.
+
+The consequence is that an app's broadcast waits behind its own journal maintenance. A fan-out
+page cannot begin while a payload sweep holds the row, and neither can begin while a signal is
+being ingested. Nothing here is a defect: the lock is doing what it was written to do, which is
+to serialise an app's transitions. But serialising EVERY subsystem on one row is a throughput
+ceiling nobody chose, and it is invisible in each subsystem's own source, because each one takes
+the lock once and correctly.
+
+This is a decision the relocation cannot avoid making. Moving the journal into a service either
+inherits this serialisation, splits it, or entrenches it, and it is far cheaper to decide before
+the creator calls are carried across than to discover afterwards that one row is the throughput
+ceiling for a platform. The relocation proposal is currently silent on it, which is a decision by
+default rather than by choice.
+
 **Lease validity has two representations and they are not kept apart.** The durable form is
 already right: `__zeroship_workflow_tasks.deadline` is an absolute integer, as are the manager's
 `assignments.expires_at` and `workers.expires_at`, and `Clock::sample` in
