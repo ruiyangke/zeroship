@@ -380,7 +380,7 @@ pub fn audit_unmask_capability_grants_sql(
     let readwrite_lit = quote_lit(readwrite);
     let readonly_lit = quote_lit(readonly);
     format!(
-        r#"GRANT INSERT ON {schema_q}.{table_q} TO {readwrite_q}, {readonly_q};
+        r"GRANT INSERT ON {schema_q}.{table_q} TO {readwrite_q}, {readonly_q};
         DO $audit_unmask_grant$
         DECLARE
             audit_sequence text;
@@ -398,7 +398,7 @@ pub fn audit_unmask_capability_grants_sql(
                 audit_sequence, '{readwrite_lit}', '{readonly_lit}'
             );
         END
-        $audit_unmask_grant$;"#
+        $audit_unmask_grant$;"
     )
 }
 

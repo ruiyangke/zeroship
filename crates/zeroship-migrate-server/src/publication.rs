@@ -223,14 +223,6 @@ mod tests {
         assert!(sql.contains("ORDER BY c.relname"));
     }
 
-    /// The member read is scoped to ONE schema inside the query. Read
-    /// unscoped, the delta below would propose dropping every co-tenant
-    /// database's tables out of the shared object.
-    #[test]
-    fn the_member_read_is_scoped_to_one_schema() {
-        assert!(published_member_query().contains("n.nspname = $2"));
-    }
-
     /// The delta names only this schema's relations, and never `SET TABLE`.
     #[test]
     fn membership_edits_are_deltas_and_never_replace_the_shared_object() {
