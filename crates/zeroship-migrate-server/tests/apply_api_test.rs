@@ -595,7 +595,7 @@ fn assert_policy_fixtures_are_current(policy_config: &ManagedPolicyConfig) {
             )
         });
         policy_config
-            .compose_effective_for_app(&app_id, None, Some(&draft))
+            .compose_effective_for_schema(&app_id, app_id.as_str(), None, Some(&draft))
             .unwrap_or_else(|err| {
                 panic!(
                     "policy fixture {name} parses but no longer admits against the \
@@ -608,7 +608,7 @@ fn assert_policy_fixtures_are_current(policy_config: &ManagedPolicyConfig) {
         .expect("escalating_policy must PARSE; it is refused at admit, not at load");
     assert!(
         policy_config
-            .compose_effective_for_app(&app_id, None, Some(&escalating))
+            .compose_effective_for_schema(&app_id, app_id.as_str(), None, Some(&escalating))
             .is_err(),
         "escalating_policy must be refused by admit; a fixture the ceiling now grants \
          would turn policy_api_rejects_escalating_draft_at_submit_pg into a no-op"

@@ -2714,7 +2714,7 @@ fn confined_ceiling_for(app_id: &zeroship_core::AppId) -> zeroship_migrate_polic
     // to the composition this reads.
     zeroship_migrate_server::policy::ManagedPolicyConfig::default_confined([7u8; 32], 1)
         .expect("the shipped confined ceiling must load")
-        .current_ceiling_for_app(app_id, None)
+        .current_ceiling_for_schema(app_id, app_id.as_str(), None)
         .expect("the shipped confined ceiling must compose for an app")
         .policy
 }

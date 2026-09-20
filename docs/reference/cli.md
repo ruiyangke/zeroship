@@ -195,7 +195,8 @@ the app is restored.
 
 ## `zeroship migrate`
 
-Applies the app's committed migrations to its deployed database.
+Applies a database's committed migrations to the deployed database that app is
+bound to.
 
 ```
 zeroship migrate [<path-to-migrations.ir.json>] [--app=<label>] [--database=<label>]
@@ -206,8 +207,11 @@ zeroship migrate [<path-to-migrations.ir.json>] [--app=<label>] [--database=<lab
 - **The path** is optional. With no positional it is
   `<out>/migrations.ir.json` for the selected database, from `zeroship.jsonc`.
 - **`--database`** names one of the app's own database labels; with none
-  passed it is the app's primary. The migration service addresses the app, so
-  a non-primary label is refused rather than applied to the wrong schema.
+  passed it is the app's primary. Any of the app's databases may be migrated -
+  `primary` decides which handle is `env.db`, not which schema a migration set
+  can reach. The label is dereferenced to its `dbs_` id before the request, so
+  the word never travels. With no config file in the directory there are no
+  labels and `--database` is the id itself.
 - **`--app`** names one of the file's `apps` labels (an app id when there is
   no file); **`--app-name`** its routing label. Unlike
   deploy, migrate never creates an app: a name that matches nothing fails with
@@ -217,10 +221,14 @@ zeroship migrate [<path-to-migrations.ir.json>] [--app=<label>] [--database=<lab
   (an `environments.<name>` member).
 
 The file posted is the build's recorded migration set (its intermediate
-representation, or IR); the CLI does not parse or rewrite it. `migrate` prints
-what it resolved, how many operations it applied and skipped — the
-`applied`/`skipped` counts are operations, not migration files — and the
-migration id.
+representation, or IR); the CLI does not parse or rewrite it, which is why the
+database rides in the URL rather than in the body. `migrate` prints what it
+resolved, how many operations it applied and skipped — the `applied`/`skipped`
+counts are operations, not migration files — and the migration id.
+
+An apply naming a database this app holds no live binding to is refused with
+`database_not_bound`, naming the database and the call that grants one. Bind it
+with `zeroship db bind` and re-run.
 
 ## `zeroship db`
 

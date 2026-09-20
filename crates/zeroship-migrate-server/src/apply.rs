@@ -301,7 +301,6 @@ pub async fn apply_ir_documents(
     principal_id: &UserId,
 ) -> Result<ApplyMigrationsResponse, ApplyRequestError> {
     validate_request_shape(request)?;
-    let policy = resolve_apply_policy(app_id, request, policy_config)?;
     let migration_id = Uuid::now_v7();
 
     match request.kind {
@@ -325,6 +324,12 @@ pub async fn apply_ir_documents(
         schema: schema_text.clone(),
         reason: reason.to_string(),
     })?;
+
+    // THE CEILING IS BOUND TO THAT SCHEMA, which is why it is composed here and
+    // not before the derivation: every namespace-scoped grant in it names the
+    // schema this apply writes, and a ceiling bound to any other name grants
+    // nothing here and refuses every creator statement as out-of-scope.
+    let policy = resolve_apply_policy(app_id, &schema, request, policy_config)?;
 
     // (a) DRIVER: open a native compio session, wrap it in the adapter's
     // `CompioPgSession`, and drive the published engine over it. Provisioning
@@ -800,18 +805,19 @@ async fn apply_prepared_ir_documents(
 #[allow(clippy::result_large_err)]
 fn resolve_apply_policy(
     app_id: &AppId,
+    schema: &SchemaName,
     request: &ApplyMigrationsRequest,
     policy_config: &ManagedPolicyConfig,
 ) -> Result<EffectivePolicy, ApplyRequestError> {
     let Some(policy) = request.policy.as_ref() else {
-        return Ok(policy_config.compose_effective_for_app(app_id, None, None)?);
+        return Ok(policy_config.compose_effective_for_schema(app_id, schema.as_str(), None, None)?);
     };
     let draft = CreatorPolicyDraft {
         filename: policy.filename.as_str(),
         body: policy.body.as_str(),
     };
     let parsed = policy_config.parse_draft(&draft)?;
-    Ok(policy_config.compose_effective_for_app(app_id, None, Some(&parsed))?)
+    Ok(policy_config.compose_effective_for_schema(app_id, schema.as_str(), None, Some(&parsed))?)
 }
 
 /// Lower every document under the guard, refuse a denied plan, and retain the
@@ -1409,10 +1415,6 @@ mod tests {
     use super::*;
 
     const FIXTURE_APP_ID: &str = "app_02xfboclmnln2ar6iblni0000";
-
-    fn fixture_app_id() -> AppId {
-        AppId::parse(FIXTURE_APP_ID).expect("the fixture app id must be canonical")
-    }
 
     fn fixture_schema() -> SchemaName {
         SchemaName::new(FIXTURE_APP_ID).expect("the fixture is a legal schema identifier")
