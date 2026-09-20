@@ -545,6 +545,60 @@ and has no public production record. The techniques transfer. The architecture d
 
 ---
 
+## What landed, and the evidence it landed on
+
+The compare-and-set filters are in. Every read-modify-write named in the survey above now names
+the value its own read observed, and the four private copies of the rows-changed check are one
+shared `fence::changed_once`. `deploys::record_verified` takes an `AppStateLock` rather than an
+`AppId`, so the lock convention that used to be stated three modules above the write is a
+precondition the caller cannot satisfy without having taken the lock. `management::target::install`
+REPLACED its `&AppWorkflows` parameter with that token rather than taking both, which is what
+makes the guard real: taking both would let a caller pass a lock for one app and an id for another.
+
+**The guard is bound by a mutation, not by coverage.** `ingress_models`'s concurrent-revocation
+test passes with the app lock in place whether or not the compare-and-set exists, because the lock
+serialises the two writers. It is the lock's REMOVAL that separates them, and the separation is
+visible in the failure site rather than in a pass/fail bit:
+
+    lock present, CAS present    passes
+    lock removed, CAS present    the loser's filter matches no row, and the
+                                 revocation returns an error
+    lock removed, CAS reverted   both writers store the same successor, no
+                                 error is raised anywhere, and one revocation
+                                 is silently lost
+
+The third case is the defect this slice exists to remove, and the second is what the guard
+converts it into. A brief that asks only for "a test that fails before the fix" does not
+distinguish them, because the third case fails too - it simply fails somewhere else.
+
+**The test asserts its own contention rather than assuming it.** It opens a second service over
+the same store, holds the app state row, and waits on `pg_stat_activity` until both writers are
+demonstrably blocked on that row before releasing it, bounded by the ORM's own lock budget rather
+than a chosen interval. It is PostgreSQL-only by construction: a SQLite journal reserves its writer
+as the transaction opens, so two hosts never contend for the row at all.
+
+**Verification, and what it did not cover.** The gate is `cargo xtask test workflow`. Its migration
+compiler artifact step did not run here and was not counted as passing: it imports the gitignored
+`packages/zero-migrate/dist`, which no commit provides, so it is absent in a worktree that has not
+had a JavaScript build. One cargo test shares that dependency and fails for the same reason -
+`zeroship-workflow-manager`'s deployment model comparison shells out to the same generator. Neither
+is reachable from this change, which touches only `crates/zeroship-workflow/src/service`.
+
+The cargo portions ran to completion and clean. Reaching completion required setting
+`RUST_MIN_STACK`, which `xtask/src/data.rs` sets for its own suites and `xtask/src/workflow.rs`
+does not: without it one payload ownership test overflows its stack and aborts the whole binary.
+**An aborted target does not report failures - it stops reporting, and every instrument reads the
+silence as absence.** Runs of this suite that aborted were read as complete for most of a day.
+
+**Context a reader will want and a fast-forward could not carry.** At the time this landed the
+workflow suite was red on the app-database-decoupling branch's gate. That was not a blocker and
+was not this change: the failures there are confined to the PostgreSQL path while the SQLite
+siblings of the same tests pass in the same binary, which is not a shape service logic can
+produce. Recording it here because the merge was a fast-forward and a fast-forward has no commit
+to hold it.
+
+---
+
 ## Do-not notes
 
 **Do not delete a table before naming where its invariant lands.** The delivery group is
