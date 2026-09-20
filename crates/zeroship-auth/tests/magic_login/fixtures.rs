@@ -166,7 +166,7 @@ pub(super) async fn assert_completion_state(
     server: &AuthServer,
     nonce: &str,
     consumed: bool,
-    attempts: i16,
+    attempts: i32,
 ) {
     let row = server
         .pg
@@ -185,7 +185,7 @@ pub(super) async fn assert_completion_state(
     }
     assert_eq!(row.get::<_, bool>(1), consumed, "completion consumption");
     assert_eq!(
-        row.get::<_, i16>(2),
+        row.get::<_, i32>(2),
         attempts,
         "only a new reservation or wrong code spends the attempt budget"
     );

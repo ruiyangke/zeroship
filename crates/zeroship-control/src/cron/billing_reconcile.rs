@@ -348,7 +348,7 @@ pub fn invoice_item_idempotency_key(
     organization_id: &str,
     app_id: &AppId,
     period_start_unix: i64,
-    segment_no: i16,
+    segment_no: i32,
 ) -> String {
     format!(
         "billitem:{organization_id}:{}:{period_start_unix}:{segment_no}",
@@ -1460,7 +1460,7 @@ pub(crate) async fn bill_organization_with_parts<S: StripeApi>(
             &[&invoice_id],
         )
         .await?;
-    let mut posted: std::collections::HashSet<(AppId, i16)> =
+    let mut posted: std::collections::HashSet<(AppId, i32)> =
         std::collections::HashSet::with_capacity(posted_rows.len());
     for row in &posted_rows {
         let raw: String = row.get("app_id");
@@ -1469,7 +1469,7 @@ pub(crate) async fn bill_organization_with_parts<S: StripeApi>(
                 "billing_reconcile: billing_line_provider_refs row has a malformed app id {raw:?}: {e}"
             ))
         })?;
-        posted.insert((app_id, row.get::<_, i16>("segment_no")));
+        posted.insert((app_id, row.get::<_, i32>("segment_no")));
     }
     // Which (app, segment) lines already have an intent (snapshot) row written?
     let line_rows = conn
@@ -1478,7 +1478,7 @@ pub(crate) async fn bill_organization_with_parts<S: StripeApi>(
             &[&invoice_id],
         )
         .await?;
-    let mut line_exists: std::collections::HashSet<(AppId, i16)> =
+    let mut line_exists: std::collections::HashSet<(AppId, i32)> =
         std::collections::HashSet::with_capacity(line_rows.len());
     for row in &line_rows {
         let raw: String = row.get("app_id");
@@ -1487,7 +1487,7 @@ pub(crate) async fn bill_organization_with_parts<S: StripeApi>(
                 "billing_reconcile: invoice_lines row has a malformed app id {raw:?}: {e}"
             ))
         })?;
-        line_exists.insert((app_id, row.get::<_, i16>("segment_no")));
+        line_exists.insert((app_id, row.get::<_, i32>("segment_no")));
     }
 
     // MAJOR-1: reconcile the EXISTING draft's (app, segment) set against the FRESHLY
@@ -1500,11 +1500,11 @@ pub(crate) async fn bill_organization_with_parts<S: StripeApi>(
     // immutability trigger fires only on a finalized parent), so we delete the orphans
     // here: drop the Stripe item (adopting an un-ref'd-but-possibly-posted item via
     // its deterministic metadata key first), then the provider-ref, then the line.
-    let fresh_keys: std::collections::HashSet<(AppId, i16)> = lines
+    let fresh_keys: std::collections::HashSet<(AppId, i32)> = lines
         .iter()
         .map(|l| (l.app_id.clone(), l.segment_no))
         .collect();
-    let orphans: Vec<(AppId, i16)> = line_exists
+    let orphans: Vec<(AppId, i32)> = line_exists
         .union(&posted)
         .filter(|k| !fresh_keys.contains(*k))
         .cloned()
@@ -2058,7 +2058,7 @@ pub(crate) fn billed_app(line: &BilledLine) -> &AppId {
 /// path emits exactly one at `segment_no = 0`.
 pub(crate) struct BilledLine {
     app_id: AppId,
-    segment_no: i16,
+    segment_no: i32,
     plan_id: String,
     /// The base, un-enriched per-segment description (`segment_description`). The
     /// CU suffix is appended at POST time so the persisted/idempotent inputs and

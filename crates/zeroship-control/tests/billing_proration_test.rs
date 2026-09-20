@@ -616,7 +616,7 @@ async fn read_segment_lines(
     state: &AppState,
     organization: &str,
     app: &AppId,
-) -> Vec<(i16, String, i64, i64, i64, i64, serde_json::Value)> {
+) -> Vec<(i32, String, i64, i64, i64, i64, serde_json::Value)> {
     state
         .control_pg
         .query(
@@ -633,7 +633,7 @@ async fn read_segment_lines(
         .iter()
         .map(|r| {
             (
-                r.get::<_, i16>("segment_no"),
+                r.get::<_, i32>("segment_no"),
                 r.get::<_, String>("plan_id"),
                 r.get::<_, i64>("included_units"),
                 r.get::<_, i64>("fx_pico_cents_per_unit"),
@@ -1607,7 +1607,7 @@ async fn shrinking_redrive_removes_orphaned_segment_and_stripe_item() {
         .await
         .expect("seed draft invoice");
     // The real segment 0 line (matches what the fresh build will produce).
-    for (seg, amount) in [(0i16, 1_000i64), (1i16, 7_777i64)] {
+    for (seg, amount) in [(0i32, 1_000i64), (1i32, 7_777i64)] {
         fx.state
             .control_pg
             .execute(
