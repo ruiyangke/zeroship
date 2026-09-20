@@ -7995,6 +7995,7 @@ dependencies = [
  "zeroship-bundle",
  "zeroship-core",
  "zeroship-data-orm",
+ "zeroship-data-v8",
  "zeroship-mailer",
  "zeroship-metering",
  "zeroship-migrate-server",
