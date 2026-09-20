@@ -11,6 +11,16 @@ on: [push, pull_request]
 # pnpm comes from the devShell as well. It is a devShell entry, so it is first on
 # PATH, and pnpm then switches itself to the `package.json#packageManager`
 # version, which is what keeps that field the pin CI runs.
+# libtest gives every test its own thread, and a spawned thread's default stack
+# is a fraction of the main thread's. A test deep enough to exhaust it does not
+# fail: it aborts the process, libtest never prints a result line, and a summary
+# that counts those lines scores the aborted target as zero failures. The floor
+# lives here rather than beside a step because the steps that need it are the
+# ones invoking cargo directly - `cargo test --workspace` reaches every member,
+# while `cargo xtask` steps carry their own floor from the harness.
+env:
+  RUST_MIN_STACK: "33554432"
+
 defaults:
   run:
     shell: nix develop --command bash -e {0}
