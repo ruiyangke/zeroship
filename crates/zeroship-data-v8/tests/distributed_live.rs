@@ -281,6 +281,27 @@ fn runtime_for(
 ) -> Runtime {
     let mut env_vars = HashMap::new();
     env_vars.insert("APP_ID".to_string(), app_id.to_string());
+    // The ENVELOPE, not the bare descriptor. `RUNTIME_DESCRIPTOR` is the v2
+    // SCHEMA descriptor and its `"version": 2` is the schema's; the document the
+    // runtime validates carries its own `"version": 1` from
+    // `databases::DOCUMENT_VERSION` and wraps the schema under `databases`. Two
+    // different numbers share the field name, so passing the schema where the
+    // document belongs fails as "must be version 1" against a 2.
+    //
+    // Read BEFORE `app_bindings` moves into the service config below.
+    let descriptor_document = {
+        let bound = app_bindings.bindings_for(app_id, COLD_START_DEPLOY_TOKEN);
+        let database = bound
+            .first()
+            .and_then(DbBinding::database)
+            .expect("the harness binding addresses a database");
+        zeroship_runtime::databases::RuntimeDatabases::single(
+            "main",
+            database.as_str(),
+            RUNTIME_DESCRIPTOR,
+        )
+        .expect("the harness descriptor is valid JSON")
+    };
     let plugins: Vec<Arc<dyn NativePlugin>> = vec![DbService::new(DbServiceConfig {
         app_bindings,
         project_keys: Default::default(),
@@ -300,7 +321,7 @@ fn runtime_for(
         // blob resolved by `crates/zeroship-worker/src/sync.rs`; native startup
         // validates it and passes it directly to plugins. All isolates in this
         // target are the same deploy, so they carry the same document.
-        .runtime_descriptor(Some(RUNTIME_DESCRIPTOR.to_string()))
+        .runtime_descriptor(Some(descriptor_document))
         .build()
 }
 
