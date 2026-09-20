@@ -107,6 +107,26 @@ at all: queue readers keep positions in memory and checkpoint an ack level into 
 record. Child workflows and external signals are not special cases; both are an event, an entry
 in a per-execution map, and one outbox row, written atomically.
 
+Two consequences for this proposal, and the second corrects it.
+
+The per-category shape Temporal keeps only for compatibility is the shape we have, with nothing
+to keep it for: we are pre-launch and owe no one a migration. That is the fold described below.
+
+An ack level works for Temporal because its queue is APPEND-ONLY, so an item stays selectable
+until acknowledged. Our sweeps read a MUTABLE set, and processing an item removes it from the
+query that would re-derive the list. That is why "checkpoint a cursor, not a row per scan"
+fails here and a frozen list is load bearing. The honest fix is not to substitute a cursor for
+the page row. It is to make what the sweep reads append-only, at which point the page tables go
+for Temporal's reason rather than by a substitution that converts at most once into at least
+once.
+
+**Temporal also lacks things this journal carries**, which is the other half of the comparison
+and the reason table count alone is a poor score. Server-orchestrated compensation, topic
+broadcast with subscriber fan-out, and payload offload with a collection lifecycle have no
+counterpart there. Cascade cancellation exists but runs inside the history service with no
+durable obligation row, so it does not survive that service dying mid-cascade. Any claim that
+this system spends more state for less capability has to account for those first.
+
 **Resonate keeps no outbox.** The header of its only migration, in
 `crates/resonate-server-postgres/migrations/0001_initial.sql`, states the principle:
 
@@ -121,9 +141,11 @@ named CHECK constraints named identically to properties in a machine-checked spe
 
 ## The design
 
-Four techniques, each of which a system in this class already ships without the tables we spend.
-Two of them survived the per-table pass below unchanged. Two did not, and are written here with
-the objection attached rather than removed, because the objection is the useful part.
+Five techniques, each of which a system in this class already ships without the tables we spend.
+Two of the first four survived the per-table pass below unchanged. Two did not, and are written
+here with the objection attached rather than removed, because the objection is the useful part.
+The fifth came out of the comparison rather than the pass, and is the one with the most code
+behind it.
 
 **1. A transition returns its messages; the caller delivers them.** This removes the network hop
 and the receipt matching: nothing is stored because nothing needs draining. It does NOT by
@@ -151,6 +173,16 @@ fails with that property's name. The obstacle is dialect parity: `step_child_lin
 CHECK the journal declares and it exists only in the PostgreSQL artifact, so today this technique
 has no enforcement at all on the SQLite tier. That is Open 1, and it is a precondition for this
 technique rather than a detail under it.
+
+**5. One discriminated mechanism instead of per-kind machinery.** This is the largest remaining
+structural change and it was not in the first version of this proposal. `fanout` and
+`propagation` are two implementations of one idea: take an obligation, page through the entities
+it reaches, record what each page did, and refuse to run a page out of order. Each has its own
+publication table, its own page table, its own history module and its own receipt validation.
+Temporal's position is that a child workflow and an external signal are not special cases, and
+the same argument applies here with more force, because our two cases are nearer to each other
+than those two are. Collapsing them removes more code than deleting any table on the list above,
+and unlike the deletions it does not require the relocation first.
 
 ---
 
@@ -288,6 +320,14 @@ and has no public production record. The techniques transfer. The architecture d
 ---
 
 ## Open
+
+0. **Is reduction even the right work?** Asked first because it outranks the rest. This journal
+   has no synchronous query of a running workflow's state and no visibility or search surface,
+   and the comparable systems treat both as core. On a platform where agents build the apps,
+   "what is this run doing right now" is a question that will be asked constantly, and today the
+   only answer is reading journal rows directly. Adding that probably delivers more than every
+   deletion below put together. This proposal should not be read as arguing otherwise; it argues
+   only that if the state is reduced, these are the reductions that hold up.
 
 1. **Does the SQLite dev tier take the same shape?** It should, and pre-launch there is no
    reason it cannot. Worth settling before the first table is deleted rather than after, because
