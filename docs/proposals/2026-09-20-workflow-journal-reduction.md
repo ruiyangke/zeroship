@@ -873,3 +873,65 @@ pair exists because a foreign key could not cross the boundary, that the move re
 and that the move is therefore when to re-derive them. The lock-ordering question is the exception:
 it is not a reduction, it is work the move adds, and it should be answered before the two installs
 share a schema rather than after.
+
+## The relocation already has a working precedent, and it is on the SQLite side
+
+Every argument above is about PostgreSQL, where the journal and the manager are
+separate schemas in separate databases. The local SQLite host does not work that
+way, and what it does instead is the thing this proposal is asking for.
+
+`crates/zeroship-workflow-manager/src/local.rs` installs one file from two
+generated schemas:
+
+    /// The deployment catalog followed by the manager schema, exactly as generated.
+    pub const SQLITE_SCHEMA: &str = concat!(
+        include_str!("../schema/deployments/sqlite.sql"),
+        include_str!("../schema/sqlite.sql"),
+    );
+
+and its own comment states the addressing rule that makes it work:
+
+    /// The deployment catalog and the queue use separate ORM bindings to the same
+    /// file. The queue acquires its deployment holds through this catalog.
+
+**Two independently generated schemas, one store, separate bindings.** That is
+the shape step 1 proposes for the journal, running today, for a different pair
+of schemas. The journal's own `SQLITE_SQL` is not in that constant, so the
+local file does not hold the journal yet - the relocation's SQLite half is one
+more `include_str!` in a constant that already takes two.
+
+Whoever writes step 1 should read this before designing the install, because
+the question "can two generated schemas share one store without merging their
+generators" is already answered here, in the affirmative, by code.
+
+### And on SQLite the lock question this document raised does not arise
+
+The section above records a new obligation the move creates: two tenant roots
+with two lock counters in one schema, and nothing ordering a transaction that
+touches both. On SQLite there is nothing to order.
+
+`crates/zeroship-data-orm/src/backend/sqlite/executor.rs` documents why, and it
+is emphatic that the choice is deliberate:
+
+    /// **`IMMEDIATE` is load-bearing, not a style choice.**
+    /// `IMMEDIATE` takes the write lock at `BEGIN`
+    /// The cost, stated because it is real: `IMMEDIATE` takes a write lock on every
+    /// database the connection has open, `main` included, not only the one this
+    /// binding addresses.
+
+`local.rs` opens its transactions the same way, through
+`rusqlite::TransactionBehavior::Immediate`, and its binding's schema name is
+`main`. So a writer already holds the whole file, and two lock counters in one
+file cannot deadlock against each other because they were never separately
+acquirable.
+
+**The move therefore has opposite consequences on the two backends, and the
+document should stop speaking as though it has one.** On PostgreSQL it creates
+an ordering question that did not exist. On SQLite it removes a separation that
+did exist: journal writes, which today contend only with other journal writes,
+would begin serialising against every manager write on the same file, bounded
+by `local.rs`'s `CONTENTION_BOUND`.
+
+Neither is an argument against the relocation. Both are work it creates, on
+sides that have to be reasoned about separately, and only one of them is
+visible from the PostgreSQL schema this document has been reading.
