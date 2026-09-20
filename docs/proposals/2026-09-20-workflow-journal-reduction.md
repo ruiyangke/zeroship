@@ -19,8 +19,10 @@ as the new one.
 
 ```
   execution        runs, generations, steps, tasks, waits, signals, payloads, payload_refs
-  delivery         outbox, job_publications, advance_publications, fanout_publications,
-                   propagation_publications, fanout_pages, propagations, propagation_pages
+  delivery         job_publications, advance_publications, fanout_publications,
+                   propagation_publications, fanout_pages, propagation_pages
+  cancellation     propagations
+  event log        outbox
   bookkeeping      job_receipts, management_receipts, requests,
                    collection_pages, reconciliation_pages
   pub/sub          topics, broadcasts, subscriptions
@@ -30,7 +32,7 @@ as the new one.
   housekeeping     schema_version, app_state
 ```
 
-**The delivery group is the largest, and it is there for one reason.**
+**The delivery group is there for one reason.**
 `crates/zeroship-workflow/src/service/publication.rs` opens by saying so:
 
 > Creator-owned, immutable queue publication intents. Journal transitions write intents before
@@ -63,14 +65,34 @@ construction, so two replicas holding one cannot compare them at all.
 ## What the relocation already removes
 
 Once the journal and the queue are in `workflow_manager`, a transition and its queue effect
-commit in one transaction. There is no remote to publish to, so there is no intent to record, no
-receipt to match, and no deduplication state to keep. The delivery group is not reduced by the
-move. It is made unnecessary by it.
+commit in one transaction. There is no remote to publish to, so there is no intent to record and
+no receipt to match.
+
+What the move does not do on its own is retire the deduplication identity, and that difference
+decides how much of the delivery group can go. `publication.rs::record_job` mints a job id with
+`JobId::mint`, then looks for an earlier job for the same frontier by selecting on
+`(app_id, run_id, generation, frontier_revision, available_at)` and reusing the id it finds. The
+identity of a publishable job is that tuple of business columns, not its key, and the tuple lives
+only in the per-kind table: the intent row carries an opaque encoded `specification` and nothing
+to match on. The unique index over the tuple is what makes select-then-insert correct when two
+transactions run it at once, because both can select nothing and both can insert. Each commits
+atomically and the frontier still gets two jobs unless something refuses the second.
+
+Nothing on the manager side reconstructs that mapping. `Queue::existing` in
+`crates/zeroship-workflow-manager/src/queue.rs` loads by job id and compares a digest, so it can
+tell that a job with a given id has the content it should; it cannot find a job with the same
+content under a different id. The `jobs` table carries scope, dispatch and management-request
+keys and no content-keyed unique index. Both halves of the identity question therefore rest on
+the creator-side read-then-mint and the per-kind index behind it.
+
+So one transaction removes the network hop and the receipt. It does not remove the need for a
+uniqueness constraint over the identifying tuple, and a design that drops the per-kind tables has
+to say where that tuple goes.
 
 This is worth stating plainly because the relocation has been argued as a safety change: a
-creator should not be able to drop the log the platform is executing against. It is also the
-largest simplification available, and the system's biggest group of tables is a direct
-consequence of the split it closes.
+creator should not be able to drop the log the platform is executing against. It is also a
+simplification, because the delivery group exists as a direct consequence of the split it
+closes rather than as something workflow execution needs.
 
 ---
 
@@ -100,35 +122,121 @@ named CHECK constraints named identically to properties in a machine-checked spe
 ## The design
 
 Four techniques, each of which a system in this class already ships without the tables we spend.
+Two of them survived the per-table pass below unchanged. Two did not, and are written here with
+the objection attached rather than removed, because the objection is the useful part.
 
-**1. A transition returns its messages; the caller delivers them.** This removes the delivery
-group outright rather than compressing it. Nothing is stored because nothing needs draining.
+**1. A transition returns its messages; the caller delivers them.** This removes the network hop
+and the receipt matching: nothing is stored because nothing needs draining. It does NOT by
+itself remove the delivery group, which is what this section originally claimed. The intent rows
+carry a dedup identity that one transaction does not reproduce, and the group goes only if
+something else carries it. See Open 3, which is where the real work is.
 
 **2. Queues and timer sets become partial indexes on the entity they describe.** Membership of a
-sweep is a predicate over the row, not a row of its own.
+sweep is a predicate over the row, not a row of its own. This survives, with one boundary: it
+applies to deciding WHO is due, not to a sweep already in flight, whose frozen item list is not
+a predicate over current rows. The page tables below are that distinction.
 
 **3. Small fan-out edges become array columns with a containment index.** The access pattern is
-"who is waiting on me", which an array answers without a second table to keep consistent.
+"who is waiting on me", which an array answers without a second table to keep consistent. This
+does not work for `subscriptions`, the table it was aimed at. Each edge carries an allocated
+`sequence` that `recipients::select` pages by, ordered and bounded by the broadcast's cutoff,
+with a unique index that is also the only guard against a lost update in `signals::subscribe`.
+An array of run ids on the topic carries no per-edge sequence and no index over it. Either the
+technique is wrong here or fan-out paging has to change, and this proposal has not made that
+case.
 
 **4. Invariants become named CHECK constraints.** A state machine encoded structurally across
 tables is a state machine nobody can read. A constraint that names the property it protects
-fails with that property's name.
+fails with that property's name. The obstacle is dialect parity: `step_child_linkage` is the only
+CHECK the journal declares and it exists only in the PostgreSQL artifact, so today this technique
+has no enforcement at all on the SQLite tier. That is Open 1, and it is a precondition for this
+technique rather than a detail under it.
 
 ---
 
 ## What is deleted
 
+This list is the answer to Open 2, worked per table against `schema.ts` and the code that
+enforces each property rather than in aggregate. It is shorter than the list this proposal
+started with, because the per-table pass refuted most of it.
+
+**Deletable, with the invariant named.**
+
 ```
-  the delivery group          transitions commit their own effects
-  collection_pages,
-  reconciliation_pages        resumable scans checkpoint a cursor, not a row per scan
-  continuation_heads,
-  continuation_members        a continuation is a fresh root, not a tracked chain
-  topics, subscriptions       a waiter is an edge on the thing waited on
+  outbox                      nothing reads it
+  job_publications,
+  advance_publications,
+  fanout_publications,
+  propagation_publications    only if the job id carries the identifying tuple
+  fanout_pages,
+  propagation_pages           the frozen page result moves with its receipt
+  subscriptions               an edge on the thing waited on, carrying its sequence
 ```
 
-Each line is a claim that a capability survives the table. None of them is a claim that the
-capability is unnecessary.
+`outbox` is deletable for the opposite of the reason first given here. It is not the
+transactional outbox; `job_publications` and the three per-kind tables are. `outbox` is an
+application event log written by `emit` in `crates/zeroship-workflow/src/service/app.rs` and read
+by nothing, its `delivered_at` declared in `models/schema_definition.rs` and never written or
+read. Tests in `tests/management.rs` and `management/atomic_application.rs` use it as a rollback
+witness and need a different one. The confusion is in the code as well as in this document:
+`delivery.rs` and `runner/delivery.rs` both say "the creator outbox" in comments that are about
+the publication intents, so the name already refers to two different things.
+
+The per-kind tables go only under Open 3's second shape. Under the first they move rather than
+disappear.
+
+`subscriptions` can become an edge, but the edge has to keep a per-app allocated `sequence` with
+a unique index over `(app_id, sequence)`. `recipients::select` pages by `sequence > cursor AND
+sequence <= cutoff_sequence` ordered ascending, so the index is what makes that keyset safe, and
+it is also the only thing that would catch a lost update in `signals::subscribe`, whose write of
+`subscription_sequence` carries no compare-and-set guard.
+
+**Not deletable. Each of these carries a property with no other home.**
+
+```
+  propagations                the cascade fence
+  topics                      a revocation epoch and a sequence allocator
+  collection_pages,
+  reconciliation_pages        a frozen item list, which a cursor cannot represent
+```
+
+`propagations` answers a question no other table can. `propagation::fenced` treats every
+cascading child of a parent generation as cancelled while that generation's cascade obligation is
+unfinished, even though the child's own `control` column still reads `none`, and
+`service/tests/propagation/fence.rs` binds exactly that. It is read from `frontier.rs`,
+`delivery.rs::heartbeat_job`, `tasks.rs::heartbeat_inner` and `control/restart.rs`. Without the
+row, in the window between a parent settling and the cascade page arriving, a leased child keeps
+running and a child completing with `ContinueAsNew` starts a generation outside the cancellation.
+This proposal filed it under delivery, which is the error: it is a liveness boundary between a
+cancelled parent and its running children, and atomicity says nothing about it.
+
+`topics` is not a subscription table. `signal_epoch` is the per-topic revocation epoch for signal
+capability tokens, checked for equality at redemption so that a bump refuses every token already
+minted, and `broadcasts`, which this proposal keeps, has a foreign key into it.
+`completed_sequence` is the predecessor gate that holds a later broadcast unacknowledged until
+its predecessor finishes; `tests/fanout/ordering.rs` settles that it cannot be replaced by
+timestamps, backdating a broadcast's `created_at` and still requiring the earlier one first.
+
+The page tables hold a frozen list, not a position in a derivable one. `prepare_collection` and
+`prepare_reconciliation` read `plan` back on retry and never re-derive it, and the pending arm
+ignores the retrying attempt's `page_size`. It has to work that way: processing an item removes
+it from the query that would re-derive the list, since a purged payload leaves the state filter,
+a deleted one has its `expires_at` pushed past the frozen cutoff, a confirmed publication leaves
+the unconfirmed filter and a settled hold leaves `acquiring`/`releasing`. So an index into a
+re-derived list addresses the wrong item and the sweep skips the ones in between. Their semantics
+is at most once per item per page, from `delivery::reserve`'s compare-and-set committed before
+the item's I/O; replacing the row with a cursor over item identity turns that into at least once.
+`reconciliation_pages` also holds the captured upper boundary of a sweep's first page, which
+`app_state` does not record until settlement.
+
+**Unsettled.** `continuation_heads` and `continuation_members` were not resolved. The chain is
+what lets a parent that accepted one generation of a child observe a later one, through
+`read::resolve` following `steps.child_member_id` to the head and on to the current run, and
+`tests/continuations.rs::pending_targets` binds it. "A continuation is a fresh root" deletes that
+resolution rather than relocating it, which is a design decision this proposal has not made. Two
+further facts belong with it: `steps`, a kept table, holds foreign keys into
+`continuation_members`, and the `step_child_linkage` CHECK that ties a child checkpoint to its
+accepted member exists only in the PostgreSQL artifact.
 
 ---
 
@@ -143,9 +251,11 @@ compensation that itself fails and a rollback interrupted partway, are undocumen
 systems that take that approach. Server-orchestrated compensation answers both. It costs
 columns, not tables.
 
-**The fence stays.** Refusing an operation whose authority has lapsed is not machinery to be
-simplified away; it is the property the machinery exists for. Any reduction has to say where
-each invariant lands, not merely which table disappears.
+**The authority fence stays.** Refusing an operation whose authority has lapsed is not machinery
+to be simplified away; it is the property the machinery exists for. Any reduction has to say
+where each invariant lands, not merely which table disappears. This is a different fence from
+the cascade fence on `propagations` above, which is about a cancelled parent's running children;
+the two share a word and nothing else.
 
 **Single writer per execution stays**, for the same reason.
 
@@ -183,13 +293,32 @@ and has no public production record. The techniques transfer. The architecture d
    reason it cannot. Worth settling before the first table is deleted rather than after, because
    a second shape is how the delivery group came back last time.
 
-2. **Which invariant does each deleted table carry today?** This has to be answered per table
-   before deletion, not in aggregate. A table that turns out to be the only writer of a
-   uniqueness constraint is not a table whose capability survives its removal.
+2. **Which invariant does each deleted table carry today?** Answered, per table, in "What is
+   deleted". The pass was worth more than the list it produced: it refuted most of the original
+   list, and the tables it saved were saved by properties their names do not suggest. It left
+   `continuation_heads` and `continuation_members` unsettled, which is a design call rather than
+   a missing fact.
 
-3. **Does removing the publication intents lose idempotency that the single transaction does not
-   replace?** The intents carry per-kind uniqueness. One transaction gives atomicity, which is
-   not the same property.
+   It also surfaced three gaps that belong to the current code rather than to this proposal, and
+   that anyone touching these tables should close first. No test resumes an unsettled page with
+   a different `page_size`, which is the one mutation that would bind the frozen item list, and
+   no test aborts the reserve transaction itself rather than the finalization that follows it.
+   `subscription_sequence_unique` has no stated purpose anywhere, and the schema comment that
+   appears to justify it describes standing in for a foreign key's supporting index, which does
+   not apply because nothing references `subscriptions`. And `ingress::target_epoch` states in a
+   comment that its callers hold the app lock through commit; all three do, but nothing in the
+   signature enforces it, so a fourth caller would reintroduce the race the comment says cannot
+   happen. The same shape appears on `closed_epoch` in `app.rs` and `deliver` in `signals.rs`.
+
+3. **Where does the identifying tuple live once the per-kind tables are gone?** Answered far
+   enough to reject the easy version: it cannot simply go, because the job id is minted and the
+   tuple is the only identity a publishable job has. Two shapes remain open. Constrain the queue
+   row on the same columns, which keeps the constraint and moves it. Or derive the job id from
+   `(kind, entity, revision, available_at)` so the primary key carries the identity and
+   select-then-insert becomes an insert that collides. The second is what lets the per-kind tables
+   go rather than move, and it is the one to cost out. `available_at` is part of the tuple today,
+   so a derived id has to include it, and rescheduling a frontier to a new due time has to keep
+   producing a new job.
 
 ---
 
@@ -198,7 +327,16 @@ and has no public production record. The techniques transfer. The architecture d
 **Do not delete a table before naming where its invariant lands.** The delivery group is
 deduplication state that `publication.rs` says explicitly nothing may retire. Committing in one
 transaction replaces the reason it exists; it does not automatically replace every guarantee it
-provides.
+provides. The advance intent is the worked example: it reads as a projection of the intent row,
+and it is the dedup key.
+
+**Do not let a grouping carry the argument.** Every table above was deleted by the sentence
+written against its group, not against it. `propagations` was filed under delivery and inherited
+"transitions commit their own effects", which is true of delivery and says nothing about a
+cancellation fence; `outbox` was filed under delivery and kept by an argument about the
+transactional outbox, which it is not part of. A group is a reading aid. When it appears in the
+justification column it has become a claim about every row, and the rows that are misfiled are
+exactly the ones no one re-reads.
 
 **Do not let `Instant` back across a boundary.** It is the representation that made two replicas
 disagree, and it is comfortable to use because it is what the standard library hands you.
