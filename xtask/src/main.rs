@@ -186,16 +186,12 @@ fn root() -> PathBuf {
 
 /// A cargo invocation, and the test binaries it goes on to spawn.
 ///
-/// libtest gives every test its own thread, and a spawned thread's default
-/// stack is a fraction of the main thread's. A test deep enough to exhaust it
-/// does not fail: it aborts the process, libtest never prints a result line,
-/// and a summary that counts those lines scores the aborted target as zero
-/// failures. Raising the floor here covers every area, because a value set per
-/// area is absent from the next area someone adds.
+/// Runs from [`root`] so cargo reads the workspace's `.cargo/config.toml`,
+/// which is where the spawned tests' stack floor comes from. See
+/// [`the_workspace_config_raises_the_thread_stack_floor`].
 fn cargo() -> Command {
     let mut command = Command::new(env!("CARGO"));
     command.current_dir(root());
-    command.env("RUST_MIN_STACK", "33554432");
     command
 }
 
@@ -245,25 +241,33 @@ fn cancelled() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::cargo;
-    use std::ffi::OsStr;
+    use super::root;
 
-    /// Every area runs its suites through [`cargo`], so a stack floor set here
-    /// reaches all of them and one set beside a single area reaches only that
-    /// area. The floor has to be a raise: a spawned thread's default stack is a
-    /// fraction of the main thread's, and a test that exhausts it aborts the
-    /// process rather than failing, which reports as no failures at all.
+    /// The floor is asserted where it is SET rather than where one caller
+    /// passes it on, so it covers every cargo invocation: a bare `cargo test`
+    /// carries it as much as `cargo xtask` or CI, and a floor set beside one
+    /// caller is absent from the next caller someone adds.
+    ///
+    /// It has to be a RAISE rather than merely present. A spawned thread's
+    /// default stack is a fraction of the main thread's, and a test that
+    /// exhausts it ABORTS the process rather than failing - libtest prints no
+    /// result line, so a summary counting those lines scores the aborted
+    /// target as zero failures.
     #[test]
-    fn cargo_raises_the_thread_stack_floor_for_spawned_tests() {
-        let command = cargo();
-        let floor = command
-            .get_envs()
-            .find(|(key, _)| *key == OsStr::new("RUST_MIN_STACK"))
-            .and_then(|(_, value)| value)
-            .expect("cargo() must set RUST_MIN_STACK for the test binaries it spawns");
+    fn the_workspace_config_raises_the_thread_stack_floor() {
+        let path = root().join(".cargo").join("config.toml");
+        let text = std::fs::read_to_string(&path)
+            .expect("the workspace cargo config must exist");
+        let config: toml_edit::DocumentMut = text
+            .parse()
+            .expect("the workspace cargo config must parse as TOML");
+        let floor = config
+            .get("env")
+            .and_then(|env| env.get("RUST_MIN_STACK"))
+            .and_then(|entry| entry.get("value"))
+            .and_then(|value| value.as_str())
+            .expect("[env].RUST_MIN_STACK must carry a string byte count");
         let bytes: usize = floor
-            .to_str()
-            .expect("the stack floor must be UTF-8")
             .parse()
             .expect("the stack floor must be a plain byte count");
         assert!(
