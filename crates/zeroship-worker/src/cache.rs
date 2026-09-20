@@ -1615,12 +1615,12 @@ mod tests {
     /// A runtime descriptor document whose one database carries a corrupt v2
     /// schema, for the two arms that assert a load refuses it.
     ///
-    /// Three properties are load-bearing, and each was wrong here once. The
-    /// envelope MUST be a document: the runtime checks the document before it
-    /// reaches any entry's schema, so a bare schema is refused for the wrong
-    /// reason and never gets near `indexes`. The schema MUST be `version` 2,
-    /// or the entry's own version check refuses it first. And the corruption
-    /// MUST be the `indexes` entry, because that is what both arms name.
+    /// Three properties are load-bearing. The envelope MUST be a document:
+    /// the runtime checks the document before it reaches any entry's schema,
+    /// so a bare schema is refused for the wrong reason and never gets near
+    /// `indexes`. The schema MUST be `version` 2, or the entry's own version
+    /// check refuses it first. And the corruption MUST be the `indexes`
+    /// entry, because that is what both arms name.
     fn corrupt_descriptor_document() -> String {
         let database = zeroship_core::DatabaseId::mint();
         zeroship_runtime::databases::RuntimeDatabases::single(
@@ -1634,10 +1634,10 @@ mod tests {
     /// The refusal names the descriptor, the corrupt member, and the database
     /// entry it was reached through.
     ///
-    /// The third clause is what distinguishes "the document was opened and its
-    /// entry's schema rejected" from "the envelope was rejected and no schema
-    /// was ever read" - which is how these arms passed on the wrong error
-    /// before.
+    /// The third clause is the discriminating one: it separates "the document
+    /// was opened and its entry's schema rejected" from "the envelope was
+    /// rejected and no schema was ever read", and only the first is what
+    /// these arms claim to measure.
     fn assert_descriptor_refusal(error: &str) {
         assert!(
             error.contains("manifest.runtime_descriptor")
