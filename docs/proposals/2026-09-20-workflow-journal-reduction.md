@@ -772,3 +772,104 @@ release path presumably has ordering requirements that survive the move in some 
 is narrower: their REASON is the boundary, so the move is the moment to re-derive them rather
 than to carry them across unexamined. Whoever takes step 6 should read `retention.rs` before
 assuming its ledger is still earning its place.
+
+## The name comparison was a filter, and the pairs it missed are the load-bearing ones
+
+The section above found its overlaps by stripping `__zeroship_workflow_` from the journal's table
+names and looking for the same name on the manager's side. That method can only find a duplicated
+concept when both teams happened to choose the same word, which is a fact about naming rather than
+about the schema.
+
+Replacing it with a partition - every table in
+`crates/zeroship-workflow-schema/schema/postgres.sql` against every table in
+`crates/zeroship-workflow-manager/schema/postgres.sql`, compared by column set rather than by name
+- finds pairs the name comparison is structurally unable to see. The pairs below share no name
+with their counterpart, and they are the ones with consequences.
+
+**First, the noise floor, because without it this method manufactures findings.** Nearly every
+tenant-scoped table on both sides carries `id`, `app_id` and `revision`, so any two narrow tables
+match on that triple alone. A pair is only reported here when the agreement survives removing it.
+
+### The tenant root and the lock, which is the one with a consequence
+
+    journal   __zeroship_workflow_app_state    id, app_id, signal_epoch, last_polled_at, ...
+    manager   queue_scopes                     id, lock_version, dispatch_cursor
+
+Not a column in common beyond the key, and the same role: one row per app, the target of nearly
+every foreign key on its side, and the row carrying that side's concurrency counter.
+
+**They also take the lock by the same idiom, which neither side can have copied from the other,
+because neither can see the other's schema.** `lock_app_state` in
+`crates/zeroship-workflow/src/service/app.rs` issues
+
+    patch: value!({"$inc":{"signal_epoch":0}}),
+
+an increment by zero, which changes no value and exists only to take the row lock. The manager
+writes the same statement against its own counter in
+`crates/zeroship-workflow-manager/src/queue.rs` and
+`crates/zeroship-workflow-manager/src/coordinator/placement.rs`:
+
+    value!({"$inc":{"lock_version":0}}),
+
+and again through the typed form `targets::lock_version.increment(0)?` in
+`crates/zeroship-workflow-manager/src/capacity.rs`. Two independently designed schemas arrived at
+the same tenant-root-plus-zero-increment lock, which is good evidence the shape is right and
+exactly why the collision matters.
+
+This document already argues that the journal's concurrency unit is not an arbitrary row but the
+row the schema designates as the tenant. **The manager designates a different row, for the same
+purpose, in the same future schema.** After the move an app has two tenant roots and two lock
+counters, and any transaction touching both has an ordering question that neither side has today,
+because today they cannot be in one transaction at all.
+
+That is a new obligation the move creates rather than one it deletes, and it is the first such
+thing this document has found. It belongs in the step that merges the two installs.
+
+### A receipt that is a strict subset of the request
+
+    journal   __zeroship_workflow_management_receipts   id, app_id, run_id, request_id,
+                                                        revision, outcome, created_at
+    manager   management                                the same columns, plus actor, request,
+                                                        request_digest, blocks_execution
+
+Every column of the journal's table is present in the manager's. The difference that explains why
+both exist is the nullability: `outcome` is `NOT NULL` in the journal and nullable in the manager.
+The manager's row is written when the request arrives and updated when it settles; the journal's
+row is written only once there is an outcome to record. The manager holds the request, the journal
+holds the receipt, and the receipt is duplicated into the journal's schema so it can be a foreign
+key target for `__zeroship_workflow_job_receipts` - which is the same reason `schedules` is
+duplicated, found again in a table whose name gives no hint of it.
+
+### The occurrence ledger, duplicated with mirror-image foreign keys
+
+    journal   __zeroship_workflow_occurrences   id, app_id, schedule_id, revision, at,
+                                                job_id, run_id
+    manager   schedule_occurrences              the same, with at renamed scheduled_at and
+                                                activation_id added
+
+The foreign keys are each side pointing at its own copy: the journal's `job_id` references
+`__zeroship_workflow_job_receipts`, the manager's references `jobs`; the journal's `schedule_id`
+references `__zeroship_workflow_schedules`, the manager's references `schedules`. `run_id` is
+nullable in the journal and `NOT NULL` in the manager.
+
+    journal   __zeroship_workflow_activation_scopes   id, activation_id, revision
+    manager   schedule_scopes                         the same, plus enabled
+
+Same shape, anchored to each side's own tenant root, with the manager's `activation_id` nullable
+and the journal's not.
+
+### What this changes about the method, not just the findings
+
+The earlier section reached a correct conclusion by a method that could not have found these. That
+is worth stating plainly, because the same shortcut is available at every later step: comparing
+two schemas by name answers a question about vocabulary and reads as though it answered a question
+about structure. The comparison that belongs before step 1 is the partition, and its output is the
+list above rather than a count.
+
+**What this does not license.** None of these pairs is established as mergeable. `management` and
+`management_receipts` differ in when the row is written, the occurrence tables differ in what they
+anchor to, and the two tenant roots differ in everything but their role. The claim is that each
+pair exists because a foreign key could not cross the boundary, that the move removes that reason,
+and that the move is therefore when to re-derive them. The lock-ordering question is the exception:
+it is not a reduction, it is work the move adds, and it should be answered before the two installs
+share a schema rather than after.
