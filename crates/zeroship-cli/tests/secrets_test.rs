@@ -55,7 +55,7 @@ fn secret_rm_rejects_invalid_keys_without_request() {
     assert!(
         requests
             .lines()
-            .any(|arg| arg == "https://control.example.test/api/apps/app_123/secrets/FOO"),
+            .any(|arg| arg == "https://control.example.test/api/apps/app_034klb07lrb9jgma6imvmx000/secrets/FOO"),
         "valid key produced the wrong URL:\n{requests}"
     );
 }
@@ -79,7 +79,7 @@ fn secret_expose_preserves_names_already_on_the_list() {
     let output = run_secret(
         temp.path(),
         &request_log,
-        &["secret", "expose", "BRAVO", "--app=app_123"],
+        &["secret", "expose", "BRAVO", "--app=app_034klb07lrb9jgma6imvmx000"],
     );
     assert!(
         output.status.success(),
@@ -97,13 +97,13 @@ fn secret_expose_preserves_names_already_on_the_list() {
     );
     assert_eq!(
         requests[0],
-        "GET https://control.example.test/api/apps/app_123/env/expose ",
+        "GET https://control.example.test/api/apps/app_034klb07lrb9jgma6imvmx000/env/expose ",
         "expose did not read the current list first:\n{log}"
     );
 
     let put = requests[1];
     assert!(
-        put.starts_with("PUT https://control.example.test/api/apps/app_123/env/expose "),
+        put.starts_with("PUT https://control.example.test/api/apps/app_034klb07lrb9jgma6imvmx000/env/expose "),
         "expose did not PUT the expose endpoint:\n{log}"
     );
     let body: serde_json::Value = serde_json::from_str(
@@ -140,7 +140,7 @@ fn secret_unexpose_keeps_the_other_exposed_names() {
     let output = run_secret(
         temp.path(),
         &request_log,
-        &["secret", "unexpose", "BRAVO", "--app=app_123"],
+        &["secret", "unexpose", "BRAVO", "--app=app_034klb07lrb9jgma6imvmx000"],
     );
     assert!(
         output.status.success(),
@@ -176,7 +176,7 @@ fn secret_set_with_expose_flag_stores_then_exposes() {
     let output = run_secret(
         temp.path(),
         &request_log,
-        &["secret", "set", "BRAVO=sk-test", "--expose", "--app=app_123"],
+        &["secret", "set", "BRAVO=sk-test", "--expose", "--app=app_034klb07lrb9jgma6imvmx000"],
     );
     assert!(
         output.status.success(),
@@ -188,7 +188,7 @@ fn secret_set_with_expose_flag_stores_then_exposes() {
     let log = std::fs::read_to_string(&request_log).expect("read curl request log");
     let lines: Vec<&str> = log.lines().collect();
     assert!(
-        lines[0].starts_with("POST https://control.example.test/api/apps/app_123/secrets "),
+        lines[0].starts_with("POST https://control.example.test/api/apps/app_034klb07lrb9jgma6imvmx000/secrets "),
         "the secret must be stored before it is exposed:\n{log}"
     );
     let put = lines
@@ -284,7 +284,7 @@ fn run_secret_rm(path_dir: &Path, request_log: &Path, key: &str) -> Output {
             "secret",
             "rm",
             key,
-            "--app=app_123",
+            "--app=app_034klb07lrb9jgma6imvmx000",
             "--control=https://control.example.test",
             "--token=test-token",
         ])
