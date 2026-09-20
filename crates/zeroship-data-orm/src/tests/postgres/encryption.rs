@@ -26,6 +26,10 @@ fn encrypted_column_round_trip_randomised() {
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             // Synthetic 32-byte root key.
             let _keys = host.supply_project_key(&["app1"], &"a".repeat(64));
+            // The key and the AAD are both derived from the DATABASE, so the
+            // fixture composes ciphertext against the one this app's binding
+            // addresses rather than against a database of its own invention.
+            let database = crate::tests::fixtures::harness_database("app1");
 
             pool.execute(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"), &[])
                 .await
@@ -54,11 +58,11 @@ fn encrypted_column_round_trip_randomised() {
             );
             let key = backend
                 .key_store()
-                .resolve("app1")
+                .resolve("app1", &database)
                 .await
                 .expect("resolve_key");
             let plaintext = b"123-45-6789";
-            let aad = encryption::canonical_aad("app1", "enc_notes", "ssn", b"row_a");
+            let aad = encryption::canonical_aad(&database, "enc_notes", "ssn", b"row_a");
             let ct = zeroship_data_orm::encryption::aead::encrypt(&key, plaintext, &aad)
                 .expect("encrypt");
 
@@ -116,6 +120,7 @@ fn encrypted_randomised_row_swap_rejected() {
             let schema = schema.as_str();
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let _keys = host.supply_project_key(&["app1"], &"b".repeat(64));
+            let database = crate::tests::fixtures::harness_database("app1");
 
             pool.execute(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"), &[])
                 .await
@@ -140,18 +145,18 @@ fn encrypted_randomised_row_swap_rejected() {
                 url.clone(),
                 host.key_source(),
             );
-            let key = backend.key_store().resolve("app1").await.unwrap();
+            let key = backend.key_store().resolve("app1", &database).await.unwrap();
             // Insert row A with its OWN AAD (binds row_pk = "row_a").
             let ct_a = zeroship_data_orm::encryption::aead::encrypt(
                 &key,
                 b"sensitive-A",
-                &encryption::canonical_aad("app1", "enc_notes", "ssn", b"row_a"),
+                &encryption::canonical_aad(&database, "enc_notes", "ssn", b"row_a"),
             )
             .unwrap();
             let ct_b = zeroship_data_orm::encryption::aead::encrypt(
                 &key,
                 b"sensitive-B",
-                &encryption::canonical_aad("app1", "enc_notes", "ssn", b"row_b"),
+                &encryption::canonical_aad(&database, "enc_notes", "ssn", b"row_b"),
             )
             .unwrap();
             for (id, ct) in [("row_a", &ct_a), ("row_b", &ct_b)] {
@@ -197,7 +202,7 @@ fn encrypted_randomised_row_swap_rejected() {
                 }
                 out
             };
-            let aad_b = encryption::canonical_aad("app1", "enc_notes", "ssn", b"row_b");
+            let aad_b = encryption::canonical_aad(&database, "enc_notes", "ssn", b"row_b");
             let err = zeroship_data_orm::encryption::aead::decrypt(&key, &raw, &aad_b)
                 .expect_err("row-swap must fail AAD verification");
             match err {
@@ -472,7 +477,7 @@ fn encrypted_column_missing_key_typed_error() {
             );
             let err = backend
                 .key_store()
-                .resolve("app1")
+                .resolve("app1", &crate::tests::fixtures::harness_database("app1"))
                 .await
                 .expect_err("missing key must yield a typed error");
             match err {

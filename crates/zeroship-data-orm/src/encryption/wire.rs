@@ -1,12 +1,17 @@
 //! Column-ciphertext framing: version flag, nonce, ciphertext and authentication tag.
 //!
-//! Only `WIRE_VERSION_V1` is accepted. Ciphertext and its appended tag stay together
+//! Only `WIRE_VERSION_V2` is accepted. Ciphertext and its appended tag stay together
 //! to match the AEAD API; AAD construction belongs to `super::aad`.
 
 use crate::error::DbError;
 
 /// Version emitted by `pack` and accepted by `unpack`.
-pub(crate) const WIRE_VERSION_V1: u8 = 0x01;
+///
+/// It is also the first segment of [`super::aad::canonical_aad`], so the flag
+/// on a blob and the contract its tag was computed under cannot disagree: a
+/// blob written under another version fails here rather than reaching AES-GCM
+/// with a context that no longer means what it meant.
+pub(crate) const WIRE_VERSION_V2: u8 = 0x02;
 
 /// Nonce length required by the AES-GCM implementation.
 const NONCE_LEN: usize = 12;
@@ -28,7 +33,7 @@ pub(crate) fn pack(nonce: &[u8; NONCE_LEN], ct_and_tag: &[u8]) -> Result<Vec<u8>
         )));
     }
     let mut out = Vec::with_capacity(HEADER_LEN + ct_and_tag.len());
-    out.push(WIRE_VERSION_V1);
+    out.push(WIRE_VERSION_V2);
     out.extend_from_slice(nonce);
     out.extend_from_slice(ct_and_tag);
     Ok(out)
@@ -49,7 +54,7 @@ pub(crate) fn unpack(blob: &[u8]) -> Result<(&[u8; NONCE_LEN], &[u8]), DbError> 
             ),
         ));
     }
-    if blob[0] != WIRE_VERSION_V1 {
+    if blob[0] != WIRE_VERSION_V2 {
         return Err(DbError::validation(
             "encryption_aead_failed",
             format!("wire::unpack: unknown version flag 0x{:02x}", blob[0]),
@@ -75,7 +80,7 @@ mod tests {
         let packed = pack(&nonce, &ct_and_tag).expect("pack");
         // [1 version | 12 nonce | 32 ct | 16 tag] = 61 bytes.
         assert_eq!(packed.len(), HEADER_LEN + ct_and_tag.len());
-        assert_eq!(packed[0], WIRE_VERSION_V1);
+        assert_eq!(packed[0], WIRE_VERSION_V2);
 
         let (out_nonce, out_payload) = unpack(&packed).expect("unpack");
         assert_eq!(out_nonce, &nonce);
@@ -86,7 +91,7 @@ mod tests {
     #[test]
     fn unpack_rejects_too_short() {
         // 1-byte blob — clearly too short.
-        let too_short = vec![WIRE_VERSION_V1];
+        let too_short = vec![WIRE_VERSION_V2];
         let err = unpack(&too_short).expect_err("too-short blob must error");
         match err {
             DbError::ValidationFailed { code, .. } => {
@@ -96,15 +101,15 @@ mod tests {
         }
 
         // header-only blob (no tag yet) — also rejected.
-        let header_only = vec![WIRE_VERSION_V1; HEADER_LEN];
+        let header_only = vec![WIRE_VERSION_V2; HEADER_LEN];
         assert!(unpack(&header_only).is_err());
 
         // exactly header + tag - 1 — boundary.
-        let boundary = vec![WIRE_VERSION_V1; HEADER_LEN + GCM_TAG_LEN - 1];
+        let boundary = vec![WIRE_VERSION_V2; HEADER_LEN + GCM_TAG_LEN - 1];
         assert!(unpack(&boundary).is_err());
     }
 
-    /// Reject any version other than `WIRE_VERSION_V1`.
+    /// Reject any version other than `WIRE_VERSION_V2`.
     #[test]
     fn unpack_rejects_unknown_version() {
         let mut blob = vec![0xFFu8]; // unknown version
@@ -119,10 +124,35 @@ mod tests {
         }
 
         // A nearby version is unknown too; do not accept it as a compatible variant.
-        let mut blob_v2 = vec![0x02u8];
-        blob_v2.extend_from_slice(&[0u8; NONCE_LEN]);
-        blob_v2.extend_from_slice(&[0u8; GCM_TAG_LEN]);
-        assert!(unpack(&blob_v2).is_err());
+        let mut adjacent = vec![WIRE_VERSION_V2 + 1];
+        adjacent.extend_from_slice(&[0u8; NONCE_LEN]);
+        adjacent.extend_from_slice(&[0u8; GCM_TAG_LEN]);
+        assert!(unpack(&adjacent).is_err());
+    }
+
+    /// The version the app-keyed AAD wrote under is not accepted.
+    ///
+    /// Its tag was computed over a context binding the APP, so accepting the
+    /// flag would hand AES-GCM a blob whose associated data is reconstructed
+    /// from a different contract. Refusing it at the flag is what makes a dev
+    /// or test database say so loudly instead of failing as a tag mismatch
+    /// indistinguishable from tampering.
+    #[test]
+    fn unpack_rejects_the_app_keyed_predecessor() {
+        let mut previous = vec![WIRE_VERSION_V2 - 1];
+        previous.extend_from_slice(&[0u8; NONCE_LEN]);
+        previous.extend_from_slice(&[0u8; GCM_TAG_LEN]);
+        let err = unpack(&previous).expect_err("the predecessor's flag must be refused");
+        match err {
+            DbError::ValidationFailed { code, message, .. } => {
+                assert_eq!(code, "encryption_aead_failed");
+                assert!(
+                    message.contains("unknown version flag"),
+                    "the refusal must name the flag rather than the length: {message}"
+                );
+            }
+            other => panic!("expected ValidationFailed, got {other:?}"),
+        }
     }
 
     /// Packing adds only the declared header to the authenticated payload.

@@ -110,20 +110,6 @@ pub fn worker_slot_name_prefix(app: &AppId) -> String {
     format!("{OBJECT_PREFIX}slot_{}__", stable_token(app.as_str(), 14))
 }
 
-/// The HKDF salt both per-app column keys are derived from.
-///
-/// **Changing what this returns is not a migration.** `k_enc` and `k_siv` are
-/// expanded from the root key salted by these bytes, so a new salt yields new
-/// keys. The `k_enc` half fails loudly - existing ciphertext no longer decrypts.
-/// The `k_siv` half fails SILENTLY and is the worse of the two: deterministic
-/// lookup tokens stop matching, so an equality search over an encrypted column
-/// returns FEWER ROWS AND NO ERROR. Pre-launch the answer is to drop and
-/// recreate every encrypted column, not to migrate it.
-#[must_use]
-pub fn encryption_salt(app: &AppId) -> &[u8] {
-    app.as_str().as_bytes()
-}
-
 /// The `SQLite` `ATTACH` alias the dev tier opens this app's file under.
 ///
 /// The alias is also what the preupdate hook reports as `db_name`, so the CDC
@@ -280,9 +266,6 @@ mod tests {
              matching stops selecting this app's slots"
         );
 
-        // The HKDF salt `derive_key` expands both per-app column keys from.
-        assert_eq!(encryption_salt(&app), FIXTURE.as_bytes());
-
         // App resources use the canonical tenant spelling.
         assert_eq!(attach_alias(&app), FIXTURE);
         assert_eq!(bundle_path_segment(&app), FIXTURE);
@@ -332,7 +315,6 @@ mod tests {
             worker_slot_name_prefix(&first),
             worker_slot_name_prefix(&second)
         );
-        assert_ne!(encryption_salt(&first), encryption_salt(&second));
         assert_ne!(attach_alias(&first), attach_alias(&second));
         assert_ne!(kv_scope(&first), kv_scope(&second));
         assert_ne!(storage_prefix(&first), storage_prefix(&second));

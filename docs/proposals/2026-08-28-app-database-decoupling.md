@@ -4,10 +4,10 @@
 entities, the control-plane surface that declares them, the cluster reconciler that makes a
 cluster match, the data path that narrows to what the reconciler granted, the creator config and
 manifest made plural, `env.databases` reaching every bound database and typed under its label,
-the `zeroship db` commands, and deploy verifying a live binding rather than comparing schemas.
-What remains is the migration service's own app-id re-key, the subscribe request naming a
-database, the encryption salt and AAD, capacity-aware placement, and an apply advancing an
-epoch.
+the `zeroship db` commands, deploy verifying a live binding rather than comparing schemas, and
+at-rest column encryption keyed on the database. What remains is the migration service's own
+app-id re-key, the subscribe request naming a database, capacity-aware placement, and an apply
+advancing an epoch.
 
 Built:
 
@@ -93,8 +93,22 @@ Built:
   `Manifest::validate` refuses a malformed descriptor hash and `collect_expected_hashes` refuses
   an entry whose blob the archive does not carry.
 
-Not built: the migration service's own app-id-to-database re-key, the encryption salt and AAD, and
-capacity-aware placement. No apply advances an epoch. Open 11's subset test at isolate build does
+- the encryption re-key. `encryption::keys::derive_key` expands one database's column key from
+  the project root key salted by `zeroship_core::database_derivation::encryption_salt`, and
+  `KeyStore::resolve` takes the app - which names the project whose root the host supplied - and
+  the database it is expanded with. `encryption::canonical_aad` binds `WIRE_VERSION_V2` and the
+  DATABASE in place of the app, and takes a `DatabaseId` rather than text so no call site can
+  hand it a tenant. `encryption::encryption_database` refuses a binding that addresses none,
+  which is the only way a platform store can reach the pass. The app-keyed
+  `app_derivation::encryption_salt` is deleted rather than left standing.
+  `crates/zeroship-data-orm/tests/postgres_database_encryption.rs` measures both axes against a
+  cluster the reconciler converged: two apps bound to one database read each other's rows, and a
+  ciphertext lifted between one app's two databases is refused - with the refusal decomposed at
+  the crypto boundary, because the key and the AAD both move with the database and a single
+  `encryption_aead_failed` cannot say which fence caught it.
+
+Not built: the migration service's own app-id-to-database re-key, and capacity-aware placement. No
+apply advances an epoch. Open 11's subset test at isolate build does
 not exist, so a build reaching a column the database lacks fails at query time with
 `42703 undefined_column`.
 
@@ -1071,32 +1085,41 @@ still reads nothing from it - the role name carries the epoch precisely so no qu
 
 ## Encryption
 
-Today the key derives from a per-app salt and
-`canonical_aad(app_id, collection, column, row_pk)` binds a hardcoded `WIRE_VERSION_V1`
-(`crates/zeroship-data-orm/src/encryption/aad.rs`), while the root key is per project
-(`db/migrations-ts/20260911000100_project_data_keys.ts`,
-`crates/zeroship-data-orm/src/encryption/keys.rs`). App keying fails in opposite directions on both
-new axes: co-binding-holders derive different keys and get an AEAD failure on data they are
-entitled to read, and one app across two databases derives one key with no database in the AAD, so
-a ciphertext lifted from one database verifies in the other. The target:
+The key is expanded per DATABASE and the authenticated context binds the DATABASE:
 
 ```
 derive_key(project_root, database_id)
 canonical_aad(WIRE_VERSION_V2, database_id, collection, column, row_pk)
 ```
 
-Encryption stops fencing co-binding-holders and becomes purely at-rest, which is what it should
-have been. If a column must be readable by one app only, that is a column-level GRANT, and on the
-subscription path a column the publication does not carry.
+`encryption::keys::derive_key` is HKDF-SHA256 over the project root key, salted by
+`zeroship_core::database_derivation::encryption_salt` - the canonical database id and never the
+rendered schema name - and `encryption::aad::canonical_aad` takes a `DatabaseId` rather than text,
+so a call site cannot hand either one a tenant. The root key itself stays per project
+(`db/migrations-ts/20260911000100_project_data_keys.ts`).
 
-Changing the salt changes every derived key and changing the AAD changes every tag, so **this
-lands in the same change that makes database ids exist**, not after.
-`crates/zeroship-core/src/app_derivation.rs` already records why the deterministic half is the
-dangerous one: a new salt makes equality search over an encrypted column return fewer rows and no
-error. Pre-launch the answer is drop and re-encrypt.
+Both halves were app-keyed, and app keying failed in opposite directions on the two axes this
+design opens. Co-binding-holders expanded different keys and got an AEAD failure over data they
+were entitled to read; one app across two databases expanded one key with no database in the AAD,
+so a ciphertext lifted from one verified in the other. Encryption therefore stops fencing
+co-binding-holders and becomes purely at-rest, which is what it should have been. If a column must
+be readable by one app only, that is a column-level GRANT, and on the subscription path a column
+the publication does not carry.
+
+**A ciphertext written before the re-key does not decrypt after it, and says so at the flag.**
+`WIRE_VERSION_V2` is the blob's own version byte as well as the AAD's first segment, so
+`wire::unpack` refuses the predecessor rather than handing AES-GCM a blob whose context is
+reconstructed under a contract it no longer means. There is no dual-read path and no re-encrypting
+migration; pre-launch the answer is drop and re-encrypt. The deterministic half is the one that
+would fail silently - a new salt makes equality search over an encrypted column return fewer rows
+and no error - which is why the refusal is at the flag and not at the tag.
 
 Salting by the database rather than the datastore also keeps ciphertext valid if a cluster is ever
 replaced underneath a datastore, since the database id does not change.
+
+**A store that addresses no database cannot encrypt.** `encryption::encryption_database` refuses a
+platform binding rather than defaulting one: a default would key every trusted service's columns
+alike, and would do it silently.
 
 **The root key stays on the project, and the zone decision is what settles it.** The argument for
 moving it down to the database was blast radius: a project whose apps sat in two zones would serve

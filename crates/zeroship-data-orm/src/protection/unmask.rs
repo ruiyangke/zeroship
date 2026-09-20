@@ -396,9 +396,10 @@ async fn fetch_and_decrypt(
     schema: &FieldMap,
 ) -> Result<Value, DbError> {
     let app_id = route.app_id();
+    let database = crate::encryption::encryption_database(route.binding())?;
 
     let aad = crate::encryption::aad::canonical_aad(
-        app_id,
+        database,
         &args.collection,
         &args.column,
         args.row_pk.as_bytes(),
@@ -440,7 +441,11 @@ async fn fetch_and_decrypt(
         };
         // Key sourcing and AEAD are vendor-neutral; only the read above was
         // not, and it now dispatches inside `crate::backend_handle`.
-        let key = route.backend().key_store().resolve(app_id).await?;
+        let key = route
+            .backend()
+            .key_store()
+            .resolve(app_id, database)
+            .await?;
         let plaintext_bytes =
             zeroize::Zeroizing::new(crate::encryption::aead::decrypt(&key, &bytes, &aad)?);
         enc_meta.decode(&plaintext_bytes)

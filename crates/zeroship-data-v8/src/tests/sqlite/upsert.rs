@@ -260,11 +260,15 @@ const _procedures = { upsertConflict };
 
         let keys =
             zeroship_data_orm::encryption::KeyStore::new(crate::tests::fixtures::key_source());
-        let key = keys.resolve(LOCAL_DEV_APP_ID).await.expect("resolve key");
+        let database = crate::tests::fixtures::harness_database(LOCAL_DEV_APP_ID);
+        let key = keys
+            .resolve(LOCAL_DEV_APP_ID, &database)
+            .await
+            .expect("resolve key");
         let plaintext = zeroship_data_orm::encryption::aead::decrypt(
             &key,
             &stored_blob,
-            &encryption::canonical_aad(LOCAL_DEV_APP_ID, "users", "ssn", first_id.as_bytes()),
+            &encryption::canonical_aad(&database, "users", "ssn", first_id.as_bytes()),
         )
         .expect("decrypt stored conflict ciphertext");
         assert_eq!(
