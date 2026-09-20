@@ -118,9 +118,9 @@ created app my-app (app_034klb07lrb9jgma6imvmx000)
 ```
 
 That id is an `app_...` identity. zeroship ids are prefixed by entity: `app_`
-an app, `dep_` a deployment, `dcm_` a deploy command, `org_` an organization,
-`prj_` a project, `ivt_` an organization invitation, `usr_` a user. Each is an
-opaque value; pass it back unchanged.
+an app, `dbs_` a database, `dep_` a deployment, `dcm_` a deploy command,
+`org_` an organization, `prj_` a project, `ivt_` an organization invitation,
+`usr_` a user. Each is an opaque value; pass it back unchanged.
 
 Only `deploy` takes the `name` fallback. `migrate`, `secret` and `var` require
 an app id, which is why `deploy` runs first. The writeback and its limits — an
@@ -133,7 +133,9 @@ database access that `env.db` depends on. For a brand-new database app the first
 `deploy` ships the code and `migrate` applies the schema; deploy does not
 check that you ran it, so a build reaching a column the database lacks fails at
 query time naming that column. What deploy DOES refuse is a database the app
-holds no live binding to - see [`db.md`](db.md).
+holds no live binding to: create the database with
+[`zeroship db`](#zeroship-db) and bind the app to it before the first deploy
+(see also [`db.md`](db.md)).
 
 ## `zeroship deploy`
 
@@ -219,6 +221,49 @@ representation, or IR); the CLI does not parse or rewrite it. `migrate` prints
 what it resolved, how many operations it applied and skipped — the
 `applied`/`skipped` counts are operations, not migration files — and the
 migration id.
+
+## `zeroship db`
+
+Creates the databases an app uses, and grants an app access to one.
+
+```
+zeroship db create   <name> --project=prj_...
+zeroship db list     --project=prj_...
+zeroship db bind     <label> --app=<label> --capability=<capability>
+zeroship db unbind   <label> --app=<label>
+zeroship db bindings <label>
+zeroship db delete   <label> [--yes]
+```
+
+A database belongs to a **project**, not to an app. It outlives the apps that
+use it, and several apps in the same project may share one.
+
+- **`<label>`** names a `databases` entry of `zeroship.jsonc`, which this
+  command dereferences to its `dbs_` id before it makes any request. Two
+  workspaces may both call a database `main`, so the word never travels; what
+  travels is the id under it, and `--env=<name>` moves that id without moving
+  the label. With no config file in the directory there are no labels and the
+  argument is the id itself. `--app` follows the same rule against `apps`.
+- **`create`** prints the new database's `id`. Record it in `zeroship.jsonc`
+  under a label of your choosing, name that label in the app's `databases`, and
+  bind it. The `name` you pass is display text for a listing; nothing resolves
+  a database by it, and a name starting with `dbs_` is refused so a name and an
+  id can never be mistaken for one another.
+- **`bind`** is what grants access. Declaring a database in `zeroship.jsonc`
+  grants nothing: `zeroship deploy` refuses an app whose manifest names a
+  database it holds no active binding to. `--capability` is passed through to
+  the control plane, which names the accepted set if you pass one it does not
+  have.
+- **`create` and `bind` declare and stop.** A new database is `provisioning`
+  and a new binding is `pending` until the service holding that cluster's
+  credential has made the cluster match. `zeroship db bindings` shows where
+  each one is.
+- **`delete`** is refused while any app still binds the database, and the
+  refusal names them; unbind each first. It needs `--yes` when the selected
+  environment is marked `"protected": true`.
+
+Reads print the control plane's JSON on stdout, so they pipe; every
+explanation goes to stderr.
 
 ## `zeroship secret` and `zeroship var`
 

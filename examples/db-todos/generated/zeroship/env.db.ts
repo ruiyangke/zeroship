@@ -45,8 +45,11 @@ const schema = {
 } as const;
 
 declare module "zeroship" {
+  interface EnvDatabases {
+    main: Db<typeof schema>;
+  }
   interface Env {
-    db: Db<typeof schema>;
+    db: EnvDatabases["main"];
   }
 }
 

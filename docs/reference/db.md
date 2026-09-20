@@ -34,9 +34,10 @@ the wrong one. A transaction covers exactly ONE database: there is no two-phase
 commit, and a statement against a second database inside a transaction on the
 first is refused.
 
-Declaring a database in `zeroship.jsonc` grants nothing. `zeroship db bind`
-grants access, and `zeroship deploy` refuses an app whose manifest names a
-database it holds no active binding to.
+Declaring a database in `zeroship.jsonc` grants nothing.
+`zeroship db bind <label> --app=<label> --capability=<capability>` grants
+access (see [`cli.md`](cli.md)), and `zeroship deploy` refuses an app whose
+manifest names a database it holds no active binding to.
 
 ```ts
 // migrations/20260628000000_initial_schema.ts
@@ -216,10 +217,15 @@ development-mode build (`vite build --mode development`) regenerates it on
 demand. A production build does not rewrite it — it refuses to ship when the
 committed module has drifted from the migrations, so commit each regeneration.
 
-`@zeroship/types` declares the base `zeroship` runtime module. The
-generated `env.db.ts` imports `@zeroship/db`'s `t`/`Db` types, reconstructs
-the folded schema, and declares the single `Env.db` augmentation for the
-app. This generated module is the only source of application database typing.
+`@zeroship/types` declares the base `zeroship` runtime module, including the
+`EnvDatabases` interface every database's module augments. The generated
+`env.db.ts` imports `@zeroship/db`'s `t`/`Db` types, reconstructs the folded
+schema, adds this database under its label, and - for the app's primary -
+declares `Env.db` as that same entry, so `env.db` and
+`env.databases[primary]` are one type as well as one object. These generated
+modules are the only source of application database typing. An app using
+several databases includes one per database; a label left out of the
+`include` is a label `env.databases` does not have.
 
 The root `@zeroship/db` package is the plain TypeScript SDK surface (`t`,
 `schema`, `RowOf`, `Db`, etc.) for shared packages and tests. The generated

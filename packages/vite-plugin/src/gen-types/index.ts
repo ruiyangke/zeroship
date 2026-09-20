@@ -35,7 +35,9 @@ import { discoverMigrations, recordMigration } from "./recorder.js";
 import { evaluateSchemaModule, schemaModuleToDescriptors } from "./manual.js";
 import {
   GENERATED_ENV_DB_BANNER,
+  renderEnvAugmentation,
   renderGeneratedEnvDb,
+  type GeneratedDatabase,
   type RuntimeDescriptor,
 } from "./render-env-db.js";
 
@@ -143,6 +145,22 @@ export function isMigrationSourceError(e: unknown): boolean {
   );
 }
 
+/**
+ * What both sources need to know beyond where the schema comes from.
+ *
+ * `label` and `primary` are REQUIRED and carry no default. They are not
+ * recoverable from the schema - a fold says what the collections are and
+ * nothing about which of an app's databases holds them - and the emitted
+ * module keys `EnvDatabases` on the label, so a guess here is `env.databases`
+ * typed under the wrong name. Every caller reads them from the same place,
+ * `zeroship.jsonc` through `project-config`.
+ */
+export interface GenTypesOptions extends GeneratedDatabase {
+  /** Regenerate in memory and diff against the committed artifacts, never
+   *  writing: the hard drift gate. */
+  check?: boolean;
+}
+
 /** Options common to both sources. */
 export interface GenTypesResult {
   /** `"written"` (regenerated) or `"checked"` (drift gate passed, no write). */
@@ -163,7 +181,7 @@ export interface GenTypesResult {
 export async function genTypesFromSchemaFile(
   schemaTsPath: string,
   outDir: string,
-  opts: { check?: boolean } = {},
+  opts: GenTypesOptions,
 ): Promise<GenTypesResult> {
   const declared = await evaluateSchemaModule(schemaTsPath);
   const descriptors = schemaModuleToDescriptors(declared);
@@ -214,7 +232,7 @@ export async function genTypesFromSchemaFile(
   });
   const runtimeJson = unwrap(reply, "manual schema source");
 
-  const envDbTs = renderManualEnvDb(outDir, schemaTsPath);
+  const envDbTs = renderManualEnvDb(outDir, schemaTsPath, opts);
   return emit(outDir, envDbTs, runtimeJson, opts.check ?? false);
 }
 
@@ -226,7 +244,7 @@ export async function genTypesFromSchemaFile(
 export async function genTypesFromMigrations(
   migrationsDir: string,
   outDir: string,
-  opts: { check?: boolean } = {},
+  opts: GenTypesOptions,
 ): Promise<GenTypesResult> {
   // Recording EVALUATES the creator's `.ts`, so everything that throws here is
   // their source: an unresolvable import, a syntax error, a DSL guard. Tagged
@@ -271,7 +289,7 @@ export async function genTypesFromMigrations(
   // The typed surface is rendered HERE, off the runtime descriptor - the engine's
   // own `envDbTs` re-authors the fold in the migration DSL, which a deployed app
   // neither depends on nor gets `env.db` typing from.
-  const envDbTs = renderGeneratedEnvDb(parseRuntimeDescriptor(runtimeJson));
+  const envDbTs = renderGeneratedEnvDb(parseRuntimeDescriptor(runtimeJson), opts);
   // THE ORDERING ANCHOR. `genArtifacts` ran ONCE above and both artifacts come
   // out of that single reply, so this hash names the descriptor that belongs to
   // exactly these documents. `migrated` records it on the ledger row for the
@@ -336,12 +354,21 @@ function parseRuntimeDescriptor(runtimeJson: string): RuntimeDescriptor {
 }
 
 /**
- * Render the MANUAL `env.db.ts` augmentation: import the author's
- * `schema` and declare `Env.db = Db<typeof schema>`. The import path is relative
- * from the out dir to `schema.ts`, extension-stripped, always `./`-anchored and
- * POSIX-slashed for a stable, cross-platform module specifier.
+ * Render the MANUAL `env.db.ts` augmentation: import the author's `schema` and
+ * declare this database's entry on `EnvDatabases` (plus `Env.db` when it is
+ * the primary). The import path is relative from the out dir to `schema.ts`,
+ * extension-stripped, always `./`-anchored and POSIX-slashed for a stable,
+ * cross-platform module specifier.
+ *
+ * The augmentation block itself comes from `renderEnvAugmentation`, the same
+ * producer the generated source uses: the two schema sources differ in where
+ * `schema` comes from and in nothing else.
  */
-function renderManualEnvDb(outDir: string, schemaTsPath: string): string {
+function renderManualEnvDb(
+  outDir: string,
+  schemaTsPath: string,
+  database: GeneratedDatabase,
+): string {
   let rel = relative(resolve(outDir), resolve(schemaTsPath));
   rel = rel.replace(/\.ts$/, "");
   rel = rel.split(/[\\/]/).join("/");
@@ -350,11 +377,7 @@ function renderManualEnvDb(outDir: string, schemaTsPath: string): string {
     MANUAL_ENV_DB_BANNER +
     `import { type Db } from "@zeroship/db";\n` +
     `import { schema } from "${rel}";\n\n` +
-    `declare module "zeroship" {\n` +
-    `  interface Env {\n` +
-    `    db: Db<typeof schema>;\n` +
-    `  }\n` +
-    `}\n\n` +
+    renderEnvAugmentation(database, "Db<typeof schema>") +
     `export {};\n`
   );
 }

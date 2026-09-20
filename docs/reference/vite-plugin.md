@@ -99,8 +99,9 @@ The dev auth provider is dev-only: it is not part of any production `.zship`.
 Your committed migrations are the schema source of truth. The build folds each
 database's migrations into generated artifacts under that database's own `out`:
 
-- `env.db.ts` - the typed `env.db` surface, as a generated `@zeroship/db`
-  schema module.
+- `env.db.ts` - this database's typed surface, as a generated `@zeroship/db`
+  schema module. It declares the database under its LABEL on `EnvDatabases`,
+  and declares `Env.db` as that entry when the app names it `primary`.
 - `schema.runtime.json` - the runtime schema descriptor carried into the
   `.zship`.
 - `migrations.ir.json` - the recorded migration set that `zeroship migrate`
@@ -136,8 +137,8 @@ rather than a build that ships a drifted artifact.
 
 ### Type activation
 
-The generated `env.db.ts` is the canonical `Env.db` augmentation. Apps include
-it in `tsconfig.json`:
+The generated `env.db.ts` is the canonical augmentation. Apps include it in
+`tsconfig.json`:
 
 ```json
 {
@@ -146,7 +147,11 @@ it in `tsconfig.json`:
 ```
 
 That path is `<out>/env.db.ts` for the database that declared it; if the entry
-moves its `out`, the `include` moves with it.
+moves its `out`, the `include` moves with it. **Include one per database the
+app uses**: each module augments `EnvDatabases` under its own label, so a
+database left out of the `include` is a label `env.databases` does not have.
+Exactly one of them - the primary's - also declares `Env.db`, which is why a
+database may not be one app's primary and another's secondary.
 
 Do not also add a `@zeroship/db/env` or a `zeroship-schema` path alias. The
 generated file is the single source of strong `env.db` typing.

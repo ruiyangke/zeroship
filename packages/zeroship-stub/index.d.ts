@@ -11,6 +11,18 @@
  */
 
 /**
+ * Every database an app declares, by its LOCAL LABEL. A separate interface
+ * rather than an inline shape on `Env`, because each database's generated
+ * `env.db.ts` augments THIS with its own label: two modules redeclaring one
+ * `databases` property with different shapes is a merge conflict, one property
+ * per label is a merge.
+ *
+ * Empty and without an index signature: a label the app does not declare is
+ * absent from `env.databases` at runtime too.
+ */
+export interface EnvDatabases {}
+
+/**
  * Composite env exposed to user handlers. The interface is exported
  * (not a structural literal) so user projects can augment it via the
  * generated `generated/zeroship/env.db.ts` module.
@@ -19,6 +31,8 @@ export interface Env {
   // Intentionally permissive — plugins attach namespaces and apps add
   // scalar secrets/vars; augmentations narrow specific keys.
   [key: string]: unknown;
+  /** The app's databases. `env.db` is the primary one, by object identity. */
+  databases: EnvDatabases;
 }
 
 // Intentionally mutable for test injection — see index.js for rationale.
