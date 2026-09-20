@@ -183,7 +183,7 @@ the instrument is green in exactly the state the invariant is violated.
 `gateway_sessions.revoked_at` is written by back-channel logout and read only by
 `crates/zeroship-gateway/src/sessions.rs`'s `validate`, which has no production
 caller, and doc comments elsewhere say the request path deliberately does not use
-it. `check_api_key` in `crates/zeroship-gateway/src/auth.rs` is defined
+it. `check_api_key` in `crates/zeroship-gateway/src/router/auth.rs` is defined
 and never called, beside a plaintext `apps.api_key` column stored next to its own
 hash. `crates/zeroship-control/src/identity_bridge.rs`'s `provision_or_link` has
 only test callers and a header claiming it sits on the bearer read path. Each is
@@ -358,7 +358,7 @@ platform", so cross-app teardown has no object.
 correction is C9.** `db/migrations-ts/20260906000000_organization_entity_model.ts`
 creates `zeroship.projects`: `id` text PRIMARY KEY under a `projects_id_shape`
 check for `^prj_[0-9A-Za-z]{22}$`, minted by
-`zeroship_core::project_id::ProjectId` in `crates/zeroship-core/src/project_id.rs`,
+`zeroship_core::project_id::ProjectId` in `crates/zeroship-id/src/project_id.rs`,
 a `slug` unique per organization, and `projects_organization_identity_key` over
 `(id, organization_id)`. Membership landed with it as `zeroship.project_members`,
 and `zeroship.app_members` was DROPPED in the same migration. `Resource::Project`
@@ -1448,7 +1448,7 @@ recorded inline below rather than silently applied. The pattern in all three is
 the same: an item was named by the family it LOOKED like it belonged to, and its
 real caller set was somewhere else.
 
-- `crates/zeroship-gateway/src/auth.rs` - the whole module (`check_api_key`).
+- `crates/zeroship-gateway/src/router/auth.rs` - the whole module (`check_api_key`).
   Verified: no caller, production or test. DELETED at step 1, with the
   `pub mod auth;` in `crates/zeroship-gateway/src/lib.rs`. Note the trap the
   deletion had to avoid: `crates/zeroship-gateway/src/router/auth.rs` is a
@@ -2784,7 +2784,7 @@ reasoning for each is in step 4 and is not repeated.
     human across them is a leak rather than a feature, and an
     organization-scoped subject produces exactly that correlation by
     construction. That argument is already written into the tree - the module
-    documentation of `crates/zeroship-core/src/organization_id.rs` states the id
+    documentation of `crates/zeroship-id/src/organization_id.rs` states the id
     seeds no subject derivation, appears in no token `aud`, and is never handed
     to app code. On this reading nothing in section 3.2 moves: the audience sum
     stays closed as `Platform | Project(pid)`, and the organization is an
@@ -2810,7 +2810,7 @@ reasoning for each is in step 4 and is not repeated.
     with no object that names it once.
 
     *Why the tree's own answer does not settle this.* The
-    `crates/zeroship-core/src/organization_id.rs` paragraph RESTATES D-B; it does
+    `crates/zeroship-id/src/organization_id.rs` paragraph RESTATES D-B; it does
     not re-derive it with organizations present. Reading it as the answer would
     be taking a consequence of the decision as evidence for the decision.
 
