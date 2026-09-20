@@ -360,10 +360,15 @@ and has no public production record. The techniques transfer. The architecture d
    a missing fact.
 
    It also surfaced three gaps that belong to the current code rather than to this proposal, and
-   that anyone touching these tables should close first. No COLLECTION or RECONCILIATION test
-   resumes an unsettled page with a different `page_size`, which is the one mutation that would
-   bind the frozen item list, and none aborts the reserve transaction itself rather than the
-   finalization that follows it. Fan-out is the counterexample worth copying rather than a gap:
+   that anyone touching these tables should close first, stated with the boundary a mutation
+   established rather than the one a reading claimed. The frozen item list IS partially bound
+   today, by exactly one test: `collection/rollback.rs`'s receipt-failure body, which retries an
+   aborted page and requires it to complete. Neutralizing the stored plan so the retry re-derives
+   it reddens that body on BOTH dialects, and a solo re-run reproduced it, so the binding is real
+   and not a starved deadline. Under the same mutation every other collection neighbour passes.
+   What rollback does NOT bind is a retry at a DIFFERENT `page_size`, because it retries at the
+   size it started with, and no collection or reconciliation test does. Nor does any of them
+   abort the reserve transaction itself rather than the finalization that follows it. Fan-out is the counterexample worth copying rather than a gap:
    `tests/fanout/ordering.rs` delivers a page at size one, retries the unsettled page at a
    larger size, and asserts both the identical receipt and an unchanged snapshot, so the larger
    page delivered nothing more. The same body also binds replay duplication by counting a
