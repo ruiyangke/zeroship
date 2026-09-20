@@ -1,8 +1,8 @@
 use super::*;
-use crate::service::models::{propagation_pages, propagation_publications, propagations};
+use crate::service::models::{propagation_pages, propagations};
 use zeroship_data_orm::orm::{Entity, Filter, Patch};
 
-/// Damaged projections, obligations and page records fail closed without
+/// Damaged specifications, obligations and page records fail closed without
 /// effects, and another app's scope cannot deliver a page.
 pub(super) async fn damage(store: Rc<OrmStore>) {
     let (service, app, foreign, _deployments) = registered_service(store).await;
@@ -29,17 +29,21 @@ pub(super) async fn damage(store: Rc<OrmStore>) {
             .await,
         Err(WorkflowServiceError::PermissionDenied)
     ));
-    // A page projection that disagrees with its specification cannot pass as
-    // this or any other operation.
-    refused_while_damaged(&service, &scope, &grant, |damaged| {
-        (
-            propagation_publications::id.eq(page.id.as_str()).unwrap(),
-            propagation_publications::revision
-                .set(if damaged { 2_i64 } else { 1 })
-                .unwrap(),
-        )
-    })
-    .await;
+    // An intent whose specification no longer derives the key it is stored
+    // under cannot pass as this or any other operation.
+    let tx = service.begin().await.unwrap();
+    let original = damage_specification(&tx, &app, page.id.as_str()).await;
+    tx.commit().await.unwrap();
+    let before = snapshot(&service, &app).await;
+    assert!(matches!(
+        scope.propagation_job(&grant, options).await,
+        Err(WorkflowServiceError::Internal(_))
+    ));
+    assert_eq!(snapshot(&service, &app).await, before);
+    assert!(scope.pending_jobs(None, 100).await.is_err());
+    let tx = service.begin().await.unwrap();
+    write_specification(&tx, page.id.as_str(), &original).await;
+    tx.commit().await.unwrap();
     assert!(scope.pending_jobs(None, 100).await.is_ok());
     // An obligation whose revision disagrees with its page refuses fresh work.
     refused_while_damaged(&service, &scope, &grant, |damaged| {

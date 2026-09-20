@@ -859,8 +859,7 @@ table has the `__zeroship_workflow_` prefix; none belongs in Control's schema.
 | `schedules`, `occurrences` | Existing customer schedule definitions and accepted occurrences. Calendar discovery moves to the manager; customer acceptance, overlap state and input references remain customer-side. |
 | `payloads`, `payload_refs` | Prepared upload metadata, ownership, integrity and committed references. |
 | `outbox` | Customer events and their payloads; distinct from manager queue metadata. |
-| `job_publications` | Closed immutable Advance, Fanout or Propagate specification and manager confirmation time. Publications survive history removal. |
-| `advance_publications`, `fanout_publications`, `propagation_publications` | The projection each published operation owns, scoped to its intent. The advance projection carries the run, generation, frontier revision, due time and deployment that a pending intent retains; the other two carry their broadcast or obligation and its revision. |
+| `job_publications` | Closed immutable Advance, Fanout or Propagate specification and manager confirmation time. The row's key is derived from the work the specification names, so the primary key is also the deduplication key. Publications survive history removal. |
 | `job_receipts` | Immutable logical job specification and committed semantic outcome, retained independently of run history and delivery attempts. Its run identity is present only for the kinds that name a run. |
 | `collection_pages`, `reconciliation_pages` | Immutable bounded plan and reserved item offset for a paged sweep, scoped to its logical job receipt. |
 
@@ -890,15 +889,20 @@ journal that creator code can reach.
 Both job tables answer this question the same way. `reconciliation_pages` holds
 the reconciliation sweep's plan and reserved offset in the shape
 `collection_pages` already stores, so `job_receipts` keeps only `run_id`: the one
-column a kind-blind scan reads. `advance_publications`, `fanout_publications` and
-`propagation_publications` hold what each published operation projects, and each
-kind's deduplication key is total on its own table rather than a unique index
-over a nullable group. Neither table carries a validator that matches every
-operation to assert which columns are null.
+column a kind-blind scan reads. `job_publications` keeps no kind-specific column
+at all, because a publication intent has no kind-specific state to keep: its
+identity is its key, and the specification it stores is what a reader decodes.
+Neither table carries a validator that matches every operation to assert which
+columns are null.
 
-Publication intents now use dedicated journal records. The scoped unique index
-binds run, generation, frontier revision and due time; `id` remains the sole
-primary key. A transition that advances an idle run invalidates its older
+Publication intents use dedicated journal records whose key is derived from the
+work they name: `publication_id` in `crates/zeroship-core/src/workflow_jobs.rs`
+binds an Advance to its deployment, run, generation, frontier revision and due
+time, a Fanout to its broadcast and page revision, and a Propagate to its
+obligation and page revision. `id` is the sole primary key and therefore the
+deduplication key, and a reader re-derives it from the specification it decoded
+rather than comparing a second copy of those columns. A transition that advances
+an idle run invalidates its older
 frontier without retargeting already committed jobs. Task claim, heartbeat and
 release do not advance that logical revision. A new generation starts a fresh
 frontier. Advance-job acceptance now binds creator claims to the logical job,

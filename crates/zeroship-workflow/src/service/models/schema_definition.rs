@@ -17,17 +17,6 @@ zeroship_data_orm::orm::schema! {
             revision: BigInt,
         }
 
-        __zeroship_workflow_advance_publications {
-            #[orm(primary_key)]
-            id: Text,
-            app_id: Text,
-            deploy_id: Text,
-            run_id: Text,
-            generation: BigInt,
-            frontier_revision: BigInt,
-            available_at: BigInt,
-        }
-
         __zeroship_workflow_app_state {
             #[orm(primary_key)]
             id: Text,
@@ -125,14 +114,6 @@ zeroship_data_orm::orm::schema! {
             broadcast_id: Text,
             revision: BigInt,
             result: Text,
-        }
-
-        __zeroship_workflow_fanout_publications {
-            #[orm(primary_key)]
-            id: Text,
-            app_id: Text,
-            broadcast_id: Text,
-            revision: BigInt,
         }
 
         __zeroship_workflow_generations {
@@ -238,14 +219,6 @@ zeroship_data_orm::orm::schema! {
             propagation_id: Text,
             revision: BigInt,
             result: Text,
-        }
-
-        __zeroship_workflow_propagation_publications {
-            #[orm(primary_key)]
-            id: Text,
-            app_id: Text,
-            propagation_id: Text,
-            revision: BigInt,
         }
 
         __zeroship_workflow_propagations {

@@ -163,14 +163,18 @@ async fn finish_run(
         .unwrap();
 }
 
-async fn parent_state(
-    service: &WorkflowService,
-    app: &AppId,
-    parent: &str,
-) -> BTreeMap<&'static str, Vec<zeroship_data_orm::Value>> {
+/// The parent's own rows, beside the frontier intents its run is named by. The
+/// intent table carries no run column, so the second half is decoded from each
+/// specification rather than selected.
+type ParentState = (
+    BTreeMap<&'static str, Vec<zeroship_data_orm::Value>>,
+    Vec<zeroship_core::workflow_jobs::JobSpec>,
+);
+
+async fn parent_state(service: &WorkflowService, app: &AppId, parent: &str) -> ParentState {
     let tx = service.begin().await.unwrap();
     let mut snapshot = BTreeMap::new();
-    for table in ["steps", "waits", "advance_publications"] {
+    for table in ["steps", "waits"] {
         snapshot.insert(
             table,
             journal_rows(&tx, table, json!({"app_id":app.as_str(), "run_id":parent}))
@@ -180,8 +184,9 @@ async fn parent_state(
                 .collect(),
         );
     }
+    let advances = advance_intents(&tx, app, parent, None).await;
     tx.commit().await.unwrap();
-    snapshot
+    (snapshot, advances)
 }
 
 async fn pending_targets(store: Rc<OrmStore>) {
@@ -338,9 +343,6 @@ async fn all_state(
         "continuation_heads",
         "continuation_members",
         "job_publications",
-        "advance_publications",
-        "fanout_publications",
-        "propagation_publications",
         "outbox",
         "steps",
         "waits",

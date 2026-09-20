@@ -29,7 +29,7 @@ async fn activation_lost_ack_and_redelivery_never_start_the_executor() {
     };
     let job = lease.delivery.job.clone();
     let mut original = BTreeMap::new();
-    for table in ["runs", "tasks", "job_publications", "advance_publications"] {
+    for table in ["runs", "tasks", "job_publications"] {
         original.insert(table, journal_count(&fixture, table).await);
     }
     fixture.metadata.lose_ack.set(true);
