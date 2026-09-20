@@ -11,6 +11,7 @@ on: [push, pull_request]
 # pnpm comes from the devShell as well. It is a devShell entry, so it is first on
 # PATH, and pnpm then switches itself to the `package.json#packageManager`
 # version, which is what keeps that field the pin CI runs.
+
 # libtest gives every test its own thread, and a spawned thread's default stack
 # is a fraction of the main thread's. A test deep enough to exhaust it does not
 # fail: it aborts the process, libtest never prints a result line, and a summary
@@ -193,6 +194,19 @@ jobs:
       - run: |
           set -o pipefail
           cargo test --workspace --no-fail-fast
+      # EVERY STEP BELOW CARRIES `!cancelled()`, and the reason is the step
+      # above. A step that fails skips the rest of the job, so an ordinary test
+      # failure silently stops the architecture invariants from being measured -
+      # the zero-tokio boundary, the dependency boundaries, the Caddyfile
+      # sha256 pin and clippy. A skipped step is not a failed step, so nothing
+      # reports it, and those checks exist precisely to catch what no test
+      # catches. The test command above already declines to stop at its first
+      # failure; the job it sits in should not either.
+      #
+      # `!cancelled()` rather than `always()`: a cancelled run should stop. On a
+      # tree that does not compile these run and fail on their own builds rather
+      # than skipping, which is louder and correct - each gate then names itself
+      # instead of hiding behind whichever step failed first.
       # The step above resolves citations that name a FILE. This one resolves
       # citations that name an ITEM, which nothing checked until now: no job ran
       # `cargo doc`, so a rustdoc link pointing at a deleted or renamed symbol
@@ -206,18 +220,23 @@ jobs:
       # zero warnings). The script's header documents all three and asserts the
       # documented-crate count as the control; see it before touching the floors.
       - name: Rustdoc links resolve with default features
+        if: ${{ !cancelled() }}
         env:
           RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
         run: cargo doc --locked --no-deps --workspace
       - name: Rustdoc links resolve with all features
+        if: ${{ !cancelled() }}
         env:
           RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
         run: cargo doc --locked --no-deps --workspace --all-features
       - name: Data architecture and database posture
+        if: ${{ !cancelled() }}
         run: cargo xtask test data-architecture
       - name: KV storage remains independent of the V8 binding
+        if: ${{ !cancelled() }}
         run: cargo test -p zeroship-kv --test architecture
       - name: Repository dependency and feature contracts
+        if: ${{ !cancelled() }}
         run: cargo xtask test repository
       # deploy/compose/docker-compose.yml HAS NO AUTOMATED CHECK as of
       # 2026-08-21. Four steps stood here - named volumes on stateful services,
@@ -243,6 +262,7 @@ jobs:
       # gate that quietly does nothing when its tool is missing prints the same
       # green as one that ran.
       - name: edge claimed-host artifact is what caddy makes of the Caddyfile
+        if: ${{ !cancelled() }}
         run: deploy/ops/caddy-claimed-hosts.sh --check
       # Data tests own PostgreSQL containers and run without optional features.
       - run: |
@@ -285,6 +305,7 @@ jobs:
         run: bash libs/compio-postgres/tests/tls_live_setup.sh --down
       # Cargo propagates lint and compilation failures using workspace lint levels.
       - name: Clippy across workspace targets and features
+        if: ${{ !cancelled() }}
         run: cargo clippy --workspace --all-targets --all-features
 
   # Required billing and migration verification. Rust fixtures own PostgreSQL
