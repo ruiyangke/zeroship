@@ -1048,3 +1048,72 @@ schemas. What does not stand is the inference that the manager's half is
 therefore reducible. **One side of a duplicated pair can be a boundary artifact
 while the other is load-bearing for a different reason, and the only way to
 tell is to read what enforces it.**
+
+## What the move does to the grant model, which is the thing another branch is blocked on
+
+`feat/app-database-decoupling` is blocked on this relocation for one reason: the
+journal's appends depend on a blanket grant in the app's schema. That is worth
+stating precisely, because the move changes the KIND of grant the journal lives
+under, not just its address.
+
+### The app schema's model: a snapshot nothing verifies
+
+`crates/zeroship-migrate-server/src/apply.rs` issues
+
+    GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {schema_q} TO {role_q};
+
+and `crates/zeroship-migrate-server/src/provisioning.rs` explains what that
+costs:
+
+    /// set is a `GRANT ... ON ALL TABLES` snapshot and this runs before any table
+    /// exists, so a role established here would carry no grant on anything the
+    /// caller goes on to create. Each caller provisions it, and repeats it after
+    /// every step that creates tables. ...
+
+`ON ALL TABLES` binds the tables that exist at that instant. A table created
+afterwards is not covered, the role simply cannot write it, and **nothing
+checks**. The discipline is an ordering rule the callers have to remember.
+
+### The manager schema's model: an enumeration that refuses to start
+
+`crates/zeroship-workflow-server/src/coordinator.rs` installs the manager
+schema - it holds the DDL directly,
+
+    pub const SCHEMA_SQL: &str = include_str!("../../zeroship-workflow-manager/schema/postgres.sql");
+
+- and at startup it checks the role it was given, per table, against a list it
+maintains:
+
+    const MANAGER_TABLES: &[&str] = &[
+        "workers",
+        "queue_scopes",
+        "deployment_holds",
+        ...
+
+    SELECT bool_and(has_table_privilege(current_user,$1,p)) AS writable,
+    has_table_privilege(current_user,$1,'TRUNCATE,TRIGGER,REFERENCES') AS privileged
+    FROM unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE']) AS p
+
+and it refuses to run at all if the role holds `CREATE` on the schema or
+DDL-shaped rights on `schema_version`. **Where the app schema grants broadly and
+verifies nothing, the manager enumerates narrowly and refuses to start when the
+answer is wrong.**
+
+### So the move is a change of regime, and it carries one obligation
+
+Relocating the journal into `workflow_manager` takes its tables out of a blanket
+snapshot that nothing audits and puts them under a per-table check that fails
+loudly. That is the substance of what the other branch is waiting for, and it is
+a real improvement rather than a change of address.
+
+**The obligation, which step 1 must not leave for step 6:** `MANAGER_TABLES` is a
+hand-maintained constant. Installing the journal's tables into
+`workflow_manager` without extending that list - or generalising the check to
+read the installed schema - leaves the startup probe passing while saying
+nothing about the journal. That reproduces the exact condition the move is meant
+to end, in the new location, with a check in place that looks like it covers it.
+
+The same file is already the journal's installer, in `journal.rs`, and already
+the manager schema's installer. **One service, no engine dependency, both
+installs.** Step 1 has less to build than the plan implies and one list to
+remember.
