@@ -18,6 +18,7 @@ mod deployments;
 mod deploys;
 pub mod fanout;
 pub use deployments::AppDeployments;
+mod fence;
 mod frontier;
 mod hold_release;
 mod ingress;

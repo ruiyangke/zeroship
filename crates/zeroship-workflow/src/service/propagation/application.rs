@@ -1,5 +1,5 @@
 use super::{
-    changed, continuations, delivery, encode, history, increment, invalid, models, obligation,
+    changed_once, continuations, delivery, encode, history, increment, invalid, models, obligation,
     parse_state, publication, revision, AppId, JobOperation, JobOutcome, JobReceipt, JobSpec, Kind,
     Obligation, Page, PageResult, Pending, PropagationOptions, Transaction, WorkflowServiceError,
 };
@@ -113,14 +113,14 @@ async fn cascade(
             .and(runs::id.eq(child.id.as_str())?)
             .and(runs::task_id.eq(child.task_id.as_deref())?);
         if child.task_id.is_some() {
-            changed(
+            changed_once(
                 entity
                     .update_many(selected, runs::control.set("cancel")?)
-                    .await?,
+                    .await?, invalid
             )?;
             continue;
         }
-        changed(
+        changed_once(
             entity
                 .update_many(
                     selected,
@@ -128,7 +128,7 @@ async fn cascade(
                         .set("cancel")?
                         .and(runs::due_at.set(Some(now))?)?,
                 )
-                .await?,
+                .await?, invalid
         )?;
         if let Some(advance) = Box::pin(publication::advance_job(tx, app, &child.id, now)).await? {
             result.successors.push(advance);
@@ -193,7 +193,7 @@ async fn notify(
         if woken == 0 {
             continue;
         }
-        changed(woken)?;
+        changed_once(woken, invalid)?;
         result.affected += 1;
         if let Some(advance) =
             Box::pin(publication::advance_job(tx, app, &parent.run_id, now)).await?
@@ -219,7 +219,7 @@ async fn persist(
         return Err(invalid());
     };
     let next = increment(page.get())?;
-    changed(
+    changed_once(
         tx.database()
             .entity::<propagations::Entity>()?
             .update_many(
@@ -233,7 +233,7 @@ async fn persist(
                     .and(propagations::finished.set(i64::from(result.finished))?)?
                     .and(propagations::revision.set(next)?)?,
             )
-            .await?,
+            .await?, invalid
     )?;
     if !result.finished {
         result.successors.push(

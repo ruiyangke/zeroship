@@ -8,6 +8,7 @@
 use super::{
     app::{decode, encode, lock_app_state},
     delivery::{self, CapturedLease, JobReceipt},
+    fence::changed_once,
     models, publication,
     store::Transaction,
     AcceptedBroadcast, AppWorkflows,
@@ -144,7 +145,7 @@ pub(super) async fn accept(
         topic_row.accepted_sequence,
         "workflow broadcast sequence exhausted",
     )?;
-    changed(
+    changed_once(
         tx.database()
             .entity::<models::topics::Entity>()?
             .update_many(
@@ -153,7 +154,7 @@ pub(super) async fn accept(
                     .and(models::topics::accepted_sequence.eq(topic_row.accepted_sequence)?),
                 models::topics::accepted_sequence.set(sequence)?,
             )
-            .await?,
+            .await?, invalid
     )?;
     let id = BroadcastId::mint();
     let saved = tx
@@ -239,13 +240,6 @@ fn increment(value: i64, message: &str) -> Result<i64, WorkflowServiceError> {
     value
         .checked_add(1)
         .ok_or_else(|| WorkflowServiceError::ResourceExhausted(message.into()))
-}
-fn changed(count: i64) -> Result<(), WorkflowServiceError> {
-    if count == 1 {
-        Ok(())
-    } else {
-        Err(invalid())
-    }
 }
 fn invalid() -> WorkflowServiceError {
     WorkflowServiceError::Internal("invalid workflow topic fanout journal".into())

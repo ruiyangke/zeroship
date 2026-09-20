@@ -7,6 +7,7 @@ use super::{
         mint_signal_capability, verify_signal_capability, CapabilityToken, SignalGrant,
         SignalTarget, WORKFLOW_AUDIENCE,
     },
+    fence::changed_once,
     models,
     policy::CapturedPolicy,
     signals,
@@ -187,35 +188,48 @@ impl AppWorkflows {
                     )
                 })?;
                 captured.check()?;
-                match target {
+                // Each arm names the epoch its own read observed. A revocation
+                // that reached a moved row would otherwise store an epoch one
+                // past a stale reading and drop the revocation it raced, so a
+                // filter that matches nothing refuses the attempt instead.
+                let changed = match target {
                     Some(SignalTarget::Run { run_id }) => {
                         tx.database()
-                            .collection(models::runs::Entity::COLLECTION)?
-                            .update(
-                                value!({"app_id":self.app.as_str(), "id":run_id}),
-                                value!({"signal_epoch":epoch}),
+                            .entity::<models::runs::Entity>()?
+                            .update_many(
+                                models::runs::app_id
+                                    .eq(self.app.as_str())?
+                                    .and(models::runs::id.eq(run_id.as_str())?)
+                                    .and(models::runs::signal_epoch.eq(previous)?),
+                                models::runs::signal_epoch.set(epoch)?,
                             )
-                            .await?;
+                            .await?
                     }
                     Some(SignalTarget::Topic { topic }) => {
                         tx.database()
-                            .collection(models::topics::Entity::COLLECTION)?
-                            .update(
-                                value!({"app_id":self.app.as_str(), "topic":topic}),
-                                value!({"signal_epoch":epoch}),
+                            .entity::<models::topics::Entity>()?
+                            .update_many(
+                                models::topics::app_id
+                                    .eq(self.app.as_str())?
+                                    .and(models::topics::topic.eq(topic.as_str())?)
+                                    .and(models::topics::signal_epoch.eq(previous)?),
+                                models::topics::signal_epoch.set(epoch)?,
                             )
-                            .await?;
+                            .await?
                     }
                     None => {
                         tx.database()
-                            .collection(models::app_state::Entity::COLLECTION)?
-                            .update(
-                                value!({"app_id":self.app.as_str()}),
-                                value!({"signal_epoch":epoch}),
+                            .entity::<models::app_state::Entity>()?
+                            .update_many(
+                                models::app_state::app_id
+                                    .eq(self.app.as_str())?
+                                    .and(models::app_state::signal_epoch.eq(previous)?),
+                                models::app_state::signal_epoch.set(epoch)?,
                             )
-                            .await?;
+                            .await?
                     }
-                }
+                };
+                changed_once(changed, invalid)?;
                 let result = RevokedSignals { epoch };
                 store_request(
                     &mut tx,
@@ -335,6 +349,9 @@ impl AppWorkflows {
         tx.commit().await?;
         Ok(result)
     }
+}
+fn invalid() -> WorkflowServiceError {
+    WorkflowServiceError::Internal("invalid workflow signal epoch journal".into())
 }
 fn authority(service: &WorkflowService) -> Result<Arc<SignalAuthority>, WorkflowServiceError> {
     service.signal_authority.clone().ok_or_else(|| {

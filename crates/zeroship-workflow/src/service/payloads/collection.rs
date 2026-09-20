@@ -15,6 +15,7 @@ use super::{
     AppId, Transaction, WorkflowService, WorkflowServiceError, deadline, lock_app, models, payload,
     storage, storage_error, typed_id,
 };
+use crate::service::fence::changed_once;
 
 /// An eligible payload fenced in `deleting` before its external deletion.
 struct Fenced {
@@ -84,7 +85,7 @@ impl WorkflowService {
                 settled,
             )
             .await?;
-        changed_once(changed)?;
+        changed_once(changed, invalid)?;
         check()?;
         tx.commit().await?;
         check()?;
@@ -99,7 +100,7 @@ impl WorkflowService {
         check: &impl Fn() -> Result<(), WorkflowServiceError>,
     ) -> Result<Option<Fenced>, WorkflowServiceError> {
         let mut tx = self.begin().await?;
-        let policy = lock_app(&mut tx, app).await?;
+        let (_, policy) = lock_app(&mut tx, app).await?;
         check()?;
         let now = tx.now().await?;
         let row = match payload(&tx, app, id).await {
@@ -129,7 +130,7 @@ impl WorkflowService {
                 models::payloads::state.set("deleting")?,
             )
             .await?;
-        changed_once(changed)?;
+        changed_once(changed, invalid)?;
         check()?;
         tx.commit().await?;
         check()?;
@@ -159,10 +160,6 @@ async fn require_unreferenced(
         return Err(invalid());
     }
     Ok(())
-}
-
-fn changed_once(changed: i64) -> Result<(), WorkflowServiceError> {
-    if changed == 1 { Ok(()) } else { Err(invalid()) }
 }
 
 fn invalid() -> WorkflowServiceError {

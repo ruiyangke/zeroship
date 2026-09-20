@@ -15,6 +15,7 @@ use super::{
     app::{decode, encode, lock_app_state, parse_state},
     continuations,
     delivery::{self, CapturedLease, JobReceipt},
+    fence::changed_once,
     models, publication,
     store::{Row, Transaction},
     AppWorkflows, ControlIntent,
@@ -315,13 +316,6 @@ fn increment(value: i64) -> Result<i64, WorkflowServiceError> {
     value.checked_add(1).ok_or_else(|| {
         WorkflowServiceError::ResourceExhausted("workflow propagation revision exhausted".into())
     })
-}
-fn changed(count: i64) -> Result<(), WorkflowServiceError> {
-    if count == 1 {
-        Ok(())
-    } else {
-        Err(invalid())
-    }
 }
 fn invalid() -> WorkflowServiceError {
     WorkflowServiceError::Internal("invalid workflow dependency propagation journal".into())

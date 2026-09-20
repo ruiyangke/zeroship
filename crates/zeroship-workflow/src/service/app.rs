@@ -532,13 +532,29 @@ pub(crate) async fn current_run(
         .next())
 }
 
-pub(crate) async fn lock_app(
+/// Evidence that [`lock_app_state`] was taken for this app on the call path
+/// that carries it.
+///
+/// A read-modify-write whose compare-and-set predicate is guaranteed true is
+/// guaranteed true *because* of that lock, and a leaf write cannot show the
+/// reader where the lock was taken. Taking one of these instead of a bare
+/// [`AppId`] puts the requirement in the write's own signature: the app cannot
+/// be named without it, so a caller that never locked cannot reach the write.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AppStateLock<'a>(&'a AppId);
+impl<'a> AppStateLock<'a> {
+    pub(crate) const fn app(self) -> &'a AppId {
+        self.0
+    }
+}
+
+pub(crate) async fn lock_app<'a>(
     tx: &mut Transaction,
-    app: &AppId,
-) -> Result<AppPolicy, WorkflowServiceError> {
+    app: &'a AppId,
+) -> Result<(AppStateLock<'a>, AppPolicy), WorkflowServiceError> {
     tx.capture_mutation(app)?;
-    lock_app_state(tx, app).await?;
-    tx.policy(app)
+    let lock = lock_app_state(tx, app).await?;
+    Ok((lock, tx.policy(app)?))
 }
 
 /// Serialize journal state without granting permission for a fresh mutation.
@@ -551,10 +567,10 @@ pub(crate) async fn lock_app(
     clippy::needless_pass_by_ref_mut,
     reason = "app lock acquisition is an exclusive transaction operation"
 )]
-pub(super) async fn lock_app_state(
+pub(super) async fn lock_app_state<'a>(
     tx: &mut Transaction,
-    app: &AppId,
-) -> Result<(), WorkflowServiceError> {
+    app: &'a AppId,
+) -> Result<AppStateLock<'a>, WorkflowServiceError> {
     tx.check_app(app)?;
     let Output::Count(locked) = tx
         .database()
@@ -573,7 +589,7 @@ pub(super) async fn lock_app_state(
     if locked != 1 {
         return Err(not_found("workflow app"));
     }
-    Ok(())
+    Ok(AppStateLock(app))
 }
 
 /// The journal's highest fenced ingress epoch. Read it under the app state lock.

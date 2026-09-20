@@ -120,7 +120,7 @@ impl WorkflowService {
             for (_, _, app, id) in candidates {
                 remaining -= 1;
                 let mut tx = self.begin().await?;
-                let policy = lock_app(&mut tx, &app).await?;
+                let (_, policy) = lock_app(&mut tx, &app).await?;
                 // Acceptance can take ownership after candidate selection.
                 // Recheck under the same app lock before touching its frontier.
                 let delivered = tx

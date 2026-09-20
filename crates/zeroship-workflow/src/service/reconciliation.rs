@@ -8,6 +8,7 @@
 use super::{
     app::{decode, encode, lock_app_state},
     delivery::{self, CapturedLease, JobReceipt},
+    fence::changed_once,
     models::{app_state, job_receipts, reconciliation_pages},
     publication::JobPublisher,
     store::Transaction,
@@ -301,7 +302,7 @@ impl AppWorkflows {
                 // makes a lost update impossible: a concurrent advance moved the
                 // revision, so it matches no row and the zero-row result fails
                 // the attempt.
-                let changed = tx
+                let Output::Count(changed) = tx
                     .database()
                     .collection(app_state::Entity::COLLECTION)?
                     .execute(Operation::Update {
@@ -309,8 +310,11 @@ impl AppWorkflows {
                         patch: value!({"reconciliation_revision":revision, "reconciliation_phase":phase.as_str(), "reconciliation_after_id":after, "reconciliation_upper_id":upper}),
                         many: true,
                     })
-                    .await?;
-                changed_once(&changed)?;
+                    .await?
+                else {
+                    return Err(invalid());
+                };
+                changed_once(changed, invalid)?;
             }
             let now = tx.now().await?;
             Progress::Settled(
@@ -366,13 +370,6 @@ async fn read_page(
     Ok(stored)
 }
 
-fn changed_once(output: &Output) -> Result<(), WorkflowServiceError> {
-    if matches!(output, Output::Count(1)) {
-        Ok(())
-    } else {
-        Err(invalid())
-    }
-}
 fn invalid() -> WorkflowServiceError {
     WorkflowServiceError::Internal("invalid workflow reconciliation journal".into())
 }

@@ -6,9 +6,10 @@
 )]
 
 use super::{
-    app::{decode, encode, lock_app},
+    app::{decode, encode, lock_app, AppStateLock},
     deployment_retention::admission_generation,
     deployments::{damaged, unavailable},
+    fence::changed_once,
     models::deploys,
     store::Transaction,
     DeployRegistration, WorkflowService,
@@ -93,7 +94,7 @@ impl WorkflowService {
             .ok_or_else(unavailable)?
             .client(app)?;
         let mut tx = self.begin().await?;
-        let policy = lock_app(&mut tx, app).await?;
+        let (_, policy) = lock_app(&mut tx, app).await?;
         super::activation::require_local_selection(&tx, app).await?;
         if admission_generation(&tx, app, &deploy.id, &deploy.hash, client.scope()).await?
             != generation
@@ -171,28 +172,34 @@ impl WorkflowService {
             return Err(conflict());
         }
         let mut tx = self.begin().await?;
-        lock_app(&mut tx, app).await?;
+        let (lock, _) = lock_app(&mut tx, app).await?;
         if admission_generation(&tx, app, &deploy.id, &deploy.hash, client.scope()).await?
             != generation
         {
             return Err(conflict());
         }
         let now = tx.now().await?;
-        record_verified(&tx, app, deploy, now).await?;
+        record_verified(&tx, lock, deploy, now).await?;
         tx.commit().await?;
         Ok(generation)
     }
 }
 
 /// The caller has verified the normal bundle and its current retained generation.
+///
+/// Naming the app through [`AppStateLock`] is what states the serialization this
+/// write depends on: the epoch it stores is read in this same transaction, and
+/// only the app state lock keeps another host from moving it in between. The
+/// filter still names the epoch that read observed, so a write that reaches a
+/// moved row is refused rather than dropping the increment it raced.
 pub(super) async fn record_verified(
     tx: &Transaction,
-    app: &AppId,
+    lock: AppStateLock<'_>,
     deploy: &DeployRegistration,
     now: i64,
 ) -> Result<(), WorkflowServiceError> {
     validate(deploy)?;
-    let collection = tx.database().collection(deploys::Entity::COLLECTION)?;
+    let app = lock.app();
     if let Some(existing) = read(tx, app, &deploy.id).await? {
         existing.check(deploy)?;
         let epoch = existing.availability_epoch.checked_add(1).ok_or_else(|| {
@@ -200,14 +207,23 @@ pub(super) async fn record_verified(
                 "deployment availability epoch exhausted".into(),
             )
         })?;
-        collection
-            .update(
-                value!({"app_id":app.as_str(), "id":deploy.id}),
-                value!({"state":"available", "availability_epoch":epoch}),
-            )
-            .await?;
+        changed_once(
+            tx.database()
+                .entity::<deploys::Entity>()?
+                .update_many(
+                    deploys::app_id
+                        .eq(app.as_str())?
+                        .and(deploys::id.eq(deploy.id.as_str())?)
+                        .and(deploys::availability_epoch.eq(existing.availability_epoch)?),
+                    deploys::state
+                        .set("available")?
+                        .and(deploys::availability_epoch.set(epoch)?)?,
+                )
+                .await?,
+            conflict,
+        )?;
     } else {
-        collection.insert(value!({"app_id":app.as_str(), "id":deploy.id, "hash":deploy.hash,
+        tx.database().collection(deploys::Entity::COLLECTION)?.insert(value!({"app_id":app.as_str(), "id":deploy.id, "hash":deploy.hash,
             "manifest":encode(deploy)?, "created_at":now, "active":0, "state":"available", "availability_epoch":1})).await?;
     }
     Ok(())

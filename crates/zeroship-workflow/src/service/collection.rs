@@ -9,6 +9,7 @@ use super::{
     AppWorkflows,
     app::{decode, encode, lock_app_state},
     delivery::{self, CapturedLease, JobReceipt},
+    fence::changed_once,
     models::{app_state, collection_pages, job_receipts},
     payloads,
     store::Transaction,
@@ -332,7 +333,7 @@ async fn advance(tx: &Transaction, job: &JobSpec, plan: &Plan) -> Result<(), Wor
                         .and(app_state::collection_upper_id.set(upper)?)?
                         .and(app_state::collection_observed_at.set(observed_at)?)?,
                 )
-                .await?,
+                .await?, invalid
         )?;
     }
     Ok(())
@@ -344,9 +345,6 @@ const fn outcome(plan: &Plan) -> JobOutcome {
     } else {
         JobOutcome::Completed {}
     }
-}
-fn changed_once(changed: i64) -> Result<(), WorkflowServiceError> {
-    if changed == 1 { Ok(()) } else { Err(invalid()) }
 }
 fn invalid() -> WorkflowServiceError {
     WorkflowServiceError::Internal("invalid workflow collection journal".into())

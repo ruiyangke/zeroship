@@ -1,5 +1,5 @@
 use super::{
-    target, AppWorkflows, CapturedLease, Command, ManagementCommand, Transaction,
+    target, AppStateLock, AppWorkflows, CapturedLease, Command, ManagementCommand, Transaction,
     WorkflowServiceError,
 };
 use crate::{
@@ -100,6 +100,7 @@ pub(super) async fn prepare(
 pub(super) async fn latest(
     scope: &AppWorkflows,
     tx: &mut Transaction,
+    lock: AppStateLock<'_>,
     command: Command<'_>,
     target: &target::Verified,
     authority: &CapturedLease,
@@ -108,7 +109,7 @@ pub(super) async fn latest(
     delivery::check_scope(scope.app_id(), command.job)?;
     tx.check_app(scope.app_id())?;
     authority.check(scope)?;
-    target.install(scope, tx, command, now).await?;
+    target.install(tx, lock, command, now).await?;
     let draft = match control::restart::prepare_draft(
         tx,
         scope.app_id(),
