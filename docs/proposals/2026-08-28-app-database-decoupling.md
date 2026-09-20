@@ -378,10 +378,13 @@ is per-app and its failure is routine - a cluster briefly unreachable during a g
 row says active but the roles are not there yet" is a state this will actually reach. A
 datastore's convergence is a one-time bootstrap and `status` carries it.
 
-### The control plane records no migration at all
+### The control plane should record no migration at all
 
-`zeroship.app_schema_applies` is **deleted and not replaced**, and
-`crates/zeroship-migrate-server/src/schema_apply_store.rs` goes with it. It exists today as the
+**NOT BUILT.** `zeroship.app_schema_applies` is still created by
+`db/migrations-ts/20260702000200_control_tables.ts`, still written through
+`crates/zeroship-migrate-server/src/schema_apply_store.rs`, and still read by
+`crates/zeroship-control/src/publication/catalog.rs`. The design below says both should go;
+neither has. It exists today as the
 platform's own record of what schema an app corresponds to, because the engine journal lives in
 the creator's schema where the migrator role can drop it, and it feeds the deploy gate's
 descriptor comparison. Both halves fall under this design.
@@ -418,7 +421,7 @@ apps      + UNIQUE ("apps_project_identity_key")   (id, project_id)
           + FOREIGN KEY (project_id, execution_zone_id)
                      -> projects(id, execution_zone_id)
 
-zeroship.app_schema_applies   DROPPED, no successor
+zeroship.app_schema_applies   unchanged - the drop above is proposed, not done
 ```
 
 **The zone moves to the project.** `apps.execution_zone_id`
