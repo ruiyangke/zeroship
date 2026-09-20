@@ -113,3 +113,8 @@ paired!(
     postgres_collect_lost_delete_reply_recovers_in_later_duty,
     rollback::lost_reply
 );
+paired!(
+    sqlite_collect_unsettled_page_resumes_on_its_frozen_plan,
+    postgres_collect_unsettled_page_resumes_on_its_frozen_plan,
+    pages::frozen_plan
+);
