@@ -175,9 +175,9 @@ Three deployment surfaces share this pipeline:
 
 1. **Control plane** (`crates/zeroship-control/`) — every handler that touches an app, env, deploy, billing, or member runs through `AuthzGuard`. Cedar engine is in-process.
 2. **Gateway** (`crates/zeroship-gateway/`) — relevant only for platform-internal admin routes the gateway exposes (today: backchannel-logout receiver). Most user-facing gateway behavior is access enforcement (does this session exist?), which is auth, not authz; authz only kicks in on `/__zeroship/admin/*` if we add such routes.
-3. **Worker** (`crates/zeroship-worker/` + `crates/plugin-authz/`, new) — Cedar engine runs inside the V8 isolate via v8class for end-user authz inside creator apps. P12 only.
+3. **Worker** (`crates/zeroship-worker/` + `crates/zeroship-authz-v8/`, new) — Cedar engine runs inside the V8 isolate via v8class for end-user authz inside creator apps. P12 only.
 
-The same Rust `crates/zeroship-authz/` crate compiles into all three. v8class bindings live in `crates/plugin-authz/`.
+The same Rust `crates/zeroship-authz/` crate compiles into all three. v8class bindings live in `crates/zeroship-authz-v8/`.
 
 ---
 
@@ -386,7 +386,7 @@ crates/zeroship-authz/
 │       └── condition_eval.rs   // each Condition variant against canned contexts
 ```
 
-`crates/plugin-authz/` (P12) provides the v8class binding into the Rust crate; it doesn't fork Cedar.
+`crates/zeroship-authz-v8/` (P12) provides the v8class binding into the Rust crate; it doesn't fork Cedar.
 
 The wrapper's surface contract (`crates/zeroship-authz/src/lib.rs`):
 
@@ -748,7 +748,7 @@ The `/device` page in `crates/zeroship-auth/src/ui/device.rs` (new in P9):
 4. CLI polls /oauth2/token; eventually gets access_token + refresh_token.
 ```
 
-The user_code → device_code mapping is hydra's responsibility; `crates/auth` only renders the form and forwards to hydra-admin on submit.
+The user_code → device_code mapping is hydra's responsibility; `crates/zeroship-auth` only renders the form and forwards to hydra-admin on submit.
 
 ### 12.3 Refresh-token rotation
 
@@ -894,7 +894,7 @@ This is purely UX — the authoritative validation happens at server-side mint v
 P12 needs Cedar inside V8 isolates. Options:
 
 1. **Cedar-WASM in V8.** Ships ~600 KB of WASM per isolate; per-isolate memory cost; cold-start hit.
-2. **Cedar-Rust via v8class.** Native Rust crate compiled into the worker binary; exposed to V8 via a `#[v8_class]` binding in `crates/plugin-authz/`. Zero per-isolate memory cost; warm Cedar in shared Rust memory.
+2. **Cedar-Rust via v8class.** Native Rust crate compiled into the worker binary; exposed to V8 via a `#[v8_class]` binding in `crates/zeroship-authz-v8/`. Zero per-isolate memory cost; warm Cedar in shared Rust memory.
 
 We pick (2). The `#[v8_class]` macro already powers `env.db.*`, `env.kv.*`, and `env.storage.*` — adding `env.authz` is the same pattern. The user-facing API:
 
@@ -1125,7 +1125,7 @@ MOD: crates/zeroship-cli/                              // zeroship login (device
 - `policies/platform/*.cedar` and `policies/creator/*.cedar` are parse-clean on build.
 - Audit rows land in `control.authz_decisions` for every `enforce()` call.
 
-**~Test count delta.** ~80 new tests (40 in `crates/authz`, 30 in `crates/control`, 10 in `crates/cli`).
+**~Test count delta.** ~80 new tests (40 in `crates/zeroship-authz`, 30 in `crates/zeroship-control`, 10 in `crates/zeroship-cli`).
 
 ### 17.2 P10 — wrapper SDK + policy editor UI + per-token audit
 
@@ -1151,7 +1151,7 @@ MOD: packages/control/src/tokens.ts                            // typed client f
 - A user who edits a PAT in the Cedar tab sees the matrix tab in read-only banner mode.
 - Per-token audit page renders last 100 decisions.
 
-**~Test count delta.** ~40 new tests (mostly Playwright on the dashboard; ~10 in `crates/control`).
+**~Test count delta.** ~40 new tests (mostly Playwright on the dashboard; ~10 in `crates/zeroship-control`).
 
 ### 17.3 P11 — orgs + Cedar analyzer + incident lock
 
@@ -1204,7 +1204,7 @@ NEW: docs/reference/permissions.md               // the @zeroship/permissions su
 - The v8class binding is allocation-free in the hot path (verified by isolate heap snapshot diff before/after 100K calls).
 
 **Tests.** Cover the package surface in `packages/permissions` and the native
-boundary in `crates/runtime` integration tests.
+boundary in `crates/zeroship-runtime` integration tests.
 
 ---
 
