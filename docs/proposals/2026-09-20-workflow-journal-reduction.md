@@ -81,7 +81,7 @@ anyone would choose:
                                              availability_epoch
 ```
 
-Every site where a race is frequent and obvious got a compare-and-set. `tasks.rs`'s lease claim
+Every site where a race is frequent and obvious got a compare-and-set. `crates/zeroship-workflow/src/service/tasks.rs`'s lease claim
 carries two guards - the CAS on the previous epoch and a `task_id` null requirement - on the
 write where contention is constant. Every site where a race is rare got a lock convention and a
 reasonable assumption instead.
@@ -93,9 +93,9 @@ a task. A lost epoch bump leaves a credential working that an operator was told 
 because redemption compares the stored epoch for equality and the bump that would have refused it
 was overwritten.
 
-Three of those conventions are stated in doc comments and one - `deploys.rs`'s
+Three of those conventions are stated in doc comments and one - `crates/zeroship-workflow/src/service/deploys.rs`'s
 `availability_epoch` - is stated nowhere, its serialisation established three modules above the
-write in `management.rs`. The documented ones are the visible half of the class. A survey that
+write in `crates/zeroship-workflow/src/service/management.rs`. The documented ones are the visible half of the class. A survey that
 started from the comments would have found three of four and reported that as the population;
 these were found by asking for a code SHAPE, a `checked_add` near a write.
 
@@ -249,7 +249,7 @@ started with, because the per-table pass refuted most of it.
 
 **A deletion that makes a property accidentally true of every survivor must pin that property
 in the same slice.** This is the mirror of the standard below, and the page tables are the worked
-example. `receipt_extension!` in `service/delivery.rs` lists four tables - `collection_pages`,
+example. `receipt_extension!` in `crates/zeroship-workflow/src/service/delivery.rs` lists four tables - `collection_pages`,
 `fanout_pages`, `propagation_pages`, `reconciliation_pages` - while `impl PageCursor` covers only
 `collection_pages` and `reconciliation_pages`. The distinction is real and load bearing: a page
 cursor stores a frozen plan and the index it reserves next, and the other two do not.
@@ -289,8 +289,8 @@ silently. A deletion lands with that evidence in its commit or it does not land.
 This is not caution for its own sake. Every claim on this list is of one class - a reading about
 where a property is bound - and that class was wrong three times in a single day, always in the
 same direction, always understating what is bound. The audit reported nothing binds the frozen
-scan plan; `tests/fanout/ordering.rs` turned out to bind the resume-at-a-different-page-size
-half; `collection/rollback.rs` turned out to bind part of the frozen plan itself. Each was found
+scan plan; `crates/zeroship-workflow/src/service/tests/fanout/ordering.rs` turned out to bind the resume-at-a-different-page-size
+half; `crates/zeroship-workflow/src/service/tests/payloads/collection/rollback.rs` turned out to bind part of the frozen plan itself. Each was found
 by looking, none by the previous reading.
 
 One refinement, or the standard fails open. A mutation that leaves the suite green does not
@@ -322,10 +322,10 @@ that the largest single deletion it claimed is gone.
 `outbox` is deletable for the opposite of the reason first given here. It is not the
 transactional outbox; `job_publications` and the three per-kind tables are. `outbox` is an
 application event log written by `emit` in `crates/zeroship-workflow/src/service/app.rs` and read
-by nothing, its `delivered_at` declared in `models/schema_definition.rs` and never written or
-read. Tests in `tests/management.rs` and `management/atomic_application.rs` use it as a rollback
+by nothing, its `delivered_at` declared in `crates/zeroship-workflow/src/service/models/schema_definition.rs` and never written or
+read. Tests in `crates/zeroship-workflow/src/service/tests/management.rs` and `crates/zeroship-workflow/src/service/tests/management/atomic_application.rs` use it as a rollback
 witness and need a different one. The confusion is in the code as well as in this document:
-`delivery.rs` and `runner/delivery.rs` both say "the creator outbox" in comments that are about
+`crates/zeroship-workflow/src/service/delivery.rs` and `crates/zeroship-workflow/src/service/runner/delivery.rs` both say "the creator outbox" in comments that are about
 the publication intents, so the name already refers to two different things.
 
 The per-kind tables go only under Open 3's second shape. Under the first they move rather than
@@ -349,8 +349,8 @@ it is also the only thing that would catch a lost update in `signals::subscribe`
 `propagations` answers a question no other table can. `propagation::fenced` treats every
 cascading child of a parent generation as cancelled while that generation's cascade obligation is
 unfinished, even though the child's own `control` column still reads `none`, and
-`service/tests/propagation/fence.rs` binds exactly that. It is read from `frontier.rs`,
-`delivery.rs::heartbeat_job`, `tasks.rs::heartbeat_inner` and `control/restart.rs`. Without the
+`crates/zeroship-workflow/src/service/tests/propagation/fence.rs` binds exactly that. It is read from `crates/zeroship-workflow/src/service/frontier.rs`,
+`delivery.rs::heartbeat_job`, `tasks.rs::heartbeat_inner` and `crates/zeroship-workflow/src/service/control/restart.rs`. Without the
 row, in the window between a parent settling and the cascade page arriving, a leased child keeps
 running and a child completing with `ContinueAsNew` starts a generation outside the cancellation.
 This proposal filed it under delivery, which is the error: it is a liveness boundary between a
@@ -360,7 +360,7 @@ cancelled parent and its running children, and atomicity says nothing about it.
 capability tokens, checked for equality at redemption so that a bump refuses every token already
 minted, and `broadcasts`, which this proposal keeps, has a foreign key into it.
 `completed_sequence` is the predecessor gate that holds a later broadcast unacknowledged until
-its predecessor finishes; `tests/fanout/ordering.rs` settles that it cannot be replaced by
+its predecessor finishes; `crates/zeroship-workflow/src/service/tests/fanout/ordering.rs` settles that it cannot be replaced by
 timestamps, backdating a broadcast's `created_at` and still requiring the earlier one first.
 
 The page tables hold a frozen list, not a position in a derivable one. `prepare_collection` and
@@ -479,14 +479,14 @@ and has no public production record. The techniques transfer. The architecture d
    It also surfaced three gaps that belong to the current code rather than to this proposal, and
    that anyone touching these tables should close first, stated with the boundary a mutation
    established rather than the one a reading claimed. The frozen item list IS partially bound
-   today, by exactly one test: `collection/rollback.rs`'s receipt-failure body, which retries an
+   today, by exactly one test: `crates/zeroship-workflow/src/service/tests/payloads/collection/rollback.rs`'s receipt-failure body, which retries an
    aborted page and requires it to complete. Neutralizing the stored plan so the retry re-derives
    it reddens that body on BOTH dialects, and a solo re-run reproduced it, so the binding is real
    and not a starved deadline. Under the same mutation every other collection neighbour passes.
    What rollback does NOT bind is a retry at a DIFFERENT `page_size`, because it retries at the
    size it started with, and no collection or reconciliation test does. Nor does any of them
    abort the reserve transaction itself rather than the finalization that follows it. Fan-out is the counterexample worth copying rather than a gap:
-   `tests/fanout/ordering.rs` delivers a page at size one, retries the unsettled page at a
+   `crates/zeroship-workflow/src/service/tests/fanout/ordering.rs` delivers a page at size one, retries the unsettled page at a
    larger size, and asserts both the identical receipt and an unchanged snapshot, so the larger
    page delivered nothing more. The same body also binds replay duplication by counting a
    subscriber's signal rows, and carries a foreign app asserted at zero as its cross-tenant
@@ -496,7 +496,7 @@ and has no public production record. The techniques transfer. The architecture d
    not apply because nothing references `subscriptions`. And `ingress::target_epoch` states in a
    comment that its callers hold the app lock through commit; all three do, but nothing in the
    signature enforces it, so a fourth caller would reintroduce the race the comment says cannot
-   happen. The same shape appears on `closed_epoch` in `app.rs` and `deliver` in `signals.rs`.
+   happen. The same shape appears on `closed_epoch` in `crates/zeroship-workflow/src/service/app.rs` and `deliver` in `crates/zeroship-workflow/src/service/signals.rs`.
 
 3. **Where does the identifying tuple live once the per-kind tables are gone?** The easy version
    was rejected first: the tuple cannot simply go, because the job id is minted and the tuple is
@@ -520,8 +520,8 @@ and has no public production record. The techniques transfer. The architecture d
    matter of choosing better fields to hash.
 
    Two tests name the property in their own assertion messages: "newer intent is outside the
-   captured upper boundary" in `tests/reconciliation.rs`, and "new publication must wait while
-   holds receive their turn" in `tests/reconciliation/deployment_holds.rs`.
+   captured upper boundary" in `crates/zeroship-workflow/src/service/tests/reconciliation.rs`, and "new publication must wait while
+   holds receive their turn" in `crates/zeroship-workflow/src/service/tests/reconciliation/deployment_holds.rs`.
 
    The evidence that this is the derived id and not the box: across two runs of the same binary
    at different loads, the FAILING SET MOVED - one dialect failed in the first run and passed in
@@ -602,7 +602,7 @@ to hold it.
 ## Do-not notes
 
 **Do not delete a table before naming where its invariant lands.** The delivery group is
-deduplication state that `publication.rs` says explicitly nothing may retire. Committing in one
+deduplication state that `crates/zeroship-workflow/src/service/publication.rs` says explicitly nothing may retire. Committing in one
 transaction replaces the reason it exists; it does not automatically replace every guarantee it
 provides. The advance intent is the worked example: it reads as a projection of the intent row,
 and it is the dedup key.
