@@ -48,8 +48,7 @@ async fn runtime_descriptor_is_read_from_its_content_addressed_blob() {
         .await
         .expect("stored descriptor resolves");
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(descriptor.descriptor.as_deref().unwrap())
-            .unwrap(),
+        crate::executable::primary_schema_json(descriptor.descriptor.as_deref()),
         serde_json::from_str::<serde_json::Value>(content).unwrap(),
     );
 }

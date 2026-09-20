@@ -1584,7 +1584,7 @@ mod tests {
                     };
                     let executable = crate::executable::load_executable(&manifest, &blobs).await.unwrap();
                     assert_eq!(executable.modules[0].specifier, "app/z-entry.js");
-                    assert_eq!(serde_json::from_str::<serde_json::Value>(executable.descriptor.as_deref().unwrap()).unwrap(), serde_json::from_str::<serde_json::Value>(descriptor).unwrap());
+                    assert_eq!(crate::executable::primary_schema_json(executable.descriptor.as_deref()), serde_json::from_str::<serde_json::Value>(descriptor).unwrap());
                     load_app(app_id.clone(), executable.modules, AppRuntimeLimits::default(),
                         AppNetPolicy::default(), Some(deployment), executable.descriptor.as_deref(),
                         &manifest, &EnvSnapshot::empty()).await.unwrap();
