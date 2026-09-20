@@ -8,8 +8,8 @@ pub mod wire;
 
 #[allow(unused_imports)] // consumed by the protection write pass
 pub use aad::canonical_aad;
-pub use aead::{AeadKey, decrypt, encrypt};
-pub use keys::{KeyStore, ProjectKeySource, SuppliedProjectKeys, derive_key};
+pub use aead::{decrypt, encrypt, AeadKey};
+pub use keys::{derive_key, KeyStore, ProjectKeySource, SuppliedProjectKeys};
 
 use crate::binding::DbBinding;
 use crate::error::DbError;

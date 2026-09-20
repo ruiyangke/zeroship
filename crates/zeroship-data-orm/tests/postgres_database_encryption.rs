@@ -371,14 +371,20 @@ async fn two_apps_bound_to_one_database_read_each_others_encrypted_rows() {
     let cluster = Cluster::build(postgres.url()).await;
 
     let writer = cluster
-        .open(Cluster::binding(APP_A, &cluster.shared, &cluster.a_on_shared))
+        .open(Cluster::binding(
+            APP_A,
+            &cluster.shared,
+            &cluster.a_on_shared,
+        ))
         .await;
     write_row(&writer).await;
 
     // CONTROL 1: the writer reads back its own row, so the write path stored
     // something this stack can recover.
     assert_eq!(
-        read_column(&writer).await.expect("the writer reads its row"),
+        read_column(&writer)
+            .await
+            .expect("the writer reads its row"),
         PLAINTEXT
     );
 
@@ -391,12 +397,7 @@ async fn two_apps_bound_to_one_database_read_each_others_encrypted_rows() {
         "the column must hold ciphertext"
     );
     let foreign = AeadKey { k_enc: [0x5a; 32] };
-    let aad = encryption::canonical_aad(
-        &cluster.shared,
-        COLLECTION,
-        COLUMN,
-        ROW_PK.as_bytes(),
-    );
+    let aad = encryption::canonical_aad(&cluster.shared, COLLECTION, COLUMN, ROW_PK.as_bytes());
     assert!(
         encryption::decrypt(&foreign, &stored, &aad).is_err(),
         "the stored bytes must be authenticated under the derived key, not any key"
@@ -405,7 +406,11 @@ async fn two_apps_bound_to_one_database_read_each_others_encrypted_rows() {
     // THE SUBJECT, differing in one variable: a different tenant, its own
     // binding, the same database.
     let reader = cluster
-        .open(Cluster::binding(APP_B, &cluster.shared, &cluster.b_on_shared))
+        .open(Cluster::binding(
+            APP_B,
+            &cluster.shared,
+            &cluster.b_on_shared,
+        ))
         .await;
     assert_eq!(
         read_column(&reader)
@@ -450,7 +455,11 @@ async fn a_ciphertext_lifted_into_another_database_does_not_verify() {
     let cluster = Cluster::build(postgres.url()).await;
 
     let here = cluster
-        .open(Cluster::binding(APP_A, &cluster.shared, &cluster.a_on_shared))
+        .open(Cluster::binding(
+            APP_A,
+            &cluster.shared,
+            &cluster.a_on_shared,
+        ))
         .await;
     write_row(&here).await;
     let lifted = cluster.stored_ciphertext(&cluster.shared).await;

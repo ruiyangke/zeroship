@@ -441,7 +441,11 @@ async fn fetch_and_decrypt(
         };
         // Key sourcing and AEAD are vendor-neutral; only the read above was
         // not, and it now dispatches inside `crate::backend_handle`.
-        let key = route.backend().key_store().resolve(app_id, database).await?;
+        let key = route
+            .backend()
+            .key_store()
+            .resolve(app_id, database)
+            .await?;
         let plaintext_bytes =
             zeroize::Zeroizing::new(crate::encryption::aead::decrypt(&key, &bytes, &aad)?);
         enc_meta.decode(&plaintext_bytes)

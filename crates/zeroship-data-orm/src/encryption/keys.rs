@@ -23,7 +23,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 use zeroize::Zeroizing;
-use zeroship_core::{DatabaseId, database_derivation};
+use zeroship_core::{database_derivation, DatabaseId};
 
 /// HKDF `info` for the at-rest column key, separating it from any other
 /// expansion of the same project root.
@@ -244,11 +244,7 @@ impl KeyStore {
     /// [`DbError::Configuration`] when the host supplied no project root key
     /// for this app.
     #[allow(clippy::unused_async)]
-    pub async fn resolve(
-        &self,
-        app_id: &str,
-        database: &DatabaseId,
-    ) -> Result<AeadKey, DbError> {
+    pub async fn resolve(&self, app_id: &str, database: &DatabaseId) -> Result<AeadKey, DbError> {
         self.lookups.set(self.lookups.get() + 1);
         Ok(derive_key(&self.source.0.lookup(app_id)?, database))
     }
