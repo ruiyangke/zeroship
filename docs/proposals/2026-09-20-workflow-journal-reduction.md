@@ -391,15 +391,50 @@ and has no public production record. The techniques transfer. The architecture d
    signature enforces it, so a fourth caller would reintroduce the race the comment says cannot
    happen. The same shape appears on `closed_epoch` in `app.rs` and `deliver` in `signals.rs`.
 
-3. **Where does the identifying tuple live once the per-kind tables are gone?** Answered far
-   enough to reject the easy version: it cannot simply go, because the job id is minted and the
-   tuple is the only identity a publishable job has. Two shapes remain open. Constrain the queue
-   row on the same columns, which keeps the constraint and moves it. Or derive the job id from
-   `(kind, entity, revision, available_at)` so the primary key carries the identity and
-   select-then-insert becomes an insert that collides. The second is what lets the per-kind tables
-   go rather than move, and it is the one to cost out. `available_at` is part of the tuple today,
-   so a derived id has to include it, and rescheduling a frontier to a new due time has to keep
-   producing a new job.
+3. **Where does the identifying tuple live once the per-kind tables are gone?** The easy version
+   was rejected first: the tuple cannot simply go, because the job id is minted and the tuple is
+   the only identity a publishable job has. That left two shapes - constrain the queue row on the
+   same columns, or derive the job id so the primary key carries the identity and
+   select-then-insert becomes an insert that collides. The second was the attractive one, because
+   it lets the per-kind tables GO rather than move.
+
+   **It was built, and it is refuted. A derived id costs a property nothing else provides.**
+
+   The reconciliation sweep's publications phase captures an upper boundary as the greatest
+   pending intent id, pages `after < id <= upper`, and rotates to the deployment-holds phase only
+   when the page reports no more. That the boundary holds is CONSTRUCTED, not probabilistic:
+   every intent writer and the capture take the same `app_state` row lock, so "recorded after
+   capture" implies "minted after capture", and a minted `JobId` is a UUIDv7, so that implies
+   "greater id". An intent written after the capture therefore sorts outside the window by
+   construction, and the phase is guaranteed its turn.
+
+   A derived id is a pure function of the work a job names. The work does not know when its row
+   was recorded. **So no derived-id design can be ordered by recording time**, and this is not a
+   matter of choosing better fields to hash.
+
+   Two tests name the property in their own assertion messages: "newer intent is outside the
+   captured upper boundary" in `tests/reconciliation.rs`, and "new publication must wait while
+   holds receive their turn" in `tests/reconciliation/deployment_holds.rs`.
+
+   The evidence that this is the derived id and not the box: across two runs of the same binary
+   at different loads, the FAILING SET MOVED - one dialect failed in the first run and passed in
+   the second while another failed in both. Load does not do that. It is the signature of a
+   nondeterministic ordering dependency, which is exactly what a hash-ordered id introduces where
+   a time-ordered one used to be.
+
+   The cost is fairness rather than termination. A cycle still ends, because the window only
+   shrinks; what is lost is the guarantee that the phase releasing deployments gets its turn
+   promptly, and the bound becomes probabilistic where it was structural.
+
+   **What would restore it**, and the size of it is the reason this is still open rather than
+   decided: a monotone per-app sequence on `job_publications`, allocated under the app lock, with
+   the publications phase cursoring on that instead of on the id. That needs the column, an
+   allocator on `app_state`, a numeric encoding for the shared `reconciliation_after_id` and
+   `reconciliation_upper_id` TEXT columns - the holds phase stores a `deploy_id` in them and
+   `Plan::validate` compares them as strings - and an audit that every intent writer genuinely
+   holds the app lock, which `advance`'s doc comment asserts and nothing enforces. That last item
+   is the same shape as `ingress::target_epoch`: a lock convention stated in prose, true today,
+   unenforced by any signature.
 
 ---
 
