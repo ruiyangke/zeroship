@@ -1405,6 +1405,15 @@ async fn host_app_reads_are_narrowed_to_the_callers_execution_zone() {
             .await
             .expect("remove the fixture app");
     }
+    // The PROJECTS go next. `apps_project_zone_fkey` requires an app's zone to
+    // equal its project's, so a fixture app in this zone has a project in it
+    // too, and `projects.execution_zone_id` references the zone under RESTRICT.
+    pg.execute(
+        "DELETE FROM zeroship.projects WHERE execution_zone_id = $1",
+        &[&away_zone],
+    )
+    .await
+    .expect("remove the fixture projects in the second zone");
     pg.execute(
         "DELETE FROM zeroship.execution_zones WHERE id = $1",
         &[&away_zone],
