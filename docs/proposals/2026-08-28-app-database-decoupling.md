@@ -2097,11 +2097,14 @@ connection given platform authority WORKS and silently stops narrowing.
 
 So the fix is bound from three sides:
 
-    tests/postgres/provisioning.rs   the function: a platform binding composes
+    crates/zeroship-data-orm/src/tests/postgres/provisioning.rs
+                                     the function: a platform binding composes
                                      no role statement, an app binding does
-    pg_session_sql.rs                the authority: PerBindingRole emits
+    crates/zeroship-data-orm/src/backend/postgres/pg_session_sql.rs
+                                     the authority: PerBindingRole emits
                                      SET LOCAL ROLE, Connection must not
-    connection/tests.rs              the constructors: built from one URL they
+    crates/zeroship-data-orm/src/connection/tests.rs
+                                     the constructors: built from one URL they
                                      must remain distinguishable
 
 The third is the one that matters longest. It converts "did each of 45 sites
