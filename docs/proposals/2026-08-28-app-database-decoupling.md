@@ -107,10 +107,9 @@ Built:
   the crypto boundary, because the key and the AAD both move with the database and a single
   `encryption_aead_failed` cannot say which fence caught it.
 
-Not built: the migration service's own app-id-to-database re-key, and capacity-aware placement. No
-apply advances an epoch. Open 11's subset test at isolate build does
-not exist, so a build reaching a column the database lacks fails at query time with
-`42703 undefined_column`.
+Not built: capacity-aware placement. No apply advances an epoch. Open 11's subset test at
+isolate build does not exist, so a build reaching a column the database lacks fails at query
+time with `42703 undefined_column`.
 - the migration service's re-key onto the database. The apply route is
   `POST /v1/apps/{app_id}/databases/{database_id}/migrations/apply`: the DATABASE is the target
   and the APP is the authorization subject, and both are in the path because the CLI posts the
@@ -143,7 +142,7 @@ not exist, so a build reaching a column the database lacks fails at query time w
   would drop every co-tenant's tables with no error anywhere. The relay reads the same shared
   name; its slot stays per app through `replication_names::relay_slot_name`.
 
-Not built: the encryption salt and AAD, and capacity-aware placement. No apply advances an epoch.
+Not built: capacity-aware placement. No apply advances an epoch.
 Open 11's subset test at isolate build does not exist, so a build reaching a column the database
 lacks fails at query time with `42703 undefined_column`.
 
