@@ -71,6 +71,41 @@ the creator calls are carried across than to discover afterwards that one row is
 ceiling for a platform. The relocation proposal is currently silent on it, which is a decision by
 default rather than by choice.
 
+**Correctness correlates with perceived contention, not with importance.** A survey of every
+read-modify-write in the service found the journal's writes split cleanly, and not along the axis
+anyone would choose:
+
+```
+  enforced by a database compare-and-set     task lease claim, scan cursors, signal_sequence
+  relying on the app lock convention alone   subscription_sequence, the signal_epoch bumps,
+                                             availability_epoch
+```
+
+Every site where a race is frequent and obvious got a compare-and-set. `tasks.rs`'s lease claim
+carries two guards - the CAS on the previous epoch and a `task_id` null requirement - on the
+write where contention is constant. Every site where a race is rare got a lock convention and a
+reasonable assumption instead.
+
+So the AUTHORIZATION FENCES are the least protected writes in the journal, precisely because
+nobody expects two revocations at once. That is not a criticism of any author: each judged
+likelihood correctly and locally. But likelihood is the wrong axis. A lost task claim redelivers
+a task. A lost epoch bump leaves a credential working that an operator was told is revoked,
+because redemption compares the stored epoch for equality and the bump that would have refused it
+was overwritten.
+
+Three of those conventions are stated in doc comments and one - `deploys.rs`'s
+`availability_epoch` - is stated nowhere, its serialisation established three modules above the
+write in `management.rs`. The documented ones are the visible half of the class. A survey that
+started from the comments would have found three of four and reported that as the population;
+these were found by asking for a code SHAPE, a `checked_add` near a write.
+
+**Why this bears on the relocation rather than being a maintenance note.** The move puts this
+journal behind a service boundary, and Plan step 4 carries three calls across it. "The caller
+holds the app lock" is checkable today by reading one crate. It stops being checkable when the
+caller is in another process. Whether the service enforces these writes with the database, with a
+guard type, or by continuing to trust a convention is a decision the relocation has to make, and
+silence makes it by default at the moment the boundary moves.
+
 **Lease validity has two representations and they are not kept apart.** The durable form is
 already right: `__zeroship_workflow_tasks.deadline` is an absolute integer, as are the manager's
 `assignments.expires_at` and `workers.expires_at`, and `Clock::sample` in
