@@ -275,7 +275,17 @@ ignores the retrying attempt's `page_size`. It has to work that way: processing 
 it from the query that would re-derive the list, since a purged payload leaves the state filter,
 a deleted one has its `expires_at` pushed past the frozen cutoff, a confirmed publication leaves
 the unconfirmed filter and a settled hold leaves `acquiring`/`releasing`. So an index into a
-re-derived list addresses the wrong item and the sweep skips the ones in between. Their semantics
+re-derived list addresses the wrong item.
+
+Today that misalignment is caught rather than acted on, and the catch is itself made of the thing
+this section is about. `next_collection_item` compares the plan `prepare_collection` returned
+against the stored one, `if plan != *expected { return Err(invalid()) }`, and then selects by
+`plan.ids.get(next)` from the STORED plan. A mutation that re-derives on retry therefore produces
+a loud refusal, not a silent skip - measured, both dialects, not inferred. But the comparison is
+only possible because a frozen list exists to compare against. Delete the row and there is no
+`*expected`: the same drift that refuses today becomes an index into a shorter list, and the
+sweep passes over the items in between without an error. The reduction would remove the detector
+in the same change as the thing it detects. Their semantics
 is at most once per item per page, from `delivery::reserve`'s compare-and-set committed before
 the item's I/O; replacing the row with a cursor over item identity turns that into at least once.
 `reconciliation_pages` also holds the captured upper boundary of a sweep's first page, which
