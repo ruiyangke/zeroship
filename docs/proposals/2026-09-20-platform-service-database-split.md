@@ -208,21 +208,53 @@ one that had nothing to reach.
 the shape `database_bindings` already uses for convergence.
 
 **2. The authorization ladder join spans auth and control.**
-`crates/zeroship-authz/src/authority.rs` joins `users` to
-`organization_members` and `organization_roles` in one statement, and
-`zeroship-authz` is linked into auth, gateway, control and migrate-server.
+`crates/zeroship-authz/src/authority.rs` joins `users` to control's membership,
+role and project tables in one statement, and `zeroship-authz` is linked into
+auth, gateway, control and migrate-server.
 
 *Measured: per decision, uncached.* `authority::resolve` has exactly one
 production caller, `enforce` in `crates/zeroship-authz/src/eval.rs`, reached
 from `crates/zeroship-control/src/authz_guard.rs`. The only cache in the crate
-is `RevocationCache` in `wrapper_revocation.rs`, which caches revocations and
-not authority.
+is `RevocationCache` in `crates/zeroship-authz/src/wrapper_revocation.rs`,
+which caches revocations and not authority.
 
 **So the auth/control cut needs a `users` PROJECTION in control's database, not
 an API call.** A network round trip per authorization decision, in four
-services, is not viable on that path. The projection needs its own freshness
-and invalidation story, which makes this cut a distributed-systems problem
-rather than a refactor - and it is the reason the sequencing puts it last.
+services, is not viable on that path. The query bounds what that projection may
+be, in ways that are read off it rather than chosen.
+
+*It carries `id`, `email_verified_at` and `locked_until`, and nothing else.*
+`resolve` reaches `users` through a single constant in
+`crates/zeroship-authz/src/authority.rs`:
+
+    const USER_ATTRS: &str = "u.email_verified_at IS NOT NULL AS email_verified, \
+         (u.locked_until IS NOT NULL AND u.locked_until > NOW()) AS account_locked";
+
+Every other table those statements name - `organization_members`,
+`organization_roles`, `projects`, `project_members`, `apps`, `databases` - is
+one this document assigns to control, so they do not cross the cut at all. The
+ladder join looks like a wide cross-service query and is a narrow one.
+
+*It must carry `locked_until` raw, never the derived boolean.* `account_locked`
+is computed against `NOW()`. A materialised copy of it is correct at the instant
+it is written and silently wrong afterwards, and it goes stale with no write to
+replicate - there is no invalidation signal to miss, because nothing happened.
+Control has to hold the timestamp and evaluate the comparison itself.
+
+*Lag on it is a security window, not a latency budget.* The crate states the
+property it buys by not caching. `crates/zeroship-authz/src/authority.rs`: "its
+result is never stored: a membership row removed by a committed transaction is
+invisible to the very next request in every process, with no invalidation signal
+to build, publish or miss". And `crates/zeroship-authz/src/lib.rs` points at it:
+"Nothing is cached: see [`authority`] for why the cache that used to sit here
+was deleted rather than fixed." The cache was not an oversight that a projection
+now gets to repeat - it was removed on purpose to buy this. A lagging projection
+reinstates exactly what was deleted to get that guarantee, and on `locked_until`
+the consequence is concrete: an account locked in auth keeps authorising in
+control for the length of the lag.
+
+That makes this cut a distributed-systems problem rather than a refactor, and it
+is why the sequencing puts it last - with the caveat recorded there.
 
 **3. Auth takes a row lock on control's `organizations` while deleting `users`.**
 `refuse_if_it_strands_an_organization` holds `SELECT ... FOR UPDATE` on a
@@ -272,8 +304,8 @@ breath as the work it authorises.
 
 **1. Worker.** Already free: no platform SQL, and a boot gate that refuses
 platform-schema reach. The change is a separate database, a role with no grant
-on it, and extending `db_posture.rs` to check database identity rather than
-schema reachability.
+on it, and extending `crates/zeroship-worker/src/db_posture.rs` to check
+database identity rather than schema reachability.
 
 **2. CDC relay.** One narrow read - `worker_instances.public_key` - and an
 in-memory replay store already. It becomes a control API call.
@@ -289,9 +321,19 @@ projections of control tables.
 **5. migrate-server.** Needs a role of its own first - it currently logs in with
 control's credential, and there is no `zeroship_migrate` role in the corpus.
 
-**6. auth ∥ control.** Last, and the only one that requires solving erasure, the
-authorization join and the cross-service CTEs. Nothing above it is blocked by
-it.
+**6. auth and control together.** Last, and the only one that requires
+solving erasure, the authorization join and the cross-service CTEs. Nothing
+above it is blocked by it.
+
+*Ordering alone may not be enough for it.* "Last" is the right position, but
+position is not the mechanism. If the `users` projection cannot be made
+synchronous with the lock write, an asynchronous copy is a live authorization
+gap for the length of the lag no matter when the cut is taken - deferring it
+changes the date, not the property. Closing it needs a choice this document does
+not yet make: a lock write that reaches control before it commits, or control
+reading `locked_until` from auth on the authorization path, which is the round
+trip claim 2 ruled out on cost. This is the one place where the split is not yet
+shown to be buildable as specified.
 
 ---
 
@@ -333,8 +375,13 @@ and it was the wrong measure.
 
 ## Open
 
-1. **ANSWERED: the authorization ladder join is per-decision and uncached.** It
-   requires a `users` projection in control, not an API call - see claim 2.
+1. **ANSWERED: the authorization ladder join is per-decision and uncached, and
+   it crosses on `users` alone.** It requires a projection in control carrying
+   `id`, `email_verified_at` and `locked_until`, not an API call - see claim 2.
+   **Still open, and the only unresolved blocker in this document: can that
+   projection be made synchronous with the lock write?** If it cannot, the
+   authorization gap is a property of the cut rather than of its timing, and
+   step 6 of the sequencing states the two mechanisms that could close it.
 2. **One audit store or one per service?** `audit_events` has three writers and
    no reader.
 3. **Does `service_assertion_replay` stay shared?** The argument for sharing is
