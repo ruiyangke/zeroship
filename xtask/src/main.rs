@@ -138,7 +138,23 @@ fn main() -> ExitCode {
                 "repository_architecture",
             ]),
             "repository architecture",
-        ),
+        )
+        // This area owns repository-wide invariants, so the harness's own unit
+        // tests belong to it. `xtask` declares a separate workspace, which puts
+        // it outside every `--workspace` command run from the root, and its
+        // binary target is reached by no other area.
+        .and_then(|()| {
+            checked(
+                cargo().args([
+                    "test",
+                    "--manifest-path",
+                    "xtask/Cargo.toml",
+                    "--bin",
+                    "xtask",
+                ]),
+                "harness unit tests",
+            )
+        }),
         Task::Test {
             suite: Suite::Workflow,
         } => workflow::run(),
