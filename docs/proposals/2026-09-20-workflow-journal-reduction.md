@@ -734,7 +734,7 @@ amount of reading either schema alone would surface this. It appears only when t
 compared under the name the relocation will give them - which is an argument for doing this
 comparison for every pair before step 1 rather than discovering the overlaps one at a time after.
 
-## The reduction is bilateral, and this document has been looking at one side
+## The duplication is bilateral, and this document had been looking at one side
 
 `deployment_holds` is named on both sides too, and comparing them changes what this proposal is
 about. The overlap is near-total - `id`, `app_id`, the deploy identifier, `deploy_hash`,
@@ -761,11 +761,15 @@ effect. `journal_state` exists in the manager because a release is deferred and 
 executed later, which a later section establishes by reading what enforces it. Both sides keep
 state about the other, and this proposal had only counted one.
 
-**So the thesis is broader than the title.** "Most of what the journal carries exists to solve a
-problem the move deletes" is true and incomplete - state in `workflow_manager` exists for the
-same problem and the same move deletes it. A reduction that only empties the journal leaves the
-manager holding a ledger about a boundary that is gone, which is the shape of leftover machinery
-that outlives its reason and gets maintained by people who assume it was load bearing.
+**So the move is not symmetric, which is a different claim from the one first made here.**
+"Most of what the journal carries exists to solve a problem the move deletes" is true. The
+tempting next step - that state in `workflow_manager` exists for the same problem and goes the
+same way - is not. A later section reads what enforces the manager's half and finds a grace
+period and a settled-reply attribution, neither of which the move touches.
+
+What the duplication does establish is that the two schemas hold the same concepts twice and
+that each side records state about the other. That is worth knowing when the two installs meet.
+It is not, by itself, an argument that either side shrinks.
 
 **What this does NOT license.** Nothing here says those columns are removable today, and the
 release path presumably has ordering requirements that survive the move in some form. The claim
@@ -993,9 +997,9 @@ The bilateral section above first attributed the manager's `journal_state`,
 `journal_job_id` and `journal_published_at` to the database boundary - the
 mirror image of the journal's own outbox - and told whoever takes step 6 to read
 `crates/zeroship-workflow-manager/src/retention.rs` before assuming that ledger
-still earns its place. That reading was done. The attribution was wrong, the
-sentence that carried it has been corrected where it was made, and this section
-records what replaced it.
+still earns its place. That reading was done. The attribution was wrong; both
+the sentence and the conclusion it supported have been corrected where they were
+made, and this section records what replaced them.
 
 **The deferral is time-based, not database-based.** In `maintain_journal`, the
 `JOURNAL_PENDING` arm does not publish a release because the journal is
