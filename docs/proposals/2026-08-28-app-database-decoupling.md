@@ -2,10 +2,12 @@
 
 **Status.** PARTLY BUILT, on `feat/app-database-decoupling`. What exists is the identity, the
 entities, the control-plane surface that declares them, the cluster reconciler that makes a
-cluster match, the data path that narrows to what the reconciler granted, and the creator config
-and manifest made plural. What remains is `env.databases` in the V8 surface, the deploy-time
-binding verification, the migration service's own re-key, the CDC routing key and the encryption
-salt.
+cluster match, the data path that narrows to what the reconciler granted, the creator config and
+manifest made plural, `env.databases` reaching every bound database, and deploy verifying a live
+binding rather than comparing schemas. What remains is the `Env.databases` TypeScript
+declaration, the `zeroship db` commands, the migration service's own app-id re-key, the subscribe
+request naming a database, the encryption salt and AAD, capacity-aware placement, and an apply
+advancing an epoch.
 
 Built:
 
