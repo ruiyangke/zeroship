@@ -103,3 +103,23 @@ fn an_app_with_no_running_host_is_never_ready() {
     let apps = ReadyApps::default();
     assert!(!apps.is_ready(&AppId::mint()));
 }
+
+/// A creator app's journal lives in a schema named after the app, not in one of
+/// the databases the app is bound to.
+///
+/// `app_schema` builds the binding that `workflow_creator` later reads the
+/// journal schema back out of, so this is where a creator's runs are written.
+/// Nothing on that path consults `SuppliedAppBindings`, which is why an app
+/// holding several databases does not split its journal across them.
+///
+/// If this fails because `app_derivation::schema_name` now returns a database
+/// schema, that change MOVES THE JOURNAL. Rows already written stay in the old
+/// schema, which nothing points at afterwards - not deleted, not read, and not
+/// named by any other test. Decide where the journal belongs before re-keying
+/// the derivation rather than discovering it here.
+#[test]
+fn the_journal_schema_is_derived_from_the_app_not_from_a_database_binding() {
+    let app = AppId::mint();
+    let schema = app_schema(&app).expect("app schema");
+    assert_eq!(schema.as_str(), app.as_str());
+}
