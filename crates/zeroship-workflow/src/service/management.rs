@@ -6,7 +6,7 @@
 )]
 
 use super::{
-    app::lock_app_state,
+    app::{lock_app_state, AppStateLock},
     delivery::{self, CapturedLease, JobReceipt},
     store::Transaction,
     AppWorkflows,
@@ -125,7 +125,7 @@ impl AppWorkflows {
         target: &target::Verified,
     ) -> Result<JobReceipt, WorkflowServiceError> {
         let mut tx = self.service.begin().await?;
-        lock_app_state(&mut tx, self.app_id()).await?;
+        let lock = lock_app_state(&mut tx, self.app_id()).await?;
         let state = history::inspect(&tx, command).await?;
         if let history::Observed::Replay(receipt) = state {
             tx.commit().await?;
@@ -135,7 +135,8 @@ impl AppWorkflows {
         state.require_next(command.revision)?;
         tx.capture_mutation(self.app_id())?;
         let now = tx.now().await?;
-        let outcome = application::latest(self, &mut tx, command, target, authority, now).await?;
+        let outcome =
+            application::latest(self, &mut tx, lock, command, target, authority, now).await?;
         let receipt = history::finish(&tx, command, outcome, now).await?;
         authority.check(self)?;
         tx.commit().await?;

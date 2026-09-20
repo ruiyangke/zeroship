@@ -26,7 +26,7 @@ async fn window_contract(store: Rc<OrmStore>) {
         .await
         .unwrap();
     let mut tx = service.begin().await.unwrap();
-    let policy = app::lock_app(&mut tx, &app_id).await.unwrap();
+    let (_, policy) = app::lock_app(&mut tx, &app_id).await.unwrap();
     let run = app::lock_run(&mut tx, &app_id, &started.id).await.unwrap();
     let now = tx.now().await.unwrap();
     let age = 100;
@@ -135,7 +135,7 @@ async fn forged_consumption_contract(store: Rc<OrmStore>) {
         .await
         .unwrap();
     let mut tx = service.begin().await.unwrap();
-    let policy = app::lock_app(&mut tx, &app_id).await.unwrap();
+    let (_, policy) = app::lock_app(&mut tx, &app_id).await.unwrap();
     let run = app::lock_run(&mut tx, &app_id, &started.id).await.unwrap();
     let now = tx.now().await.unwrap();
     let delivered = signals::deliver(

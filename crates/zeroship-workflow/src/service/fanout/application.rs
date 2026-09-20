@@ -1,5 +1,5 @@
 use super::{
-    broadcast, changed, delivery, encode, history, increment, invalid, models, publication,
+    broadcast, changed_once, delivery, encode, history, increment, invalid, models, publication,
     recipients, signals, topic_record, AppId, Broadcast, FanoutOptions, JobOperation, JobOutcome,
     JobReceipt, JobSpec, Page, PageResult, Pending, TopicRecord, Transaction, WorkflowServiceError,
 };
@@ -88,7 +88,7 @@ async fn persist(
         return Err(invalid());
     };
     let next = increment(revision.get(), "workflow fanout revision exhausted")?;
-    changed(
+    changed_once(
         tx.database()
             .entity::<models::broadcasts::Entity>()?
             .update_many(
@@ -101,10 +101,10 @@ async fn persist(
                     .and(models::broadcasts::finished.set(i64::from(result.finished))?)?
                     .and(models::broadcasts::revision.set(next)?)?,
             )
-            .await?,
+            .await?, invalid
     )?;
     if result.finished {
-        changed(
+        changed_once(
             tx.database()
                 .entity::<models::topics::Entity>()?
                 .update_many(
@@ -113,7 +113,7 @@ async fn persist(
                         .and(models::topics::completed_sequence.eq(topic.completed_sequence)?),
                     models::topics::completed_sequence.set(broadcast.sequence)?,
                 )
-                .await?,
+                .await?, invalid
         )?;
     } else {
         result.successors.push(

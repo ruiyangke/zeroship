@@ -1,5 +1,6 @@
 use super::{
-    changed, increment, invalid, models, one, AppId, Broadcast, Transaction, WorkflowServiceError,
+    changed_once, increment, invalid, models, one, AppId, Broadcast, Transaction,
+    WorkflowServiceError,
 };
 use zeroship_data_orm::orm::{FromRow, Insertable};
 
@@ -15,7 +16,7 @@ pub(in crate::service) async fn allocate(
 ) -> Result<i64, WorkflowServiceError> {
     let current = counter(tx, app).await?;
     let next = increment(current, "workflow signal delivery sequence exhausted")?;
-    changed(
+    changed_once(
         tx.database()
             .entity::<models::app_state::Entity>()?
             .update_many(
@@ -24,7 +25,7 @@ pub(in crate::service) async fn allocate(
                     .and(models::app_state::signal_sequence.eq(current)?),
                 models::app_state::signal_sequence.set(next)?,
             )
-            .await?,
+            .await?, invalid
     )?;
     Ok(next)
 }

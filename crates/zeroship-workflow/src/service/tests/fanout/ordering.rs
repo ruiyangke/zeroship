@@ -177,7 +177,7 @@ async fn direct_signal_order(service: &WorkflowService, scope: &AppWorkflows, ap
         .await
         .unwrap();
     let mut tx = service.begin().await.unwrap();
-    let policy = crate::service::app::lock_app(&mut tx, app).await.unwrap();
+    let (_, policy) = crate::service::app::lock_app(&mut tx, app).await.unwrap();
     let row = crate::service::app::lock_run(&mut tx, app, &run.id)
         .await
         .unwrap();

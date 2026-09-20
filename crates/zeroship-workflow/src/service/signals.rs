@@ -3,6 +3,7 @@ use super::{
         emit, encode, lock_app_state, lock_run, parse_state, request_result, require_open_epoch,
         store_request,
     },
+    fence::changed_once,
     models,
     policy::CapturedPolicy,
     store::Transaction,
@@ -193,21 +194,25 @@ pub(crate) async fn subscribe(
         return Ok(());
     };
     validate_topic(topic)?;
-    let sequence = subscription_sequence(tx, app)
-        .await?
-        .checked_add(1)
-        .ok_or_else(|| {
-            WorkflowServiceError::ResourceExhausted(
-                "workflow subscription sequence exhausted".into(),
+    let current = subscription_sequence(tx, app).await?;
+    let sequence = current.checked_add(1).ok_or_else(|| {
+        WorkflowServiceError::ResourceExhausted("workflow subscription sequence exhausted".into())
+    })?;
+    // Naming the sequence this read observed is what makes the allocation safe:
+    // a concurrent subscriber moved it, so this update matches no row and the
+    // attempt is refused instead of handing two subscriptions one sequence.
+    changed_once(
+        tx.database()
+            .entity::<models::app_state::Entity>()?
+            .update_many(
+                models::app_state::app_id
+                    .eq(app.as_str())?
+                    .and(models::app_state::subscription_sequence.eq(current)?),
+                models::app_state::subscription_sequence.set(sequence)?,
             )
-        })?;
-    tx.database()
-        .collection(models::app_state::Entity::COLLECTION)?
-        .update(
-            value!({"app_id":app.as_str()}),
-            value!({"subscription_sequence":sequence}),
-        )
-        .await?;
+            .await?,
+        invalid,
+    )?;
     tx.database().collection(models::subscriptions::Entity::COLLECTION)?.insert(value!({
         "app_id":app.as_str(), "run_id":run_id, "generation":generation, "ordinal":i64::from(step.ordinal),
         "id":typed_id::new_workflow_subscription_id(), "topic":topic.as_str(), "created_at":now, "sequence":sequence,
@@ -256,4 +261,8 @@ async fn subscription_sequence(tx: &Transaction, app: &AppId) -> Result<i64, Wor
         .next()
         .ok_or_else(|| WorkflowServiceError::Internal("workflow app state is missing".into()))?
         .subscription_sequence)
+}
+
+fn invalid() -> WorkflowServiceError {
+    WorkflowServiceError::Internal("invalid workflow subscription journal".into())
 }

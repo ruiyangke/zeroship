@@ -1,5 +1,5 @@
 use super::{
-    conflict, AppWorkflows, CapturedLease, Command, ManagementCommand, Transaction,
+    conflict, AppStateLock, AppWorkflows, CapturedLease, Command, ManagementCommand, Transaction,
     WorkflowServiceError,
 };
 use crate::{
@@ -56,20 +56,20 @@ impl Verified {
 
     pub(super) async fn install(
         &self,
-        app: &AppWorkflows,
         tx: &Transaction,
+        lock: AppStateLock<'_>,
         command: Command<'_>,
         now: i64,
     ) -> Result<(), WorkflowServiceError> {
         let ManagementCommand::RestartLatest { deployment_id } = command.operation else {
             return Err(conflict());
         };
-        if deployment_id.as_str() != self.registration.id || self.scope.app() != app.app_id() {
+        if deployment_id.as_str() != self.registration.id || self.scope.app() != lock.app() {
             return Err(conflict());
         }
         if admission_generation(
             tx,
-            app.app_id(),
+            lock.app(),
             &self.registration.id,
             &self.registration.hash,
             &self.scope,
@@ -79,6 +79,6 @@ impl Verified {
         {
             return Err(conflict());
         }
-        deploys::record_verified(tx, app.app_id(), &self.registration, now).await
+        deploys::record_verified(tx, lock, &self.registration, now).await
     }
 }

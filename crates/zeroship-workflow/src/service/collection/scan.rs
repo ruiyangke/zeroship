@@ -1,4 +1,5 @@
 use super::{invalid, CollectionOptions, Transaction, WorkflowServiceError};
+use crate::service::fence::changed_once;
 use crate::service::models::{app_state, collection_pages, payloads};
 use serde::{Deserialize, Serialize};
 use zeroship_core::app_id::AppId;
@@ -129,7 +130,7 @@ pub(super) async fn initialize(
             .into_iter()
             .next();
         scan.collection_observed_at = Some(now);
-        super::changed_once(
+        changed_once(
             tx.database()
                 .entity::<app_state::Entity>()?
                 .update_many(
@@ -140,7 +141,7 @@ pub(super) async fn initialize(
                         .set(scan.collection_upper_id.as_deref())?
                         .and(app_state::collection_observed_at.set(Some(now))?)?,
                 )
-                .await?,
+                .await?, invalid
         )?;
     }
     scan.validate(app)?;

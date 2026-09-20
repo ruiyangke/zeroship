@@ -66,7 +66,7 @@ async fn postgres_a_parent_at_the_child_depth_ceiling_starts_no_further_child() 
 async fn dependency_contract(store: Rc<OrmStore>) {
     let (service, local, foreign, _deployments) = registered_service(store).await;
     let mut tx = service.begin().await.unwrap();
-    let policy = app::lock_app(&mut tx, &local).await.unwrap();
+    let (_, policy) = app::lock_app(&mut tx, &local).await.unwrap();
     app::lock_app(&mut tx, &foreign).await.unwrap();
     let now = tx.now().await.unwrap();
     let ancestor = seed_run(&mut tx, &local, "Example", Some("ancestor")).await;

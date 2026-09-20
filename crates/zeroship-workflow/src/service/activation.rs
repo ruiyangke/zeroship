@@ -101,7 +101,7 @@ impl AppWorkflows {
                     .registration(deployment_id.as_str().to_owned(), held.deploy_hash.clone());
 
                 let mut tx = self.service.begin().await?;
-                lock_app_state(&mut tx, self.app_id()).await?;
+                let lock = lock_app_state(&mut tx, self.app_id()).await?;
                 if let Some(receipt) = receipt(&tx, job).await? {
                     tx.commit().await?;
                     return Ok(receipt);
@@ -123,7 +123,7 @@ impl AppWorkflows {
                 }
                 let now = tx.now().await?;
                 super::schedules::validate_deployment(&deploy, policy, now)?;
-                deploys::record_verified(&tx, self.app_id(), &deploy, now).await?;
+                deploys::record_verified(&tx, lock, &deploy, now).await?;
                 tx.database()
                     .collection(job_receipts::Entity::COLLECTION)?
                     .insert(value!({

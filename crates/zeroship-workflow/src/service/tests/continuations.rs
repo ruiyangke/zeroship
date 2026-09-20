@@ -367,7 +367,7 @@ async fn rollback(store: Rc<OrmStore>) {
     for retire in [false, true] {
         let scope = service.fixture_app(app_id.clone());
         let mut tx = scope.service.begin().await.unwrap();
-        let policy = app::lock_app(&mut tx, &app_id).await.unwrap();
+        let (_, policy) = app::lock_app(&mut tx, &app_id).await.unwrap();
         let run = app::lock_run(&mut tx, &app_id, &child).await.unwrap();
         let now = tx.now().await.unwrap();
         Box::pin(frontier::apply(

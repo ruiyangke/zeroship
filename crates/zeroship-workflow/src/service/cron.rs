@@ -253,7 +253,7 @@ impl AppWorkflows {
                 let registration = cron.declaration(&deployment)?;
 
                 let mut tx = self.service.begin().await?;
-                lock_app_state(&mut tx, self.app_id()).await?;
+                let lock = lock_app_state(&mut tx, self.app_id()).await?;
                 if let Some(receipt) = receipt(&tx, job).await? {
                     tx.commit().await?;
                     return Ok(receipt);
@@ -295,7 +295,7 @@ impl AppWorkflows {
                     ));
                 }
                 let now = tx.now().await?;
-                deploys::record_verified(&tx, self.app_id(), &deployment, now).await?;
+                deploys::record_verified(&tx, lock, &deployment, now).await?;
                 if !cron.binding(&tx, self.app_id()).await? {
                     tx.database()
                         .entity::<schedules::Entity>()?
