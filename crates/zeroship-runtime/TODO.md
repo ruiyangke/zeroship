@@ -272,7 +272,7 @@ near-heap-limit callback grows the cap by `initial / 4` per hit
 catchable JS RangeError, then the worker LRU reaps the isolate.
 
 Reference docs: `docs/reference/runtime-limits.md`.
-Tests: `crates/runtime/tests/heap_limits.rs` (3 tests).
+Tests: `crates/zeroship-runtime/tests/heap_limits.rs` (3 tests).
 
 ### 2. Boot snapshot — INVESTIGATED 2026-05-06, NOT WORTH IT
 
@@ -329,7 +329,7 @@ full GC instead of incremental budget — invisible since it only
 fires on idle).
 
 Reference docs: `docs/reference/runtime-limits.md` § Idle GC.
-Tests: `crates/runtime/tests/idle_gc.rs` (3 tests).
+Tests: `crates/zeroship-runtime/tests/idle_gc.rs` (3 tests).
 
 (Note: original "drop --workers=16 to --workers=4" alternative
 isn't a runtime concern — it's a deploy-time config.)

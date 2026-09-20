@@ -8,6 +8,6 @@ fixture-only shims for ambient Node modules that are not part of the runtime
 surface (`stream`, `process`, `assert`, `tty`, etc.). The driver package source
 is not patched.
 
-The e2e test is `crates/runtime/tests/node_ioredis_e2e.rs`. It brings up
+The e2e test is `crates/zeroship-runtime/tests/node_ioredis_e2e.rs`. It brings up
 `redis:7` on `127.0.0.1:6391` when no compatible server is already reachable.
 
