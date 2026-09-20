@@ -32,6 +32,7 @@ pub mod backend;
 pub mod backend_handle;
 pub mod backend_selection;
 pub mod binding;
+pub mod resolved_bindings;
 pub mod budgets;
 pub mod capability;
 pub mod cdc;

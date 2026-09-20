@@ -463,11 +463,16 @@ mod tests {
         assert_eq!(validate(&bundle()).unwrap().as_str(), "customer");
     }
 
+    /// One malformed-bundle case: the field's name, and the single-field
+    /// mutation that makes an otherwise well-formed bundle malformed in that
+    /// one way. Named so the `Vec` below reads as a table of cases.
+    type MalformCase = (&'static str, Box<dyn Fn(&mut SchemaBundle)>);
+
     /// Each refusal is checked against a control that differs in ONE field, so a
     /// validator that refused everything would not pass this.
     #[test]
     fn every_malformed_bundle_is_refused_for_its_own_reason() {
-        let cases: Vec<(&str, Box<dyn Fn(&mut SchemaBundle)>)> = vec![
+        let cases: Vec<MalformCase> = vec![
             (
                 "dialect",
                 Box::new(|b: &mut SchemaBundle| b.dialect = "sqlite".into()),

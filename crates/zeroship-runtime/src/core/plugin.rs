@@ -138,6 +138,30 @@ pub trait NativePlugin: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Additional `env.*` members this plugin owns, built after its own
+    /// namespace and after the descriptor is bound.
+    ///
+    /// The database plugin publishes `env.databases` this way: one handle per
+    /// database the deployment declares, the primary being the SAME object as
+    /// `env.db`, so there is one concept and one code path and a
+    /// single-database app sees no difference.
+    ///
+    /// The runtime refuses a name any plugin's own namespace already uses, or
+    /// that another companion took, so two plugins cannot silently fight over
+    /// one member.
+    ///
+    /// # Errors
+    /// Return an error to reject startup without publishing anything.
+    fn companion_namespaces<'s>(
+        &self,
+        _scope: &mut v8::PinScope<'s, '_>,
+        _app_id: &str,
+        _namespace: v8::Local<'s, v8::Object>,
+        _descriptor: Option<&serde_json::Value>,
+    ) -> Result<Vec<(&'static str, v8::Local<'s, v8::Value>)>, String> {
+        Ok(Vec::new())
+    }
+
     /// Prepare SDK facades before creator evaluation. The module graph is
     /// compiled and native namespaces are bound. Any returned promise is
     /// retained by startup and must settle before creator code runs.
@@ -175,6 +199,53 @@ pub(crate) fn runtime_app_id(scope: &mut v8::PinScope<'_, '_>) -> String {
         .get_slot::<crate::state::SharedState>()
         .and_then(|state| state.borrow().app_id().map(str::to_owned))
         .unwrap_or_else(|| zeroship_core::app_id::LOCAL_DEV_APP_ID.to_string())
+}
+
+/// Publish one companion member onto the `env` object.
+///
+/// Only the runtime's own startup calls this, after checking the name is free;
+/// a plugin returns its companions and never writes `env` itself.
+pub(crate) fn publish_env_member(
+    scope: &mut v8::PinScope<'_, '_>,
+    name: &str,
+    value: v8::Local<'_, v8::Value>,
+) -> Result<(), String> {
+    let env_global = scope
+        .get_slot::<crate::state::SharedState>()
+        .and_then(|state| state.borrow().env_obj.clone())
+        .ok_or_else(|| "runtime: plugin namespaces are not initialized".to_string())?;
+    let env = v8::Local::new(scope, env_global);
+    let key = v8::String::new(scope, name)
+        .ok_or_else(|| format!("runtime: could not allocate env member {name:?}"))?;
+    env.set(scope, key.into(), value)
+        .ok_or_else(|| format!("runtime: could not publish env member {name:?}"))?;
+    Ok(())
+}
+
+/// Return one `env.*` member already published on this isolate.
+///
+/// A plugin reads back a companion it published itself; the runtime is what
+/// decided the name was free.
+///
+/// # Errors
+/// When `env` is not initialized, the member is absent, or it is not an object.
+pub fn runtime_env_member<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    name: &str,
+) -> Result<v8::Local<'s, v8::Object>, String> {
+    let env_global = scope
+        .get_slot::<crate::state::SharedState>()
+        .and_then(|state| state.borrow().env_obj.clone())
+        .ok_or_else(|| "runtime: plugin namespaces are not initialized".to_string())?;
+    let env = v8::Local::new(scope, env_global);
+    let key = v8::String::new(scope, name)
+        .ok_or_else(|| format!("runtime: could not allocate env member {name:?}"))?;
+    let value = env
+        .get(scope, key.into())
+        .ok_or_else(|| format!("runtime: env member {name:?} is missing"))?;
+    value
+        .try_into()
+        .map_err(|_| format!("runtime: env member {name:?} is not an object"))
 }
 
 /// Return the namespace object already built for a plugin on this isolate.
@@ -275,11 +346,11 @@ impl NativeRegistrar {
 /// collides with a plugin namespace, the plugin wins (platform primitives
 /// override user config) — the overlay order below enforces this.
 ///
-/// The returned object is shallow-frozen (via `Object.freeze`), so user code
-/// can't monkey-patch `env.db = null` at runtime. Namespace sub-objects
-/// remain mutable by reference, but their registered methods are attached as
-/// own properties at build time — replacing them would require reassigning
-/// through the frozen parent.
+/// The returned object is NOT yet frozen: a plugin's companion namespaces are
+/// published onto it afterwards, by `crate::init::prepare_application`, which
+/// seals it with [`seal_env_object`] once every plugin has contributed. Sealing
+/// here instead would silently drop every companion, because a `Set` on a
+/// frozen object is refused rather than raised.
 pub(crate) fn build_env_object(
     scope: &mut v8::PinScope,
     plugins: &[Arc<dyn NativePlugin>],
@@ -352,22 +423,34 @@ pub(crate) fn build_env_object(
         env_obj.set(scope, ns_key.into(), ns_obj.into());
     }
 
-    // Shallow freeze via Object.freeze. Prevents user code from reassigning
-    // `env.db = null` or adding `env.foo`. Namespace sub-objects stay
-    // unfrozen — their methods are already attached, and freezing them
-    // would be a minor defensive-in-depth gain at the cost of breaking any
-    // future plugin that expects to extend its namespace after registration.
-    let freeze_source = "(obj) => Object.freeze(obj)";
-    let code = v8::String::new(scope, freeze_source).unwrap();
-    if let Some(script) = v8::Script::compile(scope, code, None)
-        && let Some(func_val) = script.run(scope)
-        && let Ok(freeze_fn) = v8::Local::<v8::Function>::try_from(func_val)
-    {
-        let undefined = v8::undefined(scope).into();
-        let _ = freeze_fn.call(scope, undefined, &[env_obj.into()]);
-    }
-
     v8::Global::new(scope, env_obj)
+}
+
+/// Shallow-freeze `env` once every plugin has published what it owns.
+///
+/// Prevents user code from reassigning `env.db = null` or adding `env.foo`.
+/// Namespace sub-objects stay unfrozen — their methods are already attached,
+/// and freezing them would be a minor defence-in-depth gain at the cost of
+/// breaking any future plugin that expects to extend its namespace after
+/// registration.
+///
+/// # Ordering is the contract
+///
+/// This runs AFTER [`publish_env_member`] has placed every companion
+/// namespace. A `Set` on a frozen object is REFUSED rather than raised, so a
+/// seal that ran earlier would drop each companion without an error anywhere -
+/// the member would simply be `undefined` in creator code.
+///
+/// # Errors
+/// When `env` is not initialized.
+pub(crate) fn seal_env_object(scope: &v8::PinScope<'_, '_>) -> Result<(), String> {
+    let env_global = scope
+        .get_slot::<crate::state::SharedState>()
+        .and_then(|state| state.borrow().env_obj.clone())
+        .ok_or_else(|| "runtime: env is not initialized".to_string())?;
+    let env = v8::Local::new(scope, env_global);
+    env.set_integrity_level(scope, v8::IntegrityLevel::Frozen);
+    Ok(())
 }
 
 #[cfg(test)]

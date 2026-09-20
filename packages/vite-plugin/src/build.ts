@@ -18,6 +18,8 @@ import { zeroshipModulePlugin } from "./zeroship-module.js";
 import { genTypesFromMigrations } from "./gen-types/index.js";
 import {
   defaultProjectConfig,
+  selectBuildTarget,
+  type BuildTarget,
   type ProjectConfigHolder,
   type ResolvedProjectConfig,
 } from "./project-config/index.js";
@@ -450,12 +452,16 @@ export function findServerEntry(root: string, explicit?: string): string | null 
 export function buildPlugin(
   state: TransformState,
   project: ProjectConfigHolder,
+  appLabel?: string,
 ): Plugin {
   const { serverFunctionMap } = state;
   // Every build shape comes from `zeroship.jsonc` (or its schema defaults
   // when there is no file). These are project config, not plugin options,
   // because the Rust CLI also needs them and cannot read `vite.config.ts`.
   let projectConfig: ResolvedProjectConfig = defaultProjectConfig();
+  // Which declared app this build is, and the databases it uses. A workspace
+  // declaring one app implies it; one declaring several must be told which.
+  let buildTarget: BuildTarget = { label: null, databases: [] };
   let root = "";
   let isDev = false;
   // The client build's `outDir` (resolved). Read in configResolved so the
@@ -579,27 +585,35 @@ export function buildPlugin(
      */
     async buildStart() {
       if (isDev) return;
-      const migrationsRel = projectConfig.migrations.dir;
-      const migrationsAbs = resolve(root, migrationsRel);
-      // No migrations dir → nothing to generate (an app may ship none).
-      if (!existsSync(migrationsAbs)) return;
-
-      const outDir = resolve(root, projectConfig.migrations.out);
       const isProd = viteMode === "production";
-      try {
-        // Production: generated-artifact check (a HARD drift gate — no binary to be
-        // absent, so drift is always caught). Non-production: regenerate (write) so a
-        // local `vite build --mode development` refreshes the committed types.
-        await genTypesFromMigrations(migrationsAbs, outDir, { check: isProd });
-        console.log(
-          isProd
-            ? "[zeroship] gen-types --check: env.db.ts + schema.runtime.json track the migrations"
-            : "[zeroship] gen-types: regenerated env.db.ts + schema.runtime.json from the migrations",
-        );
-      } catch (e) {
-        // A drift / load / fold failure is a real build error — surface it.
-        console.error(`[zeroship] gen-types failed: ${(e as Error).message}`);
-        throw e;
+      for (const database of buildTarget.databases) {
+        const migrationsAbs = resolve(root, database.migrations);
+        // No migrations dir → nothing to generate (a database may ship none).
+        if (!existsSync(migrationsAbs)) continue;
+        const outDir = resolve(root, database.out);
+        try {
+          // Production: generated-artifact check (a HARD drift gate — no binary to be
+          // absent, so drift is always caught). Non-production: regenerate (write) so a
+          // local `vite build --mode development` refreshes the committed types.
+          // The LABEL and the PRIMARY FLAG come from `zeroship.jsonc` through
+          // `selectBuildTarget`, not from the fold: the emitted module keys
+          // `EnvDatabases` on the label, and only the primary declares
+          // `Env.db`.
+          await genTypesFromMigrations(migrationsAbs, outDir, {
+            label: database.label,
+            primary: database.primary,
+            check: isProd,
+          });
+          console.log(
+            isProd
+              ? `[zeroship] gen-types --check: ${database.label} env.db.ts + schema.runtime.json track the migrations`
+              : `[zeroship] gen-types: regenerated ${database.label} env.db.ts + schema.runtime.json from the migrations`,
+          );
+        } catch (e) {
+          // A drift / load / fold failure is a real build error — surface it.
+          console.error(`[zeroship] gen-types failed for ${database.label}: ${(e as Error).message}`);
+          throw e;
+        }
       }
     },
 
@@ -628,6 +642,7 @@ export function buildPlugin(
       // up using is how a build silently uses a sibling app's settings.
       root = resolve(userConfig?.root ?? process.cwd());
       projectConfig = project.load(root);
+      buildTarget = selectBuildTarget(projectConfig, appLabel);
       const hasExplicitInput =
         userConfig?.build?.rollupOptions?.input != null;
       if (hasExplicitInput) return;
@@ -680,6 +695,7 @@ export function buildPlugin(
     configResolved(config: any) {
       root = config.root;
       projectConfig = project.load(root);
+      buildTarget = selectBuildTarget(projectConfig, appLabel);
       isDev = config.command === "serve";
       logger = config.logger;
       // Vite's ResolvedConfig.mode reflects the `--mode` flag
@@ -822,13 +838,18 @@ export function buildPlugin(
             schedules: extras.schedules,
             workflows: extras.workflows,
           },
-          // Carry the generated runtime schema descriptor (`schema.runtime.json`)
-          // the buildStart gen-types step emitted. Migration documents are
-          // applied through the migration service and are not packed into .zship.
-          migrations: {
-            dir: projectConfig.migrations.dir,
-            genTypesOut: projectConfig.migrations.out,
-          },
+          // Carry one generated runtime schema descriptor
+          // (`schema.runtime.json`) per database the app declares, as the
+          // buildStart gen-types step emitted them. Migration documents are
+          // applied through the migration service and are not packed into
+          // .zship.
+          databases: buildTarget.databases.map((database) => ({
+            label: database.label,
+            id: database.id,
+            primary: database.primary,
+            migrations: database.migrations,
+            out: database.out,
+          })),
         });
       } catch (e) {
         console.error(`[zeroship] failed to emit .zship: ${(e as Error).message}`);

@@ -362,8 +362,8 @@ async fn sqlite_store(path: &Path) -> OrmStore {
 
 async fn orm_store(url: &str, schema: super::store::SchemaName) -> OrmStore {
     OrmStore::connect(
-        zeroship_data_orm::binding::DbBinding::new("workflow", "test-deployment", schema),
-        &zeroship_data_orm::connection::ConnectionFactory::for_url(url).unwrap(),
+        zeroship_data_orm::binding::DbBinding::platform("workflow", "test-deployment", schema),
+        &zeroship_data_orm::connection::ConnectionFactory::for_platform_url(url).unwrap(),
         zeroship_data_orm::encryption::ProjectKeySource::unavailable(),
     )
     .await

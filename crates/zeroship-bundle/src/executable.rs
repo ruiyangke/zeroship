@@ -8,6 +8,7 @@
 use crate::{sha256_hex, validate_hash_format, BlobError, BlobStore, Manifest};
 use compio::io::AsyncReadAtExt;
 use std::collections::BTreeMap;
+use zeroship_id::DatabaseId;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ExecutableError {
@@ -68,7 +69,20 @@ pub fn verify_deployment_manifest(
 pub struct LoadedWorker {
     entry: String,
     modules: BTreeMap<String, String>,
-    runtime_descriptor: Option<serde_json::Value>,
+    databases: Vec<LoadedDatabase>,
+}
+
+/// One database the deployment declares, with its descriptor blob resolved.
+///
+/// The label is the creator's own name for the database and reaches the
+/// isolate as the member name on `env.databases`; `database_id` is what every
+/// server-side map keys on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoadedDatabase {
+    pub label: String,
+    pub database_id: DatabaseId,
+    pub primary: bool,
+    pub schema: serde_json::Value,
 }
 impl std::fmt::Debug for LoadedWorker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -114,16 +128,21 @@ impl LoadedWorker {
                 String::from_utf8(bytes).map_err(|_| ExecutableError::InvalidExecutable)?,
             );
         }
-        let runtime_descriptor = if let Some(descriptor) = &manifest.runtime_descriptor {
-            let bytes = read_blob(source, &descriptor.hash, &mut remaining).await?;
-            Some(serde_json::from_slice(&bytes).map_err(|_| ExecutableError::InvalidExecutable)?)
-        } else {
-            None
-        };
+        let mut databases = Vec::with_capacity(manifest.runtime_descriptor.len());
+        for entry in &manifest.runtime_descriptor {
+            let bytes = read_blob(source, &entry.hash, &mut remaining).await?;
+            databases.push(LoadedDatabase {
+                label: entry.label.clone(),
+                database_id: entry.database_id.clone(),
+                primary: entry.primary,
+                schema: serde_json::from_slice(&bytes)
+                    .map_err(|_| ExecutableError::InvalidExecutable)?,
+            });
+        }
         Ok(Self {
             entry: worker.entry.clone(),
             modules,
-            runtime_descriptor,
+            databases,
         })
     }
 
@@ -137,14 +156,27 @@ impl LoadedWorker {
         &self.modules
     }
 
+    /// Every database this deployment declares, in manifest order.
     #[must_use]
-    pub const fn runtime_descriptor(&self) -> Option<&serde_json::Value> {
-        self.runtime_descriptor.as_ref()
+    pub fn databases(&self) -> &[LoadedDatabase] {
+        &self.databases
+    }
+
+    /// The schema of the app's PRIMARY database, the one `env.db` reaches.
+    ///
+    /// `Manifest::validate` admits exactly one primary in a non-empty set, so
+    /// this is `None` only for an app that declares no database at all.
+    #[must_use]
+    pub fn primary_schema(&self) -> Option<&serde_json::Value> {
+        self.databases
+            .iter()
+            .find(|database| database.primary)
+            .map(|database| &database.schema)
     }
 
     #[must_use]
-    pub fn into_parts(self) -> (String, BTreeMap<String, String>, Option<serde_json::Value>) {
-        (self.entry, self.modules, self.runtime_descriptor)
+    pub fn into_parts(self) -> (String, BTreeMap<String, String>, Vec<LoadedDatabase>) {
+        (self.entry, self.modules, self.databases)
     }
 }
 

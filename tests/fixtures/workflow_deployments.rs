@@ -57,7 +57,7 @@ impl Sources {
     pub fn assert_loaded(&self, loaded: &zeroship_bundle::LoadedWorker) {
         assert_eq!(loaded.entry(), self.entry);
         assert_eq!(loaded.modules(), &self.modules);
-        assert_eq!(loaded.runtime_descriptor(), self.descriptor.as_ref());
+        assert_eq!(loaded.primary_schema(), self.descriptor.as_ref());
     }
 }
 
@@ -86,7 +86,7 @@ impl Deployments {
             .unwrap();
         let ledger = platform.deployments().clone();
         let database = Database::connect(
-            DbBinding::new(
+            DbBinding::platform(
                 "platform",
                 "fixture-catalog",
                 SchemaName::new("main").unwrap(),
@@ -143,9 +143,14 @@ impl Deployments {
             let bytes = serde_json::to_vec(value).unwrap();
             let hash = zeroship_bundle::sha256_hex(&bytes);
             self.source.put_blob(&hash, &bytes).await.unwrap();
-            Some(RuntimeDescriptorEntry { hash })
+            vec![RuntimeDescriptorEntry {
+                label: "main".into(),
+                database_id: zeroship_core::DatabaseId::mint(),
+                primary: true,
+                hash,
+            }]
         } else {
-            None
+            Vec::new()
         };
         let manifest = Manifest {
             worker: Some(WorkerCode {

@@ -128,5 +128,20 @@
     "file": "20260919000000_workflow_journal.ts",
     "name": "workflow_journal",
     "opCount": 2
+  },
+  {
+    "file": "20260919000100_project_execution_zone.ts",
+    "name": "project_execution_zone",
+    "opCount": 8
+  },
+  {
+    "file": "20260919000200_database_entities.ts",
+    "name": "database_entities",
+    "opCount": 35
+  },
+  {
+    "file": "20260919000300_database_placement_keys.ts",
+    "name": "database_placement_keys",
+    "opCount": 5
   }
 ]

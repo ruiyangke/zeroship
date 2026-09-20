@@ -148,10 +148,13 @@ fn refuse_on_evaluation_error(response: &Response, pass: &str) -> Result<(), Aut
 ///
 /// The probe order is `Resource::Any`, then each organization the principal is
 /// a member of, then the representative project set
-/// ([`authority::project_probe_resources`]). Apps are NOT probed: every
-/// app-scoped band also has a `Project` statement, so a project probe answers
-/// for the apps inside it, and enumerating apps would add cost without adding
-/// an answer.
+/// ([`authority::project_probe_resources`]). Apps and databases are NOT
+/// probed: every app-scoped and every database-scoped band also carries the
+/// same actions in a `Project` statement, so a project probe answers for the
+/// apps and databases inside it, and enumerating either would add cost without
+/// adding an answer. **That pairing is a requirement on every new band**, not
+/// an observation about the current ones: a database action permitted only at
+/// `resource is Database` would read as ungrantable on the consent screen.
 ///
 /// Because every band discriminates the resource TYPE in its scope, an
 /// App-typed or Project-typed probe can no longer satisfy an organization
@@ -322,6 +325,7 @@ async fn audit_decision(
 fn audit_resource(resource: &Resource) -> (&'static str, Option<String>) {
     match resource {
         Resource::App { id } => ("app", Some(id.as_str().to_owned())),
+        Resource::Database { id } => ("database", Some(id.as_str().to_owned())),
         Resource::Project { id } => ("project", Some(id.clone())),
         Resource::Organization { id } => ("organization", Some(id.clone())),
         Resource::Any => ("any", None),
@@ -356,6 +360,12 @@ mod tests {
                     id: zeroship_id::AppId::mint(),
                 },
                 "app",
+            ),
+            (
+                Resource::Database {
+                    id: zeroship_id::DatabaseId::mint(),
+                },
+                "database",
             ),
             (Resource::Project { id: "p".to_owned() }, "project"),
             (
@@ -406,6 +416,9 @@ mod tests {
             Resource::Any,
             Resource::App {
                 id: zeroship_id::AppId::mint(),
+            },
+            Resource::Database {
+                id: zeroship_id::DatabaseId::mint(),
             },
             Resource::Project {
                 id: "prj_0000123456789abcdefghijkl".to_owned(),

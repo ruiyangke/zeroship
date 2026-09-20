@@ -3,6 +3,9 @@
 #[path = "../../../tests/fixtures/postgres/mod.rs"]
 mod postgres_fixture;
 
+#[path = "../../../tests/fixtures/data/roles.rs"]
+mod roles;
+
 use compio_postgres::Pool;
 use compio_tls::TlsConnector;
 use compio_ws::{tungstenite::Message, WebSocketStream};
@@ -78,9 +81,56 @@ async fn relay_process_authenticates_workers_and_streams_commits_without_worker_
     admin.batch_execute(&format!("CREATE ROLE \"{relay_role}\" LOGIN REPLICATION NOSUPERUSER NOBYPASSRLS PASSWORD 'fixture'; CREATE ROLE \"{worker_role}\" LOGIN NOREPLICATION NOSUPERUSER NOBYPASSRLS PASSWORD 'fixture'")).await.unwrap();
     let db = Pool::connect(admin_url.as_str(), 2).await.unwrap();
     let app = zeroship_core::typed_id::generate(zeroship_core::typed_id::APP_PREFIX);
-    let publication = zeroship_core::replication_names::publication_name(&app).unwrap();
-    let slot = publication.replacen("__zs_pub_", "__zs_relay_", 1);
-    db.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS zeroship; CREATE TABLE IF NOT EXISTS zeroship.worker_instances (id text PRIMARY KEY, ring_key bytea NOT NULL, public_key bytea NOT NULL, advertise_host inet NOT NULL, advertise_port int NOT NULL, registered_at timestamptz NOT NULL DEFAULT now(), status text NOT NULL CHECK (status IN ('active', 'draining', 'gone'))); GRANT USAGE ON SCHEMA zeroship TO \"{relay_role}\"; GRANT SELECT (id, status, public_key) ON zeroship.worker_instances TO \"{relay_role}\"; CREATE SCHEMA \"{app}\"; CREATE TABLE \"{app}\".orders (id int PRIMARY KEY, secret text); GRANT USAGE ON SCHEMA \"{app}\" TO \"{worker_role}\"; GRANT SELECT, INSERT, UPDATE, DELETE ON \"{app}\".orders TO \"{worker_role}\"; CREATE PUBLICATION \"{publication}\" FOR TABLE \"{app}\".orders")).await.unwrap();
+    let publication = zeroship_core::replication_names::DATASTORE_PUBLICATION;
+    let slot = zeroship_core::replication_names::relay_slot_name(&app).unwrap();
+    // The app's ONE database. The relay reads these ids back out of Control's
+    // rows to learn which schema this subscriber is entitled to, so the fixture
+    // declares them rather than letting anything derive a schema from the app
+    // id.
+    let binding = zeroship_data_orm::binding::DbBinding::to_database(
+        app.as_str(),
+        zeroship_data_orm::binding::COLD_START_DEPLOY_TOKEN,
+        zeroship_core::DatabaseId::mint(),
+        zeroship_core::BindingId::mint(),
+        1,
+    )
+    .unwrap();
+    let schema = binding.schema().as_str().to_owned();
+    let database = binding.database().unwrap().as_str().to_owned();
+    let binding_role = binding.session_role().unwrap().to_owned();
+    db.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS zeroship; CREATE TABLE IF NOT EXISTS zeroship.worker_instances (id text PRIMARY KEY, ring_key bytea NOT NULL, public_key bytea NOT NULL, advertise_host inet NOT NULL, advertise_port int NOT NULL, registered_at timestamptz NOT NULL DEFAULT now(), status text NOT NULL CHECK (status IN ('active', 'draining', 'gone'))); GRANT USAGE ON SCHEMA zeroship TO \"{relay_role}\"; GRANT SELECT (id, status, public_key) ON zeroship.worker_instances TO \"{relay_role}\"")).await.unwrap();
+    // Stand-ins for the two Control tables the relay's schema lookup reads
+    // (`db/migrations-ts/20260919000200_database_entities.ts`), carrying only
+    // the columns that lookup names. The relay gets SELECT on exactly those.
+    db.batch_execute(&format!("CREATE TABLE IF NOT EXISTS zeroship.databases (id text PRIMARY KEY, status text NOT NULL, schema_epoch int NOT NULL DEFAULT 1); CREATE TABLE IF NOT EXISTS zeroship.database_bindings (id text PRIMARY KEY, app_id text NOT NULL, database_id text NOT NULL, status text NOT NULL, generation bigint NOT NULL DEFAULT 1, observed_generation bigint NOT NULL DEFAULT 1); GRANT SELECT (id, status, schema_epoch) ON zeroship.databases TO \"{relay_role}\"; GRANT SELECT (id, app_id, database_id, status, generation, observed_generation) ON zeroship.database_bindings TO \"{relay_role}\"")).await.unwrap();
+    db.execute(
+        "INSERT INTO zeroship.databases (id, status) VALUES ($1, 'active')",
+        &[&database],
+    )
+    .await
+    .unwrap();
+    db.execute(
+        "INSERT INTO zeroship.database_bindings (id, app_id, database_id, status) \
+         VALUES ($1, $2, $3, 'active')",
+        &[
+            &binding.edge().unwrap().binding().as_str().to_owned(),
+            &app,
+            &database,
+        ],
+    )
+    .await
+    .unwrap();
+    // The runtime's reach comes from the binding ladder, never from a grant to
+    // the login. A direct grant to `worker_role` is the thing the whole fence
+    // exists to prevent, and it would survive every revoke.
+    roles::ensure_binding_ladder(&db, &binding).await.unwrap();
+    db.batch_execute(&format!("CREATE TABLE \"{schema}\".orders (id int PRIMARY KEY, secret text); GRANT SELECT, INSERT, UPDATE, DELETE ON \"{schema}\".orders TO \"{}\"; GRANT \"{binding_role}\" TO \"{worker_role}\" WITH INHERIT FALSE; CREATE PUBLICATION \"{publication}\" FOR TABLE \"{schema}\".orders",
+        zeroship_core::database_derivation::capability_role_name(
+            binding.database().unwrap(),
+            zeroship_core::database_role::DatabaseCapability::ReadWrite,
+        )
+        .unwrap(),
+    )).await.unwrap();
     // A minimal stand-in for the real `zeroship.worker_join_signers` table
     // (`db/migrations-ts/20260914000400_execution_zones_and_join_signers.ts`),
     // just enough to model the two facts the CDC reader's cascade depends on:
@@ -276,6 +326,13 @@ async fn relay_process_authenticates_workers_and_streams_commits_without_worker_
     worker_url.set_username(&worker_role).unwrap();
     worker_url.set_password(Some("fixture")).unwrap();
     let worker = Pool::connect(worker_url.as_str(), 1).await.unwrap();
+    // The login carries nothing of its own: the grant is `WITH INHERIT FALSE`,
+    // so it reaches the table only by assuming the binding role, exactly as the
+    // data path does with `SET LOCAL ROLE`.
+    worker
+        .batch_execute(&format!("SET ROLE \"{binding_role}\""))
+        .await
+        .unwrap();
     assert!(worker
         .query(
             "SELECT * FROM pg_create_logical_replication_slot('forbidden_worker', 'pgoutput')",
@@ -283,7 +340,7 @@ async fn relay_process_authenticates_workers_and_streams_commits_without_worker_
         )
         .await
         .is_err());
-    worker.batch_execute(&format!("BEGIN; INSERT INTO \"{app}\".orders VALUES (1, 'private'); ROLLBACK; INSERT INTO \"{app}\".orders VALUES (2, 'private')")).await.unwrap();
+    worker.batch_execute(&format!("BEGIN; INSERT INTO \"{schema}\".orders VALUES (1, 'private'); ROLLBACK; INSERT INTO \"{schema}\".orders VALUES (2, 'private')")).await.unwrap();
     let expected = Event::Change {
         collection: "orders".into(),
         operation: Operation::Insert,
@@ -299,7 +356,7 @@ async fn relay_process_authenticates_workers_and_streams_commits_without_worker_
 
     worker
         .batch_execute(&format!(
-            "INSERT INTO \"{app}\".orders VALUES (3, 'private'), (4, 'private'), (5, 'private')"
+            "INSERT INTO \"{schema}\".orders VALUES (3, 'private'), (4, 'private'), (5, 'private')"
         ))
         .await
         .unwrap();
@@ -330,7 +387,7 @@ async fn relay_process_authenticates_workers_and_streams_commits_without_worker_
     );
     worker
         .batch_execute(&format!(
-            "INSERT INTO \"{app}\".orders VALUES (6, 'private')"
+            "INSERT INTO \"{schema}\".orders VALUES (6, 'private')"
         ))
         .await
         .unwrap();
@@ -375,7 +432,7 @@ async fn relay_process_authenticates_workers_and_streams_commits_without_worker_
     )
     .await
     .unwrap();
-    db.batch_execute(&format!("DROP PUBLICATION \"{publication}\"; DROP SCHEMA \"{app}\" CASCADE; DROP OWNED BY \"{relay_role}\"; DROP OWNED BY \"{worker_role}\"")).await.unwrap();
+    db.batch_execute(&format!("DROP PUBLICATION \"{publication}\"; DROP SCHEMA \"{schema}\" CASCADE; DROP OWNED BY \"{relay_role}\"; DROP OWNED BY \"{worker_role}\"")).await.unwrap();
     db.close().await;
     admin
         .batch_execute(&format!(

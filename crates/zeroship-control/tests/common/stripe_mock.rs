@@ -127,10 +127,7 @@ pub async fn start_mock_stripe() -> MockStripe {
 async fn serve_conn(mut stream: TcpStream, state: Arc<Mutex<MockState>>) {
     let mut acc: Vec<u8> = Vec::new();
     loop {
-        loop {
-            let Some((req, consumed)) = try_parse_request(&acc) else {
-                break;
-            };
+        while let Some((req, consumed)) = try_parse_request(&acc) {
             acc.drain(0..consumed);
             let response = handle_mock_request(&req, &state);
             if stream.write_all(response).await.0.is_err() {

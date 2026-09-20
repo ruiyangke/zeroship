@@ -2,10 +2,11 @@
 //
 // This example is the migration-first one: `migrations/*.ts` are folded into
 // `generated/zeroship/{env.db.ts,schema.runtime.json,migrations.ir.json}`, and
-// `zeroship migrate` posts that last file. Both directories are stated here so
-// the build, the dev server, `zeroship-dev-migrate`, the repo-wide gen-types
-// runner and the Rust CLI all read ONE spelling of them. Before this file
-// there were four.
+// `zeroship migrate` posts that last file. Both directories are stated under
+// the database that owns them, so the build, the dev server,
+// `zeroship-dev-migrate`, the repo-wide gen-types runner and the Rust CLI all
+// read ONE spelling of them.
+
 {
   "$schema": "https://zeroship.ai/schema/project-v1.json",
 
@@ -19,9 +20,19 @@
     "output": "dist/app.zship"
   },
 
-  "migrations": {
-    "dir": "migrations",
-    "out": "generated/zeroship"
+  // One database, by LOCAL LABEL. The id is what the CLI sends; the label is
+  // what this file, the manifest and `env.databases` use.
+  "databases": {
+    "main": {
+      "id": "dbs_03evr3oqx1200cfkwyailh8l8",
+      "migrations": "migrations",
+      "out": "generated/zeroship"
+    }
+  },
+
+  // `primary` is this app's `env.db`.
+  "apps": {
+    "db_todos": { "databases": ["main"], "primary": "main" }
   },
 
   "secrets": []

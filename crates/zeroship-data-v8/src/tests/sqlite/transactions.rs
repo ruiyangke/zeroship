@@ -5,10 +5,11 @@ use zeroship_data_orm::value;
 fn native_transaction_isolation_refusals_keep_the_parent_usable() {
     run(async {
         let dir = tempfile::tempdir().unwrap();
+        let alias = crate::tests::fixtures::harness_alias(LOCAL_DEV_APP_ID);
         apply_schema_ahead_of_runtime(
             &dir,
             &format!(
-                "CREATE TABLE \"{LOCAL_DEV_APP_ID}\".notes ({SYSTEM_COLUMNS_SQLITE}, title TEXT NOT NULL);"
+                "CREATE TABLE \"{alias}\".notes ({SYSTEM_COLUMNS_SQLITE}, title TEXT NOT NULL);"
             ),
         );
         let source = sqlite_runtime_source(
@@ -54,10 +55,11 @@ const _procedures = {
 fn native_transaction_collections_expire_with_their_own_frame() {
     run(async {
         let dir = tempfile::tempdir().unwrap();
+        let alias = crate::tests::fixtures::harness_alias(LOCAL_DEV_APP_ID);
         apply_schema_ahead_of_runtime(
             &dir,
             &format!(
-                "CREATE TABLE \"{LOCAL_DEV_APP_ID}\".notes ({SYSTEM_COLUMNS_SQLITE}, title TEXT NOT NULL);"
+                "CREATE TABLE \"{alias}\".notes ({SYSTEM_COLUMNS_SQLITE}, title TEXT NOT NULL);"
             ),
         );
         let source = sqlite_runtime_source(

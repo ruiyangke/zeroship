@@ -97,7 +97,7 @@ async fn delete(platform: &platform::Platform, app: &AppId) {
 
 async fn connect_lifecycle(url: &str) -> ControlLifecycle {
     let database = Database::connect(
-        DbBinding::new(
+        DbBinding::platform(
             "platform",
             "workflow-lifecycle",
             SchemaName::new("zeroship").unwrap(),
@@ -112,7 +112,7 @@ async fn connect_lifecycle(url: &str) -> ControlLifecycle {
 
 async fn queue(platform: &platform::Platform) -> Queue {
     Queue::connect(
-        DbBinding::new(
+        DbBinding::platform(
             "workflow_manager",
             "workflow_manager",
             SchemaName::new("workflow_manager").unwrap(),

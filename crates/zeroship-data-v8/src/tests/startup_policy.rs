@@ -7,7 +7,6 @@ use std::time::Duration;
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::connection::ConnectionFactory;
 use zeroship_data_orm::protection::mask_policy::install_mask_policy;
-use zeroship_data_orm::sql::SchemaName;
 use zeroship_data_v8::service::{DbService, DbServiceConfig};
 use zeroship_runtime::{
     CancelFlag, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, Runtime, SettledFetch,
@@ -19,17 +18,42 @@ fn binding() -> DbBinding {
         "app_startup_policy_{}",
         NEXT.fetch_add(1, Ordering::Relaxed)
     );
-    DbBinding::new(
-        &app,
-        "startup_policy_fixture",
-        SchemaName::new(&app).unwrap(),
-    )
+    crate::tests::fixtures::harness_binding_at_deploy(&app, "startup_policy_fixture")
 }
 
 fn runtime(source: &str, binding: &DbBinding, url: &str) -> Runtime {
+    runtime_for(
+        source,
+        binding.app_id(),
+        binding.deploy_token(),
+        crate::tests::fixtures::harness_app_bindings([binding.app_id()]),
+        url,
+    )
+}
+
+/// [`runtime`] for an app the host resolved NO binding for: the store is
+/// empty, which is what a host holds for an app that binds no database.
+fn unresolved_runtime(source: &str, app_id: &str, url: &str) -> Runtime {
+    runtime_for(
+        source,
+        app_id,
+        "startup_policy_fixture",
+        std::sync::Arc::new(zeroship_data_orm::resolved_bindings::SuppliedAppBindings::new()),
+        url,
+    )
+}
+
+fn runtime_for(
+    source: &str,
+    app_id: &str,
+    deploy_token: &str,
+    app_bindings: std::sync::Arc<zeroship_data_orm::resolved_bindings::SuppliedAppBindings>,
+    url: &str,
+) -> Runtime {
     let plugin = DbService::new(DbServiceConfig {
+        app_bindings,
         project_keys: Default::default(),
-        connection: ConnectionFactory::for_url(url).unwrap(),
+        connection: ConnectionFactory::for_app_url(url).unwrap(),
         cdc_relay: None,
         meter: None,
     })
@@ -37,8 +61,8 @@ fn runtime(source: &str, binding: &DbBinding, url: &str) -> Runtime {
     .plugin();
     let runtime = Runtime::builder()
         .env_vars(HashMap::from([
-            ("APP_ID".into(), binding.app_id().into()),
-            ("ZEROSHIP_DEPLOY_ID".into(), binding.deploy_token().into()),
+            ("APP_ID".into(), app_id.into()),
+            ("ZEROSHIP_DEPLOY_ID".into(), deploy_token.into()),
         ]))
         .plugins(vec![plugin])
         .modules(vec![
@@ -171,6 +195,38 @@ async fn sdk_declarations_are_snapshotted_and_finalized_without_database_io() {
     assert_eq!(
         dispatch(&runtime, "/__zeroship/v1/inspect").await,
         (200, serde_json::json!({"json": "function"}))
+    );
+}
+
+/// An app the host resolved no binding for still starts.
+///
+/// Descriptor binding installs the startup policy slot only when the PRIMARY
+/// binding resolved, so finalization has to agree with it. An app that binds
+/// no database is ordinary - a host serves it beside apps that do, on the same
+/// thread and therefore the same plugin set - and refusing it at startup would
+/// leave it unservable rather than merely database-less.
+///
+/// [`absent_declaration_seals_the_default`] is the control: the same shape of
+/// source on a RESOLVED app seals a policy on its binding. Here there is no
+/// binding, so there is nothing to seal and no `env.db` member to seal it
+/// through, and the arm asserts both rather than only that startup returned.
+#[compio::test]
+async fn an_app_with_no_resolved_binding_starts_without_a_database() {
+    let runtime = unresolved_runtime(
+        r#"
+        import { env } from 'zeroship';
+        export default { rpc: { inspect() { return typeof env.db.declareMaskPolicy; } } };
+    "#,
+        "app_startup_policy_unresolved",
+        UNUSED_DATABASE,
+    );
+    initialize(&runtime)
+        .await
+        .expect("an app the host resolved no binding for still starts");
+    assert_eq!(
+        dispatch(&runtime, "/__zeroship/v1/inspect").await,
+        (200, serde_json::json!({"json": "undefined"})),
+        "no resolved binding means no database handle to declare a policy on"
     );
 }
 
@@ -328,7 +384,8 @@ async fn finalization_rejects_a_conflicting_binding_and_preserves_older_deployme
     for path in ["/fetch", "/__zeroship/v1/inspect"] {
         assert_eq!(dispatch(&conflicting, path).await.0, 500);
     }
-    let next_binding = DbBinding::new(binding.app_id(), "next_deploy", binding.schema().clone());
+    let next_binding =
+        crate::tests::fixtures::harness_binding_at_deploy(binding.app_id(), "next_deploy");
     let next = runtime(changed_source, &next_binding, UNUSED_DATABASE);
     initialize(&next).await.unwrap();
     assert_policy(

@@ -35,8 +35,6 @@
 //! GRANT/ALTER/REVOKE naturally idempotent), so it is safe to run on every apply.
 
 use compio_postgres::Client;
-use zeroship_core::app_derivation;
-use zeroship_id::AppId;
 use zeroship_migrate::ExecutorConfig;
 use zeroship_migrate_postgres::confinement::PostgresConfinementExt;
 use zeroship_migrate_postgres::role::migrator_role_name;
@@ -73,38 +71,49 @@ fn quote_lit(value: &str) -> String {
     value.replace('\'', "''")
 }
 
-/// Build the executor identity shared by explicit database creation and apply.
+/// Build the executor identity for a schema whose owning role is already
+/// named.
+///
+/// A creator database's schema is created by the cluster reconciler and owned
+/// by `zs_db_<dbs>_mig`, a name derived from the DATABASE. Re-deriving an owner
+/// from the schema text here would compose a different role, and
+/// [`provision_migrator`] would then hand the reconciler's schema to it - which
+/// the reconciler's next pass takes straight back, leaving objects owned by one
+/// role inside a schema owned by another.
 ///
 /// The runtime journal stays in the data schema, so `meta_schema` must be reset
 /// after `ExecutorConfig::new` derives its default companion schema.
-pub(crate) fn migrator_executor_config(
-    schema: &str,
-) -> Result<(ExecutorConfig, String), ProvisionRoleError> {
-    let role = migrator_role_name(schema)
-        .map_err(|_| ProvisionRoleError::BadRoleName(schema.to_string()))?;
+pub(crate) fn migrator_executor_config_for_role(schema: &str, role: &str) -> ExecutorConfig {
     let mut config = ExecutorConfig::new(
         schema.to_string(),
         schema.to_string(),
         confined_guard_policy_for_schema(schema)
             .expect("embedded no-inject confined guard charter must bind and compose"),
     )
-    .with_migrator_role(role.clone());
+    .with_migrator_role(role.to_string());
     config.confinement.meta_schema = schema.to_string();
-    Ok((config, role))
+    config
+}
+
+/// The same identity for a PLATFORM schema, whose owner is derived from the
+/// schema because no other entity names it.
+pub(crate) fn migrator_executor_config(
+    schema: &str,
+) -> Result<(ExecutorConfig, String), ProvisionRoleError> {
+    let role = migrator_role_name(schema)
+        .map_err(|_| ProvisionRoleError::BadRoleName(schema.to_string()))?;
+    Ok((migrator_executor_config_for_role(schema, &role), role))
 }
 
 /// Idempotently create one schema and the least-privilege migrator role that
 /// owns it.
 ///
-/// Schema-addressed, so it serves both the app create verb
-/// ([`provision_app_database`]) and the schema-bundle path. Neither the schema
-/// nor the runtime role needs an app identity - both derive from the schema
-/// alone - but the runtime role is deliberately NOT provisioned here: its grant
-/// set is a `GRANT ... ON ALL TABLES` snapshot and this runs before any table
-/// exists, so a role established here would carry no grant on anything the
-/// caller goes on to create. Each caller provisions it, and repeats it after
-/// every step that creates tables. Audit tables, publications and apply-ledger
-/// rows remain apply-time concerns.
+/// Schema-addressed, and it serves the PLATFORM schema-bundle path, whose
+/// schemas no database entity names and whose owner is therefore derived from
+/// the schema text. A CREATOR database's schema is not created here: the
+/// cluster reconciler owns that, because the schema's owner and its two
+/// capability roles are derived from the database id and must be minted in one
+/// transaction with the epoch row that names them.
 pub async fn provision_database(
     admin: &Client,
     schema: &str,
@@ -161,8 +170,14 @@ pub async fn provision_migrator(
     admin: &Client,
     cfg: &ExecutorConfig,
 ) -> Result<(), ProvisionRoleError> {
-    let role = migrator_role_name(&cfg.project_id)
-        .map_err(|_| ProvisionRoleError::BadRoleName(cfg.project_id.clone()))?;
+    // THE ROLE COMES OFF THE CONFIG, not off a second derivation. The engine
+    // brackets its DDL in the config's `migrator_role`, so a role provisioned
+    // under any other name would be established, granted and made an owner
+    // while the apply ran as something else.
+    let role = zeroship_migrate_postgres::confinement::of(cfg)
+        .migrator_role
+        .clone()
+        .ok_or_else(|| ProvisionRoleError::BadRoleName(cfg.project_id.clone()))?;
     let role_q = quote_ident(&role);
     let role_lit = quote_lit(&role);
     let proj_q = quote_ident(&cfg.project_schema);
@@ -261,48 +276,6 @@ pub async fn provision_migrator(
     Ok(())
 }
 
-/// Provision an app's creator database: its schema, the least-privilege migrator
-/// role that owns it, and the per-app RUNTIME role the worker opens it under.
-///
-/// THE RUNTIME ROLE IS PART OF CREATING THE DATABASE: an app that never
-/// applies a creator migration must still have a database it can open. The
-/// create verb establishes every identity the database needs, and the apply
-/// path repeats the role provisioning afterwards so tables an apply CREATED
-/// receive its grants.
-///
-/// Every step is idempotent, so a repeated create changes nothing.
-///
-/// # Errors
-/// Reports schema, migrator-role and runtime-role provisioning failures.
-pub async fn provision_app_database(
-    admin: &Client,
-    app_id: &AppId,
-) -> Result<(), ProvisionAppDatabaseError> {
-    let schema = app_derivation::schema_name(app_id);
-    provision_database(admin, &schema).await?;
-    let (_, migrator) = migrator_executor_config(&schema)?;
-    let bound = zeroship_core::schema_name::SchemaName::new(&schema)
-        .map_err(|_| ProvisionRoleError::BadRoleName(schema.clone()))?;
-    crate::apply::provision_runtime_app_role(admin, &bound, &migrator)
-        .await
-        .map_err(|error| ProvisionAppDatabaseError::RuntimeRole(error.to_string()))?;
-    Ok(())
-}
-
-/// Error creating an app's creator database and its identities.
-#[derive(Debug, thiserror::Error)]
-pub enum ProvisionAppDatabaseError {
-    /// The app schema or its migrator role could not be provisioned.
-    #[error(transparent)]
-    Database(#[from] ProvisionDatabaseError),
-    /// The migrator role name could not be derived.
-    #[error(transparent)]
-    Role(#[from] ProvisionRoleError),
-    /// The per-app runtime role could not be provisioned.
-    #[error("runtime app role: {0}")]
-    RuntimeRole(String),
-}
-
 /// The unqualified name of the per-app unmask audit table.
 ///
 /// The PostgreSQL and SQLite creators and the ORM writer are kept in sync by
@@ -375,6 +348,72 @@ pub fn audit_unmask_table_sql(app_schema: &str) -> String {
         END
         $audit_unmask_contract$;"#
     )
+}
+
+/// The grants that let a bound session write an unmask audit row.
+///
+/// # Why the audit table is granted here and creator tables are not
+///
+/// This table is PLATFORM DDL inside a creator schema: its shape is fixed, it
+/// carries no classified column, and the data plane writes it through the same
+/// narrowed session that read the row being unmasked. Which COLUMNS of a
+/// CREATOR table each capability may touch is derived from the owner's own
+/// migration IR, so those grants are per column and belong with the DDL that
+/// creates them. This one is per table and belongs with the DDL above.
+///
+/// **Both capabilities, including read-only.** An unmask is a READ that
+/// produced plaintext, so a read-only binding performs them and its audit row
+/// has to land. `INSERT` and the sequence are the whole grant: no `SELECT`, so
+/// no session can read another actor's audit trail back through the app.
+#[must_use]
+pub fn audit_unmask_capability_grants_sql(schema: &str, readwrite: &str, readonly: &str) -> String {
+    let schema_q = quote_ident(schema);
+    let table_q = quote_ident(AUDIT_UNMASK_TABLE);
+    let readwrite_q = quote_ident(readwrite);
+    let readonly_q = quote_ident(readonly);
+    let schema_lit = quote_lit(schema);
+    let table_lit = quote_lit(AUDIT_UNMASK_TABLE);
+    let readwrite_lit = quote_lit(readwrite);
+    let readonly_lit = quote_lit(readonly);
+    format!(
+        r"GRANT INSERT ON {schema_q}.{table_q} TO {readwrite_q}, {readonly_q};
+        DO $audit_unmask_grant$
+        DECLARE
+            audit_sequence text;
+        BEGIN
+            audit_sequence := pg_get_serial_sequence(
+                format('%I.%I', '{schema_lit}', '{table_lit}'),
+                'id'
+            );
+            IF audit_sequence IS NULL THEN
+                RAISE EXCEPTION 'serial sequence missing for %.%.id',
+                    '{schema_lit}', '{table_lit}';
+            END IF;
+            EXECUTE format(
+                'GRANT USAGE, SELECT ON SEQUENCE %s TO %I, %I',
+                audit_sequence, '{readwrite_lit}', '{readonly_lit}'
+            );
+        END
+        $audit_unmask_grant$;"
+    )
+}
+
+/// Idempotently give a database's capability roles the audit-write grant.
+///
+/// # Errors
+/// Any database error, including a missing identity sequence on a table that
+/// predates the contract above.
+pub async fn grant_audit_unmask_to_capabilities(
+    admin: &Client,
+    schema: &str,
+    readwrite: &str,
+    readonly: &str,
+) -> Result<(), compio_postgres::Error> {
+    exec_retry(
+        admin,
+        &audit_unmask_capability_grants_sql(schema, readwrite, readonly),
+    )
+    .await
 }
 
 /// Idempotently establish an app's unmask audit table, as an admin principal.

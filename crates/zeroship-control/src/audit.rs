@@ -169,6 +169,22 @@ pub enum Action {
     ProjectMemberRoleChanged,
     /// A project seat was withdrawn.
     ProjectMemberRemoved,
+    /// A database was created in a project and placed on a cluster. The detail
+    /// carries the datastore and the zone, because placement is the decision
+    /// nothing else records: the row says where it landed, and this says when
+    /// and by whom it was put there.
+    DatabaseCreated,
+    /// A database was deleted. Only reachable once no app binds it, so this row
+    /// is also the record that the last binding had already gone.
+    DatabaseDeleted,
+    /// An app was granted access to a database at one capability.
+    ///
+    /// A BINDING IS AN AUTHORITY CHANGE, which is why it is audited in the
+    /// caller's transaction beside the seat changes rather than best-effort
+    /// afterwards: it is the whole answer to "which app may read this data".
+    DatabaseBound,
+    /// An app's access to a database was withdrawn.
+    DatabaseUnbound,
 }
 
 impl Action {
@@ -219,6 +235,10 @@ impl Action {
             Self::ProjectMemberAdded => "project_member_added",
             Self::ProjectMemberRoleChanged => "project_member_role_changed",
             Self::ProjectMemberRemoved => "project_member_removed",
+            Self::DatabaseCreated => "database_created",
+            Self::DatabaseDeleted => "database_deleted",
+            Self::DatabaseBound => "database_bound",
+            Self::DatabaseUnbound => "database_unbound",
         }
     }
 }

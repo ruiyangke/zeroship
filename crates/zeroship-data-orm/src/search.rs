@@ -115,7 +115,7 @@ mod tests {
 
     #[test]
     fn spatial_search_materializes_its_default_limit() {
-        let binding = DbBinding::cold_start("spatial_limit");
+        let binding = crate::tests::fixtures::harness_binding("spatial_limit");
         let schema = crate::tests::fixtures::native_fields(value!({
             "id":{"type":"integer","required":true,"primaryKey":true},
             "location":{"type":"geoPoint"}
@@ -137,7 +137,7 @@ mod tests {
 
     #[test]
     fn sqlite_spatial_search_selects_an_unreadable_identity_for_internal_ranking() {
-        let binding = DbBinding::cold_start("spatial_hidden_identity");
+        let binding = crate::tests::fixtures::harness_binding("spatial_hidden_identity");
         let schema = crate::tests::fixtures::native_fields(value!({
             "id":{
                 "type":"integer",

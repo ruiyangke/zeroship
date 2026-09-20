@@ -448,6 +448,7 @@ pub async fn fetch_app_env(
         service_auth,
         app_id,
         crate::cache::project_keys().as_deref(),
+        crate::cache::app_bindings().as_deref(),
     )
     .await
 }
@@ -459,6 +460,7 @@ pub async fn fetch_app_env_supplying(
     service_auth: &zeroship_core::service_peers::ServiceAuth,
     app_id: &AppId,
     keys: Option<&zeroship_data_orm::encryption::SuppliedProjectKeys>,
+    bindings: Option<&zeroship_data_orm::resolved_bindings::SuppliedAppBindings>,
 ) -> Result<String, String> {
     // Resolve host material before publishing the environment or creating an
     // isolate. Every thread uses the database service's shared source.
@@ -473,8 +475,82 @@ pub async fn fetch_app_env_supplying(
                 .map_err(|error| error.to_string())?;
         }
     }
+    // The app's database binding, resolved by Control and composed by nobody
+    // else. An app Control serves no live binding for gets no `env.db`, which
+    // is the fail-closed direction: a namespace whose every call would be
+    // refused at session setup is worse than an absent one.
+    if let Some(bindings) = bindings {
+        let app = app_id.as_str();
+        if !bindings.is_bound(app).map_err(|error| error.to_string())? {
+            let url = format!("{url_base}/internal/apps/{app}/bindings");
+            match http_get(&url, control_authorization(service_auth)?.as_deref()).await {
+                Ok(body) => {
+                    // EVERY live binding, because `env.databases` reaches every
+                    // database this app binds. Supplying only the first would
+                    // leave the rest unresolvable at isolate build.
+                    for resolved in parse_resolved_bindings(&body)? {
+                        bindings
+                            .supply(app, resolved)
+                            .map_err(|error| error.to_string())?;
+                    }
+                }
+                // An app with no live binding is ordinary: not every app
+                // declares a database. It is recorded and the environment is
+                // published without one.
+                Err(error) => tracing::debug!(
+                    app_id = app,
+                    %error,
+                    "worker: control served no live database binding for this app"
+                ),
+            }
+        }
+    }
     let url = format!("{url_base}/internal/apps/{}/env", app_id.as_str());
     http_get(&url, control_authorization(service_auth)?.as_deref()).await
+}
+
+/// Decode Control's binding response: the SET of live bindings for one app.
+///
+/// Every field is parsed through its typed id, so a malformed response is a
+/// refusal rather than a binding that composes a role name nothing created.
+/// One malformed entry refuses the whole response: a partial set would leave
+/// an isolate reaching for a handle the host never supplied.
+fn parse_resolved_bindings(
+    body: &str,
+) -> Result<Vec<zeroship_data_orm::resolved_bindings::ResolvedBinding>, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(body).map_err(|_| "invalid control binding response".to_string())?;
+    let entries = value
+        .get("bindings")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "control binding response has no bindings".to_string())?;
+    entries.iter().map(parse_resolved_binding).collect()
+}
+
+fn parse_resolved_binding(
+    value: &serde_json::Value,
+) -> Result<zeroship_data_orm::resolved_bindings::ResolvedBinding, String> {
+    let field = |name: &str| -> Result<String, String> {
+        value
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| format!("control binding response has no {name}"))
+    };
+    let database = zeroship_core::DatabaseId::parse(&field("database_id")?)
+        .map_err(|error| error.to_string())?;
+    let binding =
+        zeroship_core::BindingId::parse(&field("binding_id")?).map_err(|error| error.to_string())?;
+    let epoch = value
+        .get("schema_epoch")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|epoch| u32::try_from(epoch).ok())
+        .ok_or_else(|| "control binding response has no schema_epoch".to_string())?;
+    Ok(zeroship_data_orm::resolved_bindings::ResolvedBinding {
+        database,
+        binding,
+        epoch,
+    })
 }
 
 /// Mint this worker's credential for one control-plane call.

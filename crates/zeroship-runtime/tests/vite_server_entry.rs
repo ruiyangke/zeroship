@@ -86,7 +86,7 @@ async fn request(runtime: &Runtime, path: &str, input: Value) -> (u16, String) {
         "POST",
         &format!("http://localhost/{path}"),
         &[("content-type".into(), "application/json".into())],
-        &json!({"json": input}).to_string(),
+        json!({"json": input}).to_string(),
         &EnvSnapshot::empty(),
         RequestCtx::new(CancelFlag::new()),
     );

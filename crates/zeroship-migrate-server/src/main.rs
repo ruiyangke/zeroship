@@ -168,6 +168,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ),
         );
         report.field(
+            "execution_zone",
+            CheckValue::Plain(settings.execution_zone.get().clone()),
+        );
+        report.field(
+            "reconcile_interval_seconds",
+            CheckValue::Count(
+                usize::try_from(*settings.reconcile_interval_seconds.get()).unwrap_or(usize::MAX),
+            ),
+        );
+        report.field(
             "oauth_audience",
             CheckValue::Plain(settings.oauth_audience.get().clone()),
         );
@@ -217,6 +227,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // flag or the file reference that supplied it.
     let database_url = settings.database_url.expose_str().to_owned();
     let provision_database_url = settings.provision_database_url.expose_str().to_owned();
+    let execution_zone = settings.execution_zone.get().clone();
+    let reconcile_interval = *settings.reconcile_interval_seconds.get();
     if provision_database_url.trim().is_empty() {
         tracing::error!(
             "migrated: --provision-database-url-file / ZEROSHIP_MIGRATE_SERVER_PROVISION_DATABASE_URL is required for per-app schema provisioning"
@@ -298,6 +310,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ),
                 bearer_verifier,
             ));
+            // THE CLUSTER RECONCILER. Control declares databases and bindings
+            // and cannot reach the cluster they live on; this service holds
+            // that cluster's privileged credential and executes no creator
+            // code, so it is the process that makes the cluster match. Without
+            // this loop nothing reaches `active` and every declaration the
+            // control plane writes stays inert.
+            if reconcile_interval > 0 {
+                let reconciler = zeroship_migrate_server::datastore::Reconciler::new(
+                    zeroship_migrate_server::datastore::control::ControlStore::new(Arc::clone(
+                        &control_pg,
+                    )),
+                    provision_database_url.clone(),
+                    Some(execution_zone),
+                );
+                compio::runtime::spawn(
+                    reconciler.run(std::time::Duration::from_secs(reconcile_interval)),
+                )
+                .detach();
+            } else {
+                tracing::warn!(
+                    "migrate-server: migrate_server.reconcile_interval_seconds is 0, so no \
+                     datastore registers and no database or binding this deployment declares \
+                     ever reaches a cluster"
+                );
+            }
+
             let mutation_rate_limiter = Arc::new(PostgresMutationRateLimiter::new(
                 control_pg,
                 mutation_rate_limit,

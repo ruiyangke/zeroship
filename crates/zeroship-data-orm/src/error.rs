@@ -22,8 +22,8 @@
 //! | [`DbError::Serialization`] | Postgres 40001 | SSI conflict in REPEATABLE READ / SERIALIZABLE |
 //! | [`DbError::LockContention`] | Postgres 55P03 / lock-not-available | `SELECT … FOR UPDATE NOWAIT` |
 //! | [`DbError::Transient`] | Postgres class 08, deadlock, out-of-memory | connection drop, 40P01 |
-//! | [`DbError::Configuration`] | Plugin mis-configured, OR the app's own DB was never provisioned | `DB_URL` not set; `schema_not_provisioned` (per-app role missing, fix: `zeroship migrate`) |
-//! | [`DbError::PermissionDenied`] | A classified authorization refusal with a terminal HTTP remedy | revoked per-app database grant |
+//! | [`DbError::Configuration`] | Plugin mis-configured, OR the binding does not resolve on the cluster, OR the bound database holds no such relation | `DB_URL` not set; `schema_epoch_stale` (the binding role for this epoch does not exist); `schema_not_migrated` (Postgres 42P01/42703, fix: `zeroship migrate`) |
+//! | [`DbError::PermissionDenied`] | A classified authorization refusal with a terminal HTTP remedy | revoked database binding |
 //! | [`DbError::Coded`] | Pre-typed code from another subsystem | migrations.rs `migration_*` codes |
 //! | [`DbError::Internal`] | Anything else; logged but stamped `internal` | a `JSON.stringify` that lost a column |
 
@@ -366,11 +366,12 @@ pub enum DbError {
 /// it by matching a creator-visible error code string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionSetupDisposition {
-    /// Preserve the classified [`DbError`] as-is while ending this attempt.
-    Preserve,
-    /// End this attempt and re-resolve its authority. No producer selects this
-    /// yet; an epoch fence can use it without changing the begin event again.
-    #[allow(dead_code, reason = "reserved for the schema-epoch producer task")]
+    /// End this attempt and re-resolve its authority.
+    ///
+    /// The binding role names the schema epoch, so a role that does not exist
+    /// says the shape this build was resolved against is not the shape the
+    /// cluster has. Nothing local can repair that and retrying the same
+    /// statement cannot either; the binding has to be resolved again.
     ReResolve,
     /// End this attempt with a specific terminal denial.
     Denied(DenyReason),
@@ -414,15 +415,22 @@ impl SessionSetupError {
     }
 }
 
-/// Public error code for "this app's database was never provisioned".
+/// Public error code for a session whose binding role does not exist at the
+/// epoch this isolate was built against.
 ///
-/// On the 5xx allow-list in `crates/zeroship-runtime/src/core/dispatch.rs` in BOTH
-/// spellings: `@zeroship/db` re-stamps every native code through
+/// The role name carries the epoch as its last component, so one `SET LOCAL
+/// ROLE` answers both "has the schema moved under code that is behind" and
+/// "has this database been converged at all". Neither is improved by sending
+/// the same statement again, and both are answered by resolving the binding
+/// afresh, so the code names the condition rather than a command.
+///
+/// On the 5xx allow-list in `crates/zeroship-runtime/src/core/dispatch.rs` in
+/// BOTH spellings: `@zeroship/db` re-stamps every native code through
 /// `canonicalErrorCode` inside the isolate, so a creator using the SDK sees
-/// `SCHEMA_NOT_PROVISIONED` and a creator calling `env.db` directly sees this
-/// one. Both must be listed or the exemption is inert on the path creators
-/// actually take.
-pub const SCHEMA_NOT_PROVISIONED: &str = "schema_not_provisioned";
+/// `SCHEMA_EPOCH_STALE` and a creator calling `env.db` directly sees this one.
+/// Both must be listed or the exemption is inert on the path creators actually
+/// take.
+pub const SCHEMA_EPOCH_STALE: &str = "schema_epoch_stale";
 
 /// Public error code for a session whose database-role membership was revoked.
 pub const GRANT_REVOKED: &str = DenyReason::GrantRevoked.code();
@@ -432,25 +440,62 @@ pub const GRANT_REVOKED: &str = DenyReason::GrantRevoked.code();
 pub const GRANT_REVOKED_MESSAGE: &str =
     "this app's database grant has been revoked. Restore the database grant before retrying.";
 
-/// The wire message for [`SCHEMA_NOT_PROVISIONED`]. Platform-authored and
-/// fixed: it names the condition and the exact command that fixes it, and it
-/// interpolates NOTHING. The server text and the role name (which embeds the
-/// app id) stay in the operator log.
+/// The wire message for [`SCHEMA_EPOCH_STALE`]. Platform-authored and fixed: it
+/// names the condition and the next action, and it interpolates NOTHING. The
+/// server text and the role name (which embeds the binding id and the epoch)
+/// stay in the operator log.
 ///
 /// The remediation lives in the MESSAGE, not the hint, because `hint` is
 /// populated by `OpError::coded` and then dropped -- `build_verbose_error_body`
 /// emits `message`/`name`/`code`/`details`/`retryable` and never `hint`. A
 /// creator reading the HTTP response only ever sees the message.
-pub const MISSING_ROLE_MESSAGE: &str =
-    "this app's database is not provisioned: its per-app Postgres role does not \
-     exist. Run `zeroship migrate` for this app, then retry.";
+pub const STALE_EPOCH_MESSAGE: &str =
+    "this app's database binding is not live at the schema epoch this build was \
+     resolved at. Retry the request; a redeploy resolves the binding afresh.";
 
-/// Operator/`env.db`-caller hint for [`SCHEMA_NOT_PROVISIONED`]. Reaches app
-/// JS as `err.hint` on a direct native throw; does NOT reach the HTTP wire.
-pub const MISSING_ROLE_HINT: &str =
-    "`zeroship migrate` creates the app's schema and per-app role. A deploy \
-     alone does not: the first `env.db` call is what discovers the role is \
-     missing.";
+/// Operator/`env.db`-caller hint for [`SCHEMA_EPOCH_STALE`]. Reaches app JS as
+/// `err.hint` on a direct native throw; does NOT reach the HTTP wire.
+pub const STALE_EPOCH_HINT: &str =
+    "The binding role names the schema epoch. A migration that changed the \
+     schema retires the previous epoch's role, and a database that has not been \
+     converged has none yet.";
+
+/// Public error code for a query naming a relation its database does not hold.
+///
+/// This is the state a freshly created database is in: the reconciler creates
+/// the schema, the capability roles and the grants, so the binding resolves and
+/// the session narrows, and the schema is EMPTY until an apply runs. Nothing
+/// before the query can see it, because every check up to that point succeeds.
+///
+/// It is a query-time condition and never a session-setup one, which is why it
+/// is reached from [`crate::backend::postgres::pg_error::classify`] rather than
+/// from the binding classifier: by the time `SET LOCAL ROLE` has succeeded, the
+/// role exists and the grant stands, and only the relation is absent.
+///
+/// On the 5xx allow-list in `crates/zeroship-runtime/src/core/dispatch.rs` in
+/// BOTH spellings, for the same reason [`SCHEMA_EPOCH_STALE`] is.
+pub const SCHEMA_NOT_MIGRATED: &str = "schema_not_migrated";
+
+/// The wire message for [`SCHEMA_NOT_MIGRATED`]. Platform-authored and fixed:
+/// it names the condition and the exact command that fixes it, and it
+/// interpolates NOTHING. The server text, which carries the relation name, stays
+/// in the operator log.
+///
+/// The remediation lives in the MESSAGE, not the hint, because `hint` is
+/// populated by `OpError::coded` and then dropped -- `build_verbose_error_body`
+/// emits `message`/`name`/`code`/`details`/`retryable` and never `hint`. A
+/// creator reading the HTTP response only ever sees the message.
+pub const NOT_MIGRATED_MESSAGE: &str =
+    "this app's database does not have the table or column this query names. \
+     Run `zeroship migrate` for this app, then retry.";
+
+/// Operator/`env.db`-caller hint for [`SCHEMA_NOT_MIGRATED`]. Reaches app JS as
+/// `err.hint` on a direct native throw; does NOT reach the HTTP wire.
+pub const NOT_MIGRATED_HINT: &str =
+    "`zeroship migrate` applies this app's migrations to the database it is \
+     bound to. A deploy alone does not: the binding resolves and the session \
+     narrows either way, so the first query is what discovers the relation is \
+     absent.";
 
 impl DbError {
     /// Borrow the backend-independent error code for diagnostics and boundaries.
@@ -719,6 +764,12 @@ impl std::error::Error for DbError {}
 
 impl From<zeroship_core::database_role::PerAppRoleNameError> for DbError {
     fn from(error: zeroship_core::database_role::PerAppRoleNameError) -> Self {
+        Self::internal(format!("db: {error}"))
+    }
+}
+
+impl From<zeroship_core::database_role::RoleNameTooLong> for DbError {
+    fn from(error: zeroship_core::database_role::RoleNameTooLong) -> Self {
         Self::internal(format!("db: {error}"))
     }
 }

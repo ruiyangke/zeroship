@@ -198,8 +198,14 @@ fn common(resource: &str, args: &[String]) -> (AppId, String, String) {
         (None, None) => None,
     };
 
-    let app = project_config::resolve_value(args, "--app", None, None, resolved.as_ref(), "app", None)
-        .unwrap_or_else(|e| die(e));
+    let selection = project_config::select_app(args, resolved.as_ref()).unwrap_or_else(|e| die(e));
+    let app = selection.id.unwrap_or_else(|| {
+        die(format!(
+            "`apps.{}` carries no `app` id yet, so there is no app to address. Run \\
+             `zeroship deploy` first.",
+            selection.label.as_deref().unwrap_or("<none>")
+        ))
+    });
     let control_url = project_config::resolve_control(args, resolved.as_ref())
         .unwrap_or_else(|e| die(e));
     let token = resolve_bearer_token(args).unwrap_or_else(|e| die(e));

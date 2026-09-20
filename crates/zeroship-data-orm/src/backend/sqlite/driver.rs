@@ -85,6 +85,7 @@ mod tests {
     #[compio::test]
     async fn owned_driver_outlives_its_host() {
         use crate::driver::{Driver, LeaseKind};
+        let alias = crate::tests::fixtures::harness_alias("app_owned_driver");
         let directory = tempfile::tempdir().unwrap();
         let database_path = directory.path().join("driver.sqlite");
         let backend = super::super::SqliteBackend::open(
@@ -95,10 +96,7 @@ mod tests {
         .await
         .unwrap();
         let driver = backend
-            .connection_driver(
-                "app_owned_driver",
-                &crate::sql::SchemaName::new("app_owned_driver").unwrap(),
-            )
+            .connection_driver(&crate::tests::fixtures::harness_binding("app_owned_driver"))
             .await
             .unwrap();
         drop(backend);
@@ -111,13 +109,13 @@ mod tests {
         );
         session.exec("BEGIN", &[]).await.unwrap();
         session
-            .exec("CREATE TABLE app_owned_driver.leased (id INTEGER)", &[])
+            .exec(&format!("CREATE TABLE {alias}.leased (id INTEGER)"), &[])
             .await
             .unwrap();
         assert_eq!(
             session
                 .exec(
-                    "INSERT INTO app_owned_driver.leased VALUES ($1)",
+                    &format!("INSERT INTO {alias}.leased VALUES ($1)"),
                     &[1.into()]
                 )
                 .await
@@ -140,15 +138,12 @@ mod tests {
         .await
         .unwrap();
         let source = reopened
-            .connection_driver(
-                "app_owned_driver",
-                &crate::sql::SchemaName::new("app_owned_driver").unwrap(),
-            )
+            .connection_driver(&crate::tests::fixtures::harness_binding("app_owned_driver"))
             .await
             .unwrap();
         let session = source.acquire(LeaseKind::Autocommit).await.unwrap();
         let rows = session
-            .query("SELECT id FROM app_owned_driver.leased", &[])
+            .query(&format!("SELECT id FROM {alias}.leased"), &[])
             .await
             .unwrap();
         assert_eq!(rows[0]["id"], crate::value::Value::from(1));
@@ -164,10 +159,7 @@ mod tests {
         )
         .unwrap();
         let driver = backend
-            .connection_driver(
-                "app_driver",
-                &crate::sql::SchemaName::new("app_driver").unwrap(),
-            )
+            .connection_driver(&crate::tests::fixtures::harness_binding("app_driver"))
             .await
             .unwrap();
         crate::driver::tests::native_commands(driver, "BLOB").await;
@@ -185,10 +177,7 @@ mod tests {
         )
         .unwrap();
         let driver = backend
-            .connection_driver(
-                "app_decode",
-                &crate::sql::SchemaName::new("app_decode").unwrap(),
-            )
+            .connection_driver(&crate::tests::fixtures::harness_binding("app_decode"))
             .await
             .unwrap();
         let session = driver.acquire(LeaseKind::Autocommit).await.unwrap();

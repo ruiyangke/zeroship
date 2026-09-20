@@ -818,8 +818,7 @@ async fn sqlite_cron_receipt_failure_rolls_back_run_publication_and_occurrence()
     let attached = store
         .backend
         .query(
-            store.binding.app_id(),
-            store.binding.schema(),
+            &store.binding,
             "PRAGMA database_list",
             &[],
         )
@@ -827,7 +826,7 @@ async fn sqlite_cron_receipt_failure_rolls_back_run_publication_and_occurrence()
         .unwrap();
     let namespace = store
         .backend
-        .namespace(store.binding.app_id(), store.binding.schema());
+        .namespace(&store.binding);
     let path = attached
         .iter()
         .find(|row| row.get("name").and_then(zeroship_data_orm::Value::as_str) == Some(namespace))

@@ -278,10 +278,10 @@ fn render_as_migration_service(
     let policy_config =
         migrate_server_policy::ManagedPolicyConfig::default_confined(vec![0_u8; 32], 1)
             .expect("the production default confined policy loads");
-    let effective = policy_config
-        .compose_effective_for_app(&app_id, None, None)
-        .expect("the service composes its no-draft app policy");
     let project_schema = zeroship_core::app_derivation::schema_name(&app_id);
+    let effective = policy_config
+        .compose_effective_for_schema(&app_id, &project_schema, None, None)
+        .expect("the service composes its no-draft policy for that schema");
 
     let ops = raw_ops(&documents);
 
