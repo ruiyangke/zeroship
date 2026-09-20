@@ -120,9 +120,6 @@ async fn snapshot(scope: &AppWorkflows) -> Vec<Vec<zeroship_data_orm::Value>> {
         "broadcasts",
         "signals",
         "job_publications",
-        "advance_publications",
-        "fanout_publications",
-        "propagation_publications",
         "job_receipts",
         "fanout_pages",
         "topics",
@@ -185,5 +182,5 @@ paired!(
 paired!(
     sqlite_pending_publication_validation_fences_code_release,
     postgres_pending_publication_validation_fences_code_release,
-    retention::projection
+    retention::damaged_specification
 );

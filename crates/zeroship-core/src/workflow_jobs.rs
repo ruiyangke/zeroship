@@ -14,6 +14,7 @@ use crate::{
     workflow_schedules::ScheduleId,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::num::NonZeroU64;
 use std::time::Duration;
 
@@ -169,6 +170,137 @@ impl JobSpec {
             | JobOperation::Collect {} => false,
         }
     }
+
+    /// The id this specification's own content derives, when the operation is
+    /// one a creator journal publishes.
+    ///
+    /// Equal to `self.id` for every publication intent the journal holds, and
+    /// that equality is the integrity check a reader applies: the key carries
+    /// the identity, so a specification that no longer derives the key it is
+    /// stored under is a damaged journal rather than a different job.
+    #[must_use]
+    pub fn publication_id(&self) -> Option<JobId> {
+        publication_id(&self.app_id, &self.operation, self.available_at)
+    }
+}
+
+/// The primary key of a publication intent, derived from the work it names.
+///
+/// `None` for the seven operations a creator journal never publishes, which is
+/// how an intent row wearing one of them is refused.
+///
+/// # What each kind's identity is, and why
+///
+/// The derivation covers the operation in full, and additionally covers the due
+/// time for `Advance` alone:
+///
+/// - **`Advance`** is identified by its deployment, run, generation, frontier
+///   revision AND due time. A run whose frontier revision has not moved but
+///   whose due time has is a different job, so rescheduling a frontier produces
+///   a different id rather than silently rewriting a published job's due time.
+/// - **`Fanout`** is identified by its broadcast and page revision, and
+///   **`Propagate`** by its obligation and page revision. Neither carries the
+///   due time: both are recorded as available now, so including it would make
+///   every observation of the same page a different job and there would be no
+///   deduplication at all.
+///
+/// # The shape of the input
+///
+/// Every field is preceded by a one-byte type tag and, for text, its length, so
+/// no concatenation of one field's value can be read as another's. The leading
+/// domain and kind tags keep two kinds from meeting on equal-looking inputs.
+#[must_use]
+pub fn publication_id(
+    app: &AppId,
+    operation: &JobOperation,
+    available_at: UnixMillis,
+) -> Option<JobId> {
+    let mut identity = match operation {
+        JobOperation::Advance { .. } => Identity::new("advance"),
+        JobOperation::Fanout { .. } => Identity::new("fanout"),
+        JobOperation::Propagate { .. } => Identity::new("propagate"),
+        JobOperation::Activate { .. }
+        | JobOperation::Cron { .. }
+        | JobOperation::Management { .. }
+        | JobOperation::ReleaseHold { .. }
+        | JobOperation::Close { .. }
+        | JobOperation::Reconcile {}
+        | JobOperation::Collect {} => return None,
+    };
+    identity.text(app.as_str());
+    match operation {
+        JobOperation::Advance {
+            deployment_id,
+            run_id,
+            generation,
+            revision,
+        } => {
+            identity.text(deployment_id.as_str());
+            identity.text(run_id.as_str());
+            identity.number(i64::from(*generation));
+            identity.number(revision.get());
+            identity.number(available_at.get());
+        }
+        JobOperation::Fanout {
+            broadcast_id,
+            revision,
+        } => {
+            identity.text(broadcast_id.as_str());
+            identity.number(revision.get());
+        }
+        JobOperation::Propagate {
+            propagation_id,
+            revision,
+        } => {
+            identity.text(propagation_id.as_str());
+            identity.number(revision.get());
+        }
+        JobOperation::Activate { .. }
+        | JobOperation::Cron { .. }
+        | JobOperation::Management { .. }
+        | JobOperation::ReleaseHold { .. }
+        | JobOperation::Close { .. }
+        | JobOperation::Reconcile {}
+        | JobOperation::Collect {} => return None,
+    }
+    Some(identity.finish())
+}
+
+/// The unambiguous encoding [`publication_id`] hashes.
+struct Identity(Sha256);
+
+impl Identity {
+    /// The domain separator. It is versioned because changing which fields a
+    /// kind's identity covers changes every id that kind derives, and two
+    /// runtimes disagreeing about that would publish the same work twice.
+    const DOMAIN: &'static [u8] = b"zeroship/workflow/publication/1";
+
+    fn new(kind: &str) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(Self::DOMAIN);
+        let mut identity = Self(hasher);
+        identity.text(kind);
+        identity
+    }
+
+    fn text(&mut self, value: &str) {
+        self.0.update([b't']);
+        self.0
+            .update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+        self.0.update(value.as_bytes());
+    }
+
+    fn number(&mut self, value: i64) {
+        self.0.update([b'n']);
+        self.0.update(value.to_be_bytes());
+    }
+
+    fn finish(self) -> JobId {
+        let digest = self.0.finalize();
+        let mut body = [0u8; 16];
+        body.copy_from_slice(&digest[..16]);
+        JobId::derived(body)
+    }
 }
 
 /// Worker publication carries placement identity, never a caller-chosen expiry.
@@ -229,10 +361,14 @@ pub enum JobOutcome {
     Completed {},
     Waiting {},
     Rejected {},
-    Management { outcome: ManagementOutcome },
+    Management {
+        outcome: ManagementOutcome,
+    },
     /// The creator fenced the job's epoch; `drained` reports whether its closed
     /// drain predicates held in that same transaction.
-    Closed { drained: bool },
+    Closed {
+        drained: bool,
+    },
 }
 
 impl JobOutcome {

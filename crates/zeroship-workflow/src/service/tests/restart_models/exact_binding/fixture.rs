@@ -7,7 +7,7 @@ use crate::{
     },
 };
 use std::collections::BTreeMap;
-use zeroship_core::workflow_jobs::{JobOperation, JobSpec};
+use zeroship_core::workflow_jobs::JobOperation;
 use zeroship_data_orm::{orm::Operation, value, Value};
 
 pub(super) struct Fixture {
@@ -121,22 +121,9 @@ impl Fixture {
         .await;
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].text("deploy_id").unwrap(), deployment);
-        let frontiers = journal_rows(
-            tx,
-            "advance_publications",
-            json!({"app_id":self.owner.as_str(),"run_id":self.run,"generation":generation}),
-        )
-        .await;
+        let mut frontiers = advance_intents(tx, &self.owner, &self.run, Some(generation)).await;
         assert_eq!(frontiers.len(), 1);
-        let publications = journal_rows(
-            tx,
-            "job_publications",
-            json!({"app_id":self.owner.as_str(),"id":frontiers[0].text("id").unwrap()}),
-        )
-        .await;
-        assert_eq!(publications.len(), 1);
-        let job: JobSpec =
-            serde_json::from_str(&publications[0].text("specification").unwrap()).unwrap();
+        let job = frontiers.pop().unwrap();
         assert_eq!(job.app_id, self.owner);
         assert!(
             matches!(job.operation, JobOperation::Advance {deployment_id, run_id, generation: actual, ..}
@@ -196,9 +183,6 @@ impl Fixture {
             "signals",
             "payload_refs",
             "job_publications",
-            "advance_publications",
-            "fanout_publications",
-            "propagation_publications",
             "outbox",
             "requests",
             "management_receipts",

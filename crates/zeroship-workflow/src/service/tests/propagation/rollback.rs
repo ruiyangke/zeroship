@@ -71,14 +71,9 @@ async fn rollback(store: Rc<OrmStore>, database: Database) {
     let grant = JobGrant::new(&page);
     let options = PropagationOptions { page_size: 1 };
     let before = snapshot(&service, &app).await;
-    // Fail at the child's Advance publication, the successor page publication
-    // and the page record itself.
-    for table in [
-        "job_publications",
-        "advance_publications",
-        "propagation_publications",
-        "propagation_pages",
-    ] {
+    // Fail at the child's Advance publication and the successor page
+    // publication, which share the intent table, and at the page record itself.
+    for table in ["job_publications", "propagation_pages"] {
         database.fault(table, true).await;
         assert!(scope.propagation_job(&grant, options).await.is_err());
         assert_eq!(snapshot(&service, &app).await, before);
