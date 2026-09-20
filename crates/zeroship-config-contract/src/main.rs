@@ -7,8 +7,8 @@ use zeroship_config_contract::registry::platform_specs;
 const USAGE: &str = "usage: zeroship-config-contract \
 [check-metadata [path/to/Cargo.toml] | env-vars-doc [--root DIR] [--check]]";
 
-/// The generated half of the environment reference.
-const ENV_VARS_DOC: &str = "docs/reference/env-vars.md";
+/// The generated half of the platform environment reference.
+const ENV_VARS_DOC: &str = "docs/architecture/platform-env-vars.md";
 
 fn main() {
     let args = std::env::args().skip(1).collect::<Vec<_>>();

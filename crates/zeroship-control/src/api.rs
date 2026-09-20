@@ -2421,7 +2421,7 @@ mod stream_tmp_tests {
 
         let reference = compact(include_str!("../../../docs/reference/control.md"));
         for required in [
-            "`trace_id` is present only on responses produced by `infrastructure_error_response`.",
+            "`trace_id` is present only on an infrastructure failure",
             "For example, `control.env.listVars` failures remain id-less.",
         ] {
             assert!(
