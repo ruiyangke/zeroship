@@ -7,6 +7,11 @@ import { fieldsOf } from "../../db/tests/_install-helper.js";
 import { renderGeneratedEnvDb, type RuntimeDescriptor } from "../src/gen-types/render-env-db.js";
 import { fieldDefToDto } from "../src/gen-types/manual.js";
 
+/** The database these renders belong to: a `main` labelled primary, which is
+ *  what a single-database app's `zeroship.jsonc` declares. The renderer needs
+ *  it because the emitted module keys `EnvDatabases` on the label. */
+const MAIN = { label: "main", primary: true } as const;
+
 const descriptor: RuntimeDescriptor = {
   version: 2,
   collections: {
@@ -29,7 +34,7 @@ const descriptor: RuntimeDescriptor = {
 };
 
 test("generated builders preserve named edges, scalar references, and ordinary fields", () => {
-  const source = renderGeneratedEnvDb(descriptor) + "\nexport { schema };\n";
+  const source = renderGeneratedEnvDb(descriptor, MAIN) + "\nexport { schema };\n";
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } });
   const exports: { schema?: Record<string, Record<string, sdk.TypeBuilder>> } = {};
   new Function("require", "exports", compiled.outputText)((name: string) => {
@@ -52,7 +57,7 @@ test("generated builders preserve named edges, scalar references, and ordinary f
 
 test("generated relation names and target row types compile without widening", () => {
   const file = resolve(import.meta.dirname, "__generated-relation-contract.ts");
-  const source = renderGeneratedEnvDb(descriptor) + `
+  const source = renderGeneratedEnvDb(descriptor, MAIN) + `
 declare const db: Db<typeof schema>;
 async function useRelations() {
   const rows = await db.todos.find().with({ user: true });
@@ -119,5 +124,5 @@ test("manual descriptor mapping carries relation names into the schema engine", 
 test("unsupported reference storage cannot generate a text reference", () => {
   assert.throws(() => renderGeneratedEnvDb({ collections: {
     invalid: { fields: { owner: { type: "boolean", refTarget: "users", relation: "user" } } },
-  } }), /reference storage/);
+  } }, MAIN), /reference storage/);
 });

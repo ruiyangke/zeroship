@@ -302,6 +302,50 @@ describe("validation", () => {
     assert.throws(() => parseProjectConfig("zeroship.jsonc", body), /names no `primary`/);
   });
 
+  /**
+   * A workspace where one app makes a database its `env.db` and another merely
+   * uses it. Both apps are typed from that database's SINGLE `env.db.ts`, and
+   * that file declares `Env.db` for a primary and not otherwise, so it cannot
+   * serve both.
+   */
+  const SPLIT_PRIMACY = `{
+  "$schema": "https://zeroship.ai/schema/project-v1.json",
+  "name": "demo-app",
+  "control": "https://control.zeroship.ai",
+  "runtime_date": "2026-08-14",
+  "build": { "mode": "full", "dist": "dist", "output": "dist/app.zship" },
+  "databases": {
+    "main": { "id": "dbs_03evr3oqx1200yyd6zj2cebfw", "migrations": "migrations", "out": "generated/zeroship/main" },
+    "analytics": { "id": "dbs_03evr3oqx1200qyvgmdnjrsla", "migrations": "migrations/analytics", "out": "generated/zeroship/analytics" }
+  },
+  "apps": {
+    "storefront": { "databases": ["main", "analytics"], "primary": "main" },
+    "reporting": { "databases": ["analytics"], "primary": "analytics" }
+  },
+  "secrets": []
+}`;
+
+  test("a database that is one app's primary and another's secondary is refused", () => {
+    assert.throws(
+      () => parseProjectConfig("zeroship.jsonc", SPLIT_PRIMACY),
+      /makes `analytics` its `primary`.*uses it without naming it/s,
+    );
+  });
+
+  test("the same two apps agreeing on primacy are accepted", () => {
+    // The CONTROL. Only the disagreement is refused: two apps sharing a
+    // database and both making it their `env.db` is the ordinary shape, and a
+    // rule that refused it would refuse every multi-app workspace.
+    const agreed = SPLIT_PRIMACY.replace(
+      '"storefront": { "databases": ["main", "analytics"], "primary": "main" }',
+      '"storefront": { "databases": ["analytics"], "primary": "analytics" }',
+    );
+    assert.notEqual(agreed, SPLIT_PRIMACY, "storefront's wiring must actually change");
+    const resolved = resolveProjectConfig(parseProjectConfig("zeroship.jsonc", agreed));
+    assert.equal(resolved.apps!.storefront.primary, "analytics");
+    assert.equal(resolved.apps!.reporting.primary, "analytics");
+  });
+
   test("a label that is not a usable member name is refused", () => {
     const body = FULL.replace('"main": { "id": "dbs_', '"__proto__": { "id": "dbs_');
     assert.notEqual(body, FULL, "the label must actually change");

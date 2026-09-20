@@ -3,11 +3,11 @@
 **Status.** PARTLY BUILT, on `feat/app-database-decoupling`. What exists is the identity, the
 entities, the control-plane surface that declares them, the cluster reconciler that makes a
 cluster match, the data path that narrows to what the reconciler granted, the creator config and
-manifest made plural, `env.databases` reaching every bound database, and deploy verifying a live
-binding rather than comparing schemas. What remains is the `Env.databases` TypeScript
-declaration, the `zeroship db` commands, the migration service's own app-id re-key, the subscribe
-request naming a database, the encryption salt and AAD, capacity-aware placement, and an apply
-advancing an epoch.
+manifest made plural, `env.databases` reaching every bound database and typed under its label,
+the `zeroship db` commands, and deploy verifying a live binding rather than comparing schemas.
+What remains is the migration service's own app-id re-key, the subscribe request naming a
+database, the encryption salt and AAD, capacity-aware placement, and an apply advancing an
+epoch.
 
 Built:
 
@@ -609,7 +609,7 @@ Three resources, three owners, three management models.
 ### Creating a database is two facts in two places
 
 ```
-  creator: zeroship db create --project prj_... --name main
+  creator: zeroship db create main --project=prj_...
         |
         v
   CONTROL     authorize: does the caller hold a qualifying seat on the project
@@ -636,7 +636,7 @@ inference: it would mean a revoked binding is silently restored by the next depl
 config file is a stale snapshot of an intent someone has since changed.
 
 ```
-  GRANT is an explicit act     zeroship db bind dbs_... --app app_... --readwrite
+  GRANT is an explicit act     zeroship db bind main --app=storefront --capability=readwrite
   DEPLOY only verifies         "app X declares database main (dbs_Y) but holds no active
                                binding to it" -> refuse, naming the command that fixes it
 ```
@@ -656,19 +656,23 @@ to its end.
 ### The creator surface
 
 ```
-  zeroship db create --project prj_... --name main     -> prints dbs_...
-  zeroship db list
-  zeroship db bind   dbs_... --app app_... --readwrite
-  zeroship db unbind dbs_... --app app_...
-  zeroship db bindings dbs_...                          -> which apps, which capability
-  zeroship db delete dbs_...                            -> refuses while bound
+  zeroship db create   main --project=prj_...             -> prints dbs_...
+  zeroship db list     --project=prj_...
+  zeroship db bind     main --app=storefront --capability=readwrite
+  zeroship db unbind   main --app=storefront
+  zeroship db bindings main                               -> which apps, which capability
+  zeroship db delete   main                               -> refuses while bound
 
   zeroship migrate --database main                      -> migrate-server, by id
   zeroship deploy                                       -> verifies bindings, not schemas
 ```
 
 `main` is the local label from `zeroship.jsonc`; the CLI dereferences it to a `dbs_` before any
-request, so a label never travels as an identifier.
+request, so a label never travels as an identifier. With no file in the directory there are no
+labels and the argument is the id, the same rule `--app` already follows. `--capability` is
+passed through rather than checked here: `validate_capability` names the accepted set in its
+refusal, and a second copy of that vocabulary in the CLI would refuse valid input the day the
+ladder moves.
 
 The routes those commands call are mounted by `zeroship_control::databases::configure`
 (`crates/zeroship-control/src/databases.rs`):
@@ -1175,6 +1179,25 @@ rather than in one flat namespace - which also removes any need for a build-time
 have been resolved by renaming a collection inside a database the app might share.
 `RESERVED_ENV_DB_NAMES` (`crates/zeroship-data-v8/js/runtime/install-schema.ts`) needs no new
 entries, because nothing new is planted on `env.db`.
+
+### The types are one interface per WORKSPACE, not one property per database
+
+A plain `interface Env { databases: ... }` in each generated `env.db.ts` cannot work. Every
+database has its own generated module, so every module would declare the same property with a
+different shape, and TypeScript calls that a conflict rather than a union. What merges is a
+separate `EnvDatabases`, declared once in the `zeroship` package alongside `Env { databases:
+EnvDatabases }`, which each generated module AUGMENTS with its own label. The primary's module
+also declares `Env { db: EnvDatabases["<label>"] }` - as the labelled entry rather than as the
+handle type again, so the identity the runtime gives is what the types say. `EnvDatabases` carries
+no index signature: the runtime publishes an entry per declared database and nothing else, so a
+label the app never declared is a compile error rather than `unknown`.
+
+That is also why **a database is the primary of every app that uses it, or of none of them.** One
+database has one `out` directory, so it has one `env.db.ts`, and that file declares `Env.db` for a
+primary and not otherwise; a workspace where one app makes `analytics` its primary and another
+merely uses it is asking one file to be two. Both config readers refuse it
+(`checkPrimacyIsUniform`, `check_primacy_is_uniform`), because the alternative is a drift-gate
+failure that names the artifact instead of the two lines that cannot both hold.
 
 ---
 

@@ -88,7 +88,7 @@ operationally identical, so both tools apply its empty default.
 | `apps.<label>` | object | — | see [Labels](#labels). One entry per app this workspace deploys. |
 | `apps.<label>.app` | string | none | CLI: `deploy`, `migrate`, `secret`, `var`. The app's id. Absent on a fresh project; see [The writeback](#the-writeback-and-starting-a-project-with-no-app-yet). |
 | `apps.<label>.databases` | string[] | required | build and CLI. The database LABELS this app uses. Each becomes a member of `env.databases`. |
-| `apps.<label>.primary` | string | required when `databases` is non-empty | build and CLI. Which of them is `env.db`. `env.db === env.databases[primary]` holds by object identity, so it cannot be inferred. |
+| `apps.<label>.primary` | string | required when `databases` is non-empty | build and CLI. Which of them is `env.db`. `env.db === env.databases[primary]` holds by object identity, so it cannot be inferred. A database is the primary of every app that uses it or of none: one database has one generated `env.db.ts`, and that file declares `Env.db` only for a primary. |
 | `control` | string | required | CLI: `deploy`, `migrate`, `secret`, `var`, and `login`. Control-plane base URL. |
 | `runtime_date` | string, `^[0-9]{4}-[0-9]{2}-[0-9]{2}$` | required | build (transport only). The scaffold stamps the current UTC date; the build copies it into the manifest; the runtime ignores it. See [`runtime_date`](#runtime_date-is-transported-but-inert). |
 | `build.mode` | `"full"` \| `"static"` | `"full"` | build. `"full"` builds a worker — server code plus its remote-callable procedures (RPC) — and the client; `"static"` is a static-site (SSG) deploy with no worker, just the files in `dist`. |
@@ -616,6 +616,7 @@ below, `<key>` and `<value>` stand for that key and its value:
 - an app naming an undeclared database → `<path>: apps.<label>.databases names <name>, which this file does not declare under databases (declared: <comma list>)`
 - an app that uses a database but names no primary → `<path>: apps.<label> uses <comma list> but names no primary. The primary is env.db, and env.db === env.databases[primary] by object identity, so it cannot be inferred.`
 - a primary the app does not use → `<path>: apps.<label>.primary is <value>, which is not one of apps.<label>.databases (<comma list>)`
+- one app's primary being another app's secondary → `<path>: apps.<a> makes <database> its primary while apps.<b> uses it without naming it. A database has ONE generated env.db.ts (databases.<database>.out), and that file declares Env.db only for a primary, so the two apps cannot both be typed from it. Give one of them its own database, or make <database> the primary of both.`
 - an environment naming a label the root does not declare → `<path>: environments.<name>.<section>.<label> names no root <section> entry (declared: <comma list>). An environment overrides the id under a label, never the label itself.`
 
 The remaining refusals are multi-line. A forbidden key name, anywhere in the

@@ -56,7 +56,7 @@ import {
   genTypesFromMigrations,
   genTypesFromSchemaFile,
 } from "../src/gen-types/index.js";
-import { declaredDatabases, readProjectConfig } from "../src/project-config/index.js";
+import { databaseForOutDir, readProjectConfig } from "../src/project-config/index.js";
 
 /** Directories a repo walk must never descend into: build output, dependency
  *  trees, sibling git checkouts, and the vendored engine. */
@@ -131,20 +131,29 @@ async function runOne(app: ArtifactApp, check: boolean): Promise<string> {
   // The artifacts were discovered by directory, and a workspace has one
   // directory per DATABASE, so the sources are the ones of the database whose
   // `out` is this directory.
-  const database = Object.entries(declaredDatabases(config)).find(
-    ([, declared]) => resolve(app.root, declared.out) === resolve(app.outDir),
-  );
-  if (database != null) {
-    const migrationsDir = resolve(app.root, database[1].migrations);
-    if (existsSync(migrationsDir) && statSync(migrationsDir).isDirectory()) {
-      await genTypesFromMigrations(migrationsDir, app.outDir, { check });
-      return `migrations (${database[0]})`;
-    }
+  const database = databaseForOutDir(config, app.root, app.outDir);
+  // THE DECLARATION IS REQUIRED, not merely a schema source. `env.db.ts`
+  // declares this database's entry on `EnvDatabases` under its LABEL, and
+  // `Env.db` only when an app names it `primary` - two facts that live in
+  // `zeroship.jsonc` and nowhere in the fold. An out dir no `databases.*.out`
+  // claims cannot be regenerated without guessing both.
+  if (database == null) {
+    throw new Error(
+      `gen-types-all: ${app.outDir} holds committed ${RUNTIME_DESCRIPTOR_FILE} + ` +
+        `${ENV_DB_FILE} but no \`databases.*.out\` in ${app.root} names it, so the label ` +
+        `its artifacts declare on \`EnvDatabases\` is unknown`,
+    );
+  }
+  const { label, primary } = database;
+  const migrationsDir = resolve(app.root, database.migrations);
+  if (existsSync(migrationsDir) && statSync(migrationsDir).isDirectory()) {
+    await genTypesFromMigrations(migrationsDir, app.outDir, { label, primary, check });
+    return `migrations (${label})`;
   }
   for (const rel of ["schema.ts", "src/schema.ts"]) {
     const schemaTs = join(app.root, rel);
     if (existsSync(schemaTs)) {
-      await genTypesFromSchemaFile(schemaTs, app.outDir, { check });
+      await genTypesFromSchemaFile(schemaTs, app.outDir, { label, primary, check });
       return `schema (${rel})`;
     }
   }

@@ -399,14 +399,20 @@ fn project(
     let project = tempfile::tempdir().expect("create project directory");
     std::fs::create_dir(project.path().join("dist")).expect("create dist");
     std::fs::write(project.path().join("dist/app.zship"), b"test archive").expect("write archive");
+    // The app id lives under the app's LABEL, which is also where `deploy`
+    // writes it back on a first push. `None` is the fresh-project shape: the
+    // entry exists and carries no id yet.
     let app = app_id
-        .map(|id| format!("  \"app\": {id:?},\n"))
+        .map(|id| format!(" \"app\": {id:?},"))
         .unwrap_or_default();
     let secrets = serde_json::to_string(secrets).expect("serialize secret names");
+    // A workspace with NO database: `databases` and `apps` are both required,
+    // and an app naming no database is the schema-less shape. These tests are
+    // about the deploy call, so the database axis is deliberately empty.
     std::fs::write(
         project.path().join("zeroship.jsonc"),
         format!(
-            "{{\n  \"name\": {name:?},\n{app}  \"control\": {control_url:?},\n  \"runtime_date\": \"2026-08-14\",\n  \"build\": {{ \"mode\": \"full\", \"dist\": \"dist\", \"output\": \"dist/app.zship\" }},\n  \"migrations\": {{ \"dir\": \"migrations\", \"out\": \"generated/zeroship\" }},\n  \"secrets\": {secrets}\n}}\n"
+            "{{\n  \"name\": {name:?},\n  \"control\": {control_url:?},\n  \"runtime_date\": \"2026-08-14\",\n  \"build\": {{ \"mode\": \"full\", \"dist\": \"dist\", \"output\": \"dist/app.zship\" }},\n  \"databases\": {{}},\n  \"apps\": {{ \"app\": {{{app} \"databases\": [] }} }},\n  \"secrets\": {secrets}\n}}\n"
         ),
     )
     .expect("write project config");
