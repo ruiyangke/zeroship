@@ -1,3 +1,5 @@
+#[path = "repository/build_inputs.rs"]
+mod build_inputs;
 #[allow(dead_code)]
 #[path = "architecture/repo.rs"]
 mod repo;
