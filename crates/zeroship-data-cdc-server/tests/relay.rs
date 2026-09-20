@@ -81,8 +81,8 @@ async fn relay_process_authenticates_workers_and_streams_commits_without_worker_
     admin.batch_execute(&format!("CREATE ROLE \"{relay_role}\" LOGIN REPLICATION NOSUPERUSER NOBYPASSRLS PASSWORD 'fixture'; CREATE ROLE \"{worker_role}\" LOGIN NOREPLICATION NOSUPERUSER NOBYPASSRLS PASSWORD 'fixture'")).await.unwrap();
     let db = Pool::connect(admin_url.as_str(), 2).await.unwrap();
     let app = zeroship_core::typed_id::generate(zeroship_core::typed_id::APP_PREFIX);
-    let publication = zeroship_core::replication_names::publication_name(&app).unwrap();
-    let slot = publication.replacen("__zs_pub_", "__zs_relay_", 1);
+    let publication = zeroship_core::replication_names::DATASTORE_PUBLICATION;
+    let slot = zeroship_core::replication_names::relay_slot_name(&app).unwrap();
     // The app's ONE database. The relay reads these ids back out of Control's
     // rows to learn which schema this subscriber is entitled to, so the fixture
     // declares them rather than letting anything derive a schema from the app

@@ -514,14 +514,33 @@ impl Fleet {
         // THE CREATOR ZONE. Every schema statement below runs on the creator
         // database, which has no platform schema;  above stays on the
         // platform one and is used only for platform catalog rows.
-        let (creator_pg, creator_connection) =
+        let (mut creator_pg, creator_connection) =
             compio_postgres::connect(&fleet.database.creator_url(), compio_postgres::NoTls)
                 .await
                 .unwrap();
         let creator_driver = compio::runtime::spawn(creator_connection.run());
+        // The PLATFORM schema this app's workflow journal lives in, composed
+        // from the app id. It is not a creator database and no binding reaches
+        // it.
         zeroship_migrate_server::provisioning::provision_database(&creator_pg, fleet.app_id.as_str())
             .await
             .unwrap();
+        // THE CREATOR DATABASE. Declared on the platform side exactly as
+        // Control declares one, converged on the creator side exactly as the
+        // cluster reconciler converges one, and bound to this app - the apply
+        // below writes into ITS schema and admits against ITS binding.
+        let database = zeroship_core::DatabaseId::mint();
+        declare_creator_database(&pg, &fleet.app_id, &database).await;
+        zeroship_migrate_server::datastore::cluster::apply_bootstrap_corpus(&creator_pg)
+            .await
+            .expect("bootstrap the creator cluster");
+        zeroship_migrate_server::datastore::cluster::converge_database(
+            &mut creator_pg,
+            &database,
+            1,
+        )
+        .await
+        .expect("converge the creator database");
         if fleet.manager_url.is_some() {
             // The creator journal is migration-path DDL: the worker's host
             // never creates it. Installing it before the apply below leaves it
@@ -552,6 +571,7 @@ impl Fleet {
             &fleet.database.creator_url(),
             &schema_work,
             &fleet.app_id,
+            &database,
             &request,
             &policy,
             &ledger,
@@ -796,4 +816,79 @@ fn pack(path: &Path, descriptor: &[u8]) {
             .unwrap();
     }
     archive.into_inner().unwrap().finish().unwrap();
+}
+
+/// Declare one creator database for this app and bind it, on the CONTROL
+/// connection.
+///
+/// The rows are written already live because what this fleet exercises is the
+/// worker and the workflow host, not convergence: Control declares a database
+/// `provisioning` and a binding `pending`, and a per-cluster reconciler is what
+/// moves either to `active`. The zone and the datastore come first because
+/// `zeroship.databases` carries composite keys onto both.
+async fn declare_creator_database(
+    pg: &compio_postgres::Client,
+    app: &AppId,
+    database: &zeroship_core::DatabaseId,
+) {
+    let project: String = pg
+        .query_one(
+            "SELECT project_id FROM zeroship.apps WHERE id = $1::text",
+            &[&app.as_str()],
+        )
+        .await
+        .expect("the provisioned app row")
+        .get("project_id");
+    let zone: String = pg
+        .query_one(
+            "SELECT execution_zone_id FROM zeroship.projects WHERE id = $1::text",
+            &[&project],
+        )
+        .await
+        .expect("the app's project row")
+        .get("execution_zone_id");
+    let datastore = zeroship_core::typed_id::generate("dst");
+    pg.execute(
+        "INSERT INTO zeroship.datastores (id, system_identifier, execution_zone_id, status) \
+         VALUES ($1, 5566778899001122, $2, 'active') \
+         ON CONFLICT (system_identifier) DO NOTHING",
+        &[&datastore, &zone],
+    )
+    .await
+    .expect("register the fleet's creator cluster");
+    let datastore: String = pg
+        .query_one(
+            "SELECT id FROM zeroship.datastores WHERE system_identifier = 5566778899001122",
+            &[],
+        )
+        .await
+        .expect("the registered datastore row")
+        .get("id");
+    pg.execute(
+        "INSERT INTO zeroship.databases \
+             (id, project_id, execution_zone_id, datastore_id, name, status) \
+         VALUES ($1, $2, $3, $4, $5, 'active')",
+        &[
+            &database.as_str(),
+            &project,
+            &zone,
+            &datastore,
+            &format!("fleet-{}", database.as_str()),
+        ],
+    )
+    .await
+    .expect("declare the fleet's creator database");
+    pg.execute(
+        "INSERT INTO zeroship.database_bindings \
+             (id, app_id, database_id, project_id, capability, status, observed_generation) \
+         VALUES ($1, $2, $3, $4, 'readwrite', 'active', 1)",
+        &[
+            &zeroship_core::BindingId::mint().as_str().to_owned(),
+            &app.as_str(),
+            &database.as_str(),
+            &project,
+        ],
+    )
+    .await
+    .expect("bind the fleet app to its creator database");
 }
