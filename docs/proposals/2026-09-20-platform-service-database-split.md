@@ -317,13 +317,20 @@ database identity rather than schema reachability.
 **2. CDC relay.** One narrow read - `worker_instances.public_key` - and an
 in-memory replay store already. It becomes a control API call.
 
-**3. Gateway.** No production read-joins; every statement is single-table. Its
-cost is the session and anchor tables, whose ownership this document assigns to
-it.
+**3. Gateway.** No production read-joins; every statement is single-table. That
+property is what makes this step mechanical, but it is not what makes it small.
+Beyond the session and anchor tables this document gives it, the gateway reads
+`users`, `oauth_clients` and `oauth_grants` from auth, and `apps`, `projects`,
+`organizations`, `plans` and `app_oauth_clients` from control, plus the shared
+`audit_events`. Every one of those becomes an API call. The step is ordered
+third because single-table reads convert one at a time without decomposing a
+join, not because there are few of them.
 
-**4. Workflow.** Already a separate schema with its own migrator role and a boot
-check that enumerates its tables. Its cross-service reads are column-scoped
-projections of control tables.
+**4. Workflow.** Already a separate schema with its own migrator role: the
+corpus carries `zeroship_workflow` and `zeroship_workflow_migrator`, and
+`db/migrations-ts/20260919000000_workflow_journal.ts` and
+`db/migrations-ts/20260911000000_workflow_coordination.ts` build the schema. Its
+cross-service reads are column-scoped projections of control tables.
 
 **5. migrate-server.** Needs a role of its own first - it currently logs in with
 control's credential, and there is no `zeroship_migrate` role in the corpus.
@@ -343,6 +350,46 @@ trip claim 2 ruled out on cost. This is the one place where the split is not yet
 shown to be buildable as specified.
 
 ---
+
+## Re-deriving the claims above
+
+Every sentence in this document that describes what a service reads is a claim
+about code, and none of it is checkable by anything that checks citations: a
+path resolving says nothing about whether the sentence beside it is still true.
+So rather than ask a reader to trust the prose, here is how to re-derive it.
+
+What a service reaches in the platform schema, as SQL:
+
+    grep -rhoE '(FROM|INTO|UPDATE|JOIN)[[:space:]]+zeroship\.[a-z_]+' \
+        --include='*.rs' crates/<crate>/src/ | grep -oE 'zeroship\.[a-z_]+' | sort -u
+
+Run against `zeroship-worker` this returns nothing, which is the worker claim in
+step 1. Run against `zeroship-gateway` it returns the set step 3 names. Whether
+a role exists is the same question asked of the corpus:
+
+    grep -rho 'zeroship_[a-z_]*' db/ | sort -u
+
+Two ways this sweep lies, both of which it did while this section was written:
+
+**`zeroship\.` is not a schema reference.** The bare pattern also matches
+`spiffe://zeroship.ai/svc/worker`, which is how the worker's identity claims are
+spelled. A sweep for the bare prefix reports the worker touching the platform
+schema when it does not. Anchoring on the SQL keyword is what makes the answer
+mean what it says.
+
+**`src/` is not production.** `#[cfg(test)]` modules live in `src/` and the
+sweep cannot see the gate. `crates/zeroship-data-cdc-server/src/source.rs`
+inserts `zeroship.databases` rows with `status = 'active'` inside such a module,
+against stand-in tables it creates itself. Read the gate before concluding a
+service writes a table; the difference decides whether step 2 is one read or
+three tables.
+
+The same caution applies to a comment that states an invariant.
+`crates/zeroship-control/src/databases.rs` carries a header asserting that
+nothing in the file reaches `status = 'active'`. It is true - the writers bind
+`STATUS_PROVISIONING`, `STATUS_DELETING` and `BINDING_STATUS_PENDING`, and
+`STATUS_ACTIVE` appears only inside a read predicate - but it would read
+identically if it were false. Check the writers.
 
 ## What transfers from the app-database decoupling
 
