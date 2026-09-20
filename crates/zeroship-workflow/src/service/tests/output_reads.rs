@@ -44,9 +44,9 @@ async fn output_contract(store: Rc<OrmStore>) {
     let (service, app, other, _deployments) = registered_service(store).await;
     let app = service.fixture_app(app);
     let other = service.fixture_app(other);
-    let backend = app.clone().into_backend(1024).unwrap();
+    let backend = app.clone().into_backend(&service, 1024).unwrap();
     assert_eq!(backend.app_id(), app.app_id());
-    assert!(app.clone().into_backend(0).is_err());
+    assert!(app.clone().into_backend(&service, 0).is_err());
     let worker = WorkerIdentity::new("output-reader".into()).unwrap();
     let run = backend
         .start("Example".into(), StartOptions::default())

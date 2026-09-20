@@ -101,7 +101,7 @@ impl Fixture {
                 source: source.into(),
             }])
             .plugins(vec![Arc::new(WorkflowBinding::service(
-                app.clone().into_backend(1024).unwrap(),
+                app.clone().into_backend(&self.service, 1024).unwrap(),
             ))])
             // Deliberately conflicting and mutable input must not grant authority.
             .env_vars([("APP_ID".into(), self.other.app_id().as_str().to_owned())].into());
@@ -275,12 +275,12 @@ async fn ready_binding_reaches_only_the_published_backend_of_its_runtime_identit
     );
     // Another app's published backend never serves this identity, whatever
     // the mutable environment names.
-    apps.install(fixture.other.clone().into_backend(1024).unwrap());
+    apps.install(fixture.other.clone().into_backend(&fixture.service, 1024).unwrap());
     assert_eq!(
         fetch(fixture.ready_runtime(&apps, &identity, source)).await,
         refused
     );
-    apps.install(fixture.app.clone().into_backend(1024).unwrap());
+    apps.install(fixture.app.clone().into_backend(&fixture.service, 1024).unwrap());
     let started = fetch(fixture.ready_runtime(&apps, &identity, source)).await;
     let run = started["id"].as_str().expect("a published backend starts runs");
     assert_eq!(

@@ -234,9 +234,12 @@ DDL application remains a provisioning operation. PostgreSQL runtime connections
 have ordinary app-role DML permissions and cannot provision the journal.
 
 `AppWorkflows::into_backend` creates a bounded client for other runtime threads,
-including V8. The database stays on its owning compio thread. Queue overload
-rejects admission; dropping a waiting call cancels its operation and lets the ORM
-settle any open transaction. Callers only receive success after confirmed commit.
+including V8. Its construction site names the `WorkflowService` whose journal
+that client reads and writes, so the store behind the creator seam is a choice
+made there rather than one the app handle carries. The database stays on its
+owning compio thread. Queue overload rejects admission; dropping a waiting call
+cancels its operation and lets the ORM settle any open transaction. Callers only
+receive success after confirmed commit.
 
 `WorkflowService::open` requires `HostPolicies`. The trusted host creates a
 `PolicyBinding`, reserves a refresh ticket and installs a validated snapshot:
@@ -359,8 +362,9 @@ App handles expose `read_step_output` for a completed
 named occurrence in the run's current generation. The service resolves that
 generation under the restart fence and checks reference ownership before
 opening storage. `PayloadRead::into_bytes` verifies the stream within a host
-memory limit. `into_backend` adapts the app handle to `WorkflowBackend`;
-its bound identity cannot change between operations. `AppBackend::with_commit_hint`
+memory limit. `into_backend` adapts the app handle to `WorkflowBackend` over the
+journal its caller names, refusing a service opened over another policy
+registry; its bound identity cannot change between operations. `AppBackend::with_commit_hint`
 tells the trusted host when a start, signal, transition or restart finished, so
 the host can publish that commit's pending intents at once; manager
 reconciliation still recovers any intent the host misses. The hint carries no
