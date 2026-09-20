@@ -81,9 +81,14 @@ pub(crate) fn declare(
 }
 
 pub(crate) fn finalize(scope: &mut v8::PinScope) -> Result<(), String> {
-    let policy = scope
-        .get_slot_mut::<StartupPolicy>()
-        .ok_or("database startup policy binding is missing")?;
+    // `initialize` runs only for a deployment whose PRIMARY binding resolved,
+    // so an absent slot means the host resolved nothing for this app: it has
+    // no `env.db` to declare a policy on and nothing to seal. It stays
+    // unsealed, which `require_finalized` reads as closed, so every database
+    // route is refused for want of a policy rather than admitted without one.
+    let Some(policy) = scope.get_slot_mut::<StartupPolicy>() else {
+        return Ok(());
+    };
     install_mask_policy(&policy.binding, policy.declaration.clone())
         .map_err(|error| error.to_string())?;
     policy.finalized = true;
