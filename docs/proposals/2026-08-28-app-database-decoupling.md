@@ -1370,7 +1370,7 @@ app with it, not just the one doing the dropping.
 
 ## SQLite dev tier
 
-One file per database, `zs-db-<dbs>.sqlite`, ATTACHed under alias `db_<dbs>`. `attach_app_file`
+One file per database, `zs-db-<dbs>.sqlite`, ATTACHed under alias `db_<dbs>`. `attach_alias_file`
 (`crates/zeroship-data-orm/src/backend/sqlite/mod.rs`) already is a per-database handle under a
 different name, with a dedup set because SQLite errors on a duplicate alias; the dedup key becomes
 the database id. There is no Datastore entity on this tier and no control plane at all.
@@ -1493,8 +1493,9 @@ inheriting membership row rather than checking a pair.
 
 **No CRUD code may reach a raw connection, and this must stay a compile-time property.** The role
 fence is applied by two functions
-(`crates/zeroship-data-orm/src/backend/postgres/pg_autocommit.rs` and
-`crates/zeroship-data-orm/src/backend/postgres/implementation.rs`, `apply_per_app_role`); anything
+(`with_scoped_transaction` in `crates/zeroship-data-orm/src/backend/postgres/pg_autocommit.rs`, and
+`apply_session_authority` in
+`crates/zeroship-data-orm/src/backend/postgres/implementation.rs`); anything
 issuing SQL outside them is unfenced. Under a private database the blast radius of one unfenced
 statement was a single app's schema; under sharing it is every database in the cluster, and
 `WITH INHERIT FALSE` only converts such a statement from succeeding to failing at runtime. The
