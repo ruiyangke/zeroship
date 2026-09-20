@@ -212,9 +212,17 @@ the shape `database_bindings` already uses for convergence.
 `organization_members` and `organization_roles` in one statement, and
 `zeroship-authz` is linked into auth, gateway, control and migrate-server.
 
-*Unverified:* whether this runs per decision or is cached. That measurement
-decides whether the split needs a `users` projection in control's database or
-merely an API call.
+*Measured: per decision, uncached.* `authority::resolve` has exactly one
+production caller, `enforce` in `crates/zeroship-authz/src/eval.rs`, reached
+from `crates/zeroship-control/src/authz_guard.rs`. The only cache in the crate
+is `RevocationCache` in `wrapper_revocation.rs`, which caches revocations and
+not authority.
+
+**So the auth/control cut needs a `users` PROJECTION in control's database, not
+an API call.** A network round trip per authorization decision, in four
+services, is not viable on that path. The projection needs its own freshness
+and invalidation story, which makes this cut a distributed-systems problem
+rather than a refactor - and it is the reason the sequencing puts it last.
 
 **3. Auth takes a row lock on control's `organizations` while deleting `users`.**
 `refuse_if_it_strands_an_organization` holds `SELECT ... FOR UPDATE` on a
@@ -283,8 +291,8 @@ data holds no foreign key into the platform schema. This one has no equivalent.
 
 ## Open
 
-1. **Is the authorization ladder join per-decision or cached?** Decides whether
-   control needs a `users` projection. Unmeasured.
+1. **ANSWERED: the authorization ladder join is per-decision and uncached.** It
+   requires a `users` projection in control, not an API call - see claim 2.
 2. **One audit store or one per service?** `audit_events` has three writers and
    no reader.
 3. **Does `service_assertion_replay` stay shared?** The argument for sharing is
