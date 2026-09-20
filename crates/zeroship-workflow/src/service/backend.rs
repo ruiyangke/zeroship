@@ -1,6 +1,6 @@
 //! App-scoped calls to the customer engine on its owning compio thread.
 
-use super::{policy::PolicyAuthority, AppWorkflows, PolicyBinding, RequestId};
+use super::{policy::PolicyAuthority, AppWorkflows, PolicyBinding, RequestId, WorkflowService};
 use crate::{
     backend::WorkflowBackend,
     operations::{
@@ -166,11 +166,31 @@ fn unavailable() -> WorkflowServiceError {
     WorkflowServiceError::Unavailable("workflow engine is unavailable".into())
 }
 impl AppWorkflows {
-    /// Bind the native interface to this engine thread with a bounded request queue.
+    /// Bind the native interface to this engine thread with a bounded request
+    /// queue, reading and writing the journal `journal` was opened over.
+    ///
+    /// Which store the backend reaches is a choice its construction site
+    /// makes, not one the handle carries: every call through the returned
+    /// backend goes to `journal`'s store, while the app identity, its policy
+    /// binding, its ingress, payload storage, deployments and signal authority
+    /// stay as this handle holds them. Naming the service this handle was
+    /// bound to keeps the creator seam on the same database as the app's
+    /// execution; naming another service's puts it on that one. A
+    /// [`WorkflowService`] exists only over a journal it verified as it
+    /// opened, so no unverified store reaches a backend this way.
     ///
     /// # Errors
-    /// Rejects an empty output read limit.
-    pub fn into_backend(self, max_output_bytes: usize) -> Result<AppBackend, WorkflowServiceError> {
+    /// Rejects an empty output read limit and a journal opened over a
+    /// different policy registry than this handle's binding.
+    pub fn into_backend(
+        mut self,
+        journal: &WorkflowService,
+        max_output_bytes: usize,
+    ) -> Result<AppBackend, WorkflowServiceError> {
+        if !self.binding.belongs_to(&journal.policies) {
+            return Err(WorkflowServiceError::PermissionDenied);
+        }
+        self.service.store = journal.store.clone();
         AppBackend::new(self, max_output_bytes)
     }
 }

@@ -183,9 +183,10 @@ pub async fn open<C: Composition>(
     let api = api.with_ingress(ingress.clone());
     let (wake_sender, wake) = flume::bounded(1);
     let hint = wake_sender.clone();
+    // The local host keeps the creator seam on the journal it opened above.
     let backend = api
         .clone()
-        .into_backend(config.payloads.max_payload_bytes)?
+        .into_backend(&service, config.payloads.max_payload_bytes)?
         .with_commit_hint(Arc::new(move || {
             let _ = hint.try_send(());
         }));
