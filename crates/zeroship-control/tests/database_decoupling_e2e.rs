@@ -47,7 +47,10 @@ mod common;
 /// `pg_authid` and `pg_auth_members` are cluster-shared. A second spelling in
 /// this crate would let the two drift and make a failure here unattributable.
 #[path = "../../zeroship-migrate-server/tests/fixture/tenant.rs"]
-#[allow(dead_code, reason = "the shared fixture also serves the version-floor arm, which this target does not have")]
+#[allow(
+    dead_code,
+    reason = "the shared fixture also serves the version-floor arm, which this target does not have"
+)]
 mod tenant;
 
 use std::collections::HashMap;
@@ -106,8 +109,7 @@ const PROJECT_ROOT_HEX: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718
 /// A syntactically valid descriptor hash. Nothing on the deploy path compares
 /// it any more - the schema-equality gate is deleted - but `Manifest::validate`
 /// still refuses one that is not 64 hexadecimal characters.
-const DESCRIPTOR_HASH: &str =
-    "1111111111111111111111111111111111111111111111111111111111111111";
+const DESCRIPTOR_HASH: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 
 /// The MAC key the confined migration ceiling is sealed with.
 const SEAL_KEY: &[u8] = b"database decoupling e2e seal key 32 bytes";
@@ -666,8 +668,7 @@ fn server_error(error: &compio_postgres::Error) -> &compio_postgres::error::DbEr
 /// shape. A hand-written copy here would drift the day the ceiling changes and
 /// the drift would surface as an unexplained column error.
 fn generated_fields(authored: Json) -> Json {
-    const ORACLE: &str =
-        include_str!("../../zeroship-data-orm/tests/fixtures/schema.runtime.json");
+    const ORACLE: &str = include_str!("../../zeroship-data-orm/tests/fixtures/schema.runtime.json");
     let oracle: Json = serde_json::from_str(ORACLE).expect("the generated descriptor parses");
     let mut fields = serde_json::Map::new();
     for (name, definition) in oracle["collections"]["posts"]["fields"]
@@ -858,18 +859,18 @@ fn dispatch(spec: Dispatch) -> (u16, Json) {
                                     "a creator RPC settles as a buffered response; a stream here \
                                      means the dispatch took the streaming path"
                                 ),
-                                SettledFetch::WebSocketUpgrade { .. } => panic!(
-                                    "a creator RPC must not upgrade to a WebSocket"
-                                ),
+                                SettledFetch::WebSocketUpgrade { .. } => {
+                                    panic!("a creator RPC must not upgrade to a WebSocket")
+                                }
                             }
                         })
                     }
-                    FetchOutcome::Stream { .. } => panic!(
-                        "a creator RPC settles as a buffered response, not a stream"
-                    ),
-                    FetchOutcome::WebSocketUpgrade { .. } => panic!(
-                        "a creator RPC must not upgrade to a WebSocket"
-                    ),
+                    FetchOutcome::Stream { .. } => {
+                        panic!("a creator RPC settles as a buffered response, not a stream")
+                    }
+                    FetchOutcome::WebSocketUpgrade { .. } => {
+                        panic!("a creator RPC must not upgrade to a WebSocket")
+                    }
                 };
                 let body = String::from_utf8_lossy(&body).into_owned();
                 let json =
@@ -1587,9 +1588,14 @@ async fn the_whole_decoupled_path_runs_in_one_exercise() {
     // CONTROL: app A's OTHER binding is untouched, so the revoke reached one
     // edge and not the login.
     assert_eq!(
-        count_under_role(&mut cluster, &a_private_role, &private_id, PRIVATE_COLLECTION)
-            .await
-            .expect("app A's other binding is unaffected by the revoke"),
+        count_under_role(
+            &mut cluster,
+            &a_private_role,
+            &private_id,
+            PRIVATE_COLLECTION
+        )
+        .await
+        .expect("app A's other binding is unaffected by the revoke"),
         1,
         "revoking one binding must not disturb the same app's other database"
     );
