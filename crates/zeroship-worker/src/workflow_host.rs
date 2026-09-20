@@ -156,12 +156,40 @@ fn client_options() -> ClientOptions {
 /// Process resources the host composes creator execution from. Every one of
 /// them is already the worker's own: nothing here arrives with a placement.
 #[allow(missing_debug_implementations)]
+/// Which schema an app's workflow journal is installed in.
+///
+/// The journal discriminates tenants by an `app_id` COLUMN, not by schema, so
+/// one installation can hold every app. That is what makes this a choice
+/// rather than a derivation.
+#[derive(Clone, Debug)]
+pub enum JournalLocation {
+    /// One journal per app, in the app's own schema beside its creator tables.
+    CreatorSchema,
+    /// One journal for every app, in a schema the service owns.
+    Service(SchemaName),
+}
+
+impl JournalLocation {
+    /// The schema this app's journal lives in.
+    ///
+    /// # Errors
+    /// Refuses an app whose derived schema name is not a legal identifier.
+    fn schema(&self, app: &AppId) -> Result<SchemaName, WorkflowServiceError> {
+        match self {
+            Self::CreatorSchema => app_schema(app),
+            Self::Service(schema) => Ok(schema.clone()),
+        }
+    }
+}
+
 pub struct HostResources {
     /// The enrolled instance identity every manager and Control call uses.
     pub service_auth: Arc<ServiceAuth>,
     pub control_url: String,
     /// The creator database service `env.db` uses; journals share its login.
     pub db_service: Arc<DbService>,
+    /// Which schema this host installs app journals in.
+    pub journal: JournalLocation,
     /// The creator object store `env.storage` uses; payloads live there.
     pub storage: StorageBackendConfig,
     pub kv_store: Option<zeroship_kv::KvStore>,
@@ -321,6 +349,7 @@ async fn run(
 /// storage and artifacts are the ones this worker serves every request with.
 struct ProductionResources {
     control_url: String,
+    journal: JournalLocation,
     service_auth: Arc<ServiceAuth>,
     db: Arc<DbService>,
     objects: StorageStore,
@@ -350,6 +379,7 @@ impl ProductionResources {
             service_auth: resources.service_auth,
             db: resources.db_service,
             objects,
+            journal: resources.journal,
             blob_store: resources.blob_store,
             envs: resources.envs.clone(),
             contexts: Rc::new(SharedContexts {
@@ -392,7 +422,7 @@ impl WorkflowResourceProvider for ProductionResources {
             sync::put_env_from_json(&self.envs, app.clone(), &env, info.env_version)
                 .map_err(|_| unavailable("workflow app environment is invalid"))?;
         }
-        let schema = app_schema(app)?;
+        let schema = self.journal.schema(app)?;
         let holds = RemoteDeploymentHolds::new(
             &self.control_url,
             self.service_auth.clone(),
