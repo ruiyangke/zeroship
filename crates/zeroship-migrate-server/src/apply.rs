@@ -42,8 +42,7 @@ use crate::policy::{
 use crate::provisioning::AUDIT_UNMASK_TABLE;
 use crate::provisioning::{
     exec_retry, grant_audit_unmask_to_capabilities, migrator_executor_config_for_role,
-    provision_audit_unmask_table, provision_migrator,
-    ProvisionRoleError,
+    provision_audit_unmask_table, provision_migrator, ProvisionRoleError,
 };
 use crate::publication::{reconcile_database_publication, PublicationError};
 use crate::schema_apply_store::{
@@ -833,7 +832,12 @@ fn resolve_apply_policy(
     policy_config: &ManagedPolicyConfig,
 ) -> Result<EffectivePolicy, ApplyRequestError> {
     let Some(policy) = request.policy.as_ref() else {
-        return Ok(policy_config.compose_effective_for_schema(app_id, schema.as_str(), None, None)?);
+        return Ok(policy_config.compose_effective_for_schema(
+            app_id,
+            schema.as_str(),
+            None,
+            None,
+        )?);
     };
     let draft = CreatorPolicyDraft {
         filename: policy.filename.as_str(),
@@ -1446,7 +1450,7 @@ mod tests {
     #[test]
     fn runtime_provisioning_does_not_narrow_table_access_by_name() {
         let provisioning = runtime_role_provisioning_sql(&fixture_schema(), "zs_migrator_fixture")
-        .expect("test runtime role name");
+            .expect("test runtime role name");
         let statements = provisioning.statements();
         assert!(
             statements
@@ -1469,7 +1473,7 @@ mod tests {
     #[test]
     fn runtime_provisioning_delegates_only_precreated_narrow_roles() {
         let provisioning = runtime_role_provisioning_sql(&fixture_schema(), "zs_migrator_fixture")
-        .expect("test runtime role name");
+            .expect("test runtime role name");
         let sql = provisioning.dependents;
         assert!(sql.contains("IF EXISTS (SELECT 1 FROM pg_roles"));
         // The inherit option is part of the ASSERTED string, not a suffix the
@@ -1961,25 +1965,17 @@ mod live_audit_unmask_provisioning {
         provision_audit_unmask_table(&admin, &before)
             .await
             .expect("provision audit table (production order)");
-        provision_runtime_app_role(
-            &admin,
-            &scratch_schema_name(&before),
-            &migrator_before,
-        )
-        .await
-        .expect("provision runtime role (production order)");
+        provision_runtime_app_role(&admin, &scratch_schema_name(&before), &migrator_before)
+            .await
+            .expect("provision runtime role (production order)");
 
         // ARM B - the inversion, differing in exactly one variable.
         let after = scratch_schema();
         teardown(&admin, &after).await;
         let migrator_after = provision_schema_and_migrator(&admin, &after).await;
-        provision_runtime_app_role(
-            &admin,
-            &scratch_schema_name(&after),
-            &migrator_after,
-        )
-        .await
-        .expect("provision runtime role (inverted order)");
+        provision_runtime_app_role(&admin, &scratch_schema_name(&after), &migrator_after)
+            .await
+            .expect("provision runtime role (inverted order)");
         provision_audit_unmask_table(&admin, &after)
             .await
             .expect("provision audit table (inverted order)");
@@ -1990,23 +1986,15 @@ mod live_audit_unmask_provisioning {
         let between = scratch_schema();
         teardown(&admin, &between).await;
         let migrator_between = provision_schema_and_migrator(&admin, &between).await;
-        provision_runtime_app_role(
-            &admin,
-            &scratch_schema_name(&between),
-            &migrator_between,
-        )
-        .await
-        .expect("provision runtime role (first apply-path call)");
+        provision_runtime_app_role(&admin, &scratch_schema_name(&between), &migrator_between)
+            .await
+            .expect("provision runtime role (first apply-path call)");
         provision_audit_unmask_table(&admin, &between)
             .await
             .expect("provision audit table (between the two calls)");
-        provision_runtime_app_role(
-            &admin,
-            &scratch_schema_name(&between),
-            &migrator_between,
-        )
-        .await
-        .expect("provision runtime role (second apply-path call)");
+        provision_runtime_app_role(&admin, &scratch_schema_name(&between), &migrator_between)
+            .await
+            .expect("provision runtime role (second apply-path call)");
 
         let insert_priv = |schema: &str| {
             format!(
@@ -2209,13 +2197,9 @@ mod live_creator_schema_table_privileges {
         provision_audit_unmask_table(admin, schema)
             .await
             .expect("provision the audit table");
-        provision_runtime_app_role(
-            admin,
-            &scratch_schema_name(schema),
-            &migrator,
-        )
-        .await
-        .expect("provision the runtime role");
+        provision_runtime_app_role(admin, &scratch_schema_name(schema), &migrator)
+            .await
+            .expect("provision the runtime role");
         migrator
     }
 
@@ -2244,13 +2228,9 @@ mod live_creator_schema_table_privileges {
             ))
             .await
             .expect("seed an inflight marker");
-        provision_runtime_app_role(
-            &admin,
-            &scratch_schema_name(&schema),
-            &migrator,
-        )
-        .await
-        .expect("the apply path's second provisioning call");
+        provision_runtime_app_role(&admin, &scratch_schema_name(&schema), &migrator)
+            .await
+            .expect("the apply path's second provisioning call");
 
         let tables = top_level_tables(&admin, &schema).await;
         assert!(!tables.is_empty(), "the apply path created no tables");
@@ -2403,13 +2383,9 @@ mod live_creator_schema_table_privileges {
             .await
             .expect("create a prefixed table as the migrator");
 
-        provision_runtime_app_role(
-            &admin,
-            &scratch_schema_name(&schema),
-            &migrator,
-        )
-        .await
-        .expect("re-provision the runtime role");
+        provision_runtime_app_role(&admin, &scratch_schema_name(&schema), &migrator)
+            .await
+            .expect("re-provision the runtime role");
         for privilege in ["SELECT", "INSERT", "UPDATE", "DELETE"] {
             assert!(
                 has_privilege(&admin, &schema, "__zeroship_schema_backfills", privilege).await,

@@ -134,7 +134,10 @@ impl MutationRateLimiter for AllowAllMutations {
 }
 
 fn tmpdir(label: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!("zs-apply-target-{label}-{}", Uuid::new_v4().simple()));
+    let path = std::env::temp_dir().join(format!(
+        "zs-apply-target-{label}-{}",
+        Uuid::new_v4().simple()
+    ));
     std::fs::create_dir_all(&path).expect("create the request scratch directory");
     path
 }
@@ -431,7 +434,10 @@ async fn an_apply_naming_a_database_without_a_live_binding_is_refused() {
     );
     assert_eq!(
         refused_body["remedy"],
-        json!(format!("POST /api/databases/{}/bindings", database.as_str())),
+        json!(format!(
+            "POST /api/databases/{}/bindings",
+            database.as_str()
+        )),
         "the refusal must name the call that fixes it: {refused_body}"
     );
     assert_eq!(

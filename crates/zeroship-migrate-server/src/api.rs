@@ -234,7 +234,11 @@ pub async fn apply(
     };
     // ADMISSION, above every side effect. A refused apply must leave no
     // temporary directory, no role, no ledger row and no lock behind.
-    match state.bindings.holds_live_binding(&app_id, &database_id).await {
+    match state
+        .bindings
+        .holds_live_binding(&app_id, &database_id)
+        .await
+    {
         Ok(true) => {}
         Ok(false) => {
             return apply_error_response(ApplyRequestError::DatabaseNotBound {

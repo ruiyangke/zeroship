@@ -165,7 +165,8 @@ pub fn cmd_migrate(args: &[String]) -> Result<(), String> {
     let control_url = project_config::resolve_control(args, resolved.as_ref())?;
     let token = resolve_bearer_token(args)?;
 
-    let (database_label, database) = resolve_migrate_database(args, resolved.as_ref(), label.as_deref())?;
+    let (database_label, database) =
+        resolve_migrate_database(args, resolved.as_ref(), label.as_deref())?;
     let input = resolve_ir_path(args, resolved.as_ref(), database_label.as_deref())?;
 
     // BEFORE the POST, always. Applying a migration set to the wrong database
