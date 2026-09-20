@@ -757,9 +757,9 @@ job, because it cannot see that row and cannot commit with it.
 
 **That is the same transactional outbox this document already identifies, viewed from the other
 end.** The delivery group exists in the journal because a transition cannot commit its own queue
-effect. `journal_state` exists in the manager for the mirror-image reason: a release cannot
-observe its own effect on the journal. One boundary, two sets of bookkeeping, and this proposal
-had only counted one.
+effect. `journal_state` exists in the manager because a release is deferred and then
+executed later, which a later section establishes by reading what enforces it. Both sides keep
+state about the other, and this proposal had only counted one.
 
 **So the thesis is broader than the title.** "Most of what the journal carries exists to solve a
 problem the move deletes" is true and incomplete - state in `workflow_manager` exists for the
@@ -769,9 +769,9 @@ that outlives its reason and gets maintained by people who assume it was load be
 
 **What this does NOT license.** Nothing here says those columns are removable today, and the
 release path presumably has ordering requirements that survive the move in some form. The claim
-is narrower: their REASON is the boundary, so the move is the moment to re-derive them rather
-than to carry them across unexamined. Whoever takes step 6 should read `retention.rs` before
-assuming its ledger is still earning its place.
+is narrower: the move is the moment to re-derive them rather than to carry them across
+unexamined. Whoever takes step 6 should read `retention.rs` before assuming its ledger is still
+earning its place - that reading was done, and the answer is in the correction near the end.
 
 ## The name comparison was a filter, and the pairs it missed are the load-bearing ones
 
@@ -986,3 +986,65 @@ built.
 `zeroship-control` also appears in a search for dependents and is a third false
 positive of a different kind: its edge is under `[dev-dependencies]`, so it is a
 test-only user and ships nothing.
+
+## Correction: the manager's journal ledger is not a boundary artifact, and it survives the move
+
+The bilateral section above first attributed the manager's `journal_state`,
+`journal_job_id` and `journal_published_at` to the database boundary - the
+mirror image of the journal's own outbox - and told whoever takes step 6 to read
+`crates/zeroship-workflow-manager/src/retention.rs` before assuming that ledger
+still earns its place. That reading was done. The attribution was wrong, the
+sentence that carried it has been corrected where it was made, and this section
+records what replaced it.
+
+**The deferral is time-based, not database-based.** In `maintain_journal`, the
+`JOURNAL_PENDING` arm does not publish a release because the journal is
+unreachable. It declines to publish until a grace period has elapsed:
+
+    if intent
+        .journal_published_at
+        .is_some_and(|at| at > now.saturating_sub(grace))
+        || !self
+            .unused_deployment(tx, app, deployment, intent.held_at, grace)
+            .await?
+    {
+        return Ok(());
+    }
+
+One clause is a re-publish suppression window, the other requires the
+deployment to have gone unused for the grace period. **Co-locating the journal
+removes neither.** A release that must happen later still has to be recorded
+now and executed then, and that is what a state column is for.
+
+**And the hop is inside one service, not across two.** `ReleaseHold` is refused
+to workers at both boundaries, in `coordinator/jobs.rs` and in
+`crates/zeroship-workflow-client/src/jobs.rs`, each saying why:
+
+    // A worker that could publish a release would be asking itself to give
+    // code back, so retention stays the manager's decision.
+
+So the manager publishes the job and the manager executes it. The two sides of
+the outbox were never two processes or two databases - they are two
+transactions separated by time.
+
+**`journal_job_id` is not bookkeeping either.** Its guard states the property:
+
+    /// A release job identity is recorded only while one is in flight, so a
+    /// settled reply cannot be attributed to a duty that was reset or finished.
+
+That is an attribution guard against a stale reply, and it is enforced, not
+merely documented - `validate_journal` rejects a row where
+`(self.journal_state == JOURNAL_RELEASING) != self.journal_job_id.is_some()`.
+
+### What this changes for the plan
+
+Step 6 should not expect to delete these columns. The earlier section's claim
+that "their REASON is the boundary" is withdrawn: their reason is a grace
+period and a settled-reply attribution, and the move touches neither.
+
+The bilateral finding itself stands - the journal and the manager do both keep
+state about one another, and `deployment_holds` is duplicated across the two
+schemas. What does not stand is the inference that the manager's half is
+therefore reducible. **One side of a duplicated pair can be a boundary artifact
+while the other is load-bearing for a different reason, and the only way to
+tell is to read what enforces it.**
