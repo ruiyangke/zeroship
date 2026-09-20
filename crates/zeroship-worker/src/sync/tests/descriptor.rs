@@ -40,7 +40,7 @@ async fn runtime_descriptor_is_read_from_its_content_addressed_blob() {
             label: "main".into(),
             database_id: zeroship_core::DatabaseId::mint(),
             primary: true,
-            hash: hash,
+            hash,
         }],
         ..executable_manifest(&blobs).await
     };

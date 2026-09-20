@@ -917,7 +917,7 @@ fn db_live_stream_crosses_relay_and_v8_isolates_without_worker_replication() {
         roles::ensure_binding_ladder(&pool, &binding)
             .await
             .expect("provision the binding role ladder");
-        create_app_publication(&pool, &schema, &publication, &["events"])
+        create_app_publication(&pool, &schema, publication, &["events"])
             .await
             .expect("create migration-owned publication");
         pool
@@ -1065,7 +1065,7 @@ fn db_live_stream_crosses_relay_and_v8_isolates_without_worker_replication() {
             .map_err(|error| format!("deprovision app CDC: {error}"))?;
         // Local subscription teardown leaves migration-owned publications
         // intact. Only the operator fixture cleans up this publication.
-        let publication_retained = publication_exists(&pool, &publication).await?;
+        let publication_retained = publication_exists(&pool, publication).await?;
         pool.execute(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"), &[])
             .await
             .map_err(|error| format!("drop test schema: {error}"))?;
