@@ -242,7 +242,7 @@ fn an_expired_access_token_rotates_and_the_successor_is_persisted_before_it_is_u
     let output = Command::new(env!("CARGO_BIN_EXE_zeroship"))
         .arg("secret")
         .arg("list")
-        .arg("--app=11111111-1111-4111-8111-111111111111")
+        .arg("--app=app_034klb07lrb9jgma6imvmx000")
         .arg(format!("--control={}", server.url))
         .env("ZEROSHIP_CONFIG_HOME", config.path())
         .output()
@@ -358,7 +358,7 @@ fn a_refused_rotation_reports_that_the_session_ended_rather_than_a_raw_http_erro
     let output = Command::new(env!("CARGO_BIN_EXE_zeroship"))
         .arg("secret")
         .arg("list")
-        .arg("--app=11111111-1111-4111-8111-111111111111")
+        .arg("--app=app_034klb07lrb9jgma6imvmx000")
         .arg(format!("--control={}", server.url))
         .env("ZEROSHIP_CONFIG_HOME", config.path())
         .output()
@@ -388,7 +388,8 @@ fn login_honors_project_config_environment_and_prints_provenance() {
   "control": "{control}",
   "runtime_date": "2026-08-14",
   "build": {{ "mode": "full", "dist": "dist", "output": "dist/app.zship" }},
-  "migrations": {{ "dir": "migrations", "out": "generated/zeroship" }}{environments}
+  "databases": {{}},
+  "apps": {{ "app": {{ "databases": [] }} }}{environments}
 }}"#
         )
     };
@@ -403,7 +404,7 @@ fn login_honors_project_config_environment_and_prints_provenance() {
             "selected-config",
             &format!("{}/alternate-root", server.url),
             &format!(
-                ",\n  \"environments\": {{\n    \"staging\": {{\n      \"app\": \"11111111-1111-4111-8111-111111111111\",\n      \"control\": \"{}/selected\"\n    }}\n  }}",
+                ",\n  \"environments\": {{\n    \"staging\": {{\n      \"apps\": {{ \"app\": {{ \"app\": \"app_034klb07lrb9jgma6imvmx000\" }} }},\n      \"databases\": {{}},\n      \"control\": \"{}/selected\"\n    }}\n  }}",
                 server.url
             ),
         ),
