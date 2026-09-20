@@ -174,8 +174,7 @@ impl Postgres {
             Ok(LeaseRequest {
                 context: database.context.clone(),
                 backend: database.backend.clone(),
-                app_id: database.binding.app_id().to_owned(),
-                schema: database.binding.schema().clone(),
+                binding: database.binding.clone(),
                 acquire: compile(key.clone(), AdvisoryLockAction::Try)?,
                 release: compile(key, AdvisoryLockAction::Release)?,
             })
@@ -243,8 +242,7 @@ impl TransactionCommand {
 struct LeaseRequest {
     context: crate::OrmContext,
     backend: crate::backend::BackendHandle,
-    app_id: String,
-    schema: crate::sql::SchemaName,
+    binding: crate::binding::DbBinding,
     acquire: CompiledQuery,
     release: CompiledQuery,
 }
@@ -254,15 +252,14 @@ impl LeaseRequest {
         let Self {
             context,
             backend,
-            app_id,
-            schema,
+            binding,
             acquire,
             release,
         } = self;
         context
             .scope(async move {
                 let session = backend
-                    .open_tx_session(&app_id, &schema, BeginIntent::Default)
+                    .open_tx_session(&binding, BeginIntent::Default)
                     .await
                     .map_err(|error| match error {
                         OpenSessionError::Failed(error) => error,

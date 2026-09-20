@@ -7,7 +7,6 @@ use crate::tests::fixtures::{self};
 
 use compio_postgres::Pool;
 
-use zeroship_data_orm::binding::DbBinding;
 
 use crate::value::value;
 
@@ -34,17 +33,18 @@ fn vector_search_returns_k_nearest() {
             let app = crate::tests::fixtures::test_app_id!();
 
             let app = app.as_str();
+            let alias = crate::tests::fixtures::harness_alias(app);
             let coll = "docs";
             // Search resolves the app binding before planning, so provision its
             // role as well as its schema.
-            let _role = provision_app_with_role(&pool, app).await;
-            crate::tests::fixtures::roles::ensure_per_app_role(&pool, app)
+            let _role = provision_binding_schema(&pool, app).await;
+            crate::tests::fixtures::roles::ensure_binding_ladder(&pool, &crate::tests::fixtures::harness_binding(app))
                 .await
                 .unwrap();
             // The fixture carries every field in its read descriptor.
             pool.execute(
                 &format!(
-                    "CREATE TABLE \"{app}\".\"{coll}\" (\
+                    "CREATE TABLE \"{alias}\".\"{coll}\" (\
                id SERIAL PRIMARY KEY, \
                embedding vector(8) NOT NULL, \
                created_at TIMESTAMPTZ DEFAULT NOW(), \
@@ -86,12 +86,12 @@ fn vector_search_returns_k_nearest() {
                 format!("[{}]", parts.join(","))
             }
 
-            // The per-app role gets NO table privileges from provisioning alone - the
+            // The capability role gets NO table privileges from provisioning alone - the
             // grants are explicit and per-column, which is the same fact production
             // carries (a create-plus-migrate leaves the runtime role unable to read its
             // own tables until the grants run). Without this the search fails closed
             // with `permission denied for table docs`, correctly.
-            fixtures::grant_all_runtime_table_columns(&pool, app, coll).await;
+            fixtures::grant_all_runtime_table_columns(&pool, &crate::tests::fixtures::harness_binding(app), coll).await;
 
             let dims = 8usize;
             for i in 0..100usize {
@@ -99,7 +99,7 @@ fn vector_search_returns_k_nearest() {
                 let lit = fmt_vec(&v);
                 pool.execute(
                     &format!(
-                        "INSERT INTO \"{app}\".\"{coll}\" (embedding) VALUES ($1::text::vector)"
+                        "INSERT INTO \"{alias}\".\"{coll}\" (embedding) VALUES ($1::text::vector)"
                     ),
                     &[&lit as &(dyn compio_postgres::types::ToSql + Sync)],
                 )
@@ -123,7 +123,7 @@ fn vector_search_returns_k_nearest() {
                 coll,
                 value!({ "embedding": { "type": "vector", "vectorDims": 8 } }),
             );
-            let binding = DbBinding::cold_start(app);
+            let binding = crate::tests::fixtures::harness_binding(app);
             let schema = zeroship_data_orm::descriptor::collection_schema(&binding, coll)
                 .expect("descriptor slice for the search fixture");
             let registration = zeroship_data_orm::sql::registration::SqlRegistration::postgres();
@@ -246,7 +246,7 @@ fn pgvector_extension_missing_reports_typed_error() {
             // so the extension error must still be the one that surfaces. If the order
             // ever flipped, this would fail with `collection_not_declared` instead.
             async fn search(backend: &PostgresBackend) -> DbError {
-                let binding = DbBinding::cold_start("vector_missing");
+                let binding = crate::tests::fixtures::harness_binding("vector_missing");
                 zeroship_data_orm::search::Search::vector_search(
                     backend,
                     None,
@@ -325,16 +325,17 @@ fn vector_dimension_mismatch_rejected_at_insert() {
             let app = crate::tests::fixtures::test_app_id!();
 
             let app = app.as_str();
+            let alias = crate::tests::fixtures::harness_alias(app);
             let coll = "docs";
             // Same provisioning gap as `vector_search_returns_k_nearest`: a schema
-            // without its per-app role fails closed before the insert is ever attempted.
-            let _role = provision_app_with_role(&pool, app).await;
-            crate::tests::fixtures::roles::ensure_per_app_role(&pool, app)
+            // without its binding ladder fails closed before the insert is ever attempted.
+            let _role = provision_binding_schema(&pool, app).await;
+            crate::tests::fixtures::roles::ensure_binding_ladder(&pool, &crate::tests::fixtures::harness_binding(app))
                 .await
                 .unwrap();
             pool.execute(
                 &format!(
-                    "CREATE TABLE \"{app}\".\"{coll}\" (\
+                    "CREATE TABLE \"{alias}\".\"{coll}\" (\
                id SERIAL PRIMARY KEY, \
                embedding vector(128) NOT NULL\
              )"
@@ -353,7 +354,7 @@ fn vector_dimension_mismatch_rejected_at_insert() {
             let result = pool
                 .query_text_params(
                     &format!(
-                        "INSERT INTO \"{app}\".\"{coll}\" (embedding) VALUES ($1::text::vector)"
+                        "INSERT INTO \"{alias}\".\"{coll}\" (embedding) VALUES ($1::text::vector)"
                     ),
                     &[&lit],
                 )
@@ -401,18 +402,19 @@ fn near_returns_within_radius() {
             let app = crate::tests::fixtures::test_app_id!();
 
             let app = app.as_str();
+            let alias = crate::tests::fixtures::harness_alias(app);
             let coll = "places";
-            pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+            pool.execute(&format!("DROP SCHEMA IF EXISTS \"{alias}\" CASCADE"), &[])
                 .await
                 .unwrap();
-            pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+            crate::tests::fixtures::roles::ensure_binding_ladder(&pool, &crate::tests::fixtures::harness_binding(app))
                 .await
                 .unwrap();
             // System columns for the same reason as the vector fixture above: the
             // spatial base query projects the descriptor's field list plus all seven.
             pool.execute(
                 &format!(
-                    "CREATE TABLE \"{app}\".\"{coll}\" (\
+                    "CREATE TABLE \"{alias}\".\"{coll}\" (\
                id SERIAL PRIMARY KEY, \
                location geography(POINT, 4326) NOT NULL, \
                created_at TIMESTAMPTZ DEFAULT NOW(), \
@@ -433,10 +435,7 @@ fn near_returns_within_radius() {
                 value!({ "id": {"type":"integer", "primaryKey":true}, "location": { "type": "geoPoint" } }),
             );
 
-            crate::tests::fixtures::roles::ensure_per_app_role(&pool, app)
-                .await
-                .unwrap();
-            fixtures::grant_all_runtime_table_columns(&pool, app, coll).await;
+            fixtures::grant_all_runtime_table_columns(&pool, &crate::tests::fixtures::harness_binding(app), coll).await;
 
             let london = GeoPoint {
                 lat: 51.5074,
@@ -464,7 +463,7 @@ fn near_returns_within_radius() {
                 let lit = format!("POINT({lng} {lat})");
                 pool.execute(
                     &format!(
-                        "INSERT INTO \"{app}\".\"{coll}\" (location) VALUES (ST_GeogFromText($1))"
+                        "INSERT INTO \"{alias}\".\"{coll}\" (location) VALUES (ST_GeogFromText($1))"
                     ),
                     &[&lit as &(dyn compio_postgres::types::ToSql + Sync)],
                 )
@@ -480,7 +479,7 @@ fn near_returns_within_radius() {
                 url.clone(),
                 host.key_source(),
             );
-            let binding = DbBinding::cold_start(app);
+            let binding = crate::tests::fixtures::harness_binding(app);
             let schema = crate::tests::fixtures::native_fields(value!({ "id": {"type":"integer", "primaryKey":true}, "location": { "type": "geoPoint" } }));
             let registration =
                 zeroship_data_orm::sql::registration::SqlRegistration::postgres();
@@ -589,7 +588,7 @@ fn postgis_extension_missing_reports_typed_error() {
             // No descriptor entry, deliberately: the extension probe runs BEFORE the
             // schema resolve, so this must still surface `postgis_extension_missing`.
             async fn near(backend: &PostgresBackend) -> DbError {
-                let binding = DbBinding::cold_start("postgis_missing");
+                let binding = crate::tests::fixtures::harness_binding("postgis_missing");
                 zeroship_data_orm::search::Search::spatial_near(
                     backend,
                     None,

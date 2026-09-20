@@ -1075,7 +1075,7 @@ mod tests {
     fn row_presence_selects_a_constant_without_loading_fields() {
         use crate::schema::{CollectionSchema, Schema};
         use crate::sql::registration::SqlRegistration;
-        let binding = DbBinding::cold_start(zeroship_core::app_id::AppId::mint().as_str());
+        let binding = crate::tests::fixtures::harness_binding(zeroship_core::app_id::AppId::mint().as_str());
         crate::OrmContext::new().with(|| {
             let schema = CollectionSchema::from_fields(&value!({
                 "id":{"type":"string", "primaryKey":true, "required":true, "readable":false},

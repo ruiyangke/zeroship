@@ -53,11 +53,19 @@
 // missing value denies at a comparison instead. See `crates/zeroship-authz/src/
 // entities.rs`.
 //
-// `App`, `Project` and `Organization` carry no attributes because no policy
-// dereferences one. `Resource` is the synthetic platform-level type whose only
-// member is `Resource::"*"` (`Resource::Any`), the resource for surfaces that
-// name nothing: create an organization, list the ones you belong to, read your
-// own account.
+// `App`, `Database`, `Project` and `Organization` carry no attributes because
+// no policy dereferences one. In particular `Database` carries no `project`
+// attribute: a database's owning project is resolved SERVER-SIDE by
+// `crates/zeroship-authz/src/authority.rs` and arrives as the rank in
+// `context.effective_rank`, for the same reason the ranks themselves are
+// context keys rather than entity attributes - a policy dereferencing a missing
+// entity attribute is SKIPPED with an unrecorded evaluation error, while a
+// missing membership denies at a comparison.
+//
+// `Resource` is the synthetic platform-level type whose only member is
+// `Resource::"*"` (`Resource::Any`), the resource for surfaces that name
+// nothing: create an organization, list the ones you belong to, read your own
+// account.
 
 entity User = {
   "email_verified": Bool,
@@ -65,6 +73,7 @@ entity User = {
 };
 
 entity App;
+entity Database;
 entity Project;
 entity Organization;
 entity Resource;
@@ -115,156 +124,177 @@ type RequestContext = {
 
 action "apps:read" appliesTo {
   principal: [User],
-  resource: [App, Project, Organization, Resource],
+  resource: [App, Database, Project, Organization, Resource],
   context: RequestContext
 };
 
 action "apps:write" appliesTo {
   principal: [User],
-  resource: [App, Project, Organization, Resource],
+  resource: [App, Database, Project, Organization, Resource],
   context: RequestContext
 };
 
 action "apps:deploy" appliesTo {
   principal: [User],
-  resource: [App, Project, Organization, Resource],
+  resource: [App, Database, Project, Organization, Resource],
   context: RequestContext
 };
 
 action "migrations:approve" appliesTo {
   principal: [User],
-  resource: [App, Project, Organization, Resource],
+  resource: [App, Database, Project, Organization, Resource],
   context: RequestContext
 };
 
 action "apps:archive" appliesTo {
   principal: [User],
-  resource: [App, Project, Organization, Resource],
+  resource: [App, Database, Project, Organization, Resource],
+  context: RequestContext
+};
+
+// The database family. A database is PROJECT-owned, so each of these is
+// permitted at `Database` and at `Project` scope and at `App` scope by no band:
+// an app holds a binding to a database, never authority over one.
+action "database:read" appliesTo {
+  principal: [User],
+  resource: [App, Database, Project, Organization, Resource],
+  context: RequestContext
+};
+
+action "database:write" appliesTo {
+  principal: [User],
+  resource: [App, Database, Project, Organization, Resource],
+  context: RequestContext
+};
+
+action "database:migrate" appliesTo {
+  principal: [User],
+  resource: [App, Database, Project, Organization, Resource],
   context: RequestContext
 };
 
 action "deployments:read" appliesTo {
   principal: [User],
-  resource: [App, Project, Organization, Resource],
+  resource: [App, Database, Project, Organization, Resource],
   context: RequestContext
 };
 
 action "env:read" appliesTo {
   principal: [User],
-  resource: [App, Project, Organization, Resource],
+  resource: [App, Database, Project, Organization, Resource],
   context: RequestContext
 };
 
 action "env:write" appliesTo {
   principal: [User],
-  resource: [App, Project, Organization, Resource],
+  resource: [App, Database, Project, Organization, Resource],
   context: RequestContext
 };
 
 action "secrets:read" appliesTo {
   principal: [User],
-  resource: [App, Project, Organization, Resource],
+  resource: [App, Database, Project, Organization, Resource],
   context: RequestContext
 };
 
 action "secrets:write" appliesTo {
   principal: [User],
-  resource: [App, Project, Organization, Resource],
+  resource: [App, Database, Project, Organization, Resource],
   context: RequestContext
 };
 
 action "billing:read" appliesTo {
   principal: [User],
-  resource: [App, Project, Organization, Resource],
+  resource: [App, Database, Project, Organization, Resource],
   context: RequestContext
 };
 
 action "billing:write" appliesTo {
   principal: [User],
-  resource: [App, Project, Organization, Resource],
+  resource: [App, Database, Project, Organization, Resource],
   context: RequestContext
 };
 
 action "organization:create" appliesTo {
   principal: [User],
-  resource: [App, Project, Organization, Resource],
+  resource: [App, Database, Project, Organization, Resource],
   context: RequestContext
 };
 
 action "organization:read" appliesTo {
   principal: [User],
-  resource: [App, Project, Organization, Resource],
+  resource: [App, Database, Project, Organization, Resource],
   context: RequestContext
 };
 
 action "organization:write" appliesTo {
   principal: [User],
-  resource: [App, Project, Organization, Resource],
+  resource: [App, Database, Project, Organization, Resource],
   context: RequestContext
 };
 
 action "organization:admin" appliesTo {
   principal: [User],
-  resource: [App, Project, Organization, Resource],
+  resource: [App, Database, Project, Organization, Resource],
   context: RequestContext
 };
 
 action "organization:members:read" appliesTo {
   principal: [User],
-  resource: [App, Project, Organization, Resource],
+  resource: [App, Database, Project, Organization, Resource],
   context: RequestContext
 };
 
 action "organization:members:write" appliesTo {
   principal: [User],
-  resource: [App, Project, Organization, Resource],
+  resource: [App, Database, Project, Organization, Resource],
   context: RequestContext
 };
 
 action "organization:members:leave" appliesTo {
   principal: [User],
-  resource: [App, Project, Organization, Resource],
+  resource: [App, Database, Project, Organization, Resource],
   context: RequestContext
 };
 
 action "project:create" appliesTo {
   principal: [User],
-  resource: [App, Project, Organization, Resource],
+  resource: [App, Database, Project, Organization, Resource],
   context: RequestContext
 };
 
 action "project:read" appliesTo {
   principal: [User],
-  resource: [App, Project, Organization, Resource],
+  resource: [App, Database, Project, Organization, Resource],
   context: RequestContext
 };
 
 action "project:write" appliesTo {
   principal: [User],
-  resource: [App, Project, Organization, Resource],
+  resource: [App, Database, Project, Organization, Resource],
   context: RequestContext
 };
 
 action "project:members:read" appliesTo {
   principal: [User],
-  resource: [App, Project, Organization, Resource],
+  resource: [App, Database, Project, Organization, Resource],
   context: RequestContext
 };
 
 action "project:members:write" appliesTo {
   principal: [User],
-  resource: [App, Project, Organization, Resource],
+  resource: [App, Database, Project, Organization, Resource],
   context: RequestContext
 };
 
 action "account:read" appliesTo {
   principal: [User],
-  resource: [App, Project, Organization, Resource],
+  resource: [App, Database, Project, Organization, Resource],
   context: RequestContext
 };
 
 action "account:write" appliesTo {
   principal: [User],
-  resource: [App, Project, Organization, Resource],
+  resource: [App, Database, Project, Organization, Resource],
   context: RequestContext
 };

@@ -4,8 +4,9 @@
 //! isolate transaction callbacks; the actor publishes committed change events
 //! through the supplied change sink. Migrations own the physical schema.
 
+use crate::binding::DbBinding;
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -18,7 +19,6 @@ use zeroship_data_orm::error::DbError;
 use zeroship_data_orm::storage::LockManager;
 
 use crate::cdc::ChangeSink;
-use crate::sql::SchemaName;
 
 /// No-op change sink for backend tests.
 #[cfg(test)]
@@ -52,7 +52,7 @@ pub struct SqliteBackend {
     session: Rc<SqliteSession>,
     lock_registry: Rc<InProcessLockRegistry>,
     db_dir: PathBuf,
-    app_id_cache: RefCell<HashSet<String>>,
+    alias_cache: RefCell<HashSet<String>>,
     /// Keeps change publication alive with the backend.
     _publisher: compio::runtime::JoinHandle<()>,
     /// Project encryption keys supplied by the trusted host.
@@ -86,7 +86,7 @@ impl SqliteBackend {
         crate::backend::sqlite::row_json::typed_rows_to_values(&typed)
     }
 
-    /// Open a control file and place per-app database files beside it.
+    /// Open a control file and place one file per database beside it.
     pub async fn open(
         path: impl AsRef<Path>,
         sink: Arc<dyn ChangeSink>,
@@ -186,7 +186,7 @@ impl SqliteBackend {
             session,
             lock_registry: Rc::new(InProcessLockRegistry::new()),
             db_dir,
-            app_id_cache: RefCell::new(HashSet::new()),
+            alias_cache: RefCell::new(HashSet::new()),
             _publisher,
             key_store,
         }
@@ -266,8 +266,8 @@ impl SqliteBackend {
 impl crate::tests::fixtures::DatabaseFixture for SqliteBackend {
     type Client = SqliteSessionHandle;
 
-    async fn fixture_session(&self, app_id: &str) -> Result<Self::Client, DbError> {
-        let lease = self.session.reserve_transaction(app_id).await?;
+    async fn fixture_session(&self, alias: &str) -> Result<Self::Client, DbError> {
+        let lease = self.session.reserve_transaction(alias).await?;
         Ok(SqliteSessionHandle::with_lease(self.session.clone(), lease))
     }
 
@@ -343,54 +343,66 @@ const MAIN_DATABASE: &str = "main";
 impl SqliteBackend {
     /// The database a binding's statements address.
     ///
-    /// A binding on schema `main` addresses the file this backend opened. Every
-    /// other binding addresses its app's own file, attached under the app id.
-    pub(crate) fn database_alias<'a>(app_id: &'a str, schema: &'a SchemaName) -> &'a str {
-        if schema.as_str() == MAIN_DATABASE {
+    /// **It is the SCHEMA, and it has to be.** SQLite's ATTACH alias occupies
+    /// the schema-name position of a qualified table and every query builder
+    /// qualifies with `binding.schema()`. An alias minted from the tenant would
+    /// name something nothing attached the moment the schema stopped being the
+    /// app id, which is what a database identity makes it.
+    ///
+    /// A binding on schema `main` addresses the file this backend opened.
+    pub(crate) fn database_alias(binding: &DbBinding) -> &str {
+        if binding.schema().as_str() == MAIN_DATABASE {
             MAIN_DATABASE
         } else {
-            app_id
+            binding.schema().as_str()
         }
     }
 
     /// Make a binding's database addressable on this backend's connections.
     ///
-    /// A binding on schema `main` needs no attachment, so no app file is
-    /// created for it.
-    pub async fn attach_binding(&self, app_id: &str, schema: &SchemaName) -> Result<(), DbError> {
-        if Self::database_alias(app_id, schema) == MAIN_DATABASE {
+    /// A binding on schema `main` needs no attachment, so no file is created
+    /// for it.
+    pub async fn attach_binding(&self, binding: &DbBinding) -> Result<(), DbError> {
+        let alias = Self::database_alias(binding);
+        if alias == MAIN_DATABASE {
             return Ok(());
         }
-        self.attach_app_file(app_id).await
+        // The preupdate hook reports the alias and nothing else, so the tenant
+        // a change is published under has to be recorded where both are known.
+        record_alias_tenant(alias, binding.app_id());
+        self.attach_alias_file(alias).await
     }
 
-    /// Attach the app’s database file under its schema alias, caching successful attaches.
+    /// Attach one database file under `alias`, caching successful attaches.
     /// Schema changes are owned by the migration engine.
-    pub async fn attach_app_file(&self, app_id: &str) -> Result<(), DbError> {
+    ///
+    /// Private: reaching it without a binding would attach a database whose
+    /// tenant nothing recorded, and a change on it would then be published to
+    /// no app at all.
+    async fn attach_alias_file(&self, alias: &str) -> Result<(), DbError> {
         // Idempotent guard. The cache must be checked before the
         // ATTACH because SQLite hard-errors on a duplicate ATTACH of
         // the same alias ("database <alias> is already in use"); the
         // PG side gets idempotency for free via `IF NOT EXISTS`.
-        if self.app_id_cache.borrow().contains(app_id) {
+        if self.alias_cache.borrow().contains(alias) {
             return Ok(());
         }
 
-        // Compute the per-app file path. `to_string_lossy` is safe in
+        // Compute the database file path. `to_string_lossy` is safe in
         // practice — see the rustdoc note above.
-        let file_path = self.db_dir.join(format!("zs-{app_id}.sqlite"));
+        let file_path = self.db_dir.join(format!("zs-{alias}.sqlite"));
         let path_str = file_path.to_string_lossy().into_owned();
 
         // Route through the session actor's `attach` helper. The
         // actor's `run_attach` constructs the formatted ATTACH SQL
         // inline (the alias is double-quote-escaped — matches the
         // dialect's `quote_ident` byte-for-byte — and the path's
-        // single quotes are doubled). The ATTACH is spelled ONLY there:
-        // a dialect-level template for it used to exist alongside, with
-        // no consumer, because the actor needs the file_path substituted
-        // upstream anyway.
-        match self.session.attach(app_id, &path_str).await {
+        // single quotes are doubled). The ATTACH is spelled ONLY there,
+        // because the actor needs the file_path substituted upstream
+        // anyway, so a dialect-level template would carry no consumer.
+        match self.session.attach(alias, &path_str).await {
             Ok(()) => {
-                self.app_id_cache.borrow_mut().insert(app_id.to_string());
+                self.alias_cache.borrow_mut().insert(alias.to_string());
                 Ok(())
             }
             Err(e) => {
@@ -403,7 +415,7 @@ impl SqliteBackend {
                 // then return Ok. Other errors propagate verbatim.
                 let msg = format!("{e}");
                 if msg.contains("already in use") || msg.contains("already attached") {
-                    self.app_id_cache.borrow_mut().insert(app_id.to_string());
+                    self.alias_cache.borrow_mut().insert(alias.to_string());
                     Ok(())
                 } else {
                     Err(e)
@@ -1170,4 +1182,49 @@ impl crate::backend::Backend for SqliteBackend {
     fn admits_concurrent_transactions(&self) -> bool {
         false
     }
+}
+
+/// Every app bound to one `ATTACH` alias on this process's dev tier.
+///
+/// **The alias is a DATABASE and the broker routes on an APP, so this is the
+/// translation between them.** SQLite's preupdate hook reports the alias and
+/// nothing else; production learns the same mapping from Control's binding
+/// topology, which the relay reads. A dev process has no control plane, so the
+/// mapping is what `attach_binding` saw: every binding whose statements have
+/// addressed this alias.
+///
+/// Process-wide rather than per backend because the publisher task and the
+/// session actor run on different threads from the one that attached.
+///
+/// An alias nobody bound publishes nothing. Stamping the alias as a tenant
+/// instead would deliver to a subscription nobody holds, which reads as a lost
+/// event rather than as an unbound database.
+static ALIAS_TENANTS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, BTreeSet<String>>>> =
+    std::sync::OnceLock::new();
+
+fn alias_tenants() -> &'static std::sync::Mutex<HashMap<String, BTreeSet<String>>> {
+    ALIAS_TENANTS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// Record that `app_id` addresses `alias`.
+pub(crate) fn record_alias_tenant(alias: &str, app_id: &str) {
+    if let Ok(mut tenants) = alias_tenants().lock() {
+        tenants
+            .entry(alias.to_owned())
+            .or_default()
+            .insert(app_id.to_owned());
+    }
+}
+
+/// The apps a change on `alias` is published to, in a stable order.
+pub(crate) fn tenants_for_alias(alias: &str) -> Vec<String> {
+    alias_tenants()
+        .lock()
+        .map(|tenants| {
+            tenants
+                .get(alias)
+                .map(|set| set.iter().cloned().collect())
+                .unwrap_or_default()
+        })
+        .unwrap_or_default()
 }

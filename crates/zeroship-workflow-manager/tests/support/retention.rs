@@ -71,7 +71,7 @@ impl Catalog {
             }
         };
         let database = Database::connect(
-            DbBinding::new("deployment_catalog", "retention-test", schema),
+            DbBinding::platform("deployment_catalog", "retention-test", schema),
             ConnectOptions::new(url, ProjectKeySource::unavailable()).connection_authority(),
             deployments::collections().unwrap(),
         )

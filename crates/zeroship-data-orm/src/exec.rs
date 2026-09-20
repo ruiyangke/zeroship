@@ -35,9 +35,9 @@ fn tx_connection_busy() -> DbError {
     )
 }
 
-/// Which of the two empty-slot causes applies for `app_id`.
-fn tx_slot_unavailable(app_id: &str) -> DbError {
-    if crate::tx_lanes::with(|l| l.tx_claimed_by(app_id)) {
+/// Which of the two empty-slot causes applies for this route.
+fn tx_slot_unavailable(route: &crate::binding::DbRoute) -> DbError {
+    if crate::tx_lanes::with(|l| l.tx_claimed_by(route)) {
         tx_connection_busy()
     } else {
         tx_scope_expired()
@@ -51,8 +51,8 @@ fn tx_slot_unavailable(app_id: &str) -> DbError {
 /// the transaction connection.
 pub(crate) fn take_tx_lane(route: &TxRoute) -> Result<crate::tx_lanes::TxClientSlotGuard, DbError> {
     route.check_scope()?;
-    crate::tx_lanes::TxClientSlotGuard::take(route.app_id())
-        .map_err(|_| tx_slot_unavailable(route.app_id()))
+    crate::tx_lanes::TxClientSlotGuard::take(&route.key())
+        .map_err(|_| tx_slot_unavailable(&route.key()))
 }
 
 /// Read catalog evidence on the captured binding and transaction lease.
@@ -61,19 +61,19 @@ pub(crate) async fn read_catalog(
 ) -> Result<crate::sql::catalog::LiveSchema, DbError> {
     if route.in_tx() {
         route.check_scope()?;
-        return crate::transaction::driver::execute_operation(route.app_id(), async {
+        return crate::transaction::driver::execute_operation(&route.key(), async {
             let lane = take_tx_lane(route)?;
             route.backend().validate_session(lane.client())?;
             route
                 .backend()
-                .introspect_schema(route.app_id(), route.schema(), Some(lane.client()))
+                .introspect_schema(route.binding(), Some(lane.client()))
                 .await
         })
         .await;
     }
     route
         .backend()
-        .introspect_schema(route.app_id(), route.schema(), None)
+        .introspect_schema(route.binding(), None)
         .await
 }
 
@@ -82,7 +82,7 @@ pub(crate) async fn read_catalog(
 pub async fn run_sql(route: &TxRoute, sql: &str, params: &[Value]) -> Result<Vec<Value>, DbError> {
     if route.in_tx() {
         route.check_scope()?;
-        return crate::transaction::driver::execute_operation(route.app_id(), async {
+        return crate::transaction::driver::execute_operation(&route.key(), async {
             let lane = take_tx_lane(route)?;
             route.backend().validate_session(lane.client())?;
             #[cfg(test)]
@@ -95,7 +95,7 @@ pub async fn run_sql(route: &TxRoute, sql: &str, params: &[Value]) -> Result<Vec
     tests::record_sqlite_shared_route();
     route
         .backend()
-        .query(route.app_id(), route.schema(), sql, params)
+        .query(route.binding(), sql, params)
         .await
 }
 
@@ -103,7 +103,7 @@ pub async fn run_sql(route: &TxRoute, sql: &str, params: &[Value]) -> Result<Vec
 pub async fn run_statement(route: &TxRoute, sql: &str, params: &[Value]) -> Result<u64, DbError> {
     if route.in_tx() {
         route.check_scope()?;
-        return crate::transaction::driver::execute_operation(route.app_id(), async {
+        return crate::transaction::driver::execute_operation(&route.key(), async {
             let lane = take_tx_lane(route)?;
             route.backend().validate_session(lane.client())?;
             #[cfg(test)]
@@ -116,7 +116,7 @@ pub async fn run_statement(route: &TxRoute, sql: &str, params: &[Value]) -> Resu
     tests::record_sqlite_shared_route();
     route
         .backend()
-        .exec(route.app_id(), route.schema(), sql, params)
+        .exec(route.binding(), sql, params)
         .await
 }
 
@@ -196,7 +196,7 @@ pub(crate) fn emit_mutation_rows(
 ) {
     emit_for_rows(
         rows,
-        route.app_id(),
+        &route.key(),
         route.in_tx(),
         backend_publishes_committed_changes(route.backend()),
         collection,
@@ -231,7 +231,7 @@ pub(crate) fn emit_mutation_count(
         && crate::cdc::broker::has_subscribers(app_id, collection)
     {
         queue_or_emit(
-            app_id,
+            &route.key(),
             route.in_tx(),
             collection,
             op,
@@ -259,7 +259,7 @@ fn backend_publishes_committed_changes(backend: &BackendHandle) -> bool {
 /// WAL delivery owns the app, or the collection has no subscribers.
 fn emit_for_rows(
     rows: &[Value],
-    app_id: &str,
+    route: &crate::binding::DbRoute,
     in_tx: bool,
     backend_publishes: bool,
     collection: &str,
@@ -275,8 +275,8 @@ fn emit_for_rows(
         // The backend's commit publisher owns delivery for this write.
         return;
     }
-    if crate::cdc::broker::is_app_suppressed(app_id)
-        || !crate::cdc::broker::has_subscribers(app_id, collection)
+    if crate::cdc::broker::is_app_suppressed(route.app_id())
+        || !crate::cdc::broker::has_subscribers(route.app_id(), collection)
     {
         return;
     }
@@ -309,7 +309,7 @@ fn emit_for_rows(
         };
         #[cfg(test)]
         tests::record_tuple_built();
-        queue_or_emit(app_id, in_tx, collection, op, pk, columns, tuple);
+        queue_or_emit(route, in_tx, collection, op, pk, columns, tuple);
     }
 }
 
@@ -318,7 +318,7 @@ fn emit_for_rows(
 /// path to drain on COMMIT. Otherwise (autocommit), fire it
 /// immediately. Subscribers no longer observe pre-commit state.
 fn queue_or_emit(
-    app_id: &str,
+    route: &crate::binding::DbRoute,
     in_tx: bool,
     collection: &str,
     op: zeroship_data_orm::cdc::ChangeOp,
@@ -333,11 +333,18 @@ fn queue_or_emit(
     // immediately; queueing it would park the event on a settle path that
     // belongs to a different unit of work.
     if !in_tx {
-        crate::cdc::broker::emit_local(app_id, collection, op, pk, changed_columns, new_tuple);
+        crate::cdc::broker::emit_local(
+            route.app_id(),
+            collection,
+            op,
+            pk,
+            changed_columns,
+            new_tuple,
+        );
         return;
     }
     let ev = zeroship_data_orm::cdc::ChangeEvent {
-        app_id: app_id.to_string(),
+        app_id: route.app_id().to_string(),
         collection: collection.to_string(),
         op,
         pk,
@@ -345,7 +352,7 @@ fn queue_or_emit(
         new_tuple,
         old_tuple: None,
     };
-    crate::tx_lanes::with_mut(|l| l.push_pending_emit(ev));
+    crate::tx_lanes::with_mut(|l| l.push_pending_emit(route, ev));
 }
 
 fn value_to_logical_id(value: &Value) -> Option<String> {
@@ -360,9 +367,9 @@ fn value_to_logical_id(value: &Value) -> Option<String> {
 /// through the broker. Called by the transaction settle path on COMMIT.
 /// Scoped to the committing app so one app's COMMIT can never
 /// fire a co-resident app's pre-commit events.
-pub fn drain_pending_emits_on_commit(app_id: &str) {
+pub fn drain_pending_emits_on_commit(route: &crate::binding::DbRoute) {
     let queued: Vec<zeroship_data_orm::cdc::ChangeEvent> =
-        crate::tx_lanes::with_mut(|l| l.drain_pending_emits_for(app_id));
+        crate::tx_lanes::with_mut(|l| l.drain_pending_emits_for(route));
     for ev in queued {
         crate::cdc::broker::emit_local(
             &ev.app_id,
@@ -375,22 +382,25 @@ pub fn drain_pending_emits_on_commit(app_id: &str) {
     }
 }
 
-/// Clear `app_id`'s `pending_emits` queue without firing any events.
+/// Clear the route's `pending_emits` queue without firing any events.
 /// Called by the transaction settle path on ROLLBACK (and by
 /// `exec_begin` to drop any stale residue from an interrupted prior
 /// run). Scoped to the app so a ROLLBACK never drops a
 /// co-resident app's queued events.
-pub fn clear_pending_emits(app_id: &str) {
-    crate::tx_lanes::with_mut(|l| l.clear_pending_emits_for(app_id));
+pub fn clear_pending_emits(route: &crate::binding::DbRoute) {
+    crate::tx_lanes::with_mut(|l| l.clear_pending_emits_for(route));
 }
 
 #[cfg(test)]
-pub fn ambient_route_for_tests(app_id: &str, backend: crate::backend::BackendHandle) -> TxRoute {
+pub fn ambient_route_for_tests(
+    binding: &crate::binding::DbBinding,
+    backend: crate::backend::BackendHandle,
+) -> TxRoute {
     let registration = backend.sql_registration().clone();
-    let captured = if crate::tx_lanes::with(|l| l.has_tx_for(app_id)) {
-        crate::tx_route::CapturedRoute::tx_for_tests(app_id, registration)
+    let captured = if crate::tx_lanes::with(|l| l.has_tx_for(&binding.route())) {
+        crate::tx_route::CapturedRoute::tx_on_binding_for_tests(binding, registration)
     } else {
-        crate::tx_route::CapturedRoute::pool_for_tests(app_id, registration)
+        crate::tx_route::CapturedRoute::pool_on_binding_for_tests(binding, registration)
     };
     // Sync, and it can be: only the COLD path needs to await, and a harness
     // driving exec directly has already opened a backend. Production binds
@@ -510,7 +520,7 @@ mod tests {
             );
             let handle = BackendHandle::new(Rc::clone(&sqlite));
 
-            let derived = ambient_route_for_tests("app_route_dialect", handle.clone());
+            let derived = ambient_route_for_tests(&crate::tests::fixtures::harness_binding("app_route_dialect"), handle.clone());
             assert_eq!(
                 derived.sql_registration().family(),
                 crate::sql::registration::SQLITE_FAMILY,
@@ -529,7 +539,7 @@ mod tests {
     fn exec_count_rejects_malformed_driver_results() {
         run(async {
             let (backend, dir) = crate::tests::fixtures::unit_backend();
-            let route = ambient_route_for_tests("app_count_result", backend);
+            let route = ambient_route_for_tests(&crate::tests::fixtures::harness_binding("app_count_result"), backend);
             for sql in [
                 "SELECT 1 AS other",
                 "SELECT 'one' AS count",
@@ -590,7 +600,7 @@ mod tests {
         let rows = vec![synthetic_row()];
         emit_for_rows(
             &rows,
-            "app_suppressed",
+            &crate::tests::fixtures::harness_route("app_suppressed"),
             /* in_tx */ false,
             /* backend_publishes */ false,
             "messages",
@@ -617,7 +627,7 @@ mod tests {
         let rows = vec![synthetic_row()];
         emit_for_rows(
             &rows,
-            "app_no_subs",
+            &crate::tests::fixtures::harness_route("app_no_subs"),
             /* in_tx */ false,
             /* backend_publishes */ false,
             "ghosts",
@@ -670,7 +680,7 @@ mod tests {
         // earlier test on the same OS thread.
         crate::tx_lanes::with(|l| {
             assert!(
-                !l.has_tx_for("app_active_queue_or_emit_no_tx_emits_immediately"),
+                !l.has_tx_for(&crate::tests::fixtures::harness_route("app_active_queue_or_emit_no_tx_emits_immediately")),
                 "precondition: no tx"
             )
         });
@@ -683,7 +693,7 @@ mod tests {
         let mut tuple = HashMap::new();
         tuple.insert("id".to_string(), "9".to_string());
         queue_or_emit(
-            "app_active_queue_or_emit_no_tx_emits_immediately",
+            &crate::tests::fixtures::harness_route("app_active_queue_or_emit_no_tx_emits_immediately"),
             false,
             "messages",
             ChangeOp::Insert,
@@ -728,17 +738,18 @@ mod tests {
             },
             old_tuple: None,
         };
+        let route = crate::tests::fixtures::harness_route(
+            "app_active_drain_pending_emits_on_commit_fires_every_queued_event",
+        );
         crate::tx_lanes::with_mut(|l| {
-            l.push_pending_emit(mk_event(1));
-            l.push_pending_emit(mk_event(2));
-            l.push_pending_emit(mk_event(3));
+            l.push_pending_emit(&route, mk_event(1));
+            l.push_pending_emit(&route, mk_event(2));
+            l.push_pending_emit(&route, mk_event(3));
         });
         // Sanity: nothing has been delivered before drain.
         assert!(sub.pop().is_none(), "drain must not have happened yet");
 
-        drain_pending_emits_on_commit(
-            "app_active_drain_pending_emits_on_commit_fires_every_queued_event",
-        );
+        drain_pending_emits_on_commit(&crate::tests::fixtures::harness_route("app_active_drain_pending_emits_on_commit_fires_every_queued_event"));
 
         let mut pks = Vec::new();
         while let Some(msg) = sub.pop() {
@@ -755,9 +766,7 @@ mod tests {
 
         // Drain a second time → nothing left (queue is consumed, not
         // copied).
-        drain_pending_emits_on_commit(
-            "app_active_drain_pending_emits_on_commit_fires_every_queued_event",
-        );
+        drain_pending_emits_on_commit(&crate::tests::fixtures::harness_route("app_active_drain_pending_emits_on_commit_fires_every_queued_event"));
         assert!(sub.pop().is_none(), "second drain must be a no-op");
         reset_world("app_active_drain_pending_emits_on_commit_fires_every_queued_event");
     }
@@ -782,16 +791,25 @@ mod tests {
             new_tuple: HashMap::new(),
             old_tuple: None,
         };
-        crate::tx_lanes::with_mut(|l| l.push_pending_emit(ev));
+        crate::tx_lanes::with_mut(|l| {
+            l.push_pending_emit(
+                &crate::tests::fixtures::harness_route(
+                    "app_active_clear_pending_emits_drops_without_firing",
+                ),
+                ev,
+            );
+        });
 
-        clear_pending_emits("app_active_clear_pending_emits_drops_without_firing");
+        clear_pending_emits(&crate::tests::fixtures::harness_route("app_active_clear_pending_emits_drops_without_firing"));
 
         assert!(
             sub.pop().is_none(),
             "ROLLBACK path must drop queued events silently",
         );
         // After clear, drain must also be a no-op (queue is empty).
-        drain_pending_emits_on_commit("app_active_clear_pending_emits_drops_without_firing");
+        drain_pending_emits_on_commit(&crate::tests::fixtures::harness_route(
+            "app_active_clear_pending_emits_drops_without_firing",
+        ));
         assert!(sub.pop().is_none(), "post-clear drain must publish nothing");
         reset_world("app_active_clear_pending_emits_drops_without_firing");
     }
@@ -807,7 +825,7 @@ mod tests {
         let rows = vec![synthetic_row()];
         emit_for_rows(
             &rows,
-            "app_active_exec_mutation_with_emit_builds_when_active_subscriber",
+            &crate::tests::fixtures::harness_route("app_active_exec_mutation_with_emit_builds_when_active_subscriber"),
             /* in_tx */ false,
             /* backend_publishes */ false,
             "messages",
@@ -869,7 +887,7 @@ mod tests {
             let rows = vec![synthetic_row()];
             emit_for_rows(
                 &rows,
-                "app_active_exec_mutation_with_emit_skips_local_emit_when_sqlite_cdc_publishes",
+                &crate::tests::fixtures::harness_route("app_active_exec_mutation_with_emit_skips_local_emit_when_sqlite_cdc_publishes"),
                 /* in_tx */ false,
                 backend_publishes_committed_changes(&handle),
                 "messages",
@@ -902,7 +920,7 @@ mod tests {
         let rows = vec![synthetic_typed_id_row()];
         emit_for_rows(
             &rows,
-            "app_active_exec_mutation_with_emit_uses_logical_typed_id_for_pk",
+            &crate::tests::fixtures::harness_route("app_active_exec_mutation_with_emit_uses_logical_typed_id_for_pk"),
             /* in_tx */ false,
             /* backend_publishes */ false,
             "messages",
@@ -926,6 +944,7 @@ mod tests {
     fn sqlite_exec_helpers_use_tx_connection_when_present() {
         reset_world("app_exec");
         run(async {
+            let alias = crate::tests::fixtures::harness_alias("app_exec");
             let dir = tempfile::tempdir().expect("tempdir");
             let backend = Rc::new(
                 crate::backend_selection::new_sqlite_backend(
@@ -935,15 +954,17 @@ mod tests {
                 .expect("open sqlite backend"),
             );
             backend
-                .attach_app_file("app_exec")
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure app schema");
             backend
                 .execute_fixture(
-                    r#"CREATE TABLE "app_exec"."notes" (
+                    &format!(
+                        r#"CREATE TABLE "{alias}"."notes" (
                            id INTEGER PRIMARY KEY,
                            title TEXT NOT NULL
-                       )"#,
+                       )"#
+                    ),
                     &[],
                 )
                 .await
@@ -955,14 +976,13 @@ mod tests {
             // engine cannot name it any more.
             let handle = BackendHandle::new(Rc::clone(&backend));
 
-            let admission = crate::transaction::TxAdmission::acquire("app_exec".to_owned())
+            let admission = crate::transaction::TxAdmission::acquire(crate::tests::fixtures::harness_route("app_exec"))
                 .await
                 .expect("the fixture claims a free lane");
             crate::transaction::exec_begin_or_savepoint(
                 false,
                 None,
-                "app_exec",
-                crate::sql::SchemaName::new("app_exec").unwrap(),
+                &crate::tests::fixtures::harness_binding("app_exec"),
                 handle.clone(),
             )
             .await
@@ -971,11 +991,12 @@ mod tests {
 
             reset_sqlite_route();
             let inserted = exec_mutation(
-                &ambient_route_for_tests("app_exec", handle.clone()),
+                &ambient_route_for_tests(&crate::tests::fixtures::harness_binding("app_exec"), handle.clone()),
                 CompiledQuery {
-                    sql: r#"INSERT INTO "app_exec"."notes" (id, title)
+                    sql: format!(
+                        r#"INSERT INTO "{alias}"."notes" (id, title)
                         VALUES (1, 'tx-row') RETURNING *"#
-                        .to_string(),
+                    ),
                     params: vec![],
                 },
             )
@@ -993,9 +1014,9 @@ mod tests {
 
             reset_sqlite_route();
             let count = exec_count(
-                &ambient_route_for_tests("app_exec", handle.clone()),
+                &ambient_route_for_tests(&crate::tests::fixtures::harness_binding("app_exec"), handle.clone()),
                 CompiledQuery {
-                    sql: r#"SELECT COUNT(*) AS count FROM "app_exec"."notes""#.to_string(),
+                    sql: format!(r#"SELECT COUNT(*) AS count FROM "{alias}"."notes""#),
                     params: vec![],
                 },
             )
@@ -1010,9 +1031,9 @@ mod tests {
 
             reset_sqlite_route();
             let rows = exec_query(
-                &ambient_route_for_tests("app_exec", handle.clone()),
+                &ambient_route_for_tests(&crate::tests::fixtures::harness_binding("app_exec"), handle.clone()),
                 CompiledQuery {
-                    sql: r#"SELECT title FROM "app_exec"."notes" WHERE id = 1"#.to_string(),
+                    sql: format!(r#"SELECT title FROM "{alias}"."notes" WHERE id = 1"#),
                     params: vec![],
                 },
             )
@@ -1026,7 +1047,7 @@ mod tests {
             assert_eq!(rows[0].get("title").and_then(Value::as_str), Some("tx-row"));
 
             assert!(matches!(
-                crate::transaction::exec_settle("app_exec", false, None).await,
+                crate::transaction::exec_settle(&crate::tests::fixtures::harness_route("app_exec"), false, None).await,
                 crate::transaction::SettleOutcome::Ok
             ));
         });
@@ -1116,7 +1137,7 @@ mod tests {
             assert_eq!(second.records(), vec![(DB_READS.to_owned(), 1)]);
 
             // Not an app id, and no sink: the route binds and serves the read.
-            let unmetered = ambient_route_for_tests("platform", backend);
+            let unmetered = ambient_route_for_tests(&crate::tests::fixtures::harness_binding("platform"), backend);
             assert!(unmetered.usage().is_none());
             exec_query(&unmetered, select())
                 .await
@@ -1132,6 +1153,7 @@ mod tests {
         let app_id = "app_usage_counts";
         reset_world(app_id);
         run(async {
+            let alias = crate::tests::fixtures::harness_alias(app_id);
             let dir = tempfile::tempdir().expect("tempdir");
             let backend = Rc::new(
                 crate::backend_selection::new_sqlite_backend(
@@ -1141,13 +1163,13 @@ mod tests {
                 .expect("open sqlite backend"),
             );
             backend
-                .attach_app_file(app_id)
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure app schema");
             backend
                 .execute_fixture(
                     &format!(
-                        r#"CREATE TABLE "{app_id}"."notes" (
+                        r#"CREATE TABLE "{alias}"."notes" (
                                id INTEGER PRIMARY KEY,
                                title TEXT NOT NULL
                            )"#
@@ -1165,7 +1187,7 @@ mod tests {
                 &metered_route(app_id, handle.clone(), &sink),
                 CompiledQuery {
                     sql: format!(
-                        r#"INSERT INTO "{app_id}"."notes" (id, title) VALUES (1, 'a') RETURNING *"#
+                        r#"INSERT INTO "{alias}"."notes" (id, title) VALUES (1, 'a') RETURNING *"#
                     ),
                     params: vec![],
                 },
@@ -1177,7 +1199,7 @@ mod tests {
             exec_query(
                 &metered_route(app_id, handle.clone(), &sink),
                 CompiledQuery {
-                    sql: format!(r#"SELECT title FROM "{app_id}"."notes" WHERE id = 1"#),
+                    sql: format!(r#"SELECT title FROM "{alias}"."notes" WHERE id = 1"#),
                     params: vec![],
                 },
             )
@@ -1188,7 +1210,7 @@ mod tests {
             exec_count(
                 &metered_route(app_id, handle.clone(), &sink),
                 CompiledQuery {
-                    sql: format!(r#"SELECT COUNT(*) AS count FROM "{app_id}"."notes""#),
+                    sql: format!(r#"SELECT COUNT(*) AS count FROM "{alias}"."notes""#),
                     params: vec![],
                 },
             )
@@ -1199,7 +1221,7 @@ mod tests {
             let bad = exec_query(
                 &metered_route(app_id, handle.clone(), &sink),
                 CompiledQuery {
-                    sql: format!(r#"SELECT nope FROM "{app_id}"."no_such_table""#),
+                    sql: format!(r#"SELECT nope FROM "{alias}"."no_such_table""#),
                     params: vec![],
                 },
             )
@@ -1210,7 +1232,7 @@ mod tests {
                 let affected = exec_mutation_count_with_emit(
                     CompiledQuery {
                         sql: format!(
-                            r#"UPDATE "{app_id}"."notes" SET title = 'changed' WHERE {filter}"#
+                            r#"UPDATE "{alias}"."notes" SET title = 'changed' WHERE {filter}"#
                         ),
                         params: vec![],
                     },
@@ -1224,7 +1246,7 @@ mod tests {
             }
             assert!(exec_mutation_count_with_emit(
                 CompiledQuery {
-                    sql: format!(r#"DELETE FROM "{app_id}"."missing""#),
+                    sql: format!(r#"DELETE FROM "{alias}"."missing""#),
                     params: vec![],
                 },
                 &metered_route(app_id, handle.clone(), &sink),
@@ -1288,7 +1310,7 @@ mod tests {
             // is parked in the per-isolate slot — exactly the state a
             // creator callback leaves behind across an `await`.
             let client = backend
-                .fixture_session("app_a")
+                .fixture_session(&crate::tests::fixtures::harness_alias("app_a"))
                 .await
                 .expect("acquire tx client");
             backend
@@ -1296,7 +1318,7 @@ mod tests {
                 .await
                 .expect("BEGIN");
             crate::tx_lanes::with_mut(|l| {
-                let prev = l.install_tx_client("app_a", Session::new(client));
+                let prev = l.install_tx_client(&crate::tests::fixtures::harness_route("app_a"), Session::new(client));
                 assert!(prev.is_none(), "tx slot must start empty");
             });
 
@@ -1304,7 +1326,7 @@ mod tests {
             // query on the same thread.
             reset_sqlite_route();
             let rows = exec_query(
-                &ambient_route_for_tests("app_b", handle.clone()),
+                &ambient_route_for_tests(&crate::tests::fixtures::harness_binding("app_b"), handle.clone()),
                 CompiledQuery {
                     sql: "SELECT 'b' AS title".to_string(),
                     params: vec![],
@@ -1323,12 +1345,12 @@ mod tests {
             // app_a's parked transaction must still be present and
             // untouched after app_b's access.
             assert!(
-                crate::tx_lanes::with(|l| l.has_tx_for("app_a")),
+                crate::tx_lanes::with(|l| l.has_tx_for(&crate::tests::fixtures::harness_route("app_a"))),
                 "app_a's parked tx must survive app_b's access",
             );
 
             // Cleanup: roll app_a's tx back and drop the client.
-            if let Some(client) = crate::tx_lanes::with_mut(|l| l.take_tx_client_for("app_a")) {
+            if let Some(client) = crate::tx_lanes::with_mut(|l| l.take_tx_client_for(&crate::tests::fixtures::harness_route("app_a"))) {
                 let _ = client.exec("ROLLBACK", &[]).await;
             } else {
                 panic!("app_a's tx client should still be parked for cleanup");
@@ -1344,6 +1366,7 @@ mod tests {
         run(async {
             use std::time::Duration;
 
+            let alias = crate::tests::fixtures::harness_alias("app_exec_cancel");
             let dir = tempfile::tempdir().expect("tempdir");
             let backend = Rc::new(
                 crate::backend_selection::new_sqlite_backend(
@@ -1353,23 +1376,27 @@ mod tests {
                 .expect("open sqlite backend"),
             );
             backend
-                .attach_app_file("app_exec_cancel")
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure app schema");
             backend
                 .execute_fixture(
-                    r#"CREATE TABLE "app_exec_cancel"."notes" (
+                    &format!(
+                        r#"CREATE TABLE "{alias}"."notes" (
                            id INTEGER PRIMARY KEY,
                            title TEXT NOT NULL
-                       )"#,
+                       )"#
+                    ),
                     &[],
                 )
                 .await
                 .expect("CREATE TABLE notes");
             backend
                 .execute_fixture(
-                    r#"INSERT INTO "app_exec_cancel"."notes" (id, title)
-                        VALUES (1, 'persisted')"#,
+                    &format!(
+                        r#"INSERT INTO "{alias}"."notes" (id, title)
+                        VALUES (1, 'persisted')"#
+                    ),
                     &[],
                 )
                 .await
@@ -1381,14 +1408,13 @@ mod tests {
             // engine cannot name it any more.
             let handle = BackendHandle::new(Rc::clone(&backend));
 
-            let admission = crate::transaction::TxAdmission::acquire("app_exec_cancel".to_owned())
+            let admission = crate::transaction::TxAdmission::acquire(crate::tests::fixtures::harness_route("app_exec_cancel"))
                 .await
                 .expect("the fixture claims a free lane");
             crate::transaction::exec_begin_or_savepoint(
                 false,
                 None,
-                "app_exec_cancel",
-                crate::sql::SchemaName::new("app_exec_cancel").unwrap(),
+                &crate::tests::fixtures::harness_binding("app_exec_cancel"),
                 handle.clone(),
             )
             .await
@@ -1398,11 +1424,13 @@ mod tests {
             let gate = backend.arm_next_command_gate_for_tests();
             let spawned_handle = handle.clone();
             let task = crate::orm_context::spawn(async move {
+                // The spawned future is 'static, so it resolves the alias
+                // itself rather than capturing the one the test body holds.
+                let alias = crate::tests::fixtures::harness_alias("app_exec_cancel");
                 exec_query(
-                    &ambient_route_for_tests("app_exec_cancel", spawned_handle),
+                    &ambient_route_for_tests(&crate::tests::fixtures::harness_binding("app_exec_cancel"), spawned_handle),
                     CompiledQuery {
-                        sql: r#"SELECT title FROM "app_exec_cancel"."notes" WHERE id = 1"#
-                            .to_string(),
+                        sql: format!(r#"SELECT title FROM "{alias}"."notes" WHERE id = 1"#),
                         params: vec![],
                     },
                 )
@@ -1417,19 +1445,19 @@ mod tests {
             compio::time::sleep(Duration::from_millis(20)).await;
 
             assert!(
-                crate::tx_lanes::with(|l| l.has_tx_for("app_exec_cancel")),
+                crate::tx_lanes::with(|l| l.has_tx_for(&crate::tests::fixtures::harness_route("app_exec_cancel"))),
                 "dropping the in-flight future must restore the tx slot"
             );
 
             assert!(matches!(
-                crate::transaction::exec_settle("app_exec_cancel", false, None).await,
+                crate::transaction::exec_settle(&crate::tests::fixtures::harness_route("app_exec_cancel"), false, None).await,
                 crate::transaction::SettleOutcome::Ok
             ));
 
             let rows = exec_query(
-                &ambient_route_for_tests("app_exec_cancel", handle.clone()),
+                &ambient_route_for_tests(&crate::tests::fixtures::harness_binding("app_exec_cancel"), handle.clone()),
                 CompiledQuery {
-                    sql: r#"SELECT title FROM "app_exec_cancel"."notes" WHERE id = 1"#.to_string(),
+                    sql: format!(r#"SELECT title FROM "{alias}"."notes" WHERE id = 1"#),
                     params: vec![],
                 },
             )
@@ -1546,8 +1574,11 @@ mod tests {
             let pool = Rc::new(Pool::connect(&url, 1).await.expect("pool connect"));
 
             let app_id = "p2c1leak";
-            let role = zeroship_core::database_role::per_app_role_name(app_id)
-                .expect("test app role name");
+            let binding = crate::tests::fixtures::harness_binding(app_id);
+            let role = binding
+                .session_role()
+                .expect("a harness binding narrows")
+                .to_owned();
             let role_ident = crate::sql::mapping::quote_ident(&role);
 
             // Discover the login role so we can (a) GRANT it membership
@@ -1588,8 +1619,8 @@ mod tests {
                 Duration::from_millis(100),
                 crate::backend::pg_autocommit::scoped_rows(
                     &pool,
-                    &crate::sql::SchemaName::new(app_id).expect("fixture schema"),
-                    crate::connection::SessionAuthority::PerAppRole,
+                    &binding,
+                    crate::connection::SessionAuthority::PerBindingRole,
                     "SELECT pg_sleep(1)",
                     &[],
                 ),

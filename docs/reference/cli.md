@@ -27,14 +27,27 @@ by the CLI and by the build, never by the runtime and never packed into a
   "control": "https://control.zeroship.ai",
   "runtime_date": "2026-08-14",
   "build": { "mode": "full", "dist": "dist", "output": "dist/app.zship" },
-  "migrations": { "dir": "migrations", "out": "generated/zeroship" }
+  "databases": {
+    "main": {
+      "id": "dbs_03evr3oqx1200yyd6zj2cebfw",
+      "migrations": "migrations",
+      "out": "generated/zeroship"
+    }
+  },
+  "apps": {
+    "app": { "databases": ["main"], "primary": "main" }
+  }
 }
 ```
 
-`name`, `control`, `runtime_date`, `build` and `migrations` are required at the
-root; inside `build`, `mode`, `dist` and `output` are; inside `migrations`, `dir`
-and `out` are. Optional keys are `app` (the deploy target's app id, which the
-first `deploy` may write back), `secrets` (secret NAMES only, never values),
+`name`, `control`, `runtime_date`, `build`, `databases` and `apps` are required
+at the root; inside `build`, `mode`, `dist` and `output` are; inside a database
+entry, `id`, `migrations` and `out` are; inside an app entry, `databases` is.
+The keys of `databases` and `apps` are LOCAL LABELS: they name an entry in this
+file, the CLI dereferences one to an id before any request, and a label never
+travels as an identifier. Optional keys are an app's `app` (its id, which the
+first `deploy` may write back) and `primary` (required once it uses a
+database), `secrets` (secret NAMES only, never values),
 `environments` (named targets selected with `--env=`), and `build.serverEntry`.
 Unknown keys are refused. The full contract — defaults, patterns, environments,
 the writeback and precedence — is in [`project-config.md`](project-config.md);
@@ -95,8 +108,9 @@ The artifact path, app and control plane come from `zeroship.jsonc`, and each
 command prints what it resolved and from where before it acts. Neither command
 needs a target argument.
 
-On the first deploy the file has no `app` key. `deploy` falls back to the project
-`name`, creates that app, and writes its id back into `zeroship.jsonc`:
+On the first deploy the selected `apps` entry has no `app` id. `deploy` falls
+back to the workspace `name`, creates that app, and writes its id back into
+that entry in `zeroship.jsonc`:
 
 ```
 created app my-app (app_034klb07lrb9jgma6imvmx000)
@@ -104,36 +118,44 @@ created app my-app (app_034klb07lrb9jgma6imvmx000)
 ```
 
 That id is an `app_...` identity. zeroship ids are prefixed by entity: `app_`
-an app, `dep_` a deployment, `dcm_` a deploy command, `org_` an organization,
-`prj_` a project, `ivt_` an organization invitation, `usr_` a user. Each is an
-opaque value; pass it back unchanged.
+an app, `dbs_` a database, `dep_` a deployment, `dcm_` a deploy command,
+`org_` an organization, `prj_` a project, `ivt_` an organization invitation,
+`usr_` a user. Each is an opaque value; pass it back unchanged.
 
-Only `deploy` takes the `name` fallback. `migrate`, `secret` and `var` require an
-app id, which is why `deploy` runs first. The writeback and its limits — an
-explicit `app`, an `--app`, or an `--env=` deploy is never written — are in
-[`project-config.md`](project-config.md).
+Only `deploy` takes the `name` fallback. `migrate`, `secret` and `var` require
+an app id, which is why `deploy` runs first. The writeback and its limits — an
+entry that already carries an id, an `--app-name`, or an `--env=` deploy is
+never written — are in [`project-config.md`](project-config.md).
 
 **Order matters for an app with a database.** `deploy` ships code and never
 touches the database; `migrate` creates the schema, its tables, and the runtime
 database access that `env.db` depends on. For a brand-new database app the first
-`deploy` is refused with `409 schema_not_applied`, then `migrate` applies the
-schema, then `deploy` again goes live. The refusal and its remedy are in
-[`db.md`](db.md).
+`deploy` ships the code and `migrate` applies the schema; deploy does not
+check that you ran it, so a build reaching a column the database lacks fails at
+query time naming that column. What deploy DOES refuse is a database the app
+holds no live binding to: create the database with
+[`zeroship db`](#zeroship-db) and bind the app to it before the first deploy
+(see also [`db.md`](db.md)).
 
 ## `zeroship deploy`
 
 Uploads a `.zship` to the control plane.
 
 ```
-zeroship deploy [<path-to-.zship>] [--app=<id>] [--app-name=<name>]
+zeroship deploy [<path-to-.zship>] [--app=<label>] [--app-name=<name>]
                 [--control=URL] [--token=<token>] [--no-create]
                 [--command-id=<id>] [--config=PATH] [--env=NAME]
 ```
 
 - **The path** is optional. With no positional it is `build.output` from
   `zeroship.jsonc`; with no file at all, the path is required.
-- **`--app=<id>`** addresses the app by its `app_...` identity. An id that
-  resolves to nothing is an error: deploy never creates an app from an id.
+- **`--app=<label>`** names one of the `apps` entries the file declares, and
+  the id comes from the file — so a label never travels as an identifier and a
+  typo lists the labels that exist. A workspace declaring one app implies it;
+  one declaring several requires the flag. With NO file there are no labels, so
+  the same flag is an `app_...` id; which case you are in is decided by whether
+  there is a file, never by inspecting the value. An id that resolves to
+  nothing is an error: deploy never creates an app from an id.
 - **`--app-name=<name>`** addresses the app by its routing label (the hostname
   subdomain). A name that matches nothing is created on first deploy, unless
   `--no-create` is given.
@@ -143,7 +165,8 @@ zeroship deploy [<path-to-.zship>] [--app=<id>] [--app-name=<name>]
 - **`--command-id=<dcm_...>`** resumes a deploy whose outcome was not reported.
   Each invocation otherwise mints a new command id and prints it.
 - **`--env=<name>`** selects an `environments` entry, which supplies that
-  target's `app` and `control` (see [`project-config.md`](project-config.md)).
+  target's app ids, database ids and `control` (see
+  [`project-config.md`](project-config.md)).
 
 `deploy` checks the app's declared secret names (the `secrets` array in
 `zeroship.jsonc`) against what the app has configured and warns once for each
@@ -153,7 +176,7 @@ not check declared secrets for app <id>: <reason>` and the upload continues.
 
 A deploy whose generated schema descriptor (the schema the build recorded for
 `env.db`) disagrees with the app's newest applied migration is refused with
-`409 schema_not_applied`, and nothing goes live. When a migration set exists
+`409 database_not_bound`, and nothing goes live. When a migration set exists
 beside the project config, deploy prints a reminder naming `zeroship migrate`
 before uploading. That reminder is a hint, not a verdict: it fires on the
 presence of the migration set, not on whether the migrations are already applied.
@@ -172,16 +195,25 @@ the app is restored.
 
 ## `zeroship migrate`
 
-Applies the app's committed migrations to its deployed database.
+Applies a database's committed migrations to the deployed database that app is
+bound to.
 
 ```
-zeroship migrate [<path-to-migrations.ir.json>] [--app=<id>] [--app-name=<name>]
+zeroship migrate [<path-to-migrations.ir.json>] [--app=<label>] [--database=<label>]
+                 [--app-name=<name>]
                  [--control=URL] [--token=<token>] [--config=PATH] [--env=NAME] [--yes]
 ```
 
 - **The path** is optional. With no positional it is
-  `<migrations.out>/migrations.ir.json` from `zeroship.jsonc`.
-- **`--app`** takes the app's id; **`--app-name`** its routing label. Unlike
+  `<out>/migrations.ir.json` for the selected database, from `zeroship.jsonc`.
+- **`--database`** names one of the app's own database labels; with none
+  passed it is the app's primary. Any of the app's databases may be migrated -
+  `primary` decides which handle is `env.db`, not which schema a migration set
+  can reach. The label is dereferenced to its `dbs_` id before the request, so
+  the word never travels. With no config file in the directory there are no
+  labels and `--database` is the id itself.
+- **`--app`** names one of the file's `apps` labels (an app id when there is
+  no file); **`--app-name`** its routing label. Unlike
   deploy, migrate never creates an app: a name that matches nothing fails with
   `app <name> not found; zeroship migrate never creates an app - deploy it
   first, or pass its id with --app=`.
@@ -189,15 +221,62 @@ zeroship migrate [<path-to-migrations.ir.json>] [--app=<id>] [--app-name=<name>]
   (an `environments.<name>` member).
 
 The file posted is the build's recorded migration set (its intermediate
-representation, or IR); the CLI does not parse or rewrite it. `migrate` prints
-what it resolved, how many operations it applied and skipped — the
-`applied`/`skipped` counts are operations, not migration files — and the
-migration id.
+representation, or IR); the CLI does not parse or rewrite it, which is why the
+database rides in the URL rather than in the body. `migrate` prints what it
+resolved, how many operations it applied and skipped — the `applied`/`skipped`
+counts are operations, not migration files — and the migration id.
+
+An apply naming a database this app holds no live binding to is refused with
+`database_not_bound`, naming the database and the call that grants one. Bind it
+with `zeroship db bind` and re-run.
+
+## `zeroship db`
+
+Creates the databases an app uses, and grants an app access to one.
+
+```
+zeroship db create   <name> --project=prj_...
+zeroship db list     --project=prj_...
+zeroship db bind     <label> --app=<label> --capability=<capability>
+zeroship db unbind   <label> --app=<label>
+zeroship db bindings <label>
+zeroship db delete   <label> [--yes]
+```
+
+A database belongs to a **project**, not to an app. It outlives the apps that
+use it, and several apps in the same project may share one.
+
+- **`<label>`** names a `databases` entry of `zeroship.jsonc`, which this
+  command dereferences to its `dbs_` id before it makes any request. Two
+  workspaces may both call a database `main`, so the word never travels; what
+  travels is the id under it, and `--env=<name>` moves that id without moving
+  the label. With no config file in the directory there are no labels and the
+  argument is the id itself. `--app` follows the same rule against `apps`.
+- **`create`** prints the new database's `id`. Record it in `zeroship.jsonc`
+  under a label of your choosing, name that label in the app's `databases`, and
+  bind it. The `name` you pass is display text for a listing; nothing resolves
+  a database by it, and a name starting with `dbs_` is refused so a name and an
+  id can never be mistaken for one another.
+- **`bind`** is what grants access. Declaring a database in `zeroship.jsonc`
+  grants nothing: `zeroship deploy` refuses an app whose manifest names a
+  database it holds no active binding to. `--capability` is passed through to
+  the control plane, which names the accepted set if you pass one it does not
+  have.
+- **`create` and `bind` declare and stop.** A new database is `provisioning`
+  and a new binding is `pending` until the service holding that cluster's
+  credential has made the cluster match. `zeroship db bindings` shows where
+  each one is.
+- **`delete`** is refused while any app still binds the database, and the
+  refusal names them; unbind each first. It needs `--yes` when the selected
+  environment is marked `"protected": true`.
+
+Reads print the control plane's JSON on stdout, so they pipe; every
+explanation goes to stderr.
 
 ## `zeroship secret` and `zeroship var`
 
 Both commands manage per-app configuration. `secret` values are encrypted at
-rest; `var` values are plaintext. Both require `--app=<id>` (or an `app` in
+rest; `var` values are plaintext. Both require `--app` (or a sole app entry in
 `zeroship.jsonc`); neither accepts a name. In your app, `env` is the runtime
 object exposing these values (`env.KEY`), `env.db` is its managed database, and
 `process.env` is the Node-style environment any bundled npm dependency can read.
@@ -356,7 +435,7 @@ result can be piped. A successful command exits `0`; a command that fails exits
 non-zero with a `zeroship <command>: <message>` line on stderr. The CLI defines
 no numeric error codes; when a failure comes back from the platform, the message
 carries the HTTP status and the server's response body verbatim, which is where
-codes such as the `409 schema_not_applied` refusal on deploy come from.
+codes such as the `409 database_not_bound` refusal on deploy come from.
 
 `zeroship` with no command, and an unrecognized top-level command, print the
 command list. There is no `zeroship build`.

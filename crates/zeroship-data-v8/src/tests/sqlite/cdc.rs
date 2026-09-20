@@ -5,10 +5,11 @@ use crate::tests::fixtures::parity;
 fn prefixed_creator_table_delivers_change_through_the_v8_adapter() {
     let dir = tempfile::tempdir().unwrap();
     let collection = "__zeroship_workflow_app_state";
+    let alias = crate::tests::fixtures::harness_alias(LOCAL_DEV_APP_ID);
     apply_schema_ahead_of_runtime(
         &dir,
         &format!(
-            "CREATE TABLE \"{LOCAL_DEV_APP_ID}\".\"{collection}\" ({SYSTEM_COLUMNS_SQLITE}, \
+            "CREATE TABLE \"{alias}\".\"{collection}\" ({SYSTEM_COLUMNS_SQLITE}, \
              \"name\" TEXT NOT NULL)"
         ),
     );

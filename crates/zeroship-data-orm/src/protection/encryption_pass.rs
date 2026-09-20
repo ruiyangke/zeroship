@@ -1,6 +1,7 @@
 //! Encrypt and decrypt declared fields using native ciphertext buffers.
-//! Randomised encryption authenticates the row identity as well as collection
-//! and column, so moving ciphertext to another row fails authentication.
+//! Randomised encryption authenticates the database and the row identity as
+//! well as collection and column, so moving ciphertext to another database or
+//! another row fails authentication.
 //! Mask derivation receives protected plaintext before encryption replaces it.
 
 use crate::schema::FieldMap;
@@ -8,6 +9,7 @@ use crate::value::Value;
 use zeroize::Zeroizing;
 
 use crate::encryption::{plaintext::PlaintextType, KeyStore};
+use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
 
 /// A logical field's encoded plaintext and mask input, staged before key lookup.
@@ -18,7 +20,7 @@ type PendingEncryption = (String, Zeroizing<Vec<u8>>, Zeroizing<String>);
 #[cfg(test)]
 pub async fn encrypt_row_on_write(
     keys: &KeyStore,
-    app_id: &str,
+    binding: &DbBinding,
     collection: &str,
     schema: &FieldMap,
     row_pk: &str,
@@ -27,7 +29,7 @@ pub async fn encrypt_row_on_write(
     let mut sidechannel = crate::protection::mask_pass::MaskPlaintextSidechannel::new();
     encrypt_row_on_write_with_sidechannel(
         keys,
-        app_id,
+        binding,
         collection,
         schema,
         row_pk,
@@ -45,7 +47,7 @@ pub async fn encrypt_row_on_write(
 /// choose physical column names. Absent and null fields remain untouched.
 pub async fn encrypt_row_on_write_with_sidechannel(
     keys: &KeyStore,
-    app_id: &str,
+    binding: &DbBinding,
     collection: &str,
     schema: &FieldMap,
     row_pk: &str,
@@ -83,10 +85,11 @@ pub async fn encrypt_row_on_write_with_sidechannel(
         to_encrypt.push((col.clone(), plaintext, sidechannel_str));
     }
 
+    let database = crate::encryption::encryption_database(binding)?;
     for (col, plaintext, sidechannel_str) in to_encrypt {
-        let key = keys.resolve(app_id).await?;
+        let key = keys.resolve(binding.app_id(), database).await?;
         let aad =
-            crate::encryption::aad::canonical_aad(app_id, collection, &col, row_pk.as_bytes());
+            crate::encryption::aad::canonical_aad(database, collection, &col, row_pk.as_bytes());
         let ciphertext = crate::encryption::aead::encrypt(&key, &plaintext, &aad)?;
         sidechannel.insert(col.clone(), sidechannel_str);
         let obj = row.as_object_mut().expect("checked above");
@@ -104,7 +107,7 @@ pub async fn encrypt_row_on_write_with_sidechannel(
 /// `ValidationFailed { code: "encryption_aead_failed" }`.
 pub async fn decrypt_row_on_read(
     keys: &KeyStore,
-    app_id: &str,
+    binding: &DbBinding,
     collection: &str,
     schema: &FieldMap,
     row: &mut Value,
@@ -156,10 +159,11 @@ pub async fn decrypt_row_on_read(
         to_decrypt.push((col.clone(), plaintext_type, bytes));
     }
 
+    let database = crate::encryption::encryption_database(binding)?;
     for (col, plaintext_type, blob) in to_decrypt {
-        let key = keys.resolve(app_id).await?;
+        let key = keys.resolve(binding.app_id(), database).await?;
         let aad =
-            crate::encryption::aad::canonical_aad(app_id, collection, &col, row_pk.as_bytes());
+            crate::encryption::aad::canonical_aad(database, collection, &col, row_pk.as_bytes());
         let plaintext = Zeroizing::new(crate::encryption::aead::decrypt(&key, &blob, &aad)?);
         let value = plaintext_type.decode(&plaintext)?;
         let obj = row.as_object_mut().expect("checked above");
@@ -195,6 +199,7 @@ mod tests {
     #[test]
     fn write_then_read_round_trip_randomised() {
         let keys = test_key_store();
+        let binding = crate::tests::fixtures::harness_binding("app1");
 
         let schema = test_schema(crate::value!({
             "id": { "type": "string", "primaryKey": true },
@@ -205,7 +210,7 @@ mod tests {
 
         let rt = compio::runtime::Runtime::new().expect("compio runtime");
         rt.block_on(async {
-            encrypt_row_on_write(&keys, "app1", "users", &schema, "usr_01HX", &mut row)
+            encrypt_row_on_write(&keys, &binding, "users", &schema, "usr_01HX", &mut row)
                 .await
                 .unwrap();
         });
@@ -222,7 +227,7 @@ mod tests {
             crate::value!({ "id": "usr_01HX", "ssn": Value::Bytes(raw.clone()), "name": "alice" });
 
         rt.block_on(async {
-            decrypt_row_on_read(&keys, "app1", "users", &schema, &mut read_row)
+            decrypt_row_on_read(&keys, &binding, "users", &schema, &mut read_row)
                 .await
                 .unwrap();
         });
@@ -236,7 +241,7 @@ mod tests {
         let mut wrong_pk_row =
             crate::value!({ "id": "usr_02HX", "ssn": Value::Bytes(raw.clone()), "name": "alice" });
         let err = rt.block_on(async {
-            decrypt_row_on_read(&keys, "app1", "users", &schema, &mut wrong_pk_row).await
+            decrypt_row_on_read(&keys, &binding, "users", &schema, &mut wrong_pk_row).await
         });
         match err {
             Err(DbError::ValidationFailed { code, .. }) => {
@@ -249,6 +254,7 @@ mod tests {
     #[test]
     fn decrypt_row_on_read_skips_masked_display_values() {
         let keys = test_key_store();
+        let binding = crate::tests::fixtures::harness_binding("app1");
 
         let schema = test_schema(crate::value!({
             "contactEmail": {
@@ -264,7 +270,7 @@ mod tests {
 
         let rt = compio::runtime::Runtime::new().expect("compio runtime");
         rt.block_on(async {
-            decrypt_row_on_read(&keys, "app1", "users", &schema, &mut read_row)
+            decrypt_row_on_read(&keys, &binding, "users", &schema, &mut read_row)
                 .await
                 .unwrap();
         });
@@ -277,20 +283,71 @@ mod tests {
         let keys = KeyStore::new(crate::encryption::ProjectKeySource::supplied(
             std::sync::Arc::new(crate::encryption::SuppliedProjectKeys::new()),
         ));
+        let binding = crate::tests::fixtures::harness_binding("app");
         let schema = test_schema(crate::value!({
             "secret": {"type":"string", "encrypted":true, "mask":{"classification":"pii"}}
         }));
         let mut row = crate::value!({"id":"row", "secret":"***"});
-        decrypt_row_on_read(&keys, "app", "records", &schema, &mut row)
+        decrypt_row_on_read(&keys, &binding, "records", &schema, &mut row)
             .await
             .unwrap();
         assert_eq!(row["secret"].as_str(), Some("***"));
+    }
+
+    /// **A store that addresses no database cannot encrypt.** A platform
+    /// binding - a trusted service's own schema, opened under the login's
+    /// authority - names no database, so there is no salt to expand a column
+    /// key from and no id to bind a tag to.
+    ///
+    /// The refusal is the point: defaulting would key every platform service's
+    /// columns alike and do it silently. The CONTROL is the same row and the
+    /// same schema under a real binding, which encrypts.
+    #[compio::test]
+    async fn a_platform_store_is_refused_an_encrypted_column() {
+        let keys = test_key_store();
+        let schema = test_schema(crate::value!({
+            "id": { "type": "string", "primaryKey": true },
+            "ssn": { "type": "string", "encrypted": true },
+        }));
+
+        let platform = DbBinding::platform(
+            "app1",
+            "fixture",
+            crate::sql::SchemaName::new("zeroship").expect("a legal schema name"),
+        );
+        let mut refused = crate::value!({ "id": "usr_01HX", "ssn": "123-45-6789" });
+        let error =
+            encrypt_row_on_write(&keys, &platform, "users", &schema, "usr_01HX", &mut refused)
+                .await
+                .expect_err("a platform store must not encrypt");
+        match error {
+            DbError::Configuration { code, .. } => {
+                assert_eq!(code, "encryption_requires_a_database");
+            }
+            other => panic!("expected Configuration, got {other:?}"),
+        }
+        assert_eq!(
+            refused["ssn"].as_str(),
+            Some("123-45-6789"),
+            "the refusal must arrive before the row is rewritten"
+        );
+
+        // CONTROL: the same row and schema under a binding that DOES address a
+        // database, so the refusal above is about the missing database rather
+        // than about the key store or the field descriptor.
+        let bound = crate::tests::fixtures::harness_binding("app1");
+        let mut permitted = crate::value!({ "id": "usr_01HX", "ssn": "123-45-6789" });
+        encrypt_row_on_write(&keys, &bound, "users", &schema, "usr_01HX", &mut permitted)
+            .await
+            .expect("a database binding encrypts");
+        assert!(permitted["ssn"].as_bytes().is_some());
     }
 
     /// Equal plaintexts produce different ciphertexts across rows.
     #[test]
     fn same_plaintext_yields_distinct_ciphertext() {
         let keys = test_key_store();
+        let binding = crate::tests::fixtures::harness_binding("app1");
 
         let schema = test_schema(crate::value!({
             "ssn": { "type": "string", "encrypted": true },
@@ -301,10 +358,10 @@ mod tests {
 
         let rt = compio::runtime::Runtime::new().expect("compio runtime");
         rt.block_on(async {
-            encrypt_row_on_write(&keys, "app1", "users", &schema, "usr_a", &mut row_a)
+            encrypt_row_on_write(&keys, &binding, "users", &schema, "usr_a", &mut row_a)
                 .await
                 .unwrap();
-            encrypt_row_on_write(&keys, "app1", "users", &schema, "usr_b", &mut row_b)
+            encrypt_row_on_write(&keys, &binding, "users", &schema, "usr_b", &mut row_b)
                 .await
                 .unwrap();
         });

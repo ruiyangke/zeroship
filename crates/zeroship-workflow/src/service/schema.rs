@@ -13,17 +13,12 @@ pub async fn initialize_local(store: &super::store::OrmStore) -> Result<(), Work
     }
     let rows = store
         .backend
-        .query(
-            store.binding.app_id(),
-            store.binding.schema(),
-            "PRAGMA database_list",
-            &[],
-        )
+        .query(&store.binding, "PRAGMA database_list", &[])
         .await
         .map_err(super::store::database_error)?;
     let namespace = store
         .backend
-        .namespace(store.binding.app_id(), store.binding.schema());
+        .namespace(&store.binding);
     let file = rows
         .iter()
         .find(|row| row.get("name").and_then(Value::as_str) == Some(namespace))

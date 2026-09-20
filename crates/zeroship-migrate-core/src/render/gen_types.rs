@@ -115,10 +115,10 @@ struct RuntimeCollectionDescriptorV2 {
 /// apart, whatever that function decides to spell.
 ///
 /// **The AEAD binds the LOGICAL FIELD NAME, not the physical column.** `canonical_aad`
-/// receives its `col` argument from `for (col, def) in schema_obj.iter()` - the schema
-/// FIELD KEY - in `crud/encryption_pass.rs` and `crud/unmask.rs` alike. The field key
-/// and the physical column name are not the same string, and the rule is the logical
-/// one.
+/// receives its `column` argument from `for (col, def) in schema.iter()` - the schema
+/// FIELD KEY - in `protection/encryption_pass.rs` and `protection/unmask.rs` alike. The
+/// field key and the physical column name are not the same string, and the rule is the
+/// logical one.
 ///
 /// **That makes the storage flip a rename and not a re-encrypt.** "Fixing" the AAD
 /// to bind `raw_column` would destroy every ciphertext in the deployment, because

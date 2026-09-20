@@ -97,7 +97,7 @@ fn manifest_for(
             built_at: "2026-04-29T00:00:00Z".into(),
         },
         exports: None,
-        runtime_descriptor: None,
+        runtime_descriptor: Vec::new(),
     }
 }
 

@@ -264,16 +264,16 @@ impl LiteStore for ControlLiteStore {
         }
         let segment_row = conn
             .query(
-                "SELECT COALESCE(MIN(segment_no), 32767)::smallint AS next_floor \
+                "SELECT COALESCE(MIN(segment_no), 32767)::int AS next_floor \
                  FROM zeroship.invoice_lines \
                  WHERE invoice_id = $1 AND app_id = $2 AND line_kind <> 'usage'",
                 &[&invoice_id, &app_id.as_str()],
             )
             .await?;
-        let floor: i16 = segment_row
+        let floor: i32 = segment_row
             .first()
             .map(|r| r.get("next_floor"))
-            .unwrap_or(i16::MAX);
+            .unwrap_or(32767);
         let segment_no = floor.checked_sub(1).ok_or_else(|| {
             ProviderError::Config(
                 "adjustment_note exhausted invoice line segment range".to_string(),

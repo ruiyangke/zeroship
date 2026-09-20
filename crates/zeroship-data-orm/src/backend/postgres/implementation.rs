@@ -67,7 +67,7 @@ impl PostgresBackend {
             pool,
             url,
             key_source,
-            crate::connection::SessionAuthority::PerAppRole,
+            crate::connection::SessionAuthority::PerBindingRole,
         )
     }
 
@@ -108,7 +108,7 @@ impl PostgresBackend {
             url,
             max_size,
             key_source,
-            crate::connection::SessionAuthority::PerAppRole,
+            crate::connection::SessionAuthority::PerBindingRole,
         )
         .await
     }
@@ -164,11 +164,11 @@ impl PostgresBackend {
     /// Propagates pool checkout, session setup, statement and COMMIT failures.
     pub(crate) async fn query_scoped_values(
         &self,
-        schema: &crate::sql::SchemaName,
+        binding: &crate::binding::DbBinding,
         sql: &str,
         params: &[crate::value::Value],
     ) -> Result<Vec<crate::value::Value>, DbError> {
-        pg_autocommit::scoped_json(&self.pool, schema, self.session_authority, sql, params).await
+        pg_autocommit::scoped_json(&self.pool, binding, self.session_authority, sql, params).await
     }
 
 }
@@ -180,7 +180,7 @@ impl PostgresBackend {
 impl crate::tests::fixtures::DatabaseFixture for PostgresBackend {
     type Client = compio_postgres::PoolConnection;
 
-    async fn fixture_session(&self, _app_id: &str) -> Result<Self::Client, DbError> {
+    async fn fixture_session(&self, _alias: &str) -> Result<Self::Client, DbError> {
         self.pool
             .acquire()
             .await
@@ -329,15 +329,15 @@ pub fn render_begin(intent: BeginIntent) -> String {
 /// Apply the backend's immutable authority and transaction limits.
 pub(crate) async fn apply_session_authority(
     client: &compio_postgres::Client,
-    schema: &crate::sql::SchemaName,
+    binding: &crate::binding::DbBinding,
     authority: crate::connection::SessionAuthority,
 ) -> Result<(), zeroship_data_orm::error::SessionSetupError> {
-    let sql = crate::backend::postgres::pg_session_sql::tx_session_setup_sql(schema, authority)
+    let sql = crate::backend::postgres::pg_session_sql::tx_session_setup_sql(binding, authority)
         .map_err(zeroship_data_orm::error::SessionSetupError::failed)?;
     client.simple_query(&sql).await.map_err(|e| {
         let mut classified = match authority {
-            crate::connection::SessionAuthority::PerAppRole => {
-                crate::backend::postgres::pg_error::classify_pg_per_app_session_setup(&e, schema)
+            crate::connection::SessionAuthority::PerBindingRole => {
+                crate::backend::postgres::pg_error::classify_pg_binding_session_setup(&e, binding)
             }
             crate::connection::SessionAuthority::Connection => {
                 zeroship_data_orm::error::SessionSetupError::failed(

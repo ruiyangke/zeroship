@@ -572,6 +572,16 @@ pub enum OrganizationError {
     /// reversible step and delete is the terminal one; refusing here is what
     /// keeps the ordering an act rather than an accident.
     AppNotArchived,
+    /// Delete was asked for on an app that still binds databases, named here.
+    ///
+    /// A grant is an explicit act and so is its withdrawal, so the funnel does
+    /// not silently revoke on the creator's behalf. The refusal is ALSO the only
+    /// thing standing between this path and a raw constraint error: deletion
+    /// sets `apps.project_id = NULL`, which changes the key
+    /// `database_bindings_app_project_fkey` references under `ON UPDATE
+    /// RESTRICT`, so without the predicate `PostgreSQL` refuses the statement and
+    /// the creator is handed a 500 for an ordinary ordering mistake.
+    AppHasDatabaseBindings(Vec<String>),
     /// Dissolve was asked for while the organization still owes - an unpaid
     /// finalized invoice, or usage in a closed period that was never invoiced.
     ///
@@ -589,7 +599,11 @@ pub enum OrganizationError {
 }
 
 impl OrganizationError {
-    #[allow(clippy::needless_pass_by_value)]
+    #[allow(
+        clippy::needless_pass_by_value,
+        clippy::too_many_lines,
+        reason = "one arm per variant; its length is the enum's size, not branching"
+    )]
     pub fn into_response(self) -> web::HttpResponse {
         match self {
             Self::OrganizationNotFound => {
@@ -656,6 +670,19 @@ impl OrganizationError {
                            PUT /api/apps/{app_id}/archive, which is reversible, and then \
                            delete it, which is not",
             })),
+            Self::AppHasDatabaseBindings(databases) => {
+                web::HttpResponse::Conflict().json(&json!({
+                    "error": "app has database bindings",
+                    "detail": format!(
+                        "an app is deleted only once it binds no database; it still binds {}. \
+                         Withdraw each one with DELETE \
+                         /api/databases/{{database_id}}/bindings/{{app_id}} first - no data is \
+                         destroyed, because the app owns none of it",
+                        databases.join(", ")
+                    ),
+                    "databases": databases,
+                }))
+            }
             Self::OrganizationOwesBilling(outstanding) => {
                 // The remedy is derived from the same rows the refusal reports,
                 // so the two can never name different next steps. It is
@@ -2783,6 +2810,8 @@ pub async fn delete_app(
             AND a.deleted_at IS NULL \
             AND a.archived_at IS NOT NULL \
             AND EXISTS (SELECT 1 FROM {seat} WHERE actor_role.rank >= {admin}) \
+            AND NOT EXISTS (SELECT 1 FROM zeroship.database_bindings b \
+                             WHERE b.app_id = a.id) \
          RETURNING a.name, a.project_id AS still_attached",
         seat = actor_seat("$2", "$3"),
         admin = ladder_rank("$4"),
@@ -3211,7 +3240,7 @@ pub async fn remove_project_member(
 /// In practice a dissolved organization owns no projects at all - dissolve
 /// refuses while any remains - so this arm is the one that stays true if that
 /// ever stops being so.
-async fn lock_project_organization<C: GenericClient + Sync>(
+pub(crate) async fn lock_project_organization<C: GenericClient + Sync>(
     tx: &C,
     project_id: &str,
 ) -> Result<String, OrganizationError> {
@@ -3717,7 +3746,32 @@ async fn classify_app_deletion_refusal<C: GenericClient + Sync>(
             "deleting an app needs admin authority in the organization".to_string(),
         );
     }
-    OrganizationError::Db
+    match app_database_bindings(tx, app_id).await {
+        Ok(bound) if !bound.is_empty() => OrganizationError::AppHasDatabaseBindings(bound),
+        Ok(_) => OrganizationError::Db,
+        Err(err) => err,
+    }
+}
+
+/// The databases one app still binds, by display name.
+///
+/// Read only to build the refusal above, so the caller is told which grants to
+/// withdraw rather than which constraint fired.
+async fn app_database_bindings<C: GenericClient + Sync>(
+    tx: &C,
+    app_id: &AppId,
+) -> Result<Vec<String>, OrganizationError> {
+    let rows = tx
+        .query(
+            "SELECT d.name FROM zeroship.database_bindings b \
+               JOIN zeroship.databases d ON d.id = b.database_id \
+              WHERE b.app_id = $1 \
+              ORDER BY d.name",
+            &[&app_id.as_str()],
+        )
+        .await
+        .map_err(|err| db_error(&err, "read the app's database bindings"))?;
+    Ok(rows.iter().map(|row| row.get("name")).collect())
 }
 
 async fn classify_transfer_refusal<C: GenericClient + Sync>(

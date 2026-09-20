@@ -16,7 +16,12 @@ async fn runtime_descriptor_blob_fetch_failure_is_load_error() {
     let blobs = Blobs::new();
     let hash = "c".repeat(64);
     let manifest = Manifest {
-        runtime_descriptor: Some(RuntimeDescriptorEntry { hash: hash.clone() }),
+        runtime_descriptor: vec![RuntimeDescriptorEntry {
+            label: "main".into(),
+            database_id: zeroship_core::DatabaseId::mint(),
+            primary: true,
+            hash: hash.clone(),
+        }],
         ..executable_manifest(&blobs).await
     };
     let error = load_executable(&manifest, &blobs.store)
@@ -31,15 +36,19 @@ async fn runtime_descriptor_is_read_from_its_content_addressed_blob() {
     let content = r#"{"collections":[],"label":"descriptor payload"}"#;
     let hash = blobs.put(content.as_bytes()).await;
     let manifest = Manifest {
-        runtime_descriptor: Some(RuntimeDescriptorEntry { hash }),
+        runtime_descriptor: vec![RuntimeDescriptorEntry {
+            label: "main".into(),
+            database_id: zeroship_core::DatabaseId::mint(),
+            primary: true,
+            hash,
+        }],
         ..executable_manifest(&blobs).await
     };
     let descriptor = load_executable(&manifest, &blobs.store)
         .await
         .expect("stored descriptor resolves");
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(descriptor.descriptor.as_deref().unwrap())
-            .unwrap(),
+        crate::executable::primary_schema_json(descriptor.descriptor.as_deref()),
         serde_json::from_str::<serde_json::Value>(content).unwrap(),
     );
 }
@@ -49,7 +58,12 @@ async fn runtime_descriptor_invalid_utf8_is_a_load_error() {
     let blobs = Blobs::new();
     let hash = blobs.put(&[0xff, 0xfe]).await;
     let manifest = Manifest {
-        runtime_descriptor: Some(RuntimeDescriptorEntry { hash: hash.clone() }),
+        runtime_descriptor: vec![RuntimeDescriptorEntry {
+            label: "main".into(),
+            database_id: zeroship_core::DatabaseId::mint(),
+            primary: true,
+            hash: hash.clone(),
+        }],
         ..executable_manifest(&blobs).await
     };
     let error = load_executable(&manifest, &blobs.store)

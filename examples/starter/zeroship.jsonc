@@ -3,17 +3,18 @@
 // Read by the `zeroship` CLI and by the build; never by the runtime, never
 // packed into the .zship. No secrets: names only, values in .env or
 // `zeroship secret set`.
+//
+// The local stack `zeroship dev init` plus docker compose bring up. A real
+// creator app points at the hosted control plane, which is what the scaffold
+// template (packages/create-zeroship-app/template/zeroship.jsonc) ships.
+//
+// The app entry carries no `app` id: the first `zeroship deploy` auto-creates
+// the app and writes its id under this label.
+
 {
   "$schema": "https://zeroship.ai/schema/project-v1.json",
 
-  "name": "zeroship-starter",
-
-  // The local stack `zeroship dev init` plus docker compose bring up. A real
-  // creator app points at the hosted control plane, which is what the scaffold
-  // template (packages/create-zeroship-app/template/zeroship.jsonc) ships.
-  //
-  // `app` is absent: the first `zeroship deploy` auto-creates the app and
-  // appends its id to this root object.
+  "name": "starter",
   "control": "http://localhost:9090",
   "runtime_date": "2026-08-14",
 
@@ -23,11 +24,11 @@
     "output": "dist/app.zship"
   },
 
-  // Explicit, not defaulted. The CLI has no fallback for these; that is what
-  // stops it and the build from disagreeing about where the fold is written.
-  "migrations": {
-    "dir": "migrations",
-    "out": "generated/zeroship"
+  // This app reaches no database, so it declares none and gets no `env.db`.
+  "databases": {},
+
+  "apps": {
+    "starter": { "databases": [] }
   },
 
   "secrets": []

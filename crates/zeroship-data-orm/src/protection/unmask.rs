@@ -270,7 +270,7 @@ async fn prepare_unmask_backend(
     // addresses `main`, PostgreSQL needs nothing - and this path only needs it
     // to have happened.
     backend
-        .prepare_for_app(binding.app_id(), binding.schema())
+        .prepare_for_app(binding)
         .await
 }
 
@@ -286,10 +286,6 @@ pub async fn dispatch_unmask(
     mut args: UnmaskFieldArgs,
 ) -> Result<UnmaskFieldResult, DbError> {
     route.validate_binding(binding)?;
-    let app_id = binding.app_id();
-    // SCHEMA: the audit table is reached through it on PostgreSQL. `app_id`
-    // above stays the TENANT - SQLite ATTACH alias, key salt.
-    let db_schema = binding.schema();
     let backend = route.backend();
     // Step 0 — the descriptor entry. Resolved once for the whole dispatch: the
     // mask metadata, the column-spelling alias and the encryption metadata all
@@ -322,8 +318,7 @@ pub async fn dispatch_unmask(
         // `canUnmask()` probe path the SDK uses.
         write_audit_unmask_row(
             backend,
-            db_schema,
-            app_id,
+            binding,
             &args,
             &mask_meta.classification,
             "denied",
@@ -364,8 +359,7 @@ pub async fn dispatch_unmask(
     // typed error; the audit table reflects only completed unmasks).
     write_audit_unmask_row(
         backend,
-        db_schema,
-        app_id,
+        binding,
         &args,
         &mask_meta.classification,
         "granted",
@@ -402,9 +396,10 @@ async fn fetch_and_decrypt(
     schema: &FieldMap,
 ) -> Result<Value, DbError> {
     let app_id = route.app_id();
+    let database = crate::encryption::encryption_database(route.binding())?;
 
     let aad = crate::encryption::aad::canonical_aad(
-        app_id,
+        database,
         &args.collection,
         &args.column,
         args.row_pk.as_bytes(),
@@ -446,7 +441,11 @@ async fn fetch_and_decrypt(
         };
         // Key sourcing and AEAD are vendor-neutral; only the read above was
         // not, and it now dispatches inside `crate::backend_handle`.
-        let key = route.backend().key_store().resolve(app_id).await?;
+        let key = route
+            .backend()
+            .key_store()
+            .resolve(app_id, database)
+            .await?;
         let plaintext_bytes =
             zeroize::Zeroizing::new(crate::encryption::aead::decrypt(&key, &bytes, &aad)?);
         enc_meta.decode(&plaintext_bytes)
@@ -501,12 +500,10 @@ async fn fetch_plaintext_raw(
 /// from trusted identity fields.
 async fn write_audit_unmask_row(
     backend: &BackendHandle,
-    // SCHEMA: where the audit table lives on PostgreSQL, and what the runtime
-    // role the INSERT runs under is derived from.
-    db_schema: &crate::sql::SchemaName,
-    // TENANT: the SQLite ATTACH alias the same table is reached through on the
-    // dev tier.
-    app_id: &str,
+    // The binding names both halves this INSERT needs: the SCHEMA the audit
+    // table lives in on PostgreSQL, and the TENANT whose ATTACH alias the same
+    // table is reached through on the dev tier.
+    binding: &DbBinding,
     args: &UnmaskFieldArgs,
     classification: &str,
     outcome: &str,
@@ -543,8 +540,7 @@ async fn write_audit_unmask_row(
 
     backend
         .append_unmask_audit(
-            db_schema,
-            app_id,
+            binding,
             &crate::backend::UnmaskAuditRow {
                 actor_id: &actor_id_s,
                 actor_role: &actor_role_s,
@@ -647,10 +643,6 @@ pub async fn dispatch_bulk_unmask(
     if args.items.is_empty() {
         return Ok(BulkUnmaskResult::default());
     }
-    let app_id = binding.app_id();
-    // SCHEMA: the audit table is reached through it on PostgreSQL. `app_id`
-    // above stays the TENANT - SQLite ATTACH alias, key salt.
-    let db_schema = binding.schema();
     let backend = route.backend();
 
     // ---- Step 0 — the descriptor entry, resolved once for every pair.
@@ -732,8 +724,7 @@ pub async fn dispatch_bulk_unmask(
     if !unauthorized.is_empty() {
         write_audit_bulk_row(
             backend,
-            db_schema,
-            app_id,
+            binding,
             &normalized_audit_args,
             &classifications,
             "denied",
@@ -794,8 +785,7 @@ pub async fn dispatch_bulk_unmask(
     // ---- Step 4 — single audit row for the whole call on success.
     write_audit_bulk_row(
         backend,
-        db_schema,
-        app_id,
+        binding,
         &normalized_audit_args,
         &classifications,
         "granted",
@@ -820,8 +810,7 @@ pub async fn dispatch_bulk_unmask(
 /// exactly which pairs caused the refusal.
 async fn write_audit_bulk_row(
     backend: &BackendHandle,
-    db_schema: &crate::sql::SchemaName,
-    app_id: &str,
+    binding: &DbBinding,
     args: &BulkUnmaskArgs,
     classifications: &std::collections::HashMap<String, String>,
     outcome: &str,
@@ -875,8 +864,7 @@ async fn write_audit_bulk_row(
     };
     write_audit_unmask_row(
         backend,
-        db_schema,
-        app_id,
+        binding,
         &synthetic,
         &classification_joined,
         outcome,
@@ -922,11 +910,7 @@ pub async fn authorize_query_hint(
     if unmask_columns.is_empty() {
         return Ok(());
     }
-    let app_id = binding.app_id();
     let backend = route.backend();
-    // SCHEMA: the audit table is reached through it on PostgreSQL. `app_id`
-    // above stays the TENANT - SQLite ATTACH alias, key salt.
-    let db_schema = binding.schema();
 
     let schema = crate::descriptor::collection_schema(binding, collection)?;
 
@@ -957,8 +941,7 @@ pub async fn authorize_query_hint(
     if !unauthorized.is_empty() {
         write_audit_query_hint_row(
             backend,
-            db_schema,
-            app_id,
+            binding,
             collection,
             unmask_columns,
             &classifications,
@@ -1011,11 +994,7 @@ pub async fn audit_query_hint_granted(
     if unmask_columns.is_empty() {
         return Ok(());
     }
-    let app_id = binding.app_id();
     let backend = route.backend();
-    // SCHEMA: the audit table is reached through it on PostgreSQL. `app_id`
-    // above stays the TENANT - SQLite ATTACH alias, key salt.
-    let db_schema = binding.schema();
     // Re-resolve classifications for the audit row. Cheap — the descriptor
     // lookup is a HashMap read.
     let schema = crate::descriptor::collection_schema(binding, collection)?;
@@ -1029,8 +1008,7 @@ pub async fn audit_query_hint_granted(
     }
     write_audit_query_hint_row(
         backend,
-        db_schema,
-        app_id,
+        binding,
         collection,
         unmask_columns,
         &classifications,
@@ -1150,8 +1128,7 @@ pub async fn dispatch_unmask_for_query(
 #[allow(clippy::too_many_arguments)]
 async fn write_audit_query_hint_row(
     backend: &BackendHandle,
-    db_schema: &crate::sql::SchemaName,
-    app_id: &str,
+    binding: &DbBinding,
     collection: &str,
     unmask_columns: &[String],
     classifications: &[String],
@@ -1189,8 +1166,7 @@ async fn write_audit_query_hint_row(
     };
     write_audit_unmask_row(
         backend,
-        db_schema,
-        app_id,
+        binding,
         &synthetic,
         &class_joined,
         outcome,
@@ -1422,7 +1398,7 @@ mod tests {
         let sanitized = sanitize_app_actor(Some(value!({ "kind": "auto" })));
         assert_eq!(sanitized.actor, None);
         assert!(
-            !check_unmask_authorization(&DbBinding::cold_start("app_x"), &sanitized.actor, "pii")
+            !check_unmask_authorization(&crate::tests::fixtures::harness_binding("app_x"), &sanitized.actor, "pii")
                 .unwrap(),
             "sanitized (stripped-auto) app actor must be denied"
         );
@@ -1446,14 +1422,14 @@ mod tests {
     fn authz_stub_grants_auto_actor() {
         let actor = Some(value!({ "kind": "auto", "id": null }));
         assert!(check_unmask_authorization(
-            &DbBinding::cold_start("authz_stub_grants_auto_1"),
+            &crate::tests::fixtures::harness_binding("authz_stub_grants_auto_1"),
             &actor,
             "spi"
         )
         .unwrap());
         let actor = Some(value!({ "kind": "auto", "id": "system" }));
         assert!(check_unmask_authorization(
-            &DbBinding::cold_start("authz_stub_grants_auto_2"),
+            &crate::tests::fixtures::harness_binding("authz_stub_grants_auto_2"),
             &actor,
             "pii"
         )
@@ -1464,14 +1440,14 @@ mod tests {
     fn authz_stub_denies_user_actor() {
         let actor = Some(value!({ "kind": "user", "id": "usr_xyz" }));
         assert!(!check_unmask_authorization(
-            &DbBinding::cold_start("authz_stub_denies_user_1"),
+            &crate::tests::fixtures::harness_binding("authz_stub_denies_user_1"),
             &actor,
             "spi"
         )
         .unwrap());
         let actor = Some(value!({ "kind": "user", "id": "usr_xyz" }));
         assert!(!check_unmask_authorization(
-            &DbBinding::cold_start("authz_stub_denies_user_2"),
+            &crate::tests::fixtures::harness_binding("authz_stub_denies_user_2"),
             &actor,
             "pii"
         )
@@ -1484,7 +1460,7 @@ mod tests {
             let actor = Some(value!({ "kind": kind }));
             let app_id = format!("authz_stub_denies_other_{kind}");
             assert!(
-                !check_unmask_authorization(&DbBinding::cold_start(&app_id), &actor, "pii")
+                !check_unmask_authorization(&crate::tests::fixtures::harness_binding(&app_id), &actor, "pii")
                     .unwrap(),
                 "kind={kind} must be denied by the declared policy"
             );
@@ -1494,7 +1470,7 @@ mod tests {
     #[test]
     fn authz_stub_denies_unauthenticated() {
         assert!(!check_unmask_authorization(
-            &DbBinding::cold_start("authz_stub_unauth_1"),
+            &crate::tests::fixtures::harness_binding("authz_stub_unauth_1"),
             &None,
             "pii"
         )
@@ -1502,7 +1478,7 @@ mod tests {
         // Empty object — no `kind` field — also denied.
         let actor = Some(value!({}));
         assert!(!check_unmask_authorization(
-            &DbBinding::cold_start("authz_stub_unauth_2"),
+            &crate::tests::fixtures::harness_binding("authz_stub_unauth_2"),
             &actor,
             "pii"
         )
@@ -1510,7 +1486,7 @@ mod tests {
         // Actor that isn't an object (e.g. JS passed a string) — denied.
         let actor = Some(value!("auto"));
         assert!(!check_unmask_authorization(
-            &DbBinding::cold_start("authz_stub_unauth_3"),
+            &crate::tests::fixtures::harness_binding("authz_stub_unauth_3"),
             &actor,
             "pii"
         )
@@ -1527,13 +1503,13 @@ mod tests {
     struct PolicyGuard(String);
     impl PolicyGuard {
         fn install(app_id: &str, policy: crate::protection::mask_policy::MaskPolicy) -> Self {
-            crate::protection::mask_policy::cache_put(&DbBinding::cold_start(app_id), Some(policy));
+            crate::protection::mask_policy::cache_put(&crate::tests::fixtures::harness_binding(app_id), Some(policy));
             Self(app_id.to_string())
         }
     }
     impl Drop for PolicyGuard {
         fn drop(&mut self) {
-            crate::protection::mask_policy::cache_put(&DbBinding::cold_start(&self.0), None);
+            crate::protection::mask_policy::cache_put(&crate::tests::fixtures::harness_binding(&self.0), None);
         }
     }
 
@@ -1548,12 +1524,12 @@ mod tests {
         let _g = PolicyGuard::install(app_id, policy);
 
         let actor = Some(value!({ "kind": "user", "id": "usr_x" }));
-        assert!(check_unmask_authorization(&DbBinding::cold_start(app_id), &actor, "pii").unwrap());
+        assert!(check_unmask_authorization(&crate::tests::fixtures::harness_binding(app_id), &actor, "pii").unwrap());
         assert!(
-            check_unmask_authorization(&DbBinding::cold_start(app_id), &actor, "public").unwrap()
+            check_unmask_authorization(&crate::tests::fixtures::harness_binding(app_id), &actor, "public").unwrap()
         );
         assert!(
-            !check_unmask_authorization(&DbBinding::cold_start(app_id), &actor, "spi").unwrap()
+            !check_unmask_authorization(&crate::tests::fixtures::harness_binding(app_id), &actor, "spi").unwrap()
         );
     }
 
@@ -1569,7 +1545,7 @@ mod tests {
 
         let actor = Some(value!({ "kind": "operator", "id": "op_1" }));
         assert!(
-            !check_unmask_authorization(&DbBinding::cold_start(app_id), &actor, "public").unwrap()
+            !check_unmask_authorization(&crate::tests::fixtures::harness_binding(app_id), &actor, "public").unwrap()
         );
     }
 
@@ -1586,10 +1562,10 @@ mod tests {
         let _g = PolicyGuard::install(app_id, policy);
 
         let actor = Some(value!({ "kind": "auto" }));
-        assert!(check_unmask_authorization(&DbBinding::cold_start(app_id), &actor, "pii").unwrap());
-        assert!(check_unmask_authorization(&DbBinding::cold_start(app_id), &actor, "spi").unwrap());
+        assert!(check_unmask_authorization(&crate::tests::fixtures::harness_binding(app_id), &actor, "pii").unwrap());
+        assert!(check_unmask_authorization(&crate::tests::fixtures::harness_binding(app_id), &actor, "spi").unwrap());
         assert!(
-            check_unmask_authorization(&DbBinding::cold_start(app_id), &actor, "internal").unwrap()
+            check_unmask_authorization(&crate::tests::fixtures::harness_binding(app_id), &actor, "internal").unwrap()
         );
     }
 
@@ -1605,13 +1581,13 @@ mod tests {
 
         let actor = Some(value!({ "kind": "auto" }));
         assert!(
-            check_unmask_authorization(&DbBinding::cold_start(app_id), &actor, "public").unwrap()
+            check_unmask_authorization(&crate::tests::fixtures::harness_binding(app_id), &actor, "public").unwrap()
         );
         assert!(
-            !check_unmask_authorization(&DbBinding::cold_start(app_id), &actor, "pii").unwrap()
+            !check_unmask_authorization(&crate::tests::fixtures::harness_binding(app_id), &actor, "pii").unwrap()
         );
         assert!(
-            !check_unmask_authorization(&DbBinding::cold_start(app_id), &actor, "spi").unwrap()
+            !check_unmask_authorization(&crate::tests::fixtures::harness_binding(app_id), &actor, "spi").unwrap()
         );
     }
 
@@ -1818,7 +1794,7 @@ mod tests {
 
     #[test]
     fn bulk_unmask_empty_items_returns_empty_result() {
-        let binding = DbBinding::cold_start("bulk_unit_empty_app");
+        let binding = crate::tests::fixtures::harness_binding("bulk_unit_empty_app");
         let runtime = compio::runtime::Runtime::new().unwrap();
         let args = BulkUnmaskArgs {
             collection: "users".into(),
@@ -1843,16 +1819,23 @@ mod tests {
             let route_app = "bulk_route_target";
             let (route, _dir) = unit_route(route_app);
             let cases = [
-                DbBinding::new(
-                    "bulk_other_app",
-                    crate::binding::COLD_START_DEPLOY_TOKEN,
-                    crate::sql::SchemaName::new(route_app).unwrap(),
-                ),
-                DbBinding::new(
-                    route_app,
-                    crate::binding::COLD_START_DEPLOY_TOKEN,
-                    crate::sql::SchemaName::new("bulk_other_schema").unwrap(),
-                ),
+                // Another tenant on the SAME database.
+                {
+                    let edge = crate::tests::fixtures::harness_binding(route_app)
+                        .edge()
+                        .expect("a harness binding addresses a database")
+                        .clone();
+                    DbBinding::to_database(
+                        "bulk_other_app",
+                        crate::binding::COLD_START_DEPLOY_TOKEN,
+                        edge.database().clone(),
+                        edge.binding().clone(),
+                        edge.epoch(),
+                    )
+                    .expect("the co-tenant binding composes")
+                },
+                // The SAME tenant on another database.
+                crate::tests::fixtures::harness_binding("bulk_other_schema"),
             ];
 
             for binding in cases {
@@ -1890,7 +1873,7 @@ mod tests {
             "users",
             value!({ "ssn": { "type": "string", "mask": { "kind": "last4" } } }),
         );
-        let binding = DbBinding::cold_start(app_id);
+        let binding = crate::tests::fixtures::harness_binding(app_id);
         let runtime = compio::runtime::Runtime::new().unwrap();
         let args = BulkUnmaskArgs {
             collection: "users".into(),
@@ -1923,7 +1906,7 @@ mod tests {
         // against a collection this deploy cannot serve read as "no such
         // masked column".
         crate::tests::fixtures::reset_engine();
-        let binding = DbBinding::cold_start("bulk_unit_undeclared_app");
+        let binding = crate::tests::fixtures::harness_binding("bulk_unit_undeclared_app");
         let runtime = compio::runtime::Runtime::new().unwrap();
         let args = BulkUnmaskArgs {
             collection: "users".into(),
@@ -1953,12 +1936,12 @@ mod tests {
 
     #[test]
     fn query_hint_empty_columns_no_op() {
-        let binding = DbBinding::cold_start("qhint_unit_empty_app");
+        let binding = crate::tests::fixtures::harness_binding("qhint_unit_empty_app");
         let runtime = compio::runtime::Runtime::new().unwrap();
         let ok = runtime.block_on(async {
             let (backend, _dir) = unit_backend();
             authorize_query_hint(
-                &crate::exec::ambient_route_for_tests(binding.app_id(), backend.clone()),
+                &crate::exec::ambient_route_for_tests(&binding, backend.clone()),
                 &binding,
                 "users",
                 &[],
@@ -1982,13 +1965,13 @@ mod tests {
             "users",
             value!({ "ssn": { "type": "string", "mask": { "kind": "last4" } } }),
         );
-        let binding = DbBinding::cold_start(app_id);
+        let binding = crate::tests::fixtures::harness_binding(app_id);
         let runtime = compio::runtime::Runtime::new().unwrap();
         let err = runtime
             .block_on(async {
                 let (backend, _dir) = unit_backend();
                 authorize_query_hint(
-                    &crate::exec::ambient_route_for_tests(binding.app_id(), backend.clone()),
+                    &crate::exec::ambient_route_for_tests(&binding, backend.clone()),
                     &binding,
                     "users",
                     &["nonexistent".to_string()],
@@ -2009,7 +1992,7 @@ mod tests {
 
     #[test]
     fn dispatch_unmask_for_query_empty_columns_is_noop() {
-        let binding = DbBinding::cold_start("qhint_unit_empty_dispatch_app");
+        let binding = crate::tests::fixtures::harness_binding("qhint_unit_empty_dispatch_app");
         let runtime = compio::runtime::Runtime::new().unwrap();
         let mut rows = vec![value!({ "id": "u1", "name": "alice" })];
         let original = rows.clone();

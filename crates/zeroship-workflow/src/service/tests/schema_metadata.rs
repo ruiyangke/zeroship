@@ -142,7 +142,7 @@ async fn assert_metadata(store: &OrmStore) {
     assert!(!collections.is_empty());
     let namespace = store
         .backend
-        .namespace(store.binding.app_id(), store.binding.schema());
+        .namespace(&store.binding);
     let family = store.backend.sql_registration().family();
     let sql = match family {
         POSTGRES_FAMILY => r"
@@ -171,8 +171,7 @@ async fn assert_metadata(store: &OrmStore) {
     let rows = store
         .backend
         .query(
-            store.binding.app_id(),
-            store.binding.schema(),
+            &store.binding,
             &sql,
             &[namespace.into()],
         )
@@ -243,7 +242,7 @@ async fn assert_metadata(store: &OrmStore) {
 async fn assert_unique_metadata(store: &OrmStore, descriptor: &Value) {
     let namespace = store
         .backend
-        .namespace(store.binding.app_id(), store.binding.schema());
+        .namespace(&store.binding);
     let sql = match store.backend.sql_registration().family() {
         POSTGRES_FAMILY => r"
             SELECT t.relname AS table_name, i.relname AS index_name, a.attname AS column_name
@@ -273,8 +272,7 @@ async fn assert_unique_metadata(store: &OrmStore, descriptor: &Value) {
     let rows = store
         .backend
         .query(
-            store.binding.app_id(),
-            store.binding.schema(),
+            &store.binding,
             &sql,
             &[namespace.into()],
         )

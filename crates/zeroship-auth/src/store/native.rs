@@ -64,7 +64,7 @@ zeroship_data_orm::orm::schema! {
 )]
 pub async fn connect(url: &str) -> Result<Database, DbError> {
     Database::connect(
-        DbBinding::new("platform", "auth", SchemaName::new("zeroship")?),
+        DbBinding::platform("platform", "auth", SchemaName::new("zeroship")?),
         ConnectOptions::new(url, ProjectKeySource::unavailable()).connection_authority(),
         models::schema(),
     )

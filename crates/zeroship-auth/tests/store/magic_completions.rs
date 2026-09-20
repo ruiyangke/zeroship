@@ -17,7 +17,7 @@ async fn create(client: &Client) {
 
 #[derive(Debug, PartialEq, Eq)]
 struct State {
-    attempts: i16,
+    attempts: i32,
     pending: Option<chrono::DateTime<chrono::Utc>>,
     consumed: bool,
 }

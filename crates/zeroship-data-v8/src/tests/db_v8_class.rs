@@ -19,13 +19,21 @@
 
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
-use zeroship_data_v8::v8_classes::collection::Collection;
-use zeroship_data_v8::v8_classes::db::{mint_db, Db};
+use crate::v8_classes::collection::Collection;
+use crate::v8_classes::db::{mint_db, Db};
 use zeroship_runtime::{init_v8, RuntimeState, SharedState};
+
+/// The app every test here mints under. The store must be keyed on the SAME
+/// id `mint_db` is called with, or the mint refuses and every assertion below
+/// it never runs.
+const APP: &str = "test_app";
 
 fn install_runtime_state(scope: &mut v8::PinScope<'_, '_>) {
     let state: SharedState = Rc::new(RefCell::new(RuntimeState::new(HashMap::new(), None, None)));
     scope.set_slot(state);
+    // These mint a `Db` on a bare isolate, so `DbPlugin::register` never runs
+    // and the thread would carry no binding store for the host to have filled.
+    crate::tests::fixtures::supply_app_bindings([APP]);
 }
 
 #[test]
@@ -37,7 +45,7 @@ fn db_is_v8_class_instance() {
     let scope = &mut v8::ContextScope::new(handle_scope, context);
     install_runtime_state(scope);
 
-    let db = mint_db(scope, "test_app").expect("mint_db");
+    let db = mint_db(scope, APP).expect("mint_db");
 
     // Walk the prototype chain: db.__proto__ must equal Db.prototype.
     let class_tmpl = Db::install(scope);
@@ -71,7 +79,7 @@ fn db_collection_caches_by_name() {
     let scope = &mut v8::ContextScope::new(handle_scope, context);
     install_runtime_state(scope);
 
-    let db = mint_db(scope, "test_app").expect("mint_db");
+    let db = mint_db(scope, APP).expect("mint_db");
     let collection_key = v8::String::new(scope, "collection").unwrap();
     let collection_fn_v = db
         .get(scope, collection_key.into())
@@ -125,7 +133,7 @@ fn collection_exposes_direct_lookup_helpers() {
     let scope = &mut v8::ContextScope::new(handle_scope, context);
     install_runtime_state(scope);
 
-    let db = mint_db(scope, "test_app").expect("mint_db");
+    let db = mint_db(scope, APP).expect("mint_db");
     let collection_key = v8::String::new(scope, "collection").unwrap();
     let collection_fn: v8::Local<v8::Function> = db
         .get(scope, collection_key.into())
@@ -159,7 +167,7 @@ fn prefixed_creator_schema_table_can_open_a_subscription() {
     let scope = &mut v8::ContextScope::new(handle_scope, context);
     install_runtime_state(scope);
 
-    let db = mint_db(scope, "test_app").expect("mint_db");
+    let db = mint_db(scope, APP).expect("mint_db");
     let result = eval_with_db(
         scope,
         db,
@@ -260,7 +268,7 @@ fn db_transaction_is_a_native_method() {
     let scope = &mut v8::ContextScope::new(handle_scope, context);
     install_runtime_state(scope);
 
-    let db = mint_db(scope, "test_app").expect("mint_db");
+    let db = mint_db(scope, APP).expect("mint_db");
     let key = v8::String::new(scope, "transaction").unwrap();
     let v = db.get(scope, key.into()).expect("transaction prop");
     assert!(
@@ -281,7 +289,7 @@ fn db_begin_transaction_is_not_exposed() {
     let scope = &mut v8::ContextScope::new(handle_scope, context);
     install_runtime_state(scope);
 
-    let db = mint_db(scope, "test_app").expect("mint_db");
+    let db = mint_db(scope, APP).expect("mint_db");
     let key = v8::String::new(scope, "beginTransaction").unwrap();
     // `get` walks the whole prototype chain, so this also proves it isn't
     // on Db.prototype.
@@ -301,7 +309,7 @@ fn db_exposes_declaration_without_platform_installers() {
     let context = v8::Context::new(handle_scope, Default::default());
     let scope = &mut v8::ContextScope::new(handle_scope, context);
     install_runtime_state(scope);
-    let db = mint_db(scope, "test_app").expect("mint_db");
+    let db = mint_db(scope, APP).expect("mint_db");
     for name in ["collection", "transaction", "declareMaskPolicy"] {
         let key = v8::String::new(scope, name).unwrap();
         assert!(db.get(scope, key.into()).unwrap().is_function(), "{name}");

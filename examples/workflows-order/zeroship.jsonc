@@ -1,16 +1,27 @@
+// zeroship.jsonc - tooling configuration for examples/workflows-order. COMMITTED.
+//
+// Read by the `zeroship` CLI and by the build; never by the runtime, never
+// packed into the .zship. No secrets: names only, values in .env or
+// `zeroship secret set`.
+
 {
   "$schema": "https://zeroship.ai/schema/project-v1.json",
+
   "name": "workflows-order",
   "control": "http://localhost:9090",
   "runtime_date": "2026-09-14",
+
   "build": {
     "serverEntry": "src/index.ts",
     "mode": "full",
     "dist": "dist",
     "output": "dist/app.zship"
   },
-  "migrations": {
-    "dir": "migrations",
-    "out": "generated/zeroship"
+
+  // This app reaches no database, so it declares none and gets no `env.db`.
+  "databases": {},
+
+  "apps": {
+    "workflows_order": { "databases": [] }
   }
 }

@@ -650,16 +650,16 @@ fn wpt_text_encoding_streams_compliance() {
 
     // ≥85% gate — ratchet up after we triage the residual failures.
     let total = totals.pass + totals.fail;
-    if total > 0 {
-        let pct = totals.pass * 100 / total;
-        assert!(
-            pct >= 85,
-            "WPT encoding/streams pass rate {pct}% < 85% (pass={}, fail={}, skip={})",
-            totals.pass,
-            totals.fail,
-            totals.skip,
-        );
-    } else {
+    // `checked_div` IS the zero check: it answers `None` exactly when no test
+    // ran, which is the condition the panic below reports.
+    let Some(pct) = (totals.pass * 100).checked_div(total) else {
         panic!("no WPT encoding/streams tests ran");
-    }
+    };
+    assert!(
+        pct >= 85,
+        "WPT encoding/streams pass rate {pct}% < 85% (pass={}, fail={}, skip={})",
+        totals.pass,
+        totals.fail,
+        totals.skip,
+    );
 }

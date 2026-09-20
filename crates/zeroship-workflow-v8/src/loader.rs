@@ -75,13 +75,21 @@ impl WorkflowRuntimeLoader for AppRuntimeLoader {
                 source: executable.modules()[name].clone(),
             })
             .collect();
-        let descriptor = executable
-            .runtime_descriptor()
-            .map(serde_json::to_string)
-            .transpose()
-            .map_err(|_| {
-                WorkflowServiceError::InvalidRequest("invalid workflow runtime descriptor".into())
-            })?;
+        // One entry per database the pinned deployment declares, each
+        // carrying that database's schema. The labels ride along because they
+        // are the member names on `env.databases`.
+        let databases: Vec<_> = executable
+            .databases()
+            .iter()
+            .map(|database| zeroship_runtime::databases::RuntimeDatabase {
+                label: database.label.clone(),
+                database_id: database.database_id.as_str().to_owned(),
+                primary: database.primary,
+                schema: database.schema.clone(),
+            })
+            .collect();
+        let descriptor = (!databases.is_empty())
+            .then(|| zeroship_runtime::databases::RuntimeDatabases::document(databases));
         let runtime = Runtime::builder()
             .app_id(self.backend.app_id().clone())
             .modules(modules)

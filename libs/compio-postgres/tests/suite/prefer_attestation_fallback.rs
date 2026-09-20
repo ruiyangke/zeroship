@@ -112,8 +112,7 @@ async fn verify_full_still_refuses_a_connector_that_cannot_attest() {
 
     let error = compio_postgres::connect(&dsn, common::suite_tls())
         .await
-        .err()
-        .expect("verify-full must not connect through a connector that verifies nothing");
+        .expect_err("verify-full must not connect through a connector that verifies nothing");
     let chain = common::error_chain(&error);
     assert!(
         chain.contains("verify-full"),

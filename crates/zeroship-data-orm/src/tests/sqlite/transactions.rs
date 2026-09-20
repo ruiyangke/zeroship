@@ -25,7 +25,7 @@ fn nested_savepoint_rollback_to_keeps_outer_sqlite() {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
             let client = backend
-                .fixture_session("default")
+                .fixture_session(&crate::tests::fixtures::harness_alias("default"))
                 .await
                 .expect("acquire client");
 
@@ -111,7 +111,7 @@ fn nested_savepoint_release_keeps_both_sqlite() {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
             let client = backend
-                .fixture_session("default")
+                .fixture_session(&crate::tests::fixtures::harness_alias("default"))
                 .await
                 .expect("acquire client");
 
@@ -202,7 +202,7 @@ fn an_autocommit_read_proceeds_while_the_app_holds_an_open_transaction() {
                 .expect("seed");
 
             let tx = backend
-                .fixture_session("default")
+                .fixture_session(&crate::tests::fixtures::harness_alias("default"))
                 .await
                 .expect("acquire tx client");
             backend
@@ -301,7 +301,7 @@ fn a_cancellation_interrupts_a_statement_that_is_already_running() {
 
             let (backend, _dir) = fresh_backend(host);
             let tx = backend
-                .fixture_session("default")
+                .fixture_session(&crate::tests::fixtures::harness_alias("default"))
                 .await
                 .expect("acquire tx client");
             let cancel = tx
@@ -374,7 +374,7 @@ fn a_cancellation_after_commit_does_not_roll_the_commit_back() {
                 .expect("create table");
 
             let tx = backend
-                .fixture_session("default")
+                .fixture_session(&crate::tests::fixtures::harness_alias("default"))
                 .await
                 .expect("acquire tx client");
             let cancel = tx.cancel_handle().expect("cancel handle");
@@ -448,7 +448,7 @@ fn a_cancel_for_a_retired_reservation_does_not_roll_back_the_next_transaction() 
             // by a dropped future is exactly how SC-1 step 9 will arm this.
             let stale_cancel = {
                 let first = backend
-                    .fixture_session("default")
+                    .fixture_session(&crate::tests::fixtures::harness_alias("default"))
                     .await
                     .expect("acquire the first transaction");
                 let cancel = first.cancel_handle().expect("cancel handle for R1");
@@ -465,7 +465,7 @@ fn a_cancel_for_a_retired_reservation_does_not_roll_back_the_next_transaction() 
 
             // R2 takes the lane R1 gave up, and opens its own transaction.
             let second = backend
-                .fixture_session("default")
+                .fixture_session(&crate::tests::fixtures::harness_alias("default"))
                 .await
                 .expect("acquire the second transaction");
             backend
@@ -540,7 +540,7 @@ fn a_second_cancellation_is_answered_not_re_executed() {
                 .expect("create table");
 
             let tx = backend
-                .fixture_session("default")
+                .fixture_session(&crate::tests::fixtures::harness_alias("default"))
                 .await
                 .expect("acquire tx client");
             let cancel = tx.cancel_handle().expect("cancel handle");
@@ -632,18 +632,20 @@ fn two_apps_hold_transactions_at_the_same_time() {
     Host::test(|host| {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
+            let alias_a = crate::tests::fixtures::harness_alias("app_a");
+            let alias_b = crate::tests::fixtures::harness_alias("app_b");
             backend
-                .attach_app_file("app_a")
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias_a))
                 .await
                 .expect("attach app_a");
             backend
-                .attach_app_file("app_b")
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias_b))
                 .await
                 .expect("attach app_b");
-            for app in ["app_a", "app_b"] {
+            for alias in [&alias_a, &alias_b] {
                 backend
                     .execute_fixture(
-                        &format!("CREATE TABLE \"{app}\".\"t\" (id INTEGER PRIMARY KEY, v TEXT)"),
+                        &format!("CREATE TABLE \"{alias}\".\"t\" (id INTEGER PRIMARY KEY, v TEXT)"),
                         &[],
                     )
                     .await
@@ -651,7 +653,7 @@ fn two_apps_hold_transactions_at_the_same_time() {
             }
 
             let a = backend
-                .fixture_session("app_a")
+                .fixture_session(&crate::tests::fixtures::harness_alias("app_a"))
                 .await
                 .expect("app_a acquires its transaction connection");
             backend
@@ -659,12 +661,16 @@ fn two_apps_hold_transactions_at_the_same_time() {
                 .await
                 .expect("BEGIN a");
             backend
-                .execute_fixture_on(&a, "INSERT INTO \"app_a\".\"t\" (v) VALUES ('a')", &[])
+                .execute_fixture_on(
+                    &a,
+                    &format!("INSERT INTO \"{alias_a}\".\"t\" (v) VALUES ('a')"),
+                    &[],
+                )
                 .await
                 .expect("app_a writes inside its transaction");
 
             let b = backend
-                .fixture_session("app_b")
+                .fixture_session(&crate::tests::fixtures::harness_alias("app_b"))
                 .await
                 .expect("app_b must get its own transaction connection while app_a holds one");
             backend
@@ -672,7 +678,11 @@ fn two_apps_hold_transactions_at_the_same_time() {
                 .await
                 .expect("BEGIN b");
             backend
-                .execute_fixture_on(&b, "INSERT INTO \"app_b\".\"t\" (v) VALUES ('b')", &[])
+                .execute_fixture_on(
+                    &b,
+                    &format!("INSERT INTO \"{alias_b}\".\"t\" (v) VALUES ('b')"),
+                    &[],
+                )
                 .await
                 .expect("app_b writes inside its transaction");
 
@@ -693,9 +703,9 @@ fn two_apps_hold_transactions_at_the_same_time() {
                 TerminalOutcome::Committed
             );
             let probe = backend.autocommit_client();
-            for (app, want) in [("app_a", "a"), ("app_b", "b")] {
+            for (app, alias, want) in [("app_a", &alias_a, "a"), ("app_b", &alias_b, "b")] {
                 let rows = probe
-                    .query(&format!("SELECT v FROM \"{app}\".\"t\""), &[])
+                    .query(&format!("SELECT v FROM \"{alias}\".\"t\""), &[])
                     .await
                     .expect("read back");
                 assert_eq!(rows.len(), 1, "{app} must hold exactly its own row");
@@ -715,31 +725,33 @@ fn a_transaction_lane_cannot_address_another_apps_tables() {
     Host::test(|host| {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
+            let alias_a = crate::tests::fixtures::harness_alias("app_a");
+            let alias_b = crate::tests::fixtures::harness_alias("app_b");
             backend
-                .attach_app_file("app_a")
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias_a))
                 .await
                 .expect("attach app_a");
             backend
-                .attach_app_file("app_b")
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias_b))
                 .await
                 .expect("attach app_b");
             backend
                 .execute_fixture(
-                    "CREATE TABLE \"app_a\".\"secret\" (id INTEGER PRIMARY KEY, v TEXT)",
+                    &format!("CREATE TABLE \"{alias_a}\".\"secret\" (id INTEGER PRIMARY KEY, v TEXT)"),
                     &[],
                 )
                 .await
                 .expect("create app_a.secret");
             backend
                 .execute_fixture(
-                    "INSERT INTO \"app_a\".\"secret\" (v) VALUES ('tenant-a')",
+                    &format!("INSERT INTO \"{alias_a}\".\"secret\" (v) VALUES ('tenant-a')"),
                     &[],
                 )
                 .await
                 .expect("seed app_a.secret");
 
             let b = backend
-                .fixture_session("app_b")
+                .fixture_session(&crate::tests::fixtures::harness_alias("app_b"))
                 .await
                 .expect("acquire app_b's transaction connection");
             backend
@@ -747,7 +759,7 @@ fn a_transaction_lane_cannot_address_another_apps_tables() {
                 .await
                 .expect("BEGIN b");
             let leaked = backend
-                .execute_fixture_on(&b, "DELETE FROM \"app_a\".\"secret\"", &[])
+                .execute_fixture_on(&b, &format!("DELETE FROM \"{alias_a}\".\"secret\""), &[])
                 .await
                 .expect_err("app_b's transaction must not reach app_a's tables");
             assert!(
@@ -760,7 +772,7 @@ fn a_transaction_lane_cannot_address_another_apps_tables() {
             // reported an error afterwards would be worse than no check.
             let rows = backend
                 .autocommit_client()
-                .query("SELECT v FROM \"app_a\".\"secret\"", &[])
+                .query(&format!("SELECT v FROM \"{alias_a}\".\"secret\""), &[])
                 .await
                 .expect("read app_a.secret back");
             assert_eq!(rows.len(), 1);
@@ -769,23 +781,24 @@ fn a_transaction_lane_cannot_address_another_apps_tables() {
     })
 }
 
-/// The refusal that survives, and the message that must name the app.
+/// The refusal that survives, and the message that must name the database.
 ///
-/// A second top-level transaction for the SAME app is still refused
-/// immediately. This is the only producer of `transaction_connection_busy` on
-/// this path, so the message can say whose transaction it is - the distinction
-/// defect L22b names.
+/// A second top-level transaction on the SAME database is still refused
+/// immediately. The lane is per database because the connection is: the actor
+/// resolves a lane's own ATTACH by that name. This is the only producer of
+/// `transaction_connection_busy` on this path, so the message can say which
+/// database it is - the distinction defect L22b names.
 #[test]
-fn a_second_transaction_for_the_same_app_is_still_refused_and_names_it() {
+fn a_second_transaction_on_the_same_database_is_still_refused_and_names_it() {
     Host::test(|host| {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
             backend
-                .attach_app_file("app_a")
+                .attach_binding(&crate::tests::fixtures::harness_binding("app_a"))
                 .await
                 .expect("attach app_a");
             let first = backend
-                .fixture_session("app_a")
+                .fixture_session(&crate::tests::fixtures::harness_alias("app_a"))
                 .await
                 .expect("first acquire");
             backend
@@ -794,9 +807,9 @@ fn a_second_transaction_for_the_same_app_is_still_refused_and_names_it() {
                 .expect("BEGIN");
 
             let err = backend
-                .fixture_session("app_a")
+                .fixture_session(&crate::tests::fixtures::harness_alias("app_a"))
                 .await
-                .expect_err("a second transaction for the same app must be refused");
+                .expect_err("a second transaction on the same database must be refused");
             match &err {
                 DbError::ValidationFailed {
                     code,
@@ -805,8 +818,9 @@ fn a_second_transaction_for_the_same_app_is_still_refused_and_names_it() {
                 } => {
                     assert_eq!(*code, "transaction_connection_busy", "got {err:?}");
                     assert!(
-                        message.contains("app_a"),
-                        "the message must name the app whose transaction it is; got {message:?}"
+                        message.contains(&crate::tests::fixtures::harness_alias("app_a")),
+                        "the message must name the database whose transaction it is; \
+                         got {message:?}"
                     );
                     assert!(hint.is_some(), "the remedy is the creator's, so say it");
                 }
@@ -817,7 +831,7 @@ fn a_second_transaction_for_the_same_app_is_still_refused_and_names_it() {
             // round trip - so the next acquire succeeds.
             drop(first);
             backend
-                .fixture_session("app_a")
+                .fixture_session(&crate::tests::fixtures::harness_alias("app_a"))
                 .await
                 .expect("the app's lane is free once its lease drops");
         });
@@ -844,17 +858,17 @@ fn transaction_lanes_are_capped_and_the_refusal_has_its_own_code() {
             // next app evicts one and is admitted.
             for i in 0..cap {
                 let app = format!("cap_a{i}");
-                backend.attach_app_file(&app).await.expect("attach");
+                backend.attach_binding(&crate::tests::fixtures::harness_binding(&app)).await.expect("attach");
                 let client = backend
-                    .fixture_session(&app)
+                    .fixture_session(&crate::tests::fixtures::harness_alias(&app))
                     .await
                     .expect("acquire under the cap");
                 drop(client);
             }
             let app = format!("cap_a{cap}");
-            backend.attach_app_file(&app).await.expect("attach");
+            backend.attach_binding(&crate::tests::fixtures::harness_binding(&app)).await.expect("attach");
             backend
-                .fixture_session(&app)
+                .fixture_session(&crate::tests::fixtures::harness_alias(&app))
                 .await
                 .expect("an idle lane must be evicted rather than refusing");
 
@@ -864,9 +878,9 @@ fn transaction_lanes_are_capped_and_the_refusal_has_its_own_code() {
             let mut held = Vec::new();
             for i in 0..cap {
                 let app = format!("cap_b{i}");
-                backend.attach_app_file(&app).await.expect("attach");
+                backend.attach_binding(&crate::tests::fixtures::harness_binding(&app)).await.expect("attach");
                 let client = backend
-                    .fixture_session(&app)
+                    .fixture_session(&crate::tests::fixtures::harness_alias(&app))
                     .await
                     .expect("acquire under the cap");
                 backend
@@ -876,9 +890,9 @@ fn transaction_lanes_are_capped_and_the_refusal_has_its_own_code() {
                 held.push(client);
             }
             let app = format!("cap_b{cap}");
-            backend.attach_app_file(&app).await.expect("attach");
+            backend.attach_binding(&crate::tests::fixtures::harness_binding(&app)).await.expect("attach");
             let err = backend
-                .fixture_session(&app)
+                .fixture_session(&crate::tests::fixtures::harness_alias(&app))
                 .await
                 .expect_err("every lane is mid-transaction, so this must be refused");
             match &err {
@@ -924,7 +938,7 @@ fn a_write_upgrade_on_a_stale_wal_snapshot_is_refused() {
                 .expect("seed");
 
             let tx = backend
-                .fixture_session("snapshot_app")
+                .fixture_session(&crate::tests::fixtures::harness_alias("snapshot_app"))
                 .await
                 .expect("acquire tx client");
             backend
@@ -1008,11 +1022,12 @@ fn an_app_files_write_upgrade_is_plain_busy_because_it_is_not_in_wal() {
     Host::test(|host| {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
-            backend.attach_app_file("jm_app").await.expect("attach");
+            let alias = crate::tests::fixtures::harness_alias("jm_app");
+            backend.attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias)).await.expect("attach");
 
             let mode = backend
                 .autocommit_client()
-                .query("PRAGMA \"jm_app\".journal_mode", &[])
+                .query(&format!("PRAGMA \"{alias}\".journal_mode"), &[])
                 .await
                 .expect("read the attached file's journal mode");
             assert_eq!(
@@ -1089,8 +1104,14 @@ fn impatient_probe(path: &std::path::Path) -> rusqlite::Connection {
     probe
 }
 
-fn main_schema() -> crate::sql::SchemaName {
-    crate::sql::SchemaName::new("main").expect("main is a legal schema name")
+/// The dev tier opens its shared file under SQLite's own `main`, which no
+/// binding role narrows: the fixture runs under the connection's own authority.
+fn main_binding(who: &str) -> zeroship_data_orm::binding::DbBinding {
+    zeroship_data_orm::binding::DbBinding::platform(
+        who,
+        "replica",
+        crate::sql::SchemaName::new("main").expect("main is a legal schema name"),
+    )
 }
 
 /// **The write lock is taken at `BEGIN`, before the transaction's first
@@ -1115,7 +1136,7 @@ fn a_transaction_holds_the_write_lock_from_begin_before_any_statement() {
                 .expect("create the table");
 
             let session = backend
-                .open_tx_session("replica", &main_schema(), BeginIntent::Default)
+                .open_tx_session(&main_binding("replica"), BeginIntent::Default)
                 .await
                 .expect("open the transaction");
 
@@ -1160,7 +1181,7 @@ fn two_replicas_reading_before_they_write_both_commit() {
 
             async fn replica(backend: &SqliteBackend, who: &str) -> Result<(), DbError> {
                 let session = backend
-                    .open_tx_session(who, &main_schema(), BeginIntent::Default)
+                    .open_tx_session(&main_binding(who), BeginIntent::Default)
                     .await
                     .map_err(|error| match error {
                         OpenSessionError::Failed(error) => error,
@@ -1221,10 +1242,9 @@ fn two_apps_on_one_backend_serialize_their_transactions_through_main() {
     Host::test(|host| {
         host.run(async {
             let (backend, dir) = fresh_backend(host);
-            let app_schema =
-                crate::sql::SchemaName::new("tenant_a").expect("legal schema name");
+            let app_binding = crate::tests::fixtures::harness_binding("tenant_a");
             backend
-                .attach_app_file("tenant_a")
+                .attach_binding(&crate::tests::fixtures::harness_binding("tenant_a"))
                 .await
                 .expect("attach the app file");
 
@@ -1235,7 +1255,7 @@ fn two_apps_on_one_backend_serialize_their_transactions_through_main() {
                 .expect("create a table in main");
 
             let session = backend
-                .open_tx_session("tenant_a", &app_schema, BeginIntent::Default)
+                .open_tx_session(&app_binding, BeginIntent::Default)
                 .await
                 .expect("open the app's transaction");
 

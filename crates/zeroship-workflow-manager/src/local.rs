@@ -104,7 +104,7 @@ impl LocalPlatform {
 }
 
 fn binding() -> Result<DbBinding, deployments::Error> {
-    Ok(DbBinding::new(
+    Ok(DbBinding::platform(
         "platform",
         "local-platform",
         SchemaName::new("main").map_err(|_| invalid())?,

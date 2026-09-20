@@ -30,6 +30,8 @@ use std::collections::HashMap;
 #[path = "../../../tests/fixtures/postgres/mod.rs"]
 mod postgres;
 mod relay_fixture;
+#[path = "../../../tests/fixtures/data/roles.rs"]
+mod roles;
 #[path = "../../../tests/fixtures/data/tracing.rs"]
 mod test_tracing;
 use zeroship_data_orm::cdc::relay::RelayConfig;
@@ -39,7 +41,9 @@ use std::thread::{self, JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
 
 use compio_postgres::{NoTls, Pool};
-use zeroship_core::AppId;
+use zeroship_core::{AppId, BindingId, DatabaseId};
+use zeroship_data_orm::binding::{DbBinding, COLD_START_DEPLOY_TOKEN};
+use zeroship_data_orm::resolved_bindings::{ResolvedBinding, SuppliedAppBindings};
 use zeroship_data_v8::service::{DbService, DbServiceConfig};
 use zeroship_runtime::channel::{CancelFlag, StreamReader};
 use zeroship_runtime::plugin::NativePlugin;
@@ -225,9 +229,9 @@ const RUNTIME_DESCRIPTOR: &str = r#"{
 /// [`assert_descriptor_matches_table`] before the exercise starts; the types are
 /// not, and nothing in the tree checks them.
 ///
-/// [`APP_SCHEMA_SLOT`] is the only placeholder; the caller substitutes the
-/// per-app schema name.
-const EVENTS_DDL: &str = r#"CREATE TABLE "APP_SCHEMA"."events" (
+/// [`SCHEMA_SLOT`] is the only placeholder; the caller substitutes the
+/// binding's schema name.
+const EVENTS_DDL: &str = r#"CREATE TABLE "DB_SCHEMA"."events" (
     id VARCHAR(255) PRIMARY KEY,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -241,31 +245,67 @@ const EVENTS_DDL: &str = r#"CREATE TABLE "APP_SCHEMA"."events" (
 /// The three system indexes [`RUNTIME_DESCRIPTOR`] declares, by the names it
 /// declares them under.
 const EVENTS_INDEX_DDL: [&str; 3] = [
-    r#"CREATE INDEX "events_deleted_at_idx" ON "APP_SCHEMA"."events" (deleted_at)"#,
-    r#"CREATE INDEX "events_updated_at_idx" ON "APP_SCHEMA"."events" (updated_at)"#,
-    r#"CREATE INDEX "events_created_by_idx" ON "APP_SCHEMA"."events" (created_by)"#,
+    r#"CREATE INDEX "events_deleted_at_idx" ON "DB_SCHEMA"."events" (deleted_at)"#,
+    r#"CREATE INDEX "events_updated_at_idx" ON "DB_SCHEMA"."events" (updated_at)"#,
+    r#"CREATE INDEX "events_created_by_idx" ON "DB_SCHEMA"."events" (created_by)"#,
 ];
 
-/// The token [`EVENTS_DDL`] and [`EVENTS_INDEX_DDL`] carry where the per-app
+/// The token [`EVENTS_DDL`] and [`EVENTS_INDEX_DDL`] carry where the binding's
 /// schema name goes.
 ///
-/// Not `{app_id}`: a brace-delimited placeholder inside a plain string literal
+/// Not `{schema}`: a brace-delimited placeholder inside a plain string literal
 /// is what `clippy::literal_string_with_formatting_args` is looking for, and the
 /// two `.replace` call sites would each raise it.
-const APP_SCHEMA_SLOT: &str = "APP_SCHEMA";
+const SCHEMA_SLOT: &str = "DB_SCHEMA";
 
+/// The schema epoch this target's binding is resolved at.
+///
+/// The epoch is the last component of `zs_bind_<bnd>_e<E>`, so the ladder the
+/// fixture provisions and the role each session narrows to have to name the
+/// same one.
+const SCHEMA_EPOCH: u32 = 1;
+
+/// One isolate's runtime, reading its binding out of the store the harness
+/// resolved.
+///
+/// `app_bindings` is composed once, on the test's own thread, and cloned into
+/// every spawn. An isolate composes no part of a binding, so handing the same
+/// store to all three threads is what keeps them on one schema and one role.
 fn runtime_for(
     url: &str,
     runtime_app_id: AppId,
     app_id: &str,
+    app_bindings: Arc<SuppliedAppBindings>,
     relay: &RelayConfig,
     modules: Vec<ModuleEntry>,
 ) -> Runtime {
     let mut env_vars = HashMap::new();
     env_vars.insert("APP_ID".to_string(), app_id.to_string());
+    // The ENVELOPE, not the bare descriptor. `RUNTIME_DESCRIPTOR` is the v2
+    // SCHEMA descriptor and its `"version": 2` is the schema's; the document the
+    // runtime validates carries its own `"version": 1` from
+    // `databases::DOCUMENT_VERSION` and wraps the schema under `databases`. Two
+    // different numbers share the field name, so passing the schema where the
+    // document belongs fails as "must be version 1" against a 2.
+    //
+    // Read BEFORE `app_bindings` moves into the service config below.
+    let descriptor_document = {
+        let bound = app_bindings.bindings_for(app_id, COLD_START_DEPLOY_TOKEN);
+        let database = bound
+            .first()
+            .and_then(DbBinding::database)
+            .expect("the harness binding addresses a database");
+        zeroship_runtime::databases::RuntimeDatabases::single(
+            "main",
+            database.as_str(),
+            RUNTIME_DESCRIPTOR,
+        )
+        .expect("the harness descriptor is valid JSON")
+    };
     let plugins: Vec<Arc<dyn NativePlugin>> = vec![DbService::new(DbServiceConfig {
+        app_bindings,
         project_keys: Default::default(),
-        connection: zeroship_data_orm::connection::ConnectionFactory::for_url(url)
+        connection: zeroship_data_orm::connection::ConnectionFactory::for_app_url(url)
             .expect("valid database configuration"),
         cdc_relay: Some(relay.clone()),
         meter: None,
@@ -281,7 +321,7 @@ fn runtime_for(
         // blob resolved by `crates/zeroship-worker/src/sync.rs`; native startup
         // validates it and passes it directly to plugins. All isolates in this
         // target are the same deploy, so they carry the same document.
-        .runtime_descriptor(Some(RUNTIME_DESCRIPTOR.to_string()))
+        .runtime_descriptor(Some(descriptor_document))
         .build()
 }
 
@@ -544,6 +584,7 @@ fn spawn_anchor(
     url: String,
     runtime_app_id: AppId,
     app_id: String,
+    app_bindings: Arc<SuppliedAppBindings>,
     relay: RelayConfig,
     channels: AnchorChannels,
 ) -> JoinHandle<Result<(), String>> {
@@ -556,7 +597,14 @@ fn spawn_anchor(
     thread::spawn(move || {
         init_v8();
         let thread_id = thread::current().id();
-        let runtime = runtime_for(&url, runtime_app_id, &app_id, &relay, anchor_modules());
+        let runtime = runtime_for(
+            &url,
+            runtime_app_id,
+            &app_id,
+            app_bindings,
+            &relay,
+            anchor_modules(),
+        );
         let arm = call(&runtime, "GET", "/arm", "");
         let io = compio::runtime::Runtime::new()
             .map_err(|error| format!("anchor compio runtime: {error}"))?;
@@ -602,13 +650,21 @@ fn spawn_subscriber(
     url: String,
     runtime_app_id: AppId,
     app_id: String,
+    app_bindings: Arc<SuppliedAppBindings>,
     relay: RelayConfig,
     initial: std::sync::mpsc::Sender<Result<(ThreadId, String), String>>,
 ) -> JoinHandle<Result<SubscriberResult, String>> {
     thread::spawn(move || {
         init_v8();
         let thread_id = thread::current().id();
-        let runtime = runtime_for(&url, runtime_app_id, &app_id, &relay, subscriber_modules());
+        let runtime = runtime_for(
+            &url,
+            runtime_app_id,
+            &app_id,
+            app_bindings,
+            &relay,
+            subscriber_modules(),
+        );
         let outcome = call(
             &runtime,
             "POST",
@@ -676,12 +732,20 @@ fn spawn_writer(
     url: String,
     runtime_app_id: AppId,
     app_id: String,
+    app_bindings: Arc<SuppliedAppBindings>,
     relay: RelayConfig,
 ) -> JoinHandle<Result<WriterResult, String>> {
     thread::spawn(move || {
         init_v8();
         let thread_id = thread::current().id();
-        let runtime = runtime_for(&url, runtime_app_id, &app_id, &relay, writer_modules());
+        let runtime = runtime_for(
+            &url,
+            runtime_app_id,
+            &app_id,
+            app_bindings,
+            &relay,
+            writer_modules(),
+        );
         let outcome = call(&runtime, "POST", "/write", "{}");
         let io = compio::runtime::Runtime::new()
             .map_err(|error| format!("writer compio runtime: {error}"))?;
@@ -726,7 +790,7 @@ async fn slot_state(pool: &Pool, slot: &str) -> Result<Option<bool>, String> {
 /// Refuse to run unless [`RUNTIME_DESCRIPTOR`] and [`EVENTS_DDL`] describe the
 /// same columns. The ORM compiles projections from the descriptor without
 /// consulting the catalog, so this fixture checks its two inputs directly.
-async fn assert_descriptor_matches_table(pool: &Pool, app_id: &str) -> Result<(), String> {
+async fn assert_descriptor_matches_table(pool: &Pool, schema: &str) -> Result<(), String> {
     let descriptor: serde_json::Value = serde_json::from_str(RUNTIME_DESCRIPTOR)
         .map_err(|error| format!("RUNTIME_DESCRIPTOR is not valid JSON: {error}"))?;
     let mut declared = descriptor["collections"]["events"]["fields"]
@@ -741,7 +805,7 @@ async fn assert_descriptor_matches_table(pool: &Pool, app_id: &str) -> Result<()
         .query_text_params(
             "SELECT column_name FROM information_schema.columns \
              WHERE table_schema = $1 AND table_name = 'events'",
-            &[app_id],
+            &[schema],
         )
         .await
         .map_err(|error| format!("read the events table's columns: {error}"))?;
@@ -775,15 +839,19 @@ async fn publication_exists(pool: &Pool, publication: &str) -> Result<bool, Stri
 /// The relay requires an existing publication and never chooses its members.
 /// The harness supplies that migration-owned fixture with table-owner authority.
 /// `events` must be a member for pgoutput to deliver its changes.
+///
+/// The publication is named after the APP, which is what the relay's source
+/// derives and asks for; its members are qualified with the BINDING's schema,
+/// which is where the table actually is.
 async fn create_app_publication(
     pool: &Pool,
-    app_id: &str,
+    schema: &str,
     publication: &str,
     tables: &[&str],
 ) -> Result<(), String> {
     let members = tables
         .iter()
-        .map(|table| format!(r#""{app_id}"."{table}""#))
+        .map(|table| format!(r#""{schema}"."{table}""#))
         .collect::<Vec<_>>()
         .join(", ");
     let sql = if members.is_empty() {
@@ -797,64 +865,6 @@ async fn create_app_publication(
         .map_err(|error| format!("create migration-owned publication: {error}"))
 }
 
-async fn provision_app_role(pool: &Pool, app_id: &str) -> Result<(), String> {
-    let role = zeroship_core::database_role::per_app_role_name(app_id)
-        .expect("distributed live app id must produce a valid PostgreSQL role name");
-    pool.execute(
-        &format!(
-            r#"DO $distributed_live_role$ BEGIN
-                IF NOT EXISTS (
-                    SELECT 1 FROM pg_roles
-                    WHERE rolname = '__zeroship_app_role_template'
-                ) THEN
-                    CREATE ROLE __zeroship_app_role_template
-                        NOLOGIN NOREPLICATION NOCREATEDB NOCREATEROLE NOINHERIT;
-                END IF;
-                IF NOT EXISTS (
-                    SELECT 1 FROM pg_roles
-                    WHERE rolname = '{role}'
-                ) THEN
-                    CREATE ROLE "{role}"
-                        NOLOGIN NOREPLICATION NOCREATEDB NOCREATEROLE
-                        INHERIT IN ROLE __zeroship_app_role_template;
-                END IF;
-            END $distributed_live_role$"#
-        ),
-        &[],
-    )
-    .await
-    .map_err(|error| format!("create per-app role: {error}"))?;
-    for grant in [
-        format!(r#"GRANT USAGE ON SCHEMA "{app_id}" TO "{role}""#),
-        format!(
-            r#"GRANT
-                  SELECT (id, created_at, updated_at, created_by, updated_by, version, deleted_at, title),
-                  INSERT (id, created_at, updated_at, created_by, updated_by, version, deleted_at, title),
-                  UPDATE (id, created_at, updated_at, created_by, updated_by, version, deleted_at, title),
-                  DELETE
-                ON TABLE "{app_id}"."events" TO "{role}""#
-        ),
-        format!(
-            r#"GRANT USAGE, SELECT
-                ON ALL SEQUENCES IN SCHEMA "{app_id}" TO "{role}""#
-        ),
-    ] {
-        pool.execute(&grant, &[])
-            .await
-            .map_err(|error| format!("grant per-app role privileges: {error}"))?;
-    }
-    Ok(())
-}
-
-async fn drop_app_role(pool: &Pool, app_id: &str) -> Result<(), String> {
-    let role = zeroship_core::database_role::per_app_role_name(app_id)
-        .expect("distributed live app id must produce a valid PostgreSQL role name");
-    pool.execute(&format!(r#"DROP ROLE IF EXISTS "{role}""#), &[])
-        .await
-        .map_err(|error| format!("drop per-app role: {error}"))?;
-    Ok(())
-}
-
 #[test]
 fn db_live_stream_crosses_relay_and_v8_isolates_without_worker_replication() {
     init_v8();
@@ -863,8 +873,28 @@ fn db_live_stream_crosses_relay_and_v8_isolates_without_worker_replication() {
     let url = postgres.url();
     let runtime_app_id = AppId::mint();
     let app_id = runtime_app_id.as_str().to_string();
-    let publication = zeroship_core::replication_names::publication_name(&app_id).unwrap();
-    let slot = publication.replacen("__zs_pub_", "__zs_relay_", 1);
+    // The edge a trusted host would have resolved for this app, composed once
+    // on this thread. It is the only source of the schema the fixture
+    // provisions and of the role every session narrows to, so the three
+    // isolates below cannot drift onto a database of their own.
+    let binding = DbBinding::to_database(
+        app_id.as_str(),
+        COLD_START_DEPLOY_TOKEN,
+        DatabaseId::mint(),
+        BindingId::mint(),
+        SCHEMA_EPOCH,
+    )
+    .expect("a minted database and edge compose a legal role name");
+    let schema = binding.schema().as_str().to_string();
+    let app_bindings = Arc::new(SuppliedAppBindings::new());
+    app_bindings
+        .supply(
+            &app_id,
+            ResolvedBinding::from(binding.edge().expect("the binding addresses a database")),
+        )
+        .expect("a fresh store accepts its first binding");
+    let publication = zeroship_core::replication_names::DATASTORE_PUBLICATION;
+    let slot = zeroship_core::replication_names::relay_slot_name(&app_id).unwrap();
 
     let io = compio::runtime::Runtime::new().expect("control compio runtime");
     let pool = io.block_on(async {
@@ -883,33 +913,38 @@ fn db_live_stream_crosses_relay_and_v8_isolates_without_worker_replication() {
         drop(probe);
 
         let pool = Pool::connect(&url, 4).await.expect("connect control pool");
-        pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app_id}\" CASCADE"), &[])
+        pool.execute(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"), &[])
             .await
             .expect("drop stale test schema");
-        pool.execute(&format!("CREATE SCHEMA \"{app_id}\""), &[])
+        pool.execute(&format!("CREATE SCHEMA \"{schema}\""), &[])
             .await
             .expect("create test schema");
-        pool.execute(&EVENTS_DDL.replace(APP_SCHEMA_SLOT, &app_id), &[])
+        pool.execute(&EVENTS_DDL.replace(SCHEMA_SLOT, &schema), &[])
             .await
             .expect("create events table");
         for index in EVENTS_INDEX_DDL {
-            pool.execute(&index.replace(APP_SCHEMA_SLOT, &app_id), &[])
+            pool.execute(&index.replace(SCHEMA_SLOT, &schema), &[])
                 .await
                 .expect("create events system index");
         }
-        assert_descriptor_matches_table(&pool, &app_id)
+        assert_descriptor_matches_table(&pool, &schema)
             .await
             .expect("runtime descriptor agrees with the events table");
-        provision_app_role(&pool, &app_id)
+        // The ladder last, so its schema-wide grants reach the table that is
+        // already there. It issues the capability role's privileges, hands the
+        // binding role exactly that one role `WITH SET FALSE`, and admits this
+        // admin login to the binding role; the worker login's own edge is the
+        // relay fixture's.
+        roles::ensure_binding_ladder(&pool, &binding)
             .await
-            .expect("provision per-app role");
-        create_app_publication(&pool, &app_id, &publication, &["events"])
+            .expect("provision the binding role ladder");
+        create_app_publication(&pool, &schema, publication, &["events"])
             .await
             .expect("create migration-owned publication");
         pool
     });
 
-    let relay = io.block_on(relay_fixture::RelayFixture::start(&pool, &url, &app_id));
+    let relay = io.block_on(relay_fixture::RelayFixture::start(&pool, &url, &binding));
     let worker_url = relay.worker_url.clone();
     let (anchor_ready_tx, anchor_ready_rx) = std::sync::mpsc::channel();
     let (close_tx, close_rx) = flume::bounded(1);
@@ -919,6 +954,7 @@ fn db_live_stream_crosses_relay_and_v8_isolates_without_worker_replication() {
         worker_url.clone(),
         runtime_app_id.clone(),
         app_id.clone(),
+        app_bindings.clone(),
         relay.config.clone(),
         AnchorChannels {
             ready: anchor_ready_tx,
@@ -938,6 +974,7 @@ fn db_live_stream_crosses_relay_and_v8_isolates_without_worker_replication() {
             worker_url.clone(),
             runtime_app_id.clone(),
             app_id.clone(),
+            app_bindings.clone(),
             relay.config.clone(),
             initial_tx,
         ));
@@ -952,6 +989,7 @@ fn db_live_stream_crosses_relay_and_v8_isolates_without_worker_replication() {
             worker_url.clone(),
             runtime_app_id,
             app_id.clone(),
+            app_bindings.clone(),
             relay.config.clone(),
         ));
         let writer_result = join_role(writer.take().expect("writer handle"), "writer")?;
@@ -1030,9 +1068,12 @@ fn db_live_stream_crosses_relay_and_v8_isolates_without_worker_replication() {
     let anchor_result = join_role(anchor, "anchor");
 
     let app_delete_result = io.block_on(async {
+        // The store the isolates ran against, so retiring the app retires the
+        // binding they narrowed to rather than a store that never held one.
         let service = DbService::new(DbServiceConfig {
+            app_bindings: app_bindings.clone(),
             project_keys: Default::default(),
-            connection: zeroship_data_orm::connection::ConnectionFactory::for_url(&url)
+            connection: zeroship_data_orm::connection::ConnectionFactory::for_app_url(&url)
                 .expect("valid database configuration"),
             cdc_relay: None,
             meter: None,
@@ -1045,11 +1086,15 @@ fn db_live_stream_crosses_relay_and_v8_isolates_without_worker_replication() {
             .map_err(|error| format!("deprovision app CDC: {error}"))?;
         // Local subscription teardown leaves migration-owned publications
         // intact. Only the operator fixture cleans up this publication.
-        let publication_retained = publication_exists(&pool, &publication).await?;
-        pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app_id}\" CASCADE"), &[])
+        let publication_retained = publication_exists(&pool, publication).await?;
+        pool.execute(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"), &[])
             .await
             .map_err(|error| format!("drop test schema: {error}"))?;
-        drop_app_role(&pool, &app_id).await?;
+        // After the schema, so the capability role carries no privilege and no
+        // default ACL when it is dropped.
+        roles::drop_binding_ladder(&pool, &binding)
+            .await
+            .map_err(|error| format!("drop the binding role ladder: {error}"))?;
         // Stand in for the privileged reconciler again, so the shared test
         // server does not accumulate one publication per run of this target.
         pool.execute(

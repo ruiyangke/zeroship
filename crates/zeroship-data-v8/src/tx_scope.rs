@@ -53,10 +53,15 @@ pub(crate) fn current_tx_scope(scope: &mut v8::PinScope<'_, '_>) -> Option<Trans
     let value = map.get(scope, sym.into())?;
     let value = v8::Local::<v8::Array>::try_from(value).ok()?;
     let app = value.get_index(scope, 0)?.to_rust_string_lossy(scope);
-    let generation = v8::Local::<v8::BigInt>::try_from(value.get_index(scope, 1)?).ok()?;
-    let frame = v8::Local::<v8::BigInt>::try_from(value.get_index(scope, 2)?).ok()?;
+    let database = value.get_index(scope, 1)?.to_rust_string_lossy(scope);
+    let generation = v8::Local::<v8::BigInt>::try_from(value.get_index(scope, 2)?).ok()?;
+    let frame = v8::Local::<v8::BigInt>::try_from(value.get_index(scope, 3)?).ok()?;
+    // A database half this build cannot parse decodes to nothing rather than to
+    // a platform route: widening a creator scope into one that narrows to no
+    // role is the direction that must not be available.
+    let route = zeroship_data_orm::binding::DbRoute::decoded(app, &database)?;
     Some(TransactionScope::observed(
-        app,
+        route,
         generation.u64_value().0,
         frame.u64_value().0,
     ))
@@ -70,10 +75,14 @@ pub(crate) fn enter(
     transaction: &TransactionScope,
 ) -> Option<v8::Global<v8::Value>> {
     let sym = scope_symbol(scope)?;
-    let app = v8::String::new(scope, transaction.app_id())?;
+    let app = v8::String::new(scope, transaction.route().app_id())?;
+    let database = v8::String::new(scope, transaction.route().database_text())?;
     let generation = v8::BigInt::new_from_u64(scope, transaction.generation());
     let frame = v8::BigInt::new_from_u64(scope, transaction.frame());
-    let value = v8::Array::new_with_elements(scope, &[app.into(), generation.into(), frame.into()]);
+    let value = v8::Array::new_with_elements(
+        scope,
+        &[app.into(), database.into(), generation.into(), frame.into()],
+    );
     let prev = scope.get_continuation_preserved_embedder_data();
     let prev_global = v8::Global::new(scope, prev);
 
@@ -139,8 +148,7 @@ pub(crate) fn capture_route(
     let usage = crate::usage::sink_for(binding)?;
     Ok(crate::tx_route::CapturedRoute::capture(
         current_tx_scope(scope).as_ref(),
-        binding.app_id(),
-        binding.schema().clone(),
+        binding,
         configured_sql_registration(),
         connection,
         usage,
@@ -194,16 +202,10 @@ mod tests {
             .block_on(f)
     }
 
-    /// SQL registration is captured before a backend is opened.
-    /// The fixture binding: app id and schema are the same string here, which
-    /// is what production still mints. Spelled once so the tests below read the
-    /// route`s two identities off ONE source, as `mint_db` does.
+    /// The fixture binding. Spelled once so the tests below read the route's
+    /// two identities off ONE source, as `mint_db` does.
     fn app_a_binding() -> zeroship_data_orm::binding::DbBinding {
-        zeroship_data_orm::binding::DbBinding::new(
-            "app_a",
-            zeroship_data_orm::binding::COLD_START_DEPLOY_TOKEN,
-            zeroship_data_orm::sql::SchemaName::new("app_a").expect("fixture schema name"),
-        )
+        crate::tests::fixtures::harness_binding("app_a")
     }
 
     #[test]
@@ -238,7 +240,11 @@ mod tests {
         in_scope!(let scope);
         let prev = super::enter(
             scope,
-            &super::TransactionScope::observed("app_a".to_owned(), 1, 1),
+            &super::TransactionScope::observed(
+                crate::tests::fixtures::harness_route("app_a"),
+                1,
+                1,
+            ),
         );
         assert!(
             super::capture_route(scope, &app_a_binding())
@@ -259,7 +265,11 @@ mod tests {
         in_scope!(let scope);
         let prev = super::enter(
             scope,
-            &super::TransactionScope::observed("app_other".to_owned(), 2, 1),
+            &super::TransactionScope::observed(
+                crate::tests::fixtures::harness_route("app_other"),
+                2,
+                1,
+            ),
         );
         assert!(
             !super::capture_route(scope, &app_a_binding())
@@ -267,11 +277,7 @@ mod tests {
                 .in_tx(),
             "SEC-1: app_a must not join app_other's transaction"
         );
-        let other = zeroship_data_orm::binding::DbBinding::new(
-            "app_other",
-            zeroship_data_orm::binding::COLD_START_DEPLOY_TOKEN,
-            zeroship_data_orm::sql::SchemaName::new("app_other").expect("fixture schema name"),
-        );
+        let other = crate::tests::fixtures::harness_binding("app_other");
         assert!(super::capture_route(scope, &other).unwrap().in_tx());
         super::leave(scope, prev);
     }
@@ -287,9 +293,13 @@ mod tests {
         in_scope!(let scope);
         let prev = super::enter(
             scope,
-            &super::TransactionScope::observed("app_a".to_owned(), 1, 1),
+            &super::TransactionScope::observed(
+                crate::tests::fixtures::harness_route("app_a"),
+                1,
+                1,
+            ),
         );
-        let ambient = zeroship_data_orm::transaction::is_active("app_a");
+        let ambient = zeroship_data_orm::transaction::is_active(&crate::tests::fixtures::harness_route("app_a"));
         let captured = super::capture_route(scope, &app_a_binding())
             .unwrap()
             .in_tx();

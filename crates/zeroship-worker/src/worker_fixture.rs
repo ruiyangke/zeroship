@@ -48,6 +48,14 @@ impl Worker {
             blob_store,
         });
         let app_id = AppId::mint();
+        // Control resolves this app's live binding before the worker builds an
+        // isolate for it, and `sync::fetch_app_env_supplying` installs it into
+        // the database service. A fixture that installs the service and skips
+        // the resolution gives its app no `env.db` at all, so do here what the
+        // sync path does there.
+        if let Some(service) = kernel.db_service.as_deref() {
+            crate::cache::fixture::bind_app(service, &app_id);
+        }
         let envs = SharedEnvs::default();
         crate::sync::put_env_from_json(
             &envs,

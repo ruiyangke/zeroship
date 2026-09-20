@@ -341,14 +341,27 @@ describe("emitZship", () => {
         root: fix.root,
         builtAt: "2026-04-29T00:00:00Z",
         silent: true,
-        migrations: { dir: "migrations", genTypesOut: "generated" },
+        databases: [{
+          label: "main",
+          id: "dbs_03evr3oqx1200yyd6zj2cebfw",
+          primary: true,
+          migrations: "migrations",
+          out: "generated",
+        }],
       });
       const tarBytes = zstdDecompressSync(await fs.readFile(result.outputPath));
       const entries = parseTar(tarBytes);
       const manifest = JSON.parse(entries[0].bytes.toString("utf8"));
       const descriptorHash = sha256Hex(descriptor);
 
-      assert.deepEqual(manifest.runtime_descriptor, { hash: descriptorHash });
+      assert.deepEqual(manifest.runtime_descriptor, [
+        {
+          label: "main",
+          database_id: "dbs_03evr3oqx1200yyd6zj2cebfw",
+          primary: true,
+          hash: descriptorHash,
+        },
+      ]);
       assert.equal(
         entries
           .find((entry) => entry.name === `blobs/${descriptorHash}`)
@@ -383,7 +396,13 @@ describe("emitZship", () => {
           root: fix.root,
           builtAt: "2026-04-29T00:00:00Z",
           silent: true,
-          migrations: { dir: "migrations", genTypesOut: "generated" },
+          databases: [{
+          label: "main",
+          id: "dbs_03evr3oqx1200yyd6zj2cebfw",
+          primary: true,
+          migrations: "migrations",
+          out: "generated",
+        }],
         }),
         /collection 'id' must be required and non-null/,
       );

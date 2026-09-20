@@ -38,7 +38,7 @@ impl Host {
     }
 
     pub(crate) fn set_database_url(&self, url: &str) {
-        let factory = ConnectionFactory::for_url(url).expect("fixture connection configuration");
+        let factory = ConnectionFactory::for_app_url(url).expect("fixture connection configuration");
         let mut slot = self.connection.borrow_mut();
         if slot
             .as_ref()
@@ -49,7 +49,7 @@ impl Host {
     }
 
     pub(crate) fn install_backend(&self, backend: backend::BackendHandle, url: &str) {
-        let factory = ConnectionFactory::for_url(url).expect("fixture configuration");
+        let factory = ConnectionFactory::for_app_url(url).expect("fixture configuration");
         *self.connection.borrow_mut() =
             Some(LocalConnection::from_backend(factory, backend).expect("fixture backend"));
     }
@@ -115,7 +115,7 @@ impl Host {
                 .await
                 .expect("fixture pool"),
         );
-        crate::tests::fixtures::roles::ensure_per_app_role(&pool, app_id)
+        crate::tests::fixtures::roles::ensure_binding_ladder(&pool, &crate::tests::fixtures::harness_binding(app_id))
             .await
             .expect("fixture role");
         if self.current_backend().is_none() {
@@ -126,7 +126,7 @@ impl Host {
 
     pub(crate) fn clear_mask_policy_cache(&self, app_id: &str) {
         zeroship_data_orm::protection::mask_policy::cache_put(
-            &zeroship_data_orm::binding::DbBinding::cold_start(app_id),
+            &crate::tests::fixtures::harness_binding(app_id),
             None,
         );
     }
@@ -138,13 +138,13 @@ impl Host {
         collection: &str,
         actor_id: Option<&str>,
     ) -> Result<(), DbError> {
-        let binding = zeroship_data_orm::binding::DbBinding::cold_start(app_id);
+        let binding = crate::tests::fixtures::harness_binding(app_id);
         let backend = self.backend().await?;
         // The route the V8 dispatcher would have captured. The protection-floor
         // fence reads the live catalog, so the helper has to stand in for that half
         // of the dispatcher's frame too - a helper that skipped it would let a test
         // write through a fence production applies.
-        let route = exec::ambient_route_for_tests(app_id, backend.clone());
+        let route = exec::ambient_route_for_tests(&crate::tests::fixtures::harness_binding(app_id), backend.clone());
         crud::prepare_insert_many_docs_for_binding(
             backend.key_store(),
             &route,
@@ -162,7 +162,7 @@ impl Host {
         collection: &str,
         rows: Vec<crate::value::Value>,
     ) -> Result<Vec<crate::value::Value>, DbError> {
-        let binding = zeroship_data_orm::binding::DbBinding::cold_start(app_id);
+        let binding = crate::tests::fixtures::harness_binding(app_id);
         let backend = self.backend().await?;
         // The route comes from the ambient parked-tx slot rather than from a V8
         // scope, because there is no isolate here - the same trade
@@ -170,7 +170,7 @@ impl Host {
         // route, not a handle: its unmask stage issues SELECTs of its own and they
         // must land on the lane the read that produced these rows ran on.
         let result = crud::read_pipeline::apply(
-            &exec::ambient_route_for_tests(app_id, backend),
+            &exec::ambient_route_for_tests(&crate::tests::fixtures::harness_binding(app_id), backend),
             &binding,
             collection,
             rows,
@@ -188,13 +188,13 @@ impl Host {
         op: zeroship_data_orm::cdc::ChangeOp,
     ) -> Result<Vec<crate::value::Value>, String> {
         let backend = self.backend().await.map_err(DbError::into_string)?;
-        let route = exec::ambient_route_for_tests(app_id, backend);
+        let route = exec::ambient_route_for_tests(&crate::tests::fixtures::harness_binding(app_id), backend);
         exec::exec_mutation_with_emit(
             bq,
             &route,
             collection,
             op,
-            &crate::binding::DbBinding::cold_start(app_id),
+            &crate::tests::fixtures::harness_binding(app_id),
         )
         .await
         .map_err(DbError::into_string)
@@ -206,7 +206,7 @@ impl Host {
         bq: crate::sql::compiler::CompiledQuery,
     ) -> Result<Vec<crate::value::Value>, String> {
         let backend = self.backend().await.map_err(DbError::into_string)?;
-        let route = exec::ambient_route_for_tests(app_id, backend);
+        let route = exec::ambient_route_for_tests(&crate::tests::fixtures::harness_binding(app_id), backend);
         exec::exec_query(&route, bq)
             .await
             .map_err(DbError::into_string)
@@ -218,14 +218,13 @@ impl Host {
 
     pub(crate) async fn begin_transaction_for_app(&self, app_id: &str) {
         let backend = self.backend().await.expect("registered fixture backend");
-        let admission = transaction::TxAdmission::acquire(app_id.to_owned())
+        let admission = transaction::TxAdmission::acquire(crate::tests::fixtures::harness_route(app_id))
             .await
             .expect("the fixture claims a free lane");
         transaction::exec_begin_or_savepoint(
             false,
             None,
-            app_id,
-            crate::sql::SchemaName::new(app_id).expect("fixture schema"),
+            &crate::tests::fixtures::harness_binding(app_id),
             backend,
         )
         .await
@@ -235,21 +234,22 @@ impl Host {
 
     pub(crate) async fn rollback_transaction(&self, app_id: &str) {
         assert!(matches!(
-            transaction::exec_settle(app_id, false, None).await,
+            transaction::exec_settle(&crate::tests::fixtures::harness_route(app_id), false, None).await,
             transaction::SettleOutcome::Ok
         ));
     }
 
-    pub(crate) fn push_pending_emit(&self, ev: zeroship_data_orm::cdc::ChangeEvent) {
-        crate::tx_lanes::with_mut(|l| l.push_pending_emit(ev));
+    pub(crate) fn push_pending_emit(&self, app_id: &str, ev: zeroship_data_orm::cdc::ChangeEvent) {
+        let route = crate::tests::fixtures::harness_route(app_id);
+        crate::tx_lanes::with_mut(|l| l.push_pending_emit(&route, ev));
     }
 
     pub(crate) fn drain_pending_emits(&self, app_id: &str) {
-        exec::drain_pending_emits_on_commit(app_id);
+        exec::drain_pending_emits_on_commit(&crate::tests::fixtures::harness_route(app_id));
     }
 
     pub(crate) fn clear_pending_emits(&self, app_id: &str) {
-        exec::clear_pending_emits(app_id);
+        exec::clear_pending_emits(&crate::tests::fixtures::harness_route(app_id));
     }
 }
 

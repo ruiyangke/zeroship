@@ -28,6 +28,8 @@ mod billing_safety_net_test;
 mod billing_tax_test;
 mod bootstrap_builder_test;
 mod connect_fee_test;
+mod database_http_test;
+mod database_surface_test;
 mod app_delete_funnel_test;
 mod archive_app_billing_history_test;
 mod deploy_http_test;

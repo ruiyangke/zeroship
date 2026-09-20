@@ -110,7 +110,7 @@ impl LatestFixture {
                 ("main", infrastructure.url().to_owned())
             }
         };
-        let binding = DbBinding::new(
+        let binding = DbBinding::platform(
             "platform",
             "latest-deployment-test",
             SchemaName::new(schema).unwrap(),
