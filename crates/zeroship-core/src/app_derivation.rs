@@ -240,8 +240,7 @@ mod tests {
         );
 
         assert_eq!(
-            crate::replication_names::relay_slot_name(FIXTURE)
-                .expect("untyped relay slot name"),
+            crate::replication_names::relay_slot_name(FIXTURE).expect("untyped relay slot name"),
             "__zs_relay_2b19d2d9cc47ffdd41163308916b",
             "the relay's per-app slot shares this app's stable token"
         );

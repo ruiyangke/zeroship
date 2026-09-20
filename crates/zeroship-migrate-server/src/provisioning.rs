@@ -366,11 +366,7 @@ pub fn audit_unmask_table_sql(app_schema: &str) -> String {
 /// has to land. `INSERT` and the sequence are the whole grant: no `SELECT`, so
 /// no session can read another actor's audit trail back through the app.
 #[must_use]
-pub fn audit_unmask_capability_grants_sql(
-    schema: &str,
-    readwrite: &str,
-    readonly: &str,
-) -> String {
+pub fn audit_unmask_capability_grants_sql(schema: &str, readwrite: &str, readonly: &str) -> String {
     let schema_q = quote_ident(schema);
     let table_q = quote_ident(AUDIT_UNMASK_TABLE);
     let readwrite_q = quote_ident(readwrite);
