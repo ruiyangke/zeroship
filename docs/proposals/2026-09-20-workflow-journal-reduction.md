@@ -236,14 +236,19 @@ mutation cannot refute a disjunction.
 
 ```
   outbox                      nothing reads it
-  job_publications,
-  advance_publications,
-  fanout_publications,
-  propagation_publications    only if the job id carries the identifying tuple
   fanout_pages,
   propagation_pages           the frozen page result moves with its receipt
   subscriptions               an edge on the thing waited on, carrying its sequence
 ```
+
+**The per-kind publication tables are no longer on this list.** They were, conditionally -
+"only if the job id carries the identifying tuple" - and that condition was built and refuted.
+A derived id cannot carry recording-time ordering, which the reconciliation sweep's captured
+upper boundary is constructed on; Open 3 has the detail and the evidence. So
+`advance_publications`, `fanout_publications` and `propagation_publications` MOVE at best, by
+constraining the queue row on the same columns, and moving a constraint is not a reduction. They
+are listed here as a deletion nowhere any more, and the honest shortening of this proposal is
+that the largest single deletion it claimed is gone.
 
 `outbox` is deletable for the opposite of the reason first given here. It is not the
 transactional outbox; `job_publications` and the three per-kind tables are. `outbox` is an
