@@ -94,11 +94,12 @@ zeroship migrate     # apply the schema (env.db apps)
 
 Neither command takes a target: the artifact path, the app and the control
 plane come from `zeroship.jsonc` in this directory, and each command prints
-what it resolved and from where before it acts. `--app=<id>` and
-`--control=<url>` still override the file.
+what it resolved and from where before it acts. With one app declared `--app`
+is optional; with several it names which label to act on. `--control=<url>`
+still overrides the file.
 
-`zeroship.jsonc` ships with no `app` key: on the first push `deploy` falls back
-to the project `name`, creates that app, and appends its id to the file.
+The `apps` entry ships with no `app` id: on the first push `deploy` falls back
+to the workspace `name`, creates that app, and writes its id into that entry.
 `migrate`, `secret` and `var` do NOT take that fallback, but can read the id
 after that first deploy.
 

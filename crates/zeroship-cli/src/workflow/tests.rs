@@ -102,13 +102,13 @@ fn publish(root: &Path, version: &str, cooldown: &str) -> PathBuf {
 
 fn test_storage(root: &Path, app: &AppId) -> HostStorage {
     HostStorage {
-        connection: zeroship_data_orm::connection::ConnectionFactory::for_url(&format!(
+        connection: zeroship_data_orm::connection::ConnectionFactory::for_app_url(&format!(
             "sqlite:{}",
             root.join(".zeroship/dev.sqlite").display()
         ))
         .unwrap(),
         keys: zeroship_data_orm::encryption::ProjectKeySource::unavailable(),
-        binding: zeroship_data_orm::binding::DbBinding::new(
+        binding: zeroship_data_orm::binding::DbBinding::platform(
             app.as_str(),
             "test-deployment",
             zeroship_core::schema_name::SchemaName::new(
@@ -169,12 +169,13 @@ fn metered_database(
     let meter = Arc::new(zeroship_metering::Meter::new());
     let service =
         zeroship_data_v8::service::DbService::new(zeroship_data_v8::service::DbServiceConfig {
-            connection: zeroship_data_orm::connection::ConnectionFactory::for_url(&format!(
+            connection: zeroship_data_orm::connection::ConnectionFactory::for_app_url(&format!(
                 "sqlite:{}",
                 root.join(".zeroship/dev.sqlite").display()
             ))
             .unwrap(),
             project_keys: crate::project_keys::load(&root.join(".zeroship/private"), app).unwrap(),
+            app_bindings: crate::dev_binding::load(&root.join(".zeroship/private"), app).unwrap(),
             cdc_relay: None,
             meter: Some(meter.clone()),
         })

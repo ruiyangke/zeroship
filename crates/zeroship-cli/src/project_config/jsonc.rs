@@ -36,26 +36,51 @@ pub fn parse(text: &str) -> Result<Value, String> {
     parse_to_serde_value(text, &PARSE_OPTIONS).map_err(|error| error.to_string())
 }
 
-/// Return the original UTF-8 byte span of a top-level member's value.
-pub fn top_level_value_span(text: &str, key: &str) -> Option<(usize, usize)> {
+/// Return the original UTF-8 byte span of one member's value.
+///
+/// `parents` is the chain of object keys to descend through first, so
+/// `member_value_span(text, &["apps", "storefront"], "app")` finds the app id
+/// under one label and never the same key name at another depth.
+pub fn member_value_span(text: &str, parents: &[&str], key: &str) -> Option<(usize, usize)> {
     validate_scanned_source(text).ok()?;
     let parsed = parse_to_ast(text, &CollectOptions::default(), &PARSE_OPTIONS).ok()?;
     let AstValue::Object(root) = parsed.value? else {
         return None;
     };
-    let range = root.get(key)?.value.range();
+    let mut cursor = root;
+    for parent in parents {
+        let AstValue::Object(child) = &cursor.get(parent)?.value else {
+            return None;
+        };
+        cursor = child.clone();
+    }
+    let range = cursor.get(key)?.value.range();
     Some((range.start, range.end))
 }
 
-/// Append a string member to the root object while retaining its CST trivia.
-pub fn append_top_level_string(text: &str, key: &str, value: &str) -> Result<String, String> {
+/// Append a string member while retaining the file's CST trivia.
+///
+/// Every object on `parents` must already exist: this writes a value into a
+/// block the creator declared, never a block it invents. A label the file does
+/// not carry is a naming error the caller reports, not one this silently fixes.
+pub fn append_member_string(
+    text: &str,
+    parents: &[&str],
+    key: &str,
+    value: &str,
+) -> Result<String, String> {
     validate_scanned_source(text)?;
     let root = CstRootNode::parse(text, &PARSE_OPTIONS).map_err(|error| error.to_string())?;
-    let object = root
+    let mut object = root
         .object_value()
         .ok_or_else(|| "the top level must be an object".to_string())?;
+    for parent in parents {
+        object = object
+            .object_value(parent)
+            .ok_or_else(|| format!("`{parent}` is not an object in this file"))?;
+    }
     if object.get(key).is_some() {
-        return Err(format!("top-level member `{key}` already exists"));
+        return Err(format!("member `{key}` already exists"));
     }
     object.append(key, CstInputValue::String(value.to_string()));
     Ok(root.to_string())

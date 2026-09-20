@@ -4,7 +4,11 @@ use zeroship_runtime::state::{NativeValue, OpError, ResolveValue};
 
 struct ResultValue {
     value: Value,
-    has_masked: bool,
+    /// The binding the rows came from, when any column of them is masked. A
+    /// masked column rehydrates against the schema of the database that
+    /// produced it, never against `env.db`'s. `None` is a result with nothing
+    /// to rehydrate, which is why it needs no database at all.
+    masked_from: Option<zeroship_data_orm::binding::DbBinding>,
 }
 impl NativeValue for ResultValue {
     fn into_v8<'s>(
@@ -12,16 +16,35 @@ impl NativeValue for ResultValue {
         scope: &mut v8::PinScope<'s, '_>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
         let value = encode(scope, self.value)?;
-        Ok(if self.has_masked {
-            crate::v8_classes::masked_value::rehydrate_masked_values(scope, value).unwrap_or(value)
-        } else {
-            value
+        let masked_from = self.masked_from;
+        Ok(match masked_from {
+            Some(binding) => {
+                crate::v8_classes::masked_value::rehydrate_masked_values(scope, value, binding)
+                    .unwrap_or(value)
+            }
+            None => value,
         })
     }
 }
 
-pub fn resolve(value: Value, has_masked: bool) -> ResolveValue {
-    ResolveValue::Native(Box::new(ResultValue { value, has_masked }))
+/// Materialize a native result that carries no masked column.
+pub fn resolve(value: Value) -> ResolveValue {
+    ResolveValue::Native(Box::new(ResultValue {
+        value,
+        masked_from: None,
+    }))
+}
+
+/// Materialize a native result whose masked columns rehydrate against the
+/// binding the rows were read through.
+pub fn resolve_masked(
+    value: Value,
+    binding: zeroship_data_orm::binding::DbBinding,
+) -> ResolveValue {
+    ResolveValue::Native(Box::new(ResultValue {
+        value,
+        masked_from: Some(binding),
+    }))
 }
 fn allocation_error() -> OpError {
     OpError::error("could not materialize database result")

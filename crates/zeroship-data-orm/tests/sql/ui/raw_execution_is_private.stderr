@@ -1,4 +1,4 @@
-error[E0433]: failed to resolve: could not find `probe` in `transaction`
+error[E0433]: cannot find `probe` in `transaction`
  --> tests/sql/ui/raw_execution_is_private.rs:5:45
   |
 5 |     let _ = zeroship_data_orm::transaction::probe::operation;
@@ -49,5 +49,5 @@ error[E0603]: function `run_on_tx_conn` is private
 note: the function `run_on_tx_conn` is defined here
  --> src/transaction/mod.rs
   |
-  | pub(crate) async fn run_on_tx_conn(app_id: &str, sql: &str) -> Result<(), DbError> {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  | pub(crate) async fn run_on_tx_conn(route: &DbRoute, sql: &str) -> Result<(), DbError> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

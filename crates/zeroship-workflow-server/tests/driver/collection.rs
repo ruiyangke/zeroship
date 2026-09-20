@@ -224,7 +224,7 @@ async fn no_holds(platform: &platform::Platform, app: &AppId) {
 
 async fn setup(platform: &platform::Platform) -> (Recovery, JobSpec) {
     let queue = Queue::connect(
-        DbBinding::new(
+        DbBinding::platform(
             "workflow_manager",
             "collection-driver",
             SchemaName::new("workflow_manager").unwrap(),

@@ -16,10 +16,12 @@
 //
 // NOT A GENERAL JSON-SCHEMA COMPILER. It understands exactly the constructs
 // `project-v1.json` uses: object/string/boolean/array-of-string, `enum`,
-// `pattern`, `default`, `required`, `additionalProperties: false`, one level of
-// `$ref` into `$defs`, and the `x-cli-read` / `x-rust-resolved-default` /
-// `x-required-members` / `x-forbidden-key-names` markers. Anything else in the
-// schema is a codegen error rather than a silent omission -- see `unsupported()`.
+// `pattern`, `default`, `required`, `additionalProperties: false`, a MAP
+// (`additionalProperties` as a schema, tagged `x-entry-name`, whose leaves take
+// a `*` segment), one level of `$ref` into `$defs`, and the `x-cli-read` /
+// `x-rust-resolved-default` / `x-required-members` / `x-forbidden-key-names`
+// markers. Anything else in the schema is a codegen error rather than a silent
+// omission -- see `unsupported()`.
 
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -58,7 +60,7 @@ const KNOWN_KEYWORDS = new Set([
   "$schema", "$id", "$defs", "$ref", "title", "description", "type", "properties",
   "required", "additionalProperties", "items", "enum", "pattern", "default",
   "x-cli-read", "x-required-members", "x-forbidden-key-names", "x-config-filename",
-  "x-config-env-var", "x-rust-resolved-default",
+  "x-config-env-var", "x-rust-resolved-default", "x-entry-name", "propertyNames",
 ]);
 
 function assertKnownKeywords(node, where) {
@@ -73,8 +75,60 @@ function assertKnownKeywords(node, where) {
 
 /** @type {{path:string,type:string,default?:unknown,enum?:string[],pattern?:string,cliRead:boolean,rustResolvedDefault:boolean,itemPattern?:string}[]} */
 const leaves = [];
-/** @type {{path:string,known:string[],required:string[]}[]} */
+/** @type {{id:string,path:string,known:string[],required:string[]}[]} */
 const objects = [];
+
+/** The generated constant prefix for one closed object. */
+function constantId(path) {
+  return path === "" ? "ROOT" : path.toUpperCase().replace(/\./g, "_");
+}
+
+/** The generated constant prefix for one MAP ENTRY, from its `x-entry-name`. */
+function entryConstantId(entryName) {
+  return entryName.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase();
+}
+
+/**
+ * A map is an object whose `additionalProperties` is a SCHEMA rather than
+ * `false`: its keys are creator-chosen LABELS and its values share one shape.
+ * Leaf paths under one carry a `*` segment, so `databases.*.id` names the id
+ * of every entry rather than of a key the schema could have listed.
+ */
+function isMap(node) {
+  return (
+    node.type === "object" &&
+    node.additionalProperties != null &&
+    typeof node.additionalProperties === "object"
+  );
+}
+
+/** @type {{path:string,pattern:string}[]} */
+const labelRules = [];
+
+/**
+ * Record the rule a map's own KEYS must match.
+ *
+ * A label is not a leaf: it has no value of its own, it is the name under
+ * which one appears. Emitting it as a leaf would put it in the resolved-shape
+ * coverage sets, where neither reader has a field to satisfy it.
+ */
+function recordLabelRule(node, path, entryPath) {
+  const declared = node.propertyNames;
+  if (declared == null) {
+    unsupported(path, "a map needs `propertyNames` stating what a label may be");
+  }
+  const rule = deref(declared, `${path}.<label>`);
+  assertKnownKeywords(rule, `${path}.<label>`);
+  if (rule.type !== "string" || typeof rule.pattern !== "string") {
+    unsupported(`${path}.<label>`, "propertyNames must be a string with a pattern");
+  }
+  const prior = labelRules.find((candidate) => candidate.path === entryPath);
+  if (prior == null) {
+    labelRules.push({ path: entryPath, pattern: rule.pattern });
+  } else if (prior.pattern !== rule.pattern) {
+    unsupported(`${path}.<label>`, "root and environment label rules disagree");
+  }
+}
 
 function recordLeaf(leaf) {
   const prior = leaves.find((candidate) => candidate.path === leaf.path);
@@ -100,40 +154,80 @@ function walkObject(node, path) {
   const props = node.properties ?? {};
   const known = Object.keys(props);
   const required = node["x-required-members"] ?? node.required ?? [];
-  objects.push({ path, known, required });
+  objects.push({ id: constantId(path), path, known, required });
 
   for (const [key, rawChild] of Object.entries(props)) {
     const childPath = path ? `${path}.${key}` : key;
-    const child = deref(rawChild, childPath);
-    assertKnownKeywords(child, childPath);
-    const cliRead = child["x-cli-read"] === true;
-    const rustResolvedDefault = child["x-rust-resolved-default"] === true;
-    switch (child.type) {
-      case "object":
-        walkObject(child, childPath);
-        break;
-      case "array":
-        if (child.items?.type !== "string") unsupported(childPath, "array items must be strings");
-        recordLeaf({
-          path: childPath, type: "string[]", default: child.default,
-          cliRead, rustResolvedDefault, itemPattern: child.items.pattern,
-        });
-        break;
-      case "string":
-        recordLeaf({
-          path: childPath, type: "string", default: child.default,
-          enum: child.enum, pattern: child.pattern, cliRead, rustResolvedDefault,
-        });
-        break;
-      case "boolean":
-        recordLeaf({
-          path: childPath, type: "boolean", default: child.default, cliRead,
-          rustResolvedDefault,
-        });
-        break;
-      default:
-        unsupported(childPath, `type ${child.type}`);
-    }
+    walkRootShape(deref(rawChild, childPath), childPath);
+  }
+}
+
+/** One member of the root document, by its dotted path. */
+function walkRootShape(child, childPath) {
+  assertKnownKeywords(child, childPath);
+  const cliRead = child["x-cli-read"] === true;
+  const rustResolvedDefault = child["x-rust-resolved-default"] === true;
+  switch (child.type) {
+    case "object":
+      if (isMap(child)) walkMap(child, childPath, walkRootShape);
+      else walkObject(child, childPath);
+      break;
+    case "array":
+      if (child.items?.type !== "string") unsupported(childPath, "array items must be strings");
+      recordLeaf({
+        path: childPath, type: "string[]", default: child.default,
+        cliRead, rustResolvedDefault, itemPattern: child.items.pattern,
+      });
+      break;
+    case "string":
+      recordLeaf({
+        path: childPath, type: "string", default: child.default,
+        enum: child.enum, pattern: child.pattern, cliRead, rustResolvedDefault,
+      });
+      break;
+    case "boolean":
+      recordLeaf({
+        path: childPath, type: "boolean", default: child.default, cliRead,
+        rustResolvedDefault,
+      });
+      break;
+    default:
+      unsupported(childPath, `type ${child.type}`);
+  }
+}
+
+/**
+ * Record one map's ENTRY shape and walk its members at `<path>.*.<member>`.
+ *
+ * The entry's key set becomes its own pair of generated constants, named from
+ * `x-entry-name` rather than from the path, because a root map and the
+ * environment map overriding it carry the same dotted paths and different key
+ * sets. `walkMember` is the caller's member walker, which is what keeps an
+ * environment map's leaves on the root-relative paths its members share.
+ */
+function walkMap(node, path, walkMember) {
+  const entryName = node["x-entry-name"];
+  if (typeof entryName !== "string" || entryName === "") {
+    unsupported(path, "a map needs `x-entry-name` to name its generated constants");
+  }
+  const entryPath = `${path}.*`;
+  recordLabelRule(node, path, entryPath);
+  const entry = deref(node.additionalProperties, entryPath);
+  assertKnownKeywords(entry, entryPath);
+  if (entry.type !== "object") unsupported(entryPath, `map entries must be objects, got ${entry.type}`);
+  if (entry.additionalProperties !== false) {
+    unsupported(entryPath, "a map entry must be a closed object");
+  }
+  const props = entry.properties ?? {};
+  objects.push({
+    id: entryConstantId(entryName),
+    path: entryPath,
+    known: Object.keys(props),
+    required: entry["x-required-members"] ?? entry.required ?? [],
+  });
+  for (const [key, rawChild] of Object.entries(props)) {
+    const childPath = `${entryPath}.${key}`;
+    walkMember(deref(rawChild, childPath), childPath);
   }
 }
 
@@ -147,7 +241,7 @@ walkObject({ ...schema, properties: rootProps }, "");
 // draft of this generator made every real file fail to parse with
 // "unknown key `environments`": the walk skipped it and the known-key list is a
 // by-product of the walk.
-objects.find((o) => o.path === "").known.push("environments");
+objects.find((o) => o.id === "ROOT").known.push("environments");
 
 // The environment entry shape. Its members carry the SAME dotted paths as the
 // root ones (an env `app` is the root `app` for that target), so the CLI-read
@@ -164,8 +258,12 @@ function walkEnvironmentShape(rawNode, path) {
   const rustResolvedDefault = node["x-rust-resolved-default"] === true;
   switch (node.type) {
     case "object":
-      for (const [key, child] of Object.entries(node.properties ?? {})) {
-        walkEnvironmentShape(child, path ? `${path}.${key}` : key);
+      if (isMap(node)) {
+        walkMap(node, path, walkEnvironmentShape);
+      } else {
+        for (const [key, child] of Object.entries(node.properties ?? {})) {
+          walkEnvironmentShape(child, path ? `${path}.${key}` : key);
+        }
       }
       break;
     case "array":
@@ -194,14 +292,16 @@ for (const [key, child] of Object.entries(envEntry.properties)) {
 }
 
 const TS_RESOLVED_INTERFACE_FIELDS = new Set([
-  "name", "app", "control", "runtime_date", "build.mode", "build.serverEntry",
-  "build.dist", "build.output", "migrations.dir", "migrations.out", "secrets",
-  "protected",
+  "name", "control", "runtime_date", "build.mode", "build.serverEntry",
+  "build.dist", "build.output", "databases.*.id", "databases.*.migrations",
+  "databases.*.out", "apps.*.app", "apps.*.databases", "apps.*.primary",
+  "secrets", "protected",
 ]);
 const RUST_VALIDATOR_FIELDS = new Set([
-  "$schema", "name", "app", "control", "runtime_date", "build.mode",
-  "build.serverEntry", "build.dist", "build.output", "migrations.dir",
-  "migrations.out", "secrets", "protected",
+  "$schema", "name", "control", "runtime_date", "build.mode",
+  "build.serverEntry", "build.dist", "build.output", "databases.*.id",
+  "databases.*.migrations", "databases.*.out", "apps.*.app",
+  "apps.*.databases", "apps.*.primary", "secrets", "protected",
 ]);
 
 function assertReaderCoverage(reader, schemaFields, implementedFields) {
@@ -274,7 +374,7 @@ function tsSource() {
   L.push(`export const FORBIDDEN_KEY_NAMES: readonly string[] = ${jsonLit(schema["x-forbidden-key-names"])};`);
   L.push("");
   for (const o of objects) {
-    const id = o.path === "" ? "ROOT" : o.path.toUpperCase().replace(/\./g, "_");
+    const id = o.id;
     L.push(`export const ${id}_KNOWN_KEYS: readonly string[] = ${jsonLit(o.known)};`);
     L.push(`export const ${id}_REQUIRED_KEYS: readonly string[] = ${jsonLit(o.required)};`);
   }
@@ -293,19 +393,29 @@ function tsSource() {
     return r;
   }))};`);
   L.push("");
+  L.push("/** The rule a creator-chosen LABEL must match, by the map it keys. */");
+  L.push(`export const LABEL_RULES: readonly { path: string; pattern: string }[] = ${jsonLit(labelRules)};`);
+  L.push("");
   L.push("/** Every schema `default`, by dotted path. The ONLY copy in the TS tree. */");
   L.push("export const DEFAULTS: Readonly<Record<string, unknown>> = {");
   for (const l of withDefaults) L.push(`  ${jsonLit(l.path)}: ${jsonLit(l.default)},`);
   L.push("};");
   L.push("");
+  L.push("/** One workspace database, keyed by its LOCAL LABEL. */");
+  L.push("export interface ResolvedDatabase { id: string; migrations: string; out: string }");
+  L.push("");
+  L.push("/** One workspace app, keyed by its LOCAL LABEL. */");
+  L.push("export interface ResolvedApp { app?: string; databases: string[]; primary?: string }");
+  L.push("");
   L.push("/** The shape a fully-resolved config takes. */");
   L.push("export interface ResolvedProjectConfig {");
   L.push("  name: string;");
-  L.push("  app?: string;");
   L.push("  control: string;");
   L.push("  runtime_date: string;");
   L.push("  build: { mode: \"full\" | \"static\"; serverEntry?: string; dist: string; output: string };");
-  L.push("  migrations: { dir: string; out: string };");
+  L.push("  /** Absent only when there is no file: the schema requires it in one. */");
+  L.push("  databases?: Record<string, ResolvedDatabase>;");
+  L.push("  apps?: Record<string, ResolvedApp>;");
   L.push("  secrets: string[];");
   L.push("  protected?: boolean;");
   L.push("}");
@@ -332,7 +442,7 @@ function rsSource() {
   L.push(`pub const FORBIDDEN_KEY_NAMES: &[&str] = &[${schema["x-forbidden-key-names"].map(jsonLit).join(", ")}];`);
   L.push("");
   for (const o of objects) {
-    const id = o.path === "" ? "ROOT" : o.path.toUpperCase().replace(/\./g, "_");
+    const id = o.id;
     L.push(`pub const ${id}_KNOWN_KEYS: &[&str] = &[${o.known.map(jsonLit).join(", ")}];`);
     L.push(`pub const ${id}_REQUIRED_KEYS: &[&str] = &[${o.required.map(jsonLit).join(", ")}];`);
   }
@@ -342,12 +452,17 @@ function rsSource() {
   L.push("/// `(dotted path, regex-free validator tag)` for every constrained string.");
   L.push("///");
   L.push("/// The tag is matched in `super::validate`, which hand-writes each check: the");
-  L.push("/// CLI has no regex crate and adding one for six patterns is not proportionate.");
+  L.push("/// CLI links no regex crate, and a handful of fixed shapes does not justify one.");
   L.push("pub const FIELD_PATTERNS: &[(&str, &str)] = &[");
   for (const l of leaves) {
     if (l.pattern) L.push(`    (${jsonLit(l.path)}, ${jsonLit(l.pattern)}),`);
     if (l.itemPattern) L.push(`    (${jsonLit(l.path + "[]")}, ${jsonLit(l.itemPattern)}),`);
   }
+  L.push("];");
+  L.push("");
+  L.push("/// `(map path, label pattern)`: the rule a creator-chosen LABEL must match.");
+  L.push("pub const LABEL_PATTERNS: &[(&str, &str)] = &[");
+  for (const rule of labelRules) L.push(`    (${jsonLit(rule.path)}, ${jsonLit(rule.pattern)}),`);
   L.push("];");
   L.push("");
   L.push("/// `(dotted path, allowed values)` for every enum-constrained string.");

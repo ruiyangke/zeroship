@@ -7,6 +7,20 @@ import type { ResolvedProjectConfig } from "./project-config/index.js";
 import { RUNTIME_DESCRIPTOR_FILE } from "./gen-types/index.js";
 import { emitZship } from "./zship.js";
 
+/** One database the dev deployment declares, with its already-folded schema. */
+export interface DevDatabase {
+  /** The creator's LOCAL label, which reaches the runtime through the manifest. */
+  label: string;
+  /** The typed id declared in `zeroship.jsonc` and dereferenced before packing. */
+  id: string;
+  /** Whether this is the app's `env.db`. */
+  primary: boolean;
+  /** This database's migration sources, for the packer's missing-fold refusal. */
+  migrations: string;
+  /** The folded `schema.runtime.json` text for this database. */
+  descriptor: string;
+}
+
 /** The local app deployment, ready for the host to ingest. */
 export interface DevBundle {
   archive: Buffer;
@@ -23,7 +37,7 @@ export async function buildDevBundle(opts: {
   root: string;
   entry: string;
   project: ResolvedProjectConfig;
-  runtimeDescriptor: string | undefined;
+  databases: DevDatabase[];
 }): Promise<DevBundle> {
   const stateDir = join(opts.root, ".zeroship");
   await fs.mkdir(stateDir, { recursive: true });
@@ -31,9 +45,21 @@ export async function buildDevBundle(opts: {
   try {
     const dist = join(staging, "dist");
     const generated = join(staging, "generated");
-    if (opts.runtimeDescriptor !== undefined) {
-      await fs.mkdir(generated, { recursive: true });
-      await fs.writeFile(join(generated, RUNTIME_DESCRIPTOR_FILE), opts.runtimeDescriptor);
+    // One staged descriptor per database, each under its own label, because
+    // the three gen-types filenames are fixed and a shared directory would be
+    // one database's schema standing in for another's.
+    const packed = [];
+    for (const database of opts.databases) {
+      const out = join(generated, database.label);
+      await fs.mkdir(out, { recursive: true });
+      await fs.writeFile(join(out, RUNTIME_DESCRIPTOR_FILE), database.descriptor);
+      packed.push({
+        label: database.label,
+        id: database.id,
+        primary: database.primary,
+        migrations: database.migrations,
+        out: relative(opts.root, out),
+      });
     }
     // Each build discovers its own declarations; deleted exports and schedules
     // must not survive through the dev environment's accumulated transform state.
@@ -65,10 +91,7 @@ export async function buildDevBundle(opts: {
       silent: true,
       precompress: { brotli: false, gzip: false },
       rpcExtras: extras,
-      migrations: {
-        dir: opts.project.migrations.dir,
-        genTypesOut: relative(opts.root, generated),
-      },
+      databases: packed,
     });
     return { archive: await fs.readFile(bundle.outputPath), dependencies };
   } finally {

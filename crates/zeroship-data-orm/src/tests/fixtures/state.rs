@@ -13,7 +13,7 @@ pub(crate) fn generated_schema(fields: crate::value::Value) -> crate::schema::Fi
 /// Install a descriptor for an isolated test binding.
 pub(crate) fn cache_schema(app_id: &str, collection: &str, schema: crate::value::Value) {
     cache_schema_for_deploy(
-        &zeroship_data_orm::binding::DbBinding::cold_start(app_id),
+        &crate::tests::fixtures::harness_binding(app_id),
         collection,
         schema,
     );
@@ -52,7 +52,7 @@ mod tests {
     /// most likely to survive a reset that looks correct.
     #[test]
     fn a_mid_test_reset_drops_a_claim_and_a_withdrawal_tombstone() {
-        let app = "app_reset_guard";
+        let app = &crate::tests::fixtures::harness_route("app_reset_guard");
 
         assert!(
             crate::tx_lanes::with_mut(|l| l.try_claim_tx(app)),
@@ -92,7 +92,7 @@ mod tests {
     /// could otherwise expose the wrong projection in the next test phase.
     #[test]
     fn a_mid_test_reset_drops_an_installed_descriptor() {
-        let binding = zeroship_data_orm::binding::DbBinding::cold_start("app_reset_schema");
+        let binding = crate::tests::fixtures::harness_binding("app_reset_schema");
 
         zeroship_data_orm::schema_cache::with_mut(|c| {
             c.insert_one(

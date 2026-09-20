@@ -56,8 +56,8 @@ async fn sqlite_catalog_reads_transaction_local_protection() {
         .backend
         .get_rc::<crate::backend::sqlite::SqliteBackend>()
         .expect("SQLite fixture backend");
-    let app_id = owner.database.binding.app_id().to_owned();
-    let schema = owner.database.binding.schema().clone();
+    let binding = owner.database.binding.clone();
+    let alias = crate::backend::sqlite::SqliteBackend::database_alias(&binding).to_owned();
     let database = Database::from_schema(
         owner.database.binding.clone(),
         owner.database.backend.clone(),
@@ -80,13 +80,13 @@ async fn sqlite_catalog_reads_transaction_local_protection() {
                         \"label\" TEXT, \
                         \"secret\" TEXT /* zero-migrate:mask:kind=full,classification=pii */\
                      )",
-                    crate::sql::mapping::quote_ident(&app_id),
+                    crate::sql::mapping::quote_ident(&alias),
                 ),
                 &[],
             )
             .await?;
 
-            let committed = backend.introspect_schema(&app_id, &schema, None).await?;
+            let committed = backend.introspect_schema(&binding, None).await?;
             assert!(
                 !committed.tables.contains_key("protected_records"),
                 "the autocommit connection must not see transaction-local catalog changes"
@@ -155,11 +155,21 @@ async fn postgres_catalog_protection_follows_the_bound_schema() {
     .await;
     for in_transaction in [false, true] {
         let database = Database::from_schema(
-            DbBinding::new(
-                zeroship_core::AppId::mint().as_str(),
-                "another_deploy",
-                owner.database.binding.schema().clone(),
-            ),
+            {
+                let edge = owner
+                    .database
+                    .binding
+                    .edge()
+                    .expect("a harness binding addresses a database");
+                DbBinding::to_database(
+                    zeroship_core::AppId::mint().as_str(),
+                    "another_deploy",
+                    edge.database().clone(),
+                    edge.binding().clone(),
+                    edge.epoch(),
+                )
+                .expect("the co-tenant binding composes")
+            },
             owner.database.backend.clone(),
             Schema::from_collections(vec![("records".into(), fields())]).unwrap(),
         )

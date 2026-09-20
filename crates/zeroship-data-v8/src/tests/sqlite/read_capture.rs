@@ -68,11 +68,13 @@ async fn response(outcome: FetchOutcome) -> serde_json::Value {
 fn overlapping_queries_keep_reads_from_before_and_after_await() {
     run(async {
         let directory = tempfile::tempdir().unwrap();
+        let alias = crate::tests::fixtures::harness_alias(LOCAL_DEV_APP_ID);
         apply_schema_ahead_of_runtime(
             &directory,
-            &format!("CREATE TABLE \"{LOCAL_DEV_APP_ID}\".notes ({SYSTEM_COLUMNS_SQLITE}, title TEXT NOT NULL);"),
+            &format!("CREATE TABLE \"{alias}\".notes ({SYSTEM_COLUMNS_SQLITE}, title TEXT NOT NULL);"),
         );
         let db = crate::service::DbService::new(crate::service::DbServiceConfig {
+            app_bindings: crate::tests::fixtures::harness_app_bindings([LOCAL_DEV_APP_ID]),
             project_keys: Default::default(),
             connection: crate::tests::fixtures::recording::connection(&parity::sqlite_url(
                 &directory,
@@ -108,9 +110,12 @@ fn overlapping_queries_keep_reads_from_before_and_after_await() {
                 source: source.into(),
             }])
             .plugins(plugins)
-            .runtime_descriptor(Some(parity::runtime_descriptor(
-                "notes",
-                &value!({"title":{"type":"string","required":true}}),
+            .runtime_descriptor(Some(crate::tests::fixtures::harness_descriptor_document(
+                LOCAL_DEV_APP_ID,
+                &parity::runtime_descriptor(
+                    "notes",
+                    &value!({"title":{"type":"string","required":true}}),
+                ),
             )))
             .build();
         runtime.initialize(&EnvSnapshot::empty()).await.unwrap();

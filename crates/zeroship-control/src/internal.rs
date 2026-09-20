@@ -545,6 +545,85 @@ pub async fn get_app_data_key(
     }
 }
 
+/// Host-only database-binding delivery.
+///
+/// **The worker composes no part of a binding.** The database id names the
+/// physical schema, the edge id and the schema epoch together name the role a
+/// session narrows to, and all three are Control facts. A worker that derived
+/// any of them would address a schema and assume a role no reconciler created.
+///
+/// Only a LIVE binding is served, and "live" is a predicate rather than
+/// judgement at the caller:
+/// [`zeroship_core::live_binding::LIVE_BINDINGS_FROM_WHERE`], which carries
+/// each conjunct and why it is there. It is shared with the CDC relay and the
+/// migration service because a binding one of them calls live and another does
+/// not is a tenant-boundary disagreement.
+///
+/// A stale epoch is not a failure of this read: the cluster's own epoch row is
+/// the authority, so composing a retired one makes `SET LOCAL ROLE` fail and
+/// the caller re-resolve. That is the fail-closed direction and it is why this
+/// serves a projection rather than reading the cluster.
+pub async fn get_app_bindings(
+    req: web::HttpRequest,
+    state: State<Arc<AppState>>,
+    app_id: Path<String>,
+) -> web::HttpResponse {
+    let id = match zone_scoped_app_read(
+        &req,
+        &state,
+        endpoints::CONTROL_APP_BINDINGS,
+        &app_id,
+        || web::HttpResponse::BadRequest().json(&serde_json::json!({"error":"bad app_id"})),
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
+    // EVERY live binding, not one: an app may bind many databases and
+    // `env.databases` reaches all of them. A `LIMIT 1` here would leave every
+    // non-primary handle unresolvable while looking like a working endpoint.
+    let rows = match state
+        .control_pg
+        .query(
+            &format!(
+                "SELECT b.id AS binding_id, b.database_id, d.schema_epoch {} ORDER BY b.id",
+                zeroship_core::live_binding::LIVE_BINDINGS_FROM_WHERE
+            ),
+            &[&id.as_str()],
+        )
+        .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::error!(app_id = %id.as_str(), %error, "control-internal: binding read failed");
+            return web::HttpResponse::InternalServerError()
+                .json(&serde_json::json!({"error":"internal error"}));
+        }
+    };
+    if rows.is_empty() {
+        return web::HttpResponse::NotFound()
+            .json(&serde_json::json!({"error":"no live database binding"}));
+    }
+    let mut bindings = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let epoch: i32 = row.get("schema_epoch");
+        let Ok(epoch) = u32::try_from(epoch) else {
+            tracing::error!(app_id = %id.as_str(), "control-internal: negative schema epoch");
+            return web::HttpResponse::InternalServerError()
+                .json(&serde_json::json!({"error":"internal error"}));
+        };
+        bindings.push(serde_json::json!({
+            "binding_id": row.get::<_, &str>("binding_id"),
+            "database_id": row.get::<_, &str>("database_id"),
+            "schema_epoch": epoch,
+        }));
+    }
+    web::HttpResponse::Ok()
+        .header("cache-control", "no-store")
+        .json(&serde_json::json!({ "bindings": bindings }))
+}
+
 /// POST /internal/workers/join - a worker registers ONE live process.
 ///
 /// NOT guarded by the service-assertion allowlist, and that is not an omission.

@@ -48,7 +48,7 @@ impl Clock {
         }
         compio::time::timeout(
             timeout,
-            backend.prepare_for_app(binding.app_id(), binding.schema()),
+            backend.prepare_for_app(&binding),
         )
         .await
         .map_err(|_| Error::Timeout)??;
@@ -75,7 +75,7 @@ impl Clock {
         let rows = compio::time::timeout(
             self.timeout,
             self.backend
-                .query(self.binding.app_id(), self.binding.schema(), sql, &[]),
+                .query(&self.binding, sql, &[]),
         )
         .await
         .map_err(|_| Error::Timeout)??;

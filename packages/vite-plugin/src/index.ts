@@ -61,6 +61,15 @@ export interface ZeroshipOptions {
   /** Port for the zeroship dev server (default: 3001) */
   devServerPort?: number;
   /**
+   * Which of the workspace's `apps` this build is.
+   *
+   * A workspace declaring one app implies it; one declaring several must say,
+   * because the app decides which databases are folded, packed and served.
+   * The value is a LOCAL LABEL from the file, never an app id: the id comes
+   * from the file, so a label never travels as an identifier.
+   */
+  app?: string;
+  /**
    * Path to `zeroship.jsonc`, absolute or relative to the Vite root.
    *
    * An explicit `configPath` takes precedence over `ZEROSHIP_CONFIG` and
@@ -86,8 +95,8 @@ export interface ZeroshipOptions {
    *
    * A partial object (shallow-merged) or a function applied AFTER the file
    * loads and after environment selection. It MAY NOT change any field the
-   * Rust CLI also reads (`name`, `app`, `control`, `runtime_date`, `build.output`,
-   * `migrations.dir`, `migrations.out`, `secrets`) - the CLI cannot run a JavaScript
+   * Rust CLI also reads (`name`, `control`, `runtime_date`, `build.output`, the
+   * `databases` and `apps` maps, `secrets`) - the CLI cannot run a JavaScript
    * function, so an override there would reintroduce the exact drift the file
    * removes. The deny-list is generated from the schema, so it cannot fall
    * behind. Attempting one is an error naming the field.
@@ -141,7 +150,7 @@ export function zeroship(options: ZeroshipOptions = {}): Plugin[] {
     zeroshipModulePlugin(),
     transformPlugin(state),
     ...devServerPlugin(options, state, project),
-    buildPlugin(state, project),
+    buildPlugin(state, project, options.app),
   ];
 }
 

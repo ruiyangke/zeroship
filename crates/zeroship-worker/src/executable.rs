@@ -40,8 +40,48 @@ pub async fn load_executable(
         .collect();
     Ok(AppExecutable {
         modules,
-        descriptor: executable
-            .runtime_descriptor()
-            .map(serde_json::Value::to_string),
+        descriptor: descriptor_document(&executable),
     })
+}
+
+/// The runtime descriptor document for a loaded deployment: one entry per
+/// database it declares, each carrying that database's schema.
+///
+/// `None` for a deployment that declares no database, which is the
+/// schema-less case the runtime treats as "install nothing".
+#[must_use]
+pub fn descriptor_document(executable: &zeroship_bundle::LoadedWorker) -> Option<String> {
+    let databases: Vec<_> = executable
+        .databases()
+        .iter()
+        .map(|database| zeroship_runtime::databases::RuntimeDatabase {
+            label: database.label.clone(),
+            database_id: database.database_id.as_str().to_owned(),
+            primary: database.primary,
+            schema: database.schema.clone(),
+        })
+        .collect();
+    (!databases.is_empty())
+        .then(|| zeroship_runtime::databases::RuntimeDatabases::document(databases))
+}
+
+
+/// The primary database's schema, out of a stored descriptor DOCUMENT.
+///
+/// `AppExecutable` carries the document as text because that is what the
+/// isolate is handed. A test that means "the schema I stored round-trips" has
+/// to reach past the envelope, and comparing the whole document instead makes
+/// the assertion fail the day another database joins the manifest - for a
+/// reason that has nothing to do with what it is checking.
+#[cfg(test)]
+pub(crate) fn primary_schema_json(descriptor: Option<&str>) -> serde_json::Value {
+    let document: serde_json::Value =
+        serde_json::from_str(descriptor.expect("a descriptor is stored")).expect("valid JSON");
+    document["databases"]
+        .as_array()
+        .expect("the document carries a databases array")
+        .iter()
+        .find(|entry| entry["primary"] == serde_json::Value::Bool(true))
+        .expect("exactly one entry is primary")["schema"]
+        .clone()
 }

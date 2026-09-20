@@ -9,12 +9,12 @@ use zeroship_workflow::service::{
 
 pub async fn store(directory: &Path) -> OrmStore {
     let store = OrmStore::connect(
-        DbBinding::new(
+        DbBinding::platform(
             "workflow",
             "test-deployment",
             SchemaName::new("workflow").unwrap(),
         ),
-        &ConnectionFactory::for_url(&format!(
+        &ConnectionFactory::for_platform_url(&format!(
             "sqlite:{}",
             directory.join("app.sqlite").display()
         ))

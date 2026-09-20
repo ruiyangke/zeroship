@@ -1,6 +1,7 @@
 use zeroship_data_orm::error::DbError;
 
 use crate::backend::BackendHandle;
+use crate::binding::DbRoute;
 
 use super::driver;
 use super::reducer::frames::{FrameClose, FrameId};
@@ -24,12 +25,11 @@ pub struct ProbeOutcome {
 ///
 /// Returns the error reported by transaction admission or session setup.
 pub async fn begin(
-    app_id: &str,
-    schema: crate::sql::SchemaName,
+    binding: &crate::binding::DbBinding,
     isolation_level: Option<zeroship_data_orm::error::IsolationLevel>,
     backend: BackendHandle,
 ) -> Result<(), DbError> {
-    let driven = driver::begin_top_level(app_id, schema, isolation_level, backend).await?;
+    let driven = driver::begin_top_level(binding, isolation_level, backend).await?;
     if let Some(outcome) = driven.outcome() {
         return Err(driven.error.unwrap_or_else(|| {
             DbError::internal(format!("db: BEGIN settled immediately as {outcome:?}"))
@@ -48,12 +48,14 @@ pub async fn begin(
 /// # Panics
 ///
 /// If a transaction is already admitted for this app.
-pub fn admit_only(app_id: &str) {
+pub fn admit_only(route: &DbRoute) {
     assert!(
-        crate::tx_lanes::with_mut(|l| l.try_claim_tx(app_id)),
-        "admit_only: a transaction is already claimed for {app_id}"
+        crate::tx_lanes::with_mut(|l| l.try_claim_tx(route)),
+        "admit_only: a transaction is already claimed for {} on {}",
+        route.app_id(),
+        route.database_text()
     );
-    let actions = driver::admit_in_preparing(app_id);
+    let actions = driver::admit_in_preparing(route);
     assert!(
         actions
             .iter()
@@ -71,10 +73,10 @@ pub fn admit_only(app_id: &str) {
 /// # Panics
 ///
 /// If no execution deadline is armed.
-pub async fn fire_execution_deadline(app_id: &str) -> ProbeOutcome {
+pub async fn fire_execution_deadline(route: &DbRoute) -> ProbeOutcome {
     use super::reducer::deadline::{DeadlineKind, DeadlineState};
     let armed = crate::tx_lanes::with(|l| {
-        l.transaction_reducer(app_id)
+        l.transaction_reducer(route)
             .map(|reducer| reducer.deadline().state())
     });
     let (kind, generation) = match armed {
@@ -88,10 +90,10 @@ pub async fn fire_execution_deadline(app_id: &str) -> ProbeOutcome {
         DeadlineKind::Execution,
         "the first deadline of a transaction's life is always Execution"
     );
-    let driven = driver::deadline_fired(app_id, kind, generation).await;
+    let driven = driver::deadline_fired(route, kind, generation).await;
     ProbeOutcome {
         outcome: driven.outcome(),
-        session: session_after(app_id, None),
+        session: session_after(route, None),
         refused: driven.refusal().map(|refusal| refusal.code()),
     }
 }
@@ -102,8 +104,8 @@ pub async fn fire_execution_deadline(app_id: &str) -> ProbeOutcome {
 ///
 /// The statement's own error, verbatim. A statement that errors leaves the
 /// transaction in [`TxState::Poisoned`].
-pub async fn operation(app_id: &str, sql: &str) -> Result<(), DbError> {
-    driver::run_operation(app_id, sql, &[]).await
+pub async fn operation(route: &DbRoute, sql: &str) -> Result<(), DbError> {
+    driver::run_operation(route, sql, &[]).await
 }
 
 /// Open a nested frame.
@@ -111,8 +113,8 @@ pub async fn operation(app_id: &str, sql: &str) -> Result<(), DbError> {
 /// # Errors
 ///
 /// The frame guard's refusal, or the `SAVEPOINT`'s own error.
-pub async fn open_frame(app_id: &str) -> Result<FrameId, DbError> {
-    let driven = driver::open_frame(app_id).await;
+pub async fn open_frame(route: &DbRoute) -> Result<FrameId, DbError> {
+    let driven = driver::open_frame(route).await;
     if let Some(frame) = driven.frame() {
         return Ok(frame);
     }
@@ -124,42 +126,42 @@ pub async fn open_frame(app_id: &str) -> Result<FrameId, DbError> {
 }
 
 /// Close a nested frame.
-pub async fn close_frame(app_id: &str, frame: FrameId, released: bool) -> ProbeOutcome {
+pub async fn close_frame(route: &DbRoute, frame: FrameId, released: bool) -> ProbeOutcome {
     let close = if released {
         FrameClose::Released
     } else {
         FrameClose::RolledBackTo
     };
-    let session = session(app_id);
-    let driven = driver::close_frame(app_id, frame, close).await;
+    let session = session(route);
+    let driven = driver::close_frame(route, frame, close).await;
     ProbeOutcome {
         outcome: driven.outcome(),
-        session: session_after(app_id, session),
+        session: session_after(route, session),
         refused: driven.refusal().map(|refusal| refusal.code()),
     }
 }
 
 /// Settle the root.
-pub async fn settle(app_id: &str, commit: bool) -> ProbeOutcome {
+pub async fn settle(route: &DbRoute, commit: bool) -> ProbeOutcome {
     let intent = if commit {
         SettleIntent::Commit
     } else {
         SettleIntent::Rollback
     };
-    let driven = driver::settle_root(app_id, intent).await;
+    let driven = driver::settle_root(route, intent).await;
     ProbeOutcome {
         outcome: driven.outcome(),
-        session: session_after(app_id, None),
+        session: session_after(route, None),
         refused: driven.refusal().map(|refusal| refusal.code()),
     }
 }
 
 /// Force this transaction to end under `CleanupCause::Cancelled`.
-pub async fn cancel(app_id: &str) -> ProbeOutcome {
-    let driven = driver::cancel(app_id).await;
+pub async fn cancel(route: &DbRoute) -> ProbeOutcome {
+    let driven = driver::cancel(route).await;
     ProbeOutcome {
         outcome: driven.outcome(),
-        session: session_after(app_id, None),
+        session: session_after(route, None),
         refused: driven.refusal().map(|refusal| refusal.code()),
     }
 }
@@ -171,11 +173,11 @@ pub async fn cancel(app_id: &str) -> ProbeOutcome {
 /// on the same settlement that disposed of the session - so a caller asking
 /// afterwards has to ask the tombstone instead. Both answers come from state the
 /// driver wrote, never from a second judgement made here.
-fn session_after(app_id: &str, before: Option<SessionOwnership>) -> Option<SessionOwnership> {
-    if let Some(live) = session(app_id) {
+fn session_after(route: &DbRoute, before: Option<SessionOwnership>) -> Option<SessionOwnership> {
+    if let Some(live) = session(route) {
         return Some(live);
     }
-    if withdrawn(app_id) {
+    if withdrawn(route) {
         return Some(SessionOwnership::Withdrawn);
     }
     before.or(Some(SessionOwnership::None))
@@ -183,27 +185,27 @@ fn session_after(app_id: &str, before: Option<SessionOwnership>) -> Option<Sessi
 
 /// The reducer's state, or `None` once it has been retired.
 #[must_use]
-pub fn state(app_id: &str) -> Option<TxState> {
+pub fn state(route: &DbRoute) -> Option<TxState> {
     crate::tx_lanes::with(|l| {
-        l.transaction_reducer(app_id)
+        l.transaction_reducer(route)
             .map(super::reducer::TxReducer::state)
     })
 }
 
 /// The reducer's session ownership, or `None` once it has been retired.
 #[must_use]
-pub fn session(app_id: &str) -> Option<SessionOwnership> {
+pub fn session(route: &DbRoute) -> Option<SessionOwnership> {
     crate::tx_lanes::with(|l| {
-        l.transaction_reducer(app_id)
+        l.transaction_reducer(route)
             .map(super::reducer::TxReducer::session)
     })
 }
 
 /// Every savepoint name this transaction has minted, in order.
 #[must_use]
-pub fn minted_savepoint_names(app_id: &str) -> Vec<String> {
+pub fn minted_savepoint_names(route: &DbRoute) -> Vec<String> {
     crate::tx_lanes::with(|l| {
-        l.transaction_reducer(app_id).map_or_else(Vec::new, |r| {
+        l.transaction_reducer(route).map_or_else(Vec::new, |r| {
             r.frames()
                 .minted_names()
                 .iter()
@@ -215,8 +217,8 @@ pub fn minted_savepoint_names(app_id: &str) -> Vec<String> {
 
 /// Has this app's transaction session been withdrawn?
 #[must_use]
-pub fn withdrawn(app_id: &str) -> bool {
-    crate::tx_lanes::with(|l| l.tx_session_withdrawn(app_id))
+pub fn withdrawn(route: &DbRoute) -> bool {
+    crate::tx_lanes::with(|l| l.tx_session_withdrawn(route))
 }
 
 /// The PostgreSQL backend PID of the session currently in this app's slot.
@@ -230,11 +232,11 @@ pub fn withdrawn(app_id: &str) -> bool {
 /// The tombstone is cleared by the next `admit_transaction`, which is why
 /// [`begin`] comes before every use of this in the arms that withdraw.
 #[must_use]
-pub fn session_backend_pid(app_id: &str) -> Option<i32> {
+pub fn session_backend_pid(route: &DbRoute) -> Option<i32> {
     crate::tx_lanes::with_mut(|l| {
-        let client = l.take_tx_client_for(app_id)?;
+        let client = l.take_tx_client_for(route)?;
         let pid = client.server_process_id();
-        l.put_tx_client_for(app_id, client);
+        l.put_tx_client_for(route, client);
         pid
     })
 }
@@ -269,14 +271,14 @@ impl std::fmt::Debug for HeldSession {
 }
 
 impl HeldSession {
-    /// Take the session out of `app_id`'s slot.
+    /// Take the session out of `route`'s slot.
     ///
     /// # Errors
     ///
     /// When no session is parked for that app.
-    pub fn take(app_id: &str) -> Result<Self, DbError> {
+    pub fn take(route: &DbRoute) -> Result<Self, DbError> {
         Ok(Self {
-            guard: Some(crate::tx_lanes::TxClientSlotGuard::take(app_id)?),
+            guard: Some(crate::tx_lanes::TxClientSlotGuard::take(route)?),
         })
     }
 
@@ -292,7 +294,7 @@ impl HeldSession {
     }
 }
 
-/// Retire `app_id`'s transaction and hand its parked session to a **successor
+/// Retire `route`'s transaction and hand its parked session to a **successor
 /// lane**, as the next caller's admission would.
 ///
 /// This reproduces a *timing*, in the same spirit as [`HeldSession`]: the retire
@@ -309,17 +311,17 @@ impl HeldSession {
 /// before every `ReleaseAdmission`, and there is no second emission site.
 /// Re-homing the session onto a successor lane models that state; what the arm
 /// rules on is a filled slot plus a dead identity.
-pub fn abandon_reducer(app_id: &str) {
+pub fn abandon_reducer(route: &DbRoute) {
     crate::tx_lanes::with_mut(|l| {
-        let session = l.take_tx_client_for(app_id);
-        l.retire_transaction(app_id);
-        l.release_tx_claim(app_id);
+        let session = l.take_tx_client_for(route);
+        l.retire_transaction(route);
+        l.release_tx_claim(route);
         if let Some(session) = session {
             assert!(
-                l.try_claim_tx(app_id),
+                l.try_claim_tx(route),
                 "the successor must win the claim the release just freed"
             );
-            l.install_tx_client(app_id, session);
+            l.install_tx_client(route, session);
         }
     });
 }
@@ -327,24 +329,24 @@ pub fn abandon_reducer(app_id: &str) {
 /// How long forced cleanup waits for a cancelled statement to release the
 /// session before it gives up and withdraws.
 ///
-/// Exposed so an arm can bind itself to WHICH route through cleanup it took.
+/// Exposed so an arm can bind itself to WHICH path through cleanup it took.
 /// A cancellation the server acted on frees the session in about a round trip;
 /// one it discarded frees nothing and the cleanup sits out this whole grace. The
 /// two answers are otherwise identical at the reducer, so an arm that means to
-/// exercise the second has to measure the clock or it is not ruling on the route
+/// exercise the second has to measure the clock or it is not ruling on the path
 /// at all.
 #[must_use]
 pub const fn cancel_reclaim_grace() -> std::time::Duration {
     driver::CANCEL_RECLAIM_GRACE
 }
 
-/// Clear every trace of `app_id`'s transaction, for a test tearing down.
-pub fn reset(app_id: &str) {
+/// Clear every trace of `route`'s transaction, for a test tearing down.
+pub fn reset(route: &DbRoute) {
     let client = crate::tx_lanes::with_mut(|l| {
-        l.retire_transaction(app_id);
-        l.release_tx_claim(app_id);
-        l.clear_pending_emits_for(app_id);
-        l.take_tx_client_for(app_id)
+        l.retire_transaction(route);
+        l.release_tx_claim(route);
+        l.clear_pending_emits_for(route);
+        l.take_tx_client_for(route)
     });
     if let Some(client) = client {
         crate::tx_lanes::destroy_tx_connection(client);

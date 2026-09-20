@@ -216,8 +216,7 @@ impl Database {
     fn capture_route(&self) -> CapturedRoute {
         CapturedRoute::capture(
             self.transaction_scope.as_ref(),
-            self.binding.app_id(),
-            self.binding.schema().clone(),
+            &self.binding,
             self.backend.sql_registration().clone(),
             self.backend.connection_identity(),
             self.usage.clone(),

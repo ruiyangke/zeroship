@@ -75,7 +75,6 @@ pub async fn apply(
     mut rows: Vec<Value>,
     opts: ApplyOptions<'_>,
 ) -> Result<ApplyResult, DbError> {
-    let app_id = binding.app_id();
     // Installed model metadata determines types and protection.
     let schema = scope_schema(
         crate::descriptor::collection_schema(binding, collection)?,
@@ -87,7 +86,7 @@ pub async fn apply(
         // Use the key store bound to the backend that returned the ciphertext.
         decrypt_rows_on_read(
             route.backend().key_store(),
-            app_id,
+            binding,
             collection,
             &schema,
             &mut rows,
@@ -141,14 +140,14 @@ fn scope_schema(schema: Arc<FieldMap>, scope: &SchemaFieldScope<'_>) -> Arc<Fiel
 /// sourcing did, and both backends source identically.
 async fn decrypt_rows_on_read(
     keys: &crate::encryption::KeyStore,
-    app_id: &str,
+    binding: &DbBinding,
     collection: &str,
     schema: &FieldMap,
     rows: &mut [Value],
 ) -> Result<(), DbError> {
     for row in rows.iter_mut() {
         crate::protection::encryption_pass::decrypt_row_on_read(
-            keys, app_id, collection, schema, row,
+            keys, binding, collection, schema, row,
         )
         .await?;
     }
@@ -212,7 +211,7 @@ mod tests {
             "secret": 3
         })];
 
-        let binding = DbBinding::cold_start("app_aggregate_scope");
+        let binding = crate::tests::fixtures::harness_binding("app_aggregate_scope");
         let alias = ["secret".to_string()];
         let rt = compio::runtime::Runtime::new().expect("compio runtime build");
         // `apply` takes the ROUTE rather than resolving a backend; none of the
@@ -293,7 +292,7 @@ mod tests {
             "email": "a***@example.com"
         })];
 
-        let binding = DbBinding::cold_start("app_distinct_masked");
+        let binding = crate::tests::fixtures::harness_binding("app_distinct_masked");
         let rt = compio::runtime::Runtime::new().expect("compio runtime build");
         // Inside the runtime: see the sibling test above.
         //

@@ -424,7 +424,7 @@ pub async fn run_insert(
     let frame;
     let route = if allocates_identity {
         frame = Some(crate::transaction::AtomicWriteFrame::begin(route).await?);
-        frame.as_ref().expect("opened write frame").route()
+        frame.as_ref().expect("opened write frame").tx_route()
     } else {
         frame = None;
         &route
@@ -493,7 +493,7 @@ pub async fn run_insert_many(
         .check(&insert::requirements(allocates_identity))
         .map_err(mapping::QueryError::from)?;
     let frame = crate::transaction::AtomicWriteFrame::begin(route).await?;
-    let route = frame.route();
+    let route = frame.tx_route();
     let result = async {
         let mut docs = docs;
         prepare_insert_many_docs_for_binding(
@@ -559,7 +559,7 @@ pub(crate) async fn run_update_one(
     let result = run_update_one_inner(
         binding,
         coll,
-        frame.route().clone(),
+        frame.tx_route().clone(),
         filter,
         update,
         actor_id,
@@ -741,7 +741,7 @@ pub(crate) async fn run_update_many(
         let frame = crate::transaction::AtomicWriteFrame::begin(route).await?;
         let work_result: Result<u64, DbError> = async {
             let target_rows = write_pipeline::resolve_target_row_ids(
-                frame.route(),
+                frame.tx_route(),
                 &coll,
                 filter.clone(),
                 i64::try_from(crate::budgets::MAX_PER_ROW_UPDATE_TARGETS)
@@ -787,8 +787,8 @@ pub(crate) async fn run_update_many(
                 // the frame's route - the same connection every statement in
                 // this atomic write runs on.
                 write_pipeline::apply(
-                    frame.route().backend().key_store(),
-                    frame.route(),
+                    frame.tx_route().backend().key_store(),
+                    frame.tx_route(),
                     &binding,
                     &coll,
                     &mut row_update.values,
@@ -812,7 +812,7 @@ pub(crate) async fn run_update_many(
                         row_filter.into(),
                         row_update,
                         &autobump,
-                        frame.route().sql_registration(),
+                        frame.tx_route().sql_registration(),
                     )
                     .map_err(DbError::from)?,
                 );
@@ -823,17 +823,17 @@ pub(crate) async fn run_update_many(
                 if result_checks.is_empty() {
                     affected += exec_mutation_count_with_emit(
                         built,
-                        frame.route(),
+                        frame.tx_route(),
                         &coll,
                         zeroship_data_orm::cdc::ChangeOp::Update,
                     )
                     .await?;
                 } else {
-                    let mut rows = crate::exec::exec_mutation(frame.route(), built).await?;
+                    let mut rows = crate::exec::exec_mutation(frame.tx_route(), built).await?;
                     update::validate_results(&mut rows, &result_checks)?;
                     let count = rows.len() as u64;
                     crate::exec::emit_mutation_count(
-                        frame.route(),
+                        frame.tx_route(),
                         &coll,
                         zeroship_data_orm::cdc::ChangeOp::Update,
                         count,
@@ -1204,7 +1204,7 @@ pub async fn run_upsert(
     let frame;
     let route = if guard_identity {
         frame = Some(crate::transaction::AtomicWriteFrame::begin(route).await?);
-        frame.as_ref().expect("opened write frame").route()
+        frame.as_ref().expect("opened write frame").tx_route()
     } else {
         frame = None;
         &route
@@ -1585,7 +1585,7 @@ pub async fn prepare_insert_many_docs_for_binding(
 /// Return an owned copy of the model metadata used by CRUD passes.
 #[cfg(test)]
 pub fn runtime_schema_for_tests(app_id: &str, collection: &str) -> Result<FieldMap, DbError> {
-    let binding = DbBinding::cold_start(app_id);
+    let binding = crate::tests::fixtures::harness_binding(app_id);
     crate::descriptor::collection_schema(&binding, collection).map(|facts| (*facts).clone())
 }
 
@@ -1617,7 +1617,7 @@ async fn prepare_upsert_doc_for_write(
 /// zeroizing sidechannel; it performs no SQL or backend resolution.
 async fn encryption_pass_dispatch(
     keys: &crate::encryption::KeyStore,
-    app_id: &str,
+    binding: &DbBinding,
     collection: &str,
     schema: &FieldMap,
     row_pk: &str,
@@ -1626,7 +1626,7 @@ async fn encryption_pass_dispatch(
 ) -> Result<(), DbError> {
     crate::protection::encryption_pass::encrypt_row_on_write_with_sidechannel(
         keys,
-        app_id,
+        binding,
         collection,
         schema,
         row_pk,

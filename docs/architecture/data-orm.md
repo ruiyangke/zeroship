@@ -151,11 +151,13 @@ explicit transactions use the authority fixed when the backend opens, and that
 choice participates in connection identity. A route captured from one backend
 therefore cannot settle on a backend opened with another authority.
 
-`DbBinding` remains role-free. For a platform service, its logical id scopes
-transactions and in-memory metadata, its deploy token identifies the installed
-schema revision, and its schema names the qualified SQL namespace. Control
-owns access to platform tables. Workers retain the default per-app role path and
-reach Control-owned metadata through authenticated service APIs.
+`DbBinding::platform` is the shape a trusted service opens its own schema under:
+its tenant scopes transactions and in-memory metadata, its label identifies the
+installed schema revision, and its schema names the qualified SQL namespace. It
+carries no database and no role, so a session opened on it narrows to nothing.
+Control owns access to platform tables. A worker opens creator data under
+`DbBinding::to_database`, whose session narrows to that binding's own role, and
+reaches Control-owned metadata through authenticated service APIs.
 
 Connection configuration contains credentials and is excluded from Debug output.
 Connection setup does not create application tables.
@@ -177,6 +179,7 @@ use zeroship_data_v8::service::{DbService, DbServiceConfig};
 let service = DbService::new(DbServiceConfig {
     connection: ConnectionFactory::for_url(database_url)?,
     project_keys,
+    app_bindings,
     cdc_relay,
     meter,
 })?;
@@ -548,13 +551,16 @@ requires no search, catalog, masking, or change-publication implementation.
 `DriverSession` executes SQL with native parameters, returns rows or affected-row
 counts, and handles settlement, cancellation, cleanup, and discard.
 
-`executor::ScopedExecutor` resolves the app's physical SQL namespace and applies its authority
-on the connection that executes its statements. PostgreSQL uses a transaction
-with local role and timeout settings. SQLite attaches the app's database file
-and selects its transaction lane before exposing a physical connection source.
-A SQLite binding on schema `main` addresses the file the backend opened: it
-attaches no `zs-<app>.sqlite`, and its catalog, protection floor and statements
-all read that file.
+`executor::ScopedExecutor` takes the whole `DbBinding` and resolves the physical
+SQL namespace and the authority from it on the connection that executes its
+statements. PostgreSQL narrows the transaction to the binding's own role
+(`zs_bind_<bnd>_e<E>`) and applies the timeout settings. SQLite attaches the
+database file under the binding's schema and selects that database's
+transaction lane before exposing a physical connection source, so the dev tier
+is one `zs-<schema>.sqlite` per database and the ATTACH alias is the same string
+every query builder qualifies with. A SQLite binding on schema `main` addresses
+the file the backend opened: it attaches nothing, and its catalog, protection
+floor and statements all read that file.
 
 `backend::Backend` is the host registration contract above the driver:
 

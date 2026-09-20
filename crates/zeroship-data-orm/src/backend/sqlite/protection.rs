@@ -8,8 +8,7 @@ impl crate::protection::Catalog for SqliteBackend {
     /// Read user tables, columns, indexes, and foreign keys from SQLite PRAGMAs.
     async fn introspect_schema(
         &self,
-        app_id: &str,
-        schema: &crate::sql::SchemaName,
+        binding: &crate::binding::DbBinding,
         transaction: Option<&crate::driver::Session>,
     ) -> Result<crate::sql::catalog::LiveSchema, DbError> {
         let shared;
@@ -18,14 +17,14 @@ impl crate::protection::Catalog for SqliteBackend {
                 .get::<super::session::SqliteSessionHandle>()
                 .ok_or_else(|| DbError::internal("catalog received a non-SQLite session"))?
         } else {
-            self.attach_binding(app_id, schema).await?;
+            self.attach_binding(binding).await?;
             shared = super::session::SqliteSessionHandle::new(self.session.clone());
             &shared
         };
         let mut out = crate::sql::catalog::LiveSchema::default();
 
         // The catalog of the database the binding's statements address.
-        let q_app = crate::sql::mapping::quote_ident(Self::database_alias(app_id, schema));
+        let q_app = crate::sql::mapping::quote_ident(Self::database_alias(binding));
         let tables_sql =
             format!("SELECT name FROM {q_app}.sqlite_master WHERE type = 'table' ORDER BY name");
         let table_rows = session.query(&tables_sql, &[]).await?;

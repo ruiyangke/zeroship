@@ -17,8 +17,7 @@ impl Search for PostgresBackend {
             None => {
                 ScopedExecutor::query(
                     self,
-                    r.binding.app_id(),
-                    r.binding.schema(),
+                    r.binding,
                     r.query.sql(),
                     r.query.params(),
                 )
@@ -37,8 +36,7 @@ impl Search for PostgresBackend {
             None => {
                 ScopedExecutor::query(
                     self,
-                    r.binding.app_id(),
-                    r.binding.schema(),
+                    r.binding,
                     r.query.sql(),
                     r.query.params(),
                 )

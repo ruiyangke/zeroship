@@ -25,7 +25,6 @@
 use std::collections::BTreeMap;
 
 use uuid::Uuid;
-use zeroship_core::app_derivation;
 use zeroship_id::AppId;
 use zeroship_migrate::{
     effective_policy_from_charter_toml, seal, DestructiveOps, SealError, SealedPolicy,
@@ -126,19 +125,27 @@ impl ManagedPolicyConfig {
     /// Compose the operator ceiling ⊓ the (optional) creator draft into the effective
     /// managed policy. A draft that escalates beyond the ceiling is REJECTED here
     /// (`admit`), not clamped.
-    pub fn compose_effective_for_app(
+    ///
+    /// # Two identities, and neither implies the other
+    ///
+    /// The APP selects which operator ceiling applies - that is a fact about
+    /// the tenant and its tier. The SCHEMA is what every namespace-scoped grant
+    /// in that ceiling is bound to, and it is the schema of the DATABASE being
+    /// written, which an app id cannot produce once an app may hold several.
+    ///
+    /// A charter bound to the wrong schema name does not fail loudly: it grants
+    /// nothing on the schema the apply actually touches, so every creator
+    /// statement is refused as out-of-scope. The caller therefore passes the
+    /// schema it is about to write rather than deriving one here.
+    pub fn compose_effective_for_schema(
         &self,
         app_id: &AppId,
+        schema: &str,
         tier: Option<&str>,
         draft: Option<&ParsedDraft>,
     ) -> Result<EffectivePolicy, ManagedPolicyError> {
         let ceiling = self.catalog.resolve(app_id, tier);
-        // The ceiling is bound to the app's PHYSICAL SCHEMA, so the name comes
-        // from the derivation seam rather than from a second rendering of the id
-        // spelled here. A charter bound to the wrong schema name does not fail:
-        // it grants nothing on the schema the apply actually touches, and every
-        // creator statement is refused as out-of-scope.
-        let app_base = ceiling.effective_for_app_schema(&app_derivation::schema_name(app_id))?;
+        let app_base = ceiling.effective_for_app_schema(schema)?;
         let policy = match draft {
             // Admit the untrusted creator draft only after the operator charter has
             // been bound to this app's exact schema. Any grant outside it is rejected.
@@ -153,19 +160,21 @@ impl ManagedPolicyConfig {
         ))
     }
 
-    /// The current operator ceiling for the app (no creator draft) — the composed
-    /// ceiling-only effective policy.
-    pub fn current_ceiling_for_app(
+    /// The current operator ceiling bound to one schema (no creator draft) -
+    /// the composed ceiling-only effective policy.
+    pub fn current_ceiling_for_schema(
         &self,
         app_id: &AppId,
+        schema: &str,
         tier: Option<&str>,
     ) -> Result<EffectivePolicy, ManagedPolicyError> {
-        self.compose_effective_for_app(app_id, tier, None)
+        self.compose_effective_for_schema(app_id, schema, tier, None)
     }
 
-    pub fn seal_for_app(
+    pub fn seal_for_schema(
         &self,
         app_id: &AppId,
+        schema: &str,
         tier: Option<&str>,
         draft: Option<CreatorPolicyDraft<'_>>,
     ) -> Result<SealedManagedPolicy, ManagedPolicyError> {
@@ -173,7 +182,8 @@ impl ManagedPolicyConfig {
             .as_ref()
             .map(|draft| self.parse_draft(draft))
             .transpose()?;
-        let effective = self.compose_effective_for_app(app_id, tier, parsed_draft.as_ref())?;
+        let effective =
+            self.compose_effective_for_schema(app_id, schema, tier, parsed_draft.as_ref())?;
         self.seal_effective_for_app(effective)
     }
 
@@ -709,6 +719,7 @@ impl ManagedPolicyError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeroship_core::app_derivation;
 
     const KEY: &[u8] = b"migrated test seal key 32 bytes min";
 
@@ -785,7 +796,7 @@ scope = {{ include = ["{schema}.secret"] }}
             })
             .expect("draft parses");
         assert!(
-            cfg.compose_effective_for_app(&app_id, Some("probe"), Some(&draft))
+            cfg.compose_effective_for_schema(&app_id, app_id.as_str(), Some("probe"), Some(&draft))
                 .is_ok(),
             "a `value = false` rule in the SAME layer is expected to be inert; if this \
              now REFUSES, the engine gained within-layer masking and the warning in \
@@ -810,7 +821,7 @@ scope = {{ include = ["{schema}"], exclude = ["{schema}.secret"] }}
             })
             .expect("draft parses");
         let err = cfg
-            .compose_effective_for_app(&app_id, Some("probe"), Some(&draft))
+            .compose_effective_for_schema(&app_id, app_id.as_str(), Some("probe"), Some(&draft))
             .expect_err("`exclude` DOES restrict, so the excluded table must be refused");
         assert!(matches!(err, ManagedPolicyError::Compose(_)));
     }
@@ -840,7 +851,7 @@ scope = {{ include = ["{schema}"], exclude = ["{schema}.secret"] }}
         let app_id = AppId::mint();
 
         let effective = cfg
-            .compose_effective_for_app(&app_id, None, None)
+            .compose_effective_for_schema(&app_id, app_id.as_str(), None, None)
             .expect("no draft should resolve to default ceiling");
 
         assert_eq!(effective.ceiling_id, "confined-default");
@@ -988,7 +999,7 @@ scope = "all"
             })
             .expect("approval obligation draft parses");
         let effective = cfg
-            .compose_effective_for_app(&app_id, None, Some(&draft))
+            .compose_effective_for_schema(&app_id, app_id.as_str(), None, Some(&draft))
             .expect("obligation draft composes (composes UP)");
         assert_eq!(
             effective.approval_level(&app_derivation::schema_name(&app_id)),
@@ -1024,7 +1035,7 @@ scope = "all"
             .expect("tightening draft parses");
 
         let effective = cfg
-            .compose_effective_for_app(&app_id, None, Some(&draft))
+            .compose_effective_for_schema(&app_id, app_id.as_str(), None, Some(&draft))
             .expect("strict draft should compose");
 
         assert_eq!(effective.managed.destructive_ops, DestructiveOps::Forbid);
@@ -1051,7 +1062,7 @@ scope = "all"
             .expect("escalating draft still parses (rejected at compose)");
 
         let err = cfg
-            .compose_effective_for_app(&app_id, None, Some(&draft))
+            .compose_effective_for_schema(&app_id, app_id.as_str(), None, Some(&draft))
             .expect_err("raw_sql exceeds the confined ceiling");
 
         assert!(matches!(err, ManagedPolicyError::Compose(_)));
@@ -1076,7 +1087,7 @@ scope = "all"
             .expect("cross-schema draft parses before admission");
 
         let err = cfg
-            .compose_effective_for_app(&app_id, None, Some(&draft))
+            .compose_effective_for_schema(&app_id, app_id.as_str(), None, Some(&draft))
             .expect_err("authority outside the app schema must be rejected");
         assert!(matches!(err, ManagedPolicyError::Compose(_)));
         assert!(err.is_creator_fault());
@@ -1113,7 +1124,7 @@ scope = "all"
             .expect("all-scoped draft parses before admission");
 
         let err = cfg
-            .compose_effective_for_app(&app_id, None, Some(&draft))
+            .compose_effective_for_schema(&app_id, app_id.as_str(), None, Some(&draft))
             .expect_err("scope=all against a literal-bound rule must be refused");
         assert!(
             matches!(
@@ -1168,7 +1179,7 @@ scope = {{ include = ["{app_schema}*"] }}
             .expect("glob-scoped draft parses before admission");
 
         let err = cfg
-            .compose_effective_for_app(&app_id, None, Some(&draft))
+            .compose_effective_for_schema(&app_id, app_id.as_str(), None, Some(&draft))
             .expect_err("a glob reaching beyond the bound app schema must be rejected");
         assert!(matches!(err, ManagedPolicyError::Compose(_)));
         assert!(err.is_creator_fault());
@@ -1195,7 +1206,7 @@ scope = {{ include = ["{app_schema}*"] }}
         let app_id = AppId::mint();
 
         let sealed = cfg
-            .seal_for_app(&app_id, None, None)
+            .seal_for_schema(&app_id, app_id.as_str(), None, None)
             .expect("default confined policy should seal");
 
         // The seal verifies against the exact composed policy it covers.

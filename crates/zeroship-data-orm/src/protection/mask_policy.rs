@@ -210,7 +210,7 @@ mod tests {
 
     #[test]
     fn installed_policy_is_immutable() {
-        let binding = DbBinding::cold_start("app_fixed_policy");
+        let binding = crate::tests::fixtures::harness_binding("app_fixed_policy");
         install_mask_policy(&binding, value!({ "support": ["public"] })).unwrap();
         install_mask_policy(&binding, value!({ "support": ["public"] })).unwrap();
         let error = install_mask_policy(&binding, value!({ "support": ["pii"] })).unwrap_err();
@@ -227,9 +227,8 @@ mod tests {
 
     #[test]
     fn redeploy_does_not_change_an_older_isolates_policy() {
-        let schema = crate::sql::SchemaName::new("app_policy_deploys").unwrap();
-        let old = DbBinding::new("app_policy_deploys", "old", schema.clone());
-        let new = DbBinding::new("app_policy_deploys", "new", schema);
+        let old = crate::tests::fixtures::harness_binding_at_deploy("app_policy_deploys", "old");
+        let new = crate::tests::fixtures::harness_binding_at_deploy("app_policy_deploys", "new");
         install_mask_policy(&old, value!({ "support": ["public"] })).unwrap();
         install_mask_policy(&new, value!({ "support": ["pii"] })).unwrap();
         assert!(!allows(&old, "support", "pii"));
@@ -240,7 +239,7 @@ mod tests {
 
     #[test]
     fn default_policy_cannot_be_replaced_after_authorization() {
-        let binding = DbBinding::cold_start("app_default_policy");
+        let binding = crate::tests::fixtures::harness_binding("app_default_policy");
         assert!(!allows(&binding, "support", "pii"));
         assert!(install_mask_policy(&binding, value!({ "support": ["pii"] })).is_err());
         assert!(!allows(&binding, "support", "pii"));
@@ -248,7 +247,7 @@ mod tests {
 
     #[test]
     fn invalid_declaration_does_not_install_a_partial_policy() {
-        let binding = DbBinding::cold_start("app_invalid_policy");
+        let binding = crate::tests::fixtures::harness_binding("app_invalid_policy");
         assert!(install_mask_policy(&binding, value!({ "support": ["unknown"] })).is_err());
         assert!(cache_get(&binding).is_none());
         install_mask_policy(&binding, value!({ "support": ["pii"] })).unwrap();
@@ -472,12 +471,12 @@ mod tests {
         // implied: libtest gives every `#[test]` its own OS thread even under
         // `--test-threads=1` (measured 2026-09-01), so no other test can
         // observe or disturb these entries.
-        cache_put(&DbBinding::cold_start("app_a"), Some(policy_a.clone()));
-        cache_put(&DbBinding::cold_start("app_b"), Some(policy_b.clone()));
+        cache_put(&crate::tests::fixtures::harness_binding("app_a"), Some(policy_a.clone()));
+        cache_put(&crate::tests::fixtures::harness_binding("app_b"), Some(policy_b.clone()));
 
         // App A sees policy A only — admin grants are visible; the
         // app-B `support` role is not in the cache for app A.
-        let a = cache_get(&DbBinding::cold_start("app_a")).expect("app_a cached");
+        let a = cache_get(&crate::tests::fixtures::harness_binding("app_a")).expect("app_a cached");
         assert!(a.allows("admin", "pii"));
         assert!(a.allows("admin", "spi"));
         assert!(
@@ -487,7 +486,7 @@ mod tests {
 
         // App B sees policy B only — support grants are visible; the
         // app-A `admin` role is not in the cache for app B.
-        let b = cache_get(&DbBinding::cold_start("app_b")).expect("app_b cached");
+        let b = cache_get(&crate::tests::fixtures::harness_binding("app_b")).expect("app_b cached");
         assert!(b.allows("support", "public"));
         assert!(
             !b.allows("admin", "pii"),
@@ -499,12 +498,12 @@ mod tests {
         );
 
         // App C — never seeded — sees nothing.
-        assert!(cache_get(&DbBinding::cold_start("app_c")).is_none());
+        assert!(cache_get(&crate::tests::fixtures::harness_binding("app_c")).is_none());
 
         // Clearing app A leaves app B intact (fence against a clear-
         // implementation that walks the whole map).
-        cache_put(&DbBinding::cold_start("app_a"), None);
-        assert!(cache_get(&DbBinding::cold_start("app_a")).is_none());
-        assert!(cache_get(&DbBinding::cold_start("app_b")).is_some());
+        cache_put(&crate::tests::fixtures::harness_binding("app_a"), None);
+        assert!(cache_get(&crate::tests::fixtures::harness_binding("app_a")).is_none());
+        assert!(cache_get(&crate::tests::fixtures::harness_binding("app_b")).is_some());
     }
 }

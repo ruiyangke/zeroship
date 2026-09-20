@@ -286,6 +286,34 @@ pub const PROJECT_PREFIX: &str = "prj";
 /// as a hash, never this value.
 pub const INVITE_PREFIX: &str = "ivt";
 
+/// Datastore typed-id prefix: one `PostgreSQL` cluster, operator-owned, in one
+/// execution zone. Creators never name one and never see one.
+///
+/// The ROW is keyed on the cluster's own `pg_control_system().system_identifier`
+/// rather than on this id, so that two services configured against one cluster
+/// converge on one row. This id is the stable handle everything else references.
+pub const DATASTORE_PREFIX: &str = "dst";
+
+/// Database typed-id prefix: one schema inside a [`DATASTORE_PREFIX`] cluster,
+/// owned by a project. The unit that is migrated, bound and dropped.
+///
+/// It names the physical schema (`db_<id>`), the migrator and capability roles,
+/// the apply lock and the encryption salt - which is why it must not be reused
+/// for anything whose lifetime differs from the schema's.
+pub const DATABASE_PREFIX: &str = "dbs";
+
+/// Binding typed-id prefix: the edge joining one app to one database with one
+/// capability.
+///
+/// `bnd`, NOT `grt`. [`GRANT_PREFIX`] already means one row per (person,
+/// audience) in `zeroship.grants`, and putting a data-access edge in that
+/// namespace is exactly what the disjointness rule exists to prevent.
+///
+/// The edge carries its own id because the `PostgreSQL` role name is derived
+/// from it (`zs_bind_<id>_e<epoch>`); a composite natural key would put two ids
+/// in one identifier.
+pub const BINDING_PREFIX: &str = "bnd";
+
 /// Per-app OAuth `client_id` prefix: the
 /// deterministic, stable-for-app-life OAuth client id is `oac_<base36-app-id>`.
 /// Distinct from [`APP_PREFIX`] (the app *entity* typed_id) on purpose — the
@@ -927,6 +955,79 @@ mod tests {
     /// SOURCE row (a `she_…` spend-history id, a `obh_…` organization-billing-history id, an
     /// `inv_…` invoice id, a `ref_…` refund id, or a `dsp_…` dispute id). The design's
     /// Cross-source dedup correctness REQUIRES these prefixes be pairwise-disjoint
+    /// Every ENTITY prefix is pairwise-disjoint, which several doc comments assert
+    /// and nothing checked until this test.
+    ///
+    /// The property is what makes a mis-typed id UNRESOLVABLE rather than resolvable
+    /// against the wrong table: `parse_with_prefix` compares the prefix and rejects a
+    /// mismatch, so two entities sharing one would let an id decode successfully into
+    /// the wrong type. `bnd` versus `grt` is the live case - the data-access edge and
+    /// the auth (person, audience) grant are unrelated entities whose ids would
+    /// otherwise be mutually parseable.
+    ///
+    /// ADDING A PREFIX MEANS ADDING IT HERE. The list is hand-maintained because the
+    /// alternative is scanning this file's source for a spelling, which asserts the
+    /// text rather than the behaviour. An omission makes this test weaker rather than
+    /// red, so treat the list as part of declaring a prefix.
+    #[test]
+    fn entity_prefixes_are_pairwise_disjoint() {
+        let prefixes = [
+            ("user", USER_PREFIX),
+            ("app", APP_PREFIX),
+            ("deployment", DEPLOYMENT_PREFIX),
+            ("deploy_command", DEPLOY_COMMAND_PREFIX),
+            ("lifecycle_intent", LIFECYCLE_INTENT_PREFIX),
+            ("session", SESSION_PREFIX),
+            ("grant", GRANT_PREFIX),
+            ("organization", ORGANIZATION_PREFIX),
+            ("project", PROJECT_PREFIX),
+            ("invite", INVITE_PREFIX),
+            ("datastore", DATASTORE_PREFIX),
+            ("database", DATABASE_PREFIX),
+            ("binding", BINDING_PREFIX),
+            ("app_oauth_client", APP_OAUTH_CLIENT_PREFIX),
+            ("plan", PLAN_PREFIX),
+            ("invoice", INVOICE_PREFIX),
+            ("invoice_payment", INVOICE_PAYMENT_PREFIX),
+            ("credit", CREDIT_PREFIX),
+            ("refund", REFUND_PREFIX),
+            ("plan_change_event", PLAN_CHANGE_EVENT_PREFIX),
+            ("spend_history", SPEND_HISTORY_PREFIX),
+            ("organization_billing_history", ORGANIZATION_BILLING_HISTORY_PREFIX),
+            ("dispute", DISPUTE_PREFIX),
+            ("payout_failure", PAYOUT_FAILURE_PREFIX),
+            ("checkout_failure", CHECKOUT_FAILURE_PREFIX),
+            ("reconcile_finding", RECONCILE_FINDING_PREFIX),
+        ];
+        for (index, (name_a, prefix_a)) in prefixes.iter().enumerate() {
+            for (name_b, prefix_b) in &prefixes[index + 1..] {
+                assert_ne!(
+                    prefix_a, prefix_b,
+                    "entity prefixes must be pairwise-disjoint: {name_a} and {name_b} both \
+                     use '{prefix_a}', so an id of one would parse as the other"
+                );
+            }
+        }
+    }
+
+    /// The three decoupling prefixes are the exact spellings the design names, and
+    /// the binding edge is NOT the auth grant.
+    ///
+    /// Pinned separately from the disjointness sweep because that sweep only proves
+    /// they differ from each other. These assert WHICH value each one is, so renaming
+    /// one - which would rename every physical schema, role and encryption salt
+    /// derived from it - fails here rather than in a migration.
+    #[test]
+    fn decoupling_prefixes_are_pinned_and_distinct_from_the_auth_grant() {
+        assert_eq!(DATASTORE_PREFIX, "dst");
+        assert_eq!(DATABASE_PREFIX, "dbs");
+        assert_eq!(BINDING_PREFIX, "bnd");
+        assert_ne!(
+            BINDING_PREFIX, GRANT_PREFIX,
+            "the data-access binding must not share the auth grant's prefix"
+        );
+    }
+
     /// so a `transition_id` from one source can NEVER collide with another's. This test is
     /// the typed-id-registry assertion the design names; it fails the day two sources
     /// share a prefix (which would let one source's id silently dedup against another's).

@@ -325,7 +325,7 @@ impl Platform {
             let connect = async |schema: &zeroship_data_orm::schema::Schema| {
                 contended(async || {
                     Database::connect(
-                        DbBinding::new(
+                        DbBinding::platform(
                             "platform",
                             "workflow-local-test",
                             SchemaName::new("main").unwrap(),

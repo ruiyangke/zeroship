@@ -5,6 +5,7 @@
 // carries no worker at all. A creator debugging "why does my deploy 404 on
 // /api" can now see that fact in a file every tool reads, instead of having to
 // open a plugin argument.
+
 {
   "$schema": "https://zeroship.ai/schema/project-v1.json",
 
@@ -18,9 +19,11 @@
     "output": "dist/app.zship"
   },
 
-  "migrations": {
-    "dir": "migrations",
-    "out": "generated/zeroship"
+  // This app reaches no database, so it declares none and gets no `env.db`.
+  "databases": {},
+
+  "apps": {
+    "ssg_docs": { "databases": [] }
   },
 
   "secrets": []

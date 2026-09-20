@@ -13,10 +13,6 @@
   "name": "scaffold-app",
 
   // Where `zeroship deploy` and `zeroship migrate` send things.
-  //
-  // `app` is ABSENT on purpose: your first `zeroship deploy` creates the app
-  // and appends its id here. After that, `deploy`, `migrate`,
-  // `secret` and `var` all read it and you never type `--app=` again.
   "control": "https://control.zeroship.ai",
 
   // Stamped with today's UTC date by the scaffolder and carried in the manifest.
@@ -31,27 +27,27 @@
     "output": "dist/app.zship"
   },
 
-  // Every key is written out rather than left to a default. The CLI has NO
-  // fallbacks for these: if the file is silent it errors naming the key, which
-  // is what stops it and the build from quietly disagreeing about a path.
-  "migrations": {
-    "dir": "migrations",
-    "out": "generated/zeroship"
+  // Databases by LOCAL LABEL. Every key is written out rather than left to a
+  // default: the CLI has NO fallbacks for these, so a silent file errors
+  // naming the key instead of letting it and the build disagree about a path.
+  "databases": {
+    "main": {
+      "id": "dbs_03evr3oqx1200yeb1kbds8wyq",
+      "migrations": "migrations",
+      "out": "generated/zeroship"
+    }
+  },
+
+  // `app` is ABSENT on purpose: the first `zeroship deploy` creates the app and
+  // writes its id under this label.
+  "apps": {
+    "app": {
+      "databases": ["main"],
+      "primary": "main"
+    }
   },
 
   // Secret NAMES only. `zeroship deploy` can then tell you which ones the
   // deployed app is still missing.
   "secrets": []
-
-  // Named deploy targets, selected with --env=<name>. Both `app` and `control`
-  // must be stated in each one - an environment that names a staging control
-  // and inherits the production app is the mistake this rule exists to stop.
-  //
-  // "environments": {
-  //   "staging": {
-  //     "app": "<staging app id>",
-  //     "control": "https://control.zeroship.ai",
-  //     "protected": true
-  //   }
-  // }
 }

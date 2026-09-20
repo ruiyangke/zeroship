@@ -177,13 +177,13 @@ impl Fixture {
             calls: Cell::new(0),
         });
         let storage = HostStorage {
-            connection: ConnectionFactory::for_url(&format!(
+            connection: ConnectionFactory::for_platform_url(&format!(
                 "sqlite:{}",
                 directory.path().join("creator.sqlite").display()
             ))
             .unwrap(),
             keys: ProjectKeySource::unavailable(),
-            binding: DbBinding::new(app.as_str(), "creator-fixture", schema),
+            binding: DbBinding::platform(app.as_str(), "creator-fixture", schema),
             objects: StorageStore::from_backend(Arc::new(LocalFs::new(
                 directory.path().join("objects"),
             ))),

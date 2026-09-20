@@ -54,8 +54,9 @@ async function checkManifest(bundle: string) {
   for (const id of ["rpc:todos.create", "rpc:todos.list", "rpc:todos.subscribe", "rpc:users.public"]) {
     assert.equal(manifest.resources?.[id]?.auth, "anonymous", `${id} must be publicly reachable in this demo`);
   }
-  assert.equal(typeof manifest.runtime_descriptor?.hash, "string");
-  assert(manifest.runtime_descriptor.hash.length > 0, "Bundle must bind its runtime descriptor");
+  assert.equal(typeof manifest.runtime_descriptor?.[0]?.hash, "string");
+  assert(manifest.runtime_descriptor[0].hash.length > 0, "Bundle must bind its runtime descriptor");
+  assert(manifest.runtime_descriptor[0].primary, "the primary database is the one env.db reaches");
 }
 
 export class Platform {

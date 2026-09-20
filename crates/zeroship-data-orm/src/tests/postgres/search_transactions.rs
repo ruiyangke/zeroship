@@ -16,7 +16,6 @@ use std::rc::Rc;
 
 use crate::value::{value, Value};
 use compio_postgres::{NoTls, Pool};
-use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
 use zeroship_data_orm::tx_route::{CapturedRoute, TxRoute};
 
@@ -63,9 +62,9 @@ async fn require_extension(pool: &Rc<Pool>, extension: &str) {
         });
 }
 
-/// Build the app schema from the PLATFORM's own DDL emitter, provision the
-/// per-app role the data plane runs under, and install the descriptor entry a
-/// deploy would have installed.
+/// Build the binding's schema from the PLATFORM's own DDL emitter, provision
+/// the role ladder the data plane runs under, and install the descriptor entry
+/// a deploy would have installed.
 async fn fixture(
     host: &Host,
     pool: &Rc<Pool>,
@@ -74,27 +73,23 @@ async fn fixture(
     collection: &str,
     schema: Value,
 ) {
-    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+    let binding = crate::tests::fixtures::harness_binding(app);
+    let alias = crate::tests::fixtures::harness_alias(app);
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{alias}\" CASCADE"), &[])
         .await
         .unwrap();
-    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+    // The ladder creates the schema this binding addresses, so the emitted DDL
+    // has a namespace to land in.
+    crate::tests::fixtures::roles::ensure_binding_ladder(pool, &binding)
         .await
-        .unwrap();
-    let ddl = fixture_table_sql(
-        &crate::sql::SchemaName::new(app).expect("fixture schema name"),
-        collection,
-        &schema,
-        &FkEmission::Inline,
-    )
-    .expect("the platform's own CREATE TABLE emitter");
+        .expect("the binding ladder, as the deploy would provision it");
+    let ddl = fixture_table_sql(binding.schema(), collection, &schema, &FkEmission::Inline)
+        .expect("the platform's own CREATE TABLE emitter");
     pool.batch_execute(&ddl)
         .await
         .unwrap_or_else(|e| panic!("emitted DDL must apply: {e}\n{ddl}"));
 
-    crate::tests::fixtures::roles::ensure_per_app_role(pool, app)
-        .await
-        .expect("per-app role, as the deploy would provision it");
-    fixtures::grant_all_runtime_table_columns(pool, app, collection).await;
+    fixtures::grant_all_runtime_table_columns(pool, &binding, collection).await;
 
     host.install_postgres_pool(Rc::clone(pool), url);
     crate::tests::fixtures::cache_schema(app, collection, schema);
@@ -110,7 +105,7 @@ async fn backend(host: &Host) -> zeroship_data_orm::backend::BackendHandle {
 /// A route that claims the app's open transaction — what `CapturedRoute::capture`
 /// produces for a dispatch issued inside `db.transaction(fn)`.
 async fn tx_route(host: &Host, app: &str) -> TxRoute {
-    CapturedRoute::tx_for_tests(app, crate::sql::registration::SqlRegistration::postgres())
+    CapturedRoute::tx_on_binding_for_tests(&crate::tests::fixtures::harness_binding(app), crate::sql::registration::SqlRegistration::postgres())
         .bind(backend(host).await)
         .unwrap()
 }
@@ -129,7 +124,7 @@ async fn find_on(
     collection: &str,
     filter: Value,
 ) -> Result<Vec<Value>, DbError> {
-    let binding = DbBinding::cold_start(app);
+    let binding = crate::tests::fixtures::harness_binding(app);
     let plan =
         zeroship_data_orm::crud::plan_find(&binding, collection, &filter, &value!({})).unwrap();
     zeroship_data_orm::crud::run_find(binding, collection.to_string(), route, filter, plan)
@@ -144,7 +139,7 @@ async fn search_on(
     collection: &str,
     args: Value,
 ) -> Result<Vec<Value>, DbError> {
-    let binding = DbBinding::cold_start(app);
+    let binding = crate::tests::fixtures::harness_binding(app);
     let registration = zeroship_data_orm::sql::registration::SqlRegistration::postgres();
     let plan = zeroship_data_orm::crud::plan_search(&binding, &registration, collection, &args)?;
     zeroship_data_orm::crud::run_search(&route, binding, collection.to_string(), plan)
@@ -159,7 +154,7 @@ async fn near_on(
     collection: &str,
     args: Value,
 ) -> Result<Vec<Value>, DbError> {
-    let binding = DbBinding::cold_start(app);
+    let binding = crate::tests::fixtures::harness_binding(app);
     let registration = zeroship_data_orm::sql::registration::SqlRegistration::postgres();
     let plan = zeroship_data_orm::crud::plan_near(&binding, &registration, collection, &args)?;
     zeroship_data_orm::crud::run_near(&route, binding, collection.to_string(), plan)
@@ -211,7 +206,7 @@ fn a_vector_search_inside_a_transaction_sees_the_row_that_transaction_inserted()
             host.begin_transaction(app, &url).await;
 
             let inserted = zeroship_data_orm::crud::run_insert(
-                DbBinding::cold_start(app),
+                crate::tests::fixtures::harness_binding(app),
                 coll.to_string(),
                 tx_route(host, app).await,
                 value!({ "embedding": [1.0, 0.0, 0.0, 0.0], "title": "in the transaction" }),
@@ -319,7 +314,7 @@ fn a_spatial_near_inside_a_transaction_sees_the_row_that_transaction_inserted() 
 
             let point = value!({"lat": 51.5074, "lng": -0.1278});
             let inserted = zeroship_data_orm::crud::run_insert(
-                DbBinding::cold_start(app),
+                crate::tests::fixtures::harness_binding(app),
                 coll.to_string(),
                 tx_route(host, app).await,
                 value!({"location": point.clone(), "title": "in the transaction"}),

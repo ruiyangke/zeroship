@@ -422,7 +422,25 @@ pub async fn seed_app_in_zone(
     execution_zone_id: &str,
 ) -> AppId {
     let organization_id = seed_organization(pg).await;
-    let project_id = unowned_project_in(pg, &organization_id).await;
+    // The PROJECT is created in the same zone, not `unowned_project_in`'s
+    // default. `apps_project_zone_fkey` requires an app's zone copy to equal its
+    // project's, and both rows freeze their zone by trigger once written - so
+    // the pair has to agree at INSERT and cannot be reconciled afterwards.
+    let project_id = zeroship_core::typed_id::generate("prj");
+    let project_slug = format!("prj-{}", Uuid::new_v4().simple());
+    pg.execute(
+        "INSERT INTO zeroship.projects \
+             (id, organization_id, slug, name, execution_zone_id) \
+             VALUES ($1, $2, $3, 'Default', $4)",
+        &[
+            &project_id,
+            &organization_id,
+            &project_slug,
+            &execution_zone_id,
+        ],
+    )
+    .await
+    .expect("seed fixture project in a named zone");
     let app_id = AppId::mint();
     pg.execute(
         "INSERT INTO zeroship.apps \

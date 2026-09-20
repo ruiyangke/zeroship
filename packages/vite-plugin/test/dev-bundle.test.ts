@@ -45,7 +45,7 @@ interface Manifest {
   worker: { entry: string; modules: Record<string, string> };
   workflows?: string[];
   schedules?: { name: string; workflowName: string }[];
-  runtime_descriptor?: { hash: string };
+  runtime_descriptor?: { label: string; database_id: string; primary: boolean; hash: string }[];
 }
 
 async function unpack(archive: Buffer, output: string): Promise<Manifest> {
@@ -75,7 +75,13 @@ test("local workflow bundles retain dependencies and rebuild declarations indepe
       root,
       entry: join(root, "src/server.ts"),
       project: defaultProjectConfig(),
-      runtimeDescriptor: descriptor,
+      databases: [{
+        label: "main",
+        id: "dbs_03evr3oqx1200yyd6zj2cebfw",
+        primary: true,
+        migrations: "migrations",
+        descriptor,
+      }],
     };
     const original = await buildDevBundle(opts);
     assert.ok(original.dependencies.includes(opts.entry));
@@ -86,7 +92,14 @@ test("local workflow bundles retain dependencies and rebuild declarations indepe
     assert.deepEqual(manifest.workflows, ["Example"]);
     assert.deepEqual(manifest.schedules?.map(s => [s.name, s.workflowName]), [["periodic", "Example"]]);
     assert.ok(manifest.runtime_descriptor);
-    assert.equal(await fs.readFile(join(oldPath, "blobs", manifest.runtime_descriptor.hash), "utf8"), descriptor);
+    assert.deepEqual(
+      manifest.runtime_descriptor.map(e => [e.label, e.database_id, e.primary]),
+      [["main", "dbs_03evr3oqx1200yyd6zj2cebfw", true]],
+    );
+    assert.equal(
+      await fs.readFile(join(oldPath, "blobs", manifest.runtime_descriptor[0]!.hash), "utf8"),
+      descriptor,
+    );
 
     await fs.writeFile(join(root, "src/dependency.js"), 'import { basename } from "node:path"; export const prefix = basename("/values/replacement:");');
     const replacement = await buildDevBundle(opts);
@@ -94,7 +107,7 @@ test("local workflow bundles retain dependencies and rebuild declarations indepe
     const updated = await unpack(replacement.archive, newPath);
 
     await fs.writeFile(opts.entry, "export default { fetch() { return new Response('no workflows'); } };");
-    const removed = await buildDevBundle({ ...opts, runtimeDescriptor: undefined });
+    const removed = await buildDevBundle({ ...opts, databases: [] });
     const absent = await unpack(removed.archive, join(retained, "removed"));
     assert.equal(absent.workflows, undefined);
     assert.equal(absent.schedules, undefined);
@@ -131,13 +144,22 @@ test("failed workflow builds remove staging and never produce a partial archive"
       root,
       entry: join(root, "src/server.ts"),
       project: defaultProjectConfig(),
-      runtimeDescriptor: descriptor,
+      databases: [{
+        label: "main",
+        id: "dbs_03evr3oqx1200yyd6zj2cebfw",
+        primary: true,
+        migrations: "migrations",
+        descriptor,
+      }],
     };
     await fs.writeFile(opts.entry, 'import "./missing.js";');
     await assert.rejects(buildDevBundle(opts), /missing/);
     assert.deepEqual(await fs.readdir(join(root, ".zeroship")), []);
     await fs.writeFile(opts.entry, entry);
-    await assert.rejects(buildDevBundle({ ...opts, runtimeDescriptor: "{}" }), /runtime_descriptor/);
+    await assert.rejects(
+      buildDevBundle({ ...opts, databases: [{ ...opts.databases[0]!, descriptor: "{}" }] }),
+      /runtime_descriptor/,
+    );
     assert.deepEqual(await fs.readdir(join(root, ".zeroship")), []);
   } finally {
     await fs.rm(root, { recursive: true, force: true });

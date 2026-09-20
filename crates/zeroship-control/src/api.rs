@@ -173,54 +173,46 @@ fn error_response(e: RegistryError) -> web::HttpResponse {
         ),
         // Reachable only through a caller that does not build the remedy body.
         // `deploy` intercepts this variant before `error_response` and answers
-        // with `schema_precondition_response`, which carries the command.
-        RegistryError::SchemaNotApplied { .. } => {
+        // with `database_binding_response`, which carries the call that fixes it.
+        RegistryError::DatabaseNotBound { .. } => {
             web::HttpResponse::Conflict().json(&serde_json::json!({
-                "error": "schema_not_applied",
+                "error": "database_not_bound",
                 "detail": e.to_string(),
             }))
         }
     }
 }
 
-/// The 409 a deploy gets when its runtime schema descriptor does not name the
-/// schema the app's database holds.
+/// The 409 a deploy gets when it declares a database the app holds no live
+/// binding to.
 ///
 /// 409, not 400: the artifact is well-formed and the request is well-formed;
-/// what is wrong is the ORDER two correct operations happened in. And 409 is
-/// load-bearing beyond readability - `should_resolve_or_create_after_deploy_failure`
-/// in the CLI returns true only on 404, so a 409 does not trigger the
+/// what is missing is a GRANT nobody has made. And 409 is load-bearing beyond
+/// readability - `should_resolve_or_create_after_deploy_failure` in the CLI
+/// returns true only on 404, so a 409 does not trigger the
 /// auto-create-and-retry path and the creator sees this body rather than a
 /// second failure against a freshly created app.
 ///
-/// `remedy` is a command, not a sentence. The CLI prints this body raw, so a
-/// creator can copy the line out of the terminal.
-fn schema_precondition_response(
-    app_id: &AppId,
-    descriptor_sha256: &Option<String>,
-    applied_sha256: &Option<String>,
-) -> web::HttpResponse {
-    let (error, detail) = match descriptor_sha256 {
-        Some(_) => (
-            "schema_not_applied",
-            "this build's migrations have not been applied to the app's database. \
-             Deploying it would run code against a schema it was not built for - and \
-             where the two disagree about masking, the runtime would serve the plain \
-             value believing it was masked.",
-        ),
-        None => (
-            "schema_descriptor_missing",
-            "this artifact carries no runtime schema descriptor, but the app has \
-             applied migrations. Deploying it would boot the app with `env.db` \
-             uninstalled over a live database. Build with the migrations present.",
-        ),
-    };
+/// `remedy` NAMES THE CALL, one per unbound database, because the fix is an
+/// explicit act and not something the deploy may do on the creator's behalf.
+/// The CLI prints this body raw, so a creator can copy the line out of the
+/// terminal.
+fn database_binding_response(app_id: &AppId, databases: &[String]) -> web::HttpResponse {
     web::HttpResponse::Conflict().json(&serde_json::json!({
-        "error": error,
-        "detail": detail,
-        "deploy_descriptor_sha256": descriptor_sha256,
-        "applied_descriptor_sha256": applied_sha256,
-        "remedy": format!("zeroship migrate --app={}", app_id.as_str()),
+        "error": "database_not_bound",
+        "detail": "this artifact declares a database the app holds no live binding to. \
+                   Declaring a database grants nothing: a deploy verifies the grant and \
+                   never creates one, because an artifact is a stale snapshot of an intent \
+                   somebody may have changed since.",
+        "databases": databases,
+        "app_id": app_id.as_str(),
+        "remedy": databases
+            .iter()
+            .map(|database| format!(
+                "POST /api/databases/{database}/bindings {{\"app_id\":\"{}\",\"capability\":\"readwrite\"}}",
+                app_id.as_str()
+            ))
+            .collect::<Vec<_>>(),
     }))
 }
 
@@ -816,7 +808,7 @@ pub async fn deploy(
     if has_legacy_deploy_migration_query(req.query_string()) {
         return web::HttpResponse::BadRequest().json(&serde_json::json!({
             "error": "migration_approval_removed",
-            "detail": "deploy no longer applies migrations; run zeroship migrate against /v1/apps/{id}/migrations/apply",
+            "detail": "deploy no longer applies migrations; run zeroship migrate against /v1/apps/{app_id}/databases/{database_id}/migrations/apply",
         }));
     }
     let command_id = match deploy_command_id(&req) {
@@ -1151,10 +1143,9 @@ fn catalog_error_response(app: &AppId, error: CatalogError) -> web::HttpResponse
             "detail": "this deploy command id was already used for a different deploy; \
                        mint a new command id for a new deploy",
         })),
-        CatalogError::SchemaNotApplied {
-            descriptor_sha256,
-            applied_sha256,
-        } => schema_precondition_response(app, &descriptor_sha256, &applied_sha256),
+        CatalogError::DatabaseNotBound { databases } => {
+            database_binding_response(app, &databases)
+        }
         CatalogError::DeploymentReclaimed => {
             web::HttpResponse::Conflict().json(&serde_json::json!({
                 "error": "deployment_reclaimed",

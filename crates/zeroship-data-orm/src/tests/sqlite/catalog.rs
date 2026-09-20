@@ -13,13 +13,14 @@ fn estimate_row_count_missing_table_returns_zero() {
     Host::test(|host| {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
+            let alias = crate::tests::fixtures::harness_alias("app_demo");
             backend
-                .attach_app_file("app_demo")
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
 
             let rows = backend
-                .estimate_row_count("app_demo", "missing_table")
+                .estimate_row_count(&alias, "missing_table")
                 .await
                 .expect("estimate_row_count for missing table");
             assert_eq!(rows, 0, "missing table must classify as empty");
@@ -33,15 +34,11 @@ fn introspect_empty_schema_yields_empty_live_schema() {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
             backend
-                .attach_app_file("app_demo")
+                .attach_binding(&crate::tests::fixtures::harness_binding("app_demo"))
                 .await
                 .expect("ensure_app_schema");
             let live = backend
-                .introspect_schema(
-                    "app_demo",
-                    &crate::sql::SchemaName::new("app_demo").unwrap(),
-                    None,
-                )
+                .introspect_schema(&crate::tests::fixtures::harness_binding("app_demo"), None)
                 .await
                 .expect("introspect_schema on empty namespace");
             // No user tables → empty `tables` / `indexes` / `foreign_keys`.
@@ -68,8 +65,9 @@ fn introspect_after_create_table_round_trip() {
     Host::test(|host| {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
+            let alias = crate::tests::fixtures::harness_alias("app_demo");
             backend
-                .attach_app_file("app_demo")
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("ensure_app_schema");
 
@@ -77,17 +75,19 @@ fn introspect_after_create_table_round_trip() {
             // columns, plus a non-PK index, so the introspect output
             // exercises every PRAGMA branch.
             let client = backend
-                .fixture_session("app_demo")
+                .fixture_session(&crate::tests::fixtures::harness_alias("app_demo"))
                 .await
                 .expect("acquire client");
             backend
                 .execute_fixture_on(
                     &client,
-                    "CREATE TABLE \"app_demo\".\"items\" (\
-                     id INTEGER PRIMARY KEY, \
-                     name TEXT NOT NULL, \
-                     payload TEXT\
-                 )",
+                    &format!(
+                        "CREATE TABLE \"{alias}\".\"items\" (\
+                         id INTEGER PRIMARY KEY, \
+                         name TEXT NOT NULL, \
+                         payload TEXT\
+                     )"
+                    ),
                     &[],
                 )
                 .await
@@ -95,18 +95,14 @@ fn introspect_after_create_table_round_trip() {
             backend
                 .execute_fixture_on(
                     &client,
-                    "CREATE INDEX \"app_demo\".\"items_name_idx\" ON \"items\"(name)",
+                    &format!("CREATE INDEX \"{alias}\".\"items_name_idx\" ON \"items\"(name)"),
                     &[],
                 )
                 .await
                 .expect("CREATE INDEX items_name_idx");
 
             let live = backend
-                .introspect_schema(
-                    "app_demo",
-                    &crate::sql::SchemaName::new("app_demo").unwrap(),
-                    None,
-                )
+                .introspect_schema(&crate::tests::fixtures::harness_binding("app_demo"), None)
                 .await
                 .expect("introspect_schema after CREATE TABLE");
 
@@ -166,7 +162,7 @@ fn introspect_after_create_table_round_trip() {
 
             // estimate_row_count on the empty table is 0.
             let n = backend
-                .estimate_row_count("app_demo", "items")
+                .estimate_row_count(&alias, "items")
                 .await
                 .expect("estimate_row_count");
             assert_eq!(n, 0, "freshly-created table has 0 rows");
@@ -179,27 +175,26 @@ fn introspection_includes_prefixed_creator_schema_tables() {
     Host::test(|host| {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
+            let alias = crate::tests::fixtures::harness_alias("app_demo");
             backend
-                .attach_app_file("app_demo")
+                .attach_binding(&crate::tests::fixtures::harness_binding_for_alias(&alias))
                 .await
                 .expect("attach creator database");
             backend
                 .execute_fixture(
-                    "CREATE TABLE \"app_demo\".\"__zs_workflow_state\" (\
-                     id TEXT PRIMARY KEY, \
-                     \"secret\" TEXT /* zero-migrate:mask:kind=full,classification=pii */\
-                     )",
+                    &format!(
+                        "CREATE TABLE \"{alias}\".\"__zs_workflow_state\" (\
+                         id TEXT PRIMARY KEY, \
+                         \"secret\" TEXT /* zero-migrate:mask:kind=full,classification=pii */\
+                         )"
+                    ),
                     &[],
                 )
                 .await
                 .expect("create prefixed table");
 
             let live = backend
-                .introspect_schema(
-                    "app_demo",
-                    &crate::sql::SchemaName::new("app_demo").unwrap(),
-                    None,
-                )
+                .introspect_schema(&crate::tests::fixtures::harness_binding("app_demo"), None)
                 .await
                 .expect("introspect prefixed table");
             let secret = live

@@ -42,11 +42,12 @@ zeroship migrate    # apply the schema
 
 Neither command needs a target. The artifact path, the app and the control
 plane come from `zeroship.jsonc`, and each command prints what it resolved and
-from where before acting. `--app=<id>` and `--control=<url>` still override the
-file. `zeroship config show` prints the resolved configuration.
+from where before acting. With one app declared `--app` is optional; with
+several it names which label to act on. `--control=<url>` still overrides the
+file, and `zeroship config show` prints the resolved configuration.
 
-On the first deploy `zeroship.jsonc` has no `app` key: deploy falls back to the
-project `name`, creates that app, and writes its id back into the file.
+On the first deploy the `apps` entry has no `app` id: deploy falls back to the
+workspace `name`, creates that app, and writes its id back into that entry.
 `migrate`, `secret` and `var` do not take that fallback, so run `deploy` first.
 
 ### Run both, in that order, whenever the schema changes
@@ -67,13 +68,16 @@ it after every deploy is safe.
 
 ## Configuration and secrets
 
-`zeroship.jsonc` names the app, the control plane, the build output and the
-migration paths, so every tool reads one spelling of them. Named `environments`
-select different targets.
+`zeroship.jsonc` names the workspace's apps and databases by LOCAL LABEL, the
+control plane and the build output, so every tool reads one spelling of them.
+Each database entry carries its own `migrations` and `out` paths, and each app
+entry names the database labels it uses and which is its `primary` - the one
+`env.db` reaches. Named `environments` select different targets, and each must
+state `apps`, `control` and `databases` in full.
 
 ```bash
-zeroship secret set STRIPE_KEY=sk_live_... --app=<id>
-zeroship var set LOG_LEVEL=debug --app=<id>
+zeroship secret set STRIPE_KEY=sk_live_... --app=<label>
+zeroship var set LOG_LEVEL=debug --app=<label>
 ```
 
 Secrets are encrypted at rest and always readable as `env.KEY`. They reach

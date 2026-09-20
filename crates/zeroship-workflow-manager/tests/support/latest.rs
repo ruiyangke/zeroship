@@ -58,7 +58,7 @@ impl Source {
                 ("main", fixture.url().to_owned())
             }
         };
-        let binding = DbBinding::new(
+        let binding = DbBinding::platform(
             "platform",
             "management-selection",
             SchemaName::new(namespace).unwrap(),

@@ -307,6 +307,7 @@ fn collection_dispatch_uses_the_injected_orm_factory() {
     let calls = Arc::new(AtomicUsize::new(0));
     let factory = ConnectionFactory::new("adapter_injection", HostFactory(calls.clone()));
     let service = crate::service::DbService::new(crate::service::DbServiceConfig {
+        app_bindings: Default::default(),
         project_keys: crate::tests::fixtures::project_keys(),
         connection: factory.clone(),
         cdc_relay: None,

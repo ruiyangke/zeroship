@@ -54,8 +54,8 @@ export default {
     // journal as a trust anchor.
     //
     // The reader is the control plane's deploy precondition
-    // (`catalog::admit_schema`), which compares a `.zship`'s
-    // `runtime_descriptor.hash` against the NEWEST applied row's
+    // (`catalog::admit_schema`), which compares the PRIMARY database's
+    // `runtime_descriptor` hash against the NEWEST applied row's
     // `descriptor_sha256`. `zeroship_control` holds the grant
     // (`20260702000900_grants.ts`) and no other service reads it.
     //

@@ -25,6 +25,7 @@ pub(crate) mod driver;
 #[cfg(test)]
 pub mod probe;
 
+use crate::binding::DbRoute;
 use crate::tx_route::TxRoute;
 use zeroship_data_orm::error::DbError;
 
@@ -40,12 +41,12 @@ pub const MAX_SAVEPOINT_DEPTH: u32 = 8;
 /// still empty — the window two same-turn `transaction()` calls both fell
 /// into.
 struct AwaitTxClaim {
-    app_id: String,
+    route: DbRoute,
 }
 
 impl AwaitTxClaim {
-    fn new(app_id: String) -> Self {
-        Self { app_id }
+    fn new(route: DbRoute) -> Self {
+        Self { route }
     }
 }
 
@@ -56,20 +57,20 @@ impl std::future::Future for AwaitTxClaim {
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), DbError>> {
-        if crate::tx_lanes::with_mut(|l| l.try_claim_tx(&self.app_id)) {
+        if crate::tx_lanes::with_mut(|l| l.try_claim_tx(&self.route)) {
             return std::task::Poll::Ready(Ok(()));
         }
         // The claim is held by the callback this poll is running inside, so
         // nothing can release it before this future resolves. Parking is a
         // deadlock the database cannot see - the transaction holding the lane
         // is idle and healthy - and only a caller-side timeout ends it.
-        if crate::tx_lanes::with(|l| l.callback_is_polling(&self.app_id)) {
+        if crate::tx_lanes::with(|l| l.callback_is_polling(&self.route)) {
             return std::task::Poll::Ready(Err(nested_top_level_transaction()));
         }
         // Lost to another task. Park and re-check on the next release;
         // `release_tx_claim` wakes every waiter, so a spurious wake just
         // re-runs this poll.
-        crate::tx_lanes::with_mut(|l| l.push_tx_waiter(&self.app_id, cx.waker().clone()));
+        crate::tx_lanes::with_mut(|l| l.push_tx_waiter(&self.route, cx.waker().clone()));
         std::task::Poll::Pending
     }
 }
@@ -91,20 +92,20 @@ fn nested_top_level_transaction() -> DbError {
 /// See [`crate::tx_lanes::TxLane`]'s `callback_polls`: the marker is what turns
 /// a re-entrant top-level `transaction()` from an invisible self-deadlock into
 /// a typed refusal.
-pub(crate) fn in_callback<F: std::future::Future>(app_id: &str, body: F) -> InCallback<F> {
+pub(crate) fn in_callback<F: std::future::Future>(route: &DbRoute, body: F) -> InCallback<F> {
     InCallback {
-        app_id: app_id.to_owned(),
+        route: route.clone(),
         body: Box::pin(body),
     }
 }
 
 pub(crate) struct InCallback<F> {
-    app_id: String,
+    route: DbRoute,
     body: std::pin::Pin<Box<F>>,
 }
 
 /// Lowers the marker even when the callback unwinds.
-struct CallbackMark<'a>(&'a str);
+struct CallbackMark<'a>(&'a DbRoute);
 impl Drop for CallbackMark<'_> {
     fn drop(&mut self) {
         crate::tx_lanes::with_mut(|l| l.exit_callback(self.0));
@@ -118,8 +119,8 @@ impl<F: std::future::Future> std::future::Future for InCallback<F> {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<F::Output> {
         let this = self.get_mut();
-        crate::tx_lanes::with_mut(|l| l.enter_callback(&this.app_id));
-        let _mark = CallbackMark(&this.app_id);
+        crate::tx_lanes::with_mut(|l| l.enter_callback(&this.route));
+        let _mark = CallbackMark(&this.route);
         this.body.as_mut().poll(cx)
     }
 }
@@ -129,7 +130,7 @@ impl<F: std::future::Future> std::future::Future for InCallback<F> {
 /// claimed until cleanup acknowledges rollback or withdraws an uncertain session.
 #[derive(Debug)]
 pub struct TxAdmission {
-    app_id: String,
+    route: DbRoute,
     owner: crate::OrmContext,
     completion: driver::Completion,
     armed: bool,
@@ -141,16 +142,16 @@ impl TxAdmission {
     /// # Errors
     /// `nested_top_level_transaction` when the claim is held by the callback
     /// this call is running inside, which no amount of waiting can release.
-    pub async fn acquire(app_id: String) -> Result<Self, DbError> {
-        AwaitTxClaim::new(app_id.clone()).await?;
-        Ok(Self::current(app_id))
+    pub async fn acquire(route: DbRoute) -> Result<Self, DbError> {
+        AwaitTxClaim::new(route.clone()).await?;
+        Ok(Self::current(route))
     }
 
-    fn current(app_id: String) -> Self {
-        let completion = crate::tx_lanes::with(|l| l.transaction_completion(&app_id))
+    fn current(route: DbRoute) -> Self {
+        let completion = crate::tx_lanes::with(|l| l.transaction_completion(&route))
             .expect("a claimed lane has an admission identity");
         Self {
-            app_id,
+            route,
             owner: crate::orm_context::current(),
             completion,
             armed: true,
@@ -169,14 +170,14 @@ impl Drop for TxAdmission {
             return;
         }
         self.owner.with(|| {
-            if !crate::tx_lanes::with(|l| self.completion.is_current_in(l, &self.app_id)) {
+            if !crate::tx_lanes::with(|l| self.completion.is_current_in(l, &self.route)) {
                 return;
             }
-            if driver::cancel_admission(&self.app_id, self.completion.clone()) {
+            if driver::cancel_admission(&self.route, self.completion.clone()) {
                 return;
             }
             // No reducer means BEGIN has not been dispatched by this claim.
-            crate::tx_lanes::with_mut(|l| l.release_tx_claim(&self.app_id));
+            crate::tx_lanes::with_mut(|l| l.release_tx_claim(&self.route));
         });
     }
 }
@@ -194,7 +195,7 @@ impl Drop for TxAdmission {
 #[must_use = "an atomic write frame must be settled with finish"]
 #[derive(Debug)]
 pub struct AtomicWriteFrame {
-    route: TxRoute,
+    tx_route: TxRoute,
     frame: Option<reducer::frames::FrameId>,
     state: AtomicWriteFrameState,
     /// Armed through the callback and savepoint settlement. Root terminal SQL
@@ -211,19 +212,19 @@ enum AtomicWriteFrameState {
 
 impl AtomicWriteFrame {
     /// Open the frame and promote the captured dispatch route onto it.
-    pub async fn begin(route: TxRoute) -> Result<Self, DbError> {
-        Self::begin_with_isolation(route, None).await
+    pub async fn begin(tx_route: TxRoute) -> Result<Self, DbError> {
+        Self::begin_with_isolation(tx_route, None).await
     }
 
     pub(crate) async fn begin_with_isolation(
-        route: TxRoute,
+        tx_route: TxRoute,
         isolation_level: Option<zeroship_data_orm::error::IsolationLevel>,
     ) -> Result<Self, DbError> {
-        route.check_scope()?;
-        let nested = route.in_tx();
-        let app_id = route.app_id().to_string();
-        let schema = route.schema().clone();
-        if nested && !crate::tx_lanes::with(|l| l.has_tx_for(&app_id)) {
+        tx_route.check_scope()?;
+        let nested = tx_route.in_tx();
+        let route = tx_route.key();
+        let binding = tx_route.binding().clone();
+        if nested && !crate::tx_lanes::with(|l| l.has_tx_for(&route)) {
             return Err(DbError::validation_hinted(
                 "transaction_scope_expired",
                 "the enclosing transaction has already settled".to_string(),
@@ -232,15 +233,15 @@ impl AtomicWriteFrame {
         }
         // The depth cap is the frame stack's, not a second copy here.
         let admission = if nested {
-            Some(TxAdmission::current(app_id.clone()))
+            Some(TxAdmission::current(route.clone()))
         } else {
-            Some(TxAdmission::acquire(app_id.clone()).await?)
+            Some(TxAdmission::acquire(route.clone()).await?)
         };
 
-        let backend = route.backend().clone();
-        match exec_begin_or_savepoint(nested, isolation_level, &app_id, schema, backend).await {
+        let backend = tx_route.backend().clone();
+        match exec_begin_or_savepoint(nested, isolation_level, &binding, backend).await {
             Ok(frame) => Ok(Self {
-                route: route.into_internal_transaction()?,
+                tx_route: tx_route.into_internal_transaction()?,
                 frame,
                 state: AtomicWriteFrameState::Open,
                 admission,
@@ -259,8 +260,8 @@ impl AtomicWriteFrame {
     }
 
     /// Route all statements and broker effects through this frame.
-    pub fn route(&self) -> &TxRoute {
-        &self.route
+    pub fn tx_route(&self) -> &TxRoute {
+        &self.tx_route
     }
 
     /// Commit/release a successful body or roll back a failed one.
@@ -280,7 +281,7 @@ impl AtomicWriteFrame {
     {
         if self.admission.as_ref().is_some_and(|admission| {
             !admission.owner.with(|| {
-                crate::tx_lanes::with(|l| admission.completion.is_current_in(l, &admission.app_id))
+                crate::tx_lanes::with(|l| admission.completion.is_current_in(l, &admission.route))
             })
         }) {
             return Err(E::from(scope::expired()));
@@ -294,7 +295,7 @@ impl AtomicWriteFrame {
             }
         }
         self.state = AtomicWriteFrameState::Settling;
-        let outcome = exec_settle(self.route.app_id(), success, self.frame).await;
+        let outcome = exec_settle(&self.tx_route.key(), success, self.frame).await;
         if let Some(admission) = self.admission.take() {
             admission.handed_to_reducer();
         }
@@ -339,8 +340,7 @@ impl Drop for AtomicWriteFrame {
 pub async fn exec_begin_or_savepoint(
     nested: bool,
     isolation_level: Option<zeroship_data_orm::error::IsolationLevel>,
-    app_id: &str,
-    schema: crate::sql::SchemaName,
+    binding: &crate::binding::DbBinding,
     backend: crate::backend::BackendHandle,
 ) -> Result<Option<reducer::frames::FrameId>, DbError> {
     if nested {
@@ -350,7 +350,7 @@ pub async fn exec_begin_or_savepoint(
                 "db.transaction: savepoints inherit the enclosing transaction's isolation",
             ));
         }
-        let driven = driver::open_frame(app_id).await;
+        let driven = driver::open_frame(&binding.route()).await;
         if let Some(refusal) = driven.refusal() {
             return Err(frame_refusal(refusal, driven.error));
         }
@@ -362,7 +362,7 @@ pub async fn exec_begin_or_savepoint(
         return Ok(Some(frame));
     }
 
-    let driven = driver::begin_top_level(app_id, schema, isolation_level, backend).await?;
+    let driven = driver::begin_top_level(binding, isolation_level, backend).await?;
     let outcome = driven.outcome();
     match outcome {
         // Only the genuinely unclassified startup outcome gets the generic
@@ -416,7 +416,7 @@ fn frame_refusal(refusal: reducer::TxProtocolError, detail: Option<DbError>) -> 
     driver::protocol_error(refusal, detail)
 }
 
-/// Run one creator data statement inside `app_id`'s open transaction.
+/// Run one creator data statement inside `route`'s open transaction.
 ///
 /// Goes through the reducer's operation guard: the statement takes the session,
 /// and its outcome is reported back. A statement that errors leaves the
@@ -433,8 +433,8 @@ fn frame_refusal(refusal: reducer::TxProtocolError, detail: Option<DbError>) -> 
     reason = "the tests below are its only callers until exec.rs's in-transaction \
               arms move onto the reducer's operation guard"
 )]
-pub(crate) async fn run_on_tx_conn(app_id: &str, sql: &str) -> Result<(), DbError> {
-    driver::run_operation(app_id, sql, &[]).await
+pub(crate) async fn run_on_tx_conn(route: &DbRoute, sql: &str) -> Result<(), DbError> {
+    driver::run_operation(route, sql, &[]).await
 }
 
 // ---------------------------------------------------------------------------
@@ -482,7 +482,7 @@ pub enum SettleOutcome {
 /// SQL is due is `Indeterminate`, which withdraws and tells the creator. An
 /// absent client is never proof that terminal SQL has run.
 pub async fn exec_settle(
-    app_id: &str,
+    route: &DbRoute,
     success: bool,
     frame: Option<reducer::frames::FrameId>,
 ) -> SettleOutcome {
@@ -493,7 +493,7 @@ pub async fn exec_settle(
             } else {
                 reducer::frames::FrameClose::RolledBackTo
             };
-            let driven = driver::close_frame(app_id, frame, close).await;
+            let driven = driver::close_frame(route, frame, close).await;
             if driven.frame().is_some() {
                 return SettleOutcome::Ok;
             }
@@ -520,7 +520,7 @@ pub async fn exec_settle(
             } else {
                 reducer::SettleIntent::Rollback
             };
-            let driven = driver::settle_root(app_id, intent).await;
+            let driven = driver::settle_root(route, intent).await;
             let Some(outcome) = driven.outcome() else {
                 let error = driven.refusal().map_or_else(
                     || DbError::internal("db.transaction: the settle produced no outcome"),
@@ -576,8 +576,8 @@ fn savepoint_release_failed_indeterminate(error: DbError) -> DbError {
 }
 
 /// Whether this app still has an active transaction frame in the host context.
-pub fn is_active(app_id: &str) -> bool {
-    crate::tx_lanes::with(|lanes| lanes.has_tx_for(app_id))
+pub fn is_active(route: &DbRoute) -> bool {
+    crate::tx_lanes::with(|lanes| lanes.has_tx_for(route))
 }
 
 #[cfg(test)]
@@ -601,8 +601,8 @@ thread_local! {
 /// tenant it names - which is the shape this typing change exists to make
 /// visible.
 #[cfg(test)]
-fn test_schema() -> crate::sql::SchemaName {
-    crate::sql::SchemaName::new("app_sqlite").expect("fixture schema name")
+fn test_binding() -> crate::binding::DbBinding {
+    crate::tests::fixtures::harness_binding("app_sqlite")
 }
 
 #[cfg(test)]
@@ -636,10 +636,10 @@ mod tests {
     impl Drop for ContextReset {
         fn drop(&mut self) {
             crate::tx_lanes::with_mut(|l| {
-                let _ = l.take_tx_client_for("app_sqlite");
-                l.retire_transaction("app_sqlite");
-                l.release_tx_claim("app_sqlite");
-                l.clear_pending_emits_for("app_sqlite");
+                let _ = l.take_tx_client_for(&crate::tests::fixtures::harness_route("app_sqlite"));
+                l.retire_transaction(&crate::tests::fixtures::harness_route("app_sqlite"));
+                l.release_tx_claim(&crate::tests::fixtures::harness_route("app_sqlite"));
+                l.clear_pending_emits_for(&crate::tests::fixtures::harness_route("app_sqlite"));
             });
             // The backend slot this clears is the fixture's own thread-local,
             // not the adapter's per-isolate pool: this crate cannot name that
@@ -660,10 +660,10 @@ mod tests {
         );
         let reset = ContextReset;
         crate::tx_lanes::with_mut(|l| {
-            let _ = l.take_tx_client_for("app_sqlite");
-            l.retire_transaction("app_sqlite");
-            l.release_tx_claim("app_sqlite");
-            l.clear_pending_emits_for("app_sqlite");
+            let _ = l.take_tx_client_for(&crate::tests::fixtures::harness_route("app_sqlite"));
+            l.retire_transaction(&crate::tests::fixtures::harness_route("app_sqlite"));
+            l.release_tx_claim(&crate::tests::fixtures::harness_route("app_sqlite"));
+            l.clear_pending_emits_for(&crate::tests::fixtures::harness_route("app_sqlite"));
         });
         super::TEST_BACKEND.with(|slot| {
             *slot.borrow_mut() = Some(crate::backend::BackendHandle::new(Rc::clone(&backend)));
@@ -691,24 +691,24 @@ mod tests {
                 .await
                 .expect("create table");
 
-            exec_begin_or_savepoint(false, None, "app_sqlite", test_schema(), test_backend())
+            exec_begin_or_savepoint(false, None, &test_binding(), test_backend())
                 .await
                 .expect("begin");
 
             let first =
-                exec_begin_or_savepoint(true, None, "app_sqlite", test_schema(), test_backend())
+                exec_begin_or_savepoint(true, None, &test_binding(), test_backend())
                     .await
                     .expect("first nested frame")
                     .expect("a nested begin opens a frame");
             // Roll it back, which on PostgreSQL leaves the savepoint defined -
             // the precondition that makes a reused name dangerous.
-            match exec_settle("app_sqlite", false, Some(first)).await {
+            match exec_settle(&crate::tests::fixtures::harness_route("app_sqlite"), false, Some(first)).await {
                 SettleOutcome::Ok => {}
                 other => panic!("expected Ok for the first frame settle, got {other:?}"),
             }
 
             let second =
-                exec_begin_or_savepoint(true, None, "app_sqlite", test_schema(), test_backend())
+                exec_begin_or_savepoint(true, None, &test_binding(), test_backend())
                     .await
                     .expect("second nested frame")
                     .expect("a nested begin opens a frame");
@@ -718,7 +718,7 @@ mod tests {
             );
 
             let names = crate::tx_lanes::with(|l| {
-                l.transaction_reducer("app_sqlite")
+                l.transaction_reducer(&crate::tests::fixtures::harness_route("app_sqlite"))
                     .expect("the transaction is still open")
                     .frames()
                     .minted_names()
@@ -737,11 +737,11 @@ mod tests {
                  savepoint namespace; got {names:?}"
             );
 
-            match exec_settle("app_sqlite", false, Some(second)).await {
+            match exec_settle(&crate::tests::fixtures::harness_route("app_sqlite"), false, Some(second)).await {
                 SettleOutcome::Ok => {}
                 other => panic!("expected Ok for the second frame settle, got {other:?}"),
             }
-            let _ = exec_settle("app_sqlite", false, None).await;
+            let _ = exec_settle(&crate::tests::fixtures::harness_route("app_sqlite"), false, None).await;
         });
     }
 
@@ -834,17 +834,16 @@ mod tests {
             exec_begin_or_savepoint(
                 false,
                 Some(zeroship_data_orm::error::IsolationLevel::Serializable),
-                "app_sqlite",
-                test_schema(),
+                &test_binding(),
                 test_backend(),
             )
             .await
             .expect("begin sqlite tx");
-            run_on_tx_conn("app_sqlite", "INSERT INTO notes (title) VALUES ('kept')")
+            run_on_tx_conn(&crate::tests::fixtures::harness_route("app_sqlite"), "INSERT INTO notes (title) VALUES ('kept')")
                 .await
                 .expect("insert inside sqlite tx");
 
-            match exec_settle("app_sqlite", true, None).await {
+            match exec_settle(&crate::tests::fixtures::harness_route("app_sqlite"), true, None).await {
                 SettleOutcome::Ok => {}
                 other => panic!("expected Ok settle outcome, got {other:?}"),
             }
@@ -854,7 +853,7 @@ mod tests {
                 .await
                 .expect("count notes after commit");
             assert_eq!(rows[0][0].as_deref(), Some("1"));
-            assert!(!crate::tx_lanes::with(|l| l.has_tx_for("app_sqlite")));
+            assert!(!crate::tx_lanes::with(|l| l.has_tx_for(&crate::tests::fixtures::harness_route("app_sqlite"))));
         });
     }
 
@@ -881,10 +880,10 @@ mod tests {
                 .await
                 .expect("create table");
 
-            exec_begin_or_savepoint(false, None, "app_sqlite", test_schema(), test_backend())
+            exec_begin_or_savepoint(false, None, &test_binding(), test_backend())
                 .await
                 .expect("begin sqlite tx");
-            run_on_tx_conn("app_sqlite", "INSERT INTO notes (title) VALUES ('before')")
+            run_on_tx_conn(&crate::tests::fixtures::harness_route("app_sqlite"), "INSERT INTO notes (title) VALUES ('before')")
                 .await
                 .expect("insert before the backend is cleared");
 
@@ -894,13 +893,13 @@ mod tests {
             // backend now - the adapter's per-isolate pool is out of reach and
             // was never what `run_on_tx_conn` reads.
             super::TEST_BACKEND.with(|slot| slot.borrow_mut().take());
-            assert!(crate::tx_lanes::with(|l| l.has_tx_for("app_sqlite")));
+            assert!(crate::tx_lanes::with(|l| l.has_tx_for(&crate::tests::fixtures::harness_route("app_sqlite"))));
 
-            run_on_tx_conn("app_sqlite", "INSERT INTO notes (title) VALUES ('after')")
+            run_on_tx_conn(&crate::tests::fixtures::harness_route("app_sqlite"), "INSERT INTO notes (title) VALUES ('after')")
                 .await
                 .expect("insert after the backend is cleared");
 
-            match exec_settle("app_sqlite", true, None).await {
+            match exec_settle(&crate::tests::fixtures::harness_route("app_sqlite"), true, None).await {
                 SettleOutcome::Ok => {}
                 other => panic!("expected Ok settle outcome, got {other:?}"),
             }
@@ -910,7 +909,7 @@ mod tests {
                 .await
                 .expect("count notes after commit");
             assert_eq!(rows[0][0].as_deref(), Some("2"));
-            assert!(!crate::tx_lanes::with(|l| l.has_tx_for("app_sqlite")));
+            assert!(!crate::tx_lanes::with(|l| l.has_tx_for(&crate::tests::fixtures::harness_route("app_sqlite"))));
         });
     }
 
@@ -928,17 +927,17 @@ mod tests {
                 .await
                 .expect("create table");
 
-            exec_begin_or_savepoint(false, None, "app_sqlite", test_schema(), test_backend())
+            exec_begin_or_savepoint(false, None, &test_binding(), test_backend())
                 .await
                 .expect("begin sqlite tx");
             run_on_tx_conn(
-                "app_sqlite",
+                &crate::tests::fixtures::harness_route("app_sqlite"),
                 "INSERT INTO notes (title) VALUES ('rolled-back')",
             )
             .await
             .expect("insert inside sqlite tx");
 
-            match exec_settle("app_sqlite", false, None).await {
+            match exec_settle(&crate::tests::fixtures::harness_route("app_sqlite"), false, None).await {
                 SettleOutcome::Ok => {}
                 other => panic!("expected Ok settle outcome, got {other:?}"),
             }
@@ -948,7 +947,7 @@ mod tests {
                 .await
                 .expect("count notes after rollback");
             assert_eq!(rows[0][0].as_deref(), Some("0"));
-            assert!(!crate::tx_lanes::with(|l| l.has_tx_for("app_sqlite")));
+            assert!(!crate::tx_lanes::with(|l| l.has_tx_for(&crate::tests::fixtures::harness_route("app_sqlite"))));
         });
     }
 
@@ -997,20 +996,20 @@ mod tests {
                 .await
                 .expect("create table");
 
-            exec_begin_or_savepoint(false, None, "app_sqlite", test_schema(), test_backend())
+            exec_begin_or_savepoint(false, None, &test_binding(), test_backend())
                 .await
                 .expect("begin sqlite tx");
-            run_on_tx_conn("app_sqlite", "INSERT INTO notes (title) VALUES ('doomed')")
+            run_on_tx_conn(&crate::tests::fixtures::harness_route("app_sqlite"), "INSERT INTO notes (title) VALUES ('doomed')")
                 .await
                 .expect("insert inside sqlite tx");
 
             // Another future owns the session. Forced cleanup cannot take it out
-            // of the slot, so the only route left is the canceller captured when
+            // of the slot, so the only tx_route left is the canceller captured when
             // the session was installed.
             let held =
-                crate::tx_lanes::TxClientSlotGuard::take("app_sqlite").expect("hold the session");
+                crate::tx_lanes::TxClientSlotGuard::take(&crate::tests::fixtures::harness_route("app_sqlite")).expect("hold the session");
 
-            let driven = driver::cancel("app_sqlite").await;
+            let driven = driver::cancel(&crate::tests::fixtures::harness_route("app_sqlite")).await;
             assert_eq!(
                 driven.outcome(),
                 Some(reducer::TerminalOutcome::Cancelled(
@@ -1021,7 +1020,7 @@ mod tests {
                  Indeterminate here is what used to abandon a live session"
             );
             assert!(
-                !crate::tx_lanes::with(|l| l.tx_session_withdrawn("app_sqlite")),
+                !crate::tx_lanes::with(|l| l.tx_session_withdrawn(&crate::tests::fixtures::harness_route("app_sqlite"))),
                 "a proved cleanup withdraws nothing"
             );
 
@@ -1071,7 +1070,7 @@ mod tests {
                 .await
                 .expect("create table");
 
-            exec_begin_or_savepoint(false, None, "app_sqlite", test_schema(), test_backend())
+            exec_begin_or_savepoint(false, None, &test_binding(), test_backend())
                 .await
                 .expect("begin sqlite tx");
 
@@ -1085,11 +1084,11 @@ mod tests {
                 .await
                 .expect("autocommit insert while a transaction is open");
 
-            run_on_tx_conn("app_sqlite", "INSERT INTO notes (title) VALUES ('doomed')")
+            run_on_tx_conn(&crate::tests::fixtures::harness_route("app_sqlite"), "INSERT INTO notes (title) VALUES ('doomed')")
                 .await
                 .expect("insert inside sqlite tx");
 
-            match exec_settle("app_sqlite", false, None).await {
+            match exec_settle(&crate::tests::fixtures::harness_route("app_sqlite"), false, None).await {
                 SettleOutcome::Ok => {}
                 other => panic!("expected Ok settle outcome, got {other:?}"),
             }
@@ -1123,13 +1122,13 @@ mod tests {
                 .expect("create table");
 
             let frame = AtomicWriteFrame::begin(crate::exec::ambient_route_for_tests(
-                "app_sqlite",
+                &test_binding(),
                 test_backend(),
             ))
             .await
             .expect("begin atomic write frame");
             run_on_tx_conn(
-                "app_sqlite",
+                &crate::tests::fixtures::harness_route("app_sqlite"),
                 "INSERT INTO notes (title) VALUES ('must-rollback')",
             )
             .await
@@ -1163,7 +1162,7 @@ mod tests {
                 .await
                 .expect("settle replacement");
             assert!(!crate::tx_lanes::with(|l| {
-                l.has_tx_for("app_sqlite") || l.tx_claimed_by("app_sqlite")
+                l.has_tx_for(&crate::tests::fixtures::harness_route("app_sqlite")) || l.tx_claimed_by(&crate::tests::fixtures::harness_route("app_sqlite"))
             }));
         });
     }

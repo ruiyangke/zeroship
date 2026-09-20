@@ -58,7 +58,7 @@ refused at deploy with `400` and an `unsupported manifest version` error.
 | `metadata` | `compiler` and `built_at`. |
 | `schedules` | Workflow schedule registrations discovered at build time. Each carries `name`, `workflowName`, `input`, `overlap`, `catchUp`, and a timing `schedule`. |
 | `workflows` | The workflow declarations discovered at build time. A workflow not declared here cannot be started. |
-| `runtime_descriptor` | The generated database schema descriptor, carried as a content-addressed blob. Absent for a schema-less app. |
+| `runtime_descriptor` | ONE ENTRY PER DATABASE the app declares: `{ label, database_id, primary, hash }`, where `hash` addresses that database's generated schema descriptor as a content-addressed blob. Exactly one entry is `primary`, and that one is `env.db`. Empty for an app that declares no database. |
 
 A schedule registration's `schedule` object carries timing only: `kind: "cron"`
 with `cron_expr` and `tz`, or `kind: "interval"` with `interval_ms` (positive

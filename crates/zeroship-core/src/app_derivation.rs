@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 
 use crate::app_id::AppId;
 use crate::database_role::{self, PerAppRoleNameError};
-use crate::replication_names::{self, OBJECT_PREFIX};
+use crate::replication_names::OBJECT_PREFIX;
 
 /// The seed prefix every app-lifecycle advisory lock hashes.
 ///
@@ -39,14 +39,21 @@ pub enum DerivationError {
     EmptyWorkerId,
 }
 
-/// The physical `PostgreSQL` schema this app's tables live in.
+/// The physical `PostgreSQL` schema this app's PLATFORM-owned state lives in.
 ///
-/// Today the schema IS the tenant string, which is why
-/// `zeroship_migrate_server::apply::apply_ir_documents` could write
-/// `app_id.to_string()` and be right. Its comment there marks that line as THE
-/// service's one app-id-to-schema derivation and says the new derivation lands
-/// on it; this is that derivation, hoisted so the data plane and the migration
-/// service cannot answer the question differently.
+/// The schema IS the tenant string. Its one composer is
+/// `zeroship_worker::workflow_host::app_schema`, which reaches it through
+/// `DbBinding::platform` - the trusted-service constructor, which carries no
+/// database edge and consults no binding. A creator's own tables are not here:
+/// they live in the schema of the DATABASE they were migrated into, which
+/// [`crate::database_derivation::schema_name`] composes from a `DatabaseId`.
+///
+/// **Re-keying this MOVES the workflow journal**, with no compile error and
+/// rows already written left in a schema nothing points at afterwards.
+/// `the_journal_schema_is_derived_from_the_app_not_from_a_database_binding`
+/// (`crates/zeroship-worker/src/workflow_host/tests.rs`) trips on exactly that
+/// change and carries the reasoning; it is deliberately not restated here,
+/// because two copies of an argument drift and the test is the one that fails.
 ///
 /// The caller validates the derived spelling with [`crate::schema_name::SchemaName`].
 #[must_use]
@@ -63,21 +70,6 @@ pub fn schema_name(app: &AppId) -> String {
 /// authorization role can collide with a different app's.
 pub fn role_name(app: &AppId) -> Result<String, DerivationError> {
     Ok(database_role::per_app_role_name(app.as_str())?)
-}
-
-/// The app's logical-replication publication.
-///
-/// Infallible because an [`AppId`] can be neither empty nor NUL-bearing - the
-/// two refusals the underlying composer has.
-///
-/// **Breakage class three has its only typed producer here.** Renaming this
-/// renames every publication and leaks the old ones, which are cluster-wide
-/// objects; nothing in `PostgreSQL` reclaims them and nothing in the tree
-/// notices.
-#[must_use]
-pub fn publication_name(app: &AppId) -> String {
-    replication_names::publication_name(app.as_str())
-        .expect("an AppId is neither empty nor NUL-bearing")
 }
 
 /// This worker's replication slot for this app.
@@ -108,20 +100,6 @@ pub fn worker_slot_name(app: &AppId, worker_id: &str) -> Result<String, Derivati
 #[must_use]
 pub fn worker_slot_name_prefix(app: &AppId) -> String {
     format!("{OBJECT_PREFIX}slot_{}__", stable_token(app.as_str(), 14))
-}
-
-/// The HKDF salt both per-app column keys are derived from.
-///
-/// **Changing what this returns is not a migration.** `k_enc` and `k_siv` are
-/// expanded from the root key salted by these bytes, so a new salt yields new
-/// keys. The `k_enc` half fails loudly - existing ciphertext no longer decrypts.
-/// The `k_siv` half fails SILENTLY and is the worse of the two: deterministic
-/// lookup tokens stop matching, so an equality search over an encrypted column
-/// returns FEWER ROWS AND NO ERROR. Pre-launch the answer is to drop and
-/// recreate every encrypted column, not to migrate it.
-#[must_use]
-pub fn encryption_salt(app: &AppId) -> &[u8] {
-    app.as_str().as_bytes()
 }
 
 /// The `SQLite` `ATTACH` alias the dev tier opens this app's file under.
@@ -248,12 +226,9 @@ mod tests {
         );
 
         assert_eq!(
-            publication_name(&app),
-            "__zs_pub_2b19d2d9cc47ffdd41163308916b"
-        );
-        assert_eq!(
-            publication_name(&app),
-            replication_names::publication_name(FIXTURE).expect("untyped publication name")
+            crate::replication_names::relay_slot_name(FIXTURE).expect("untyped relay slot name"),
+            "__zs_relay_2b19d2d9cc47ffdd41163308916b",
+            "the relay's per-app slot shares this app's stable token"
         );
 
         // -- Derivations the site inlines. The literal is the only oracle. ----
@@ -279,9 +254,6 @@ mod tests {
             "the prefix must be a literal prefix of the slot, or `left(slot, n)` \
              matching stops selecting this app's slots"
         );
-
-        // The HKDF salt `derive_key` expands both per-app column keys from.
-        assert_eq!(encryption_salt(&app), FIXTURE.as_bytes());
 
         // App resources use the canonical tenant spelling.
         assert_eq!(attach_alias(&app), FIXTURE);
@@ -310,8 +282,8 @@ mod tests {
     /// The golden vectors above drive one app, so a composer that ignored its
     /// argument and returned its own frozen literal would pass all of them.
     /// This is the arm that refuses that: two distinct ids must disagree
-    /// everywhere, including the two hashed derivations, where a collision
-    /// would put two tenants on one publication or one replication slot.
+    /// everywhere, including the hashed derivations, where a collision would
+    /// put two tenants on one replication slot.
     #[test]
     fn every_derivation_varies_with_the_app_id() {
         let first = AppId::mint();
@@ -323,7 +295,6 @@ mod tests {
             role_name(&first).expect("composes"),
             role_name(&second).expect("composes")
         );
-        assert_ne!(publication_name(&first), publication_name(&second));
         assert_ne!(
             worker_slot_name(&first, "worker-a").expect("composes"),
             worker_slot_name(&second, "worker-a").expect("composes")
@@ -332,7 +303,6 @@ mod tests {
             worker_slot_name_prefix(&first),
             worker_slot_name_prefix(&second)
         );
-        assert_ne!(encryption_salt(&first), encryption_salt(&second));
         assert_ne!(attach_alias(&first), attach_alias(&second));
         assert_ne!(kv_scope(&first), kv_scope(&second));
         assert_ne!(storage_prefix(&first), storage_prefix(&second));
