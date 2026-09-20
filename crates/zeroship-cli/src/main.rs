@@ -1,7 +1,8 @@
-//! zeroship CLI - serve, deploy, migrate, config, login, secret, var, dev.
+//! zeroship CLI - serve, deploy, migrate, db, config, login, secret, var, dev.
 //!
 //! Commands:
 //!   zeroship serve   <file-or-dir> [--port=3000] [--workers=0]
+//!   zeroship db      create|list|bind|unbind|bindings|delete
 //!   zeroship deploy  [<path-to-.zship>] [--app=<id>] [--app-name=<name>] [--control=URL] [--token=TOKEN] [--no-create] [--command-id=<id>] [--config=PATH] [--env=NAME]
 //!   zeroship migrate [<path-to-migrations.ir.json>] [--app=<id>] [--app-name=<name>]
 //!                    [--control=URL] [--token=TOKEN] [--config=PATH] [--env=NAME] [--yes]
@@ -23,6 +24,7 @@ use zeroship_core::{AppId, DeployCommandId};
 use zeroship_runtime::{ModuleEntry, NativePlugin};
 
 mod auth;
+mod databases;
 mod deployment;
 mod dev;
 mod migrate;
@@ -72,6 +74,7 @@ fn main() {
         "dev" => exit_on_error("dev", dev::cmd_dev(&args)),
         "join-token" => exit_on_error("join-token", dev::cmd_join_token(&args)),
         "organization" => exit_on_error("organization", organizations::cmd_organization(&args)),
+        "db" => exit_on_error("db", databases::cmd_db(&args)),
         "secret" => secrets::cmd_secret(&args),
         "var" => secrets::cmd_var(&args),
         _ => print_usage(),
@@ -1384,6 +1387,12 @@ fn print_usage() {
     eprintln!("                   The organization owns your projects and is the billed party.");
     eprintln!("                   `use <org_...>` records which one, so the other subcommands");
     eprintln!("                   need --organization= only to override it.");
+    eprintln!("  zeroship db       create|list|bind|unbind|bindings|delete");
+    eprintln!("                   A database belongs to a PROJECT and outlives the apps that use");
+    eprintln!("                   it. `bind` grants one app access; declaring a database in");
+    eprintln!("                   zeroship.jsonc grants nothing, and deploy verifies the binding.");
+    eprintln!("                   A `<label>` argument names a `databases` entry of that file and");
+    eprintln!("                   is dereferenced to its `dbs_` id before any request.");
     eprintln!("  zeroship secret   set|list|rm|expose|unexpose|expose-list  --app=<id> [--control=URL] [--token=TOKEN]");
     eprintln!("                   Encrypted at rest. Always readable as env.KEY; reaches");
     eprintln!("                   process.env (where any npm dependency can read it) only");
