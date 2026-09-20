@@ -904,9 +904,11 @@ of schemas. The journal's own `SQLITE_SQL` is not in that constant, so the
 local file does not hold the journal yet - the relocation's SQLite half is one
 more `include_str!` in a constant that already takes two.
 
-Whoever writes step 1 should read this before designing the install, because
-the question "can two generated schemas share one store without merging their
-generators" is already answered here, in the affirmative, by code.
+That question - can two generated schemas share one store without merging their
+generators - is answered here in the affirmative, by code, and the PostgreSQL
+side answered it the same way: step 1 landed as a platform migration that folds
+the journal's generated artifact into `workflow_manager` beside the manager's
+own.
 
 ### And on SQLite the lock question this document raised does not arise
 
@@ -940,7 +942,7 @@ Neither is an argument against the relocation. Both are work it creates, on
 sides that have to be reasoned about separately, and only one of them is
 visible from the PostgreSQL schema this document has been reading.
 
-## Step 1's premise is already exercised, and the dependency graph names the wrong crate
+## The leaf invariant is exercised, but not by step 1, and the dependency graph names the wrong crate
 
 `AGENTS.md` states the invariant step 1 rests on:
 
@@ -964,9 +966,27 @@ the schema name:
     const SCHEMA_PLACEHOLDER: &str = "__ZEROSHIP_BUNDLE_SCHEMA__";
 
 So a service that is not the engine, already depending on the manager, already
-installs the journal into a schema it chooses at install time. **Step 1 is that,
-pointed at `workflow_manager`.** It is not a new capability and it should not be
-argued as one.
+installs the journal into a schema it chooses at install time. That is worth
+knowing, and it is NOT what step 1 turned out to be.
+
+**Step 1 could not be this installer pointed at `workflow_manager`, and the
+reason is in the coordinator quoted above.** `Coordinator::verify` refuses to
+start when `has_schema_privilege(current_user,'workflow_manager','CREATE')` is
+true, so the login the service opens with is required, by its own startup
+contract, to hold no DDL on that schema. A service that must not be able to
+create tables there cannot be the thing that creates them.
+
+Step 1 landed instead as a platform migration,
+`db/migrations-ts/20260919000000_workflow_journal.ts`, which states that reason
+and one more: the migration service's schema-bundle path calls
+`provision_database` unconditionally, which would reassign the schema's owner
+and mint a login holding DML over the manager's queue. `journal.rs` remains the
+installer for a journal in a CREATOR schema, which is a different target with
+different owners.
+
+The observation in this section holds; the inference drawn from it did not. A
+service being ABLE to install the journal somewhere is not evidence it is
+permitted to install it here, and the permission is the part step 1 turned on.
 
 ### One dependency in that graph is not what it looks like
 
@@ -1110,14 +1130,20 @@ snapshot that nothing audits and puts them under a per-table check that fails
 loudly. That is the substance of what the other branch is waiting for, and it is
 a real improvement rather than a change of address.
 
-**The obligation, which step 1 must not leave for step 6:** `MANAGER_TABLES` is a
-hand-maintained constant. Installing the journal's tables into
-`workflow_manager` without extending that list - or generalising the check to
-read the installed schema - leaves the startup probe passing while saying
-nothing about the journal. That reproduces the exact condition the move is meant
-to end, in the new location, with a check in place that looks like it covers it.
+**The obligation, and it is NOT step 1's:** `MANAGER_TABLES` is a
+hand-maintained constant, and so is the per-column census beside it. Whichever
+step first lets the service READ the journal has to extend both, or the startup
+probe keeps passing while saying nothing about the tables it now depends on.
+
+**Step 1 was right not to.** It installed the journal and granted nothing;
+`MANAGER_TABLES` names no journal table and neither does the census, and
+`platform_role_can_coordinate_without_customer_or_journal_privileges` in
+`crates/zeroship-workflow-server/tests/platform_schema.rs` binds that absence.
+At step 1 the correct state is no privileges and no entries. This proposal
+first assigned the obligation to step 1; that was wrong, and the check is what
+found it.
 
 The same file is already the journal's installer, in `journal.rs`, and already
 the manager schema's installer. **One service, no engine dependency, both
-installs.** Step 1 has less to build than the plan implies and one list to
-remember.
+installs.** That is worth knowing for the steps still ahead; step 1 itself
+landed elsewhere, as a platform migration.
