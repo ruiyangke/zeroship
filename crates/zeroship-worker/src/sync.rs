@@ -556,15 +556,17 @@ pub async fn fetch_app_env_supplying(
     // is the fail-closed direction: a namespace whose every call would be
     // refused at session setup is worse than an absent one.
     //
-    // Resolved once per app per process, like the key above. A re-read on
-    // every resolution would carry a rotated epoch into a store that live
-    // isolates consult at each `env.db` call, so an isolate built against an
-    // older shape would compose the CURRENT epoch's role and succeed against a
-    // schema its descriptor never described - the one direction the epoch
-    // fence exists to catch. So the binding follows the isolate rather than
-    // the isolate following the binding: a rotation that outruns a resident
-    // app is refused at `SET LOCAL ROLE`, and replacing the app is what
-    // installs the epoch it was built for.
+    // Resolved once per app per process, like the key above. An isolate
+    // captures the binding its sessions narrow with while it BUILDS -
+    // `mint_db_for_binding` takes a `DbBinding` by value and `build_env_object`
+    // runs once - so a store that moved would not move an isolate already
+    // running: it keeps the epoch it captured and is refused at `SET LOCAL
+    // ROLE` once that epoch retires, which is the fence working. What a re-read
+    // on a bare environment refresh would reach is the isolate built AFTER it
+    // from an OLDER deployment, which would capture the CURRENT epoch and run
+    // code against a shape the schema has left - the one direction the fence
+    // cannot catch. So the epoch is installed where the isolate is replaced,
+    // by `resupply_bindings`, and not here.
     if let Some(bindings) = bindings {
         let app = app_id.as_str();
         if !bindings.is_bound(app).map_err(|error| error.to_string())? {
