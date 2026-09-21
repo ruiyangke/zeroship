@@ -4,10 +4,10 @@
 entities, the control-plane surface that declares them, the cluster reconciler that makes a
 cluster match, the data path that narrows to what the reconciler granted, the creator config and
 manifest made plural, `env.databases` reaching every bound database and typed under its label,
-the `zeroship db` commands, deploy verifying a live binding rather than comparing schemas, and
-at-rest column encryption keyed on the database, and the migration service applying into the
-schema of the database the request names. What remains is the subscribe request naming a
-database, capacity-aware placement, and an apply advancing an epoch.
+the `zeroship db` commands, deploy verifying a live binding rather than comparing schemas,
+at-rest column encryption keyed on the database, the migration service applying into the schema
+of the database the request names, and an apply advancing the schema epoch on the cluster. What
+remains is the subscribe request naming a database and capacity-aware placement.
 
 Built:
 
