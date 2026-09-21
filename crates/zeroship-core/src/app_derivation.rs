@@ -41,19 +41,28 @@ pub enum DerivationError {
 
 /// The physical `PostgreSQL` schema this app's PLATFORM-owned state lives in.
 ///
-/// The schema IS the tenant string. Its one composer is
-/// `zeroship_worker::workflow_host::app_schema`, which reaches it through
+/// The schema IS the tenant string, and the hosts that need it derive it
+/// independently, in separate processes.
+/// `zeroship_worker::workflow_host::app_schema` reaches it through
 /// `DbBinding::platform` - the trusted-service constructor, which carries no
-/// database edge and consults no binding. A creator's own tables are not here:
+/// database edge and consults no binding.
+/// `zeroship_control::publication::journal` derives it again to name the
+/// schema it asks the manager to INSTALL the journal in, so the installing
+/// side and the reading side agree only by both coming through here.
+/// A creator's own tables are not here:
 /// they live in the schema of the DATABASE they were migrated into, which
 /// [`crate::database_derivation::schema_name`] composes from a `DatabaseId`.
 ///
-/// **Re-keying this MOVES the workflow journal**, with no compile error and
-/// rows already written left in a schema nothing points at afterwards.
-/// `the_journal_schema_is_derived_from_the_app_not_from_a_database_binding`
-/// (`crates/zeroship-worker/src/workflow_host/tests.rs`) trips on exactly that
-/// change and carries the reasoning; it is deliberately not restated here,
-/// because two copies of an argument drift and the test is the one that fails.
+/// **Re-keying this MOVES the workflow journal** of every app whose host
+/// installs journals in the creator schema, with no compile error and rows
+/// already written left in a schema nothing points at afterwards.
+/// `a_creator_journal_answers_each_app_its_own_schema`
+/// (`crates/zeroship-worker/src/workflow_host/tests.rs`) asserts that arm
+/// answers the app id itself, so it fails on exactly that change and carries
+/// the reasoning; it is deliberately not restated here, because two copies of
+/// an argument drift and the test is the one that fails. A host running
+/// `JournalLocation::Service` journals into a schema it owns and never reaches
+/// this function, so that arm neither moves nor guards this one.
 ///
 /// The caller validates the derived spelling with [`crate::schema_name::SchemaName`].
 #[must_use]
