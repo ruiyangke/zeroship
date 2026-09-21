@@ -819,8 +819,8 @@ by roles.
 
 ## Binding resolution
 
-BUILT for one binding per app. Control answers `GET /internal/apps/{app_id}/bindings`
-(`crates/zeroship-control/src/internal.rs`, `get_app_binding`) with the database id, the edge id
+BUILT, for the SET of databases a deployment declares. Control answers `GET /internal/apps/{app_id}/bindings`
+(`crates/zeroship-control/src/internal.rs`, `get_app_bindings`) with the database id, the edge id
 and the schema epoch, serving only a binding whose status is `active` and whose
 `observed_generation` has caught up. The worker installs it into a process-wide
 `SuppliedAppBindings` (`crates/zeroship-data-orm/src/resolved_bindings.rs`) beside the project key
@@ -834,8 +834,19 @@ every `Db` and `Collection` wrapper travels with. It carries the database, the s
 role and the epoch, and DERIVES the last two from the ids rather than accepting them, so no call
 site can hand it a name that disagrees with the cluster.
 
-Still owed: a SET rather than one binding, which is the creator surface and the manifest reshape,
-and the capability, which Control knows and does not yet serve.
+The set is built end to end: Control serves every live binding, `install_resolved_bindings`
+(`crates/zeroship-worker/src/sync.rs`) installs each one, `databases_of`
+(`crates/zeroship-runtime/src/core/databases.rs`) reads the declared set out of the deployment
+descriptor, and `env.databases` (`crates/zeroship-data-v8/src/lib.rs`) publishes one handle per
+declared database, with `env.db` the primary's.
+
+Still owed: the capability. `DatabaseCapability` (`crates/zeroship-core/src/database_derivation.rs`)
+reaches the cluster roles and the reconciler and appears nowhere in `zeroship-data-orm`,
+`zeroship-data-v8` or `zeroship-worker`, so the data plane cannot tell a read-only binding from a
+read-write one. PostgreSQL can - the binding role inherits one capability role and not the other -
+so serving it buys a refusal a creator can read rather than a permission error at the first write.
+It is not the boundary, and building it as though it were would put a check where the process
+running creator code could reach it.
 
 The worker does not compare `epoch` in Rust to authorize a transaction; the epoch is a substring
 of the role name the setup batch sends.
