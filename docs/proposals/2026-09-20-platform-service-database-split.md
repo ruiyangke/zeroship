@@ -575,6 +575,11 @@ not, grouped by the service this document assigns them to:
                      project_members          app_deploy_commands
     migrate-server   app_schema_applies
 
+`identity_links` and `principal_grants` are absent from that list because the
+assignment places them in auth, alongside `users`. Open question 4 disputes
+that placement on the document's own rule, and if it resolves the other way
+both become control crossings.
+
 Re-derive the set by tracking the enclosing table of each reference:
 
     awk '/table\("[a-z_]+", \{ schema:/ { if (match($0, /table\("[a-z_]+"/))
@@ -635,14 +640,23 @@ auth/control edge carries most of it.
    and becomes false because of this change, so it has to be retired in the
    same patch - otherwise a reviewer checks it against the tree, finds it
    accurate, and reads it as an argument against the cut.
-4. **Which database holds an auth-domain row no auth process writes?**
-   `zeroship.identity_links` is the case. Every production statement against it
-   lives in the `zeroship-authn` library, and the writer,
-   `platform_cli::materialize_default_grants`, has two callers:
+4. **`identity_links` breaks this document's own ownership rule, and the
+   assignment above papers over it.** The rule says the service that WRITES a
+   table owns it. Auth does not write `identity_links` - the name does not
+   appear anywhere in `crates/zeroship-auth/src`. Every production statement
+   against it is in the `zeroship-authn` LIBRARY, reached from
    `crates/zeroship-control/src/authz_guard.rs` and
-   `crates/zeroship-migrate-server/src/auth.rs`. So it is an auth-domain table
-   written by control's pool and migrate-server's, and read by neither auth
-   service path. Both answers cost something.
+   `crates/zeroship-migrate-server/src/auth.rs`. The assignment lists it under
+   auth on DOMAIN grounds, which the rule's second clause does not license
+   either: that clause picks among writers, and auth is not one.
+   `principal_grants` is the same case, written in the same function.
+
+   So the honest statement is that this table has no owner under the stated
+   rule, and the choice is between amending the rule for domain-owned tables
+   with no domain writer, or assigning it to control and accepting that an
+   auth-domain row lives in control's database. That choice also decides
+   whether its foreign key into `users` is a crossing: auth-owned it is not,
+   control-owned it is, and the list above counts it as not.
 5. **`cron_state` and `dpop_jti` are created and never used.** Neither name
    appears in any crate, in `src` or in tests, qualified or bare; outside the
    corpus and the owners registry they occur only in test-run Postgres logs.
