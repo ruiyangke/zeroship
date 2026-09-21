@@ -412,12 +412,16 @@ apps      + UNIQUE ("apps_project_identity_key")   (id, project_id)
                      -> projects(id, execution_zone_id)
 ```
 
-**The zone moves to the project.** `apps.execution_zone_id`
+**The zone moves to the project.** BUILT. `apps.execution_zone_id`
 (`db/migrations-ts/20260914000600_placement_eligibility.ts`) landed before anything above the app
 needed a zone; with a project-owned database it is the project that has to carry it, or "same
-project" stops implying "can share" and every sharing surface has to explain a second rule.
-`projects` therefore gains the column and the freeze trigger `apps` already has, and the app keeps
-its copy under a composite foreign key so the two cannot disagree.
+project" stops implying "can share" and every sharing surface has to explain a second rule. So
+`projects` carries the column and the freeze trigger `apps` already had, with
+`projects_zone_identity_key` beside it
+(`db/migrations-ts/20260919000100_project_execution_zone.ts`), and the app keeps its copy under
+`apps_project_zone_fkey` (`db/migrations-ts/20260919000300_database_placement_keys.ts`) so the two
+cannot disagree - the unique key that composite references is `apps_project_identity_key`, in the
+same migration as the projects half.
 
 Keeping the app's copy rather than deriving it is deliberate: `instance_serves_app`
 (`crates/zeroship-control/src/worker_join.rs`) joins on `app.execution_zone_id`, and
