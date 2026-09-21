@@ -8764,6 +8764,7 @@ dependencies = [
  "compio-postgres",
  "flume 0.11.1",
  "futures",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",
