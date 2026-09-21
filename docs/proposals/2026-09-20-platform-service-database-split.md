@@ -562,16 +562,30 @@ this split should reuse rather than reinvent:
 data holds no foreign key into the platform schema. This one has a narrower one
 that has to be found rather than assumed.
 
-Counting foreign keys that REFERENCE `users` and `apps` overstates it badly -
-that population includes keys whose child table never leaves the referenced
-table's own service, and they cannot cross a boundary they never reach. The
-question is how many point at `users` FROM A TABLE ANOTHER SERVICE OWNS, and on
-the `users` side that is at most five: `app_session_anchors`,
-`app_user_identities`, `oauth_grants`, `organization_members`, `identity_links`.
-Most of the cascades never leave auth.
+Counting foreign keys that REFERENCE `users` overstates it badly - that
+population includes keys whose child table never leaves auth, and they cannot
+cross a boundary they never reach. The question is which tables point at `users`
+FROM A TABLE ANOTHER SERVICE OWNS. Most of the corpus tables carrying a
+`references: { table: "users" }` are auth's own; these are the ones that are
+not, grouped by the service this document assigns them to:
 
-Five named tables is a design problem with a shape. The FK count was a wall,
-and it was the wrong measure.
+    gateway          app_session_anchors      app_user_identities
+    control          organizations            organization_members
+                     organization_invites     projects
+                     project_members          app_deploy_commands
+    migrate-server   app_schema_applies
+
+Re-derive the set by tracking the enclosing table of each reference:
+
+    awk '/table\("[a-z_]+", \{ schema:/ { if (match($0, /table\("[a-z_]+"/))
+             cur = substr($0, RSTART+7, RLENGTH-8) }
+         /references: \{ table: "users"/ { if (cur != "") print cur }' \
+      db/migrations-ts/*.ts | sort -u
+
+then subtract the auth column of the assignment above. A named set across three
+services is a design problem with a shape; the raw FK count was a wall, and it
+was the wrong measure. The shape is wider than a first pass suggested, and the
+auth/control edge carries most of it.
 
 ---
 
