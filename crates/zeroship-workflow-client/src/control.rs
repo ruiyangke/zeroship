@@ -1,12 +1,14 @@
 use super::{transport::Transport, Error, Options};
 use std::sync::Arc;
 use zeroship_core::{
+    app_id::AppId,
     schema_bundle::{EnsureJournal, SchemaBundleOutcome},
     service_assertion::ServiceIssuer,
     service_identity::endpoints,
     service_peers::{service_issuer, ServiceAuth, CONTROL_SERVICE_NAME},
     workflow_coordination::{
-        Assignment, ManageRun, ManagementReceipt, ManagementStatus, VerifyAssignment, AUDIENCE,
+        Assignment, ManageRun, ManagementOperation, ManagementReceipt, ManagementStatus,
+        RequestId, RunId, RunOperation, VerifyAssignment, AUDIENCE,
     },
     workflow_jobs::{JobOperation, JobSpec},
     workflow_schedules::{ActivateSchedules, DisableSchedules, RegisterSchedules},
@@ -161,6 +163,36 @@ impl ControlCoordinator {
             return Err(Error::InvalidResponse);
         }
         Ok(receipt)
+    }
+
+    /// Ask the manager to apply a lifecycle transition to one run.
+    ///
+    /// This assembles the `Transition` command in one place instead of at every
+    /// call site. It opens no endpoint of its own: the exchange is
+    /// `WORKFLOW_MANAGE`, so serving a transition cannot add to the manager's
+    /// request rate beyond what `manage` already carries.
+    ///
+    /// The caller supplies `request_id` because an exact retry returns the
+    /// original receipt; minting one here would turn every retry into a new
+    /// command. A `None` outcome means the manager accepted the command and has
+    /// not applied it yet - poll `management_status` with the same pair.
+    ///
+    /// # Errors
+    /// Refuses failed exchanges and receipts for another app or request.
+    pub async fn transition(
+        &self,
+        request_id: &RequestId,
+        app_id: &AppId,
+        run_id: &RunId,
+        operation: RunOperation,
+    ) -> Result<ManagementReceipt, Error> {
+        self.manage(&ManageRun {
+            request_id: request_id.clone(),
+            app_id: app_id.clone(),
+            run_id: run_id.clone(),
+            command: ManagementOperation::Transition { operation },
+        })
+        .await
     }
 
     /// # Errors
