@@ -1649,9 +1649,21 @@ app's requests and cannot protect a shared cluster from an app under its limit. 
 
 ## Open
 
-1. **Is a dedicated cluster a plan tier?** NEEDS-DECISION, product-shaped. With relocation
-   unsupported it must be chosen when a database is created or not offered, because an existing
-   database can never move to its own cluster.
+1. **Is a dedicated cluster a plan tier?** DECIDED: no. It is not offered.
+   The tier would have to be chosen when a database is created, because relocation
+   between clusters is not supported and an existing database can never move to its
+   own cluster. That makes it an irreversible choice presented to a creator who
+   cannot yet evaluate it, with no upgrade path once they can - a creator who
+   outgrows the shared tier would have to create a second database and move their
+   own data.
+
+   What this settles, so it is not reopened by accident: the one-way door at
+   Placement is no longer a customer-facing limitation, only an operator one.
+   Cluster-to-cluster relocation stays unsupported at no product cost, and
+   `Retire a datastore` keeps its "only when it holds no database" rule without
+   needing a drain path. If dedicated clusters are ever wanted, relocation is the
+   prerequisite and should be built first - offering the tier without it is the
+   ordering this decision rejects.
 
 2. **Supply the schema epoch producer.** PARTLY BUILT, and the two halves must not be confused.
 
