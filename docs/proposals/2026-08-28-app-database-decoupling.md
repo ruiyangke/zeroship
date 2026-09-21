@@ -1823,16 +1823,21 @@ app's requests and cannot protect a shared cluster from an app under its limit. 
    server's own SQLSTATE and message from the FIRST statement and an aborted transaction after it.
    Its control is the same batch under an assumable role, with every setting it applied read back.
 
-7. **Re-prove the pooled-connection reset against a narrowed role.** BUILDABLE.
+7. **Re-prove the pooled-connection reset against a narrowed role.** BUILT.
     `crates/zeroship-data-orm/src/backend/postgres/executor.rs` issues `BEGIN` and then applies the
     role and timeout guards on the same client through `apply_session_authority`, which runs the
     `SET LOCAL` statements `crates/zeroship-data-orm/src/backend/postgres/pg_session_sql.rs`
     composes. One call site, and the `BEGIN` precedes it, so the guards sit inside an explicit
     transaction and revert at COMMIT and at the implicit ROLLBACK on drop. That
     reasoning does not change when the role names a database, but the residue it prevents does: a
-    leaked role today is one app's own schema and under sharing it is a co-tenant's. Needs a test
-    that checks out, narrows, cancels mid-flight, and asserts the next checkout cannot reach the
-    first database.
+    leaked role today is one app's own schema and under sharing it is a co-tenant's. Bound by
+    `a_lease_abandoned_mid_statement_lends_the_next_checkout_no_database`
+    (`crates/zeroship-data-orm/tests/postgres_tenant_fence.rs`), which narrows a pooled connection
+    through the production `open_tx_session`, abandons the statement future so the session is
+    dropped with neither COMMIT nor ROLLBACK, and asserts the next checkout - the same backend, by
+    `pg_backend_pid()` over a pool of one - reaches neither the database nor the role. A plain
+    `SET` survives that arm, because PostgreSQL unwinds it on rollback as well, so a second lease
+    settles with COMMIT: the transaction scoping is only visible there.
 
 8. **Write the mandatory regression tests.** PARTLY BUILT, in
     `crates/zeroship-data-orm/tests/postgres_binding_fence.rs`, which drives the ORM against a
@@ -1861,10 +1866,34 @@ app's requests and cannot protect a shared cluster from an app under its limit. 
     `deploy_declaring_no_database_needs_no_binding_and_goes_live` as its control, differing in one
     variable.
 
-    BUILDABLE: (e) two databases each declaring `users`, which needs the CDC routing key. (g) a
-    migration applied to a shared database not failing any bound app's deploy. (g) is now free of
-    a mechanism rather than guarded by one: deploy compares no schema at all, so the test asserts
-    a property nothing can break from the control plane.
+    BUILT: (g)
+    `a_migration_one_app_applies_to_a_shared_database_does_not_fail_the_other_apps_deploy`
+    (`crates/zeroship-control/tests/database_decoupling_e2e.rs`), a stage of the one exercise that
+    already stands two apps on one shared database against a cluster its own reconciler converged.
+    App A applies a second migration into the shared database; app B - which applied nothing and
+    carries the descriptor hash of the build that went live before it - deploys and goes live.
+
+    **The whole difficulty is that the arm asserts an absence, and an absence is green for free
+    when the scenario never arose.** So every precondition is asserted rather than assumed: the two
+    apps' live-binding projections name the SAME database id, compared to each other rather than
+    each found non-empty; both bindings satisfy the liveness conjuncts `admit_bindings`
+    re-implements; the apply skips exactly the plans the first apply into that database reported
+    and advances others disjoint from them; PostgreSQL's own catalog carries a relation after the
+    apply that it did not carry before; the apply leaves both binding rows exactly as they were,
+    which is the mechanism rather than an inference about it; and the assertion is made on
+    `VerifiedDeployment::databases` - the slice `accept` hands to `admit_bindings` - because that
+    call returns on an empty list before it reads a row, so an artifact that declared nothing would
+    make the whole arm pass over a deploy that verified nothing. Its control differs in one
+    variable and sits beside it in the same exercise: the same app, the same shape, one database it
+    holds no binding to, refused `DatabaseNotBound`.
+
+    That the arm binds was shown by mutation: adding a single conjunct to `admit_bindings` that
+    requires the database's `schema_epoch` not to have moved past the generation the app's binding
+    was converged at - the nearest reintroduction of a schema comparison the control plane holds
+    data for - turns the arm red on the deploy and nothing earlier in the exercise, because every
+    deploy before the co-tenant migration is at an epoch the binding's generation covers.
+
+    BUILDABLE: (e) two databases each declaring `users`, which needs the CDC routing key.
 
 9. **Make the project config plural without losing cross-target protection.** DECIDED AND BUILT.
     `schema/project-v1.json` declares `app` as a single string, and the environments block requires
