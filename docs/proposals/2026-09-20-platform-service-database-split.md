@@ -569,6 +569,20 @@ role exists is the same question asked of the corpus:
 
     grep -rho 'zeroship_[a-z_]*' db/ | sort -u
 
+**Every command here walks the FILESYSTEM, not the repository.** A glob over
+`db/migrations-ts/*.ts` or `crates/*/src/` includes whatever is on disk,
+tracked or not, so an untracked file silently joins the population and the
+answer differs between a working copy and a clean checkout. The manifest-based
+form is `git ls-files <path>` as the input instead of a glob, and it is worth
+using for anything whose result will be quoted.
+
+This is not hypothetical in this tree. `examples/meal-kit` holds hundreds of
+files and NONE of them are tracked, so a directory-walking gate reports
+failures there that CI - which sees only tracked content - cannot reproduce.
+The corpus happens to be clean today, every TypeScript file under `db/migrations-ts`
+being tracked, which is exactly the condition that makes the difference
+invisible until it is not.
+
 Two ways the SQL-anchored sweep lies, both of which it did while this section
 was written:
 
