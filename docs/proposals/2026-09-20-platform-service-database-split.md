@@ -139,6 +139,11 @@ and never reaches this table. So the requirement is that all REPLICAS of one
 service share a store, which a per-service database satisfies. The CDC relay
 already opts out with an in-memory store. See open question 3.
 
+Every table above is assigned, and every assignment has been checked against
+the service that actually writes it - see "The assignment, checked against the
+writers" below for the result and the command that re-derives it. A `CONTESTED`
+note means another service writes the table too, and names which.
+
 ---
 
 ## The contested tables, and how each resolves
