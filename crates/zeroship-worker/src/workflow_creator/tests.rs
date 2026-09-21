@@ -12,10 +12,10 @@ use zeroship_workflow::{
     operations::{RunState, StartOptions},
     service::{
         delivery::{DeliveredTask, JobAcceptance},
-        runner::ExecutionGuard,
         AppPolicy, RequestId,
     },
 };
+use zeroship_workflow_runner::ExecutionGuard;
 
 #[path = "../../../../tests/fixtures/workflow_deployments.rs"]
 mod deployment_fixture;

@@ -32,9 +32,11 @@ use zeroship_workflow::service::{
     fanout::FanoutOptions,
     propagation::PropagationOptions,
     reconciliation::ReconciliationOptions,
-    runner::{consumer::ConsumerOptions, delivery::DeliveryOptions, TaskPayloadLimits},
     store::HostStorage,
     AppBackend,
+};
+use zeroship_workflow_runner::{
+    consumer::ConsumerOptions, delivery::DeliveryOptions, TaskPayloadLimits,
 };
 use zeroship_workflow_v8::WorkflowBinding;
 
@@ -305,7 +307,7 @@ impl LocalHost {
         let stopping = Arc::new(AtomicBool::new(false));
         let host_stopping = stopping.clone();
         zeroship_runtime::init_v8();
-        let thread = zeroship_workflow::service::runner::host::thread()
+        let thread = zeroship_workflow_runner::host::thread()
             .spawn(move || {
                 let runtime = match compio::runtime::Runtime::new() {
                     Ok(runtime) => runtime,

@@ -14,12 +14,12 @@ use zeroship_core::{
     schema_name::SchemaName,
     workflow_coordination::{AssignedScope, WorkerId},
 };
+use zeroship_workflow_runner::{
+    assignments::{CreatorFactory, CreatorRuntime},
+    TaskPayloadLimits, WorkerBinding,
+};
 use zeroship_workflow::{
     service::{
-        runner::{
-            assignments::{CreatorFactory, CreatorRuntime},
-            TaskPayloadLimits,
-        },
         store::HostStorage,
         AppDeployments, HostPolicies, IngressEpochs, PolicyBinding, SignalAuthority,
         WorkerIdentity, WorkflowService,

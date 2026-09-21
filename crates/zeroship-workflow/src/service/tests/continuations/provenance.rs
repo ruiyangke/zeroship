@@ -7,7 +7,7 @@ use super::*;
 use crate::{
     engine::WorkflowOutputRef,
     operations::{RestartOptions, RestartTarget, RunState},
-    service::{runner::TaskPayloadReader, TaskAssignment, WorkerIdentity},
+    service::{TaskAssignment, WorkerIdentity},
 };
 use bytes::Bytes;
 use std::collections::BTreeMap;
@@ -69,7 +69,7 @@ fn worker() -> WorkerIdentity {
 
 fn output_reference(data: &[u8]) -> WorkflowOutputRef {
     WorkflowOutputRef {
-        hash: crate::service::types::hash(data),
+        hash: crate::service::hash(data),
         size: i64::try_from(data.len()).unwrap(),
         content_type: Some("application/json".into()),
     }
@@ -211,9 +211,16 @@ async fn assert_output(
         OutputKind::Reference => {
             assert!(step.output.is_none());
             assert_eq!(step.output_ref, Some(output_reference(data)));
-            let reader =
-                TaskPayloadReader::new(Rc::new(service.tasks(worker())), task, data.len()).unwrap();
-            assert_eq!(reader.read_step_output("child", 0).await.unwrap(), data);
+            assert_eq!(
+                service
+                    .read_task_payload(&worker(), &task.id, &task.token, &output_reference(data))
+                    .await
+                    .unwrap()
+                    .into_bytes(data.len())
+                    .await
+                    .unwrap(),
+                data
+            );
         }
     }
 }

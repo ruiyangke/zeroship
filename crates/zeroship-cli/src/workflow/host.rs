@@ -26,17 +26,17 @@ use zeroship_core::{app_id::AppId, workflow_coordination::AssignedScope, workflo
 use zeroship_runtime::{NativePlugin, RuntimeLimits};
 use zeroship_workflow::{
     service::{
-        runner::{
-            consumer::{ConsumerBindings, ConsumerScope, JobConsumer},
-            delivery::JobTransport,
-            TaskExecutor,
-        },
         schema,
         store::HostStorage,
         AppBackend, AppPolicy, AppWorkflows, HostPolicies, IngressEpochs, PolicyBinding,
         PolicySnapshot, WorkerIdentity, WorkflowService,
     },
     WorkflowServiceError,
+};
+use zeroship_workflow_runner::{
+    consumer::{ConsumerBindings, ConsumerScope, JobConsumer},
+    delivery::JobTransport,
+    TaskExecutor, WorkerBinding,
 };
 use zeroship_workflow_v8::{AppRuntimeLoader, V8TaskExecutor};
 
