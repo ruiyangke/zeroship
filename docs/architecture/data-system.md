@@ -410,10 +410,13 @@ epochs and can return `Verdict::ReResolve`. In
 `crates/zeroship-data-orm/src/transaction/driver.rs`, `expected_authority` supplies a
 placeholder and `observation_for` echoes it. This is not a live migration fence.
 
-**Epoch retention must be bounded and fail closed (designed).** Applying a new epoch must
-retire obsolete roles before advancing, retaining the current epoch and its predecessor
-for in-flight isolates.
-A failed retirement must refuse advancement to prevent unbounded catalog growth.
+**Epoch retention is bounded and fails closed.** `crates/zeroship-migrate-server/src/rotation.rs`
+retires the predecessor's binding roles in a transaction that commits before any creator DDL, and a
+retirement that fails refuses the apply rather than advancing it, so the catalog cannot reach a third
+live epoch. The retirement is unconditional where the mint is not - at that point nothing yet knows
+whether a delta will follow - so two live epochs is a cap rather than a floor.
+`crates/zeroship-migrate-server/tests/apply_database_target_pg.rs` measures the pair against a live
+cluster: `E+1` minted, `E-1` gone, `E` still assumable.
 
 **What is not measured, and must not be read as covered:** per-backend membership cache construction
 at CONNECT time. The `SET ROLE` measurement above is on an established backend; a new backend still
@@ -435,9 +438,10 @@ separate service writes and the worker only reads:
   `db/migrations-ts/`: that corpus is applied to the CONTROL database, which holds no creator
   schema and no database roles, so an installer there would create the schema on the one server
   that never needs it and on none of the servers that do.
-- **Exactly one table**, holding the current schema epoch per database. The migration service writes
-  it inside the apply transaction that mints the new epoch's roles, so the recorded epoch and the
-  roles in the catalog cannot disagree. Its grant posture is write-to-the-migration-service,
+- **Exactly one table**, holding the current schema epoch per database beside the journal position
+  that epoch was minted at, which is what decides whether a rotation is still owed after a crash.
+  The migration service writes it inside the apply transaction that mints the new epoch's roles, so
+  the recorded epoch and the roles in the catalog cannot disagree. Its grant posture is write-to-the-migration-service,
   read-only-to-everyone-else - and **the data plane still reads nothing**: the role name carries the
   epoch precisely so no query has to. The control plane reads it to compose the binding it injects.
   A data-plane read of this table would reintroduce the catalog dependency the descriptor decision

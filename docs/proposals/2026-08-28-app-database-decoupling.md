@@ -49,7 +49,7 @@ Built:
   `42501` from `22023` on it. Transaction lanes, the captured route and the V8 continuation slot
   key on `(app_id, database_id)`. The SQLite dev tier attaches one file per database under the
   schema. Control resolves an app's live binding at
-  `GET /internal/apps/{app_id}/binding` and the worker installs it into a host-supplied store
+  `GET /internal/apps/{app_id}/bindings` and the worker installs it into a host-supplied store
   (`crates/zeroship-data-orm/src/resolved_bindings.rs`); an isolate composes no part of a binding
   and an app with none has no `env.db`.
 
@@ -819,7 +819,7 @@ by roles.
 
 ## Binding resolution
 
-BUILT for one binding per app. Control answers `GET /internal/apps/{app_id}/binding`
+BUILT for one binding per app. Control answers `GET /internal/apps/{app_id}/bindings`
 (`crates/zeroship-control/src/internal.rs`, `get_app_binding`) with the database id, the edge id
 and the schema epoch, serving only a binding whose status is `active` and whose
 `observed_generation` has caught up. The worker installs it into a process-wide
@@ -1667,7 +1667,7 @@ app's requests and cannot protect a shared cluster from an app under its limit. 
 2. **Supply the schema epoch producer.** PARTLY BUILT, and the two halves must not be confused.
 
    The EPOCH FENCE ships: the epoch is the last component of the binding role, Control serves it
-   at `GET /internal/apps/{app_id}/binding` from `databases.schema_epoch`, the binding composes
+   at `GET /internal/apps/{app_id}/bindings` from `databases.schema_epoch`, the binding composes
    the role from it, and a role the cluster never minted is `SCHEMA_EPOCH_STALE`
    (`crates/zeroship-data-orm/tests/postgres_binding_fence.rs`). Nothing in the worker compares an
    epoch; PostgreSQL does, by whether the role exists.
@@ -1680,7 +1680,13 @@ app's requests and cannot protect a shared cluster from an app under its limit. 
    binding's own epoch is the remaining work, and it is a different mechanism from the role name:
    one fences the session at setup, the other would fence an admitted transaction mid-flight.
 
-   Still owed: the migration-service write that advances `databases.schema_epoch` on an apply.
+   The EPOCH PRODUCER ships. An apply that commits a schema delta rotates the head the cluster
+   holds (`crates/zeroship-migrate-server/src/rotation.rs`): it retires `E-1` before any DDL
+   commits and refuses the apply if it cannot, then mints `E+1` for every live binding once all of
+   it has, in the transaction that advances the head. `databases.schema_epoch` follows as a
+   projection, so losing that write costs a re-resolve rather than an exactly-once obligation
+   across two servers. The head carries the journal position it was minted at, which is what
+   decides whether a rotation is still owed after a crash between the last DDL and the mint.
 
 3. **What bounds total transaction duration?** NEEDS-DECISION. Not `transaction_timeout`: it does
    not exist on 16 and does from 17, so in a mixed fleet the answer differs per cluster and a design

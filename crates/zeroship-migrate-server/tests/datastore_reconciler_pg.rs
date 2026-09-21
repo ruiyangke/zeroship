@@ -1232,3 +1232,125 @@ async fn two_services_on_one_cluster_converge_on_one_row_and_a_zone_change_is_re
         "and the standing row is not moved"
     );
 }
+
+/// A pass converges the epoch table's SHAPE, not only its existence.
+///
+/// `CREATE TABLE IF NOT EXISTS` says nothing about a table that is already
+/// there, so a cluster carrying the epoch table in a narrower shape would keep
+/// it and the apply's widen would fail on a column `PostgreSQL` cannot find -
+/// after the creator's DDL has committed. Every other fixture in this workspace
+/// owns a fresh container, which means the table is always created new and this
+/// condition is unreachable by construction; so the cluster is put into that
+/// state here deliberately, before a pass ever runs.
+///
+/// The column arrives; the head already recorded is unchanged by its arrival
+/// and carries the declared default rather than a NULL the rotation would then
+/// compare against; and a second pass over the converged cluster is a no-op.
+/// The middle claim is what makes the first mean anything - a convergence
+/// statement that dropped and recreated the table would satisfy "the column is
+/// there" and destroy every database's epoch.
+#[ntex::test]
+async fn a_pass_converges_the_epoch_table_shape_and_keeps_the_heads_already_recorded() {
+    let cluster_fixture = tenant::Cluster::start();
+    let cluster = connect(cluster_fixture.url()).await;
+    let pg = control_superuser().await;
+    let world = World::new(&pg, "epoch-shape").await;
+    let reconciler = Reconciler::new(
+        ControlStore::new(control_as_service().await),
+        cluster_fixture.url(),
+        Some(world.zone.clone()),
+    );
+
+    // A cluster whose admin table stands WITHOUT the frontier column, and with
+    // a head already recorded in it.
+    let recorded = DatabaseId::mint();
+    cluster
+        .batch_execute(&format!(
+            "CREATE SCHEMA IF NOT EXISTS \"{ADMIN_SCHEMA}\";
+             CREATE TABLE \"{ADMIN_SCHEMA}\".\"{EPOCH_TABLE}\" (
+                 database_id  text        PRIMARY KEY,
+                 schema_epoch integer     NOT NULL,
+                 updated_at   timestamptz NOT NULL DEFAULT now()
+             );
+             INSERT INTO \"{ADMIN_SCHEMA}\".\"{EPOCH_TABLE}\" (database_id, schema_epoch)
+                 VALUES ('{}', 4);",
+            recorded.as_str()
+        ))
+        .await
+        .expect("stand the admin table up in the narrower shape");
+    let narrower = epoch_table_columns(&cluster).await;
+    assert!(
+        narrower.contains(&"schema_epoch".to_owned()),
+        "the column read must see this table at all, or every assertion below is \
+         about an empty result: {narrower:?}"
+    );
+    assert!(
+        !narrower.contains(&"journal_frontier".to_owned()),
+        "the fixture must start WITHOUT the column, or this arm passes over a \
+         convergence that never happened: {narrower:?}"
+    );
+
+    pass(&reconciler).await;
+
+    assert!(
+        epoch_table_columns(&cluster).await.contains(&"journal_frontier".to_owned()),
+        "a pass makes the cluster match the shape the corpus declares"
+    );
+    assert_eq!(
+        cluster_epoch(&cluster, &recorded).await,
+        Some(4),
+        "and the head already recorded is untouched by the column's arrival"
+    );
+    assert_eq!(
+        epoch_frontier(&cluster, &recorded).await,
+        Some(0),
+        "the row gains the declared default rather than a NULL the rotation \
+         would then compare against"
+    );
+
+    // THE CONTROL: the same pass again. A statement that converges once and
+    // then errors, or moves something, is not a desired-state one.
+    let converged = epoch_table_columns(&cluster).await;
+    pass(&reconciler).await;
+    assert_eq!(
+        epoch_table_columns(&cluster).await,
+        converged,
+        "a converged cluster's epoch table is not reshaped again"
+    );
+    assert_eq!(
+        cluster_epoch(&cluster, &recorded).await,
+        Some(4),
+        "nor is any head it carries"
+    );
+}
+
+/// The epoch table's columns, as the catalog spells them, sorted.
+async fn epoch_table_columns(cluster: &Client) -> Vec<String> {
+    cluster
+        .query(
+            "SELECT attname FROM pg_attribute \
+              WHERE attrelid = to_regclass($1)::oid AND attnum > 0 AND NOT attisdropped \
+              ORDER BY attname",
+            &[&format!("{ADMIN_SCHEMA}.{EPOCH_TABLE}")],
+        )
+        .await
+        .expect("read the epoch table's columns")
+        .iter()
+        .map(|row| row.get("attname"))
+        .collect()
+}
+
+/// The journal frontier one database's head records.
+async fn epoch_frontier(cluster: &Client, database: &DatabaseId) -> Option<i64> {
+    cluster
+        .query_opt(
+            &format!(
+                "SELECT journal_frontier FROM {ADMIN_SCHEMA}.{EPOCH_TABLE} \
+                  WHERE database_id = $1"
+            ),
+            &[&database.as_str()],
+        )
+        .await
+        .expect("read the cluster's epoch table")
+        .map(|row| row.get("journal_frontier"))
+}

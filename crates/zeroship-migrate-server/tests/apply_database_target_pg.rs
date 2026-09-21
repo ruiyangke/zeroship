@@ -23,6 +23,16 @@
 //! asserts the specific `database_not_bound` kind, the database named in the
 //! body, and the binding call in the remedy - then flips the ONE variable that
 //! makes the binding live and requires the same request to succeed.
+//!
+//! # The rotation arm measures a PAIR, in one catalog read
+//!
+//! An apply that changes the schema mints `E+1` and retires `E-1`. Asserting
+//! only the first passes over a rotation that swept every earlier epoch, which
+//! fences apps that are serving correctly; asserting only the second passes
+//! over one that retired without minting, which fences all of them. So the arm
+//! requires `E+1` present, `E-1` gone and `E` standing at the same instant,
+//! and pairs the whole thing with a re-post that commits no delta, where the
+//! head must not move at all.
 
 mod fixture;
 
@@ -42,10 +52,11 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 use zeroship_authz::Action;
 use zeroship_core::database_role::DatabaseCapability;
-use zeroship_core::{database_derivation, DatabaseId};
+use zeroship_core::{database_derivation, BindingId, DatabaseId};
 use zeroship_id::{AppId, UserId};
 use zeroship_migrate_server::apply::{apply_ir_documents, ApplyMigrationsRequest};
 use zeroship_migrate_server::auth::{AuthError, Authenticator, VerifiedCaller};
+use zeroship_migrate_server::datastore::cluster;
 use zeroship_migrate_server::datastore::control::ControlStore;
 use zeroship_migrate_server::datastore::Reconciler;
 use zeroship_migrate_server::policy::ManagedPolicyConfig;
@@ -310,6 +321,7 @@ async fn a_table_migrates_into_the_named_database_and_not_into_the_other() {
     let tmp = tmpdir("apply");
     let report = apply_ir_documents(
         cluster_fixture.url(),
+        &fixture::migrated_url(),
         &tmp,
         zeroship_migrate_server::apply::ApplyTarget {
             app_id: &app,
@@ -487,3 +499,275 @@ async fn an_apply_naming_a_database_without_a_live_binding_is_refused() {
     let _ = std::fs::remove_dir_all(tmp);
 }
 
+
+/// An apply that changes the schema rotates the epoch: it mints `E+1` for
+/// every live binding, retires `E-1`, and never touches `E`.
+///
+/// # Why three applies
+///
+/// The first has no predecessor to retire - a database converges at epoch `0` -
+/// so it can only exhibit the mint. The second is where both halves are
+/// measurable at once, and where the load-bearing pair lives: `E-1` is gone
+/// AND `E` is still standing, in the same catalog read. A rotation that swept
+/// by epoch rather than by predecessor would satisfy the first assertion and
+/// fence every app serving on `E`.
+///
+/// The third is the control for the word "changes". It re-posts the documents
+/// the second applied, so every version is already journalled and no schema
+/// delta commits; a rotation that fired on every REQUEST rather than on every
+/// committed delta would move the head here, and the binding an isolate
+/// resolved a moment ago would name a role that is about to be retired for
+/// nothing. It also pins the asymmetry: the head stays, and the retirement
+/// still runs, because a retirement that waited to learn whether a delta
+/// followed would be running after the DDL it must precede.
+#[ntex::test]
+async fn an_apply_that_changes_the_schema_rotates_the_epoch_and_leaves_the_live_one_standing() {
+    let cluster_fixture = tenant::Cluster::start();
+    let cluster = connect(cluster_fixture.url()).await;
+    let pg = connect(&fixture::migrated_url()).await;
+    let world = World::new(&pg, "apply-rotation").await;
+    let reconciler = Reconciler::new(
+        ControlStore::new(control_as_service().await),
+        cluster_fixture.url(),
+        Some(world.zone.clone()),
+    );
+
+    let datastore = pass(&reconciler).await;
+    let app = world.app(&pg, "shop").await;
+    let app = AppId::parse(&app).expect("the world mints canonical app ids");
+    let database = world.declare_database(&pg, &datastore, "ledger").await;
+    let binding = world
+        .declare_binding(&pg, app.as_str(), &database, DatabaseCapability::ReadWrite)
+        .await;
+    pass(&reconciler).await;
+    let principal = seed_user(&pg).await;
+
+    // THE STARTING STATE, read rather than assumed. A database converges at
+    // epoch 0 on both sides and its binding role carries that epoch, so every
+    // move below is attributable to an apply.
+    assert_eq!(
+        cluster_epoch(&cluster, &database).await,
+        Some(0),
+        "the reconciler converges a declared database at the epoch control declared"
+    );
+    assert_eq!(
+        control_epoch(&pg, &database).await,
+        0,
+        "control's projection starts where the cluster does"
+    );
+    assert!(
+        role_exists(&cluster, &binding_role(&binding, 0)).await,
+        "the pass minted this binding's role at the converged epoch"
+    );
+    assert!(
+        !role_exists(&cluster, &binding_role(&binding, 1)).await,
+        "nothing has rotated yet, so the next epoch's role must not exist: without \
+         this the mint assertion below could pass over a role the fixture created"
+    );
+
+    // ---- APPLY 1: 0 -> 1. Nothing to retire; the mint is what is measurable.
+    apply_through(cluster_fixture.url(), &app, &database, &principal, &[NOTES]).await;
+    assert_eq!(
+        cluster_epoch(&cluster, &database).await,
+        Some(1),
+        "an apply that committed a schema delta advances the CLUSTER's head, which \
+         is the authority for every binding role name"
+    );
+    assert_eq!(
+        control_epoch(&pg, &database).await,
+        1,
+        "and projects it onto control, which is what a binding is composed from"
+    );
+    assert!(
+        role_exists(&cluster, &binding_role(&binding, 1)).await,
+        "the widen minted this live binding's role at the new epoch; without it \
+         control names a role the cluster does not carry"
+    );
+    assert!(
+        role_exists(&cluster, &binding_role(&binding, 0)).await,
+        "epoch 0 is the head this apply ran against, and a serving app is never \
+         fenced: the apply retires E-1, not E"
+    );
+
+    // ---- APPLY 2: 1 -> 2. Both halves, in one catalog read.
+    apply_through(
+        cluster_fixture.url(),
+        &app,
+        &database,
+        &principal,
+        &[NOTES, TAGS],
+    )
+    .await;
+    assert_eq!(
+        cluster_epoch(&cluster, &database).await,
+        Some(2),
+        "the second delta advances the head again"
+    );
+    assert_eq!(
+        control_epoch(&pg, &database).await,
+        2,
+        "and the projection follows it"
+    );
+    assert!(
+        role_exists(&cluster, &binding_role(&binding, 2)).await,
+        "the new epoch's role is minted"
+    );
+    assert!(
+        role_exists(&cluster, &binding_role(&binding, 1)).await,
+        "THE PAIR: the epoch this apply ran against is still assumable. An isolate \
+         built against it goes on serving while the rotation happens underneath"
+    );
+    assert!(
+        !role_exists(&cluster, &binding_role(&binding, 0)).await,
+        "THE PAIR: E-1 is gone, so an isolate two shapes behind fails at SET LOCAL \
+         ROLE with 22023 rather than reading a schema it was not built against"
+    );
+
+    // ---- APPLY 3: the control. Nothing commits, so nothing rotates.
+    let report = apply_through(
+        cluster_fixture.url(),
+        &app,
+        &database,
+        &principal,
+        &[NOTES, TAGS],
+    )
+    .await;
+    assert!(
+        report.applied.is_empty() && !report.skipped.is_empty(),
+        "the control only measures what it claims to if this apply committed no \
+         schema delta at all: {report:?}"
+    );
+    assert_eq!(
+        cluster_epoch(&cluster, &database).await,
+        Some(2),
+        "a rotation is owed by a committed schema delta, not by a request"
+    );
+    assert!(
+        !role_exists(&cluster, &binding_role(&binding, 3)).await,
+        "and no epoch beyond the head is minted"
+    );
+    assert!(
+        role_exists(&cluster, &binding_role(&binding, 2)).await,
+        "the head's own role stands, whatever this apply did or did not commit"
+    );
+    assert!(
+        !role_exists(&cluster, &binding_role(&binding, 1)).await,
+        "the RETIREMENT is unconditional where the MINT is not, and that asymmetry \
+         is the only shape the ordering rule admits: the retirement runs before any \
+         DDL commits, when nothing yet knows whether a delta will follow. So the two \
+         live epochs are a CAP and not a floor - an apply that commits nothing still \
+         narrows the window an isolate on E-1 has to re-resolve in"
+    );
+}
+
+/// This binding's role name at one epoch, composed the way the data plane
+/// composes it.
+fn binding_role(binding: &BindingId, epoch: u32) -> String {
+    database_derivation::binding_role_name(binding, epoch).expect("the role name fits")
+}
+
+async fn role_exists(cluster: &Client, role: &str) -> bool {
+    !cluster
+        .query("SELECT 1 FROM pg_roles WHERE rolname = $1", &[&role])
+        .await
+        .expect("read the role catalog")
+        .is_empty()
+}
+
+/// The epoch the CLUSTER holds, which is the authority.
+async fn cluster_epoch(cluster: &Client, database: &DatabaseId) -> Option<i32> {
+    cluster
+        .query_opt(
+            &format!(
+                "SELECT schema_epoch FROM {}.{} WHERE database_id = $1",
+                cluster::ADMIN_SCHEMA,
+                cluster::EPOCH_TABLE
+            ),
+            &[&database.as_str()],
+        )
+        .await
+        .expect("read the cluster's epoch table")
+        .map(|row| row.get("schema_epoch"))
+}
+
+/// The epoch CONTROL projects, which is what a binding is composed from.
+async fn control_epoch(pg: &Client, database: &DatabaseId) -> i32 {
+    pg.query_one(
+        "SELECT schema_epoch FROM zeroship.databases WHERE id = $1",
+        &[&database.as_str()],
+    )
+    .await
+    .expect("the database row must exist to be read")
+    .get("schema_epoch")
+}
+
+/// One `.ir.json` document, by name and by the table it creates.
+struct Document {
+    filename: &'static str,
+    name: &'static str,
+    table: &'static str,
+}
+
+const NOTES: Document = Document {
+    filename: "0001_create_notes.ir.json",
+    name: "create_notes",
+    table: "notes",
+};
+
+const TAGS: Document = Document {
+    filename: "0002_create_tags.ir.json",
+    name: "create_tags",
+    table: "tags",
+};
+
+/// Apply a document set through the service's own apply.
+///
+/// The WHOLE set every time, because that is what the CLI posts and what
+/// `attest_complete_history` requires: a request naming only the new file is
+/// refused for an incomplete history, not applied.
+async fn apply_through(
+    tenant_url: &str,
+    app: &AppId,
+    database: &DatabaseId,
+    principal: &UserId,
+    documents: &[Document],
+) -> zeroship_migrate_server::apply::ApplyMigrationsResponse {
+    let body = json!({
+        "kind": "ir",
+        "descriptor_sha256": DESCRIPTOR,
+        "documents": documents
+            .iter()
+            .map(|document| json!({
+                "filename": document.filename,
+                "body": {
+                    "ir_version": 1,
+                    "name": document.name,
+                    "ops": [{
+                        "op": "createTable",
+                        "name": document.table,
+                        "columns": [{"name": "title", "type": "text", "nullable": false}]
+                    }]
+                }
+            }))
+            .collect::<Vec<_>>(),
+    });
+    let request: ApplyMigrationsRequest =
+        serde_json::from_value(body).expect("the fixture is a legal request");
+    let tmp = tmpdir("rotation");
+    let report = apply_ir_documents(
+        tenant_url,
+        &fixture::migrated_url(),
+        &tmp,
+        zeroship_migrate_server::apply::ApplyTarget {
+            app_id: app,
+            database_id: database,
+        },
+        &request,
+        &policy_config(),
+        principal,
+    )
+    .await
+    .unwrap_or_else(|error| panic!("apply into {}: {error}", database.as_str()));
+    let _ = std::fs::remove_dir_all(tmp);
+    report
+}

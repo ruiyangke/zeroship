@@ -416,6 +416,7 @@ fn private_migration() -> Json {
 /// service's own apply.
 async fn apply_into(
     tenant_url: &str,
+    control_url: &str,
     app: &AppId,
     database: &DatabaseId,
     principal: &UserId,
@@ -427,6 +428,7 @@ async fn apply_into(
     let tmp = tmpdir(label);
     let report = apply_ir_documents(
         tenant_url,
+        control_url,
         &tmp,
         zeroship_migrate_server::apply::ApplyTarget {
             app_id: app,
@@ -1158,6 +1160,7 @@ async fn the_whole_decoupled_path_runs_in_one_exercise() {
 
     apply_into(
         cluster_fixture.url(),
+        &world.control_url,
         &app_a,
         &shared_id,
         &principal,
@@ -1167,6 +1170,7 @@ async fn the_whole_decoupled_path_runs_in_one_exercise() {
     .await;
     apply_into(
         cluster_fixture.url(),
+        &world.control_url,
         &app_a,
         &private_id,
         &principal,

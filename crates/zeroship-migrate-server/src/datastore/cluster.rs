@@ -70,7 +70,27 @@ pub const RELAY_ROLE: &str = "zeroship_cdc";
 pub const ADMIN_SCHEMA: &str = "__zeroship_admin";
 
 /// The one table [`ADMIN_SCHEMA`] holds: the live schema epoch per database.
+///
+/// `schema_epoch` is the head, and the authority for it: a binding role name
+/// carries this number, and control's copy is a projection of it.
+/// `journal_frontier` is the engine journal's high-water mark in the
+/// database's own schema as of the transaction that minted that head, and it
+/// is what decides whether a rotation is still OWED. An apply that finds the
+/// journal past it has a committed schema delta the head does not cover, which
+/// is true whether this apply produced the delta or a crashed one did.
 pub const EPOCH_TABLE: &str = "database_schema_epoch";
+
+/// `ADMIN_SCHEMA`.`EPOCH_TABLE`, quoted, composed in one place.
+///
+/// Every statement that reads or moves the head names this table, and two
+/// spellings of it would be two tables the moment either identifier changes.
+pub(crate) fn epoch_table() -> String {
+    format!(
+        "{}.{}",
+        quote_ident(ADMIN_SCHEMA),
+        quote_ident(EPOCH_TABLE)
+    )
+}
 
 /// A cluster-side step that did not complete.
 #[derive(Debug, thiserror::Error)]
@@ -85,6 +105,15 @@ pub enum ClusterError {
     /// role name can be composed against an authoritative epoch.
     #[error("database {database} has no epoch row in {ADMIN_SCHEMA}.{EPOCH_TABLE}")]
     EpochMissing { database: String },
+    /// The head stands at the largest epoch an `integer` column holds, so the
+    /// next one cannot be composed.
+    ///
+    /// Reachable from a declared epoch rather than from arithmetic this service
+    /// performed: `converge_database` seeds the head from the control row, and
+    /// nothing narrows what an operator may write there. Refusing keeps the
+    /// apply from minting a role name whose epoch wrapped.
+    #[error("database {database} stands at schema epoch {epoch}, which has no successor")]
+    EpochExhausted { database: String, epoch: i32 },
     /// The shared worker login holds a database role directly.
     ///
     /// One such membership carries every co-tenant binding's privileges on that
@@ -131,7 +160,7 @@ pub async fn apply_bootstrap_corpus(admin: &Client) -> Result<(), ClusterError> 
     let relay_q = quote_ident(RELAY_ROLE);
     let relay_lit = quote_lit(RELAY_ROLE);
     let admin_schema_q = quote_ident(ADMIN_SCHEMA);
-    let epoch_table_q = format!("{admin_schema_q}.{}", quote_ident(EPOCH_TABLE));
+    let epoch_table_q = epoch_table();
 
     // The worker login. NOSUPERUSER / NOCREATEDB / NOCREATEROLE keep schema
     // change out of the process that runs creator code; NOREPLICATION keeps
@@ -183,16 +212,28 @@ pub async fn apply_bootstrap_corpus(admin: &Client) -> Result<(), ClusterError> 
     .await?;
 
     // The platform's own schema, and the one table in it.
+    //
+    // THE TABLE IS STATED AS A SHAPE, NOT AS AN EXISTENCE. `IF NOT EXISTS`
+    // converges a cluster that has no admin table and says nothing at all about
+    // one that has it, so the column list beside it is re-asserted the same way
+    // every role attribute above is: a cluster is made to match, and matching
+    // is about the shape. Without the `ADD COLUMN`, a cluster keeps whichever
+    // shape it was created with and the apply's widen fails on a column
+    // `PostgreSQL` cannot find - after the creator's DDL has committed, which is
+    // the worst point in the sequence to discover it.
     exec_retry(
         admin,
         &format!(
             "CREATE SCHEMA IF NOT EXISTS {admin_schema_q};
              REVOKE ALL ON SCHEMA {admin_schema_q} FROM PUBLIC;
              CREATE TABLE IF NOT EXISTS {epoch_table_q} (
-                 database_id  text        PRIMARY KEY,
-                 schema_epoch integer     NOT NULL,
-                 updated_at   timestamptz NOT NULL DEFAULT now()
+                 database_id      text        PRIMARY KEY,
+                 schema_epoch     integer     NOT NULL,
+                 journal_frontier bigint      NOT NULL DEFAULT 0,
+                 updated_at       timestamptz NOT NULL DEFAULT now()
              );
+             ALTER TABLE {epoch_table_q}
+                 ADD COLUMN IF NOT EXISTS journal_frontier bigint NOT NULL DEFAULT 0;
              REVOKE ALL ON TABLE {epoch_table_q} FROM PUBLIC;"
         ),
     )
@@ -274,11 +315,7 @@ pub async fn converge_database(
     let migrator_lit = quote_lit(&roles.migrator);
     let readwrite_lit = quote_lit(&roles.readwrite);
     let readonly_lit = quote_lit(&roles.readonly);
-    let epoch_table_q = format!(
-        "{}.{}",
-        quote_ident(ADMIN_SCHEMA),
-        quote_ident(EPOCH_TABLE)
-    );
+    let epoch_table_q = epoch_table();
 
     // ONE transaction, because the epoch row is the authority for the role
     // names these statements mint. A cluster carrying the roles and not the row
@@ -346,11 +383,7 @@ pub async fn live_schema_epoch(
     admin: &Client,
     database: &DatabaseId,
 ) -> Result<i32, ClusterError> {
-    let epoch_table_q = format!(
-        "{}.{}",
-        quote_ident(ADMIN_SCHEMA),
-        quote_ident(EPOCH_TABLE)
-    );
+    let epoch_table_q = epoch_table();
     let row = admin
         .query_opt(
             &format!("SELECT schema_epoch FROM {epoch_table_q} WHERE database_id = $1::text"),
@@ -403,14 +436,26 @@ pub async fn grant_binding(
 ) -> Result<String, ClusterError> {
     let roles = DatabaseRoles::derive(database)?;
     let binding_name = binding_role(binding, epoch)?;
-    let binding_q = quote_ident(&binding_name);
-    let binding_lit = quote_lit(&binding_name);
-    let capability_q = quote_ident(roles.for_capability(capability));
-    let worker_q = quote_ident(WORKER_ROLE);
+    for statement in grant_binding_statements(&binding_name, roles.for_capability(capability)) {
+        exec_retry(admin, &statement).await?;
+    }
+    Ok(binding_name)
+}
 
-    exec_retry(
-        admin,
-        &format!(
+/// The three statements one binding's two edges are, in the order the fence
+/// requires.
+///
+/// Composed here rather than at each driver so the reconciler's retrying
+/// statement-at-a-time pass and the apply's one-transaction rotation issue the
+/// same SQL. A second spelling would be a second fence, and the two grant
+/// options are the whole of it.
+pub(crate) fn grant_binding_statements(binding_name: &str, capability_role: &str) -> [String; 3] {
+    let binding_q = quote_ident(binding_name);
+    let binding_lit = quote_lit(binding_name);
+    let capability_q = quote_ident(capability_role);
+    let worker_q = quote_ident(WORKER_ROLE);
+    [
+        format!(
             "DO $binding_role$ BEGIN
                 IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{binding_lit}') THEN
                     EXECUTE 'CREATE ROLE {binding_q} NOLOGIN NOSUPERUSER NOCREATEDB \
@@ -418,19 +463,9 @@ pub async fn grant_binding(
                 END IF;
              END $binding_role$"
         ),
-    )
-    .await?;
-    exec_retry(
-        admin,
-        &format!("GRANT {capability_q} TO {binding_q} WITH SET FALSE"),
-    )
-    .await?;
-    exec_retry(
-        admin,
-        &format!("GRANT {binding_q} TO {worker_q} WITH INHERIT FALSE"),
-    )
-    .await?;
-    Ok(binding_name)
+        format!("GRANT {capability_q} TO {binding_q} WITH SET FALSE"),
+        format!("GRANT {binding_q} TO {worker_q} WITH INHERIT FALSE"),
+    ]
 }
 
 /// Withdraw one binding's two edges, and leave its role standing.
@@ -640,11 +675,7 @@ pub async fn drop_database(
     let migrator_lit = quote_lit(&roles.migrator);
     let readwrite_lit = quote_lit(&roles.readwrite);
     let readonly_lit = quote_lit(&roles.readonly);
-    let epoch_table_q = format!(
-        "{}.{}",
-        quote_ident(ADMIN_SCHEMA),
-        quote_ident(EPOCH_TABLE)
-    );
+    let epoch_table_q = epoch_table();
 
     let transaction = admin.transaction().await?;
     transaction
@@ -710,25 +741,31 @@ pub async fn database_schemas(admin: &Client) -> Result<Vec<(String, DatabaseId)
 /// # Errors
 /// [`ClusterError::Query`] on any DDL failure.
 pub async fn drop_binding_role(admin: &Client, role: &str) -> Result<(), ClusterError> {
+    exec_retry(admin, &drop_binding_role_sql(role)).await?;
+    Ok(())
+}
+
+/// The statement one binding role's removal is.
+///
+/// Shared with the apply's epoch retirement for the reason
+/// [`grant_binding_statements`] is shared: the reap by absence and the reap by
+/// epoch must remove the same thing in the same order, or one of them leaves a
+/// membership the other assumed was gone.
+pub(crate) fn drop_binding_role_sql(role: &str) -> String {
     let role_q = quote_ident(role);
     let role_lit = quote_lit(role);
     let worker_q = quote_ident(WORKER_ROLE);
     let worker_lit = quote_lit(WORKER_ROLE);
-    exec_retry(
-        admin,
-        &format!(
-            "DO $reap_binding$ BEGIN
-                IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{role_lit}') THEN
-                    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{worker_lit}') THEN
-                        EXECUTE 'REVOKE {role_q} FROM {worker_q}';
-                    END IF;
-                    EXECUTE 'DROP ROLE {role_q}';
+    format!(
+        "DO $reap_binding$ BEGIN
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{role_lit}') THEN
+                IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{worker_lit}') THEN
+                    EXECUTE 'REVOKE {role_q} FROM {worker_q}';
                 END IF;
-             END $reap_binding$"
-        ),
+                EXECUTE 'DROP ROLE {role_q}';
+            END IF;
+         END $reap_binding$"
     )
-    .await?;
-    Ok(())
 }
 
 #[cfg(test)]
