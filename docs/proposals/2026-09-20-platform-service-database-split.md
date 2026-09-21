@@ -130,10 +130,14 @@ Ownership is not recorded anywhere in the tree today.
 
 The header of `db/migrations-ts/20260816000100_service_assertion_replay.ts`
 argues from "exactly one shared, strongly consistent store". That argument is
-weaker than it reads: the replay key is `<iss>|<jti>`, `aud` is verifier input,
-and an assertion is verified by exactly one service. The real requirement is
-that all REPLICAS of one service share a store, which a per-service database
-satisfies. The CDC relay already opts out with an in-memory store.
+weaker than it reads, though not for the reason the key suggests. The key,
+`<iss>|<jti>`, omits `aud`, which on its own would make a shared store look
+necessary. What makes it unnecessary is that
+`crates/zeroship-core/src/service_assertion.rs` checks the audience BEFORE it
+consults the store: an assertion addressed elsewhere is rejected at validation
+and never reaches this table. So the requirement is that all REPLICAS of one
+service share a store, which a per-service database satisfies. The CDC relay
+already opts out with an in-memory store. See open question 3.
 
 ---
 
@@ -538,20 +542,31 @@ and it was the wrong measure.
    store per service exists in the tree, and the live contest is a two-service
    one between auth and gateway - which this document's sequencing splits
    across step 3 and step 6.
-3. **ANSWERED: `service_assertion_replay` does not need to stay shared.** The
-   key is `format!("{}|{}", claims.iss, claims.jti)` in
-   `crates/zeroship-core/src/service_assertion.rs` - `aud` is checked
-   separately and is not in the key - so a claim is only ever contended by
-   replicas of the one service the assertion is addressed to. Four services
-   build the Postgres-backed store today (`crates/zeroship-control/src/internal.rs`,
-   `crates/zeroship-gateway/src/main.rs`,
-   `crates/zeroship-migrate-server/src/main.rs`,
-   `crates/zeroship-workflow-server/src/server.rs`) and the CDC relay already
-   opts out with `InMemoryReplayStore`. A per-service table satisfies the
-   requirement the module header states; what it does not satisfy is the
-   header's own reasoning, which argues from "this deployment already has
-   exactly one such thing" - a premise this split removes. Retire that sentence
-   with the cut, or it will read as an argument against it.
+3. **ANSWERED: `service_assertion_replay` does not need to stay shared.** What
+   settles it is ORDER, not the key's shape.
+   `crates/zeroship-core/src/service_assertion.rs` verifies the audience
+   (`validation.set_audience`) well before it consults the replay store
+   (`self.replay.claim`), so an assertion minted for one service and presented
+   to another is rejected at validation and never reaches the second service's
+   table. Cross-audience replay is closed by the audience check; the store only
+   ever settles contention between replicas of the ONE addressed service, which
+   a per-service table does. The key itself, `format!("{}|{}", claims.iss,
+   claims.jti)`, omits `aud` - so the key alone would NOT have established this,
+   and its own comment argues only that sharing is safe, which is a different
+   claim from the one this split needs.
+
+   The Postgres-backed implementations live in the `zeroship-authn` library
+   (`SharedClientReplayStore`, used by control, migrate-server and
+   workflow-server); the gateway defines its own `PoolReplayStore` in
+   `crates/zeroship-gateway/src/main.rs` over the same `claim_replay_key`. The
+   CDC relay opts out with `InMemoryReplayStore`, and auth constructs a store
+   only under `cfg(test)`.
+
+   What does not survive the cut is the module header's reasoning: "this
+   deployment already has exactly one such thing". That sentence is TRUE today
+   and becomes false because of this change, so it has to be retired in the
+   same patch - otherwise a reviewer checks it against the tree, finds it
+   accurate, and reads it as an argument against the cut.
 4. **Which database holds an auth-domain row no auth process writes?**
    `zeroship.identity_links` is the case. Every production statement against it
    lives in the `zeroship-authn` library, and the writer,
