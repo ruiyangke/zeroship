@@ -806,13 +806,16 @@ auth/control edge carries most of it.
    A split planned from the registry rather than from the corpus would assign
    them. The drift is not incidental: a hand-maintained list that must agree
    with a set of files produced elsewhere has no mechanism keeping it honest,
-   and this tree holds two other instances of exactly that shape -
-   `crates/zeroship-authz/src/engine.rs` hand-lists the `.cedar` files
-   `crates/zeroship-authz/build.rs` walks, and `zeroship-workflow-schema`
-   hand-lists the version files its generator emits. Whatever the split does
-   with this registry, it should make the registry derivable from the corpus or
-   assert the two agree, rather than leaving a fourth hand-maintained copy of
-   the same question.
+   and this tree keeps repeating that shape.
+   `crates/zeroship-authz/src/engine.rs`
+   hand-lists the `.cedar` files `crates/zeroship-authz/build.rs` walks;
+   `zeroship-workflow-schema` hand-lists the version files its generator emits;
+   `xtask/tests/repository/build_inputs.rs` hand-lists the generated artifacts
+   its staleness gate checks. Each was found the same way - by something
+   drifting - and the first two have since been bound by a test. Whatever the
+   split does with this registry, it should make the registry derivable from the
+   corpus or assert the two agree, rather than leaving one more hand-maintained
+   copy of the same question.
 
    The mechanism does not have to be invented: `policies/codegen.mjs` already
    does this in the same directory. It reads a hand-authored
