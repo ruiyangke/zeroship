@@ -79,6 +79,20 @@ pub async fn get_logs(
     HttpResponse::Ok().json(&get(&logs, &app_id))
 }
 
+/// Registers the app log read.
+///
+/// The path is the declaration [`get_logs`] hands to its authorization check,
+/// so the route this process serves and the route control is granted are one
+/// statement rather than two copies that agree until someone edits one.
+pub fn configure(cfg: &mut web::ServiceConfig) {
+    cfg.service(
+        web::resource(
+            zeroship_core::service_identity::endpoints::WORKER_APP_LOGS.path_template(),
+        )
+        .route(web::get().to(get_logs)),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

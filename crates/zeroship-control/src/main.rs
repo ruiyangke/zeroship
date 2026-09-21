@@ -1536,55 +1536,15 @@ fn main() -> std::io::Result<()> {
                     .route(web::get().to(stripe_handlers::earnings)),
             )
             // --- Internal API ---
-            .service(
-                web::resource("/internal/versions")
-                    .route(web::get().to(internal::get_versions)),
-            )
-            .service(
-                web::resource("/internal/apps/{app_id}")
-                    .route(web::get().to(internal::get_app_version)),
-            )
-            .service(
-                web::resource("/internal/apps/{app_id}/env")
-                    .route(web::get().to(internal::get_app_env)),
-            )
-            .service(
-                web::resource("/internal/apps/{app_id}/data-key")
-                    .route(web::get().to(internal::get_app_data_key)),
-            )
-            .service(
-                web::resource("/internal/apps/{app_id}/bindings")
-                    .route(web::get().to(internal::get_app_bindings)),
-            )
-            .service(
-                web::resource("/internal/routes")
-                    .route(web::get().to(internal::get_routes)),
-            )
-            .service(
-                web::resource("/internal/workers/join")
-                    .route(web::post().to(internal::join_worker_instance)),
-            )
-            .service(
-                web::resource("/internal/workers/retire")
-                    .route(web::post().to(internal::retire_worker_instance)),
-            )
-            .service(
-                web::resource("/internal/workers/renew")
-                    .route(web::post().to(internal::renew_worker_instance)),
-            )
+            // Every route in it takes its path from the declaration its
+            // handler authorizes against, so the served route and the
+            // authorized route cannot disagree.
+            .configure(internal::configure)
             // The erasure seam: the auth service asks, before it opens the
             // grace window and again before the reaper deletes, whether this
             // human is the last owner of anything.
             .configure(erasure::configure)
             .configure(zeroship_control::deployment_hold_api::configure)
-            .service(
-                web::resource("/internal/billing/reconcile")
-                    .route(web::post().to(internal::force_reconcile)),
-            )
-            .service(
-                web::resource("/internal/spend/reconcile")
-                    .route(web::post().to(internal::force_spend_reconcile)),
-            )
             .service(
                 web::resource("/internal/webhooks/stripe")
                     // Give the Bytes extractor headroom above the handler's body cap so

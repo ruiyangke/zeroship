@@ -361,10 +361,17 @@ pub async fn erasure_preflight(
     }
 }
 
+/// Register the erasure preflight at the route the auth service is granted.
+///
+/// The path is read from the declaration [`erasure_preflight`] hands to its
+/// authorization check, so the route control serves and the route control
+/// authorizes are one statement.
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
-        web::resource("/internal/principals/{principal_id}/erasure-preflight")
-            .route(web::get().to(erasure_preflight)),
+        web::resource(
+            zeroship_core::service_identity::endpoints::CONTROL_ERASURE_PREFLIGHT.path_template(),
+        )
+        .route(web::get().to(erasure_preflight)),
     );
 }
 

@@ -451,7 +451,7 @@ pub const GRANT_REVOKED_MESSAGE: &str =
 /// creator reading the HTTP response only ever sees the message.
 pub const STALE_EPOCH_MESSAGE: &str =
     "this app's database binding is not live at the schema epoch this build was \
-     resolved at. Retry the request; a redeploy resolves the binding afresh.";
+     resolved at, so the request is refused before any statement runs.";
 
 /// Operator/`env.db`-caller hint for [`SCHEMA_EPOCH_STALE`]. Reaches app JS as
 /// `err.hint` on a direct native throw; does NOT reach the HTTP wire.
