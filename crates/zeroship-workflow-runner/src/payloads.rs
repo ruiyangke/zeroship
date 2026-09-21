@@ -5,10 +5,18 @@
     reason = "task payload I/O runs on its compio host thread"
 )]
 
+mod objects;
+#[cfg(test)]
+mod tests;
+pub use objects::{
+    AppPayloads, HostPayloads, ObjectStepOutputs, PayloadObjects, PayloadRead, RunPayloads,
+    WorkerPayloads,
+};
+
 use crate::WorkerTasks;
 use zeroship_workflow::{
     engine::{JournalStep, WorkflowOutputRef},
-    service::{PayloadRead, RequestId, StagedPayload, TaskAssignment, TaskToken},
+    service::{RequestId, StagedPayload, TaskAssignment, TaskToken},
     validation, WorkflowServiceError,
 };
 use async_trait::async_trait;
@@ -66,7 +74,8 @@ impl TaskPayloads for WorkerTasks {
         body: BoxChunkSource,
     ) -> Result<StagedPayload, WorkflowServiceError> {
         self.service
-            .stage_payload(&self.worker, task, token, request, reference, body)
+            .payloads(&self.objects)
+            .stage(&self.worker, task, token, request, reference, body)
             .await
     }
     async fn read(
@@ -76,7 +85,8 @@ impl TaskPayloads for WorkerTasks {
         reference: &WorkflowOutputRef,
     ) -> Result<PayloadRead, WorkflowServiceError> {
         self.service
-            .read_task_payload(&self.worker, task, token, reference)
+            .payloads(&self.objects)
+            .read_task(&self.worker, task, token, reference)
             .await
     }
 }

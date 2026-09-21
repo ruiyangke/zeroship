@@ -154,6 +154,7 @@ async fn propagation_refuses_invalid_page_bounds_before_delivery() {
                     probe: fixture.probe.clone(),
                     service: fixture.service.clone(),
                 }),
+                fixture.objects.clone(),
                 options,
             ),
             Err(WorkflowServiceError::InvalidRequest(_))

@@ -629,6 +629,13 @@ impl CreatorFactory for Factory {
                     .await?;
             }
         }
+        let objects = crate::PayloadObjects::open(zeroship_storage::StorageStore::from_backend(
+            Arc::new(zeroship_storage::LocalFs::new(
+                self.0.directory.path().join("objects"),
+            )),
+        ))?;
+        let outputs: zeroship_workflow::SharedStepOutputs =
+            Arc::new(crate::ObjectStepOutputs::new(objects.clone(), 1024)?);
         let backend = if self.0.foreign_backend.get() {
             let policies = Arc::new(HostPolicies::default());
             let binding = policies.bind(scope.app_id.clone())?;
@@ -642,14 +649,16 @@ impl CreatorFactory for Factory {
             foreign
                 .register_app(&binding)
                 .await?
-                .into_backend(&foreign, 1024)?
+                .into_backend(&foreign, outputs.clone())?
         } else {
-            app.clone().into_backend(&service, 1024)?
+            app.clone()
+                .into_backend(&service, outputs.clone())?
         };
         let runtime = CreatorRuntime {
             app: app.with_ingress(ingress),
             executor: Rc::new(NoExecution),
             backend,
+            objects,
         };
         *opening.runtime.borrow_mut() = Some(runtime.clone());
         if let Some(finished) = self.0.finished.borrow_mut().remove(&scope.app_id) {

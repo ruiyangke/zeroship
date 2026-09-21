@@ -1,6 +1,6 @@
 #![expect(
     clippy::future_not_send,
-    reason = "collection fixtures use compio journals and storage"
+    reason = "collection fixtures use compio journals"
 )]
 
 use super::*;

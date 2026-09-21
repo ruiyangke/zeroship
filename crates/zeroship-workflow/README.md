@@ -227,8 +227,8 @@ compiles the canonical logical definition, then binds owned table, constraint
 and index identifiers for the provisioning artifact. Table prefixes do not
 restrict ORM access; schema binding and database permissions determine access.
 
-`HostStorage` carries the app's resolved connection factory, keys, binding and
-object store to its workflow thread. Local setup initializes the journal in the
+`HostStorage` carries the app's resolved connection factory, keys and binding
+to its workflow thread. Local setup initializes the journal in the
 SQLite file already attached by the ORM, preserving business tables. Canonical
 DDL application remains a provisioning operation. PostgreSQL runtime connections
 have ordinary app-role DML permissions and cannot provision the journal.
@@ -344,28 +344,32 @@ fixtures use Testcontainers.
 The replacement capability codecs use the platform's service signing keys.
 Public signal delivery checks app and target revocation epochs transactionally;
 the Control issuer and HTTP hosts are not yet wired to this replacement.
-The service stages task-owned payloads through `zeroship-storage`, verifies
-streamed content and promotes references in the completion transaction.
+The service records task-owned payloads and promotes their references in the
+completion transaction. It holds no object store: a writer, an opener and a
+deleter arrive as arguments, and `zeroship-workflow-runner` supplies them over
+`zeroship-storage`, verifying streamed content as it moves.
 Replay generations, child results and continuation inputs retain explicit
 reference edges. Collection fences uploads and retries failed deletions;
 tombstones remain discoverable when an interrupted remote write arrives late.
 `AppWorkflows::collect_job` accepts the manager's independent collection duty.
 Each delivered page preserves a fixed observation cutoff and upper identity,
-reserves item progress before storage I/O, and retains an exact receipt. Failed
+reserves item progress before deletion, and retains an exact receipt. Failed
 items remain eligible for a later sweep without trapping the page's remaining
 items. Deletion confirms the original tombstone fence and cannot extend a newer
 collector's retention deadline. Collection keeps referenced payloads, lifecycle
 history, receipts and deployment holds; completing a sweep does not certify that
-the app has drained. Committed pages replay without live policy or storage.
-Payload contracts run against local storage and Testcontainers S3.
+the app has drained. Committed pages replay without live policy, and without
+asking the deleter for anything.
 App handles expose `read_step_output` for a completed
 named occurrence in the run's current generation. The service resolves that
-generation under the restart fence and checks reference ownership before
-opening storage. `PayloadRead::into_bytes` verifies the stream within a host
-memory limit. `into_backend` adapts the app handle to `WorkflowBackend` over the
-journal its caller names, refusing a service opened over another policy
-registry; its bound identity cannot change between operations. `AppBackend::with_commit_hint`
-tells the trusted host when a start, signal, transition or restart finished, so
+generation under the restart fence and checks reference ownership, then hands
+the opener the descriptor it proved. `runner::PayloadRead::into_bytes` verifies
+the stream within a host memory limit. `into_backend` adapts the app handle to
+`WorkflowBackend` over the journal its caller names, refusing a service opened
+over another policy registry; its bound identity cannot change between
+operations. Its construction site also supplies the reader that turns a step's
+recorded output into bytes, since this crate holds no store.
+`AppBackend::with_commit_hint` tells the trusted host when a start, signal, transition or restart finished, so
 the host can publish that commit's pending intents at once; manager
 reconciliation still recovers any intent the host misses. The hint carries no
 customer data.

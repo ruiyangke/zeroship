@@ -117,6 +117,7 @@ fn scope(fixture: &Fixture, revision: i64) -> ConsumerScope {
             probe: fixture.probe.clone(),
             service: fixture.service.clone(),
         }),
+        fixture.objects.clone(),
     )
     .unwrap()
 }
@@ -804,8 +805,7 @@ async fn native_manager_delivery_and_lost_ack_finish_through_separate_orm_databa
 
 #[compio::test]
 async fn manager_collect_duty_settles_without_publishing_or_executing_creator_work() {
-    let mut fixture = Fixture::new(AppPolicy::default()).await;
-    super::collection::attach_storage(&mut fixture);
+    let fixture = Fixture::new(AppPolicy::default()).await;
     assert!(!super::collection::has_task(&fixture).await);
     let manager = NativeManager::new(&fixture).await;
     let recovery = zeroship_workflow_manager::recovery::Recovery::new(
@@ -857,7 +857,7 @@ async fn manager_collect_duty_settles_without_publishing_or_executing_creator_wo
     );
     assert_eq!(
         fixture.app.pending_jobs(None, 1).await.unwrap(),
-        [fixture.job.clone()]
+        std::slice::from_ref(&fixture.job)
     );
     assert!(manager.claim(&manager.scope).await.unwrap().is_none());
     let requests = manager.requests.borrow();

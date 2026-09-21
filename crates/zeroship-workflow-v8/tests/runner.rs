@@ -13,14 +13,15 @@ use zeroship_runtime::{runtime::InnerProbe, EnvSnapshot, ModuleEntry, Runtime};
 use zeroship_workflow::{
     operations::{RunOperation, RunState, SignalOptions, StartOptions},
     service::{
-        AppPolicy, AppWorkflows, CompletionReceipt, DeployRegistration, HostPolicies, PayloadRead,
-        PayloadSlot, PolicySnapshot, RequestId, StagedPayload, TaskAssignment, TaskToken,
-        WorkerIdentity, WorkflowService,
+        AppPolicy, AppWorkflows, CompletionReceipt, DeployRegistration, HostPolicies, PayloadSlot,
+        PolicySnapshot, RequestId, StagedPayload, TaskAssignment, TaskToken, WorkerIdentity,
+        WorkflowService,
     },
     WorkflowServiceError,
 };
 use zeroship_workflow_runner::{
-    RunnerOutcome, RunnerSlot, TaskPayloadLimits, TaskPayloads, WorkerBinding, WorkerTasks,
+    ObjectStepOutputs, PayloadObjects, PayloadRead, RunPayloads, RunnerOutcome, RunnerSlot,
+    TaskPayloadLimits, TaskPayloads, WorkerBinding, WorkerPayloads, WorkerTasks,
 };
 use zeroship_workflow_v8::{
     LoadedWorkflow, V8TaskExecutor, WorkflowBinding, WorkflowRuntimeLoader,
@@ -77,6 +78,7 @@ const BURN: &str = r"
 struct Loader {
     app: AppWorkflows,
     journal: WorkflowService,
+    objects: PayloadObjects,
     probes: RefCell<Vec<InnerProbe>>,
     cpu_limit: Option<Duration>,
     markers: Markers,
@@ -115,7 +117,15 @@ impl WorkflowRuntimeLoader for Loader {
                 Arc::new(self.markers.clone()),
                 Arc::new(WorkflowBinding::service(
                     // Replay reads must use task authority and its own read budget.
-                    self.app.clone().into_backend(&self.journal, 1).unwrap(),
+                    self.app
+                        .clone()
+                        .into_backend(
+                            &self.journal,
+                            Arc::new(
+                                ObjectStepOutputs::new(self.objects.clone(), 1).unwrap(),
+                            ),
+                        )
+                        .unwrap(),
                 )),
             ])
             .app_id(app);
@@ -134,6 +144,7 @@ struct Fixture {
     deployments: deployment_fixture::Deployments,
     service: WorkflowService,
     app: AppWorkflows,
+    objects: PayloadObjects,
     loader: Rc<Loader>,
 }
 impl Fixture {
@@ -165,10 +176,10 @@ impl Fixture {
             policies,
         )
         .await
-        .unwrap()
-        .with_payload_storage(zeroship_storage::StorageStore::from_backend(Arc::new(
-            zeroship_storage::LocalFs::new(dir.path().join("payloads")),
-        )))
+        .unwrap();
+        let objects = PayloadObjects::open(zeroship_storage::StorageStore::from_backend(
+            Arc::new(zeroship_storage::LocalFs::new(dir.path().join("payloads"))),
+        ))
         .unwrap();
         let deployments = deployment_fixture::Deployments::new().await;
         let service = service.with_deployments(deployments.binding(&[&app]));
@@ -192,9 +203,11 @@ impl Fixture {
             deployments,
             app: api.clone(),
             service: service.clone(),
+            objects: objects.clone(),
             loader: Rc::new(Loader {
                 app: api,
                 journal: service,
+                objects,
                 probes: RefCell::new(Vec::new()),
                 cpu_limit,
                 markers: Markers::default(),
@@ -221,7 +234,10 @@ impl Fixture {
     ) -> RunnerSlot {
         let tasks = Rc::new(
             self.service
-                .tasks(WorkerIdentity::new("local-v8-worker".into()).unwrap()),
+                .tasks(
+                    WorkerIdentity::new("local-v8-worker".into()).unwrap(),
+                    self.objects.clone(),
+                ),
         );
         RunnerSlot::new(
             tasks.clone(),
@@ -266,7 +282,8 @@ async fn prepare_payload(fixture: &Fixture, continuation: bool) -> String {
     };
     fixture
         .service
-        .stage_payload(
+        .payloads(&fixture.objects)
+        .stage(
             &worker,
             &task.id,
             &task.token,
@@ -377,7 +394,7 @@ impl zeroship_workflow_runner::TaskPayloads for UnavailablePayloads {
         _task: &str,
         _token: &zeroship_workflow::service::TaskToken,
         _reference: &zeroship_workflow::engine::WorkflowOutputRef,
-    ) -> Result<zeroship_workflow::service::PayloadRead, WorkflowServiceError> {
+    ) -> Result<PayloadRead, WorkflowServiceError> {
         Err(WorkflowServiceError::Unavailable(
             "fixture payload outage".into(),
         ))
@@ -406,7 +423,10 @@ async fn payload_outage_interrupts_app_code_and_leaves_the_frontier_retryable() 
     let tasks = Rc::new(
         fixture
             .service
-            .tasks(WorkerIdentity::new("local-v8-worker".into()).unwrap()),
+            .tasks(
+                WorkerIdentity::new("local-v8-worker".into()).unwrap(),
+                fixture.objects.clone(),
+            ),
     );
     let executor = Rc::new(
         V8TaskExecutor::new(
@@ -525,7 +545,10 @@ async fn output_upload_retry_preserves_the_callback_and_stops_background_app_wor
     let tasks = Rc::new(
         fixture
             .service
-            .tasks(WorkerIdentity::new("upload-worker".into()).unwrap()),
+            .tasks(
+                WorkerIdentity::new("upload-worker".into()).unwrap(),
+                fixture.objects.clone(),
+            ),
     );
     let upload = Rc::new(UploadProbe {
         tasks: tasks.as_ref().clone(),
@@ -552,6 +575,7 @@ async fn output_upload_retry_preserves_the_callback_and_stops_background_app_wor
     }
     let bytes = fixture
         .app
+        .payloads(&fixture.objects)
         .read_step_output(&run.id, "saved", 0)
         .await
         .unwrap()
@@ -584,7 +608,10 @@ async fn upload_outage_is_bounded_after_disposing_the_app() {
     let tasks = Rc::new(
         fixture
             .service
-            .tasks(WorkerIdentity::new("upload-worker".into()).unwrap()),
+            .tasks(
+                WorkerIdentity::new("upload-worker".into()).unwrap(),
+                fixture.objects.clone(),
+            ),
     );
     let upload = Rc::new(UploadProbe {
         tasks: tasks.as_ref().clone(),
@@ -633,7 +660,8 @@ async fn native_runner_stores_large_root_results_in_service_owned_payloads() {
     );
     let bytes = fixture
         .app
-        .read_payload(&run.id, 0, PayloadSlot::Output)
+        .payloads(&fixture.objects)
+        .read(&run.id, 0, PayloadSlot::Output)
         .await
         .unwrap()
         .into_bytes(256)
@@ -999,6 +1027,7 @@ async fn replay_loads_retained_dependencies_after_redeploy_and_host_restart() {
     fixture.loader = Rc::new(Loader {
         app: fixture.app.clone(),
         journal: fixture.service.clone(),
+        objects: fixture.objects.clone(),
         probes: RefCell::new(Vec::new()),
         cpu_limit: Some(Duration::from_millis(100)),
         markers: Markers::default(),
@@ -1037,7 +1066,10 @@ async fn missing_executable_never_constructs_an_app_isolate() {
         .unwrap();
     let tasks = fixture
         .service
-        .tasks(WorkerIdentity::new("inspect-executable".into()).unwrap());
+        .tasks(
+            WorkerIdentity::new("inspect-executable".into()).unwrap(),
+            fixture.objects.clone(),
+        );
     let task = tasks.poll().await.unwrap().unwrap();
     assert!(fixture
         .deployments
@@ -1132,7 +1164,10 @@ impl Manager {
         let tasks = Rc::new(
             fixture
                 .app
-                .tasks(WorkerIdentity::new(self.worker.as_str().to_owned()).unwrap()),
+                .tasks(
+                    WorkerIdentity::new(self.worker.as_str().to_owned()).unwrap(),
+                    fixture.objects.clone(),
+                ),
         );
         let executor = Rc::new(
             V8TaskExecutor::new(fixture.loader.clone(), tasks, TaskPayloadLimits::default())
@@ -1164,6 +1199,7 @@ impl Manager {
                 fixture.app.clone(),
                 self.scope.clone(),
                 executor,
+                fixture.objects.clone(),
             )
             .unwrap()])
             .unwrap();

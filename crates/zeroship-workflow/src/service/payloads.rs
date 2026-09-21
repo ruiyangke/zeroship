@@ -9,16 +9,11 @@ use super::{
 use crate::service::policy::admit;
 use crate::{engine::WorkflowOutputRef, validation, WorkflowServiceError};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use std::{cell::Cell, rc::Rc, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 use zeroship_core::{app_id::AppId, typed_id};
 use zeroship_data_orm::{
     orm::{Entity, FindOptions, FromRow, Operation, Output},
     value, Value,
-};
-use zeroship_storage::{
-    backend::{BoxByteStream, BoxChunkSource, ChunkResult, ChunkSource, OnceChunk},
-    Namespace, Storage, StorageError, StorageStore,
 };
 
 mod collection;
@@ -59,104 +54,77 @@ pub struct StagedPayload {
     pub reference: WorkflowOutputRef,
 }
 
-pub struct PayloadRead {
-    pub reference: WorkflowOutputRef,
-    pub body: BoxByteStream,
+/// One object an execution-side effect acts on, named by the record admission
+/// authorized. The descriptor is the contract the bytes must satisfy.
+#[derive(Debug, Clone, Copy)]
+pub struct PayloadTarget<'a> {
+    pub app: &'a AppId,
+    pub id: &'a str,
+    pub reference: &'a WorkflowOutputRef,
+    /// The policy generation this operation is bound to. A body handed back to
+    /// the caller outlives the transaction, so the opener guards it with this.
+    pub authority: Option<&'a Arc<PolicyAuthority>>,
 }
-impl PayloadRead {
-    fn guarded(mut self, authority: Option<Arc<PolicyAuthority>>) -> Self {
-        if let Some(authority) = authority {
-            self.body = Box::new(AuthorizedSource {
-                inner: Some(self.body),
-                authority,
-            });
-        }
-        self
-    }
 
-    /// Collect a verified payload within the host's memory budget.
+/// Stores one staged object. Admission holds the upload claim and the payload
+/// record across this call and admits nothing the writer did not confirm.
+#[async_trait::async_trait(?Send)]
+pub trait PayloadWriter {
+    /// Write the target and verify it against its descriptor. `budget` is what
+    /// remains of the shorter of the task lease and the staging window.
     ///
     /// # Errors
-    /// Rejects oversized descriptors, interrupted bodies and corrupt content.
-    pub async fn into_bytes(mut self, limit: usize) -> Result<Vec<u8>, WorkflowServiceError> {
-        let size = usize::try_from(self.reference.size)
-            .ok()
-            .filter(|size| *size <= limit)
-            .ok_or(WorkflowServiceError::PayloadTooLarge)?;
-        let mut bytes = Vec::new();
-        while let Some(chunk) = self.body.next_chunk().await {
-            let chunk = chunk.map_err(|_| {
-                WorkflowServiceError::Unavailable(
-                    "workflow payload read failed integrity verification".into(),
-                )
-            })?;
-            if bytes
-                .len()
-                .checked_add(chunk.len())
-                .is_none_or(|size| size > limit)
-            {
-                return Err(WorkflowServiceError::PayloadTooLarge);
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        if bytes.len() != size {
-            return Err(WorkflowServiceError::Unavailable(
-                "workflow payload size changed".into(),
-            ));
-        }
-        Ok(bytes)
-    }
-
-    pub(crate) fn checked(
-        reference: WorkflowOutputRef,
-        body: BoxByteStream,
-    ) -> Result<Self, WorkflowServiceError> {
-        validate_reference(&reference)?;
-        Ok(Self {
-            reference: reference.clone(),
-            body: Box::new(VerifiedSource {
-                inner: body,
-                expected: reference,
-                bytes: 0,
-                hash: Sha256::new(),
-                verified: Rc::new(Cell::new(false)),
-                finished: false,
-            }),
-        })
-    }
+    /// Reports a refused, interrupted, oversized or unverifiable write.
+    async fn write(
+        self,
+        target: PayloadTarget<'_>,
+        budget: Duration,
+    ) -> Result<(), WorkflowServiceError>;
 }
-impl std::fmt::Debug for PayloadRead {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PayloadRead")
-            .field("reference", &self.reference)
-            .finish_non_exhaustive()
-    }
+
+/// Opens one object whose ownership admission has just proven.
+#[async_trait::async_trait(?Send)]
+pub trait PayloadOpener {
+    /// The execution-side read handle this opener produces.
+    type Read;
+
+    /// # Errors
+    /// Reports a missing, unavailable or changed object.
+    async fn open(self, target: PayloadTarget<'_>) -> Result<Self::Read, WorkflowServiceError>;
+}
+
+/// Deletes objects during collection, once per payload admission fenced.
+#[async_trait::async_trait(?Send)]
+pub trait PayloadDeleter {
+    /// # Errors
+    /// Reports a refused or unavailable deletion; collection stays retryable.
+    async fn delete(&self, app: &AppId, id: &str) -> Result<(), WorkflowServiceError>;
+}
+
+/// A completed step's recorded output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StepOutput<R> {
+    /// The journal holds the value itself; no object was ever written.
+    Inline(serde_json::Value),
+    /// The journal holds a descriptor, and `R` is what the opener made of it.
+    Object(R),
 }
 
 impl WorkflowService {
-    /// Use a store whose credentials are private to the workflow host.
-    pub fn with_payload_storage(
-        mut self,
-        store: StorageStore,
-    ) -> Result<Self, WorkflowServiceError> {
-        self.payload_storage =
-            Some(store.namespace(Namespace::platform("workflow").map_err(storage_error)?));
-        Ok(self)
-    }
-
     /// Upload against current task ownership. The upload identity is durable
     /// before object I/O, so an interrupted writer leaves a collectible record.
     ///
     /// # Errors
-    /// Rejects stale task or policy authority, invalid content and storage failures.
-    pub async fn stage_payload(
+    /// Rejects stale task or policy authority, invalid content, and a write the
+    /// caller could not complete.
+    pub async fn stage_payload<W: PayloadWriter>(
         &self,
         worker: &WorkerIdentity,
         task_id: &str,
         token: &TaskToken,
         request: &RequestId,
         reference: WorkflowOutputRef,
-        body: BoxChunkSource,
+        writer: W,
     ) -> Result<StagedPayload, WorkflowServiceError> {
         let authority = payload_authority(self)?;
         let service = match authority.as_deref() {
@@ -165,22 +133,23 @@ impl WorkflowService {
         };
         guarded_payload(
             authority.as_deref(),
-            Box::pin(service.stage_payload_inner(worker, task_id, token, request, reference, body)),
+            Box::pin(service.stage_payload_inner(
+                worker, task_id, token, request, reference, writer,
+            )),
         )
         .await
     }
 
-    async fn stage_payload_inner(
+    async fn stage_payload_inner<W: PayloadWriter>(
         &self,
         worker: &WorkerIdentity,
         task_id: &str,
         token: &TaskToken,
         request: &RequestId,
         reference: WorkflowOutputRef,
-        body: BoxChunkSource,
+        writer: W,
     ) -> Result<StagedPayload, WorkflowServiceError> {
         validate_reference(&reference)?;
-        let storage = storage(self)?;
         let mut tx = self.begin().await?;
         let claim = authorized_task(&mut tx, worker, task_id, token).await?;
         let existing = tx
@@ -262,33 +231,18 @@ impl WorkflowService {
                 ));
             }
         }
-        let verified = Rc::new(Cell::new(false));
-        let source = VerifiedSource {
-            inner: body,
-            expected: reference.clone(),
-            bytes: 0,
-            hash: Sha256::new(),
-            verified: verified.clone(),
-            finished: false,
-        };
         let remaining = claim.task.deadline.min(row.expires_at) - claim.now;
-        let written = compio::time::timeout(
-            Duration::from_millis(remaining as u64),
-            storage.put_stream(
-                claim.app.as_str(),
-                &id,
-                Box::new(source),
-                reference.content_type.as_deref(),
-            ),
-        )
-        .await
-        .map_err(|_| WorkflowServiceError::Timeout)?
-        .map_err(storage_error)?;
-        if !verified.get() || written != reference.size as u64 {
-            return Err(WorkflowServiceError::Unavailable(
-                "workflow payload store did not verify the upload".into(),
-            ));
-        }
+        writer
+            .write(
+                PayloadTarget {
+                    app: &claim.app,
+                    id: &id,
+                    reference: &reference,
+                    authority: None,
+                },
+                Duration::from_millis(remaining as u64),
+            )
+            .await?;
         claim.validate_at(tx.now().await?)?;
         tx.database()
             .collection(models::payloads::Entity::COLLECTION)?
@@ -305,41 +259,50 @@ impl WorkflowService {
     /// Task reads follow committed replay edges or that task's own staged objects.
     ///
     /// # Errors
-    /// Rejects stale authority, unrelated payloads and unavailable or corrupt storage.
-    pub async fn read_task_payload(
+    /// Rejects stale authority, unrelated payloads, and an object the caller
+    /// could not open.
+    pub async fn read_task_payload<O: PayloadOpener>(
         &self,
         worker: &WorkerIdentity,
         task_id: &str,
         token: &TaskToken,
         reference: &WorkflowOutputRef,
-    ) -> Result<PayloadRead, WorkflowServiceError> {
+        opener: O,
+    ) -> Result<O::Read, WorkflowServiceError> {
         let authority = payload_authority(self)?;
         let service = match authority.as_deref() {
             Some(authority) => self.with_authority(authority.clone())?,
             None => self.clone(),
         };
-        let read = guarded_payload(
+        guarded_payload(
             authority.as_deref(),
-            Box::pin(service.read_task_payload_inner(worker, task_id, token, reference)),
+            Box::pin(service.read_task_payload_inner(
+                worker,
+                task_id,
+                token,
+                reference,
+                opener,
+                authority.as_ref(),
+            )),
         )
-        .await?;
-        Ok(read.guarded(authority))
+        .await
     }
 
-    async fn read_task_payload_inner(
+    async fn read_task_payload_inner<O: PayloadOpener>(
         &self,
         worker: &WorkerIdentity,
         task_id: &str,
         token: &TaskToken,
         reference: &WorkflowOutputRef,
-    ) -> Result<PayloadRead, WorkflowServiceError> {
+        opener: O,
+        authority: Option<&Arc<PolicyAuthority>>,
+    ) -> Result<O::Read, WorkflowServiceError> {
         validate_reference(reference)?;
-        let storage = storage(self)?;
         let mut tx = self.begin().await?;
         let claim = authorized_task(&mut tx, worker, task_id, token).await?;
         claim.validate_live()?;
         let row = owned_reference(&mut tx, &claim.app, &claim.run, reference, claim.now).await?;
-        let read = open_payload(&storage, &claim.app, &row).await?;
+        let read = open_payload(opener, &claim.app, &row, authority).await?;
         claim.validate_at(tx.now().await?)?;
         tx.commit().await?;
         Ok(read)
@@ -347,13 +310,19 @@ impl WorkflowService {
 
     /// Collect only unreferenced expired uploads. Failed deletion remains
     /// retryable; a transaction failure never authorizes a reference promotion.
-    pub async fn collect_payloads(&self, limit: usize) -> Result<usize, WorkflowServiceError> {
+    ///
+    /// # Errors
+    /// Rejects an invalid batch size and reports journal failures.
+    pub async fn collect_payloads<D: PayloadDeleter>(
+        &self,
+        limit: usize,
+        deleter: &D,
+    ) -> Result<usize, WorkflowServiceError> {
         if limit == 0 || limit > MAX_COLLECTION_BATCH {
             return Err(WorkflowServiceError::InvalidRequest(
                 "invalid payload collection batch".into(),
             ));
         }
-        storage(self)?;
         let mut tx = self.begin().await?;
         let now = tx.now().await?;
         let db = tx.database();
@@ -389,7 +358,15 @@ impl WorkflowService {
             let app = AppId::parse(&candidate.app_id).map_err(|_| {
                 WorkflowServiceError::Internal("invalid payload app identity".into())
             })?;
-            if Box::pin(self.collect_payload_checked(&app, &candidate.id, now, &|| Ok(()))).await? {
+            if Box::pin(self.collect_payload_checked(
+                &app,
+                &candidate.id,
+                now,
+                &|| Ok(()),
+                deleter,
+            ))
+            .await?
+            {
                 collected += 1;
             }
         }
@@ -402,29 +379,35 @@ impl AppWorkflows {
     /// selection and reference resolution share the run lock with restart.
     ///
     /// # Errors
-    /// Rejects invalid names, unavailable steps and storage failures.
-    pub async fn read_step_output(
+    /// Rejects invalid names, unavailable steps and object failures.
+    pub async fn read_step_output<O: PayloadOpener>(
         &self,
         run_id: &str,
         name: &str,
         occurrence: u32,
-    ) -> Result<PayloadRead, WorkflowServiceError> {
+        opener: O,
+    ) -> Result<StepOutput<O::Read>, WorkflowServiceError> {
         let authority = Arc::new(self.capture_policy().authority()?.clone());
         let scope = self.clone().with_authority(authority.as_ref().clone())?;
-        let read = authority
-            .run(Box::pin(
-                scope.read_step_output_inner(run_id, name, occurrence),
-            ))
-            .await?;
-        Ok(read.guarded(Some(authority)))
+        authority
+            .run(Box::pin(scope.read_step_output_inner(
+                run_id,
+                name,
+                occurrence,
+                opener,
+                &authority,
+            )))
+            .await
     }
 
-    async fn read_step_output_inner(
+    async fn read_step_output_inner<O: PayloadOpener>(
         &self,
         run_id: &str,
         name: &str,
         occurrence: u32,
-    ) -> Result<PayloadRead, WorkflowServiceError> {
+        opener: O,
+        authority: &Arc<PolicyAuthority>,
+    ) -> Result<StepOutput<O::Read>, WorkflowServiceError> {
         validate_run(run_id)?;
         validation::step_name(name)?;
         let occurrence = i32::try_from(occurrence).map_err(|_| {
@@ -473,17 +456,9 @@ impl AppWorkflows {
                     "workflow step payload reference changed".into(),
                 ));
             }
-            open_payload(&storage(&self.service)?, &self.app, &row).await?
+            StepOutput::Object(open_payload(opener, &self.app, &row, Some(authority)).await?)
         } else {
-            let bytes = serde_json::to_vec(&step.output)
-                .map_err(|_| WorkflowServiceError::Internal("invalid step output".into()))?;
-            let reference = WorkflowOutputRef {
-                hash: super::types::hash(&bytes),
-                size: i64::try_from(bytes.len())
-                    .map_err(|_| WorkflowServiceError::PayloadTooLarge)?,
-                content_type: Some("application/json".into()),
-            };
-            PayloadRead::checked(reference, Box::new(OnceChunk::new(bytes.into())))?
+            StepOutput::Inline(step.output.unwrap_or(serde_json::Value::Null))
         };
         tx.commit().await?;
         Ok(read)
@@ -492,34 +467,41 @@ impl AppWorkflows {
     /// Read a retained payload through this app's original policy authority.
     ///
     /// # Errors
-    /// Rejects missing history, unavailable policy and failed storage reads.
-    pub async fn read_payload(
+    /// Rejects missing history, unavailable policy and failed object reads.
+    pub async fn read_payload<O: PayloadOpener>(
         &self,
         run_id: &str,
         generation: i64,
         slot: PayloadSlot,
-    ) -> Result<PayloadRead, WorkflowServiceError> {
+        opener: O,
+    ) -> Result<O::Read, WorkflowServiceError> {
         let authority = Arc::new(self.capture_policy().authority()?.clone());
         let scope = self.clone().with_authority(authority.as_ref().clone())?;
-        let read = authority
-            .run(Box::pin(scope.read_payload_inner(run_id, generation, slot)))
-            .await?;
-        Ok(read.guarded(Some(authority)))
+        authority
+            .run(Box::pin(scope.read_payload_inner(
+                run_id,
+                generation,
+                slot,
+                opener,
+                &authority,
+            )))
+            .await
     }
 
-    async fn read_payload_inner(
+    async fn read_payload_inner<O: PayloadOpener>(
         &self,
         run_id: &str,
         generation: i64,
         slot: PayloadSlot,
-    ) -> Result<PayloadRead, WorkflowServiceError> {
+        opener: O,
+        authority: &Arc<PolicyAuthority>,
+    ) -> Result<O::Read, WorkflowServiceError> {
         validate_run(run_id)?;
-        let storage = storage(&self.service)?;
         let mut tx = self.service.begin().await?;
         lock_app(&mut tx, &self.app).await?;
         lock_run(&mut tx, &self.app, run_id).await?;
         let row = reference_at(&mut tx, &self.app, run_id, generation, slot).await?;
-        let read = open_payload(&storage, &self.app, &row).await?;
+        let read = open_payload(opener, &self.app, &row, Some(authority)).await?;
         tx.commit().await?;
         Ok(read)
     }
@@ -541,33 +523,6 @@ fn guarded_payload<'a, T: 'a>(
     match authority {
         Some(authority) => authority.run(operation),
         None => operation,
-    }
-}
-
-struct AuthorizedSource {
-    inner: Option<BoxByteStream>,
-    authority: Arc<PolicyAuthority>,
-}
-
-#[async_trait::async_trait(?Send)]
-impl ChunkSource for AuthorizedSource {
-    async fn next_chunk(&mut self) -> Option<ChunkResult> {
-        let inner = self.inner.as_mut()?;
-        let read = self
-            .authority
-            .run(async { Ok(inner.next_chunk().await) })
-            .await;
-        if let Ok(chunk) = read {
-            if !matches!(chunk, Some(Ok(_))) {
-                self.inner = None;
-            }
-            chunk
-        } else {
-            self.inner = None;
-            Some(Err(StorageError::Stream(
-                "workflow payload authority is unavailable".into(),
-            )))
-        }
     }
 }
 
@@ -831,7 +786,7 @@ async fn payload_usage(tx: &Transaction, app: &AppId) -> Result<(i64, i64), Work
     };
     Ok((total, objects))
 }
-/// Check a payload descriptor before it reaches the journal or storage.
+/// Check a payload descriptor before it reaches the journal or an object store.
 ///
 /// # Errors
 /// Rejects a malformed hash, a negative size and an invalid content type.
@@ -856,87 +811,19 @@ pub fn validate_reference(
     }
     Ok(())
 }
-pub(super) fn storage(service: &WorkflowService) -> Result<Storage, WorkflowServiceError> {
-    service.payload_storage.clone().ok_or_else(|| {
-        WorkflowServiceError::Unavailable("workflow payload storage is not configured".into())
-    })
-}
-fn storage_error(error: StorageError) -> WorkflowServiceError {
-    match error {
-        StorageError::InvalidArgument(_) => WorkflowServiceError::InvalidRequest(
-            "workflow payload did not match its descriptor".into(),
-        ),
-        StorageError::LimitExceeded(_) => WorkflowServiceError::PayloadTooLarge,
-        _ => WorkflowServiceError::Unavailable("workflow payload storage failed".into()),
-    }
-}
-async fn open_payload(
-    storage: &Storage,
+async fn open_payload<O: PayloadOpener>(
+    opener: O,
     app: &AppId,
     row: &models::PayloadRecord,
-) -> Result<PayloadRead, WorkflowServiceError> {
+    authority: Option<&Arc<PolicyAuthority>>,
+) -> Result<O::Read, WorkflowServiceError> {
     let reference = reference_from(row);
-    let (meta, body) = storage
-        .get_stream(app.as_str(), &row.id)
+    opener
+        .open(PayloadTarget {
+            app,
+            id: &row.id,
+            reference: &reference,
+            authority,
+        })
         .await
-        .map_err(storage_error)?
-        .ok_or_else(|| {
-            WorkflowServiceError::Unavailable("committed workflow payload is missing".into())
-        })?;
-    if meta.size != reference.size as u64 {
-        return Err(WorkflowServiceError::Unavailable(
-            "committed workflow payload size changed".into(),
-        ));
-    }
-    PayloadRead::checked(reference, body)
-}
-
-struct VerifiedSource {
-    inner: BoxChunkSource,
-    expected: WorkflowOutputRef,
-    bytes: u64,
-    hash: Sha256,
-    verified: Rc<Cell<bool>>,
-    finished: bool,
-}
-#[async_trait::async_trait(?Send)]
-impl ChunkSource for VerifiedSource {
-    async fn next_chunk(&mut self) -> Option<ChunkResult> {
-        if self.finished {
-            return None;
-        }
-        match self.inner.next_chunk().await {
-            Some(Ok(chunk)) => {
-                if self
-                    .bytes
-                    .checked_add(chunk.len() as u64)
-                    .is_none_or(|size| size > self.expected.size as u64)
-                {
-                    self.finished = true;
-                    return Some(Err(StorageError::InvalidArgument(
-                        "workflow payload size mismatch".into(),
-                    )));
-                }
-                self.bytes += chunk.len() as u64;
-                self.hash.update(&chunk);
-                Some(Ok(chunk))
-            }
-            Some(Err(error)) => {
-                self.finished = true;
-                Some(Err(error))
-            }
-            None => {
-                self.finished = true;
-                let hash = format!("{:x}", self.hash.clone().finalize());
-                if self.bytes != self.expected.size as u64 || hash != self.expected.hash {
-                    Some(Err(StorageError::InvalidArgument(
-                        "workflow payload digest mismatch".into(),
-                    )))
-                } else {
-                    self.verified.set(true);
-                    None
-                }
-            }
-        }
-    }
 }

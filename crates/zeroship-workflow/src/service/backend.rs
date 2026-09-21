@@ -2,7 +2,7 @@
 
 use super::{policy::PolicyAuthority, AppWorkflows, PolicyBinding, RequestId, WorkflowService};
 use crate::{
-    backend::WorkflowBackend,
+    backend::{SharedStepOutputs, WorkflowBackend},
     operations::{
         DeliveredSignal, RestartOptions, RestartedRun, RunOperation, RunStatus, SignalOptions,
         StartOptions, StartedRun, TransitionedRun,
@@ -31,7 +31,7 @@ pub struct AppBackend {
     app: AppId,
     binding: PolicyBinding,
     requests: flume::Sender<Request>,
-    max_output_bytes: usize,
+    outputs: SharedStepOutputs,
     commit_hint: Option<CommitHint>,
 }
 impl std::fmt::Debug for AppBackend {
@@ -42,18 +42,13 @@ impl std::fmt::Debug for AppBackend {
     }
 }
 impl AppBackend {
-    fn new(api: AppWorkflows, max_output_bytes: usize) -> Result<Self, WorkflowServiceError> {
-        if max_output_bytes == 0 {
-            return Err(WorkflowServiceError::InvalidRequest(
-                "workflow output read limit must be positive".into(),
-            ));
-        }
+    fn new(api: AppWorkflows, outputs: SharedStepOutputs) -> Self {
         let (requests, receiver) = flume::bounded::<Request>(MAX_QUEUED_REQUESTS);
         let backend = Self {
             app: api.app_id().clone(),
             binding: api.binding.clone(),
             requests,
-            max_output_bytes,
+            outputs,
             commit_hint: None,
         };
         compio::runtime::spawn(async move {
@@ -63,7 +58,7 @@ impl AppBackend {
                 .await;
         })
         .detach();
-        Ok(backend)
+        backend
     }
 
     #[must_use]
@@ -172,26 +167,28 @@ impl AppWorkflows {
     /// Which store the backend reaches is a choice its construction site
     /// makes, not one the handle carries: every call through the returned
     /// backend goes to `journal`'s store, while the app identity, its policy
-    /// binding, its ingress, payload storage, deployments and signal authority
-    /// stay as this handle holds them. Naming the service this handle was
+    /// binding, its ingress, deployments and signal authority stay as this
+    /// handle holds them, and `outputs` resolves a step's stored output to
+    /// bytes against the object store its host owns. Naming the service this
+    /// handle was
     /// bound to keeps the creator seam on the same database as the app's
     /// execution; naming another service's puts it on that one. A
     /// [`WorkflowService`] exists only over a journal it verified as it
     /// opened, so no unverified store reaches a backend this way.
     ///
     /// # Errors
-    /// Rejects an empty output read limit and a journal opened over a
-    /// different policy registry than this handle's binding.
+    /// Rejects a journal opened over a different policy registry than this
+    /// handle's binding.
     pub fn into_backend(
         mut self,
         journal: &WorkflowService,
-        max_output_bytes: usize,
+        outputs: SharedStepOutputs,
     ) -> Result<AppBackend, WorkflowServiceError> {
         if !self.binding.belongs_to(&journal.policies) {
             return Err(WorkflowServiceError::PermissionDenied);
         }
         self.service.store = journal.store.clone();
-        AppBackend::new(self, max_output_bytes)
+        Ok(AppBackend::new(self, outputs))
     }
 }
 #[async_trait(?Send)]
@@ -250,15 +247,9 @@ impl WorkflowBackend for AppBackend {
         name: String,
         occurrence: u32,
     ) -> Result<Vec<u8>, WorkflowServiceError> {
-        let limit = self.max_output_bytes;
+        let outputs = self.outputs.clone();
         self.call(move |api| {
-            async move {
-                api.read_step_output(&run_id, &name, occurrence)
-                    .await?
-                    .into_bytes(limit)
-                    .await
-            }
-            .boxed_local()
+            async move { outputs.read(&api, &run_id, &name, occurrence).await }.boxed_local()
         })
         .await
     }

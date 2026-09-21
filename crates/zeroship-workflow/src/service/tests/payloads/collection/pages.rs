@@ -31,7 +31,7 @@ pub(super) async fn pages(store: Rc<OrmStore>) {
             &foreign_task.token,
             &RequestId::mint(),
             reference(b"foreign"),
-            body(b"foreign"),
+            fixture.objects.upload(b"foreign"),
         )
         .await
         .unwrap();
@@ -40,13 +40,13 @@ pub(super) async fn pages(store: Rc<OrmStore>) {
     assert_eq!(
         fixture
             .scope
-            .collect_job(&first, options(2))
+            .collect_job(&first, options(2), &fixture.objects)
             .await
             .unwrap()
             .outcome,
         JobOutcome::Waiting {}
     );
-    assert_eq!(fixture.backend.calls(), old[..2]);
+    assert_eq!(fixture.objects.deletes(), old[..2]);
     let captured = fixture.scan().await;
     assert_eq!(
         captured.collection_after_id.as_deref(),
@@ -62,20 +62,20 @@ pub(super) async fn pages(store: Rc<OrmStore>) {
     fixture
         .set_expiry(&future, captured.collection_observed_at.unwrap() + 1)
         .await;
-    let reopened = fixture.reopen(true).await;
+    let reopened = fixture.reopen().await;
     let second = Grant::new(fixture.scope.app_id());
     assert_eq!(
         reopened
-            .collect_job(&second, options(2))
+            .collect_job(&second, options(2), &fixture.objects)
             .await
             .unwrap()
             .outcome,
         JobOutcome::Completed {}
     );
-    assert_eq!(fixture.backend.calls(), old);
-    assert!(fixture.exists(fixture.scope.app_id(), &future).await);
-    assert!(fixture.exists(fixture.scope.app_id(), &late).await);
-    assert!(fixture.exists(&fixture.other, &foreign.id).await);
+    assert_eq!(fixture.objects.deletes(), old);
+    assert!(fixture.exists(fixture.scope.app_id(), &future));
+    assert!(fixture.exists(fixture.scope.app_id(), &late));
+    assert!(fixture.exists(&fixture.other, &foreign.id));
     let closed = fixture.scan().await;
     assert!(
         closed.collection_after_id.is_none()
@@ -85,14 +85,18 @@ pub(super) async fn pages(store: Rc<OrmStore>) {
     fixture.expire(&future).await;
     assert_eq!(
         reopened
-            .collect_job(&Grant::new(fixture.scope.app_id()), options(2))
+            .collect_job(
+                &Grant::new(fixture.scope.app_id()),
+                options(2),
+                &fixture.objects
+            )
             .await
             .unwrap()
             .outcome,
         JobOutcome::Completed {}
     );
-    assert!(!fixture.exists(fixture.scope.app_id(), &future).await);
-    assert!(!fixture.exists(fixture.scope.app_id(), &late).await);
+    assert!(!fixture.exists(fixture.scope.app_id(), &future));
+    assert!(!fixture.exists(fixture.scope.app_id(), &late));
     assert_eq!(fixture.payload(&foreign.id).await.state, "staged");
     assert!(fixture
         .scope
@@ -111,7 +115,11 @@ pub(super) async fn replay(store: Rc<OrmStore>) {
     let id = fixture.stage().await;
     fixture.expire(&id).await;
     let grant = Grant::new(fixture.scope.app_id());
-    let receipt = fixture.scope.collect_job(&grant, options(2)).await.unwrap();
+    let receipt = fixture
+        .scope
+        .collect_job(&grant, options(2), &fixture.objects)
+        .await
+        .unwrap();
     let original = fixture.page(&grant.delivery.job).await;
     let before = fixture.scan().await;
     let plan: serde_json::Value = serde_json::from_str(&original.plan).unwrap();
@@ -135,30 +143,30 @@ pub(super) async fn replay(store: Rc<OrmStore>) {
             .is_err());
         assert!(fixture
             .scope
-            .collect_job(&grant.retry(), options(2))
+            .collect_job(&grant.retry(), options(2), &fixture.objects)
             .await
             .is_err());
         assert_eq!(fixture.scan().await, before);
-        assert_eq!(fixture.backend.calls(), std::slice::from_ref(&id));
+        assert_eq!(fixture.objects.deletes(), std::slice::from_ref(&id));
     }
     set_plan(&fixture, &grant, &original.plan, 0).await;
     assert!(fixture
         .scope
-        .collect_job(&grant.retry(), options(2))
+        .collect_job(&grant.retry(), options(2), &fixture.objects)
         .await
         .is_err());
     set_plan(&fixture, &grant, &original.plan, original.next_index).await;
     set_outcome(&fixture, &grant, &JobOutcome::Rejected {}).await;
     assert!(fixture
         .scope
-        .collect_job(&grant.retry(), options(2))
+        .collect_job(&grant.retry(), options(2), &fixture.objects)
         .await
         .is_err());
     set_outcome(&fixture, &grant, &receipt.outcome).await;
     assert_eq!(
         fixture
             .scope
-            .collect_job(&grant.retry(), options(2))
+            .collect_job(&grant.retry(), options(2), &fixture.objects)
             .await
             .unwrap(),
         receipt
@@ -167,13 +175,16 @@ pub(super) async fn replay(store: Rc<OrmStore>) {
     changed.delivery.job.available_at = 1.try_into().unwrap();
     assert!(fixture
         .scope
-        .collect_job(&changed, options(2))
+        .collect_job(&changed, options(2), &fixture.objects)
         .await
         .is_err());
     changed.delivery.job = grant.delivery.job.clone();
     changed.delivery.job.app_id = fixture.other.clone();
     assert!(matches!(
-        fixture.scope.collect_job(&changed, options(2)).await,
+        fixture
+            .scope
+            .collect_job(&changed, options(2), &fixture.objects)
+            .await,
         Err(WorkflowServiceError::PermissionDenied)
     ));
     let tx = fixture.store.begin().await.unwrap();
@@ -190,10 +201,10 @@ pub(super) async fn replay(store: Rc<OrmStore>) {
     tx.commit().await.unwrap();
     assert!(fixture
         .scope
-        .collect_job(&grant.retry(), options(2))
+        .collect_job(&grant.retry(), options(2), &fixture.objects)
         .await
         .is_err());
-    assert_eq!(fixture.backend.calls(), [id]);
+    assert_eq!(fixture.objects.deletes(), [id]);
 }
 
 async fn set_plan(fixture: &Fixture, grant: &Grant, plan: &str, next: i64) {
@@ -250,41 +261,41 @@ pub(super) async fn fairness(store: Rc<OrmStore>) {
         valid.push(id);
     }
     valid.sort();
-    fixture
-        .backend
-        .faults
-        .lock()
-        .unwrap()
-        .extend([Fault::Fail(valid[0].clone()), Fault::Hang(valid[1].clone())]);
+    fixture.objects.fail(&valid[0]);
+    fixture.objects.hang(&valid[1]);
     let grant = Grant::new(fixture.scope.app_id());
     assert_eq!(
         fixture
             .scope
-            .collect_job(&grant, options(4))
+            .collect_job(&grant, options(4), &fixture.objects)
             .await
             .unwrap()
             .outcome,
         JobOutcome::Completed {}
     );
-    assert_eq!(fixture.backend.calls(), valid);
+    assert_eq!(fixture.objects.deletes(), valid);
     assert_eq!(fixture.page(&grant.delivery.job).await.next_index, 4);
     assert_eq!(fixture.payload("").await.state, "staged");
     assert_eq!(fixture.payload(&valid[0]).await.state, "deleting");
     assert_eq!(fixture.payload(&valid[1]).await.state, "deleting");
     assert_eq!(fixture.payload(&valid[2]).await.state, "deleted");
-    assert!(fixture.exists(fixture.scope.app_id(), &valid[0]).await);
-    assert!(!fixture.exists(fixture.scope.app_id(), &valid[2]).await);
-    let calls = fixture.backend.calls();
+    assert!(fixture.exists(fixture.scope.app_id(), &valid[0]));
+    assert!(!fixture.exists(fixture.scope.app_id(), &valid[2]));
+    let calls = fixture.objects.deletes();
     fixture
-        .reopen(true)
+        .reopen()
         .await
-        .collect_job(&grant.retry(), options(1))
+        .collect_job(&grant.retry(), options(1), &fixture.objects)
         .await
         .unwrap();
-    assert_eq!(fixture.backend.calls(), calls);
+    assert_eq!(fixture.objects.deletes(), calls);
     fixture
         .scope
-        .collect_job(&Grant::new(fixture.scope.app_id()), options(4))
+        .collect_job(
+            &Grant::new(fixture.scope.app_id()),
+            options(4),
+            &fixture.objects,
+        )
         .await
         .unwrap();
     assert_eq!(fixture.payload(&valid[0]).await.state, "deleted");
@@ -292,12 +303,26 @@ pub(super) async fn fairness(store: Rc<OrmStore>) {
     assert_eq!(fixture.payload("").await.state, "staged");
 }
 
+/// A deleter that refuses every object effect, so a sweep that reaches the
+/// object store fails the run it is handed to.
+struct NoDeletion;
+#[async_trait::async_trait(?Send)]
+impl crate::service::PayloadDeleter for NoDeletion {
+    async fn delete(&self, _app: &AppId, _id: &str) -> Result<(), WorkflowServiceError> {
+        panic!("a committed receipt replays without deleting an object");
+    }
+}
+
 pub(super) async fn expired_replay(store: Rc<OrmStore>) {
     let fixture = Fixture::new(store).await;
     let id = fixture.stage().await;
     fixture.expire(&id).await;
     let grant = Grant::new(fixture.scope.app_id());
-    let receipt = fixture.scope.collect_job(&grant, options(2)).await.unwrap();
+    let receipt = fixture
+        .scope
+        .collect_job(&grant, options(2), &fixture.objects)
+        .await
+        .unwrap();
     let payload = fixture.payload(&id).await;
     let scan = fixture.scan().await;
     let binding = fixture
@@ -313,11 +338,14 @@ pub(super) async fn expired_replay(store: Rc<OrmStore>) {
                 .unwrap(),
         )
         .unwrap();
-    let reopened = fixture.reopen(false).await;
+    let reopened = fixture.reopen().await;
     let mut retry = grant.retry();
     retry.expires = Instant::now();
     assert_eq!(
-        reopened.collect_job(&retry, options(1)).await.unwrap(),
+        reopened
+            .collect_job(&retry, options(1), &NoDeletion)
+            .await
+            .unwrap(),
         receipt
     );
     assert_eq!(
@@ -325,12 +353,12 @@ pub(super) async fn expired_replay(store: Rc<OrmStore>) {
         Some(receipt)
     );
     assert!(reopened
-        .collect_job(&Grant::new(fixture.scope.app_id()), options(1))
+        .collect_job(&Grant::new(fixture.scope.app_id()), options(1), &NoDeletion)
         .await
         .is_err());
     assert_eq!(fixture.payload(&id).await, payload);
     assert_eq!(fixture.scan().await, scan);
-    assert_eq!(fixture.backend.calls(), [id]);
+    assert_eq!(fixture.objects.deletes(), [id]);
 }
 
 /// Two sweeps of one app that both planned at the same scan revision, settling
@@ -345,14 +373,14 @@ pub(super) async fn lost_update(store: Rc<OrmStore>) {
     fixture.expire(&id).await;
     let opening = fixture.scan().await.collection_revision;
     let untouched = fixture.scan_for(&fixture.other).await;
-    let (first_entered, first_resume) = fixture.backend.gate(&id);
-    let (second_entered, second_resume) = fixture.backend.gate(&id);
-    let other_host = fixture.reopen(true).await;
+    let (first_entered, first_resume) = fixture.objects.gate(&id);
+    let (second_entered, second_resume) = fixture.objects.gate(&id);
+    let other_host = fixture.reopen().await;
     let (finished, first_done) = flume::bounded(1);
     let first = async {
         let receipt = fixture
             .scope
-            .collect_job(&Grant::new(&app), options(1))
+            .collect_job(&Grant::new(&app), options(1), &fixture.objects)
             .await;
         finished.send_async(()).await.unwrap();
         receipt
@@ -361,7 +389,9 @@ pub(super) async fn lost_update(store: Rc<OrmStore>) {
     // carry the revision the first sweep read.
     let second = async {
         first_entered.recv_async().await.unwrap();
-        other_host.collect_job(&Grant::new(&app), options(1)).await
+        other_host
+            .collect_job(&Grant::new(&app), options(1), &fixture.objects)
+            .await
     };
     let order = async {
         second_entered.recv_async().await.unwrap();
@@ -391,7 +421,7 @@ pub(super) async fn frozen_plan(store: Rc<OrmStore>) {
         old.push(id);
     }
     old.sort();
-    let (entered, resume) = fixture.backend.gate(&old[1]);
+    let (entered, resume) = fixture.objects.gate(&old[1]);
     let grant = Grant::new(fixture.scope.app_id());
     let replace = async {
         entered.recv_async().await.unwrap();
@@ -405,13 +435,18 @@ pub(super) async fn frozen_plan(store: Rc<OrmStore>) {
             .install(leased_policy(2, AppPolicy::default()))
             .unwrap();
     };
-    let (result, ()) = futures::join!(fixture.scope.collect_job(&grant, options(3)), replace);
+    let (result, ()) = futures::join!(
+        fixture
+            .scope
+            .collect_job(&grant, options(3), &fixture.objects),
+        replace
+    );
     assert!(
         matches!(result, Err(WorkflowServiceError::Unavailable(_))),
         "{result:?}"
     );
     assert!(resume.is_disconnected());
-    assert_eq!(fixture.backend.calls(), old[..2]);
+    assert_eq!(fixture.objects.deletes(), old[..2]);
     let frozen = fixture.page(&grant.delivery.job).await;
     let plan: serde_json::Value = serde_json::from_str(&frozen.plan).unwrap();
     assert_eq!(plan["ids"], json!(old));
@@ -427,21 +462,21 @@ pub(super) async fn frozen_plan(store: Rc<OrmStore>) {
     let reserved = fixture.payload(&old[1]).await;
     assert_eq!(reserved.state, "deleting");
     assert!(reserved.expires_at <= cutoff, "{reserved:?}");
-    let reopened = fixture.reopen(true).await;
+    let reopened = fixture.reopen().await;
     assert_eq!(
         reopened
-            .collect_job(&grant.retry(), options(1))
+            .collect_job(&grant.retry(), options(1), &fixture.objects)
             .await
             .unwrap()
             .outcome,
         JobOutcome::Completed {}
     );
-    assert_eq!(fixture.backend.calls(), old);
+    assert_eq!(fixture.objects.deletes(), old);
     let settled = fixture.page(&grant.delivery.job).await;
     assert_eq!(settled.plan, frozen.plan);
     assert_eq!(settled.next_index, 3);
     assert_eq!(fixture.payload(&old[1]).await, reserved);
-    assert!(fixture.exists(fixture.scope.app_id(), &old[1]).await);
+    assert!(fixture.exists(fixture.scope.app_id(), &old[1]));
     assert_eq!(fixture.payload(&old[2]).await.state, "deleted");
-    assert!(!fixture.exists(fixture.scope.app_id(), &old[2]).await);
+    assert!(!fixture.exists(fixture.scope.app_id(), &old[2]));
 }

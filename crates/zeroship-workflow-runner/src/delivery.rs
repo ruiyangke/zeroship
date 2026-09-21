@@ -5,7 +5,7 @@
     reason = "delivery slots own compio-local resources"
 )]
 
-use crate::{CancelOnDrop, ExecutionGuard, TaskExecution, TaskExecutor};
+use crate::{CancelOnDrop, ExecutionGuard, PayloadObjects, RunPayloads, TaskExecution, TaskExecutor};
 use zeroship_workflow::{
     service::{
         collection::CollectionOptions,
@@ -187,6 +187,7 @@ impl<L> Drop for Active<L> {
 pub struct DeliverySlot<T: JobTransport> {
     transport: Rc<T>,
     executor: Rc<dyn TaskExecutor>,
+    objects: PayloadObjects,
     options: DeliveryOptions,
     active: Option<Active<T::Lease>>,
 }
@@ -207,12 +208,14 @@ impl<T: JobTransport> DeliverySlot<T> {
     pub fn new(
         transport: Rc<T>,
         executor: Rc<dyn TaskExecutor>,
+        objects: PayloadObjects,
         options: DeliveryOptions,
     ) -> Result<Self, WorkflowServiceError> {
         options.validate()?;
         Ok(Self {
             transport,
             executor,
+            objects,
             options,
             active: None,
         })
@@ -275,7 +278,8 @@ impl<T: JobTransport> DeliverySlot<T> {
         if matches!(lease.delivery().job.operation, JobOperation::Collect {}) {
             let receipt = bounded(
                 self.options.execution_timeout,
-                app.collect_job(&lease, self.options.collection),
+                app.payloads(&self.objects)
+                    .collect_job(&lease, self.options.collection),
             )
             .await?;
             return self.acknowledge(receipt, &lease).await;

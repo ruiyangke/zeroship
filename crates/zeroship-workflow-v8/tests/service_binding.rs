@@ -17,11 +17,12 @@ use zeroship_workflow::{
     },
     WorkflowExecution,
 };
-use zeroship_workflow_runner::ready::ReadyApps;
+use zeroship_workflow_runner::{ready::ReadyApps, ObjectStepOutputs, PayloadObjects};
 use zeroship_workflow_v8::WorkflowBinding;
 
 struct Fixture {
     _directory: tempfile::TempDir,
+    objects: PayloadObjects,
     service: WorkflowService,
     app: AppWorkflows,
     other: AppWorkflows,
@@ -71,12 +72,20 @@ impl Fixture {
         }
         let [app, other]: [AppWorkflows; 2] = apps.try_into().unwrap();
         Self {
+            objects: PayloadObjects::open(zeroship_storage::StorageStore::from_backend(
+                Arc::new(zeroship_storage::LocalFs::new(directory.path().join("payloads"))),
+            ))
+            .unwrap(),
             _directory: directory,
             app,
             other,
             service,
             bindings,
         }
+    }
+
+    fn step_outputs(&self) -> zeroship_workflow::SharedStepOutputs {
+        Arc::new(ObjectStepOutputs::new(self.objects.clone(), 1024).unwrap())
     }
 
     /// A request isolate whose `env.workflows` resolves published backends.
@@ -102,7 +111,9 @@ impl Fixture {
                 source: source.into(),
             }])
             .plugins(vec![Arc::new(WorkflowBinding::service(
-                app.clone().into_backend(&self.service, 1024).unwrap(),
+                app.clone()
+                    .into_backend(&self.service, self.step_outputs())
+                    .unwrap(),
             ))])
             // Deliberately conflicting and mutable input must not grant authority.
             .env_vars([("APP_ID".into(), self.other.app_id().as_str().to_owned())].into());
@@ -276,12 +287,24 @@ async fn ready_binding_reaches_only_the_published_backend_of_its_runtime_identit
     );
     // Another app's published backend never serves this identity, whatever
     // the mutable environment names.
-    apps.install(fixture.other.clone().into_backend(&fixture.service, 1024).unwrap());
+    apps.install(
+        fixture
+            .other
+            .clone()
+            .into_backend(&fixture.service, fixture.step_outputs())
+            .unwrap(),
+    );
     assert_eq!(
         fetch(fixture.ready_runtime(&apps, &identity, source)).await,
         refused
     );
-    apps.install(fixture.app.clone().into_backend(&fixture.service, 1024).unwrap());
+    apps.install(
+        fixture
+            .app
+            .clone()
+            .into_backend(&fixture.service, fixture.step_outputs())
+            .unwrap(),
+    );
     let started = fetch(fixture.ready_runtime(&apps, &identity, source)).await;
     let run = started["id"].as_str().expect("a published backend starts runs");
     assert_eq!(

@@ -1,8 +1,7 @@
 use super::*;
-use std::sync::Mutex;
 use zeroship_data_orm::orm::Insertable;
-use zeroship_storage::backend::{BoxByteStream, ListPage, ListRequest, ObjectMeta};
-use zeroship_storage::{Backend, StorageError};
+
+pub(super) use crate::service::tests::objects::Objects;
 
 #[derive(Clone)]
 pub(in crate::service::tests) struct Grant {
@@ -57,24 +56,15 @@ pub(super) struct Fixture {
     pub scope: AppWorkflows,
     pub other: AppId,
     pub store: Rc<OrmStore>,
-    pub backend: Arc<Objects>,
-    pub storage: StorageStore,
+    pub objects: Objects,
     pub task: TaskAssignment,
     pub worker: WorkerIdentity,
     _deployments: Deployments,
-    _directory: tempfile::TempDir,
 }
 impl Fixture {
     pub async fn new(store: Rc<OrmStore>) -> Self {
         let (service, app, other, deployments) = registered_service(store.clone()).await;
-        let directory = tempfile::tempdir().unwrap();
-        let backend = Arc::new(Objects {
-            inner: LocalFs::new(directory.path()),
-            calls: Mutex::new(Vec::new()),
-            faults: Mutex::new(Vec::new()),
-        });
-        let storage = StorageStore::from_backend(backend.clone());
-        let service = service.with_payload_storage(storage.clone()).unwrap();
+        let objects = Objects::new();
         let scope = service.fixture_app(app);
         scope
             .start(&RequestId::mint(), "Example", StartOptions::default())
@@ -87,12 +77,10 @@ impl Fixture {
             scope,
             other,
             store,
-            backend,
-            storage,
+            objects,
             task,
             worker,
             _deployments: deployments,
-            _directory: directory,
         }
     }
     pub async fn stage(&self) -> String {
@@ -103,7 +91,7 @@ impl Fixture {
                 &self.task.token,
                 &RequestId::mint(),
                 reference(b"collect-me"),
-                body(b"collect-me"),
+                self.objects.upload(b"collect-me"),
             )
             .await
             .unwrap()
@@ -175,13 +163,8 @@ impl Fixture {
         assert_eq!(rows.len(), 1);
         rows.remove(0)
     }
-    pub async fn exists(&self, app: &AppId, id: &str) -> bool {
-        self.storage
-            .namespace(zeroship_storage::Namespace::platform("workflow").unwrap())
-            .get(app.as_str(), id)
-            .await
-            .unwrap()
-            .is_some()
+    pub fn exists(&self, app: &AppId, id: &str) -> bool {
+        self.objects.exists(app, id)
     }
     pub async fn page(&self, job: &JobSpec) -> Page {
         use crate::service::models::collection_pages;
@@ -220,13 +203,11 @@ impl Fixture {
         assert_eq!(rows.len(), 1);
         rows.remove(0)
     }
-    pub async fn reopen(&self, storage: bool) -> AppWorkflows {
-        let mut service = WorkflowService::open(self.store.clone(), self.service.policies.clone())
+    /// A second host over the same journal and policy registry.
+    pub async fn reopen(&self) -> AppWorkflows {
+        let service = WorkflowService::open(self.store.clone(), self.service.policies.clone())
             .await
             .unwrap();
-        if storage {
-            service = service.with_payload_storage(self.storage.clone()).unwrap();
-        }
         service.fixture_app(self.scope.app_id().clone())
     }
 }
@@ -267,98 +248,4 @@ pub(super) struct Scan {
     pub collection_after_id: Option<String>,
     pub collection_upper_id: Option<String>,
     pub collection_observed_at: Option<i64>,
-}
-
-#[derive(Debug)]
-pub(super) enum Fault {
-    Fail(String),
-    LostDeleteReply(String),
-    Hang(String),
-    Gate(String, flume::Sender<()>, flume::Receiver<()>),
-}
-#[derive(Debug)]
-pub(super) struct Objects {
-    inner: LocalFs,
-    pub calls: Mutex<Vec<String>>,
-    pub faults: Mutex<Vec<Fault>>,
-}
-impl Objects {
-    pub fn gate(&self, id: &str) -> (flume::Receiver<()>, flume::Sender<()>) {
-        let (entered, waiting) = flume::bounded(1);
-        let (resume, gate) = flume::bounded(1);
-        self.faults
-            .lock()
-            .unwrap()
-            .push(Fault::Gate(id.into(), entered, gate));
-        (waiting, resume)
-    }
-    pub fn calls(&self) -> Vec<String> {
-        self.calls.lock().unwrap().clone()
-    }
-}
-#[async_trait::async_trait(?Send)]
-impl Backend for Objects {
-    async fn put_stream(
-        &self,
-        app: &str,
-        bucket: &str,
-        key: &str,
-        body: BoxChunkSource,
-        content_type: Option<&str>,
-    ) -> Result<u64, StorageError> {
-        self.inner
-            .put_stream(app, bucket, key, body, content_type)
-            .await
-    }
-    async fn get_stream(
-        &self,
-        app: &str,
-        bucket: &str,
-        key: &str,
-    ) -> Result<Option<(ObjectMeta, BoxByteStream)>, StorageError> {
-        self.inner.get_stream(app, bucket, key).await
-    }
-    async fn list(
-        &self,
-        app: &str,
-        bucket: &str,
-        request: ListRequest<'_>,
-    ) -> Result<ListPage, StorageError> {
-        self.inner.list(app, bucket, request).await
-    }
-    async fn delete(&self, app: &str, bucket: &str, key: &str) -> Result<bool, StorageError> {
-        self.calls.lock().unwrap().push(key.to_owned());
-        let fault = {
-            let mut faults = self.faults.lock().unwrap();
-            faults
-                .iter()
-                .position(|fault| match fault {
-                    Fault::Fail(id)
-                    | Fault::LostDeleteReply(id)
-                    | Fault::Hang(id)
-                    | Fault::Gate(id, _, _) => id == key,
-                })
-                .map(|index| faults.remove(index))
-        };
-        match fault {
-            Some(Fault::Fail(_)) => {
-                return Err(StorageError::InvalidArgument(
-                    "injected delete failure".into(),
-                ))
-            }
-            Some(Fault::LostDeleteReply(_)) => {
-                self.inner.delete(app, bucket, key).await?;
-                return Err(StorageError::InvalidArgument(
-                    "injected lost delete reply".into(),
-                ));
-            }
-            Some(Fault::Hang(_)) => std::future::pending::<()>().await,
-            Some(Fault::Gate(_, entered, resume)) => {
-                entered.send_async(()).await.unwrap();
-                resume.recv_async().await.unwrap();
-            }
-            None => {}
-        }
-        self.inner.delete(app, bucket, key).await
-    }
 }

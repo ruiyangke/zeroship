@@ -223,9 +223,11 @@ struct Harness {
     tasks: Rc<ObservedTasks>,
     probe: Rc<Probe>,
     run: String,
+    _objects: tempfile::TempDir,
 }
 impl Harness {
     async fn new(store: Rc<OrmStore>) -> Self {
+        let (objects, objects_directory) = crate::PayloadObjects::temporary();
         let (service, app, _, _deployments) = registered_service(store).await;
         service
             .fixture_register(
@@ -254,7 +256,10 @@ impl Harness {
             overrun: Cell::new(Duration::ZERO),
         });
         let tasks = Rc::new(ObservedTasks {
-            inner: service.tasks(WorkerIdentity::new("local-test-worker".into()).unwrap()),
+            inner: service.tasks(
+                WorkerIdentity::new("local-test-worker".into()).unwrap(),
+                objects,
+            ),
             app,
             probe: probe.clone(),
             control: Cell::new(None),
@@ -267,7 +272,12 @@ impl Harness {
             completions: RefCell::new(Vec::new()),
             run: RefCell::new(None),
         });
-        Self { tasks, probe, run }
+        Self {
+            tasks,
+            probe,
+            run,
+            _objects: objects_directory,
+        }
     }
     fn slot(&self, timeout: Duration) -> RunnerSlot {
         RunnerSlot::new(
