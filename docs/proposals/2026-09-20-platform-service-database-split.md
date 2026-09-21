@@ -747,3 +747,13 @@ auth/control edge carries most of it.
    with this registry, it should make the registry derivable from the corpus or
    assert the two agree, rather than leaving a fourth hand-maintained copy of
    the same question.
+
+   The mechanism does not have to be invented: `policies/codegen.mjs` already
+   does this in the same directory. It reads a hand-authored
+   `policies/confined-system-shape.inject.toml`, emits a generated TypeScript file, and
+   ships a `--check` mode wired into `package.json` as `gen-types:check`, which
+   fails when the output has drifted from its input. That is the shape this
+   registry wants: the ownership DECISIONS stay hand-written as the input, and
+   only the table LIST is derived from the corpus, so a table added without an
+   owner fails the check rather than passing silently. The registry is the one
+   artifact in that directory left out of the pattern.
