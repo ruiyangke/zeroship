@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 /// STORE, and no session is opened against the cluster it names.
 async fn deployed_with_database() -> DeployedApp {
     let kernel = crate::cache::KernelConfig {
-        workflows: zeroship_workflow::service::runner::ready::ReadyApps::default(),
+        workflows: zeroship_workflow_runner::ready::ReadyApps::default(),
         db_service: Some(crate::cache::fixture::database_service(
             "postgresql://fixture:fixture@localhost/unused",
         )),
