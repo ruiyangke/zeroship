@@ -295,37 +295,6 @@ impl SuppliedAppBindings {
     }
 }
 
-/// A local handle to the bindings the host supplied. The default has none.
-#[derive(Clone, Debug, Default)]
-pub struct AppBindingSource(Arc<SuppliedAppBindings>);
-
-impl AppBindingSource {
-    #[must_use]
-    pub fn unavailable() -> Self {
-        Self::default()
-    }
-
-    #[must_use]
-    pub fn supplied(bindings: Arc<SuppliedAppBindings>) -> Self {
-        Self(bindings)
-    }
-
-    #[must_use]
-    pub fn binding_for(
-        &self,
-        app_id: &str,
-        deploy_token: &str,
-        database: &DatabaseId,
-    ) -> Option<DbBinding> {
-        self.0.binding_for(app_id, deploy_token, database)
-    }
-
-    #[must_use]
-    pub fn bindings_for(&self, app_id: &str, deploy_token: &str) -> Vec<DbBinding> {
-        self.0.bindings_for(app_id, deploy_token)
-    }
-}
-
 fn store_unavailable() -> DbError {
     DbError::internal("db: the app binding store is unavailable")
 }
