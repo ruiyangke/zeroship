@@ -191,6 +191,29 @@ async fn reconcile_loop(config: Arc<WorkerConfig>, shared: SharedVersions, envs:
     }
 }
 
+/// Reject a polling interval the reconcile loops cannot run on.
+///
+/// Zero is the case that matters. The per-thread jitter divides by the interval,
+/// so a zero interval panics every reconcile task while the HTTP server keeps
+/// serving: the process looks healthy and deploy, env and policy reconciliation
+/// is simply dead. The version poller would also spin with no sleep between
+/// control-plane calls.
+///
+/// # Errors
+///
+/// The zero interval, which the caller must refuse at startup rather than
+/// carry into a reconcile task.
+pub fn validate_poll_interval_secs(secs: u64) -> Result<u64, String> {
+    if secs == 0 {
+        return Err(
+            "poll interval must be at least 1 second: zero stops reconciliation \
+             entirely and spins against the control plane"
+                .to_string(),
+        );
+    }
+    Ok(secs)
+}
+
 /// PHASE 2 swap decision: does this thread's cached isolate need to be
 /// torn down and reloaded to match the control plane's current app
 /// state? True when any of:
@@ -198,7 +221,8 @@ async fn reconcile_loop(config: Arc<WorkerConfig>, shared: SharedVersions, envs:
 /// - the deploy hash changed (new code),
 /// - the runtime limits changed (CPU / wall / heap),
 /// - the env version changed (var/secret rotation),
-/// - the raw-TCP net policy changed (grant/revoke/cap edit).
+/// - the raw-TCP net policy changed (grant/revoke/cap edit),
+/// - a bound database's schema epoch changed (an apply rotated the role).
 ///
 /// The env arm is SEC-7: a pure env bump (dashboard secret rotation, no
 /// redeploy) must reload the isolate. The runtime materializes the `env`
@@ -216,24 +240,16 @@ async fn reconcile_loop(config: Arc<WorkerConfig>, shared: SharedVersions, envs:
 /// `info.env_version`, so comparing against it would mask the rotation).
 /// `loaded == None` (isolate cached but nothing recorded) is treated as
 /// "unknown state" → reload, never "assume current".
-/// Reject a polling interval the reconcile loops cannot run on.
 ///
-/// Zero is the case that matters. The per-thread jitter divides by the interval,
-/// so a zero interval panics every reconcile task while the HTTP server keeps
-/// serving: the process looks healthy and deploy, env and policy reconciliation
-/// is simply dead. The version poller would also spin with no sleep between
-/// control-plane calls.
-pub fn validate_poll_interval_secs(secs: u64) -> Result<u64, String> {
-    if secs == 0 {
-        return Err(
-            "poll interval must be at least 1 second: zero stops reconciliation \
-             entirely and spins against the control plane"
-                .to_string(),
-        );
-    }
-    Ok(secs)
-}
-
+/// The epoch arm is the database half of the same argument. An isolate
+/// captures the binding its sessions narrow with while it builds, and the
+/// epoch is the last component of that binding's role name; an apply that
+/// commits a schema delta mints the next epoch's roles and retires the one
+/// before the head, so an isolate left standing across two of them opens
+/// sessions against a role the cluster has dropped and every one is refused at
+/// `SET LOCAL ROLE`. A binding's lifetime is therefore the isolate's, and this
+/// is where the isolate ends: [`resupply_bindings`] installs the set the
+/// replacement is built from before it is built.
 pub fn needs_reload(
     loaded: Option<&cache::LoadedMeta>,
     local_limits: Option<RuntimeLimits>,
@@ -246,7 +262,14 @@ pub fn needs_reload(
     let limits_changed = local_limits != Some(cache::runtime_limits_from_app(&info.runtime));
     let env_changed = loaded.map(|m| m.env_version) != Some(info.env_version);
     let net_policy_changed = loaded.map(|m| &m.net_policy) != Some(&info.net_policy);
-    hash_changed || limits_changed || env_changed || net_policy_changed
+    // The WHOLE map, compared for equality. An app binds many databases, so a
+    // maximum over them misses a second database advancing under a
+    // higher-epoch first one, and a sum that moves on any advance still
+    // collides across a change of the bound set. Equality also catches the two
+    // set changes a number cannot: a database the app has started binding and
+    // one whose binding was withdrawn.
+    let binding_epochs_changed = loaded.map(|m| &m.binding_epochs) != Some(&info.binding_epochs);
+    hash_changed || limits_changed || env_changed || net_policy_changed || binding_epochs_changed
 }
 
 async fn reconcile_once(
@@ -358,6 +381,30 @@ async fn reconcile_once(
                                 );
                                 continue;
                             };
+
+                            // BEFORE the isolate is built, never after: an
+                            // isolate captures the binding its sessions narrow
+                            // with while it builds, so a re-resolution that
+                            // followed `load_app` would leave the replacement
+                            // composing the role the apply retired - the state
+                            // this reload exists to leave. A resolution that
+                            // fails leaves the previous isolate standing and
+                            // this app for the next cycle, for the same reason
+                            // the bundle and env failures above do: an isolate
+                            // built on a binding control would not serve is
+                            // worse than the one already running.
+                            if let Err(error) =
+                                resupply_bindings(config, local_id, info).await
+                            {
+                                tracing::warn!(
+                                    app_id = local_id.as_str(),
+                                    %error,
+                                    "worker-sync: binding re-resolution failed; keeping the \
+                                     previous isolate"
+                                );
+                                continue;
+                            }
+
                             match cache::load_app(
                                 local_id.clone(),
                                 executable.modules,
@@ -380,6 +427,7 @@ async fn reconcile_once(
                                             deploy_hash: info.deploy_hash.clone(),
                                             env_version: info.env_version,
                                             net_policy: info.net_policy.clone(),
+                                            binding_epochs: info.binding_epochs.clone(),
                                         },
                                     );
                                     tracing::info!(
@@ -536,6 +584,46 @@ pub async fn fetch_app_env_supplying(
     }
     let url = control_app_url(url_base, endpoints::CONTROL_APP_ENV, app_id.as_str());
     http_get(&url, control_authorization(service_auth)?.as_deref()).await
+}
+
+/// Make this host's binding store agree with the epochs Control now reports,
+/// for an app whose isolate is about to be built or rebuilt.
+///
+/// The counterpart to the `is_bound` guard in [`fetch_app_env_supplying`].
+/// That guard is what keeps a rotation from reaching an isolate already
+/// running: the binding follows the isolate, so nothing re-reads it under one.
+/// This is the point where the isolate is REPLACED, which is the only moment
+/// at which installing a different epoch is safe, and the guard would
+/// otherwise leave the replacement inheriting the edge its predecessor was
+/// built on.
+///
+/// `AppVersionInfo::binding_epochs` decides whether a read happens at all: it
+/// is the binding topology Control reports for this app, so a store that
+/// already agrees with it has nothing to resolve, and an app Control reports
+/// no live binding for is unbound here rather than read for. The read itself
+/// serves the binding ids, which no worker composes.
+pub(crate) async fn resupply_bindings(
+    config: &WorkerConfig,
+    app_id: &AppId,
+    info: &AppVersionInfo,
+) -> Result<(), String> {
+    let Some(bindings) = crate::cache::app_bindings() else {
+        return Ok(());
+    };
+    let app = app_id.as_str();
+    if bindings.epochs_for(app) == info.binding_epochs {
+        return Ok(());
+    }
+    let resolved = if info.binding_epochs.is_empty() {
+        Vec::new()
+    } else {
+        let url = control_app_url(&config.control_url, endpoints::CONTROL_APP_BINDINGS, app);
+        let body = http_get(&url, control_authorization(&config.service_auth)?.as_deref()).await?;
+        parse_resolved_bindings(&body)?
+    };
+    bindings
+        .replace_app(app, resolved)
+        .map_err(|error| error.to_string())
 }
 
 /// Install the binding set Control served for one app.

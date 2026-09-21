@@ -134,6 +134,84 @@ impl SuppliedAppBindings {
         }
     }
 
+    /// Replace every binding this app holds with the set a host just resolved.
+    ///
+    /// The ISOLATE-REPLACEMENT path, where [`Self::supply`] is the resolution
+    /// path. `supply` refuses an edge that disagrees with the one installed,
+    /// and that refusal is what keeps a rotation away from an isolate already
+    /// running on the epoch before it; here the isolate is being replaced, so
+    /// the set it was built from goes with it and the one its successor is
+    /// built from takes its place whole. A database the app has stopped
+    /// binding leaves, a rebound database follows its new edge, and a rotated
+    /// epoch advances - none of which `supply` can express.
+    ///
+    /// The whole set is swapped under ONE write, so no reader ever observes
+    /// the app between its old bindings and its new ones. An app resolved to
+    /// an EMPTY set holds no bindings at all, the state it was in before any
+    /// host resolved one: control serves no live binding for it, and an
+    /// `env.db` composed from a retired edge is worse than an absent one.
+    ///
+    /// # Errors
+    ///
+    /// `invalid_app_binding` on an empty app id, or on a set naming one
+    /// database twice - two edges for one database disagree about which edge
+    /// the app has, and this call cannot choose between them.
+    /// `app_binding_store_unavailable` when the lock is poisoned.
+    pub fn replace_app(
+        &self,
+        app_id: &str,
+        resolved: Vec<ResolvedBinding>,
+    ) -> Result<(), DbError> {
+        if app_id.is_empty() {
+            return Err(DbError::validation(
+                "invalid_app_binding",
+                "an app binding needs an app id",
+            ));
+        }
+        for (position, edge) in resolved.iter().enumerate() {
+            if resolved[..position]
+                .iter()
+                .any(|earlier| earlier.database == edge.database)
+            {
+                return Err(DbError::validation(
+                    "invalid_app_binding",
+                    "app bindings name one database twice",
+                ));
+            }
+        }
+        {
+            let mut apps = self.apps.write().map_err(|_| store_unavailable())?;
+            if resolved.is_empty() {
+                apps.remove(app_id);
+            } else {
+                apps.insert(app_id.to_owned(), resolved);
+            }
+        }
+        Ok(())
+    }
+
+    /// The schema epoch this store holds for each of an app's databases.
+    ///
+    /// The comparable projection of the set: a host that knows which epochs
+    /// control now serves reads this to decide whether the store already
+    /// agrees, and re-resolves only when it does not. An app the store holds
+    /// nothing for answers with the empty map, which is the same answer as an
+    /// app control serves no live binding for - the two are the same state.
+    #[must_use]
+    pub fn epochs_for(&self, app_id: &str) -> std::collections::BTreeMap<DatabaseId, u32> {
+        let Ok(apps) = self.apps.read() else {
+            return std::collections::BTreeMap::new();
+        };
+        apps.get(app_id)
+            .map(|edges| {
+                edges
+                    .iter()
+                    .map(|edge| (edge.database.clone(), edge.epoch))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Whether this app's binding has been resolved.
     ///
     /// # Errors
@@ -471,6 +549,176 @@ mod tests {
             .expect("the refused supply leaves the store serving");
         assert_eq!(still.schema_epoch(), Some(edge.epoch));
         assert_eq!(still.session_role(), installed.session_role());
+    }
+
+    /// Replacing an app's set installs what a host resolved for the isolate
+    /// that is about to be built, including the two moves `supply` refuses.
+    ///
+    /// The three arms are the three things a replacement has to express and a
+    /// resolution must not: an edge that MOVED to a different binding, a
+    /// database the app no longer binds, and an epoch that advanced. Each is
+    /// asserted on the composed ROLE where a role exists, because the role is
+    /// what `SET LOCAL ROLE` sends.
+    #[test]
+    fn replacing_an_app_installs_the_set_supply_would_refuse() {
+        let store = SuppliedAppBindings::new();
+        let kept = resolved();
+        let dropped = resolved();
+        store.supply("app_x", kept.clone()).expect("supply the first");
+        store
+            .supply("app_x", dropped.clone())
+            .expect("supply the second");
+        let before = store
+            .binding_for("app_x", "d1", &kept.database)
+            .expect("the installed edge composes a binding");
+
+        // The edge MOVED and the epoch advanced, and the second database is
+        // gone from the set entirely.
+        let moved = ResolvedBinding {
+            database: kept.database.clone(),
+            binding: BindingId::mint(),
+            epoch: kept.epoch + 1,
+        };
+        assert_ne!(moved.binding, kept.binding);
+        store
+            .supply("app_x", moved.clone())
+            .expect_err("a resolution cannot move an edge under a live isolate");
+        store
+            .replace_app("app_x", vec![moved.clone()])
+            .expect("a replacement installs the set the next isolate is built from");
+
+        let after = store
+            .binding_for("app_x", "d1", &kept.database)
+            .expect("the replaced edge composes a binding");
+        assert_eq!(after.schema_epoch(), Some(moved.epoch));
+        assert_ne!(
+            before.session_role(),
+            after.session_role(),
+            "the binding id and the epoch are both in the role name, so a \
+             replacement that moved either has to move the role"
+        );
+        assert!(
+            store
+                .binding_for("app_x", "d1", &dropped.database)
+                .is_none(),
+            "a database the app has stopped binding leaves the set"
+        );
+        assert_eq!(store.bindings_for("app_x", "d1").len(), 1);
+    }
+
+    /// An empty replacement leaves the app unbound, and an app the store never
+    /// held is untouched by one.
+    ///
+    /// Control serves no live binding for such an app, so composing one from
+    /// what the store happens to still hold would narrow a fresh isolate to a
+    /// role a revocation retired. Its control is the nonempty replacement
+    /// beside it, without which this would pass over a call that emptied the
+    /// store whatever it was handed.
+    #[test]
+    fn an_empty_replacement_unbinds_the_app() {
+        let store = SuppliedAppBindings::new();
+        let edge = resolved();
+        store.supply("app_x", edge.clone()).expect("supply");
+        store.supply("app_other", resolved()).expect("supply");
+
+        store
+            .replace_app("app_x", Vec::new())
+            .expect("an app control serves no live binding for holds none");
+        assert!(!store.is_bound("app_x").expect("read the store"));
+        assert!(store.binding_for("app_x", "d1", &edge.database).is_none());
+        assert!(store.epochs_for("app_x").is_empty());
+
+        store
+            .replace_app("app_absent", Vec::new())
+            .expect("an app the store never held is already in this state");
+
+        // THE CONTROL: the neighbour app is untouched, and a nonempty
+        // replacement binds rather than unbinds.
+        assert!(store.is_bound("app_other").expect("read the store"));
+        store
+            .replace_app("app_x", vec![edge.clone()])
+            .expect("a nonempty replacement binds");
+        assert!(store.is_bound("app_x").expect("read the store"));
+    }
+
+    /// One database twice in a replacement is refused, because the call cannot
+    /// choose which of two edges the app has.
+    #[test]
+    fn a_replacement_naming_one_database_twice_is_refused() {
+        let store = SuppliedAppBindings::new();
+        let edge = resolved();
+        let twin = ResolvedBinding {
+            database: edge.database.clone(),
+            binding: BindingId::mint(),
+            epoch: edge.epoch + 1,
+        };
+        let error = store
+            .replace_app("app_x", vec![edge.clone(), twin])
+            .expect_err("two edges for one database is not a set");
+        assert_eq!(error.code(), "invalid_app_binding");
+        assert!(
+            !store.is_bound("app_x").expect("read the store"),
+            "a refused replacement installs nothing"
+        );
+
+        // The control differing in one variable: two edges naming DIFFERENT
+        // databases are a set, and install.
+        store
+            .replace_app("app_x", vec![edge, resolved()])
+            .expect("two databases are a set");
+        assert_eq!(store.epochs_for("app_x").len(), 2);
+
+        assert_eq!(
+            store
+                .replace_app("", Vec::new())
+                .expect_err("a replacement needs an app id")
+                .code(),
+            "invalid_app_binding"
+        );
+    }
+
+    /// The epoch projection reports one entry per database the app binds, and
+    /// follows every move of the set.
+    #[test]
+    fn the_epoch_projection_reports_each_databases_epoch() {
+        let store = SuppliedAppBindings::new();
+        let main = resolved();
+        let analytics = ResolvedBinding {
+            database: DatabaseId::mint(),
+            binding: BindingId::mint(),
+            epoch: main.epoch + 4,
+        };
+        assert!(store.epochs_for("app_x").is_empty());
+
+        store.supply("app_x", main.clone()).expect("supply main");
+        store
+            .supply("app_x", analytics.clone())
+            .expect("supply analytics");
+        assert_eq!(
+            store.epochs_for("app_x"),
+            std::collections::BTreeMap::from([
+                (main.database.clone(), main.epoch),
+                (analytics.database.clone(), analytics.epoch),
+            ]),
+            "each database reports its OWN epoch, not the set's highest"
+        );
+
+        // A rotation on the LOWER of the two moves the projection, which a
+        // maximum over the set would not show.
+        let rotated = ResolvedBinding {
+            epoch: main.epoch + 1,
+            ..main.clone()
+        };
+        store.supply("app_x", rotated.clone()).expect("rotate main");
+        assert_eq!(
+            store.epochs_for("app_x").get(&main.database),
+            Some(&rotated.epoch)
+        );
+        assert_eq!(
+            store.epochs_for("app_x").get(&analytics.database),
+            Some(&analytics.epoch),
+            "the database that did not rotate keeps its epoch"
+        );
     }
 
     /// Retiring an app removes every binding.

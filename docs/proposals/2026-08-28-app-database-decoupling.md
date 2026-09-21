@@ -1123,21 +1123,42 @@ Control has since stopped serving, and the classifier's only input is the bindin
 it would have answered `SCHEMA_EPOCH_STALE` for that case either way. What distinguishes a
 withdrawn binding is a re-resolution, which is a protocol rather than a classification.
 
-**That protocol is not built, and the epoch producer made its absence reachable.** A worker
-resolves an app's binding once, when it loads the app, and `SuppliedAppBindings` is cleared only
-by `deprovision_app` - so a binding's lifetime is the worker PROCESS while the isolate's is the
-DEPLOY, and nothing reconciles the two. An apply now advances the head, so the second
-schema-changing apply against a resident app retires the role that app's binding names, and every
-session it opens is refused at `SET LOCAL ROLE`. The fence is firing correctly there: the isolate
-IS behind the schema. What is missing is that nothing REPLACES the isolate, and re-resolution
-belongs with that replacement rather than beside it. Carrying the epoch into the store under a
-live isolate is the wrong repair - `binding_for` keys on the app and the database, `deploy_token`
-is attached rather than keyed, and `binding_for_isolate` reads the store at each `env.db` call, so
-a store that followed the epoch would let code built against an older shape succeed against the
-schema that replaced it, which is the one direction this fence exists to catch. The staleness
-signals a reload already compares - `deploy_hash`, the runtime limits, `env_version` and
-`net_policy`, in `needs_reload` (`crates/zeroship-worker/src/sync.rs`) - are where the epoch
-belongs, so that a moved epoch reloads the app.
+**That protocol is the isolate's replacement, and a binding's lifetime is the isolate's.** BUILT.
+An isolate captures the binding its sessions narrow with while it builds - `mint_db_for_binding`
+(`crates/zeroship-data-v8/src/v8_classes/db.rs`) takes a `DbBinding` by value, and
+`build_env_object` runs once per isolate - so a store that moves does not move an isolate already
+running. It keeps the epoch it captured and is refused at `SET LOCAL ROLE` once that epoch
+retires, which is the fence working. The danger of a store that followed the epoch on a bare
+environment refresh is the isolate built AFTER it from an OLDER deployment: that one would capture
+the CURRENT epoch and run code built against a shape the schema has left, which is the one
+direction this fence cannot catch. So the resolution in `fetch_app_env_supplying` stays guarded on
+`is_bound`, and the epoch joins the staleness signals a reload already compares - `deploy_hash`,
+the runtime limits, `env_version` and `net_policy`, in `needs_reload`
+(`crates/zeroship-worker/src/sync.rs`). The reload is where re-resolution happens:
+`AppVersionInfo::binding_epochs` carries the schema epoch of every live binding the app holds,
+`Registry::get_versions` projects it through `LIVE_BINDINGS_FROM_WHERE_EVERY_APP`, `LoadedMeta`
+records what the isolate was built against, and `sync::resupply_bindings` replaces the app's whole
+binding set through `SuppliedAppBindings::replace_app` BEFORE `load_app` builds its successor. The
+cold-start path resolves the same way, because the store outlives every isolate in the process and
+a thread that has never held this app can still find one another thread resolved before the apply.
+
+**The workflow host does not take part, and that is now an exposure rather than a gap.**
+`ProductionResources::resolve` (`crates/zeroship-worker/src/workflow_host.rs`) re-resolves on an
+env-version change alone and compares no epoch. Its isolates are pinned to the deployment a run
+replays, so it is the one builder that deliberately produces an isolate from an OLDER deployment -
+exactly the case the paragraph above names. While the store never moved, such an isolate captured
+a retired epoch and was fenced. A store that the dispatch path now advances can hand it a live
+one, and old code then reaches the schema that replaced it with no role to refuse it. Resolving it
+the way dispatch does would cement that rather than close it: a replay must not silently follow
+the schema forward. What a pinned replay owes is the epoch its own deployment was built against,
+or a refusal.
+
+**Why the whole map and not one number.** An app binds many databases. A maximum over its epochs
+does not move when a second database advances under a higher-epoch first one, and a sum that moves
+on any advance still collides across a change of the bound SET - so equality over the per-database
+map is the comparison, which also answers the two questions no SQLSTATE can: a database the app has
+started binding, and one whose binding was withdrawn. A withdrawn binding empties the app's set,
+which is the re-resolution the arm above says is a protocol rather than a classification.
 
 The codes being pairwise distinct is bound by
 `pg_error::the_three_setup_outcomes_are_pairwise_distinct`, so a later collapse is a red test

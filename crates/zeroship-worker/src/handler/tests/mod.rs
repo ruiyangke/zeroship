@@ -11,6 +11,7 @@ use zeroship_core::types::AppRuntimeLimits;
 use zeroship_storage::StorageBackendConfig;
 
 mod auth;
+mod cold_start;
 pub(super) mod fixture;
 mod kernel;
 mod lifecycle;

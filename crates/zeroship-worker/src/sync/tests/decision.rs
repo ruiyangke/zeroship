@@ -1,4 +1,6 @@
 use super::*;
+use std::collections::BTreeMap;
+use zeroship_core::DatabaseId;
 
 fn version_info(
     deploy_hash: Option<&str>,
@@ -12,6 +14,7 @@ fn version_info(
         env_version,
         manifest: None,
         net_policy: AppNetPolicy::default(),
+        binding_epochs: BTreeMap::new(),
     }
 }
 
@@ -20,7 +23,138 @@ fn loaded_meta(deploy_hash: Option<&str>, env_version: i64) -> cache::LoadedMeta
         deploy_hash: deploy_hash.map(str::to_string),
         env_version,
         net_policy: AppNetPolicy::default(),
+        binding_epochs: BTreeMap::new(),
     }
+}
+
+/// One app's per-database epochs, spelled as the pairs a case cares about.
+fn epochs(entries: &[(&DatabaseId, u32)]) -> BTreeMap<DatabaseId, u32> {
+    entries
+        .iter()
+        .map(|(database, epoch)| ((*database).clone(), *epoch))
+        .collect()
+}
+
+/// The two scalars a single number could summarise this map as. Named so a
+/// case can SHOW that the scalar it refutes did not move, rather than assert
+/// in prose that it would not have.
+fn highest(map: &BTreeMap<DatabaseId, u32>) -> Option<u32> {
+    map.values().copied().max()
+}
+
+fn total(map: &BTreeMap<DatabaseId, u32>) -> u32 {
+    map.values().copied().sum()
+}
+
+/// An isolate whose bound database rotated must be replaced: its sessions
+/// narrow to a role name carrying the epoch it was built against, and the
+/// apply after next drops that role.
+///
+/// Its rejection control is the same app at the SAME epoch, which must not
+/// reload - otherwise this would pass over a `needs_reload` that had started
+/// answering true for everything.
+#[test]
+fn needs_reload_true_when_a_bound_databases_epoch_advances() {
+    let database = DatabaseId::mint();
+    let mut info = version_info(Some("h1"), 7, AppRuntimeLimits::default());
+    info.binding_epochs = epochs(&[(&database, 5)]);
+    let mut loaded = loaded_meta(Some("h1"), 7);
+    loaded.binding_epochs = epochs(&[(&database, 4)]);
+    assert!(
+        needs_reload(Some(&loaded), Some(matching_limits(&info.runtime)), &info),
+        "an apply that advanced the schema epoch retires the role this \
+         isolate's sessions narrow to, so the isolate must be replaced"
+    );
+
+    loaded.binding_epochs = epochs(&[(&database, 5)]);
+    assert!(
+        !needs_reload(Some(&loaded), Some(matching_limits(&info.runtime)), &info),
+        "an app whose epoch did not move must not reload: reload churn drops \
+         module state and in-flight work for nothing"
+    );
+}
+
+/// An app binds MANY databases, and the second one advancing under a
+/// higher-epoch first one must reload.
+///
+/// This is the case a single scalar loses. The test SHOWS it: the highest
+/// epoch across the set is identical on both sides, so a `needs_reload`
+/// comparing a maximum would answer false here while the analytics binding's
+/// every session was refused at `SET LOCAL ROLE`.
+#[test]
+fn needs_reload_true_when_a_second_database_advances_under_a_higher_first_one() {
+    let main = DatabaseId::mint();
+    let analytics = DatabaseId::mint();
+    let mut info = version_info(Some("h1"), 7, AppRuntimeLimits::default());
+    info.binding_epochs = epochs(&[(&main, 9), (&analytics, 3)]);
+    let mut loaded = loaded_meta(Some("h1"), 7);
+    loaded.binding_epochs = epochs(&[(&main, 9), (&analytics, 2)]);
+
+    assert_eq!(
+        highest(&loaded.binding_epochs),
+        highest(&info.binding_epochs),
+        "the premise of this case: the highest epoch in the set did not move"
+    );
+    assert!(
+        needs_reload(Some(&loaded), Some(matching_limits(&info.runtime)), &info),
+        "the second database advanced, so the isolate holds a retired role for \
+         it however high the first database's epoch is"
+    );
+
+    // The rejection control, one variable changed back: the same two-database
+    // app with neither epoch moved must not reload.
+    loaded.binding_epochs = epochs(&[(&main, 9), (&analytics, 3)]);
+    assert!(!needs_reload(
+        Some(&loaded),
+        Some(matching_limits(&info.runtime)),
+        &info
+    ));
+}
+
+/// A binding WITHDRAWN while another advances must reload, and this is the
+/// case a total over the set loses: the sum is identical on both sides.
+///
+/// A withdrawn binding is the condition no SQLSTATE distinguishes - the
+/// classifier's input is the binding it was handed, so holding one is not
+/// evidence that it is live. Re-resolution is what distinguishes it, and this
+/// comparison is what asks for one.
+#[test]
+fn needs_reload_true_when_a_withdrawn_binding_leaves_the_total_unchanged() {
+    let main = DatabaseId::mint();
+    let analytics = DatabaseId::mint();
+    let mut info = version_info(Some("h1"), 7, AppRuntimeLimits::default());
+    info.binding_epochs = epochs(&[(&main, 11)]);
+    let mut loaded = loaded_meta(Some("h1"), 7);
+    loaded.binding_epochs = epochs(&[(&main, 9), (&analytics, 2)]);
+
+    assert_eq!(
+        total(&loaded.binding_epochs),
+        total(&info.binding_epochs),
+        "the premise of this case: the epochs sum to the same number"
+    );
+    assert!(
+        needs_reload(Some(&loaded), Some(matching_limits(&info.runtime)), &info),
+        "control serves no live binding for the second database any more, and \
+         an isolate holding one composes a role a revocation retired"
+    );
+
+    // And the other direction: an app that has STARTED binding a database
+    // reloads too, because its isolate was built with no handle for it.
+    loaded.binding_epochs = epochs(&[(&main, 11)]);
+    info.binding_epochs = epochs(&[(&main, 11), (&analytics, 0)]);
+    assert!(
+        needs_reload(Some(&loaded), Some(matching_limits(&info.runtime)), &info),
+        "a database the app has started binding needs an isolate built with a \
+         handle for it"
+    );
+
+    // The rejection control for both arms: equal sets do not reload.
+    loaded.binding_epochs = epochs(&[(&main, 11), (&analytics, 0)]);
+    assert!(!needs_reload(
+        Some(&loaded),
+        Some(matching_limits(&info.runtime)),
+        &info
+    ));
 }
 
 fn matching_limits(runtime: &AppRuntimeLimits) -> RuntimeLimits {
@@ -115,6 +249,7 @@ fn needs_reload_true_when_net_policy_changes() {
             max_sockets: 4,
             egress_ceiling_bytes: 1024 * 1024,
         },
+        binding_epochs: BTreeMap::new(),
     };
     assert!(
         needs_reload(Some(&loaded), Some(matching_limits(&info.runtime)), &info),
