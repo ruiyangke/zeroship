@@ -291,6 +291,50 @@ mod tests {
         assert_eq!(error.message, GRANT_REVOKED_MESSAGE);
     }
 
+    /// The read-only-binding refusal reaches the creator READABLE, which is the
+    /// whole of what it is for.
+    ///
+    /// The 403 is load-bearing and not decoration: `build_error_body`
+    /// (`crates/zeroship-runtime/src/core/dispatch.rs`) blanks a 5xx body to
+    /// `{"message":"internal error"}` unless the code is on its allow-list, and
+    /// skips that rail entirely at 4xx. A refusal that arrived as a 500 would
+    /// reach the creator as "internal error" and buy nothing over the `42501`
+    /// PostgreSQL produces on its own.
+    ///
+    /// The message must also say what is wrong and name no identifier: the
+    /// database id, the binding id and the role name stay in the operator log.
+    #[test]
+    fn a_read_only_binding_refusal_reaches_the_creator_readable() {
+        let error = DbError::PermissionDenied {
+            code: READ_ONLY_BINDING,
+            message: READ_ONLY_BINDING_MESSAGE,
+        }
+        .to_op_error();
+        match &error.kind {
+            zeroship_runtime::state::OpErrorKind::CodedError { code, status, .. } => {
+                assert_eq!(code, READ_ONLY_BINDING);
+                assert_eq!(
+                    *status,
+                    Some(403),
+                    "a 5xx would be blanked to `internal error` by the dispatch rail"
+                );
+            }
+            other => panic!("expected CodedError, got {other:?}"),
+        }
+        assert_eq!(error.message, READ_ONLY_BINDING_MESSAGE);
+        assert!(
+            error.message.contains("read-only") && error.message.contains("readwrite"),
+            "the message must name the condition and the remedy: {}",
+            error.message
+        );
+        assert!(
+            !error.message.contains("zs_bind_") && !error.message.contains("dbs_"),
+            "no identifier may ride out on the wire: {}",
+            error.message
+        );
+        assert!(error.message.is_ascii(), "ASCII only: {}", error.message);
+    }
+
     /// Sweep the SQL-violation variants (the four 23xxx codes plus
     /// Serialization, LockContention, Transient, Internal) — each must
     /// stamp the canonical wire `code` that the SDK branches on. The

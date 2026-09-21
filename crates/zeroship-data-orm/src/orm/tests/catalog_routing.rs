@@ -167,6 +167,7 @@ async fn postgres_catalog_protection_follows_the_bound_schema() {
                     edge.database().clone(),
                     edge.binding().clone(),
                     edge.epoch(),
+                    edge.database_capability(),
                 )
                 .expect("the co-tenant binding composes")
             },

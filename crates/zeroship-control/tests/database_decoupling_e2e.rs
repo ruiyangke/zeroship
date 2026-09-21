@@ -309,7 +309,8 @@ impl World {
     /// reads the same rows through the same SQL rather than restating it.
     async fn live_bindings(&self, app: &AppId) -> Vec<ResolvedBinding> {
         let sql = format!(
-            "SELECT b.id AS binding_id, b.database_id, d.schema_epoch {} ORDER BY b.id",
+            "SELECT b.id AS binding_id, b.database_id, b.capability, d.schema_epoch {} \
+             ORDER BY b.id",
             zeroship_core::live_binding::LIVE_BINDINGS_FROM_WHERE
         );
         self.pg
@@ -325,6 +326,14 @@ impl World {
                     binding: BindingId::parse(row.get::<_, String>("binding_id").as_str())
                         .expect("control stores a typed binding id"),
                     epoch: u32::try_from(epoch).expect("a schema epoch is not negative"),
+                    // Read through the one codec, exactly as the handler does.
+                    // The column's CHECK admits these two spellings and nothing
+                    // else, so a row this cannot read is a row the handler
+                    // would refuse to serve.
+                    capability: DatabaseCapability::from_wire(
+                        row.get::<_, String>("capability").as_str(),
+                    )
+                    .expect("control stores a capability the CHECK admits"),
                 }
             })
             .collect()
@@ -1329,6 +1338,18 @@ async fn the_whole_decoupled_path_runs_in_one_exercise() {
         b_bindings[0].database, shared_id,
         "app B's one binding names the SHARED database"
     );
+    // The capability control serves is the one the bind declared. Every bind in
+    // this world asked for `CAPABILITY_READWRITE`, and the isolates below then
+    // write, so a projection that served the other one would leave every write
+    // in this test refused before a statement ran.
+    for resolved in a_bindings.iter().chain(b_bindings.iter()) {
+        assert_eq!(
+            resolved.capability,
+            DatabaseCapability::from_wire(CAPABILITY_READWRITE)
+                .expect("the constant is one of the two stored spellings"),
+            "control must serve the capability the bind declared"
+        );
+    }
 
     let a_document = document(vec![
         (SHARED_LABEL, &shared_id, true, shared_descriptor()),

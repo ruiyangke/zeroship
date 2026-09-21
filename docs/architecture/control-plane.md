@@ -123,7 +123,7 @@ stateless app credentials without a per-request database lookup. If
 `manifest_json` is missing, unparsable, or fails `Manifest::validate()`, the
 registry falls back to `Manifest::passthrough()` and logs an error.
 
-`Registry::get_versions()` builds `VersionMap<Uuid, AppVersionInfo>` for workers. The manifest in that feed is optional, so undeployed apps can still appear in the version map with `manifest = None`.
+`Registry::get_versions()` builds `VersionMap<Uuid, AppVersionInfo>` for workers. The manifest in that feed is optional, so undeployed apps can still appear in the version map with `manifest = None`. Each entry also carries `binding_epochs`, the schema epoch of every database the app holds a live binding to, read through `zeroship_core::live_binding::LIVE_BINDINGS_FROM_WHERE_EVERY_APP`. It is what tells a worker that an apply rotated the role a resident isolate's sessions narrow to, so the isolate is replaced and its binding re-resolved rather than fenced at `SET LOCAL ROLE`; an app with no live binding carries the empty map, which is how a withdrawn binding reaches the worker too.
 
 Gateway polls `/internal/routes` every 5 seconds. Worker polls `/internal/versions` every 5 seconds and fetches env snapshots lazily from `/internal/apps/{app_id}/env` when `env_version` changes.
 These feeds are polled rather than pushed so the control plane stays stateless with respect to gateway and worker consumers.

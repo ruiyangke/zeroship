@@ -23,7 +23,7 @@
 //! | [`DbError::LockContention`] | Postgres 55P03 / lock-not-available | `SELECT … FOR UPDATE NOWAIT` |
 //! | [`DbError::Transient`] | Postgres class 08, deadlock, out-of-memory | connection drop, 40P01 |
 //! | [`DbError::Configuration`] | Plugin mis-configured, OR the binding does not resolve on the cluster, OR the bound database holds no such relation | `DB_URL` not set; `schema_epoch_stale` (the binding role for this epoch does not exist); `schema_not_migrated` (Postgres 42P01/42703, fix: `zeroship migrate`) |
-//! | [`DbError::PermissionDenied`] | A classified authorization refusal with a terminal HTTP remedy | revoked database binding |
+//! | [`DbError::PermissionDenied`] | A classified authorization refusal with a terminal HTTP remedy | revoked database binding; `READ_ONLY_BINDING` (a write asked of a read-only binding) |
 //! | [`DbError::Coded`] | Pre-typed code from another subsystem | migrations.rs `migration_*` codes |
 //! | [`DbError::Internal`] | Anything else; logged but stamped `internal` | a `JSON.stringify` that lost a column |
 
@@ -434,6 +434,36 @@ pub const SCHEMA_EPOCH_STALE: &str = "schema_epoch_stale";
 
 /// Public error code for a session whose database-role membership was revoked.
 pub const GRANT_REVOKED: &str = DenyReason::GrantRevoked.code();
+
+/// Public error code for a row-modifying operation asked of a binding control
+/// declared read-only.
+///
+/// **An ERGONOMIC refusal, not a fence.** The process that raises it runs
+/// creator code, so it is on the same side of the boundary as the code it
+/// refuses. `PostgreSQL` is the authority: the reconciler grants the binding
+/// role membership in exactly one of the database's two capability roles, so
+/// the statement is refused by the server whether or not anything in this crate
+/// looks. What the code buys is a creator reading "this binding is read-only"
+/// instead of `42501 permission denied for table ...`.
+///
+/// Upper-case because it reaches the caller through
+/// [`DbError::PermissionDenied`], whose codes are already spelled that way, and
+/// because `@zeroship/db`'s `canonicalErrorCode` leaves an all-upper code
+/// unchanged - so the native surface and the SDK surface name it identically
+/// and neither spelling needs an exemption the other lacks.
+pub const READ_ONLY_BINDING: &str = "READ_ONLY_BINDING";
+
+/// Fixed creator-facing message for [`READ_ONLY_BINDING`].
+///
+/// Platform-authored and interpolating NOTHING, on the terms
+/// [`STALE_EPOCH_MESSAGE`] states: the database id, the binding id and the role
+/// name stay in the operator log. It names the condition and the action that
+/// changes it, which is a control-plane rebind and not anything the app can do
+/// to itself.
+pub const READ_ONLY_BINDING_MESSAGE: &str =
+    "this app's binding to that database is read-only, so an operation that writes rows is \
+     refused before any statement runs. Bind the app to the database with the readwrite \
+     capability to write to it.";
 
 /// Fixed creator-facing message for [`GRANT_REVOKED`]. The PostgreSQL message
 /// and role name remain in the operator log.
