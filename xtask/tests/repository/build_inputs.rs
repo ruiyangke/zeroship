@@ -212,6 +212,19 @@ fn build_inputs() -> Vec<BuildInput> {
             ),
             rebuild: "pnpm build:data-v8-adapter",
         },
+        // The same crate embeds the DB SDK's PUBLISHED bundle with a second
+        // `include_str!`, at src/tests/startup_policy.rs. It is a different
+        // artifact from the adapter above and was declared by neither rule, so a
+        // test binary could compile against an SDK bundle older than its sources
+        // and answer from what the facade used to export.
+        BuildInput {
+            artifacts: vec!["packages/db/dist/index.js".to_owned()],
+            sources: also(
+                tree("packages/db/src", &["ts"]),
+                &["packages/db/tsup.config.ts", "packages/schema/dist/index.js"],
+            ),
+            rebuild: "pnpm --filter @zeroship/db build",
+        },
     ]
 }
 
@@ -402,4 +415,71 @@ fn the_wpt_pin_reader_rejects_a_script_that_declares_none() {
     assert_eq!(wpt_pin("WPT_COMMIT=\"${WPT_COMMIT:-}\"\n"), None);
     assert_eq!(wpt_pin("WPT_COMMIT=\"${WPT_COMMIT:-$OTHER}\"\n"), None);
     assert_eq!(wpt_pin("nothing here\n"), None);
+}
+
+/// Every `packages/*/dist` bundle a crate embeds with `include_str!` must be
+/// declared as a build input.
+///
+/// The staleness rule above compares what it is TOLD about. Nothing tells it
+/// what the tree actually embeds, so an artifact can reach a compiled binary
+/// without that rule ever seeing it - which is how
+/// `packages/db/dist/index.js` sat undeclared in the same crate whose adapter
+/// was declared for precisely this reason.
+#[test]
+fn every_embedded_package_bundle_is_declared_as_a_build_input() {
+    let embedded = embedded_package_bundles();
+
+    // A difference against an empty scan passes and proves nothing.
+    assert!(
+        !embedded.is_empty(),
+        "no `include_str!` of a packages/*/dist path found under crates/: the \
+         scan read the wrong tree, so a clean comparison here would be a \
+         statement about nothing"
+    );
+
+    let declared: BTreeSet<String> = build_inputs()
+        .iter()
+        .flat_map(|input| input.artifacts.iter().cloned())
+        .collect();
+
+    let undeclared: Vec<&String> = embedded.difference(&declared).collect();
+
+    assert!(
+        undeclared.is_empty(),
+        "these generated bundles are embedded with `include_str!` and declared \
+         by no build-input rule, so the staleness gate is silent about them:\n  \
+         {}\nDeclare each with its sources and rebuild command.",
+        undeclared
+            .iter()
+            .map(|path| (*path).clone())
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+}
+
+/// Repository-relative `packages/*/dist/...` paths embedded by `include_str!`
+/// anywhere under `crates/`.
+///
+/// The literal is normalised from its `packages/` segment rather than resolved
+/// against the file, because the relative prefix varies by depth and only the
+/// tail identifies the artifact.
+fn embedded_package_bundles() -> BTreeSet<String> {
+    let mut found = BTreeSet::new();
+    for path in repo::files("crates", &["rs"]) {
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        for rest in source.split("include_str!(\"").skip(1) {
+            let Some((literal, _)) = rest.split_once('"') else {
+                continue;
+            };
+            let Some(index) = literal.find("packages/") else {
+                continue;
+            };
+            let tail = &literal[index..];
+            if tail.contains("/dist/") {
+                found.insert(tail.to_owned());
+            }
+        }
+    }
+    found
 }
