@@ -31,7 +31,6 @@ pub struct WorkflowService {
     operation_policy: Option<CapturedPolicy>,
     pub(crate) deployments: Option<super::AppDeployments>,
     pub(crate) signal_authority: Option<Arc<super::SignalAuthority>>,
-    pub(crate) payload_storage: Option<zeroship_storage::Storage>,
     ingress: Option<Rc<dyn super::IngressEpochs>>,
 }
 impl std::fmt::Debug for WorkflowService {
@@ -66,7 +65,6 @@ impl WorkflowService {
             operation_policy: None,
             deployments: None,
             signal_authority: None,
-            payload_storage: None,
             ingress: None,
         })
     }

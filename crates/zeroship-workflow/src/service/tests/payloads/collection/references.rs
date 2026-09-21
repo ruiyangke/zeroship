@@ -12,7 +12,7 @@ pub(super) async fn retained(store: Rc<OrmStore>) {
             &fixture.task.token,
             &RequestId::mint(),
             output.clone(),
-            body(b"retained output"),
+            fixture.objects.upload(b"retained output"),
         )
         .await
         .unwrap();
@@ -51,24 +51,32 @@ pub(super) async fn retained(store: Rc<OrmStore>) {
     assert_eq!(
         fixture
             .scope
-            .collect_job(&Grant::new(fixture.scope.app_id()), options(2))
+            .collect_job(
+                &Grant::new(fixture.scope.app_id()),
+                options(2),
+                &fixture.objects
+            )
             .await
             .unwrap()
             .outcome,
         JobOutcome::Completed {}
     );
     assert_eq!(fixture.payload(&retained.id).await.state, "referenced");
-    assert!(fixture.exists(fixture.scope.app_id(), &retained.id).await);
-    assert!(!fixture.exists(fixture.scope.app_id(), &abandoned).await);
+    assert!(fixture.exists(fixture.scope.app_id(), &retained.id));
+    assert!(!fixture.exists(fixture.scope.app_id(), &abandoned));
     assert_eq!(preserved(&fixture).await, before);
     // A damaged eligibility projection cannot override actual reference edges.
     set_state(&fixture, &retained.id, "staged").await;
     fixture
         .scope
-        .collect_job(&Grant::new(fixture.scope.app_id()), options(2))
+        .collect_job(
+            &Grant::new(fixture.scope.app_id()),
+            options(2),
+            &fixture.objects,
+        )
         .await
         .unwrap();
-    assert_eq!(fixture.backend.calls(), [abandoned]);
+    assert_eq!(fixture.objects.deletes(), [abandoned]);
     assert_eq!(fixture.payload(&retained.id).await.state, "staged");
     assert_eq!(preserved(&fixture).await, before);
     set_state(&fixture, &retained.id, "referenced").await;
@@ -78,10 +86,11 @@ pub(super) async fn retained(store: Rc<OrmStore>) {
             &fixture.task.invocation.run_id,
             fixture.task.generation,
             PayloadSlot::Output,
+            fixture.objects.open(),
         )
         .await
         .unwrap();
-    assert_eq!(drain(read).await, b"retained output");
+    assert_eq!(read, b"retained output");
 }
 
 async fn preserved(fixture: &Fixture) -> Vec<Vec<zeroship_data_orm::Value>> {
@@ -131,19 +140,19 @@ pub(super) async fn late_upload(store: Rc<OrmStore>) {
     fixture.expire(&id).await;
     fixture
         .scope
-        .collect_job(&Grant::new(fixture.scope.app_id()), options(1))
+        .collect_job(
+            &Grant::new(fixture.scope.app_id()),
+            options(1),
+            &fixture.objects,
+        )
         .await
         .unwrap();
     let tombstone = fixture.payload(&id).await;
     assert_eq!(tombstone.state, "deleted");
-    let objects = fixture
-        .storage
-        .namespace(zeroship_storage::Namespace::platform("workflow").unwrap());
-    objects
-        .put(fixture.scope.app_id().as_str(), &id, b"late upload", None)
-        .await
-        .unwrap();
-    assert!(fixture.exists(fixture.scope.app_id(), &id).await);
+    fixture
+        .objects
+        .put(fixture.scope.app_id(), &id, b"late upload");
+    assert!(fixture.exists(fixture.scope.app_id(), &id));
     assert!(fixture
         .service
         .complete(
@@ -156,28 +165,44 @@ pub(super) async fn late_upload(store: Rc<OrmStore>) {
         .is_err());
     fixture
         .scope
-        .collect_job(&Grant::new(fixture.scope.app_id()), options(1))
+        .collect_job(
+            &Grant::new(fixture.scope.app_id()),
+            options(1),
+            &fixture.objects,
+        )
         .await
         .unwrap();
     assert_eq!(fixture.payload(&id).await, tombstone);
-    assert!(fixture.exists(fixture.scope.app_id(), &id).await);
+    assert!(fixture.exists(fixture.scope.app_id(), &id));
     fixture.expire(&id).await;
     fixture
         .scope
-        .collect_job(&Grant::new(fixture.scope.app_id()), options(1))
+        .collect_job(
+            &Grant::new(fixture.scope.app_id()),
+            options(1),
+            &fixture.objects,
+        )
         .await
         .unwrap();
     // The resweep after the window makes the tombstone final.
     let purged = fixture.payload(&id).await;
     assert_eq!(purged.state, "purged");
-    assert!(!fixture.exists(fixture.scope.app_id(), &id).await);
-    assert_eq!(fixture.backend.calls(), [id.clone(), id.clone()]);
+    assert!(!fixture.exists(fixture.scope.app_id(), &id));
+    assert_eq!(fixture.objects.deletes(), [id.clone(), id.clone()]);
     fixture.expire(&id).await;
     fixture
         .scope
-        .collect_job(&Grant::new(fixture.scope.app_id()), options(1))
+        .collect_job(
+            &Grant::new(fixture.scope.app_id()),
+            options(1),
+            &fixture.objects,
+        )
         .await
         .unwrap();
     assert_eq!(fixture.payload(&id).await.state, "purged");
-    assert_eq!(fixture.backend.calls().len(), 2, "a final tombstone is never swept");
+    assert_eq!(
+        fixture.objects.deletes().len(),
+        2,
+        "a final tombstone is never swept"
+    );
 }

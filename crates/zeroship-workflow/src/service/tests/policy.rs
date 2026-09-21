@@ -1,3 +1,4 @@
+use super::objects::{Objects, StepOutputs};
 use super::*;
 use crate::service::policy::admit;
 use crate::{
@@ -436,7 +437,11 @@ async fn retired_app_handles(store: Rc<OrmStore>) {
     let (service, app, other, _deployments) = registered_service(store).await;
     let binding = service.policies.current_binding(&app).unwrap();
     let scope = service.bind_app(&binding).unwrap();
-    let backend = scope.clone().into_backend(&service, 1024).unwrap();
+    let objects = Objects::new();
+    let backend = scope
+        .clone()
+        .into_backend(&service, StepOutputs::shared(&objects, 1024))
+        .unwrap();
     let unrelated = service.fixture_app(other);
     scope
         .start(&RequestId::mint(), "Example", StartOptions::default())

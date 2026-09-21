@@ -68,7 +68,7 @@ use zeroship_workflow_runner::{
     delivery::DeliveryOptions,
     host::{HostOptions, WorkerHost},
     ready::ReadyApps,
-    TaskPayloadLimits,
+    PayloadObjects, TaskPayloadLimits,
 };
 
 /// Bound on one delivered job's execution.
@@ -440,8 +440,8 @@ impl WorkflowResourceProvider for ProductionResources {
                 connection: self.db.connection().clone(),
                 keys: ProjectKeySource::supplied(self.db.project_keys().clone()),
                 binding: DbBinding::platform(app.as_str(), COLD_START_DEPLOY_TOKEN, schema),
-                objects: self.objects.clone(),
             },
+            objects: PayloadObjects::open(self.objects.clone())?,
             deployments,
             // No signal-capability key is provisioned to workers yet.
             signal_authority: None,

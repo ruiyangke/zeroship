@@ -433,9 +433,9 @@ stall the defect fixes that motivate the move.
    `main` in `crates/zeroship-cli/src/main.rs` opens a `StorageStore` unconditionally - the
    comment there reads "Storage plugin: always on in dev" and the backend defaults to
    `file://.zeroship/storage`, the `LocalFs` backend in
-   `crates/zeroship-storage/src/backend/local.rs` - and hands it to the workflow host as
-   `HostStorage.objects`. `LocalHost::start` in `crates/zeroship-cli/src/workflow/host.rs` then
-   calls `.with_payload_storage(storage.objects)`, the same call
+   `crates/zeroship-storage/src/backend/local.rs` - and hands it to the workflow host beside its
+   journal binding. `LocalHost::start` in `crates/zeroship-cli/src/workflow/host.rs` then opens
+   it as a `zeroship_workflow_runner::PayloadObjects`, the same call
    `crates/zeroship-worker/src/workflow_creator.rs` makes in production. A dev-tier journal can
    reach object storage on the same code path a production one does, so the SQLite tier takes
    the payload-free shape too.

@@ -8,7 +8,7 @@ use super::{
 use crate::operations::{ConflictPolicy, SignalOptions, StartOptions};
 use crate::WorkflowServiceError;
 use serde_json::json;
-use std::{path::Path, rc::Rc, sync::Arc};
+use std::{rc::Rc, sync::Arc};
 use zeroship_core::{app_id::AppId, typed_id};
 
 impl HostPolicies {
@@ -106,6 +106,7 @@ pub(super) mod manager_queue;
 pub(super) mod journal_fixture;
 #[path = "../../../../tests/fixtures/workflow_service_binding.rs"]
 pub(super) mod service_binding;
+mod objects;
 mod orm;
 mod outcomes;
 mod output_reads;

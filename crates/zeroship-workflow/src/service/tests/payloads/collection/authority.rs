@@ -4,7 +4,7 @@ pub(super) async fn replacement(store: Rc<OrmStore>) {
     let fixture = Fixture::new(store).await;
     let id = fixture.stage().await;
     fixture.expire(&id).await;
-    let (entered, resume) = fixture.backend.gate(&id);
+    let (entered, resume) = fixture.objects.gate(&id);
     let grant = Grant::new(fixture.scope.app_id());
     let replace = async {
         entered.recv_async().await.unwrap();
@@ -19,7 +19,12 @@ pub(super) async fn replacement(store: Rc<OrmStore>) {
             .install(leased_policy(2, AppPolicy::default()))
             .unwrap();
     };
-    let (result, ()) = futures::join!(fixture.scope.collect_job(&grant, options(1)), replace);
+    let (result, ()) = futures::join!(
+        fixture
+            .scope
+            .collect_job(&grant, options(1), &fixture.objects),
+        replace
+    );
     assert!(
         matches!(result, Err(WorkflowServiceError::Unavailable(_))),
         "{result:?}"
@@ -35,7 +40,7 @@ pub(super) async fn original_expiry(store: Rc<OrmStore>) {
     let fixture = Fixture::new(store).await;
     let id = fixture.stage().await;
     fixture.expire(&id).await;
-    let (entered, resume) = fixture.backend.gate(&id);
+    let (entered, resume) = fixture.objects.gate(&id);
     let binding = fixture
         .service
         .policies
@@ -65,7 +70,12 @@ pub(super) async fn original_expiry(store: Rc<OrmStore>) {
             )
             .unwrap();
     };
-    let (result, ()) = futures::join!(fixture.scope.collect_job(&grant, options(1)), extend);
+    let (result, ()) = futures::join!(
+        fixture
+            .scope
+            .collect_job(&grant, options(1), &fixture.objects),
+        extend
+    );
     assert!(
         matches!(result, Err(WorkflowServiceError::Unavailable(_))),
         "{result:?}"
@@ -79,13 +89,18 @@ pub(super) async fn delivery_expiry(store: Rc<OrmStore>) {
     let fixture = Fixture::new(store).await;
     let id = fixture.stage().await;
     fixture.expire(&id).await;
-    let (entered, resume) = fixture.backend.gate(&id);
+    let (entered, resume) = fixture.objects.gate(&id);
     let mut grant = Grant::new(fixture.scope.app_id());
     grant.expires = Instant::now() + Duration::from_secs(2);
     let wait = async {
         entered.recv_async().await.unwrap();
     };
-    let (result, ()) = futures::join!(fixture.scope.collect_job(&grant, options(1)), wait);
+    let (result, ()) = futures::join!(
+        fixture
+            .scope
+            .collect_job(&grant, options(1), &fixture.objects),
+        wait
+    );
     assert!(
         matches!(result, Err(WorkflowServiceError::Timeout)),
         "{result:?}"
@@ -106,7 +121,7 @@ pub(super) async fn delivery_expiry(store: Rc<OrmStore>) {
 async fn recover_reserved(fixture: &Fixture, grant: &Grant, id: &str) {
     assert_eq!(fixture.payload(id).await.state, "deleting");
     assert_eq!(fixture.payload(id).await.expires_at, 0);
-    assert!(fixture.exists(fixture.scope.app_id(), id).await);
+    assert!(fixture.exists(fixture.scope.app_id(), id));
     let page = fixture.page(&grant.delivery.job).await;
     assert_eq!(page.next_index, 1);
     assert!(fixture
@@ -115,49 +130,60 @@ async fn recover_reserved(fixture: &Fixture, grant: &Grant, id: &str) {
         .await
         .unwrap()
         .is_none());
-    let current = fixture.reopen(true).await;
+    let current = fixture.reopen().await;
     assert_eq!(
         current
-            .collect_job(&grant.retry(), options(1))
+            .collect_job(&grant.retry(), options(1), &fixture.objects)
             .await
             .unwrap()
             .outcome,
         JobOutcome::Completed {}
     );
-    assert_eq!(fixture.backend.calls(), [id]);
+    assert_eq!(fixture.objects.deletes(), [id]);
     assert_eq!(fixture.page(&grant.delivery.job).await, page);
     current
-        .collect_job(&Grant::new(fixture.scope.app_id()), options(1))
+        .collect_job(
+            &Grant::new(fixture.scope.app_id()),
+            options(1),
+            &fixture.objects,
+        )
         .await
         .unwrap();
     assert_eq!(fixture.payload(id).await.state, "deleted");
-    assert!(!fixture.exists(fixture.scope.app_id(), id).await);
-    assert_eq!(fixture.backend.calls(), [id, id]);
+    assert!(!fixture.exists(fixture.scope.app_id(), id));
+    assert_eq!(fixture.objects.deletes(), [id, id]);
 }
 
 pub(super) async fn stale_confirmation(store: Rc<OrmStore>) {
     let fixture = Fixture::new(store).await;
     let id = fixture.stage().await;
     fixture.expire(&id).await;
-    let (entered, resume) = fixture.backend.gate(&id);
+    let (entered, resume) = fixture.objects.gate(&id);
     let old = Grant::new(fixture.scope.app_id());
     let newer = Grant::new(fixture.scope.app_id());
-    let other_host = fixture.reopen(true).await;
+    let other_host = fixture.reopen().await;
     let concurrent = async {
         entered.recv_async().await.unwrap();
-        let receipt = other_host.collect_job(&newer, options(1)).await.unwrap();
+        let receipt = other_host
+            .collect_job(&newer, options(1), &fixture.objects)
+            .await
+            .unwrap();
         let tombstone = fixture.payload(&id).await;
         let scan = fixture.scan().await;
         resume.send_async(()).await.unwrap();
         (receipt, tombstone, scan)
     };
-    let (old_receipt, (new_receipt, tombstone, scan)) =
-        futures::join!(fixture.scope.collect_job(&old, options(1)), concurrent);
+    let (old_receipt, (new_receipt, tombstone, scan)) = futures::join!(
+        fixture
+            .scope
+            .collect_job(&old, options(1), &fixture.objects),
+        concurrent
+    );
     assert_eq!(old_receipt.unwrap().outcome, JobOutcome::Completed {});
     assert_eq!(new_receipt.outcome, JobOutcome::Completed {});
     assert_eq!(tombstone.state, "deleted");
     assert!(tombstone.expires_at > 0);
     assert_eq!(fixture.payload(&id).await, tombstone);
     assert_eq!(fixture.scan().await, scan);
-    assert_eq!(fixture.backend.calls(), [id.clone(), id]);
+    assert_eq!(fixture.objects.deletes(), [id.clone(), id]);
 }

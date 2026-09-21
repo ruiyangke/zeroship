@@ -7,11 +7,9 @@ use super::*;
 use crate::{
     engine::WorkflowOutputRef,
     operations::{RestartOptions, RestartTarget, RunState},
-    service::{TaskAssignment, WorkerIdentity},
+    service::{tests::objects::Objects, TaskAssignment, WorkerIdentity},
 };
-use bytes::Bytes;
 use std::collections::BTreeMap;
-use zeroship_storage::{backend::OnceChunk, LocalFs, StorageStore};
 
 macro_rules! case {
     ($sqlite:ident, $postgres:ident, $contract:ident) => {
@@ -77,6 +75,7 @@ fn output_reference(data: &[u8]) -> WorkflowOutputRef {
 
 async fn complete_child(
     service: &WorkflowService,
+    objects: &Objects,
     task: &TaskAssignment,
     kind: OutputKind,
     data: &'static [u8],
@@ -94,7 +93,7 @@ async fn complete_child(
                     &task.token,
                     &RequestId::mint(),
                     reference.clone(),
-                    Box::new(OnceChunk::new(Bytes::from_static(data))),
+                    objects.upload(data),
                 )
                 .await
                 .unwrap();
@@ -112,7 +111,12 @@ async fn complete_child(
         .unwrap();
 }
 
-async fn completed_family(service: &WorkflowService, app_id: &AppId, kind: OutputKind) -> Family {
+async fn completed_family(
+    service: &WorkflowService,
+    objects: &Objects,
+    app_id: &AppId,
+    kind: OutputKind,
+) -> Family {
     let scope = service.fixture_app(app_id.clone());
     let parent = scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
@@ -146,7 +150,7 @@ async fn completed_family(service: &WorkflowService, app_id: &AppId, kind: Outpu
     let child = service.poll(&worker()).await.unwrap().unwrap();
     assert_eq!(child.invocation.workflow_name, "Child");
     assert_ne!(child.invocation.run_id, accepted.invocation.run_id);
-    complete_child(service, &child, kind, ORIGINAL).await;
+    complete_child(service, objects, &child, kind, ORIGINAL).await;
     assert_eq!(deliver_propagations(&scope).await.len(), 1);
     let resumed = service.poll(&worker()).await.unwrap().unwrap();
     assert_eq!(resumed.invocation.run_id, parent.id);
@@ -154,7 +158,7 @@ async fn completed_family(service: &WorkflowService, app_id: &AppId, kind: Outpu
         resumed.invocation.journal[0].child_run_id.as_deref(),
         Some(child.invocation.run_id.as_str())
     );
-    assert_output(service, &resumed, kind, ORIGINAL).await;
+    assert_output(service, objects, &resumed, kind, ORIGINAL).await;
     service
         .complete(
             &worker(),
@@ -197,6 +201,7 @@ async fn child_step(
 
 async fn assert_output(
     service: &WorkflowService,
+    objects: &Objects,
     task: &TaskAssignment,
     kind: OutputKind,
     data: &[u8],
@@ -213,10 +218,13 @@ async fn assert_output(
             assert_eq!(step.output_ref, Some(output_reference(data)));
             assert_eq!(
                 service
-                    .read_task_payload(&worker(), &task.id, &task.token, &output_reference(data))
-                    .await
-                    .unwrap()
-                    .into_bytes(data.len())
+                    .read_task_payload(
+                        &worker(),
+                        &task.id,
+                        &task.token,
+                        &output_reference(data),
+                        objects.open(),
+                    )
                     .await
                     .unwrap(),
                 data
@@ -237,14 +245,9 @@ fn prefix() -> RestartOptions {
 
 async fn retained_provenance(store: Rc<OrmStore>) {
     for kind in [OutputKind::Inline, OutputKind::Reference] {
-        let objects = tempfile::tempdir().unwrap();
+        let objects = Objects::new();
         let (service, app_id, _, _deployments) = registered_service(store.clone()).await;
-        let service = service
-            .with_payload_storage(StorageStore::from_backend(Arc::new(LocalFs::new(
-                objects.path(),
-            ))))
-            .unwrap();
-        let family = completed_family(&service, &app_id, kind).await;
+        let family = completed_family(&service, &objects, &app_id, kind).await;
         assert_ne!(family.accepted, family.result);
         let scope = service.fixture_app(app_id.clone());
         scope
@@ -254,7 +257,7 @@ async fn retained_provenance(store: Rc<OrmStore>) {
         let child = service.poll(&worker()).await.unwrap().unwrap();
         assert_eq!(child.invocation.run_id, family.child);
         assert_eq!(child.generation, 1);
-        complete_child(&service, &child, kind, REPLACEMENT).await;
+        complete_child(&service, &objects, &child, kind, REPLACEMENT).await;
         assert_eq!(
             scope.status(&family.child).await.unwrap().state,
             RunState::Completed
@@ -271,7 +274,7 @@ async fn retained_provenance(store: Rc<OrmStore>) {
             parent.invocation.journal[0].child_run_id.as_deref(),
             Some(family.child.as_str())
         );
-        assert_output(&service, &parent, kind, ORIGINAL).await;
+        assert_output(&service, &objects, &parent, kind, ORIGINAL).await;
         for generation in [0, 1] {
             let step = child_step(&service, &app_id, &family.parent, generation).await;
             assert_eq!(step.text("child_member_id").unwrap(), family.accepted);
@@ -311,11 +314,9 @@ async fn retained_provenance(store: Rc<OrmStore>) {
 /// into the parent's replay prefix deletes only the abandoned preparation.
 async fn collected_provenance(store: Rc<OrmStore>) {
     use crate::service::tests::payloads::collection::fixture::{options, Grant};
-    let objects = tempfile::tempdir().unwrap();
+    let objects = Objects::new();
     let (service, app_id, _, _deployments) = registered_service(store).await;
-    let storage = StorageStore::from_backend(Arc::new(LocalFs::new(objects.path())));
-    let service = service.with_payload_storage(storage.clone()).unwrap();
-    let family = completed_family(&service, &app_id, OutputKind::Reference).await;
+    let family = completed_family(&service, &objects, &app_id, OutputKind::Reference).await;
     let scope = service.fixture_app(app_id.clone());
     scope
         .restart(&RequestId::mint(), &family.child, RestartOptions::default())
@@ -323,7 +324,7 @@ async fn collected_provenance(store: Rc<OrmStore>) {
         .unwrap();
     let child = service.poll(&worker()).await.unwrap().unwrap();
     assert_eq!(child.invocation.run_id, family.child);
-    complete_child(&service, &child, OutputKind::Reference, REPLACEMENT).await;
+    complete_child(&service, &objects, &child, OutputKind::Reference, REPLACEMENT).await;
     scope
         .restart(&RequestId::mint(), &family.parent, prefix())
         .await
@@ -337,7 +338,7 @@ async fn collected_provenance(store: Rc<OrmStore>) {
             &parent.token,
             &RequestId::mint(),
             output_reference(ABANDONED),
-            Box::new(OnceChunk::new(Bytes::from_static(ABANDONED))),
+            objects.upload(ABANDONED),
         )
         .await
         .unwrap()
@@ -373,19 +374,18 @@ async fn collected_provenance(store: Rc<OrmStore>) {
     assert!(before.values().all(|rows| !rows.is_empty()));
 
     scope
-        .collect_job(&Grant::new(&app_id), options(16))
+        .collect_job(&Grant::new(&app_id), options(16), &objects)
         .await
         .unwrap();
 
     assert_eq!(retained(&snapshot(&service, &app_id).await), before);
-    let objects = storage.namespace(zeroship_storage::Namespace::platform("workflow").unwrap());
     let tx = service.begin().await.unwrap();
     let payloads = journal_rows(&tx, "payloads", json!({"app_id":app_id.as_str()})).await;
     tx.commit().await.unwrap();
     assert_eq!(payloads.len(), 3);
     for payload in payloads {
         let id = payload.text("id").unwrap();
-        let stored = objects.get(app_id.as_str(), &id).await.unwrap().is_some();
+        let stored = objects.exists(&app_id, &id);
         if id == abandoned {
             assert_eq!(payload.text("state").unwrap(), "deleted");
             assert!(!stored, "collection must delete the abandoned object");
@@ -394,7 +394,7 @@ async fn collected_provenance(store: Rc<OrmStore>) {
             assert!(stored, "collection must keep referenced child output");
         }
     }
-    assert_output(&service, &parent, OutputKind::Reference, ORIGINAL).await;
+    assert_output(&service, &objects, &parent, OutputKind::Reference, ORIGINAL).await;
     service
         .complete(
             &worker(),
@@ -442,14 +442,9 @@ async fn snapshot(service: &WorkflowService, app_id: &AppId) -> Snapshot {
 
 async fn substituted_provenance(store: Rc<OrmStore>) {
     for kind in [OutputKind::Inline, OutputKind::Reference] {
-        let objects = tempfile::tempdir().unwrap();
+        let objects = Objects::new();
         let (service, app_id, _, _deployments) = registered_service(store.clone()).await;
-        let service = service
-            .with_payload_storage(StorageStore::from_backend(Arc::new(LocalFs::new(
-                objects.path(),
-            ))))
-            .unwrap();
-        let family = completed_family(&service, &app_id, kind).await;
+        let family = completed_family(&service, &objects, &app_id, kind).await;
         let scope = service.fixture_app(app_id.clone());
         scope
             .restart(&RequestId::mint(), &family.child, RestartOptions::default())
@@ -472,7 +467,7 @@ async fn substituted_provenance(store: Rc<OrmStore>) {
             if completed {
                 let child = service.poll(&worker()).await.unwrap().unwrap();
                 assert_eq!(child.invocation.run_id, family.child);
-                complete_child(&service, &child, kind, ORIGINAL).await;
+                complete_child(&service, &objects, &child, kind, ORIGINAL).await;
             }
             assert_rejected_substitution(
                 &service,
@@ -499,7 +494,7 @@ async fn substituted_provenance(store: Rc<OrmStore>) {
             .unwrap();
         let parent = service.poll(&worker()).await.unwrap().unwrap();
         assert_eq!(parent.invocation.run_id, family.parent);
-        assert_output(&service, &parent, kind, ORIGINAL).await;
+        assert_output(&service, &objects, &parent, kind, ORIGINAL).await;
         service
             .complete(
                 &worker(),

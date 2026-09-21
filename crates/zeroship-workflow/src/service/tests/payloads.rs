@@ -1,21 +1,14 @@
+use super::objects::Objects;
 use super::*;
 use crate::{
     engine::WorkflowOutputRef,
     operations::RunState,
-    service::{PayloadRead, PayloadSlot, WorkerIdentity},
+    service::{PayloadSlot, StepOutput, WorkerIdentity},
 };
-use bytes::Bytes;
 use std::rc::Rc;
-use zeroship_storage::{
-    backend::{BoxChunkSource, OnceChunk},
-    LocalFs, StorageStore,
-};
 
 pub(super) mod collection;
 
-fn body(value: &'static [u8]) -> BoxChunkSource {
-    Box::new(OnceChunk::new(Bytes::from_static(value)))
-}
 fn reference(value: &[u8]) -> WorkflowOutputRef {
     WorkflowOutputRef {
         hash: crate::service::types::hash(value),
@@ -23,34 +16,19 @@ fn reference(value: &[u8]) -> WorkflowOutputRef {
         content_type: Some("application/json".into()),
     }
 }
-async fn drain(mut value: PayloadRead) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    while let Some(chunk) = value.body.next_chunk().await {
-        bytes.extend(chunk.unwrap());
-    }
-    bytes
-}
-fn local(dir: &Path) -> StorageStore {
-    StorageStore::from_backend(Arc::new(LocalFs::new(dir)))
-}
 
 #[compio::test]
 async fn sqlite_payload_ownership_and_retention() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("zs-workflow.sqlite");
     schema::initialize_sqlite(&path).unwrap();
-    payload_contract(
-        Rc::new(sqlite_store(&path).await),
-        local(&dir.path().join("payloads")),
-    )
-    .await;
+    payload_contract(Rc::new(sqlite_store(&path).await), Objects::new()).await;
 }
 
 #[compio::test]
 async fn postgres_payload_ownership_and_retention() {
     let fixture = PostgresFixture::start().await;
-    let dir = tempfile::tempdir().unwrap();
-    payload_contract(Rc::new(fixture.store.clone()), local(dir.path())).await;
+    payload_contract(Rc::new(fixture.store.clone()), Objects::new()).await;
 }
 
 #[compio::test]
@@ -65,10 +43,9 @@ async fn postgres_payload_confirmation_write_that_outlives_its_lease_rolls_back(
 
 async fn delayed_payload_write(operation: &str) {
     let fixture = PostgresFixture::start().await;
-    let dir = tempfile::tempdir().unwrap();
     let store: Rc<OrmStore> = Rc::new(fixture.store.clone());
     let (service, app, _, _deployments) = registered_service(store.clone()).await;
-    let service = service.with_payload_storage(local(dir.path())).unwrap();
+    let objects = Objects::new();
     service
         .fixture_app(app.clone())
         .start(&RequestId::mint(), "Example", StartOptions::default())
@@ -98,7 +75,7 @@ async fn delayed_payload_write(operation: &str) {
             &task.token,
             &RequestId::mint(),
             reference(b"delayed"),
-            body(b"delayed"),
+            objects.upload(b"delayed"),
         )
         .await;
     assert!(
@@ -129,27 +106,13 @@ async fn delayed_payload_write(operation: &str) {
     tx.commit().await.unwrap();
     admin.batch_execute("DROP TRIGGER delay_payload_write ON customer.__zeroship_workflow_payloads; UPDATE customer.__zeroship_workflow_payloads SET expires_at=0;").await.unwrap();
     assert_eq!(
-        service.collect_payloads(1).await.unwrap(),
+        service.collect_payloads(1, &objects).await.unwrap(),
         usize::from(operation == "UPDATE")
     );
 }
 
-#[compio::test]
-async fn s3_payload_ownership_and_retention() {
-    let fixture = s3_fixture::Minio::start();
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("zs-workflow.sqlite");
-    schema::initialize_sqlite(&path).unwrap();
-    let storage = StorageStore::from_backend(Arc::new(zeroship_storage::S3::new(
-        fixture.config("workflows"),
-        fixture.credentials(),
-    )));
-    payload_contract(Rc::new(sqlite_store(&path).await), storage).await;
-}
-
-async fn payload_contract(store: Rc<OrmStore>, storage: StorageStore) {
+async fn payload_contract(store: Rc<OrmStore>, objects: Objects) {
     let (service, a, b, _deployments) = registered_service(store.clone()).await;
-    let service = service.with_payload_storage(storage.clone()).unwrap();
     let scope = service.fixture_app(a.clone());
     let foreign = service.fixture_app(b);
     let worker = WorkerIdentity::new("payload-worker".into()).unwrap();
@@ -170,7 +133,7 @@ async fn payload_contract(store: Rc<OrmStore>, storage: StorageStore) {
                 &task.token,
                 &request,
                 output.clone(),
-                body(data)
+                objects.upload(data)
             )
             .await,
         Err(WorkflowServiceError::NotFound(_))
@@ -182,7 +145,7 @@ async fn payload_contract(store: Rc<OrmStore>, storage: StorageStore) {
             &task.token,
             &request,
             output.clone(),
-            body(data),
+            objects.upload(data),
         )
         .await
         .unwrap();
@@ -195,7 +158,7 @@ async fn payload_contract(store: Rc<OrmStore>, storage: StorageStore) {
                 &task.token,
                 &request,
                 output.clone(),
-                body(b"ignored retry body")
+                objects.upload(b"ignored retry body")
             )
             .await
             .unwrap()
@@ -208,27 +171,28 @@ async fn payload_contract(store: Rc<OrmStore>, storage: StorageStore) {
                 &task.token,
                 &request,
                 reference(b"another"),
-                body(b"another")
+                objects.upload(b"another")
             )
             .await,
         Err(WorkflowServiceError::Conflict(_))
     ));
     assert_eq!(
-        drain(
-            service
-                .read_task_payload(&worker, &task.id, &task.token, &output)
-                .await
-                .unwrap()
-        )
-        .await,
+        service
+            .read_task_payload(&worker, &task.id, &task.token, &output, objects.open())
+            .await
+            .unwrap(),
         data
     );
     assert!(matches!(
-        scope.read_payload(&run.id, 0, PayloadSlot::Output).await,
+        scope
+            .read_payload(&run.id, 0, PayloadSlot::Output, objects.open())
+            .await,
         Err(WorkflowServiceError::NotFound(_))
     ));
     assert!(matches!(
-        foreign.read_payload(&run.id, 0, PayloadSlot::Output).await,
+        foreign
+            .read_payload(&run.id, 0, PayloadSlot::Output, objects.open())
+            .await,
         Err(WorkflowServiceError::NotFound(_))
     ));
     for other in [&foreign, &scope] {
@@ -240,7 +204,13 @@ async fn payload_contract(store: Rc<OrmStore>, storage: StorageStore) {
         assert_ne!(other_task.id, task.id);
         assert!(matches!(
             service
-                .read_task_payload(&worker, &other_task.id, &other_task.token, &output)
+                .read_task_payload(
+                    &worker,
+                    &other_task.id,
+                    &other_task.token,
+                    &output,
+                    objects.open()
+                )
                 .await,
             Err(WorkflowServiceError::NotFound(_))
         ));
@@ -276,14 +246,14 @@ async fn payload_contract(store: Rc<OrmStore>, storage: StorageStore) {
                 &task.token,
                 &interrupted,
                 wrong.clone(),
-                body(b"y")
+                objects.upload(b"y")
             )
             .await,
         Err(WorkflowServiceError::InvalidRequest(_))
     ));
     assert!(matches!(
         service
-            .read_task_payload(&worker, &task.id, &task.token, &wrong)
+            .read_task_payload(&worker, &task.id, &task.token, &wrong, objects.open())
             .await,
         Err(WorkflowServiceError::NotFound(_))
     ));
@@ -294,7 +264,7 @@ async fn payload_contract(store: Rc<OrmStore>, storage: StorageStore) {
             &task.token,
             &interrupted,
             wrong.clone(),
-            body(b"x"),
+            objects.upload(b"x"),
         )
         .await
         .unwrap();
@@ -305,7 +275,7 @@ async fn payload_contract(store: Rc<OrmStore>, storage: StorageStore) {
             &task.token,
             &RequestId::mint(),
             reference(b"uncommitted"),
-            body(b"uncommitted"),
+            objects.upload(b"uncommitted"),
         )
         .await
         .unwrap();
@@ -344,53 +314,32 @@ async fn payload_contract(store: Rc<OrmStore>, storage: StorageStore) {
         .await
         .unwrap();
     expire_uploads(&store).await;
-    assert!(service.collect_payloads(64).await.unwrap() > 0);
-    assert_eq!(service.collect_payloads(64).await.unwrap(), 0);
-    let objects = storage.namespace(zeroship_storage::Namespace::platform("workflow").unwrap());
+    assert!(service.collect_payloads(64, &objects).await.unwrap() > 0);
+    assert_eq!(service.collect_payloads(64, &objects).await.unwrap(), 0);
     assert_eq!(
         scope
-            .read_step_output(&run.id, "result", 0)
-            .await
-            .unwrap()
-            .into_bytes(data.len())
+            .read_step_output(&run.id, "result", 0, objects.open())
             .await
             .unwrap(),
-        data
+        StepOutput::Object(data.to_vec())
     );
     assert!(matches!(
-        foreign.read_step_output(&run.id, "result", 0).await,
+        foreign
+            .read_step_output(&run.id, "result", 0, objects.open())
+            .await,
         Err(WorkflowServiceError::NotFound(_))
     ));
-    assert!(objects
-        .get(a.as_str(), &uncommitted.id)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(!objects.exists(&a, &uncommitted.id));
     // Simulate an already-sent remote upload arriving after its writer died.
-    objects
-        .put(
-            a.as_str(),
-            &uncommitted.id,
-            b"uncommitted",
-            Some("application/json"),
-        )
-        .await
-        .unwrap();
+    objects.put(&a, &uncommitted.id, b"uncommitted");
     expire_uploads(&store).await;
-    service.collect_payloads(64).await.unwrap();
-    assert!(objects
-        .get(a.as_str(), &uncommitted.id)
-        .await
-        .unwrap()
-        .is_none());
+    service.collect_payloads(64, &objects).await.unwrap();
+    assert!(!objects.exists(&a, &uncommitted.id));
     assert_eq!(
-        drain(
-            scope
-                .read_payload(&run.id, 0, PayloadSlot::Step { ordinal: 0 })
-                .await
-                .unwrap()
-        )
-        .await,
+        scope
+            .read_payload(&run.id, 0, PayloadSlot::Step { ordinal: 0 }, objects.open())
+            .await
+            .unwrap(),
         data
     );
     scope
@@ -409,70 +358,66 @@ async fn payload_contract(store: Rc<OrmStore>, storage: StorageStore) {
         .unwrap();
     let recovered = WorkflowService::open(store.clone(), service.policies.clone())
         .await
-        .unwrap()
-        .with_payload_storage(storage.clone())
         .unwrap();
     let next = recovered.poll(&worker).await.unwrap().unwrap();
     assert_eq!(next.generation, 1);
     assert_eq!(next.invocation.app_id, a.as_str());
     assert_eq!(next.invocation.run_id, run.id);
     assert_eq!(
-        drain(
-            recovered
-                .read_task_payload(&worker, &next.id, &next.token, &reference(data))
-                .await
-                .unwrap()
-        )
-        .await,
-        data
-    );
-    assert!(matches!(
-        scope.read_step_output(&run.id, "missing", 0).await,
-        Err(WorkflowServiceError::NotFound(_))
-    ));
-    assert!(matches!(
-        scope.read_step_output(&run.id, "result", 1).await,
-        Err(WorkflowServiceError::NotFound(_))
-    ));
-    assert!(matches!(
         recovered
-            .read_task_payload(&worker, &next.id, &next.token, &reference(data))
-            .await
-            .unwrap()
-            .into_bytes(1)
-            .await,
-        Err(WorkflowServiceError::PayloadTooLarge)
-    ));
-    assert_eq!(
-        scope
-            .read_step_output(&run.id, "result", 0)
-            .await
-            .unwrap()
-            .into_bytes(data.len())
+            .read_task_payload(
+                &worker,
+                &next.id,
+                &next.token,
+                &reference(data),
+                objects.open()
+            )
             .await
             .unwrap(),
         data
+    );
+    assert!(matches!(
+        scope
+            .read_step_output(&run.id, "missing", 0, objects.open())
+            .await,
+        Err(WorkflowServiceError::NotFound(_))
+    ));
+    assert!(matches!(
+        scope
+            .read_step_output(&run.id, "result", 1, objects.open())
+            .await,
+        Err(WorkflowServiceError::NotFound(_))
+    ));
+    assert_eq!(
+        scope
+            .read_step_output(&run.id, "result", 0, objects.open())
+            .await
+            .unwrap(),
+        StepOutput::Object(data.to_vec())
     );
     assert_eq!(
         next.invocation.journal[0].output_ref.as_ref(),
         Some(&output)
     );
     assert_eq!(
-        drain(
-            recovered
-                .read_task_payload(&worker, &next.id, &next.token, &output)
-                .await
-                .unwrap()
-        )
-        .await,
+        recovered
+            .read_task_payload(&worker, &next.id, &next.token, &output, objects.open())
+            .await
+            .unwrap(),
         data
     );
     assert!(recovered
-        .read_task_payload(&worker, &task.id, &task.token, &output)
+        .read_task_payload(&worker, &task.id, &task.token, &output, objects.open())
         .await
         .is_err());
     assert!(recovered
-        .read_task_payload(&worker, &next.id, &next.token, &uncommitted.reference)
+        .read_task_payload(
+            &worker,
+            &next.id,
+            &next.token,
+            &uncommitted.reference,
+            objects.open()
+        )
         .await
         .is_err());
     recovered
@@ -489,21 +434,24 @@ async fn payload_contract(store: Rc<OrmStore>, storage: StorageStore) {
         output.hash
     );
     assert!(recovered
-        .read_task_payload(&worker, &next.id, &next.token, &reference(data))
+        .read_task_payload(
+            &worker,
+            &next.id,
+            &next.token,
+            &reference(data),
+            objects.open()
+        )
         .await
         .is_err());
     assert_eq!(
-        drain(
-            scope
-                .read_payload(&run.id, 1, PayloadSlot::Output)
-                .await
-                .unwrap()
-        )
-        .await,
+        scope
+            .read_payload(&run.id, 1, PayloadSlot::Output, objects.open())
+            .await
+            .unwrap(),
         data
     );
 
-    continuation_and_child(&recovered, &a, &worker).await;
+    continuation_and_child(&recovered, &a, &worker, &objects).await;
     scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
@@ -526,7 +474,7 @@ async fn payload_contract(store: Rc<OrmStore>, storage: StorageStore) {
                 &quota_task.token,
                 &RequestId::mint(),
                 output.clone(),
-                body(data)
+                objects.upload(data)
             )
             .await,
         Err(WorkflowServiceError::PayloadTooLarge)
@@ -539,7 +487,7 @@ async fn payload_contract(store: Rc<OrmStore>, storage: StorageStore) {
                 &quota_task.token,
                 &RequestId::mint(),
                 reference(b""),
-                body(b"")
+                objects.upload(b"")
             )
             .await,
         Err(WorkflowServiceError::ResourceExhausted(_))
@@ -558,15 +506,12 @@ async fn payload_contract(store: Rc<OrmStore>, storage: StorageStore) {
         .await
         .unwrap();
     expire_uploads(&store).await;
-    recovered.collect_payloads(64).await.unwrap();
+    recovered.collect_payloads(64, &objects).await.unwrap();
     assert_eq!(
-        drain(
-            scope
-                .read_payload(&run.id, 0, PayloadSlot::Step { ordinal: 0 })
-                .await
-                .unwrap()
-        )
-        .await,
+        scope
+            .read_payload(&run.id, 0, PayloadSlot::Step { ordinal: 0 }, objects.open())
+            .await
+            .unwrap(),
         data
     );
 }
@@ -577,7 +522,12 @@ async fn expire_uploads(store: &Rc<OrmStore>) {
     tx.commit().await.unwrap();
 }
 
-async fn continuation_and_child(service: &WorkflowService, app: &AppId, worker: &WorkerIdentity) {
+async fn continuation_and_child(
+    service: &WorkflowService,
+    app: &AppId,
+    worker: &WorkerIdentity,
+    objects: &Objects,
+) {
     let scope = service.fixture_app(app.clone());
     scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
@@ -595,7 +545,7 @@ async fn continuation_and_child(service: &WorkflowService, app: &AppId, worker: 
             &child.token,
             &RequestId::mint(),
             output.clone(),
-            body(data),
+            objects.upload(data),
         )
         .await
         .unwrap();
@@ -612,25 +562,31 @@ async fn continuation_and_child(service: &WorkflowService, app: &AppId, worker: 
     assert_eq!(successor.invocation.trigger.input_ref, Some(output.clone()));
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(
-            &drain(
-                service
-                    .read_task_payload(worker, &successor.id, &successor.token, &output)
-                    .await
-                    .unwrap()
-            )
-            .await
+            &service
+                .read_task_payload(
+                    worker,
+                    &successor.id,
+                    &successor.token,
+                    &output,
+                    objects.open()
+                )
+                .await
+                .unwrap()
         )
         .unwrap(),
         json!({"continued":true})
     );
     assert_eq!(
-        drain(
-            service
-                .read_task_payload(worker, &successor.id, &successor.token, &output)
-                .await
-                .unwrap()
-        )
-        .await,
+        service
+            .read_task_payload(
+                worker,
+                &successor.id,
+                &successor.token,
+                &output,
+                objects.open()
+            )
+            .await
+            .unwrap(),
         data
     );
     service
@@ -650,13 +606,10 @@ async fn continuation_and_child(service: &WorkflowService, app: &AppId, worker: 
         Some(output.clone())
     );
     assert_eq!(
-        drain(
-            service
-                .read_task_payload(worker, &parent.id, &parent.token, &output)
-                .await
-                .unwrap()
-        )
-        .await,
+        service
+            .read_task_payload(worker, &parent.id, &parent.token, &output, objects.open())
+            .await
+            .unwrap(),
         data
     );
     let done = service
@@ -671,62 +624,6 @@ async fn continuation_and_child(service: &WorkflowService, app: &AppId, worker: 
     assert_eq!(done.state, RunState::Completed);
 }
 
-#[derive(Debug)]
-struct FailingDelete {
-    inner: LocalFs,
-    fail: std::sync::atomic::AtomicBool,
-}
-#[async_trait::async_trait(?Send)]
-impl zeroship_storage::Backend for FailingDelete {
-    async fn put_stream(
-        &self,
-        app: &str,
-        bucket: &str,
-        key: &str,
-        body: BoxChunkSource,
-        content_type: Option<&str>,
-    ) -> Result<u64, zeroship_storage::StorageError> {
-        self.inner
-            .put_stream(app, bucket, key, body, content_type)
-            .await
-    }
-    async fn get_stream(
-        &self,
-        app: &str,
-        bucket: &str,
-        key: &str,
-    ) -> Result<
-        Option<(
-            zeroship_storage::backend::ObjectMeta,
-            zeroship_storage::backend::BoxByteStream,
-        )>,
-        zeroship_storage::StorageError,
-    > {
-        self.inner.get_stream(app, bucket, key).await
-    }
-    async fn list(
-        &self,
-        app: &str,
-        bucket: &str,
-        req: zeroship_storage::backend::ListRequest<'_>,
-    ) -> Result<zeroship_storage::backend::ListPage, zeroship_storage::StorageError> {
-        self.inner.list(app, bucket, req).await
-    }
-    async fn delete(
-        &self,
-        app: &str,
-        bucket: &str,
-        key: &str,
-    ) -> Result<bool, zeroship_storage::StorageError> {
-        if self.fail.swap(false, std::sync::atomic::Ordering::SeqCst) {
-            return Err(zeroship_storage::StorageError::InvalidArgument(
-                "injected delete failure".into(),
-            ));
-        }
-        self.inner.delete(app, bucket, key).await
-    }
-}
-
 #[compio::test]
 async fn deletion_failure_recovers_without_reopening_payload_authority() {
     let dir = tempfile::tempdir().unwrap();
@@ -734,12 +631,7 @@ async fn deletion_failure_recovers_without_reopening_payload_authority() {
     schema::initialize_sqlite(&path).unwrap();
     let store: Rc<OrmStore> = Rc::new(sqlite_store(&path).await);
     let (service, app, _, _deployments) = registered_service(store.clone()).await;
-    let backend = Arc::new(FailingDelete {
-        inner: LocalFs::new(dir.path().join("objects")),
-        fail: true.into(),
-    });
-    let storage = StorageStore::from_backend(backend);
-    let service = service.with_payload_storage(storage.clone()).unwrap();
+    let objects = Objects::new();
     let scope = service.fixture_app(app.clone());
     scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
@@ -756,12 +648,13 @@ async fn deletion_failure_recovers_without_reopening_payload_authority() {
             &task.token,
             &request,
             output.clone(),
-            body(b"abandoned"),
+            objects.upload(b"abandoned"),
         )
         .await
         .unwrap();
+    objects.fail(&staged.id);
     expire_uploads(&store).await;
-    assert!(service.collect_payloads(64).await.is_err());
+    assert!(service.collect_payloads(64, &objects).await.is_err());
     assert!(service
         .stage_payload(
             &worker,
@@ -769,7 +662,7 @@ async fn deletion_failure_recovers_without_reopening_payload_authority() {
             &task.token,
             &request,
             output.clone(),
-            body(b"abandoned")
+            objects.upload(b"abandoned")
         )
         .await
         .is_err());
@@ -786,16 +679,9 @@ async fn deletion_failure_recovers_without_reopening_payload_authority() {
     ));
     let recovered = WorkflowService::open(store, service.policies.clone())
         .await
-        .unwrap()
-        .with_payload_storage(storage.clone())
         .unwrap();
-    assert_eq!(recovered.collect_payloads(64).await.unwrap(), 1);
-    assert!(storage
-        .namespace(zeroship_storage::Namespace::platform("workflow").unwrap())
-        .get(app.as_str(), &staged.id)
-        .await
-        .unwrap()
-        .is_none());
+    assert_eq!(recovered.collect_payloads(64, &objects).await.unwrap(), 1);
+    assert!(!objects.exists(&app, &staged.id));
     recovered
         .complete(
             &worker,
@@ -812,11 +698,9 @@ async fn postgres_collection_rechecks_references_after_waiting_for_completion() 
     use std::time::Duration;
 
     let fixture = PostgresFixture::start().await;
-    let dir = tempfile::tempdir().unwrap();
     let store: Rc<OrmStore> = Rc::new(fixture.store.clone());
     let (service, app, _, _deployments) = registered_service(store.clone()).await;
-    let objects = local(dir.path());
-    let service = service.with_payload_storage(objects.clone()).unwrap();
+    let objects = Objects::new();
     let collector = WorkflowService::open(
         Rc::new(
             orm_store(
@@ -831,9 +715,7 @@ async fn postgres_collection_rechecks_references_after_waiting_for_completion() 
     )
     .await
     .unwrap()
-    .with_deployments(service.deployments.clone().unwrap())
-    .with_payload_storage(objects)
-    .unwrap();
+    .with_deployments(service.deployments.clone().unwrap());
     let scope = service.fixture_app(app.clone());
     let run = scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
@@ -849,7 +731,7 @@ async fn postgres_collection_rechecks_references_after_waiting_for_completion() 
             &task.token,
             &RequestId::mint(),
             output.clone(),
-            body(b"survives"),
+            objects.upload(b"survives"),
         )
         .await
         .unwrap();
@@ -897,7 +779,10 @@ async fn postgres_collection_rechecks_references_after_waiting_for_completion() 
         .unwrap(),
         1
     );
-    let collecting = compio::runtime::spawn(async move { collector.collect_payloads(64).await });
+    let collecting = {
+        let objects = objects.clone();
+        compio::runtime::spawn(async move { collector.collect_payloads(64, &objects).await })
+    };
     compio::time::timeout(Duration::from_secs(10), async {
         loop {
             let row = admin.query_one("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE usename='customer_worker' AND wait_event_type='Lock' AND position('__zeroship_workflow_app_state' in query) > 0 AND $1=ANY(pg_blocking_pids(pid)))", &[&completion_pid]).await.unwrap();
@@ -918,13 +803,10 @@ async fn postgres_collection_rechecks_references_after_waiting_for_completion() 
     .await
     .expect("completion and collection settled after releasing promotion");
     assert_eq!(
-        drain(
-            scope
-                .read_payload(&run.id, 0, PayloadSlot::Output)
-                .await
-                .unwrap()
-        )
-        .await,
+        scope
+            .read_payload(&run.id, 0, PayloadSlot::Output, objects.open())
+            .await
+            .unwrap(),
         b"survives"
     );
 }

@@ -31,7 +31,10 @@ mod policy;
 pub mod propagation;
 pub mod publication;
 pub mod reconciliation;
-pub use payloads::{validate_reference, PayloadRead, PayloadSlot, StagedPayload};
+pub use payloads::{
+    validate_reference, PayloadDeleter, PayloadOpener, PayloadSlot, PayloadTarget, PayloadWriter,
+    StagedPayload, StepOutput,
+};
 pub use policy::{
     AssignedPolicies, HostPolicies, IngressEpochs, PolicyAuthority, PolicyBinding, PolicyRefresh,
     PolicySnapshot,

@@ -36,7 +36,7 @@ use zeroship_workflow::{
 use zeroship_workflow_runner::{
     consumer::{ConsumerBindings, ConsumerScope, JobConsumer},
     delivery::JobTransport,
-    TaskExecutor, WorkerBinding,
+    ObjectStepOutputs, PayloadObjects, TaskExecutor, WorkerBinding,
 };
 use zeroship_workflow_v8::{AppRuntimeLoader, V8TaskExecutor};
 
@@ -72,6 +72,7 @@ pub struct Settings {
     pub config: super::LocalConfig,
     pub deployment: AppDeployment,
     pub storage: HostStorage,
+    pub objects: PayloadObjects,
     pub env_vars: HashMap<String, String>,
     pub peers: Vec<Arc<dyn NativePlugin>>,
     pub limits: RuntimeLimits,
@@ -95,6 +96,7 @@ pub struct Host<T: JobTransport> {
     thread: ManagerThread,
     consumer: JobConsumer<T>,
     executor: Rc<dyn TaskExecutor>,
+    objects: PayloadObjects,
     ingress: Rc<LocalIngress>,
     placement: RefCell<Placement>,
     wake: flume::Receiver<()>,
@@ -122,6 +124,7 @@ pub async fn open<C: Composition>(
         config,
         deployment,
         storage,
+        objects,
         env_vars,
         peers,
         limits,
@@ -144,7 +147,6 @@ pub async fn open<C: Composition>(
         )?)?;
     let service = WorkflowService::open(Rc::new(store), policies)
         .await?
-        .with_payload_storage(storage.objects)?
         .with_deployments(
             deployment
                 .artifacts(config.max_source_bytes)?
@@ -186,7 +188,13 @@ pub async fn open<C: Composition>(
     // The local host keeps the creator seam on the journal it opened above.
     let backend = api
         .clone()
-        .into_backend(&service, config.payloads.max_payload_bytes)?
+        .into_backend(
+            &service,
+            Arc::new(ObjectStepOutputs::new(
+                objects.clone(),
+                config.payloads.max_payload_bytes,
+            )?),
+        )?
         .with_commit_hint(Arc::new(move || {
             let _ = hint.try_send(());
         }));
@@ -198,7 +206,10 @@ pub async fn open<C: Composition>(
         peers,
         limits,
     )?);
-    let tasks = Rc::new(api.tasks(WorkerIdentity::new(manager.worker().as_str().to_owned())?));
+    let tasks = Rc::new(api.tasks(
+        WorkerIdentity::new(manager.worker().as_str().to_owned())?,
+        objects.clone(),
+    ));
     let executor = composition.executor(Rc::new(V8TaskExecutor::new(
         loader,
         tasks,
@@ -209,7 +220,12 @@ pub async fn open<C: Composition>(
         manager.worker().clone(),
         config.consumer_options(),
     )?;
-    let binding = ConsumerScope::new(api.clone(), scope.clone(), executor.clone())?;
+    let binding = ConsumerScope::new(
+        api.clone(),
+        scope.clone(),
+        executor.clone(),
+        objects.clone(),
+    )?;
     consumer.bindings().replace(vec![binding.clone()])?;
     // A previous process may have committed intents it never published.
     let _ = wake_sender.try_send(());
@@ -224,6 +240,7 @@ pub async fn open<C: Composition>(
             thread,
             consumer,
             executor,
+            objects,
             ingress,
             placement: RefCell::new(Placement { scope, binding }),
             wake,
@@ -351,6 +368,7 @@ impl<T: JobTransport> Host<T> {
             thread,
             mut consumer,
             executor,
+            objects,
             ingress,
             placement,
             wake,
@@ -364,6 +382,7 @@ impl<T: JobTransport> Host<T> {
                 &manager,
                 &api,
                 &executor,
+                &objects,
                 &ingress,
                 &bindings,
                 &placement,
@@ -399,6 +418,7 @@ async fn place(
     manager: &ManagerClient,
     api: &AppWorkflows,
     executor: &Rc<dyn TaskExecutor>,
+    objects: &PayloadObjects,
     ingress: &LocalIngress,
     bindings: &ConsumerBindings,
     placement: &RefCell<Placement>,
@@ -439,10 +459,11 @@ async fn place(
             }
         };
         let installed =
-            ConsumerScope::new(api.clone(), next.clone(), executor.clone()).and_then(|binding| {
-                bindings.replace(vec![binding.clone()])?;
-                Ok(binding)
-            });
+            ConsumerScope::new(api.clone(), next.clone(), executor.clone(), objects.clone())
+                .and_then(|binding| {
+                    bindings.replace(vec![binding.clone()])?;
+                    Ok(binding)
+                });
         match installed {
             Ok(binding) => {
                 *placement.borrow_mut() = Placement {

@@ -35,8 +35,9 @@ use zeroship_workflow::service::{
     store::HostStorage,
     AppBackend,
 };
+use zeroship_storage::StorageStore;
 use zeroship_workflow_runner::{
-    consumer::ConsumerOptions, delivery::DeliveryOptions, TaskPayloadLimits,
+    consumer::ConsumerOptions, delivery::DeliveryOptions, PayloadObjects, TaskPayloadLimits,
 };
 use zeroship_workflow_v8::WorkflowBinding;
 
@@ -265,12 +266,13 @@ impl LocalHost {
         config: LocalConfig,
         deployment: Option<&Path>,
         storage: HostStorage,
+        objects: StorageStore,
         env_vars: HashMap<String, String>,
         peers: Vec<Arc<dyn NativePlugin>>,
         limits: RuntimeLimits,
     ) -> Result<Self, String> {
         Self::start_with(
-            root, app, config, deployment, storage, env_vars, peers, limits, Production,
+            root, app, config, deployment, storage, objects, env_vars, peers, limits, Production,
         )
     }
 
@@ -286,6 +288,7 @@ impl LocalHost {
         config: LocalConfig,
         deployment: Option<&Path>,
         storage: HostStorage,
+        objects: StorageStore,
         env_vars: HashMap<String, String>,
         peers: Vec<Arc<dyn NativePlugin>>,
         limits: RuntimeLimits,
@@ -298,6 +301,7 @@ impl LocalHost {
             config,
             deployment: crate::deployment::AppDeployment::new(root, deployment)?,
             storage,
+            objects: PayloadObjects::open(objects).map_err(|error| error.to_string())?,
             env_vars,
             peers,
             limits,

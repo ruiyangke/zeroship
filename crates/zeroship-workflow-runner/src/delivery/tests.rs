@@ -287,7 +287,8 @@ fn snapshot(policy: &AppPolicy, leased: Option<Duration>) -> PolicySnapshot {
 }
 
 struct Fixture {
-    directory: tempfile::TempDir,
+    _directory: tempfile::TempDir,
+    objects: crate::PayloadObjects,
     deployments: deployments::Deployments,
     service: WorkflowService,
     app: AppWorkflows,
@@ -361,8 +362,13 @@ impl Fixture {
             },
             expires: Instant::now() + MANAGER_LEASE,
         };
+        let objects = crate::PayloadObjects::open(zeroship_storage::StorageStore::from_backend(
+            Arc::new(zeroship_storage::LocalFs::new(directory.path().join("payloads"))),
+        ))
+        .unwrap();
         Self {
-            directory,
+            _directory: directory,
+            objects,
             deployments,
             service,
             app,
@@ -388,23 +394,36 @@ impl Fixture {
     }
 
     fn slot(&self, execution_timeout: Duration) -> DeliverySlot<Metadata> {
+        self.slot_collecting(
+            execution_timeout,
+            zeroship_workflow::service::collection::CollectionOptions::default(),
+        )
+        .unwrap()
+    }
+
+    /// A slot whose delivered collection duty runs under `collection`.
+    fn slot_collecting(
+        &self,
+        execution_timeout: Duration,
+        collection: zeroship_workflow::service::collection::CollectionOptions,
+    ) -> Result<DeliverySlot<Metadata>, WorkflowServiceError> {
         DeliverySlot::new(
             self.metadata.clone(),
             Rc::new(Executor {
                 probe: self.probe.clone(),
                 service: self.service.clone(),
             }),
+            self.objects.clone(),
             DeliveryOptions {
                 execution_timeout,
                 operation_timeout: Duration::from_secs(5),
                 retry_delay: Duration::from_millis(5),
                 reconciliation: ReconciliationOptions::default(),
-                collection: zeroship_workflow::service::collection::CollectionOptions::default(),
+                collection,
                 fanout: zeroship_workflow::service::fanout::FanoutOptions::default(),
                 propagation: zeroship_workflow::service::propagation::PropagationOptions::default(),
             },
         )
-        .unwrap()
     }
     async fn task_state(&self) -> String {
         let tx = self.service.begin().await.unwrap();
@@ -434,6 +453,7 @@ async fn unrepresentable_retry_delay_is_rejected_before_execution() {
             probe: fixture.probe.clone(),
             service: fixture.service.clone(),
         }),
+        fixture.objects.clone(),
         DeliveryOptions {
             execution_timeout: Duration::from_secs(5),
             operation_timeout: Duration::from_secs(1),

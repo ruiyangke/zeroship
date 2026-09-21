@@ -7,7 +7,7 @@
 
 use crate::{
     delivery::{bounded, DeliveryOptions, DeliveryOutcome, DeliverySlot, JobTransport},
-    TaskExecutor,
+    PayloadObjects, TaskExecutor,
 };
 use zeroship_workflow::{service::AppWorkflows, WorkflowServiceError};
 use futures::{
@@ -47,6 +47,7 @@ struct ScopeBinding {
     app: AppWorkflows,
     selection: AssignedScope,
     executor: Rc<dyn TaskExecutor>,
+    objects: PayloadObjects,
     retired: Cell<bool>,
 }
 
@@ -59,6 +60,7 @@ impl ConsumerScope {
         app: AppWorkflows,
         selection: AssignedScope,
         executor: Rc<dyn TaskExecutor>,
+        objects: PayloadObjects,
     ) -> Result<Self, WorkflowServiceError> {
         if app.app_id() != &selection.app_id {
             return Err(WorkflowServiceError::PermissionDenied);
@@ -67,6 +69,7 @@ impl ConsumerScope {
             app,
             selection,
             executor,
+            objects,
             retired: Cell::new(false),
         })))
     }
@@ -407,6 +410,7 @@ async fn run_slot<T: JobTransport>(
         let created = DeliverySlot::new(
             transport.clone(),
             scope.binding.0.executor.clone(),
+            scope.binding.0.objects.clone(),
             options.delivery,
         );
         let delivery_slot = match created {

@@ -23,7 +23,10 @@ pub mod publication;
 pub mod ready;
 pub use budget::{BudgetEnd, ExecutionBudget, ExecutionGuard};
 mod payloads;
-pub use payloads::{TaskPayloadReader, TaskPayloads};
+pub use payloads::{
+    AppPayloads, HostPayloads, ObjectStepOutputs, PayloadObjects, PayloadRead, RunPayloads,
+    TaskPayloadReader, TaskPayloads, WorkerPayloads,
+};
 mod outputs;
 pub use outputs::{PreparedExecution, TaskPayloadLimits};
 
@@ -39,6 +42,9 @@ mod journal_fixture;
 #[cfg(test)]
 #[path = "../../../tests/fixtures/workflow_service_binding.rs"]
 mod service_binding;
+#[cfg(test)]
+#[path = "../../../tests/fixtures/s3.rs"]
+mod s3_fixture;
 
 use async_trait::async_trait;
 use futures::{future::Either, FutureExt};
@@ -79,6 +85,7 @@ pub trait TaskTransport {
 pub struct WorkerTasks {
     service: WorkflowService,
     worker: WorkerIdentity,
+    objects: PayloadObjects,
 }
 impl WorkerTasks {
     /// Read the deployment retained for this task's live execution claim.
@@ -104,14 +111,15 @@ impl WorkerTasks {
 /// Callers `use` it to reach `tasks`.
 pub trait WorkerBinding {
     #[must_use]
-    fn tasks(&self, worker: WorkerIdentity) -> WorkerTasks;
+    fn tasks(&self, worker: WorkerIdentity, objects: PayloadObjects) -> WorkerTasks;
 }
 
 impl WorkerBinding for WorkflowService {
-    fn tasks(&self, worker: WorkerIdentity) -> WorkerTasks {
+    fn tasks(&self, worker: WorkerIdentity, objects: PayloadObjects) -> WorkerTasks {
         WorkerTasks {
             service: self.clone(),
             worker,
+            objects,
         }
     }
 }
@@ -120,10 +128,11 @@ impl WorkerBinding for AppWorkflows {
     /// Bind task and payload operations to this app's retained policy generation.
     /// A shared host registry cannot broaden this handle to another app, and a
     /// replacement policy binding cannot renew the authority it captured.
-    fn tasks(&self, worker: WorkerIdentity) -> WorkerTasks {
+    fn tasks(&self, worker: WorkerIdentity, objects: PayloadObjects) -> WorkerTasks {
         WorkerTasks {
             service: self.service().clone(),
             worker,
+            objects,
         }
     }
 }

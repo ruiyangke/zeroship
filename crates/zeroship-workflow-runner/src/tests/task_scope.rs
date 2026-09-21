@@ -7,7 +7,7 @@ use crate::{
     deployment_fixture::Deployments,
     journal_fixture::{leased_policy, registered_service, sqlite_store, PostgresFixture},
     service_binding::ServiceFixture,
-    TaskPayloads, TaskTransport, WorkerBinding,
+    PayloadObjects, TaskPayloads, TaskTransport, WorkerBinding,
 };
 use std::rc::Rc;
 use zeroship_core::typed_id;
@@ -25,6 +25,7 @@ async fn start(
     service: &WorkflowService,
     app: &AppWorkflows,
     worker: &WorkerIdentity,
+    objects: &PayloadObjects,
 ) -> TaskAssignment {
     deployments
         .activate(
@@ -42,23 +43,24 @@ async fn start(
     app.start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .unwrap();
-    let task = app.tasks(worker.clone()).poll().await.unwrap().unwrap();
+    let task = app.tasks(worker.clone(), objects.clone()).poll().await.unwrap().unwrap();
     assert_eq!(task.invocation.app_id, app.app_id().as_str());
     task
 }
 
 async fn contract(store: Rc<OrmStore>) {
+    let (objects, _objects_directory) = PayloadObjects::temporary();
     let (service, first, second, deployments) = registered_service(store).await;
     let first = service.fixture_app(first);
     let second = service.fixture_app(second);
     let worker = WorkerIdentity::new("scoped-task-worker".into()).unwrap();
-    let task_a = start(&deployments, &service, &first, &worker).await;
-    let task_b = start(&deployments, &service, &second, &worker).await;
-    let tasks = first.tasks(worker.clone());
+    let task_a = start(&deployments, &service, &first, &worker, &objects).await;
+    let task_b = start(&deployments, &service, &second, &worker, &objects).await;
+    let tasks = first.tasks(worker.clone(), objects.clone());
 
     tasks.heartbeat(&task_a.id, &task_a.token).await.unwrap();
     second
-        .tasks(worker.clone())
+        .tasks(worker.clone(), objects.clone())
         .heartbeat(&task_b.id, &task_b.token)
         .await
         .unwrap();
@@ -75,7 +77,7 @@ async fn contract(store: Rc<OrmStore>) {
         Err(WorkflowServiceError::NotFound(_))
     ));
     second
-        .tasks(worker.clone())
+        .tasks(worker.clone(), objects.clone())
         .heartbeat(&task_b.id, &task_b.token)
         .await
         .unwrap();
@@ -87,7 +89,7 @@ async fn contract(store: Rc<OrmStore>) {
         .unwrap()
         .install(leased_policy(2, AppPolicy::default()))
         .unwrap();
-    let fresh = service.bind_app(&replacement).unwrap().tasks(worker);
+    let fresh = service.bind_app(&replacement).unwrap().tasks(worker, objects.clone());
     assert!(matches!(
         tasks.heartbeat(&task_a.id, &task_a.token).await,
         Err(WorkflowServiceError::Unavailable(_))

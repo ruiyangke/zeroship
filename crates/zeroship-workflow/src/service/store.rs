@@ -21,13 +21,12 @@ use zeroship_data_orm::{
     value, OrmContext,
 };
 
-/// Resolved app services that a host may pass to its workflow thread.
+/// Resolved app journal services that a host may pass to its workflow thread.
 #[derive(Clone, Debug)]
 pub struct HostStorage {
     pub connection: ConnectionFactory,
     pub keys: ProjectKeySource,
     pub binding: DbBinding,
-    pub objects: zeroship_storage::StorageStore,
 }
 impl HostStorage {
     pub async fn open(&self) -> Result<OrmStore, WorkflowServiceError> {

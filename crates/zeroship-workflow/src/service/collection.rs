@@ -80,12 +80,14 @@ impl AppWorkflows {
     /// A completed sweep does not imply that failed items or the app have drained.
     ///
     /// # Errors
-    /// Refuses foreign or changed jobs, damaged page metadata, unavailable storage and
-    /// exhausted authority. Committed receipts replay without live authority or storage.
-    pub async fn collect_job(
+    /// Refuses foreign or changed jobs, damaged page metadata, refused deletion and
+    /// exhausted authority. Committed receipts replay without live authority, and
+    /// without asking `deleter` for anything.
+    pub async fn collect_job<D: payloads::PayloadDeleter>(
         &self,
         grant: &impl JobLease,
         options: CollectionOptions,
+        deleter: &D,
     ) -> Result<JobReceipt, WorkflowServiceError> {
         options.validate()?;
         let job = &grant.delivery().job;
@@ -131,6 +133,7 @@ impl AppWorkflows {
                         &id,
                         plan.observed_at,
                         &check,
+                        deleter,
                     );
                     let timeout = options.item_timeout.min(delivery::remaining(&authority)?);
                     match compio::time::timeout(timeout, Box::pin(operation)).await {
@@ -169,7 +172,6 @@ impl AppWorkflows {
         }
         let authority = authority.map_err(Clone::clone)?;
         authority.check(self)?;
-        payloads::storage(&self.service)?;
         tx.capture_mutation(self.app_id())?;
         let plan = match stored {
             Stored::Pending { plan, .. } => plan,

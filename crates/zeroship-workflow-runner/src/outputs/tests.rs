@@ -4,7 +4,8 @@ use crate::{
         journal_row_count, leased_policy, registered_service, sqlite_store, PostgresFixture,
     },
     service_binding::ServiceFixture,
-    TaskPayloadReader, TaskPayloads, TaskTransport, WorkerBinding, WorkerTasks,
+    PayloadObjects, PayloadRead, RunPayloads, TaskPayloadReader, TaskPayloads, TaskTransport,
+    WorkerBinding, WorkerTasks,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -12,8 +13,8 @@ use zeroship_workflow::{
     engine::{StepOutcome, WorkflowOutputRef},
     operations::{RunState, StartOptions},
     service::{
-        schema, store::OrmStore, AppPolicy, AppWorkflows, PayloadRead, PayloadSlot, RequestId,
-        StagedPayload, TaskAssignment, TaskToken, WorkerIdentity,
+        schema, store::OrmStore, AppPolicy, AppWorkflows, PayloadSlot, RequestId, StagedPayload,
+        TaskAssignment, TaskToken, WorkerIdentity,
     },
     WorkflowServiceError,
 };
@@ -115,13 +116,14 @@ async fn postgres_output_preparation_and_retryable_uploads() {
 async fn output_contract(store: Rc<OrmStore>) {
     let dir = tempfile::tempdir().unwrap();
     let (service, app, other, _deployments) = registered_service(store.clone()).await;
-    let service = service
-        .with_payload_storage(StorageStore::from_backend(Arc::new(LocalFs::new(
-            dir.path(),
-        ))))
-        .unwrap();
+    let objects =
+        PayloadObjects::open(StorageStore::from_backend(Arc::new(LocalFs::new(dir.path()))))
+            .unwrap();
     let scope = service.fixture_app(app.clone());
-    let tasks = service.tasks(WorkerIdentity::new("output-writer".into()).unwrap());
+    let tasks = service.tasks(
+        WorkerIdentity::new("output-writer".into()).unwrap(),
+        objects.clone(),
+    );
 
     // An inline value needs no payload object, including JSON null.
     for value in [json!({"small":true}), Value::Null] {
@@ -137,6 +139,7 @@ async fn output_contract(store: Rc<OrmStore>) {
             .await
             .unwrap();
         let bytes = scope
+            .payloads(&objects)
             .read_step_output(&task.invocation.run_id, "saved", 0)
             .await
             .unwrap()
@@ -218,7 +221,8 @@ async fn output_contract(store: Rc<OrmStore>) {
         .unwrap();
     assert_eq!(receipt.state, RunState::Completed);
     let bytes = scope
-        .read_payload(&receipt.run_id, 0, PayloadSlot::Output)
+        .payloads(&objects)
+        .read(&receipt.run_id, 0, PayloadSlot::Output)
         .await
         .unwrap()
         .into_bytes(256)
@@ -228,7 +232,8 @@ async fn output_contract(store: Rc<OrmStore>) {
     assert!(matches!(
         service
             .fixture_app(other)
-            .read_payload(&receipt.run_id, 0, PayloadSlot::Output)
+            .payloads(&objects)
+            .read(&receipt.run_id, 0, PayloadSlot::Output)
             .await,
         Err(WorkflowServiceError::NotFound(_))
     ));
@@ -299,6 +304,7 @@ async fn output_contract(store: Rc<OrmStore>) {
         assert_eq!(receipt.state, RunState::Queued);
         assert_eq!(
             scope
+                .payloads(&objects)
                 .read_step_output(&task.invocation.run_id, "saved", 0)
                 .await
                 .unwrap()
