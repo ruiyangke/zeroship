@@ -562,6 +562,7 @@ impl Fleet {
         .unwrap();
         zeroship_migrate_server::apply::apply_ir_documents(
             &fleet.database.creator_url(),
+            &fleet.database.url(),
             &schema_work,
             zeroship_migrate_server::apply::ApplyTarget {
                 app_id: &fleet.app_id,

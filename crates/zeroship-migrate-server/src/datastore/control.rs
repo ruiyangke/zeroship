@@ -423,6 +423,38 @@ impl ControlStore {
         Ok(affected == 1)
     }
 
+    /// Project a rotated schema epoch onto the database row.
+    ///
+    /// The CLUSTER is the authority: the head moves inside the transaction that
+    /// mints the epoch's roles, and this row is the copy a binding is composed
+    /// from without a cross-zone read. Losing this write is self-healing - the
+    /// composed role name is one the cluster no longer carries, `SET LOCAL ROLE`
+    /// fails and the caller re-resolves - so it closes no ledger and owes no
+    /// exactly-once guarantee.
+    ///
+    /// Monotone, so an apply whose projection lands late cannot walk the row
+    /// back behind a rotation that has already happened. Reports whether the row
+    /// moved.
+    ///
+    /// # Errors
+    /// [`ControlError::Query`] on any database failure.
+    pub async fn project_schema_epoch(
+        &self,
+        database: &DatabaseId,
+        epoch: i32,
+    ) -> Result<bool, ControlError> {
+        let affected = self
+            .client
+            .execute(
+                "UPDATE zeroship.databases \
+                    SET schema_epoch = $2::int, updated_at = now() \
+                  WHERE id = $1::text AND schema_epoch < $2::int",
+                &[&database.as_str(), &epoch],
+            )
+            .await?;
+        Ok(affected == 1)
+    }
+
     /// Mark a binding's edges live at the generation that was converged.
     ///
     /// The generation is part of the predicate, not only of the assignment: a

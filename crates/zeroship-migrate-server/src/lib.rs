@@ -25,6 +25,7 @@ pub mod policy;
 pub mod provisioning;
 pub mod publication;
 pub mod rate_limit;
+pub mod rotation;
 pub mod session;
 
 #[cfg(test)]
@@ -42,6 +43,9 @@ use zeroship_core::readiness::ReadinessGate;
 #[allow(missing_debug_implementations)]
 pub struct MigrationServiceState {
     pub provision_dsn: String,
+    /// The control plane's DSN, for the one write an apply makes there: the
+    /// projection of a rotated schema epoch onto `zeroship.databases`.
+    pub control_dsn: String,
     pub tmp_dir: PathBuf,
     pub authenticator: Arc<dyn Authenticator>,
     /// Verifies inbound PLATFORM-service assertions.
@@ -84,7 +88,8 @@ impl MigrationServiceState {
             mutation_rate_limiter,
             trust_proxy,
             policy_config,
-            bindings: BindingStore::new(control_dsn),
+            bindings: BindingStore::new(control_dsn.clone()),
+            control_dsn,
             readiness: ReadinessGate::with_defaults(),
         }
     }
