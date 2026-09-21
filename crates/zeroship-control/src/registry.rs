@@ -107,10 +107,6 @@ fn catalog_registry_error(app: &AppId, error: CatalogError) -> RegistryError {
         CatalogError::DatabaseNotBound { databases } => {
             RegistryError::DatabaseNotBound { databases }
         }
-        CatalogError::ApplyInProgress => RegistryError::Conflict(format!(
-            "app {} has a schema apply in progress; retry restore after it finishes",
-            app.as_str()
-        )),
         CatalogError::InvalidRetained(detail) => RegistryError::Conflict(format!(
             "archived app {} has an invalid retained manifest: {detail}",
             app.as_str()
@@ -630,14 +626,13 @@ impl Registry {
     /// returns the stored result without changing anything.
     ///
     /// THE POINTER UPDATE IS WHAT "LIVE" MEANS. The gateway reads the app's
-    /// `deploy_hash` and `manifest_json` ([`Self::get_gateway_snapshot`]), so
-    /// the schema precondition is checked under the same app row lock that
-    /// guards the update, never in a separate read before it. The ledger it
-    /// reads is `zeroship.app_schema_applies`, which the migration service
-    /// writes one row of per apply request - including a request that applied
-    /// nothing, which is how an engine upgrade that changes descriptor bytes
-    /// without changing any schema is repaired. The engine's own journal lives
-    /// in the app's schema, whose migrator role owns it, and is never read.
+    /// `deploy_hash` and `manifest_json` ([`Self::get_gateway_snapshot`]), so the
+    /// precondition is checked under the same app row lock that guards the update,
+    /// never in a separate read before it. That precondition is binding admission:
+    /// whether the app still holds a live binding to every database the deployment
+    /// declares. It is not a schema comparison - control holds a hash and cannot
+    /// evaluate compatibility, and the engine's own journal lives in the app's
+    /// schema, which the app's migrator role owns and control never reads.
     ///
     /// There is no operator override. The remedy is a creator-reachable
     /// endpoint that is already mandatory in the golden path, and the case that

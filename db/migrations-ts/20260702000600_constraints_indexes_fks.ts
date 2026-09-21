@@ -19,7 +19,6 @@ export default {
     table("refund_provider_refs", { schema: "zeroship" }).unique("refund_provider_refs_provider_ref_kind_external_id_key").add({ columns: ["provider", "ref_kind", "external_id"] });
     table("refunds", { schema: "zeroship" }).unique("refunds_idempotency_key_key").add({ columns: ["idempotency_key"] });
     table("users", { schema: "zeroship" }).unique("users_email_key").add({ columns: ["email"] });
-    table("app_schema_applies", { schema: "zeroship" }).index("app_schema_applies_app_status_idx").add({ on: ["app_id", "status", { column: "submitted_at", order: "desc" }] });
     table("app_session_anchors", { schema: "zeroship" }).index("app_session_anchors_user_idx").add({ on: ["app_id", "global_user_id"], where: (col) => col("revoked_at").isNull() });
     table("app_user_identities", { schema: "zeroship" }).index("app_user_identities_global_user_id_idx").add({ on: ["global_user_id"] });
     table("app_user_identities", { schema: "zeroship" }).index("app_user_identities_pairwise_sub_idx").add({ on: ["pairwise_sub"] });
@@ -76,8 +75,6 @@ export default {
     table("app_env_expose", { schema: "zeroship" }).foreignKey("app_env_expose_app_id_fkey").add({ columns: ["app_id"], references: { table: "apps", columns: ["id"] }, onDelete: "cascade" });
     table("app_oauth_clients", { schema: "zeroship" }).foreignKey("app_oauth_clients_app_id_fkey").add({ columns: ["app_id"], references: { table: "apps", columns: ["id"] }, onDelete: "cascade" });
     table("app_oauth_clients", { schema: "zeroship" }).foreignKey("app_oauth_clients_client_id_fkey").add({ columns: ["client_id"], references: { table: "oauth_clients", columns: ["client_id"], schema: "zeroship" }, onDelete: "cascade" });
-    table("app_schema_applies", { schema: "zeroship" }).foreignKey("app_schema_applies_app_id_fkey").add({ columns: ["app_id"], references: { table: "apps", columns: ["id"] }, onDelete: "cascade" });
-    table("app_schema_applies", { schema: "zeroship" }).foreignKey("app_schema_applies_submitted_by_fkey").add({ columns: ["submitted_by"], references: { table: "users", columns: ["id"] }, onDelete: "setNull" });
     table("app_scope_defs", { schema: "zeroship" }).foreignKey("app_scope_defs_app_id_fkey").add({ columns: ["app_id"], references: { table: "apps", columns: ["id"] }, onDelete: "cascade" });
     table("app_secrets", { schema: "zeroship" }).foreignKey("app_secrets_app_id_fkey").add({ columns: ["app_id"], references: { table: "apps", columns: ["id"] }, onDelete: "cascade" });
     table("app_session_anchors", { schema: "zeroship" }).foreignKey("app_session_anchors_app_id_fkey").add({ columns: ["app_id"], references: { table: "apps", columns: ["id"] }, onDelete: "cascade" });

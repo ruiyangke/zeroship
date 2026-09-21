@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use zeroship_core::app_id::AppId;
+use zeroship_core::service_identity::{endpoints, ServiceEndpoint};
 use zeroship_core::types::{AppVersionInfo, VersionMap};
 use zeroship_runtime::{EnvSnapshot, RuntimeLimits};
 
@@ -151,7 +152,11 @@ fn version_poll_authorization(config: &WorkerConfig) -> Option<String> {
 }
 
 async fn poll_versions(config: &WorkerConfig) -> Result<VersionMap, String> {
-    let url = format!("{}/internal/versions", config.control_url);
+    let url = format!(
+        "{}{}",
+        config.control_url,
+        endpoints::CONTROL_VERSIONS.path_template()
+    );
     let response = http_get(&url, version_poll_authorization(config).as_deref())
         .await
         .map_err(|e| format!("fetch versions: {e}"))?;
@@ -417,6 +422,29 @@ async fn reconcile_once(
     Ok(())
 }
 
+/// The URL of one app-addressed control endpoint under `url_base`.
+///
+/// Built from the route declaration control authorizes the call against, so
+/// the caller and the destination are one statement of the path rather than
+/// two that drift apart silently: a route that moves in
+/// `zeroship_core::service_identity::endpoints` moves here with it.
+///
+/// `ServiceEndpoint::path_template` spells the app-addressed parameter
+/// `{app_id}`. A template that named it otherwise would leave the parameter in
+/// the URL unfilled, which
+/// `sync::tests::bindings::every_app_addressed_control_url_is_the_declared_route_with_its_parameter_filled`
+/// refuses.
+fn control_app_url(url_base: &str, endpoint: ServiceEndpoint, app_id: &str) -> String {
+    /// The parameter an app-addressed route declares, as the declaration
+    /// spells it.
+    const APP_ID_PARAMETER: &str = "{app_id}";
+
+    format!(
+        "{url_base}{}",
+        endpoint.path_template().replace(APP_ID_PARAMETER, app_id)
+    )
+}
+
 /// Fetch just one app's version info. Used by `load_on_demand` in `handler.rs`
 /// when a request arrives for an app that's not yet in the thread-local cache.
 pub async fn fetch_app_version(
@@ -424,7 +452,7 @@ pub async fn fetch_app_version(
     service_auth: &zeroship_core::service_peers::ServiceAuth,
     app_id: &AppId,
 ) -> Result<AppVersionInfo, String> {
-    let url = format!("{url_base}/internal/apps/{}", app_id.as_str());
+    let url = control_app_url(url_base, endpoints::CONTROL_APP, app_id.as_str());
     let body = http_get(&url, control_authorization(service_auth)?.as_deref()).await?;
     serde_json::from_str(&body).map_err(|e| e.to_string())
 }
@@ -467,7 +495,7 @@ pub async fn fetch_app_env_supplying(
     if let Some(keys) = keys {
         let app = app_id.as_str();
         if !keys.is_bound(app).map_err(|error| error.to_string())? {
-            let url = format!("{url_base}/internal/apps/{}/data-key", app_id.as_str());
+            let url = control_app_url(url_base, endpoints::CONTROL_APP_DATA_KEY, app);
             let body = http_get(&url, control_authorization(service_auth)?.as_deref()).await?;
             let key = zeroship_core::project_data_key::ProjectDataKey::from_json(body)
                 .map_err(|_| "invalid control project key response".to_string())?;
@@ -479,21 +507,22 @@ pub async fn fetch_app_env_supplying(
     // else. An app Control serves no live binding for gets no `env.db`, which
     // is the fail-closed direction: a namespace whose every call would be
     // refused at session setup is worse than an absent one.
+    //
+    // Resolved once per app per process, like the key above. A re-read on
+    // every resolution would carry a rotated epoch into a store that live
+    // isolates consult at each `env.db` call, so an isolate built against an
+    // older shape would compose the CURRENT epoch's role and succeed against a
+    // schema its descriptor never described - the one direction the epoch
+    // fence exists to catch. So the binding follows the isolate rather than
+    // the isolate following the binding: a rotation that outruns a resident
+    // app is refused at `SET LOCAL ROLE`, and replacing the app is what
+    // installs the epoch it was built for.
     if let Some(bindings) = bindings {
         let app = app_id.as_str();
         if !bindings.is_bound(app).map_err(|error| error.to_string())? {
-            let url = format!("{url_base}/internal/apps/{app}/bindings");
+            let url = control_app_url(url_base, endpoints::CONTROL_APP_BINDINGS, app);
             match http_get(&url, control_authorization(service_auth)?.as_deref()).await {
-                Ok(body) => {
-                    // EVERY live binding, because `env.databases` reaches every
-                    // database this app binds. Supplying only the first would
-                    // leave the rest unresolvable at isolate build.
-                    for resolved in parse_resolved_bindings(&body)? {
-                        bindings
-                            .supply(app, resolved)
-                            .map_err(|error| error.to_string())?;
-                    }
-                }
+                Ok(body) => install_resolved_bindings(bindings, app, &body)?,
                 // An app with no live binding is ordinary: not every app
                 // declares a database. It is recorded and the environment is
                 // published without one.
@@ -505,8 +534,52 @@ pub async fn fetch_app_env_supplying(
             }
         }
     }
-    let url = format!("{url_base}/internal/apps/{}/env", app_id.as_str());
+    let url = control_app_url(url_base, endpoints::CONTROL_APP_ENV, app_id.as_str());
     http_get(&url, control_authorization(service_auth)?.as_deref()).await
+}
+
+/// Install the binding set Control served for one app.
+///
+/// EVERY live binding, because `env.databases` reaches every database this app
+/// binds. Installing only the first would leave the rest unresolvable at
+/// isolate build.
+///
+/// # A response behind the store is not a failure
+///
+/// This runs on every resolution, so two of them can be in flight at once and
+/// the schema epoch only ever advances on the cluster. A response carrying an
+/// epoch BEHIND the one installed is therefore a slower read of a monotone
+/// value, not news, and the store keeps the later one and stays serving.
+/// Failing the resolution on it would let a lost race take the app's
+/// environment down with it.
+///
+/// Every other refusal fails the resolution, because every other refusal says
+/// Control resolved something this store cannot reconcile with what it holds -
+/// a different binding for a database the app already binds - and publishing
+/// an environment over that would leave one dispatch narrowing to a role
+/// another dispatch's descriptor was never built against.
+fn install_resolved_bindings(
+    bindings: &zeroship_data_orm::resolved_bindings::SuppliedAppBindings,
+    app: &str,
+    body: &str,
+) -> Result<(), String> {
+    for resolved in parse_resolved_bindings(body)? {
+        match bindings.supply(app, resolved) {
+            Ok(()) => {}
+            Err(error)
+                if error.code()
+                    == zeroship_data_orm::resolved_bindings::STALE_APP_BINDING =>
+            {
+                tracing::debug!(
+                    app_id = app,
+                    %error,
+                    "worker: control served a schema epoch behind the one installed"
+                );
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Ok(())
 }
 
 /// Decode Control's binding response: the SET of live bindings for one app.
@@ -527,25 +600,74 @@ fn parse_resolved_bindings(
     entries.iter().map(parse_resolved_binding).collect()
 }
 
+/// The JSON type of a value, for a refusal that names what it found.
+///
+/// The type rather than the value: the worker does not bound the length of a
+/// field in a control response, and every refusal here reaches a log.
+const fn json_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "text",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "an object",
+    }
+}
+
+/// The schema epoch of one binding entry, or the reason it is not one.
+///
+/// Four conditions and four refusals. An absent field, a field that is not a
+/// number, a number that is not whole and a number outside the range an epoch
+/// holds are four different things to go and look at, and only the first is an
+/// absence: one message for all four sends an operator after a field the
+/// response carries. A number is quoted back, because the JSON grammar bounds
+/// how long one is.
+fn parse_schema_epoch(entry: &serde_json::Value) -> Result<u32, String> {
+    let Some(found) = entry.get("schema_epoch") else {
+        return Err("control binding response has no schema_epoch".to_owned());
+    };
+    let serde_json::Value::Number(number) = found else {
+        return Err(format!(
+            "control binding response has a schema_epoch that is {}, not a number",
+            json_kind(found)
+        ));
+    };
+    let outside_the_range = || {
+        format!(
+            "control binding response has a schema_epoch outside the range an epoch holds: \
+             {number}"
+        )
+    };
+    match number.as_u64() {
+        Some(epoch) => u32::try_from(epoch).map_err(|_| outside_the_range()),
+        // A whole number that is negative: in the grammar, outside the range.
+        None if number.is_i64() => Err(outside_the_range()),
+        None => Err(format!(
+            "control binding response has a schema_epoch that is not a whole number: {number}"
+        )),
+    }
+}
+
 fn parse_resolved_binding(
     value: &serde_json::Value,
 ) -> Result<zeroship_data_orm::resolved_bindings::ResolvedBinding, String> {
     let field = |name: &str| -> Result<String, String> {
-        value
-            .get(name)
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned)
-            .ok_or_else(|| format!("control binding response has no {name}"))
+        let Some(found) = value.get(name) else {
+            return Err(format!("control binding response has no {name}"));
+        };
+        found.as_str().map(str::to_owned).ok_or_else(|| {
+            format!(
+                "control binding response has a {name} that is {}, not text",
+                json_kind(found)
+            )
+        })
     };
     let database = zeroship_core::DatabaseId::parse(&field("database_id")?)
         .map_err(|error| error.to_string())?;
     let binding =
         zeroship_core::BindingId::parse(&field("binding_id")?).map_err(|error| error.to_string())?;
-    let epoch = value
-        .get("schema_epoch")
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|epoch| u32::try_from(epoch).ok())
-        .ok_or_else(|| "control binding response has no schema_epoch".to_string())?;
+    let epoch = parse_schema_epoch(value)?;
     Ok(zeroship_data_orm::resolved_bindings::ResolvedBinding {
         database,
         binding,

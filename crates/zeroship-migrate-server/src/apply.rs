@@ -34,6 +34,7 @@ use zeroship_migrate_postgres::{PostgresBackend, DIALECT as POSTGRES};
 /// which errors are reachable, not which backend runs.
 const VENDORS: zeroship_migrate_backend::registry::VendorSet = zeroship_migrate::shipping_vendors();
 
+use crate::datastore::cluster::ClusterError;
 use crate::policy::{
     confined_guard_policy_for_schema, CreatorPolicyDraft, EffectivePolicy, ManagedPolicyConfig,
     ManagedPolicyError, SealVerifier,
@@ -45,9 +46,7 @@ use crate::provisioning::{
     provision_audit_unmask_table, provision_migrator, ProvisionRoleError,
 };
 use crate::publication::{reconcile_database_publication, PublicationError};
-use crate::schema_apply_store::{
-    SchemaApplyInput, SchemaApplyStore, SchemaApplyStoreError, TerminalTransition,
-};
+use crate::rotation::{self, Rotation};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ApplyMigrationsRequest {
@@ -200,10 +199,6 @@ pub enum ApplyRequestError {
     },
     #[error(transparent)]
     Policy(#[from] ManagedPolicyError),
-    #[error(transparent)]
-    SchemaApplyStore(#[from] SchemaApplyStoreError),
-    #[error("encode migration request: {0}")]
-    EncodeRequest(String),
     #[error("migration database connect: {0}")]
     Connect(compio_postgres::Error),
     #[error("inspect migration database schema: {0}")]
@@ -247,6 +242,22 @@ pub enum ApplyRequestError {
     ProvisionAuditUnmask(compio_postgres::Error),
     #[error("app publication provision: {0}")]
     ProvisionPublication(#[from] PublicationError),
+    /// The schema-epoch rotation did not complete.
+    ///
+    /// The stage names which half, and they fail in opposite directions.
+    /// `retire` runs before any creator DDL commits, so its failure refuses the
+    /// apply outright and the database keeps the head it had - which is the
+    /// fence's own rule, that an apply which cannot drop `E-1` never advances to
+    /// `E+1`. `rotate` runs after every file has committed, so its failure
+    /// leaves applied DDL under an unrotated head and is answered by retrying
+    /// the same request: the journal skips what ran and the frontier still says
+    /// the rotation is owed.
+    #[error("{stage} the schema epoch: {source}")]
+    SchemaEpoch {
+        stage: &'static str,
+        #[source]
+        source: ClusterError,
+    },
     #[error("{action} migration project advisory lock: {source}")]
     ProjectLock {
         action: &'static str,
@@ -282,14 +293,6 @@ pub enum ProvisionRuntimeRoleError {
 ///
 /// THERE IS ONE PATH. The ceiling the creator runs under is what bounds them, and
 /// the engine still refuses a destructive step it was not handed an [`Approval`] for.
-///
-/// The row in `zeroship.app_schema_applies` opens only after guarded preparation
-/// and complete-history attestation, but before creator DDL. A surviving request
-/// with a reachable control store then closes it through exactly one terminal
-/// transition: `mark_applied` on success or `mark_failed` on error. A process
-/// death or terminal store failure can leave it `submitted`: the ledger and app
-/// schema may live on different DSNs, so no transaction spans them. No serving
-/// path reads an open row; the deploy gate reads only `applied` rows.
 /// The app whose IR this is, and the database it lands in.
 ///
 /// Carried together because they are one fact: an apply targets a database
@@ -303,11 +306,11 @@ pub struct ApplyTarget<'a> {
 
 pub async fn apply_ir_documents(
     provision_dsn: &str,
+    control_dsn: &str,
     tmp_root: &Path,
     target: ApplyTarget<'_>,
     request: &ApplyMigrationsRequest,
     policy_config: &ManagedPolicyConfig,
-    schema_apply_store: &SchemaApplyStore,
     principal_id: &UserId,
 ) -> Result<ApplyMigrationsResponse, ApplyRequestError> {
     let ApplyTarget {
@@ -372,8 +375,6 @@ pub async fn apply_ir_documents(
     // ledger side effects. A refused apply therefore leaves no database state
     // for a retry or deploy gate to mistake for a completed lifecycle step.
     let dir = write_ir_documents(tmp_root, request)?;
-    let request_body = serde_json::to_value(request)
-        .map_err(|err| ApplyRequestError::EncodeRequest(err.to_string()))?;
     // The executor re-vets rendered SQL at apply time from its own policy, so it must
     // carry the same no-inject confined guard charter as guarded lower. The composed
     // inject-bearing policy remains separate and is passed explicitly to shape
@@ -453,22 +454,6 @@ pub async fn apply_ir_documents(
             prepare_ir_documents(&session, &exec_cfg, schema.as_str(), dir.path(), &policy).await?;
         attest_complete_history(&backend, &exec_cfg, &prepared).await?;
 
-        // Coverage refusal happens above this line. A truncated request therefore
-        // leaves no submitted, failed, or applied row that could become the deploy
-        // guard's newest ledger fact.
-        schema_apply_store
-            .record_submitted(SchemaApplyInput {
-                app_id,
-                migration_id,
-                principal_id,
-                request_body,
-                effective_profile: &policy.managed,
-                ceiling_id: &policy.ceiling_id,
-                ceiling_version: policy.ceiling_version,
-                descriptor_sha256: &request.descriptor_sha256,
-            })
-            .await?;
-
         let apply_result = run_apply(
             &backend,
             policy_config,
@@ -480,49 +465,18 @@ pub async fn apply_ir_documents(
             &exec_cfg,
             principal_id,
             session.client(),
+            control_dsn,
         )
         .await;
 
         match apply_result {
-            Ok(outcome) => {
-                // WRITTEN EVEN WHEN `outcome.applied` IS EMPTY. A re-run that applied
-                // nothing is what an app whose descriptor bytes moved without a
-                // schema change (an engine upgrade, a codegen fix) uses to become
-                // deployable again. Coverage, not emptiness, decides whether the row
-                // is safe to write.
-                match schema_apply_store
-                    .mark_applied(app_id, migration_id, &outcome.applied)
-                    .await
-                {
-                    Ok(transition) => {
-                        if transition == TerminalTransition::Lost {
-                            // The DDL is committed and cannot be taken back, but a
-                            // concurrent path failed this migration while the engine
-                            // was applying it, so the row reads `failed`. The record
-                            // now contradicts the database it describes and only an
-                            // operator can reconcile them.
-                            tracing::error!(
-                                app_id = app_id.as_str(),
-                                migration_id = %migration_id,
-                                "migrate-server: apply lost the terminal transition to a \
-                                 concurrent failure - schema changes are committed but the row \
-                                 reads failed"
-                            );
-                        }
-                        Ok(ApplyMigrationsResponse {
-                            migration_id,
-                            applied: outcome.applied,
-                            skipped: outcome.skipped,
-                            pending_contract: outcome.pending_contract,
-                        })
-                    }
-                    Err(err) => Err(ApplyRequestError::SchemaApplyStore(err)),
-                }
-            }
-            Err(err) => {
-                mark_apply_failed(schema_apply_store, app_id, migration_id, &err.to_string()).await;
-                Err(err)
-            }
+            Ok(outcome) => Ok(ApplyMigrationsResponse {
+                migration_id,
+                applied: outcome.applied,
+                skipped: outcome.skipped,
+                pending_contract: outcome.pending_contract,
+            }),
+            Err(err) => Err(err),
         }
     }
     .await;
@@ -564,6 +518,7 @@ async fn run_apply(
     exec_cfg: &ExecutorConfig,
     principal_id: &UserId,
     admin: &compio_postgres::Client,
+    control_dsn: &str,
 ) -> Result<SealedApplyOutcome, ApplyRequestError> {
     // (d) POLICY: seal the effective policy with the zeroship-migrate-policy HMAC so
     // the apply carries an authenticated, ceiling-stamped integrity token.
@@ -579,6 +534,29 @@ async fn run_apply(
         "migrate-server: applying IR under sealed managed migration policy"
     );
     let applied_by = format!("migrate-server:{}", principal_id.as_str());
+    // (T1) SUBTRACTION, AND IT IS BEFORE THE DDL. The epoch this apply retires
+    // is withdrawn from the catalog first, so an apply that cannot drop `E-1`
+    // refuses here and never reaches a state with three live epochs in it. It
+    // does not touch `E`: everything serving now goes on serving, whatever
+    // happens below.
+    //
+    // It is also as LATE as "before the DDL" allows. Every refusal decidable
+    // without touching the catalog - the binding admission, the schema-existence
+    // fence, the guarded lower, the journal attestation - has already run, so a
+    // refused apply subtracts nothing and a retired epoch always belongs to an
+    // apply that went on to execute.
+    let retired = rotation::retire_previous_epoch(admin, database_id)
+        .await
+        .map_err(|source| ApplyRequestError::SchemaEpoch {
+            stage: "retire",
+            source,
+        })?;
+    tracing::debug!(
+        database_id = database_id.as_str(),
+        epoch = retired.epoch,
+        reaped = retired.roles.len(),
+        "migrate-server: retired the previous schema epoch"
+    );
     // NO SCHEMA-WIDE RUNTIME ROLE IS ESTABLISHED HERE, and its absence is the
     // change rather than a gap. A role carrying `SELECT, INSERT, UPDATE,
     // DELETE ON ALL TABLES IN SCHEMA` and granted to the ONE shared worker
@@ -603,6 +581,39 @@ async fn run_apply(
     // datastore's one shared publication and the membership being edited is the
     // set of relations in this database's schema.
     reconcile_database_publication(admin, database_id).await?;
+    // (T4) ADDITION, AND IT IS AFTER EVERY DDL HAS COMMITTED. Whether it is
+    // owed is decided by the journal, not by what this request applied: a retry
+    // after a crash between the last file and here finds every version applied
+    // and still rotates.
+    let rotation = rotation::rotate_if_owed(admin, database_id)
+        .await
+        .map_err(|source| ApplyRequestError::SchemaEpoch {
+            stage: "rotate",
+            source,
+        })?;
+    if let Rotation::Advanced { from, to, minted } = &rotation {
+        tracing::info!(
+            database_id = database_id.as_str(),
+            from = *from,
+            to = *to,
+            minted = minted.len(),
+            "migrate-server: rotated the schema epoch"
+        );
+    }
+    // (E) THE PROJECTION, and the only control-plane write on this path. It is
+    // not part of the rotation's atomicity and cannot be: control's database
+    // and this cluster are different servers. A lost projection composes a role
+    // name the cluster no longer carries, which the caller re-resolves, so it
+    // is reported and never fatal to an apply whose DDL has committed.
+    match rotation::project_schema_epoch(control_dsn, database_id, rotation.epoch()).await {
+        Ok(_) => {}
+        Err(error) => tracing::warn!(
+            %error,
+            database_id = database_id.as_str(),
+            epoch = rotation.epoch(),
+            "migrate-server: the rotated schema epoch was not projected onto control"
+        ),
+    }
     Ok(outcome)
 }
 
@@ -1053,44 +1064,6 @@ fn validate_request_shape(request: &ApplyMigrationsRequest) -> Result<(), ApplyR
     Ok(())
 }
 
-/// Close the request's ledger row as `failed`, best effort.
-///
-/// Best effort because the caller is already returning an error and the apply has
-/// already failed: a store outage here must not replace the creator-facing reason
-/// with a database one. It is a LOUD best effort - every arm logs, including the
-/// lost race, which is the one that means the row and the database disagree.
-async fn mark_apply_failed(
-    schema_apply_store: &SchemaApplyStore,
-    app_id: &AppId,
-    migration_id: Uuid,
-    message: &str,
-) {
-    match schema_apply_store
-        .mark_failed(app_id, migration_id, message)
-        .await
-    {
-        Ok(TerminalTransition::Recorded) => {}
-        Ok(TerminalTransition::Lost) => {
-            // The row is already `applied`, so this failure belongs to a migration
-            // that another path completed. The failure marking is correctly refused;
-            // what would be wrong is letting it pass for a recorded one.
-            tracing::warn!(
-                app_id = app_id.as_str(),
-                migration_id = %migration_id,
-                reason = message,
-                "migrate-server: failure lost the terminal transition to a completed \
-                 apply - the row stays applied and this failure is not recorded on it"
-            );
-        }
-        Err(store_err) => {
-            tracing::error!(
-                error = %store_err,
-                "migrate-server: failed to mark the schema apply row failed"
-            );
-        }
-    }
-}
-
 // See the `write_ir_documents` allow above - same `ApplyRequestError` size,
 // same rationale.
 #[allow(clippy::result_large_err)]
@@ -1170,14 +1143,13 @@ pub fn apply_error_kind(err: &ApplyRequestError) -> (ntex::http::StatusCode, &'s
         ApplyRequestError::TempDir(_)
         | ApplyRequestError::Write { .. }
         | ApplyRequestError::Policy(_)
-        | ApplyRequestError::SchemaApplyStore(_)
-        | ApplyRequestError::EncodeRequest(_)
         | ApplyRequestError::Connect(_)
         | ApplyRequestError::InspectSchema(_)
         | ApplyRequestError::ProvisionRole(_)
         | ApplyRequestError::ProvisionAuditUnmask(_)
         | ApplyRequestError::ProvisionPublication(_)
         | ApplyRequestError::ProjectLock { .. }
+        | ApplyRequestError::SchemaEpoch { .. }
         | ApplyRequestError::HistoryAttestation(_) => (
             ntex::http::StatusCode::SERVICE_UNAVAILABLE,
             "migration_infrastructure",
@@ -1661,6 +1633,7 @@ mod tests {
         let err = rt
             .block_on(apply_ir_documents(
                 "postgres://unused",
+                "postgres://unused",
                 Path::new("/tmp"),
                 ApplyTarget {
                     app_id: &AppId::mint(),
@@ -1668,7 +1641,6 @@ mod tests {
                 },
                 &request,
                 &policy_config,
-                &SchemaApplyStore::new("postgres://unused"),
                 &principal_id,
             ))
             .expect_err("empty request rejected before DB connect");
@@ -1696,6 +1668,7 @@ mod tests {
         let err = rt
             .block_on(apply_ir_documents(
                 "postgres://unused",
+                "postgres://unused",
                 Path::new("/tmp"),
                 ApplyTarget {
                     app_id: &AppId::mint(),
@@ -1703,7 +1676,6 @@ mod tests {
                 },
                 &request,
                 &policy_config,
-                &SchemaApplyStore::new("postgres://unused"),
                 &principal_id,
             ))
             .expect_err("scalar request rejected before DB connect");

@@ -560,14 +560,9 @@ impl Fleet {
             1,
         )
         .unwrap();
-        let ledger = zeroship_migrate_server::schema_apply_store::SchemaApplyStore::new(
-            fleet.database.url(),
-        );
-        // The DDL lands in the creator database; the apply LEDGER stays a
-        // platform table, which is the same split the migration service runs
-        // under in production.
         zeroship_migrate_server::apply::apply_ir_documents(
             &fleet.database.creator_url(),
+            &fleet.database.url(),
             &schema_work,
             zeroship_migrate_server::apply::ApplyTarget {
                 app_id: &fleet.app_id,
@@ -575,7 +570,6 @@ impl Fleet {
             },
             &request,
             &policy,
-            &ledger,
             &owner,
         )
         .await

@@ -850,7 +850,7 @@ fn main() -> std::io::Result<()> {
             .state(readiness.clone())
             .configure(handler::configure)
             .configure(health::configure)
-            .service(web::resource("/logs/{app_id}").route(web::get().to(logs::get_logs)))
+            .configure(logs::configure)
             // Prometheus-text metrics. No auth — same policy as `/healthz`,
             // intended for intra-cluster scrapers. Expose behind a side-car
             // or ingress filter if the worker port is ever reachable from

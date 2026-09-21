@@ -181,7 +181,7 @@ pub async fn readyz(state: State<Arc<MigrationServiceState>>) -> web::HttpRespon
     let ready = state
         .readiness
         .ready(|| async {
-            match state.schema_apply_store.probe().await {
+            match state.bindings.probe().await {
                 Ok(()) => true,
                 Err(error) => {
                     tracing::warn!(
@@ -263,6 +263,7 @@ pub async fn apply(
 
     match apply_ir_documents(
         &state.provision_dsn,
+        &state.control_dsn,
         &state.tmp_dir,
         crate::apply::ApplyTarget {
             app_id: &app_id,
@@ -270,7 +271,6 @@ pub async fn apply(
         },
         &body,
         &state.policy_config,
-        &state.schema_apply_store,
         &caller.principal_id,
     )
     .await

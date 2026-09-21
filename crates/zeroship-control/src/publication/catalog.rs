@@ -12,7 +12,7 @@ use super::command::{
 };
 use super::models::catalog::{
     app_deploy_commands as commands, app_lifecycle_intents as intents,
-    app_schema_applies as applies, apps, database_bindings as bindings, databases,
+    apps, database_bindings as bindings, databases,
 };
 use std::{future::Future, num::NonZeroUsize, pin::Pin};
 use zeroship_core::{
@@ -49,8 +49,6 @@ pub enum CatalogError {
     DatabaseNotBound { databases: Vec<String> },
     #[error("deployment retention has closed activation")]
     DeploymentReclaimed,
-    #[error("a schema apply is in progress")]
-    ApplyInProgress,
     #[error("the retained deployment cannot be restored: {0}")]
     InvalidRetained(String),
     #[error("the app's lifecycle revision is exhausted")]
@@ -450,7 +448,7 @@ pub async fn archive(
 /// app with no staged deployment, publishes nothing.
 ///
 /// # Errors
-/// Refuses an apply in progress, an invalid retained manifest, schema
+/// Refuses an invalid retained manifest, schema
 /// admission and a reclaimed deployment; reports storage failures. `Ok(None)`
 /// means the app is absent or deleted.
 pub async fn restore(
@@ -463,19 +461,6 @@ pub async fn restore(
     };
     if state.archived_at.is_none() {
         return Ok(Some(Transition::Unchanged));
-    }
-    let applying = tx
-        .entity::<applies::Entity>()?
-        .query()
-        .filter(
-            applies::app_id
-                .eq(app.as_str())?
-                .and(applies::status.eq("submitted")?),
-        )
-        .exists()
-        .await?;
-    if applying {
-        return Err(CatalogError::ApplyInProgress);
     }
     let staged = match (state.deploy_hash, state.manifest_json) {
         (Some(hash), Some(manifest)) => Some(
