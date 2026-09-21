@@ -8795,6 +8795,8 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+ "tracing",
+ "tracing-subscriber",
  "v8",
  "zeroship-bundle",
  "zeroship-core",
