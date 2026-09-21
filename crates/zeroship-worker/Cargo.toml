@@ -28,6 +28,7 @@ zeroship-storage = { workspace = true, features = ["s3"] }
 zeroship-storage-v8 = { workspace = true }
 zeroship-workflow = { workspace = true }
 zeroship-workflow-client = { workspace = true }
+zeroship-workflow-runner = { workspace = true }
 zeroship-workflow-v8 = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 ntex = { workspace = true }

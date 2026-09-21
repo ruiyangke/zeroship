@@ -21,13 +21,12 @@ use zeroship_data_orm::{
     value, OrmContext,
 };
 
-/// Resolved app services that a host may pass to its workflow thread.
+/// Resolved app journal services that a host may pass to its workflow thread.
 #[derive(Clone, Debug)]
 pub struct HostStorage {
     pub connection: ConnectionFactory,
     pub keys: ProjectKeySource,
     pub binding: DbBinding,
-    pub objects: zeroship_storage::StorageStore,
 }
 impl HostStorage {
     pub async fn open(&self) -> Result<OrmStore, WorkflowServiceError> {
@@ -259,7 +258,9 @@ impl std::fmt::Debug for Transaction {
     }
 }
 impl Transaction {
-    pub(crate) fn database(&self) -> &Database {
+    /// The ORM handle this transaction scopes to the creator journal.
+    #[must_use]
+    pub fn database(&self) -> &Database {
         &self.database
     }
     pub(crate) fn host_app_ids(&self) -> Result<Vec<AppId>, WorkflowServiceError> {

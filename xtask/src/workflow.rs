@@ -37,6 +37,8 @@ pub fn run() -> Result<()> {
             "-p",
             "zeroship-workflow-manager",
             "-p",
+            "zeroship-workflow-runner",
+            "-p",
             "zeroship-workflow-schema",
             "-p",
             "zeroship-workflow-v8",

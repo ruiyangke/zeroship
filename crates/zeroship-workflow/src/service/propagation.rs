@@ -44,7 +44,7 @@ impl Default for PropagationOptions {
     }
 }
 impl PropagationOptions {
-    pub(super) fn validate(self) -> Result<(), WorkflowServiceError> {
+    pub fn validate(self) -> Result<(), WorkflowServiceError> {
         if self.page_size == 0 || i64::from(self.page_size) > MAX_ROW_LIMIT {
             return Err(WorkflowServiceError::InvalidRequest(
                 "invalid workflow propagation page bound".into(),

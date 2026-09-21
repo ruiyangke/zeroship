@@ -31,7 +31,6 @@ pub struct WorkflowService {
     operation_policy: Option<CapturedPolicy>,
     pub(crate) deployments: Option<super::AppDeployments>,
     pub(crate) signal_authority: Option<Arc<super::SignalAuthority>>,
-    pub(crate) payload_storage: Option<zeroship_storage::Storage>,
     ingress: Option<Rc<dyn super::IngressEpochs>>,
 }
 impl std::fmt::Debug for WorkflowService {
@@ -66,9 +65,13 @@ impl WorkflowService {
             operation_policy: None,
             deployments: None,
             signal_authority: None,
-            payload_storage: None,
             ingress: None,
         })
+    }
+    /// The host policy registry this service admits work against.
+    #[must_use]
+    pub const fn policies(&self) -> &Arc<super::HostPolicies> {
+        &self.policies
     }
     #[must_use]
     pub fn with_signal_authority(mut self, authority: Arc<super::SignalAuthority>) -> Self {
@@ -95,11 +98,15 @@ impl WorkflowService {
         })
     }
 
+    /// Open a creator journal transaction bound to the captured policy.
+    ///
+    /// # Errors
+    /// Reports a withdrawn policy capture and journal storage failures.
     #[expect(
         clippy::future_not_send,
         reason = "Compio drives the journal on its owning runtime thread"
     )]
-    pub(crate) async fn begin(&self) -> Result<Transaction, WorkflowServiceError> {
+    pub async fn begin(&self) -> Result<Transaction, WorkflowServiceError> {
         let captured = self.capture_policy();
         let mut tx = match &captured {
             Some(captured) => captured.run(self.store.begin()).await?,
@@ -211,7 +218,11 @@ impl AppWorkflows {
             .expect("app workflow policy binding")
     }
 
-    pub(crate) fn with_authority(
+    /// Retain an already captured authority for every operation on this handle.
+    ///
+    /// # Errors
+    /// Refuses authority captured from another binding, and one already spent.
+    pub fn with_authority(
         mut self,
         authority: super::policy::PolicyAuthority,
     ) -> Result<Self, WorkflowServiceError> {
@@ -226,6 +237,29 @@ impl AppWorkflows {
     #[must_use]
     pub fn app_id(&self) -> &AppId {
         &self.app
+    }
+
+    /// The host service this app handle binds. Execution hosts read it to
+    /// reach the task protocol under the same policy generation.
+    #[must_use]
+    pub fn service(&self) -> &WorkflowService {
+        &self.service
+    }
+
+    /// The policy generation this handle was bound to. A host registry compares
+    /// it to decide whether a prepared backend still answers for the app.
+    #[must_use]
+    pub const fn binding(&self) -> &super::PolicyBinding {
+        &self.binding
+    }
+
+    /// Capture this app's policy authority for one execution attempt. A later
+    /// refresh may authorize new work but never extends this capture.
+    ///
+    /// # Errors
+    /// Reports the refusal recorded when fresh authority was already gone.
+    pub fn captured_authority(&self) -> Result<super::PolicyAuthority, WorkflowServiceError> {
+        self.capture_policy().authority().cloned()
     }
 
     /// Establish ingress epochs through the host's policy binding for this app.

@@ -48,4 +48,23 @@ pub trait WorkflowBackend: Send + Sync + std::fmt::Debug {
     ) -> Result<Vec<u8>, WorkflowServiceError>;
 }
 
+/// Resolves a completed step's recorded output to bytes.
+///
+/// This crate records which payload a step owns and proves that ownership; it
+/// moves no payload bytes and holds no object store. The host that owns the
+/// store supplies this, and `api` arrives already carrying the policy
+/// generation the call is bound to.
+#[async_trait(?Send)]
+pub trait StepOutputReader: Send + Sync + std::fmt::Debug {
+    async fn read(
+        &self,
+        api: &crate::service::AppWorkflows,
+        run_id: &str,
+        name: &str,
+        occurrence: u32,
+    ) -> Result<Vec<u8>, WorkflowServiceError>;
+}
+
+pub type SharedStepOutputs = Arc<dyn StepOutputReader>;
+
 pub type SharedWorkflowBackend = Arc<dyn WorkflowBackend>;

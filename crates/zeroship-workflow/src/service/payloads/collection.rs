@@ -8,12 +8,12 @@
 
 #![expect(
     clippy::future_not_send,
-    reason = "payload cleanup uses compio-local transactions and storage"
+    reason = "payload cleanup uses compio-local transactions"
 )]
 
 use super::{
-    AppId, Transaction, WorkflowService, WorkflowServiceError, deadline, lock_app, models, payload,
-    storage, storage_error, typed_id,
+    AppId, PayloadDeleter, Transaction, WorkflowService, WorkflowServiceError, deadline, lock_app,
+    models, payload, typed_id,
 };
 use crate::service::fence::changed_once;
 
@@ -27,25 +27,22 @@ struct Fenced {
 }
 
 impl WorkflowService {
-    pub(in crate::service) async fn collect_payload_checked(
+    pub(in crate::service) async fn collect_payload_checked<D: PayloadDeleter>(
         &self,
         app: &AppId,
         id: &str,
         cutoff: i64,
         check: &impl Fn() -> Result<(), WorkflowServiceError>,
+        deleter: &D,
     ) -> Result<bool, WorkflowServiceError> {
         check()?;
         typed_id::parse_with_prefix(id, typed_id::WORKFLOW_PAYLOAD_PREFIX)
             .map_err(|_| invalid())?;
-        let storage = storage(self)?;
         let Some(fenced) = Box::pin(self.fence_payload(app, id, cutoff, check)).await? else {
             return Ok(false);
         };
         check()?;
-        storage
-            .delete(app.as_str(), id)
-            .await
-            .map_err(storage_error)?;
+        deleter.delete(app, id).await?;
         check()?;
         let mut tx = self.begin().await?;
         lock_app(&mut tx, app).await?;

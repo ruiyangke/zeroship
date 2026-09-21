@@ -14,12 +14,12 @@ use zeroship_core::{
     schema_name::SchemaName,
     workflow_coordination::{AssignedScope, WorkerId},
 };
+use zeroship_workflow_runner::{
+    assignments::{CreatorFactory, CreatorRuntime},
+    ObjectStepOutputs, PayloadObjects, TaskPayloadLimits, WorkerBinding,
+};
 use zeroship_workflow::{
     service::{
-        runner::{
-            assignments::{CreatorFactory, CreatorRuntime},
-            TaskPayloadLimits,
-        },
         store::HostStorage,
         AppDeployments, HostPolicies, IngressEpochs, PolicyBinding, SignalAuthority,
         WorkerIdentity, WorkflowService,
@@ -44,6 +44,7 @@ use zeroship_workflow_v8::V8TaskExecutor;
 #[derive(Clone)]
 pub struct WorkflowResources {
     pub storage: HostStorage,
+    pub objects: PayloadObjects,
     pub deployments: AppDeployments,
     pub signal_authority: Option<Arc<SignalAuthority>>,
     pub contexts: Rc<dyn WorkflowContextProvider>,
@@ -196,23 +197,29 @@ impl<P: WorkflowResourceProvider> WorkflowCreatorFactory<P> {
                     self.policies.clone(),
                 )
                 .await?
-                .with_payload_storage(resources.storage.objects)?
                 .with_deployments(resources.deployments);
                 if let Some(authority) = resources.signal_authority {
                     service = service.with_signal_authority(authority);
                 }
                 let app = service.register_app(policy).await?.with_ingress(ingress);
-                let tasks = Rc::new(app.tasks(self.worker.clone()));
+                let tasks = Rc::new(app.tasks(self.worker.clone(), resources.objects.clone()));
                 // Workflow and request isolates share one client of this app's
                 // engine, bound to the generation being prepared. Its journal
                 // is the creator database this service was opened over.
-                let backend = app.clone().into_backend(&service, self.payloads.max_payload_bytes)?;
+                let backend = app.clone().into_backend(
+                    &service,
+                    Arc::new(ObjectStepOutputs::new(
+                        resources.objects.clone(),
+                        self.payloads.max_payload_bytes,
+                    )?),
+                )?;
                 let loader = Rc::new(WorkerWorkflowRuntimeLoader::new(contexts, backend.clone()));
                 let executor = Rc::new(V8TaskExecutor::new(loader, tasks, self.payloads)?);
                 Ok(CreatorRuntime {
                     app,
                     executor,
                     backend,
+                    objects: resources.objects,
                 })
             })
             .await

@@ -21,7 +21,7 @@ fn worker_with_database() -> Worker {
     Worker::with_kernel(
         10,
         crate::cache::KernelConfig {
-            workflows: zeroship_workflow::service::runner::ready::ReadyApps::default(),
+            workflows: zeroship_workflow_runner::ready::ReadyApps::default(),
             db_service: Some(crate::cache::fixture::database_service(
                 "postgresql://fixture:fixture@localhost/unused",
             )),

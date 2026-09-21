@@ -44,7 +44,7 @@ pub struct WorkflowRun {
 
 #[derive(Clone)]
 pub(crate) struct TaskOutputReader {
-    pub reader: Rc<zeroship_workflow::service::runner::TaskPayloadReader>,
+    pub reader: Rc<zeroship_workflow_runner::TaskPayloadReader>,
     pub interrupt: zeroship_runtime::RuntimeInterrupt,
 }
 

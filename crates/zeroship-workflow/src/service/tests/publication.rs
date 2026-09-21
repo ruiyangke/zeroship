@@ -4,6 +4,7 @@
 )]
 
 use super::*;
+pub(in crate::service) use super::manager_queue::Manager;
 use crate::{
     operations::{RestartOptions, RunOperation},
     service::{publication::JobPublisher, AppWorkflows, WorkerIdentity},
@@ -11,16 +12,10 @@ use crate::{
 };
 use std::{cell::Cell, time::Duration};
 use zeroship_core::{
-    schema_name::SchemaName,
     workflow_coordination::Revision,
-    workflow_deployments::{HoldGeneration, HoldReceipt, HoldScope, HoldState},
     workflow_jobs::{BroadcastId, DeploymentId, JobOperation, JobSpec, PropagationId},
 };
-use zeroship_data_orm::binding::DbBinding;
-use zeroship_workflow_manager::{
-    retention::{HoldClient, HoldFuture},
-    Options, Queue,
-};
+use zeroship_workflow_manager::Queue;
 
 enum FaultDb {
     Sqlite(rusqlite::Connection),
@@ -360,110 +355,6 @@ async fn executable_identity(store: Rc<OrmStore>, _: &FaultDb) {
         original
     );
     assert_eq!(manager.count(), 1);
-}
-
-/// Publication tests isolate the journal outbox from artifact retention. The
-/// manager's retention suite supplies a real catalog for deployment safety.
-#[derive(Debug)]
-struct PublicationHolds;
-
-impl PublicationHolds {
-    fn receipt(
-        app: &AppId,
-        deployment: &DeploymentId,
-        generation: HoldGeneration,
-        state: HoldState,
-    ) -> HoldReceipt {
-        HoldReceipt {
-            app_id: app.clone(),
-            deploy_id: deployment.as_str().into(),
-            deploy_hash: zeroship_bundle::sha256_hex(deployment.as_str().as_bytes()),
-            holder_id: HoldScope::for_queue(app.clone()).holder().into(),
-            generation,
-            state,
-        }
-    }
-}
-
-impl HoldClient for PublicationHolds {
-    fn acquire<'a>(
-        &'a self,
-        app: &'a AppId,
-        deployment: &'a DeploymentId,
-        generation: HoldGeneration,
-    ) -> HoldFuture<'a> {
-        Box::pin(async move { Ok(Self::receipt(app, deployment, generation, HoldState::Held)) })
-    }
-
-    fn release<'a>(
-        &'a self,
-        app: &'a AppId,
-        deployment: &'a DeploymentId,
-        generation: HoldGeneration,
-    ) -> HoldFuture<'a> {
-        Box::pin(async move {
-            Ok(Self::receipt(
-                app,
-                deployment,
-                generation,
-                HoldState::Released,
-            ))
-        })
-    }
-}
-
-pub(in crate::service) struct Manager {
-    _directory: tempfile::TempDir,
-    pub(in crate::service) path: std::path::PathBuf,
-    pub(in crate::service) queue: Queue,
-}
-impl Manager {
-    pub(in crate::service) async fn new(app: &AppId) -> Self {
-        Self::with_options(app, Options::default()).await
-    }
-    pub(super) async fn with_options(app: &AppId, options: Options) -> Self {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("manager.sqlite");
-        let connection = rusqlite::Connection::open(&path).unwrap();
-        connection
-            .execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;")
-            .unwrap();
-        connection
-            .execute_batch(include_str!(
-                "../../../../zeroship-workflow-manager/schema/sqlite.sql"
-            ))
-            .unwrap();
-        let queue = Self::open_with_options(&path, options).await;
-        queue.register_scope(app).await.unwrap();
-        Self {
-            _directory: directory,
-            path,
-            queue,
-        }
-    }
-    async fn open(path: &Path) -> Queue {
-        Self::open_with_options(path, Options::default()).await
-    }
-    async fn open_with_options(path: &Path, options: Options) -> Queue {
-        Queue::connect(
-            DbBinding::platform(
-                "workflow_manager",
-                "publication-test",
-                SchemaName::new("main").unwrap(),
-            ),
-            &format!("sqlite:{}", path.display()),
-            options,
-            Rc::new(PublicationHolds),
-        )
-        .await
-        .unwrap()
-    }
-    fn count(&self) -> i64 {
-        rusqlite::Connection::open(&self.path)
-            .unwrap()
-            .query_row("SELECT count(*) FROM jobs", [], |row| row.get(0))
-            .unwrap()
-    }
 }
 
 #[derive(Clone, Copy)]

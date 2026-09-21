@@ -285,8 +285,11 @@ impl HostPolicies {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn current_binding(
+    /// The binding this registry already holds for an app.
+    ///
+    /// # Errors
+    /// Refuses an app with no installed policy.
+    pub fn current_binding(
         self: &Arc<Self>,
         app: &AppId,
     ) -> Result<PolicyBinding, WorkflowServiceError> {
@@ -344,7 +347,7 @@ impl PolicyBinding {
         Arc::ptr_eq(&self.registry, registry)
     }
 
-    pub(crate) fn same_binding(&self, other: &Self) -> bool {
+    pub fn same_binding(&self, other: &Self) -> bool {
         self.belongs_to(&other.registry)
             && self.app == other.app
             && self.generation == other.generation
@@ -436,7 +439,11 @@ impl PolicyBinding {
         self.current(&state).ok()?.snapshot.as_ref()?.ingress_epoch
     }
 
-    pub(crate) fn authority(&self) -> Result<PolicyAuthority, WorkflowServiceError> {
+    /// Capture this binding's live authority for one operation.
+    ///
+    /// # Errors
+    /// Refuses a retired or revoked binding and a poisoned registry.
+    pub fn authority(&self) -> Result<PolicyAuthority, WorkflowServiceError> {
         let state = self.registry.state.read().map_err(|_| unavailable("registry lock poisoned"))?;
         let current = self.current(&state)?;
         let snapshot = current.snapshot.as_ref().ok_or_else(|| unavailable("no installed policy for this binding"))?;
@@ -578,13 +585,25 @@ pub struct PolicyAuthority {
     pub(super) policy: AppPolicy,
     pub(super) ingress_epoch: Option<Revision>,
 }
+impl std::fmt::Debug for PolicyAuthority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PolicyAuthority")
+            .field("revision", &self.revision)
+            .field("epoch", &self.epoch)
+            .finish_non_exhaustive()
+    }
+}
 
 impl PolicyAuthority {
     pub(crate) fn belongs_to(&self, binding: &PolicyBinding) -> bool {
         self.binding.same_binding(binding)
     }
 
-    pub(crate) fn check(&self) -> Result<(), WorkflowServiceError> {
+    /// Confirm this capture still authorizes work.
+    ///
+    /// # Errors
+    /// Refuses an expired lease and a superseded or revoked generation.
+    pub fn check(&self) -> Result<(), WorkflowServiceError> {
         if self
             .deadline
             .is_some_and(|deadline| deadline <= Instant::now())
@@ -630,11 +649,23 @@ impl PolicyAuthority {
         .effective())
     }
 
-    pub(crate) fn cancelled(&self) -> Shared<BoxFuture<'static, ()>> {
+    pub fn cancelled(&self) -> Shared<BoxFuture<'static, ()>> {
         self.cancelled.clone()
     }
 
-    pub(crate) fn run<'a, T: 'a>(
+    /// The instant this capture stops authorizing work, when the lease bounds it.
+    #[must_use]
+    pub const fn deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+
+    /// The limits this capture admits work under.
+    #[must_use]
+    pub const fn policy(&self) -> &AppPolicy {
+        &self.policy
+    }
+
+    pub fn run<'a, T: 'a>(
         &'a self,
         operation: impl Future<Output = Result<T, WorkflowServiceError>> + 'a,
     ) -> LocalBoxFuture<'a, Result<T, WorkflowServiceError>> {

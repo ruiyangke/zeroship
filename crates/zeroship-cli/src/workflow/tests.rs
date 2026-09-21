@@ -8,11 +8,13 @@ use zeroship_workflow::{
     backend::WorkflowBackend,
     operations::{RunState, RunStatus, SignalOptions, StartOptions},
     service::{
-        runner::{delivery::JobTransport, ExecutionBudget, TaskExecution, TaskExecutor},
         AppPolicy, AppWorkflows, HostPolicies, PolicySnapshot, RequestId, TaskAssignment,
         WorkflowService,
     },
     WorkflowServiceError,
+};
+use zeroship_workflow_runner::{
+    delivery::JobTransport, ExecutionBudget, TaskExecution, TaskExecutor,
 };
 use zeroship_workflow_manager::{
     local::LocalPlatform,
@@ -116,10 +118,13 @@ fn test_storage(root: &Path, app: &AppId) -> HostStorage {
             )
             .unwrap(),
         ),
-        objects: zeroship_storage::StorageStore::from_backend(Arc::new(
-            zeroship_storage::LocalFs::new(root.join(".zeroship/storage")),
-        )),
     }
+}
+
+fn test_objects(root: &Path) -> zeroship_storage::StorageStore {
+    zeroship_storage::StorageStore::from_backend(Arc::new(zeroship_storage::LocalFs::new(
+        root.join(".zeroship/storage"),
+    )))
 }
 
 /// Push reconciliation past every wait here, so only immediate publication
@@ -152,6 +157,7 @@ fn start_with<C: Composition>(
         config,
         bundle,
         test_storage(root, app),
+        test_objects(root),
         [("APP_ID".into(), "untrusted-variable".into())].into(),
         peers,
         RuntimeLimits::default(),

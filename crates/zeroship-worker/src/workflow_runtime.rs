@@ -191,6 +191,15 @@ mod tests {
 
     use super::*;
     use serde_json::{json, Value};
+
+    /// The creator seam's step-output reader, over a store beneath `directory`.
+    fn step_outputs(directory: &std::path::Path) -> zeroship_workflow::SharedStepOutputs {
+        let objects = PayloadObjects::open(zeroship_storage::StorageStore::from_backend(
+            Arc::new(zeroship_storage::LocalFs::new(directory.join("objects"))),
+        ))
+        .unwrap();
+        Arc::new(ObjectStepOutputs::new(objects, 1024).unwrap())
+    }
     use std::{cell::RefCell, collections::BTreeMap, time::Duration};
     use zeroship_bundle::{
         BlobStore, LocalDiskBlobStore, Manifest, RuntimeDescriptorEntry, WorkerCode,
@@ -202,6 +211,7 @@ mod tests {
     use zeroship_runtime::{
         plugin::NativeRegistrar, CancelFlag, FetchOutcome, RequestCtx, SettledFetch,
     };
+    use zeroship_workflow_runner::{ObjectStepOutputs, PayloadObjects};
     use zeroship_workflow::service::{
         schema, store::OrmStore, AppPolicy, HostPolicies, PolicySnapshot, WorkflowService,
     };
@@ -276,7 +286,7 @@ mod tests {
                 .register_app(&binding)
                 .await
                 .unwrap()
-                .into_backend(&service, 1024)
+                .into_backend(&service, step_outputs(directory.path()))
                 .unwrap();
             let context = WorkflowAppContext {
                 schema: SchemaName::new(&tenant).unwrap(),
@@ -477,7 +487,7 @@ mod tests {
             .service
             .bind_app(&foreign)
             .unwrap()
-            .into_backend(&fixture.service, 1024)
+            .into_backend(&fixture.service, step_outputs(fixture._directory.path()))
             .unwrap();
         assert!(matches!(
             WorkerWorkflowRuntimeLoader::new(fixture.contexts.clone(), foreign_backend)
@@ -613,7 +623,7 @@ mod tests {
             .register_app(&replacement)
             .await
             .unwrap()
-            .into_backend(&fixture.service, 1024)
+            .into_backend(&fixture.service, step_outputs(fixture._directory.path()))
             .unwrap();
         fixture.contexts.0.borrow_mut().env = EnvSnapshot::vars_only(json!({"COLOR":"green"}));
 
