@@ -144,17 +144,21 @@ impl Platform {
             )
             .await
             .unwrap();
-        self.admin
-            .execute(
-                "INSERT INTO zeroship.projects(id,organization_id,slug,name) \
-                 VALUES($1,$2,'default','Placement Test')",
-                &[&project.as_str(), &organization.as_str()],
-            )
-            .await
-            .unwrap();
         // The zone is always named: the column carries no default, so Control
         // resolves the deployment's one zone when a caller names none.
         let zone = zone.unwrap_or(DEFAULT_ZONE_ID);
+        // The project is seeded in the SAME zone as the app below.
+        // `apps_project_zone_fkey` requires an app's zone copy to equal its
+        // project's, and both rows freeze their zone by trigger once written,
+        // so the pair has to agree at INSERT and cannot be reconciled after.
+        self.admin
+            .execute(
+                "INSERT INTO zeroship.projects(id,organization_id,slug,name,execution_zone_id) \
+                 VALUES($1,$2,'default','Placement Test',$3)",
+                &[&project.as_str(), &organization.as_str(), &zone],
+            )
+            .await
+            .unwrap();
         let inserted = self
             .admin
             .execute(
