@@ -36,7 +36,6 @@ const typedIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
   app_egress_rules: ["app_id", "created_by"],
   app_env_expose: ["app_id"],
   app_oauth_clients: ["app_id"],
-  app_schema_applies: ["app_id", "submitted_by"],
   app_scope_defs: ["app_id"],
   app_usage: ["app_id"],
   app_usage_history: ["app_id"],

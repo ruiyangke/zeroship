@@ -123,7 +123,6 @@ Ownership is not recorded anywhere in the tree today.
 ### `migrate-server` - schema application and cluster convergence
 
     datastores                  self-registered from pg_control_system()
-    app_schema_applies          the apply ledger
     databases                   CONTESTED - control declares, migrate converges
     database_bindings           CONTESTED - same
 
@@ -727,7 +726,6 @@ not, grouped by the service this document assigns them to:
     control          organizations            organization_members
                      organization_invites     projects
                      project_members          app_deploy_commands
-    migrate-server   app_schema_applies
 
 `identity_links` and `principal_grants` are absent from that list because the
 assignment places them in auth, alongside `users`. Open question 4 disputes
@@ -741,10 +739,10 @@ Re-derive the set by tracking the enclosing table of each reference:
          /references: \{ table: "users"/ { if (cur != "") print cur }' \
       db/migrations-ts/*.ts | sort -u
 
-then subtract the auth column of the assignment above. A named set across three
-services is a design problem with a shape; the raw FK count was a wall, and it
-was the wrong measure. The shape is wider than a first pass suggested, and the
-auth/control edge carries most of it.
+then subtract the auth column of the assignment above. A named set spanning
+gateway and control is a design problem with a shape; the raw FK count was a
+wall, and it was the wrong measure. The shape is wider than a first pass
+suggested, and the auth/control edge carries most of it.
 
 ---
 

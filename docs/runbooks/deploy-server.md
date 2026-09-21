@@ -276,10 +276,13 @@ The complete namespace matcher includes the
 `/v1/apps/{app_id}/databases/{database_id}/migrations/apply` route. Control must
 not declare a `/v1` route.
 
-Verify a migration through the public ingress and inspect both the HTTP response
-and `applied_versions`. A successful idempotent request can write a
-`zeroship.app_schema_applies` row with `applied_versions = []`, so a fresh ledger
-row alone does not prove that DDL ran.
+Verify a migration through the public ingress by reading the apply response
+body, not the status code. A 200 carries `applied` and `skipped`
+(`ApplyMigrationsResponse`, `crates/zeroship-migrate-server/src/apply.rs`); an
+idempotent repeat answers 200 with `applied: []` and the versions under
+`skipped`, so the status alone does not prove that DDL ran. The record of what
+ran is the engine journal `__zeroship_schema_migrations` in the app's own
+schema; the control plane keeps none.
 
 ```yaml
 # /opt/zeroship-deploy/compose/docker-compose.override.yml

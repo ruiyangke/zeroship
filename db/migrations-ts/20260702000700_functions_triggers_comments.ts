@@ -41,6 +41,5 @@ export default {
     table("refunds", { schema: "zeroship" }).trigger("refunds_immutable_trg").create({ timing: "before", events: ["delete", "update"], forEach: "row", execute: "refunds_immutable" });
     table("refunds", { schema: "zeroship" }).trigger("refunds_no_over_refund_trg").create({ timing: "before", events: ["insert"], forEach: "row", execute: "refunds_no_over_refund" });
     table("app_oauth_clients", { schema: "zeroship" }).column("sector_identifier").comment("Immutable after insert: refresh-token revocation markers persist the derived pairwise subject, so changing the sector would de-align stored family-kill markers from live access-token subjects.");
-    table("app_schema_applies", { schema: "zeroship" }).comment("One row per schema-apply request the migration service accepted, and the platform's own record of what an app's schema corresponds to. The engine journal cannot serve as one: it lives in the app's own schema, whose migrator role owns it and can drop it. App isolation is enforced by the migration service's authorization plus app_id-scoped primary-key lookups; no table RLS, because the service role can hold BYPASSRLS.");
   },
 };

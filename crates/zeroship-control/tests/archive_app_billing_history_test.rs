@@ -437,28 +437,10 @@ async fn restore_admits_a_staged_deploy_on_its_bindings_not_on_an_applied_schema
         .expect("app exists");
 
     let descriptor_hash = "5".repeat(64);
-    client
-        .execute(
-            "INSERT INTO zeroship.app_schema_applies \
-                (app_id, migration_id, status, request_body, effective_profile, \
-                 ceiling_id, ceiling_version, applied_versions, submitted_by, \
-                 applied_at, descriptor_sha256) \
-             VALUES ($1, $2, 'applied', '{}'::jsonb, '{}'::jsonb, 'test-ceiling', 1, \
-                     '[]'::jsonb, $3, now(), $4)",
-            &[
-                &app.id.as_str(),
-                &Uuid::now_v7(),
-                &owner.as_str(),
-                &descriptor_hash,
-            ],
-        )
-        .await
-        .expect("record applied schema descriptor");
-
     // Restore admits the staged artifact on its BINDINGS, not on its schema:
-    // an app whose staged deploy declares no database has nothing to verify,
-    // and the applied-migration row above is now irrelevant to it. Comparing
-    // schemas here coupled every app on a shared database to every other.
+    // an app whose staged deploy declares no database has nothing to verify.
+    // Comparing schemas here coupled every app on a shared database to every
+    // other.
     assert!(
         !registry
             .get_routes()

@@ -1,7 +1,7 @@
 //! Native ORM mappings for the Control catalog rows that deploy, archive,
 //! restore, publication and deployment collection share.
 //!
-//! `apps`, `app_schema_applies` and `database_bindings` declare only the
+//! `apps` and `database_bindings` declare only the
 //! columns these operations read or write. The deployment catalog models come from
 //! `zeroship_workflow_manager::deployments` so retention fences and this
 //! catalog agree on one mapping. `tests/deploy_publication/schema.rs` compares
@@ -21,16 +21,6 @@ zeroship_data_orm::orm::schema! {
             archived_at: Nullable<Timestamp>,
             deleted_at: Nullable<Timestamp>,
             updated_at: Timestamp,
-        }
-
-        app_schema_applies {
-            #[orm(primary_key)]
-            id: BigInt,
-            app_id: Text,
-            status: Text,
-            descriptor_sha256: Text,
-            submitted_at: Timestamp,
-            applied_at: Nullable<Timestamp>,
         }
 
         database_bindings {
