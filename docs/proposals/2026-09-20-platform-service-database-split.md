@@ -456,6 +456,45 @@ shown to be buildable as specified.
 
 ---
 
+## The assignment, checked against the writers
+
+The rule says the writer owns the table, so the assignment is checkable. Every
+table the corpus creates is assigned to some service, and for every table whose
+production writer is NOT the service it is assigned to, the assignment already
+carries a `CONTESTED` note naming the other writers. No silent mismatch
+survives:
+
+    grep -rnoE '(INSERT INTO|UPDATE|DELETE FROM)[[:space:]]+zeroship\.[a-z_]+' \
+        --include='*.rs' crates/*/src/ \
+      | grep -vE '/tests?\.rs:|/tests/|_tests?/|_test\.rs:|/bin/|/fixture' \
+      | sed -E 's|^crates/zeroship-([a-z0-9-]+)/src/.*zeroship\.([a-z_]+)$|\2 \1|' \
+      | sort -u
+
+Three exclusions in that pipeline are load-bearing, and each was found by a
+false positive it let through. A test module in a file named tests.rs is a file, not a
+directory, so excluding a directory named `tests` leaves
+`crates/zeroship-gateway/src/sessions/tests.rs` in the population.
+`crates/zeroship-control/src/bin/dev_provision.rs` is a separate binary target
+that inserts into `zeroship.users` as a development tool rather than as the
+control service. And a `#[cfg(test)]` module inside an ordinary source file is
+invisible to any path filter -
+`crates/zeroship-data-cdc-server/src/source.rs` writes `zeroship.databases`
+inside one, against stand-in tables it creates itself. Before those exclusions
+the sweep reported control and gateway writing `zeroship.users`, which neither
+does.
+
+**A residue worth deciding on.** These carry no literal-SQL write in any crate
+or in the corpus: `app_deploy_commands`, `app_lifecycle_intents`, `app_usage`,
+`app_usage_history`, `execution_zones`, plus `cron_state` and `dpop_jti` from
+open question 5. That is not proof they are unwritten - a table named through a
+`format!` or reached by an ORM is invisible to this sweep - but the first five
+are read by code that never writes them, which is the shape `cron_state` and
+`dpop_jti` have. `organization_roles`, `worker_join_tokens` and
+`worker_join_token_claims` looked the same and are not: the corpus writes them
+directly.
+
+---
+
 ## Re-deriving the claims above
 
 Every sentence in this document that describes what a service reads is a claim
