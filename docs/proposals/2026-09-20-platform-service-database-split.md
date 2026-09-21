@@ -93,7 +93,7 @@ Ownership is not recorded anywhere in the tree today.
     credit_ledger               refunds                  refund_provider_refs
     payouts                     payout_failures          stripe_events_seen
     provider_dead_letter        execution_zones          authz_decisions
-    audit_events                CONTESTED - three writers
+    audit_events                CONTESTED - auth and gateway both write
     worker_instances            CONTESTED - three consumers
     worker_join_tokens          worker_join_token_claims
     worker_join_signers         worker_join_signer_zones
@@ -363,13 +363,30 @@ What a service reaches in the platform schema, as SQL:
     grep -rhoE '(FROM|INTO|UPDATE|JOIN)[[:space:]]+zeroship\.[a-z_]+' \
         --include='*.rs' crates/<crate>/src/ | grep -oE 'zeroship\.[a-z_]+' | sort -u
 
-Run against `zeroship-worker` this returns nothing, which is the worker claim in
-step 1. Run against `zeroship-gateway` it returns the set step 3 names. Whether
-a role exists is the same question asked of the corpus:
+That pattern alone is not enough, because a table named only as a FUNCTION
+ARGUMENT never sits beside a SQL keyword. Control's audit sweep builds
+`DELETE FROM {table}` and takes the name from its caller, and auth's token
+sweep does the same, so `zeroship.authz_decisions`,
+`zeroship.magic_completions` and `zeroship.email_verifications` are invisible
+to it. The second half catches those:
+
+    grep -rhoE '"zeroship\.[a-z_]+"' --include='*.rs' crates/<crate>/src/ | tr -d '"'
+
+and it is wider than the truth in the other direction: it also returns
+`zeroship.tenant_app` and `zeroship.tenant_client`, which are GUC names rather
+than tables, along with `zeroship.ai` and `zeroship.jsonc`. Run both, union
+them, and READ each name the second adds - the two are blind in opposite
+directions and neither is the answer by itself.
+
+Run against `zeroship-worker`, both halves return nothing, which is the worker
+claim in step 1 and is the stronger form of it: the claim survives the wider
+instrument, not only the one that could not have seen a dynamic name. Whether a
+role exists is the same question asked of the corpus:
 
     grep -rho 'zeroship_[a-z_]*' db/ | sort -u
 
-Two ways this sweep lies, both of which it did while this section was written:
+Two ways the SQL-anchored sweep lies, both of which it did while this section
+was written:
 
 **`zeroship\.` is not a schema reference.** The bare pattern also matches
 `spiffe://zeroship.ai/svc/worker`, which is how the worker's identity claims are
@@ -462,8 +479,16 @@ and it was the wrong measure.
    projection be made synchronous with the lock write?** If it cannot, the
    authorization gap is a property of the cut rather than of its timing, and
    step 6 of the sequencing states the two mechanisms that could close it.
-2. **One audit store or one per service?** `audit_events` has three writers and
-   no reader.
+2. **One audit store or one per service?** `audit_events` is written by auth
+   (`crates/zeroship-auth/src/store/audit.rs` inserts,
+   `crates/zeroship-auth/src/cron/audit_retention.rs` deletes on retention) and
+   by gateway (`crates/zeroship-gateway/src/backchannel_logout.rs`), and has no
+   production reader - every `SELECT` against it is a test fixture. Control is
+   NOT a third writer: its own sweep passes `zeroship.app_audit` and
+   `zeroship.authz_decisions`, tables it already owns. So the precedent for one
+   store per service exists in the tree, and the live contest is a two-service
+   one between auth and gateway - which this document's sequencing splits
+   across step 3 and step 6.
 3. **Does `service_assertion_replay` stay shared?** The argument for sharing is
    weaker than its header claims.
 4. **Which database holds an auth-domain row written only by control?**
