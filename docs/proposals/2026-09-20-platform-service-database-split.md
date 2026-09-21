@@ -501,11 +501,32 @@ statement or not at all. Three groups fall out:
       worker_join_token_claims
 
 The first group is unreferenced and should be dropped rather than assigned. The
-third is explained. The second is the one that needs a person: a test that
-installs a trigger to make an insert fail implies an insert exists, and no
-statement in any crate or in the corpus performs one. Either the tests assert a
-negative, or a writer is reached by a path none of the instruments in this
-document can see. Resolve it before assigning those two.
+The third is explained. The second is a specific finding rather than a gap:
+**control is the intended writer, named in the corpus, and no statement
+exercises the grant.** `db/migrations-ts/20260914000100_deploy_publication.ts`
+declares
+
+    privileges: ["select", "insert"],
+    on: { kind: "table", schema: "zeroship", names: ["app_deploy_commands"] },
+    to: ["zeroship_control"],
+
+    privileges: ["select", "insert", "update"],
+    on: { kind: "table", schema: "zeroship", names: ["app_lifecycle_intents"] },
+    to: ["zeroship_control"],
+
+Three independent signals agree: the corpus grants control INSERT on both and
+UPDATE on the intents table, control's tests install a BEFORE INSERT trigger on
+`app_lifecycle_intents` to make an insert fail, and no statement in any crate
+performs one. Nobody writes a grant for a table nobody is meant to write, and
+nobody writes a trigger to fail an insert that cannot happen. The writer is
+MISSING rather than hidden.
+
+That makes these two unlike the unreferenced group: they are unfinished, not
+dead, and the assignment to control is supported by the grant even though no
+code exercises it. What this document cannot say is whether the writer was
+removed, never written, or lives somewhere these instruments do not reach -
+that needs a person, and it is a question about control rather than about the
+split.
 
 ---
 
