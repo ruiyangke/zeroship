@@ -1112,6 +1112,22 @@ Control has since stopped serving, and the classifier's only input is the bindin
 it would have answered `SCHEMA_EPOCH_STALE` for that case either way. What distinguishes a
 withdrawn binding is a re-resolution, which is a protocol rather than a classification.
 
+**That protocol is not built, and the epoch producer made its absence reachable.** A worker
+resolves an app's binding once, when it loads the app, and `SuppliedAppBindings` is cleared only
+by `deprovision_app` - so a binding's lifetime is the worker PROCESS while the isolate's is the
+DEPLOY, and nothing reconciles the two. An apply now advances the head, so the second
+schema-changing apply against a resident app retires the role that app's binding names, and every
+session it opens is refused at `SET LOCAL ROLE`. The fence is firing correctly there: the isolate
+IS behind the schema. What is missing is that nothing REPLACES the isolate, and re-resolution
+belongs with that replacement rather than beside it. Carrying the epoch into the store under a
+live isolate is the wrong repair - `binding_for` keys on the app and the database, `deploy_token`
+is attached rather than keyed, and `binding_for_isolate` reads the store at each `env.db` call, so
+a store that followed the epoch would let code built against an older shape succeed against the
+schema that replaced it, which is the one direction this fence exists to catch. The staleness
+signals a reload already compares - `deploy_hash`, the runtime limits, `env_version` and
+`net_policy`, in `needs_reload` (`crates/zeroship-worker/src/sync.rs`) - are where the epoch
+belongs, so that a moved epoch reloads the app.
+
 The codes being pairwise distinct is bound by
 `pg_error::the_three_setup_outcomes_are_pairwise_distinct`, so a later collapse is a red test
 rather than a silent merge. `crates/zeroship-data-orm/tests/postgres_binding_fence.rs` measures

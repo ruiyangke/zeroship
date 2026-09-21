@@ -1363,7 +1363,7 @@ convenience; the code is the contract, and `isOptimisticLockError(e)` matches on
 | `OPTIMISTIC_CONCURRENCY` | `update` with a CAS version that didn't match. |
 | `NOT_FOUND` | A unique-row lookup matched no row. |
 | `NOT_UNIQUE` | A unique-row lookup matched more than one row. |
-| `SCHEMA_EPOCH_STALE` | The binding role for the schema epoch this build was resolved at does not exist on the cluster, so the request is refused before any statement runs. Retry; a redeploy resolves the binding afresh. |
+| `SCHEMA_EPOCH_STALE` | The binding role for the schema epoch this build was resolved at does not exist on the cluster, so the request is refused before any statement runs. A worker resolves an app's binding once, when it loads the app, so a retry alone does not move it. |
 | `GRANT_REVOKED` | The database refused the app's role; a terminal HTTP 403. Restore the grant before retrying. |
 | `LIVE_IN_TRANSACTION` | `db.live()` was called inside a transaction. |
 | `SCHEMA_INVALID` | A schema declaration is malformed (empty or duplicate index name, unknown field). |

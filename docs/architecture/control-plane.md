@@ -136,6 +136,17 @@ The binding response carries the database id, the edge id and the schema epoch;
 the worker composes no part of it, and Control serves only a binding whose
 status is active and whose `observed_generation` has caught up to its
 `generation`. An app Control serves no live binding for has no `env.db`.
+Both reads happen once per app per worker process. The key is one value for the
+life of the app. The binding carries the schema epoch, which an apply that
+commits a schema delta advances, and the epoch is part of the binding role
+name - so a worker holding the epoch it first resolved composes a role the
+apply after next drops, and every session that app opens is then refused at
+`SET LOCAL ROLE`. The binding is deliberately not re-read on a bare environment
+refresh: live isolates consult the store at each `env.db` call, so carrying a
+rotation into it under a resident isolate would let code built against an older
+shape succeed against the schema that replaced it, which is the direction the
+epoch fence exists to catch. Resolving the epoch belongs with replacing the
+isolate, and nothing does that today.
 
 Control resolves the app's project from the registry and serializes initial
 provisioning by locking that project. The wrapped key lives

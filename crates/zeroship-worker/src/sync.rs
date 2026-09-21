@@ -507,21 +507,22 @@ pub async fn fetch_app_env_supplying(
     // else. An app Control serves no live binding for gets no `env.db`, which
     // is the fail-closed direction: a namespace whose every call would be
     // refused at session setup is worse than an absent one.
+    //
+    // Resolved once per app per process, like the key above. A re-read on
+    // every resolution would carry a rotated epoch into a store that live
+    // isolates consult at each `env.db` call, so an isolate built against an
+    // older shape would compose the CURRENT epoch's role and succeed against a
+    // schema its descriptor never described - the one direction the epoch
+    // fence exists to catch. So the binding follows the isolate rather than
+    // the isolate following the binding: a rotation that outruns a resident
+    // app is refused at `SET LOCAL ROLE`, and replacing the app is what
+    // installs the epoch it was built for.
     if let Some(bindings) = bindings {
         let app = app_id.as_str();
         if !bindings.is_bound(app).map_err(|error| error.to_string())? {
             let url = control_app_url(url_base, endpoints::CONTROL_APP_BINDINGS, app);
             match http_get(&url, control_authorization(service_auth)?.as_deref()).await {
-                Ok(body) => {
-                    // EVERY live binding, because `env.databases` reaches every
-                    // database this app binds. Supplying only the first would
-                    // leave the rest unresolvable at isolate build.
-                    for resolved in parse_resolved_bindings(&body)? {
-                        bindings
-                            .supply(app, resolved)
-                            .map_err(|error| error.to_string())?;
-                    }
-                }
+                Ok(body) => install_resolved_bindings(bindings, app, &body)?,
                 // An app with no live binding is ordinary: not every app
                 // declares a database. It is recorded and the environment is
                 // published without one.
@@ -535,6 +536,50 @@ pub async fn fetch_app_env_supplying(
     }
     let url = control_app_url(url_base, endpoints::CONTROL_APP_ENV, app_id.as_str());
     http_get(&url, control_authorization(service_auth)?.as_deref()).await
+}
+
+/// Install the binding set Control served for one app.
+///
+/// EVERY live binding, because `env.databases` reaches every database this app
+/// binds. Installing only the first would leave the rest unresolvable at
+/// isolate build.
+///
+/// # A response behind the store is not a failure
+///
+/// This runs on every resolution, so two of them can be in flight at once and
+/// the schema epoch only ever advances on the cluster. A response carrying an
+/// epoch BEHIND the one installed is therefore a slower read of a monotone
+/// value, not news, and the store keeps the later one and stays serving.
+/// Failing the resolution on it would let a lost race take the app's
+/// environment down with it.
+///
+/// Every other refusal fails the resolution, because every other refusal says
+/// Control resolved something this store cannot reconcile with what it holds -
+/// a different binding for a database the app already binds - and publishing
+/// an environment over that would leave one dispatch narrowing to a role
+/// another dispatch's descriptor was never built against.
+fn install_resolved_bindings(
+    bindings: &zeroship_data_orm::resolved_bindings::SuppliedAppBindings,
+    app: &str,
+    body: &str,
+) -> Result<(), String> {
+    for resolved in parse_resolved_bindings(body)? {
+        match bindings.supply(app, resolved) {
+            Ok(()) => {}
+            Err(error)
+                if error.code()
+                    == zeroship_data_orm::resolved_bindings::STALE_APP_BINDING =>
+            {
+                tracing::debug!(
+                    app_id = app,
+                    %error,
+                    "worker: control served a schema epoch behind the one installed"
+                );
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Ok(())
 }
 
 /// Decode Control's binding response: the SET of live bindings for one app.
