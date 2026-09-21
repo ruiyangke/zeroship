@@ -14,6 +14,9 @@ const bytewiseColumns = {
     "reconciliation_after_id", "reconciliation_upper_id",
   ],
   job_publications: ["id", "app_id"],
+  advance_publications: ["id", "app_id", "run_id", "deploy_id"],
+  fanout_publications: ["id", "app_id", "broadcast_id"],
+  propagation_publications: ["id", "app_id"],
   fanout_pages: ["id", "app_id", "broadcast_id"],
   propagation_pages: ["id", "app_id"],
   broadcasts: ["id", "app_id", "topic"],
@@ -326,21 +329,43 @@ export function workflowSchema(namespace) {
   // Only Advance, Fanout and Propagate are ever published, and this row holds
   // what the sweep that has not yet read the specification needs: the intent's
   // identity, the specification itself, and whether a manager receipt confirmed
-  // it.
-  //
-  // There are no per-kind columns, because there is no per-kind tuple left to
-  // store. The job id is DERIVED from the work the job names
-  // (`publication_id` in crates/zeroship-core/src/workflow_jobs.rs), so the
-  // primary key IS the deduplication key: two transactions observing the same
-  // frontier, broadcast page or propagation page compute the same id, and the
-  // second insert collides instead of adding a second job. A reader re-derives
-  // the id from the specification it decoded and refuses a row whose key its
-  // own content does not produce.
+  // it. Each operation's own projection is a row in its own table, so a kind
+  // reaches its own columns and no other's, and the key that deduplicates that
+  // kind is total there rather than a unique index over a nullable group.
   create("job_publications", {
     ...identity(), specification: text(),
     created_at: integer(), confirmed_at: t.bigInt(),
   }, ["app_id", "id"], [appFk("job_publications")]);
   index("job_publications", "pending", ["app_id", "confirmed_at", "id"]);
+  // An advance intent's due time is part of its identity: a run whose frontier
+  // revision has not moved but whose due time has is a different job, so the
+  // deduplication key carries it.
+  create("advance_publications", {
+    ...identity(), deploy_id: text(), run_id: text(), generation: integer(),
+    frontier_revision: integer(), available_at: integer(),
+  }, ["app_id", "id"], [
+    appFk("advance_publications"),
+    fk("advance_publication_intent", ["app_id", "id"], "job_publications", ["app_id", "id"]),
+  ], [
+    { name: "advance_publication_frontier", columns: ["app_id", "run_id", "generation", "frontier_revision", "available_at"] },
+  ]);
+  index("advance_publications", "deployment", ["app_id", "deploy_id"]);
+  create("fanout_publications", {
+    ...identity(), broadcast_id: text(), revision: integer(),
+  }, ["app_id", "id"], [
+    appFk("fanout_publications"),
+    fk("fanout_publication_intent", ["app_id", "id"], "job_publications", ["app_id", "id"]),
+  ], [
+    { name: "fanout_publication_broadcast", columns: ["app_id", "broadcast_id", "revision"] },
+  ]);
+  create("propagation_publications", {
+    ...identity(), propagation_id: text(), revision: integer(),
+  }, ["app_id", "id"], [
+    appFk("propagation_publications"),
+    fk("propagation_publication_intent", ["app_id", "id"], "job_publications", ["app_id", "id"]),
+  ], [
+    { name: "propagation_publication_obligation", columns: ["app_id", "propagation_id", "revision"] },
+  ]);
   create("fanout_pages", {
     ...identity(), broadcast_id: text(), revision: integer(), result: text(),
   }, ["app_id", "id"], [
