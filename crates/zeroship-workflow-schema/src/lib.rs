@@ -129,16 +129,28 @@ pub fn versions(dialect: &str) -> Option<&'static [SchemaVersion]> {
 /// The complete `PostgreSQL` series. Adding a version adds a row here and one
 /// module under `schema/migrations/`; `the_series_is_contiguous_and_current`
 /// refuses a list that drifts from the generated `VERSION`.
-const POSTGRES_VERSIONS: &[SchemaVersion] = &[SchemaVersion {
-    version: 1,
-    sql: include_str!("../schema/versions/0001.postgres.sql"),
-}];
+const POSTGRES_VERSIONS: &[SchemaVersion] = &[
+    SchemaVersion {
+        version: 1,
+        sql: include_str!("../schema/versions/0001.postgres.sql"),
+    },
+    SchemaVersion {
+        version: 2,
+        sql: include_str!("../schema/versions/0002.postgres.sql"),
+    },
+];
 
 /// The complete `SQLite` series, the peer of [`POSTGRES_VERSIONS`].
-const SQLITE_VERSIONS: &[SchemaVersion] = &[SchemaVersion {
-    version: 1,
-    sql: include_str!("../schema/versions/0001.sqlite.sql"),
-}];
+const SQLITE_VERSIONS: &[SchemaVersion] = &[
+    SchemaVersion {
+        version: 1,
+        sql: include_str!("../schema/versions/0001.sqlite.sql"),
+    },
+    SchemaVersion {
+        version: 2,
+        sql: include_str!("../schema/versions/0002.sqlite.sql"),
+    },
+];
 
 /// The dialect key for `PostgreSQL` artifacts.
 pub const POSTGRES: &str = "postgres";
