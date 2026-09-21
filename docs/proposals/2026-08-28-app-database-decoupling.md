@@ -1142,16 +1142,31 @@ binding set through `SuppliedAppBindings::replace_app` BEFORE `load_app` builds 
 cold-start path resolves the same way, because the store outlives every isolate in the process and
 a thread that has never held this app can still find one another thread resolved before the apply.
 
-**The workflow host does not take part, and that is now an exposure rather than a gap.**
+**The workflow host does not take part, and the fence does not catch it.** LIVE.
 `ProductionResources::resolve` (`crates/zeroship-worker/src/workflow_host.rs`) re-resolves on an
-env-version change alone and compares no epoch. Its isolates are pinned to the deployment a run
-replays, so it is the one builder that deliberately produces an isolate from an OLDER deployment -
-exactly the case the paragraph above names. While the store never moved, such an isolate captured
-a retired epoch and was fenced. A store that the dispatch path now advances can hand it a live
-one, and old code then reaches the schema that replaced it with no role to refuse it. Resolving it
-the way dispatch does would cement that rather than close it: a replay must not silently follow
-the schema forward. What a pinned replay owes is the epoch its own deployment was built against,
-or a refusal.
+env-version change alone and compares no epoch. A run's deployment is pinned in the journal -
+`service/app.rs` freezes `active_deploy` onto `generations.deploy_id` at `insert_run`, and
+`service/frontier.rs` resolves the hash back through that frozen key - so the workflow host is the
+one builder that deliberately produces an isolate from an OLDER deployment, and its descriptor
+comes from that pinned bundle while its epoch comes from the live store. The deploy token does not
+help: `SuppliedAppBindings::binding_for` passes it to `DbBinding::to_database` as an identity
+field, and the role is composed from the binding id and the epoch alone, so a pinned hash retrieves
+the store's CURRENT epoch. The host and every HTTP thread share one `Arc<SuppliedAppBindings>`.
+
+This pairing predates the epoch producer: a host that cold-filled the store always installed
+whatever epoch Control served at that moment. What changed is the ending. A fixed epoch eventually
+retired and `SET LOCAL ROLE` refused; a store the dispatch path advances never retires under a
+replay, so old code reaches the schema that replaced it with no role to refuse it.
+
+**Neither remedy is expressible yet, and that is the finding.** A replay must not silently follow
+the schema forward, so resolving it the way dispatch does would cement this rather than close it.
+But refusing needs the same fact resolving needs - the epoch the pinned deployment was built
+against - and nothing records it: `schema_epoch` appears nowhere in `crates/zeroship-workflow/`,
+the journal's `__zeroship_workflow_deploys` carries hash, manifest and availability but no schema
+shape, and the column comment in `db/migrations-ts/20260919000200_database_entities.ts` says the
+value is a role-name input rather than a record. So the prerequisite is a recorded fact: what
+schema epoch a deployment was built against, written where the pin is written. Until that exists,
+a replay cannot tell the two cases apart, and neither can this document.
 
 **Why the whole map and not one number.** An app binds many databases. A maximum over its epochs
 does not move when a second database advances under a higher-epoch first one, and a sum that moves
