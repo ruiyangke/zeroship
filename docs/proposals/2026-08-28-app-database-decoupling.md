@@ -85,11 +85,10 @@ Built:
   binding to - `active` with `observed_generation` caught up, the same predicate the worker's own
   resolution uses - and `api::database_binding_response` carries the call that grants one,
   `POST /api/databases/{database_id}/bindings`, one per unbound database.
-  `catalog::admit_schema` and its applied-row read are gone with
-  `CatalogError::SchemaNotApplied`, `RegistryError::SchemaNotApplied` and
-  `schema_precondition_response`: equality coupled every app on a shared database to every other,
-  because one app migrating changed the newest applied row and broke every other bound app's next
-  deploy. The artifact-self-consistency arm survives where it needs no knowledge of any database -
+  Deploy admission is that binding check and nothing beside it: it carries no schema equality
+  test, because equality coupled every app on a shared database to every other - one app
+  migrating moved the compared value and broke every other bound app's next deploy. The
+  artifact-self-consistency arm stands where it needs no knowledge of any database -
   `Manifest::validate` refuses a malformed descriptor hash and `collect_expected_hashes` refuses
   an entry whose blob the archive does not carry.
 
@@ -154,11 +153,6 @@ on that wire is the routing key's remaining half. And `ThreadDbContext` holds on
 connection plus a per-app binding map rather than a connection map keyed `(app_id, database_id)`,
 because keying it that way needs per-database datastore coordinates that arrive with
 `env.databases`.
-
-`zeroship.app_schema_applies` is still keyed on the app alone, so the ledger records THAT an app
-applied a set and not WHICH database it went to. Nothing reads it - the deploy gate that did is
-deleted - so it is an audit gap rather than a correctness one, and closing it is a platform
-migration.
 
 **Control still never writes `active` itself.** The management surface declares and stops: a
 database it creates stops at `provisioning` and a binding at `pending` until a reconciler holding
@@ -380,36 +374,32 @@ datastore's convergence is a one-time bootstrap and `status` carries it.
 
 ### The control plane should record no migration at all
 
-**NOT BUILT.** `zeroship.app_schema_applies` is still created by
-`db/migrations-ts/20260702000200_control_tables.ts`, still written through
-`crates/zeroship-migrate-server/src/schema_apply_store.rs`, and still read by
-`crates/zeroship-control/src/publication/catalog.rs`. The design below says both should go;
-neither has. It exists today as the
-platform's own record of what schema an app corresponds to, because the engine journal lives in
-the creator's schema where the migrator role can drop it, and it feeds the deploy gate's
-descriptor comparison. Both halves fall under this design.
+**BUILT.** The platform schema carries no per-apply record. The migrate server applies and
+returns the outcome to its caller (`ApplyMigrationsResponse`,
+`crates/zeroship-migrate-server/src/apply.rs`), and control reads nothing about applies:
+`crates/zeroship-control/src/publication/catalog.rs` admits a deploy and a restore on bindings
+alone. The engine journal in the creator's own schema, where the migrator role can drop it, is
+the record of what ran - and the platform depends on no property of it.
 
-**The descriptor comparison is an equality test, and equality is a coupling mechanism.** An
-app's build hashes the schema it was generated against. With one app per database that hash
-answered a real question. With several, any migration - a purely additive one included -
-invalidates the build of every app bound to that database, so all of them stop being deployable
-while all of them keep running correctly. Forcing every app on a database to move together is
-precisely the property this design exists to remove. It is not a transient window either: a
-database owned by a project and apps built on their own cadence do not move together, and a
-database that outlives its apps never moves together with any of them.
+**A descriptor comparison is an equality test, and equality is a coupling mechanism.** An app's
+build hashes the schema it was generated against. With one app per database that hash answers a
+real question. With several, comparing it would invalidate the build of every app bound to that
+database on any migration, a purely additive one included, so all of them would stop being
+deployable while all of them kept running correctly. Forcing every app on a database to move
+together is precisely the property this design exists to remove. It is not a transient window
+either: a database owned by a project and apps built on their own cadence do not move together,
+and a database that outlives its apps never moves together with any of them.
 
-**The remaining columns have no production reader.** The control-side model
-(`crates/zeroship-control/src/publication/models.rs`) declares only `id`, `app_id`, `status`,
-`descriptor_sha256`, `submitted_at` and `applied_at`, under a comment saying it declares "only
-the columns these operations read or write". `migration_id`, `request_body`,
-`effective_profile`, `ceiling_id`, `ceiling_version`, `applied_versions`, `submitted_by` and
-`last_error` are written and read by nothing - the same one-writer-zero-readers test
-`docs/proposals/2026-08-28-migration-record-consolidation.md` used to delete
-`zeroship.migrated_migration_audit`.
+The rule is the one-writer-zero-readers test
+`docs/proposals/2026-08-28-migration-record-consolidation.md` applies to
+`zeroship.migrated_migration_audit`: a column no production path reads earns no table to sit
+in. The control-side catalog model (`crates/zeroship-control/src/publication/models.rs`)
+declares "only the columns these operations read or write", and every column it declares
+belongs to a table the deploy, archive and restore paths read.
 
-So the engine journal in the creator's own schema becomes the only record of what ran, which is
-what that consolidation set out to achieve and stopped one table short of. Per-apply audit, if
-it is wanted, is an audit event in the audit system rather than a bespoke ledger.
+So the engine journal in the creator's own schema is the only record of what ran, which is what
+that consolidation set out to achieve and stopped one table short of. Per-apply audit, if it is
+wanted, is an audit event in the audit system rather than a bespoke ledger.
 
 ### Changes to existing tables
 
@@ -420,8 +410,6 @@ projects  + execution_zone_id, NOT NULL, frozen by trigger
 apps      + UNIQUE ("apps_project_identity_key")   (id, project_id)
           + FOREIGN KEY (project_id, execution_zone_id)
                      -> projects(id, execution_zone_id)
-
-zeroship.app_schema_applies   unchanged - the drop above is proposed, not done
 ```
 
 **The zone moves to the project.** `apps.execution_zone_id`
@@ -967,13 +955,19 @@ lock follows the database rather than the app. The publication reconciler's lock
 is keyed on the datastore publication, because that is the object being edited and every
 database on the cluster contends for it.
 
-**The deploy gate stops comparing schemas.** `crates/zeroship-control/src/registry.rs` today
-predicates the deploy UPDATE on one `descriptor_sha256` matching the newest applied row and
-reports `RegistryError::SchemaNotApplied { descriptor_sha256, applied_sha256 }`. That comparison
-is deleted, along with the catalog read behind it
-(`crates/zeroship-control/src/publication/catalog.rs`). The descriptor-mismatch arm of
-`SchemaNotApplied` goes with it; the artifact-inconsistency arm survives as a manifest
-self-consistency check that needs no knowledge of any database.
+**The deploy gate verifies bindings, not schemas. This landed.** `265f988a9` ("verify database
+bindings at deploy, not schemas") made the precondition binding admission.
+`crates/zeroship-control/src/registry.rs` predicates the deploy UPDATE on nothing about schema,
+and `admit_bindings` (`crates/zeroship-control/src/publication/catalog.rs`) is the admission
+for `accept` and for `restore` alike, refusing either when the app holds no LIVE binding to a
+database the artifact names. Restore admits on the same predicate as deploy, so the two cannot
+disagree about what an app may run against, and neither asks anything about an apply.
+
+The artifact-inconsistency check stands on its own beside them: a manifest self-consistency test
+needing no knowledge of any database. `Manifest::validate`
+(`crates/zeroship-bundle/src/manifest.rs`) refuses a malformed descriptor hash and
+`collect_expected_hashes` (`crates/zeroship-bundle/src/unpack.rs`) refuses an entry whose blob
+the archive does not carry.
 
 `Manifest.runtime_descriptor` (`crates/zeroship-bundle/src/manifest.rs`) still changes shape,
 because an app now carries one descriptor per database: entries of `{ label, database_id }` plus

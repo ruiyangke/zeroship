@@ -7,7 +7,7 @@
   {
     "file": "20260702000200_control_tables.ts",
     "name": "control_tables",
-    "opCount": 34
+    "opCount": 29
   },
   {
     "file": "20260702000300_auth_oauth_tables.ts",
@@ -22,12 +22,12 @@
   {
     "file": "20260702000600_constraints_indexes_fks.ts",
     "name": "constraints_indexes_fks",
-    "opCount": 134
+    "opCount": 131
   },
   {
     "file": "20260702000700_functions_triggers_comments.ts",
     "name": "functions_triggers_comments",
-    "opCount": 38
+    "opCount": 37
   },
   {
     "file": "20260702000800_policies_rls.ts",
@@ -57,7 +57,7 @@
   {
     "file": "20260831000001_sortable_entity_id_collations.ts",
     "name": "sortable_entity_id_collations",
-    "opCount": 49
+    "opCount": 48
   },
   {
     "file": "20260906000000_organization_entity_model.ts",

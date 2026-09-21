@@ -1155,8 +1155,7 @@ fn catalog_error_response(app: &AppId, error: CatalogError) -> web::HttpResponse
         }
         CatalogError::RevisionExhausted => web::HttpResponse::Conflict()
             .json(&serde_json::json!({"error": "lifecycle revision exhausted"})),
-        CatalogError::ApplyInProgress
-        | CatalogError::InvalidRetained(_)
+        CatalogError::InvalidRetained(_)
         | CatalogError::Storage(_)
         | CatalogError::Database(_) => infrastructure_error_response(
             StatusCode::INTERNAL_SERVER_ERROR,

@@ -50,7 +50,6 @@ use zeroship_migrate_server::datastore::control::ControlStore;
 use zeroship_migrate_server::datastore::Reconciler;
 use zeroship_migrate_server::policy::ManagedPolicyConfig;
 use zeroship_migrate_server::rate_limit::MutationRateLimiter;
-use zeroship_migrate_server::schema_apply_store::SchemaApplyStore;
 use zeroship_migrate_server::MigrationServiceState;
 
 const SEAL_KEY: &[u8] = b"apply database target seal key 32 bytes";
@@ -234,10 +233,8 @@ async fn owner_of(cluster: &Client, database: &DatabaseId, table: &str) -> Strin
         .get("rolname")
 }
 
-/// The principal an apply is attributed to.
-///
-/// `app_schema_applies.submitted_by` is a foreign key onto `zeroship.users`, so
-/// a ledger row cannot be opened for a principal the platform does not hold.
+/// The principal an apply is attributed to. The platform must hold the user
+/// before a request can name them.
 async fn seed_user(pg: &Client) -> UserId {
     let user = UserId::mint();
     pg.execute(
@@ -320,7 +317,6 @@ async fn a_table_migrates_into_the_named_database_and_not_into_the_other() {
         },
         &request,
         &policy_config(),
-        &SchemaApplyStore::new(fixture::migrated_url()),
         &seed_user(&pg).await,
     )
     .await
@@ -447,12 +443,6 @@ async fn an_apply_naming_a_database_without_a_live_binding_is_refused() {
         Vec::<String>::new(),
         "a refused apply must leave no DDL behind"
     );
-    assert_eq!(
-        ledger_rows(&pg, &app).await,
-        0,
-        "a refused apply must open no ledger row"
-    );
-
     // THE CONTROL. One variable moves: this app's binding becomes live.
     let binding = world
         .declare_binding(&pg, app.as_str(), &database, DatabaseCapability::ReadWrite)
@@ -497,13 +487,3 @@ async fn an_apply_naming_a_database_without_a_live_binding_is_refused() {
     let _ = std::fs::remove_dir_all(tmp);
 }
 
-/// How many apply-ledger rows this app has.
-async fn ledger_rows(pg: &Client, app: &AppId) -> i64 {
-    pg.query_one(
-        "SELECT count(*)::int8 AS n FROM zeroship.app_schema_applies WHERE app_id = $1::text",
-        &[&app.as_str()],
-    )
-    .await
-    .expect("read the apply ledger")
-    .get("n")
-}

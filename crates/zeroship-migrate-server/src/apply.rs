@@ -45,9 +45,6 @@ use crate::provisioning::{
     provision_audit_unmask_table, provision_migrator, ProvisionRoleError,
 };
 use crate::publication::{reconcile_database_publication, PublicationError};
-use crate::schema_apply_store::{
-    SchemaApplyInput, SchemaApplyStore, SchemaApplyStoreError, TerminalTransition,
-};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ApplyMigrationsRequest {
@@ -200,10 +197,6 @@ pub enum ApplyRequestError {
     },
     #[error(transparent)]
     Policy(#[from] ManagedPolicyError),
-    #[error(transparent)]
-    SchemaApplyStore(#[from] SchemaApplyStoreError),
-    #[error("encode migration request: {0}")]
-    EncodeRequest(String),
     #[error("migration database connect: {0}")]
     Connect(compio_postgres::Error),
     #[error("inspect migration database schema: {0}")]
@@ -282,14 +275,6 @@ pub enum ProvisionRuntimeRoleError {
 ///
 /// THERE IS ONE PATH. The ceiling the creator runs under is what bounds them, and
 /// the engine still refuses a destructive step it was not handed an [`Approval`] for.
-///
-/// The row in `zeroship.app_schema_applies` opens only after guarded preparation
-/// and complete-history attestation, but before creator DDL. A surviving request
-/// with a reachable control store then closes it through exactly one terminal
-/// transition: `mark_applied` on success or `mark_failed` on error. A process
-/// death or terminal store failure can leave it `submitted`: the ledger and app
-/// schema may live on different DSNs, so no transaction spans them. No serving
-/// path reads an open row; the deploy gate reads only `applied` rows.
 /// The app whose IR this is, and the database it lands in.
 ///
 /// Carried together because they are one fact: an apply targets a database
@@ -307,7 +292,6 @@ pub async fn apply_ir_documents(
     target: ApplyTarget<'_>,
     request: &ApplyMigrationsRequest,
     policy_config: &ManagedPolicyConfig,
-    schema_apply_store: &SchemaApplyStore,
     principal_id: &UserId,
 ) -> Result<ApplyMigrationsResponse, ApplyRequestError> {
     let ApplyTarget {
@@ -372,8 +356,6 @@ pub async fn apply_ir_documents(
     // ledger side effects. A refused apply therefore leaves no database state
     // for a retry or deploy gate to mistake for a completed lifecycle step.
     let dir = write_ir_documents(tmp_root, request)?;
-    let request_body = serde_json::to_value(request)
-        .map_err(|err| ApplyRequestError::EncodeRequest(err.to_string()))?;
     // The executor re-vets rendered SQL at apply time from its own policy, so it must
     // carry the same no-inject confined guard charter as guarded lower. The composed
     // inject-bearing policy remains separate and is passed explicitly to shape
@@ -453,22 +435,6 @@ pub async fn apply_ir_documents(
             prepare_ir_documents(&session, &exec_cfg, schema.as_str(), dir.path(), &policy).await?;
         attest_complete_history(&backend, &exec_cfg, &prepared).await?;
 
-        // Coverage refusal happens above this line. A truncated request therefore
-        // leaves no submitted, failed, or applied row that could become the deploy
-        // guard's newest ledger fact.
-        schema_apply_store
-            .record_submitted(SchemaApplyInput {
-                app_id,
-                migration_id,
-                principal_id,
-                request_body,
-                effective_profile: &policy.managed,
-                ceiling_id: &policy.ceiling_id,
-                ceiling_version: policy.ceiling_version,
-                descriptor_sha256: &request.descriptor_sha256,
-            })
-            .await?;
-
         let apply_result = run_apply(
             &backend,
             policy_config,
@@ -484,45 +450,13 @@ pub async fn apply_ir_documents(
         .await;
 
         match apply_result {
-            Ok(outcome) => {
-                // WRITTEN EVEN WHEN `outcome.applied` IS EMPTY. A re-run that applied
-                // nothing is what an app whose descriptor bytes moved without a
-                // schema change (an engine upgrade, a codegen fix) uses to become
-                // deployable again. Coverage, not emptiness, decides whether the row
-                // is safe to write.
-                match schema_apply_store
-                    .mark_applied(app_id, migration_id, &outcome.applied)
-                    .await
-                {
-                    Ok(transition) => {
-                        if transition == TerminalTransition::Lost {
-                            // The DDL is committed and cannot be taken back, but a
-                            // concurrent path failed this migration while the engine
-                            // was applying it, so the row reads `failed`. The record
-                            // now contradicts the database it describes and only an
-                            // operator can reconcile them.
-                            tracing::error!(
-                                app_id = app_id.as_str(),
-                                migration_id = %migration_id,
-                                "migrate-server: apply lost the terminal transition to a \
-                                 concurrent failure - schema changes are committed but the row \
-                                 reads failed"
-                            );
-                        }
-                        Ok(ApplyMigrationsResponse {
-                            migration_id,
-                            applied: outcome.applied,
-                            skipped: outcome.skipped,
-                            pending_contract: outcome.pending_contract,
-                        })
-                    }
-                    Err(err) => Err(ApplyRequestError::SchemaApplyStore(err)),
-                }
-            }
-            Err(err) => {
-                mark_apply_failed(schema_apply_store, app_id, migration_id, &err.to_string()).await;
-                Err(err)
-            }
+            Ok(outcome) => Ok(ApplyMigrationsResponse {
+                migration_id,
+                applied: outcome.applied,
+                skipped: outcome.skipped,
+                pending_contract: outcome.pending_contract,
+            }),
+            Err(err) => Err(err),
         }
     }
     .await;
@@ -1053,44 +987,6 @@ fn validate_request_shape(request: &ApplyMigrationsRequest) -> Result<(), ApplyR
     Ok(())
 }
 
-/// Close the request's ledger row as `failed`, best effort.
-///
-/// Best effort because the caller is already returning an error and the apply has
-/// already failed: a store outage here must not replace the creator-facing reason
-/// with a database one. It is a LOUD best effort - every arm logs, including the
-/// lost race, which is the one that means the row and the database disagree.
-async fn mark_apply_failed(
-    schema_apply_store: &SchemaApplyStore,
-    app_id: &AppId,
-    migration_id: Uuid,
-    message: &str,
-) {
-    match schema_apply_store
-        .mark_failed(app_id, migration_id, message)
-        .await
-    {
-        Ok(TerminalTransition::Recorded) => {}
-        Ok(TerminalTransition::Lost) => {
-            // The row is already `applied`, so this failure belongs to a migration
-            // that another path completed. The failure marking is correctly refused;
-            // what would be wrong is letting it pass for a recorded one.
-            tracing::warn!(
-                app_id = app_id.as_str(),
-                migration_id = %migration_id,
-                reason = message,
-                "migrate-server: failure lost the terminal transition to a completed \
-                 apply - the row stays applied and this failure is not recorded on it"
-            );
-        }
-        Err(store_err) => {
-            tracing::error!(
-                error = %store_err,
-                "migrate-server: failed to mark the schema apply row failed"
-            );
-        }
-    }
-}
-
 // See the `write_ir_documents` allow above - same `ApplyRequestError` size,
 // same rationale.
 #[allow(clippy::result_large_err)]
@@ -1170,8 +1066,6 @@ pub fn apply_error_kind(err: &ApplyRequestError) -> (ntex::http::StatusCode, &'s
         ApplyRequestError::TempDir(_)
         | ApplyRequestError::Write { .. }
         | ApplyRequestError::Policy(_)
-        | ApplyRequestError::SchemaApplyStore(_)
-        | ApplyRequestError::EncodeRequest(_)
         | ApplyRequestError::Connect(_)
         | ApplyRequestError::InspectSchema(_)
         | ApplyRequestError::ProvisionRole(_)
@@ -1668,7 +1562,6 @@ mod tests {
                 },
                 &request,
                 &policy_config,
-                &SchemaApplyStore::new("postgres://unused"),
                 &principal_id,
             ))
             .expect_err("empty request rejected before DB connect");
@@ -1703,7 +1596,6 @@ mod tests {
                 },
                 &request,
                 &policy_config,
-                &SchemaApplyStore::new("postgres://unused"),
                 &principal_id,
             ))
             .expect_err("scalar request rejected before DB connect");

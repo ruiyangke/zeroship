@@ -80,7 +80,6 @@ use zeroship_migrate_server::apply::{apply_ir_documents, ApplyMigrationsRequest,
 use zeroship_migrate_server::datastore::control::ControlStore;
 use zeroship_migrate_server::datastore::{PassReport, Reconciler};
 use zeroship_migrate_server::policy::ManagedPolicyConfig;
-use zeroship_migrate_server::schema_apply_store::SchemaApplyStore;
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::Runtime;
@@ -417,7 +416,6 @@ fn private_migration() -> Json {
 /// service's own apply.
 async fn apply_into(
     tenant_url: &str,
-    control_url: &str,
     app: &AppId,
     database: &DatabaseId,
     principal: &UserId,
@@ -436,7 +434,6 @@ async fn apply_into(
         },
         &request,
         &policy_config(),
-        &SchemaApplyStore::new(control_url.to_owned()),
         principal,
     )
     .await
@@ -1161,7 +1158,6 @@ async fn the_whole_decoupled_path_runs_in_one_exercise() {
 
     apply_into(
         cluster_fixture.url(),
-        &world.control_url,
         &app_a,
         &shared_id,
         &principal,
@@ -1171,7 +1167,6 @@ async fn the_whole_decoupled_path_runs_in_one_exercise() {
     .await;
     apply_into(
         cluster_fixture.url(),
-        &world.control_url,
         &app_a,
         &private_id,
         &principal,

@@ -200,7 +200,7 @@ async fn erasing_a_sole_owner_retains_the_organizations_invoice() {
 /// Every one of these references BLOCKED a hard delete before that migration -
 /// read out of `pg_constraint` as `confdeltype` in (`a`, `r`) - and only
 /// `oauth_clients.created_by` was on the reaper's hand-maintained list. Three of
-/// them (`identity_links`, `principal_grants`, `app_schema_applies`) were also
+/// them (`identity_links` and `principal_grants`) were also
 /// `NOT NULL`, so the `SET NULL` that list performed was not a spelling they
 /// accepted: a creator who had signed in through the CLI or deployed a schema
 /// could not be erased at all.
@@ -282,22 +282,6 @@ async fn reaper_erases_a_user_holding_every_previously_blocking_reference() {
         )
         .await
         .unwrap();
-        let migration_id = Uuid::new_v4();
-        db.execute(
-            "INSERT INTO zeroship.app_schema_applies \
-            (app_id, migration_id, status, request_body, effective_profile, \
-             ceiling_id, ceiling_version, descriptor_sha256, submitted_by) \
-         VALUES ($1, $2, 'applied', '{}'::jsonb, '{}'::jsonb, 'managed', 1, $3, $4)",
-            &[
-                &app_id.as_str(),
-                &migration_id,
-                &format!("sha-{tag}"),
-                &victim.id.as_str(),
-            ],
-        )
-        .await
-        .unwrap();
-
         users::request_deletion(&mut db, &victim.id, account_reaper::GRACE_DAYS)
             .await
             .unwrap()
@@ -348,19 +332,6 @@ async fn reaper_erases_a_user_holding_every_previously_blocking_reference() {
             .expect("the oauth client survives its creator")
             .get("created_by");
         assert!(created_by.is_none(), "oauth_clients.created_by is SET NULL");
-        let submitted_by: Option<String> = db
-            .query_one(
-                "SELECT submitted_by FROM zeroship.app_schema_applies \
-             WHERE app_id = $1 AND migration_id = $2",
-                &[&app_id.as_str(), &migration_id],
-            )
-            .await
-            .expect("the schema apply record survives its submitter")
-            .get("submitted_by");
-        assert!(
-            submitted_by.is_none(),
-            "app_schema_applies.submitted_by is SET NULL"
-        );
     })
     .await;
 }
