@@ -376,6 +376,23 @@ check has to land in the SAME change as the move, not after it. A reviewer who
 checks the comment finds it accurate; a reviewer who checks the arm finds it
 present; the gate distinguishes nothing.
 
+*And the test guarding this arm cannot catch its vacuity, which is worth
+knowing before anyone relies on it.*
+`crates/zeroship-worker/src/db_posture/tests.rs` has
+`refuses_a_login_that_can_reach_the_platform_schema`, and it is a properly
+built unit test: it sets the flag true and asserts `validate` refuses, then
+sets it false and asserts `validate` accepts - a case and its control. But it
+sets the FIELD directly and never runs the probe. It binds the ARM, and says
+nothing about whether the probe can still produce a true. After the cut the
+probe returns false on every creator database, the arm stops firing, and this
+test passes unchanged.
+
+Its second half is the tell: with the flag false it asserts "a creator-database
+login is the accepted posture". After the cut that describes every login,
+including one pointed at the wrong database. So the identity check needs a test
+that exercises the PROBE against a live database - the arm is already covered,
+and the coverage is not what is at risk.
+
 **2. CDC relay.** Two production reads, not one. `worker_instances.public_key`
 is the narrow one and becomes a control API call. The other is
 `bound_database_schema` in `crates/zeroship-data-cdc-server/src/source.rs`,
