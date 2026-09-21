@@ -322,9 +322,9 @@ The machinery to carry it exists. The worker already reaches the manager over HT
 `zeroship-workflow-client` with a validated `Transport`, so job delivery is already a remote
 protocol. This extends a working client rather than inventing one.
 
-1. **Install the journal into `workflow_manager` at service boot.** Nothing reads it yet. Verify
-   that the schema installs, that one stamp row covers the installation, and that the
-   creator-schema path is untouched.
+1. **Install the journal into `workflow_manager` as a platform migration.** Nothing reads it
+   yet. Verify that the schema installs, that one stamp row covers the installation, and that
+   the creator-schema path is untouched.
 
 2. **Let `AppBackend` bind the service's own store.** It already implements `WorkflowBackend`;
    today it assumes a creator binding. Make the binding a parameter rather than an assumption.
