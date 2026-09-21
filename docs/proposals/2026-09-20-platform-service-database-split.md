@@ -738,4 +738,12 @@ auth/control edge carries most of it.
 6. **Does `policies/platform-table-owners.json` get pruned before or as part of
    the split?** It carries four entries naming tables no tracked file creates.
    A split planned from the registry rather than from the corpus would assign
-   them.
+   them. The drift is not incidental: a hand-maintained list that must agree
+   with a set of files produced elsewhere has no mechanism keeping it honest,
+   and this tree holds two other instances of exactly that shape -
+   `crates/zeroship-authz/src/engine.rs` hand-lists the `.cedar` files
+   `crates/zeroship-authz/build.rs` walks, and `zeroship-workflow-schema`
+   hand-lists the version files its generator emits. Whatever the split does
+   with this registry, it should make the registry derivable from the corpus or
+   assert the two agree, rather than leaving a fourth hand-maintained copy of
+   the same question.
