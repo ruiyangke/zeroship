@@ -1845,9 +1845,13 @@ app's requests and cannot protect a shared cluster from an app under its limit. 
     mints `E+1` through `cluster::grant_binding` and reaps the retired role through
     `cluster::drop_binding_role`, then asserts the isolate still holding `E` is refused
     `SCHEMA_EPOCH_STALE`, with three controls: the read before the rotation, the retired role's
-    absence from `pg_roles`, and a binding resolved at `E+1` still reading. What it does NOT yet
-    exercise is the rotation being DRIVEN BY AN APPLY - it calls the reconciler directly - so the
-    apply's own widen transaction is still unmeasured. (d) one app on two databases holds a
+    absence from `pg_roles`, and a binding resolved at `E+1` still reading. The rotation driven by
+    an APPLY is measured beside it, by
+    `an_apply_that_changes_the_schema_rotates_the_epoch_and_leaves_the_live_one_standing`
+    (`crates/zeroship-migrate-server/tests/apply_database_target_pg.rs`), which runs the apply's
+    own widen transaction rather than calling the reconciler, and asserts the cluster head
+    advanced, the control projection followed it, and the role the live isolate holds still
+    stands. (d) one app on two databases holds a
     transaction on each at once, which is the lane key measured as behaviour; a key without the
     database half turns the second into `nested_top_level_transaction`.
 
