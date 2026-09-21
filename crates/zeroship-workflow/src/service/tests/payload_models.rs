@@ -1,32 +1,39 @@
+use super::objects::Objects;
 use super::*;
 use crate::{
     engine::WorkflowOutputRef,
-    service::{app, models, WorkerIdentity},
+    service::{app, models, PayloadOpener, PayloadTarget, WorkerIdentity},
 };
 use zeroship_data_orm::{orm::Entity, value};
-use zeroship_storage::{backend::OnceChunk, LocalFs, StorageStore};
+
+/// Hands back the descriptor admission resolved together with the bytes, so a
+/// read states which object it reached rather than only what it holds.
+struct Descriptor<'a>(&'a Objects);
+#[async_trait::async_trait(?Send)]
+impl PayloadOpener for Descriptor<'_> {
+    type Read = (WorkflowOutputRef, Vec<u8>);
+    async fn open(self, target: PayloadTarget<'_>) -> Result<Self::Read, WorkflowServiceError> {
+        let reference: WorkflowOutputRef = target.reference.clone();
+        Ok((reference, self.0.open().open(target).await?))
+    }
+}
 
 #[compio::test]
 async fn sqlite_payload_quota_uses_exact_scoped_aggregates() {
     let directory = tempfile::tempdir().unwrap();
     let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
-    quota_contract(Rc::new(store), directory.path()).await;
+    quota_contract(Rc::new(store)).await;
 }
 
 #[compio::test]
 async fn postgres_payload_quota_uses_exact_scoped_aggregates() {
     let fixture = PostgresFixture::start().await;
-    let directory = tempfile::tempdir().unwrap();
-    quota_contract(Rc::new(fixture.store.clone()), directory.path()).await;
+    quota_contract(Rc::new(fixture.store.clone())).await;
 }
 
-async fn quota_contract(store: Rc<OrmStore>, directory: &Path) {
+async fn quota_contract(store: Rc<OrmStore>) {
     let (service, local, foreign, _deployments) = registered_service(store).await;
-    let service = service
-        .with_payload_storage(StorageStore::from_backend(Arc::new(LocalFs::new(
-            directory.join("objects"),
-        ))))
-        .unwrap();
+    let objects = Objects::new();
     let worker = WorkerIdentity::new("payload-model-worker".into()).unwrap();
     let large = (1_i64 << 53) + 1;
     let mut local_task = None;
@@ -80,24 +87,31 @@ async fn quota_contract(store: Rc<OrmStore>, directory: &Path) {
                 &task.token,
                 &RequestId::mint(),
                 reference(bytes, None),
-                Box::new(OnceChunk::new(bytes.to_vec().into())),
+                objects.upload(bytes),
             )
             .await;
         if accepted {
             result.unwrap();
-            let read = service
-                .read_task_payload(&worker, &task.id, &task.token, &reference(bytes, None))
+            let (descriptor, body) = service
+                .read_task_payload(
+                    &worker,
+                    &task.id,
+                    &task.token,
+                    &reference(bytes, None),
+                    Descriptor(&objects),
+                )
                 .await
                 .unwrap();
-            assert!(read.reference.content_type.is_none());
-            assert_eq!(read.into_bytes(bytes.len()).await.unwrap(), bytes);
+            assert!(descriptor.content_type.is_none());
+            assert_eq!(body, bytes);
             assert!(matches!(
                 service
                     .read_task_payload(
                         &worker,
                         &task.id,
                         &task.token,
-                        &reference(bytes, Some("text/plain"))
+                        &reference(bytes, Some("text/plain")),
+                        objects.open()
                     )
                     .await,
                 Err(WorkflowServiceError::NotFound(_))
@@ -131,21 +145,27 @@ async fn quota_contract(store: Rc<OrmStore>, directory: &Path) {
             &task.token,
             &RequestId::mint(),
             typed.clone(),
-            Box::new(OnceChunk::new(bytes::Bytes::from_static(b"x"))),
+            objects.upload(b"x"),
         )
         .await
         .unwrap();
-    let read = service
-        .read_task_payload(&worker, &task.id, &task.token, &typed)
+    let (descriptor, body) = service
+        .read_task_payload(&worker, &task.id, &task.token, &typed, Descriptor(&objects))
         .await
         .unwrap();
-    assert_eq!(read.reference, typed);
-    assert_eq!(read.into_bytes(1).await.unwrap(), b"x");
+    assert_eq!(descriptor, typed);
+    assert_eq!(body, b"x");
     let untyped = reference(b"x", None);
-    let read = service
-        .read_task_payload(&worker, &task.id, &task.token, &untyped)
+    let (descriptor, body) = service
+        .read_task_payload(
+            &worker,
+            &task.id,
+            &task.token,
+            &untyped,
+            Descriptor(&objects),
+        )
         .await
         .unwrap();
-    assert_eq!(read.reference, untyped);
-    assert_eq!(read.into_bytes(1).await.unwrap(), b"x");
+    assert_eq!(descriptor, untyped);
+    assert_eq!(body, b"x");
 }

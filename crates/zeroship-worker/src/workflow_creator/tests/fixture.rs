@@ -184,12 +184,13 @@ impl Fixture {
             .unwrap(),
             keys: ProjectKeySource::unavailable(),
             binding: DbBinding::platform(app.as_str(), "creator-fixture", schema),
-            objects: StorageStore::from_backend(Arc::new(LocalFs::new(
-                directory.path().join("objects"),
-            ))),
         };
         let resources = WorkflowResources {
             storage,
+            objects: PayloadObjects::open(StorageStore::from_backend(Arc::new(LocalFs::new(
+                directory.path().join("objects"),
+            ))))
+            .unwrap(),
             deployments: deployments.binding(&[&app]),
             signal_authority: Some(Arc::new(
                 SignalAuthority::new(

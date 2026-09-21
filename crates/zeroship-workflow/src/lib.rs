@@ -16,6 +16,6 @@ pub mod operations;
 pub mod service;
 pub mod validation;
 
-pub use backend::{SharedWorkflowBackend, WorkflowBackend};
+pub use backend::{SharedStepOutputs, SharedWorkflowBackend, StepOutputReader, WorkflowBackend};
 pub use errors::WorkflowServiceError;
 pub use execution::{WorkflowExecution, WorkflowInvocation, WorkflowTrigger};

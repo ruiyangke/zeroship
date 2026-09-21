@@ -769,7 +769,7 @@ fn main() -> std::io::Result<()> {
     // `env.workflows` once its assignment's preparation passed its final
     // checks, and not before or after. With no manager configured the
     // registry simply stays empty.
-    let workflows = zeroship_workflow::service::runner::ready::ReadyApps::default();
+    let workflows = zeroship_workflow_runner::ready::ReadyApps::default();
     let workflow_host = match workflow_host_config {
         Some(host_config) => {
             let resources = zeroship_worker::workflow_host::HostResources {

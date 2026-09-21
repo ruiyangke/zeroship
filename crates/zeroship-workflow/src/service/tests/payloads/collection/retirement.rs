@@ -106,7 +106,7 @@ impl Manager {
     }
 
     /// Deliver one Collect page to the creator and settle it.
-    async fn collect(&self, scope: &AppWorkflows) {
+    async fn collect(&self, scope: &AppWorkflows, objects: &Objects) {
         let job = self
             .recovery
             .dispatch(&self.scope.app_id, DutyKind::Collect)
@@ -114,7 +114,10 @@ impl Manager {
             .unwrap()
             .unwrap();
         let grant = self.claim(&job).await;
-        let receipt = scope.collect_job(&grant, options(8)).await.unwrap();
+        let receipt = scope
+            .collect_job(&grant, options(8), objects)
+            .await
+            .unwrap();
         assert_eq!(receipt.outcome, JobOutcome::Completed {});
         self.settle(&receipt, &grant).await;
     }
@@ -176,7 +179,7 @@ pub(super) async fn retirement(store: Rc<OrmStore>) {
     assert_eq!(manager.state().await, ScopeState::Open);
 
     fixture.expire(&abandoned).await;
-    manager.collect(&fixture.scope).await;
+    manager.collect(&fixture.scope, &fixture.objects).await;
     assert_eq!(fixture.payload(&abandoned).await.state, "deleted");
     assert!(
         !manager.close(&fixture.scope).await,
@@ -186,14 +189,17 @@ pub(super) async fn retirement(store: Rc<OrmStore>) {
 
     // The resweep window passes; the next sweep deletes once more, finally.
     fixture.expire(&abandoned).await;
-    manager.collect(&fixture.scope).await;
+    manager.collect(&fixture.scope, &fixture.objects).await;
     let purged = fixture.payload(&abandoned).await;
     assert_eq!(purged.state, "purged");
-    assert_eq!(fixture.backend.calls(), [abandoned.clone(), abandoned.clone()]);
-    manager.collect(&fixture.scope).await;
+    assert_eq!(
+        fixture.objects.deletes(),
+        [abandoned.clone(), abandoned.clone()]
+    );
+    manager.collect(&fixture.scope, &fixture.objects).await;
     assert_eq!(fixture.payload(&abandoned).await, purged);
     assert_eq!(
-        fixture.backend.calls().len(),
+        fixture.objects.deletes().len(),
         2,
         "collection never sweeps a final tombstone again"
     );
@@ -212,19 +218,19 @@ pub(super) async fn concurrent_resweep(store: Rc<OrmStore>) {
     fixture.expire(&id).await;
     fixture
         .scope
-        .collect_job(&Grant::new(&app), options(1))
+        .collect_job(&Grant::new(&app), options(1), &fixture.objects)
         .await
         .unwrap();
     assert_eq!(fixture.payload(&id).await.state, "deleted");
     fixture.expire(&id).await;
-    let (first_entered, first_resume) = fixture.backend.gate(&id);
-    let (second_entered, second_resume) = fixture.backend.gate(&id);
-    let other_host = fixture.reopen(true).await;
+    let (first_entered, first_resume) = fixture.objects.gate(&id);
+    let (second_entered, second_resume) = fixture.objects.gate(&id);
+    let other_host = fixture.reopen().await;
     let (finished, first_done) = flume::bounded(1);
     let first = async {
         let receipt = fixture
             .scope
-            .collect_job(&Grant::new(&app), options(1))
+            .collect_job(&Grant::new(&app), options(1), &fixture.objects)
             .await;
         finished.send_async(()).await.unwrap();
         receipt
@@ -232,7 +238,7 @@ pub(super) async fn concurrent_resweep(store: Rc<OrmStore>) {
     let second = async {
         first_entered.recv_async().await.unwrap();
         other_host
-            .collect_job(&Grant::new(&app), options(1))
+            .collect_job(&Grant::new(&app), options(1), &fixture.objects)
             .await
     };
     let order = async {
@@ -245,7 +251,7 @@ pub(super) async fn concurrent_resweep(store: Rc<OrmStore>) {
     assert_eq!(first.unwrap().outcome, JobOutcome::Completed {});
     assert_eq!(second.unwrap().outcome, JobOutcome::Completed {});
     assert_eq!(fixture.payload(&id).await.state, "purged");
-    assert_eq!(fixture.backend.calls(), [id.clone(), id.clone(), id]);
+    assert_eq!(fixture.objects.deletes(), [id.clone(), id.clone(), id]);
 }
 
 /// A final tombstone no longer counts toward the app's payload quota: once the
@@ -277,7 +283,7 @@ pub(super) async fn quota(store: Rc<OrmStore>) {
                 &fixture.task.token,
                 &RequestId::mint(),
                 reference(b"collect-me"),
-                body(b"collect-me"),
+                fixture.objects.upload(b"collect-me"),
             )
             .await
     };
@@ -289,7 +295,7 @@ pub(super) async fn quota(store: Rc<OrmStore>) {
         fixture.expire(&first).await;
         fixture
             .scope
-            .collect_job(&Grant::new(&app), options(1))
+            .collect_job(&Grant::new(&app), options(1), &fixture.objects)
             .await
             .unwrap();
         assert_eq!(fixture.payload(&first).await.state, expected);

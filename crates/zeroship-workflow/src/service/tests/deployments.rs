@@ -73,7 +73,6 @@ async fn normal_app_deployments_load_from_s3() {
     reason = "the database and storage contract runs on its compio thread"
 )]
 async fn deployment_contract(store: Rc<OrmStore>, deployments: Deployments) {
-    use crate::service::{runner::TaskTransport, WorkerIdentity};
     let (service, app, other, deployments) =
         registered_with_deployments(store.clone(), deployments).await;
     let original = image("original");
@@ -115,8 +114,8 @@ async fn deployment_contract(store: Rc<OrmStore>, deployments: Deployments) {
         .await
         .unwrap()
         .with_deployments(service.deployments.clone().unwrap());
-    let tasks = reopened.tasks(WorkerIdentity::new("customer".into()).unwrap());
-    let foreign = reopened.tasks(WorkerIdentity::new("foreign".into()).unwrap());
+    let tasks = TaskHandle::new(&reopened, "customer");
+    let foreign = TaskHandle::new(&reopened, "foreign");
     let mut active = Vec::new();
     while let Some(task) = tasks.poll().await.unwrap() {
         active.push(task);

@@ -26,6 +26,7 @@ zeroship-kv = { workspace = true, features = ["redis", "redb"] }
 zeroship-kv-v8 = { workspace = true }
 zeroship-workflow-v8 = { workspace = true }
 zeroship-workflow = { workspace = true }
+zeroship-workflow-runner = { workspace = true }
 zeroship-workflow-manager = { workspace = true }
 zeroship-bundle = { workspace = true }
 zeroship-metering = { workspace = true }

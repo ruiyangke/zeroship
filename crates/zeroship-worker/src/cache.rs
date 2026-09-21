@@ -12,7 +12,7 @@ use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::{Runtime, RuntimeLimits};
 use zeroship_runtime::{EnvSnapshot, ModuleEntry, NetPolicy};
 use zeroship_storage::StorageBackendConfig;
-use zeroship_workflow::service::runner::ready::ReadyApps;
+use zeroship_workflow_runner::ready::ReadyApps;
 
 #[cfg(test)]
 pub(crate) mod fixture;

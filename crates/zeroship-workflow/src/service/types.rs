@@ -140,7 +140,7 @@ pub struct CompletionReceipt {
     pub committed_at: i64,
 }
 
-pub(crate) fn hash(bytes: &[u8]) -> String {
+pub fn hash(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))
