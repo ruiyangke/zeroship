@@ -368,6 +368,24 @@ Checked through its libraries as well as its own source: gateway links
 already in its column above, so the single-table property holds for what the
 gateway PROCESS executes, not merely for what its crate spells.
 
+*A constraint on this step is already written down at the site.*
+`crates/zeroship-gateway/src/main.rs` records, on `PoolReplayStore`, that the
+gateway "is a callee on exactly one internal edge - `/oidc/backchannel-logout`
+- and that edge takes the FULL profile, so the `jti` must be claimed in a store
+every gateway replica shares", and then states the consequence: "**This store
+is why the gateway still holds a database credential.** The credential-free
+gateway target is incompatible with a shared replay store terminating here."
+
+That interacts with open question 3 in a way worth being explicit about.
+Per-service replay stores are enough for correctness, and they let the gateway
+claim into its OWN database rather than a shared one - but they do not make the
+gateway credential-free, because it still holds a credential to that database.
+The comment names the only two things that do: move the backchannel-logout edge
+off the gateway, or re-tier it so the edge no longer takes the full profile.
+Neither is in this document's scope, and a split that quietly repoints the
+gateway's credential at a new database should not be mistaken for progress
+toward the credential-free target.
+
 **4. Workflow.** Already a separate schema with its own migrator role: the
 corpus carries `zeroship_workflow` and `zeroship_workflow_migrator`, and
 `db/migrations-ts/20260919000000_workflow_journal.ts` and
