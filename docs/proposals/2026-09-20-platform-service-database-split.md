@@ -338,6 +338,21 @@ platform-schema reach. The change is a separate database, a role with no grant
 on it, and extending `crates/zeroship-worker/src/db_posture.rs` to check
 database identity rather than schema reachability.
 
+*That extension is required, not cosmetic, and the reason is easy to miss.* The
+gate's probe asks `EXISTS (SELECT 1 FROM pg_namespace WHERE nspname =
+'zeroship' AND has_schema_privilege(current_user, oid, 'USAGE'))`, and names no
+database anywhere - `current_database`, `datname` and `pg_database` appear
+nowhere in the file. `pg_namespace` is a PER-DATABASE catalog, so today, on the
+shared database where the platform schema exists, the probe is a real test of
+the grant. Move the worker to a creator database and no schema named `zeroship`
+exists there at all, so the answer is false whatever the role was granted. The
+gate would pass without testing anything, and it would pass identically on the
+right database and on a wrong one.
+
+A boot gate that cannot fail is the same defect as a check that passes over
+empty input. After the cut, the question worth refusing on is which DATABASE
+the worker opened, which is why the probe has to name it.
+
 **2. CDC relay.** Two production reads, not one. `worker_instances.public_key`
 is the narrow one and becomes a control API call. The other is
 `bound_database_schema` in `crates/zeroship-data-cdc-server/src/source.rs`,
