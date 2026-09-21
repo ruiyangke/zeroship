@@ -68,7 +68,7 @@ use zeroship_control::databases::{
     self, BindDatabaseBody, CreateDatabaseBody, CAPABILITY_READWRITE,
 };
 use zeroship_control::organizations::{self, CreateOrganizationBody};
-use zeroship_control::publication::CatalogError;
+use zeroship_control::publication::{Acceptance, CatalogError};
 use zeroship_control::Registry;
 use zeroship_core::database_role::DatabaseCapability;
 use zeroship_core::{database_derivation, AppId, BindingId, DatabaseId, UserId};
@@ -76,7 +76,9 @@ use zeroship_data_orm::connection::ConnectionFactory;
 use zeroship_data_orm::encryption::SuppliedProjectKeys;
 use zeroship_data_orm::resolved_bindings::{ResolvedBinding, SuppliedAppBindings};
 use zeroship_data_v8::service::{DbService, DbServiceConfig};
-use zeroship_migrate_server::apply::{apply_ir_documents, ApplyMigrationsRequest, WORKER_ROLE};
+use zeroship_migrate_server::apply::{
+    apply_ir_documents, ApplyMigrationsRequest, ApplyMigrationsResponse, ApplyTarget, WORKER_ROLE,
+};
 use zeroship_migrate_server::datastore::control::ControlStore;
 use zeroship_migrate_server::datastore::{PassReport, Reconciler};
 use zeroship_migrate_server::policy::ManagedPolicyConfig;
@@ -121,6 +123,17 @@ const PRIVATE_LABEL: &str = "analytics";
 
 const SHARED_COLLECTION: &str = "notes";
 const PRIVATE_COLLECTION: &str = "events";
+
+/// The collection a SECOND migration adds to the shared database, after both
+/// apps have already deployed against a schema that does not carry it.
+const CO_TENANT_COLLECTION: &str = "ledger";
+
+/// The shared database's first migration document, under the filename the
+/// engine journals it by.
+const SHARED_FIRST_DOCUMENT: &str = "0001_create_notes.ir.json";
+
+/// The document the co-tenant migration adds to that history.
+const CO_TENANT_DOCUMENT: &str = "0002_create_ledger.ir.json";
 
 /// The plaintext app A writes into the encrypted column.
 const SECRET: &str = "123-45-6789";
@@ -283,6 +296,23 @@ impl World {
         (row.get("status"), row.get("schema_epoch"))
     }
 
+    /// The deploy hash the app row carries, which is the projection the gateway
+    /// dispatches from.
+    ///
+    /// A deploy that returned a result and left this column where it was would
+    /// satisfy every assertion about the returned value and ship nothing, so
+    /// "the deploy succeeded" is read here rather than from the acceptance.
+    async fn live_deploy_hash(&self, app: &AppId) -> Option<String> {
+        self.pg
+            .query_one(
+                "SELECT deploy_hash FROM zeroship.apps WHERE id = $1",
+                &[&app.as_str()],
+            )
+            .await
+            .expect("the app row must exist to be read")
+            .get("deploy_hash")
+    }
+
     async fn binding_row(&self, binding: &BindingId) -> (String, i32, i32) {
         let row = self
             .pg
@@ -382,7 +412,7 @@ fn shared_migration() -> Json {
         "kind": "ir",
         "descriptor_sha256": DESCRIPTOR_HASH,
         "documents": [{
-            "filename": "0001_create_notes.ir.json",
+            "filename": SHARED_FIRST_DOCUMENT,
             "body": {
                 "ir_version": 1,
                 "name": "create_notes",
@@ -397,6 +427,36 @@ fn shared_migration() -> Json {
             }
         }]
     })
+}
+
+/// The shared database's COMPLETE history, with one document the first apply
+/// did not carry.
+///
+/// The whole history and not only the new file: `attest_complete_history`
+/// (`crates/zeroship-migrate-server/src/apply.rs`) refuses an apply whose
+/// supplied manifest set does not cover every version already in the engine
+/// journal, so a request carrying `0002` alone would fail on coverage and
+/// measure nothing about what a co-tenant's migration does to a deploy.
+fn co_tenant_migration() -> Json {
+    let mut request = shared_migration();
+    request["documents"]
+        .as_array_mut()
+        .expect("the fixture request carries a document array")
+        .push(json!({
+            "filename": CO_TENANT_DOCUMENT,
+            "body": {
+                "ir_version": 1,
+                "name": "create_ledger",
+                "ops": [{
+                    "op": "createTable",
+                    "name": CO_TENANT_COLLECTION,
+                    "columns": [
+                        {"name": "entry", "type": "text", "nullable": false}
+                    ]
+                }]
+            }
+        }));
+    request
 }
 
 /// The creator migration for the database only app A binds.
@@ -423,15 +483,24 @@ fn private_migration() -> Json {
 
 /// Apply one creator migration into one database, through the migration
 /// service's own apply.
+///
+/// `expect_skipped` is what the engine journal already covers, named by the
+/// `mig_` ids the response reports rather than by filename: one `.ir.json`
+/// document lowers to several plans and the response speaks in plans. Every
+/// first apply names none; a request re-supplying a history so the coverage
+/// attestation passes names what that history applied, and naming it is what
+/// keeps "the apply advanced the journal" from being satisfied by an apply that
+/// re-ran nothing and advanced nothing. Compared as a SET, because the response
+/// does not promise the order the earlier apply reported.
 async fn apply_into(
     tenant_url: &str,
     control_url: &str,
-    app: &AppId,
-    database: &DatabaseId,
+    target: ApplyTarget<'_>,
     principal: &UserId,
     request: Json,
     label: &str,
-) {
+    expect_skipped: &[String],
+) -> ApplyMigrationsResponse {
     let request: ApplyMigrationsRequest =
         serde_json::from_value(request).expect("the fixture is a legal apply request");
     let tmp = tmpdir(label);
@@ -439,10 +508,7 @@ async fn apply_into(
         tenant_url,
         control_url,
         &tmp,
-        zeroship_migrate_server::apply::ApplyTarget {
-            app_id: app,
-            database_id: database,
-        },
+        target,
         &request,
         &policy_config(),
         principal,
@@ -450,10 +516,27 @@ async fn apply_into(
     .await
     .unwrap_or_else(|error| panic!("apply into {label}: {error}"));
     assert!(
-        !report.applied.is_empty() && report.skipped.is_empty(),
+        !report.applied.is_empty(),
         "the apply must advance the journal rather than skip: {report:?}"
     );
+    let mut skipped = report.skipped.clone();
+    skipped.sort();
+    let mut expected = expect_skipped.to_vec();
+    expected.sort();
+    assert_eq!(
+        skipped, expected,
+        "the apply must skip exactly the history it re-supplied: {report:?}"
+    );
+    assert!(
+        report
+            .applied
+            .iter()
+            .all(|plan| !expect_skipped.contains(plan)),
+        "what this apply advanced must be disjoint from what it re-supplied, or \
+         `applied` is the earlier history counted twice: {report:?}"
+    );
     let _ = std::fs::remove_dir_all(tmp);
+    report
 }
 
 // ---------------------------------------------------------------------------
@@ -1167,24 +1250,30 @@ async fn the_whole_decoupled_path_runs_in_one_exercise() {
         );
     }
 
-    apply_into(
+    let shared_first_apply = apply_into(
         cluster_fixture.url(),
         &world.control_url,
-        &app_a,
-        &shared_id,
+        ApplyTarget {
+            app_id: &app_a,
+            database_id: &shared_id,
+        },
         &principal,
         shared_migration(),
         "shared",
+        &[],
     )
     .await;
     apply_into(
         cluster_fixture.url(),
         &world.control_url,
-        &app_a,
-        &private_id,
+        ApplyTarget {
+            app_id: &app_a,
+            database_id: &private_id,
+        },
         &principal,
         private_migration(),
         "private",
+        &[],
     )
     .await;
 
@@ -1309,6 +1398,35 @@ async fn the_whole_decoupled_path_runs_in_one_exercise() {
         ),
         other => panic!("expected DatabaseNotBound, got {other:?}"),
     }
+
+    // -----------------------------------------------------------------------
+    // STAGE 4b. ARM (g): a migration one app applies to the SHARED database
+    // does not fail the other app's deploy.
+    //
+    // It runs here, between the deploys and the isolates, because it needs both
+    // apps live on one database and it leaves the shared schema grown by one
+    // relation the stages below neither read nor forbid. The refusal directly
+    // above is its control, differing in one variable.
+    // -----------------------------------------------------------------------
+    a_migration_one_app_applies_to_a_shared_database_does_not_fail_the_other_apps_deploy(
+        CoTenantDeploy {
+            world: &world,
+            cluster: &cluster,
+            tenant_url: cluster_fixture.url(),
+            principal: &principal,
+            applying: Bound {
+                app: &app_a,
+                binding: &a_shared,
+            },
+            deploying: Bound {
+                app: &app_b,
+                binding: &b_shared,
+            },
+            shared: &shared_id,
+            already_applied: &shared_first_apply.applied,
+        },
+    )
+    .await;
 
     // -----------------------------------------------------------------------
     // STAGE 5. Creator code, in a real isolate, through env.db and
@@ -1628,6 +1746,301 @@ async fn the_whole_decoupled_path_runs_in_one_exercise() {
     common::drain_pg().await;
 }
 
+/// One app's side of a shared database: the app, and the binding it holds to
+/// that database. Carried as a pair because an app id alone cannot say which
+/// edge was converged for it.
+struct Bound<'a> {
+    app: &'a AppId,
+    binding: &'a BindingId,
+}
+
+/// Everything arm (g) needs to measure, in the spec shape [`Dispatch`] already
+/// uses in this file.
+struct CoTenantDeploy<'a> {
+    world: &'a World,
+    cluster: &'a Client,
+    tenant_url: &'a str,
+    principal: &'a UserId,
+    /// The app that applies the migration.
+    applying: Bound<'a>,
+    /// The app that deploys after it and must not be failed by it.
+    deploying: Bound<'a>,
+    shared: &'a DatabaseId,
+    /// What the FIRST apply into `shared` reported as applied, which the second
+    /// must re-supply and skip.
+    already_applied: &'a [String],
+}
+
+/// ARM (g) OF THE MANDATORY REGRESSION SET: on a database two apps share, one
+/// app's migration does not fail the other app's deploy.
+///
+/// This is the property the deleted descriptor-equality gate destroyed. That
+/// gate compared the manifest's `runtime_descriptor.hash` against the hash on
+/// the app's newest applied row, so ANY migration - a purely additive one
+/// included - invalidated the build of every other app bound to that database
+/// while every one of them kept running correctly.
+/// `publication::catalog::admit_bindings` now compares no schema at all: it
+/// reads `database_bindings` and `databases` and nothing else, so the property
+/// is free of a mechanism rather than guarded by one.
+///
+/// # This asserts that something does NOT happen, so it passes for free if the
+/// # scenario never arises
+///
+/// Five ways it could be green over a tree where the property is false, and the
+/// assertion that forecloses each:
+///
+/// - **The two apps are not actually on one database.** Two independent
+///   databases make a co-tenant migration a migration of nobody's schema.
+///   Foreclosed by comparing the two database ids for EQUALITY, each read out
+///   of its own app's live-binding projection rather than from this test's
+///   variables, and by `assert_ne!` on the two app ids.
+/// - **A binding is not live, so the deploy was never admitted on it.**
+///   Foreclosed by asserting the three conjuncts
+///   `zeroship_core::live_binding::LIVE_BINDINGS_FROM_WHERE` spells - the
+///   binding `active`, `observed_generation >= generation`, the database
+///   `active` - which are the three `admit_bindings` re-implements over the
+///   ORM, read from the rows for both apps.
+/// - **The migration applied nothing.** An apply that skipped every document
+///   leaves the schema where it was and there is no co-tenant change to survive.
+///   Foreclosed by requiring `applied` to be non-empty and disjoint from the
+///   plans the FIRST apply into this database reported, and `skipped` to be
+///   exactly those plans - and then by asking `PostgreSQL` rather than the
+///   service: the shared schema carries a relation after the apply that it
+///   demonstrably did not carry before.
+/// - **The artifact named no database**, which returns from `admit_bindings` on
+///   an empty list before any row is read - the shape
+///   `deploy_declaring_no_database_needs_no_binding_and_goes_live`
+///   (`crates/zeroship-control/tests/deploy_http_test.rs`) measures on purpose.
+///   Foreclosed on the VERIFIED deployment rather than on the manifest, because
+///   `VerifiedDeployment::databases` is the slice `catalog::accept` hands to
+///   `admit_bindings` and a manifest entry that did not survive verification
+///   would leave that slice empty.
+/// - **The deploy returned a result and shipped nothing.** Foreclosed by
+///   requiring `Acceptance::Accepted` rather than the receipt replay an
+///   identical hash answers with, and by reading the app row's `deploy_hash`
+///   back and finding the new build there.
+///
+/// # The control
+///
+/// The refusal that differs from this in one variable is in the same exercise,
+/// a few lines above the call: the same app deploying the same shape with ONE
+/// more database - the one it holds no binding to - is refused
+/// `CatalogError::DatabaseNotBound`. The HTTP-surface form of that control,
+/// with its status, body and remedy, is
+/// `deploy_naming_an_unbound_database_is_refused_and_names_the_binding_call`
+/// and its own control in `crates/zeroship-control/tests/deploy_http_test.rs`;
+/// neither is restated here.
+async fn a_migration_one_app_applies_to_a_shared_database_does_not_fail_the_other_apps_deploy(
+    scene: CoTenantDeploy<'_>,
+) {
+    let CoTenantDeploy {
+        world,
+        cluster,
+        tenant_url,
+        principal,
+        applying,
+        deploying,
+        shared,
+        already_applied,
+    } = scene;
+    let (applying, applying_binding) = (applying.app, applying.binding);
+    let (deploying, deploying_binding) = (deploying.app, deploying.binding);
+    // PRECONDITION 1. TWO APPS, ONE DATABASE. Read each app's own live-binding
+    // projection and compare the DATABASE IDS to each other. "Each is
+    // non-empty" would hold over two separate databases, which is the scenario
+    // in which this whole arm asserts nothing.
+    let applying_live = world.live_bindings(applying).await;
+    let deploying_live = world.live_bindings(deploying).await;
+    let applying_edge = applying_live
+        .iter()
+        .find(|resolved| &resolved.binding == applying_binding)
+        .expect("the applying app holds its shared binding in the live projection");
+    let deploying_edge = deploying_live
+        .iter()
+        .find(|resolved| &resolved.binding == deploying_binding)
+        .expect("the deploying app holds its shared binding in the live projection");
+    assert_eq!(
+        applying_edge.database, deploying_edge.database,
+        "the two apps must be bound to the SAME database, or a migration by one \
+         is not a migration of the other's schema and this arm measures nothing"
+    );
+    assert_eq!(
+        &applying_edge.database, shared,
+        "and that one database is the shared one this stage migrates"
+    );
+    assert_ne!(
+        applying, deploying,
+        "two apps, not one app named twice: the deploy below must be the app that \
+         did NOT apply the migration"
+    );
+    assert_ne!(
+        applying_binding, deploying_binding,
+        "two bindings, one per app, and not one binding read twice"
+    );
+
+    // PRECONDITION 2. BOTH BINDINGS ARE LIVE BY THE PREDICATE DEPLOY USES.
+    // `admit_bindings` re-implements `LIVE_BINDINGS_FROM_WHERE` over the ORM,
+    // and its three conjuncts are these. A deploy admitted over a binding that
+    // was not live would be admitted for a reason this arm is not about.
+    let mut rows_before = Vec::new();
+    for (binding, what) in [
+        (applying_binding, "the applying app's binding"),
+        (deploying_binding, "the deploying app's binding"),
+    ] {
+        let row = world.binding_row(binding).await;
+        let (status, generation, observed) = &row;
+        assert_eq!(status, "active", "{what} must be active");
+        assert!(
+            observed >= generation,
+            "{what}: a live binding's observed generation has caught up \
+             ({observed} >= {generation})"
+        );
+        rows_before.push((binding, what, row));
+    }
+    let (database_status, epoch_before) = world.database_row(shared).await;
+    assert_eq!(
+        database_status, "active",
+        "the shared database must be active, the third conjunct of LIVE"
+    );
+
+    // PRECONDITION 3. THE DEPLOYING APP IS ALREADY LIVE ON A BUILD THAT
+    // PREDATES THE MIGRATION. Without this the deploy below could be a first
+    // deploy, and "its deploy did not start failing" would have no before.
+    let deployed_before = world
+        .live_deploy_hash(deploying)
+        .await
+        .expect("the deploying app went live earlier in this exercise");
+
+    // PRECONDITION 4. THE SCHEMA BEFORE, asked of PostgreSQL. Exact, so the
+    // relation the apply adds is one that demonstrably did not exist.
+    assert_eq!(
+        creator_tables(cluster, shared).await,
+        vec![SHARED_COLLECTION.to_owned()],
+        "before the co-tenant migration the shared database carries one collection"
+    );
+
+    // THE CO-TENANT MIGRATION, by the app that is NOT deploying below.
+    //
+    // The history it re-supplies has to be a real one before `apply_into` can
+    // hold it to anything: an empty expectation would be satisfied by an apply
+    // that skipped nothing because there was nothing to skip.
+    assert!(
+        !already_applied.is_empty(),
+        "the first apply into the shared database reported the plans it applied"
+    );
+    let report = apply_into(
+        tenant_url,
+        &world.control_url,
+        ApplyTarget {
+            app_id: applying,
+            database_id: shared,
+        },
+        principal,
+        co_tenant_migration(),
+        "shared-co-tenant",
+        already_applied,
+    )
+    .await;
+    assert!(
+        !report.applied.is_empty(),
+        "the co-tenant migration advanced the journal: {report:?}"
+    );
+
+    // AND THE SCHEMA REALLY MOVED. A non-empty `applied` is the service's own
+    // report of itself; this is the catalog.
+    assert_eq!(
+        creator_tables(cluster, shared).await,
+        vec![
+            CO_TENANT_COLLECTION.to_owned(),
+            SHARED_COLLECTION.to_owned()
+        ],
+        "the shared database now carries a relation it did not carry before"
+    );
+    let (database_status, epoch_after) = world.database_row(shared).await;
+    assert_eq!(
+        database_status, "active",
+        "an apply does not take the database out of the state that makes a \
+         binding live - which is the only way it could fail a deploy from here"
+    );
+    assert!(
+        epoch_after > epoch_before,
+        "the committed delta rotated the schema epoch and control's projection \
+         followed it ({epoch_before} -> {epoch_after}), so the control plane has \
+         seen this migration and could compare on it if it compared at all"
+    );
+    // AND IT MOVED NOTHING LIVENESS DEPENDS ON. The deploy below succeeding
+    // because the apply left every binding row exactly where it was is the
+    // mechanism; asserting it here means the arm measures that rather than
+    // reasoning about it, and it closes the window where a rotation that
+    // bumped `generation` would refuse every co-tenant until a pass caught up.
+    for (binding, what, before) in &rows_before {
+        assert_eq!(
+            &world.binding_row(binding).await,
+            before,
+            "{what} must be exactly what it was before the apply"
+        );
+    }
+
+    // THE DEPLOY, by the app that did not apply. Its descriptor is the one it
+    // built against BEFORE the migration; only the compiler label differs from
+    // the artifact already live, so this is a new deployment rather than a
+    // replay of the stored receipt.
+    let redeploy = manifest_labelled(
+        "after-a-co-tenants-migration",
+        vec![(SHARED_LABEL, shared, true)],
+    );
+    assert!(
+        redeploy
+            .runtime_descriptor
+            .iter()
+            .all(|entry| entry.hash == DESCRIPTOR_HASH),
+        "the artifact carries the descriptor hash of the build that went live \
+         before the migration, which is exactly what the deleted equality gate \
+         would now refuse"
+    );
+    // THE VALUE ADMISSION ACTUALLY RECEIVES. `admit_bindings` returns Ok on an
+    // empty list before it reads a single row, so an artifact whose declared
+    // set came out empty would make every assertion below pass over a deploy
+    // that verified nothing. `accept` reads exactly this slice, so this is the
+    // one place the claim can be made rather than inferred from the manifest.
+    let deployment = common::deployments::verified(redeploy);
+    assert_eq!(
+        deployment.databases(),
+        std::slice::from_ref(shared),
+        "the verified artifact declares the shared database, and only it, to the \
+         admission that is about to read binding rows for it"
+    );
+    let accepted = world
+        .registry
+        .deploy(common::deployments::command(
+            deploying,
+            &world.owner,
+            deployment,
+        ))
+        .await
+        .expect(
+            "a migration another app applied to the shared database must not fail \
+             this app's deploy",
+        );
+    let Acceptance::Accepted(result) = accepted else {
+        panic!("the deploy must be admitted, not replayed from a receipt: {accepted:?}");
+    };
+    assert_ne!(
+        result.deploy_hash, deployed_before,
+        "the admitted artifact is a new build and not the one already live"
+    );
+    assert!(
+        result.lifecycle_revision.is_some(),
+        "an active app's admitted deploy allocates a lifecycle revision: {result:?}"
+    );
+    assert_eq!(
+        world.live_deploy_hash(deploying).await.as_deref(),
+        Some(result.deploy_hash.as_str()),
+        "and it is LIVE in the projection the gateway dispatches from, which is \
+         the half a returned result cannot carry"
+    );
+}
+
 /// How many roles the cluster carries under one name: one, or none.
 async fn world_role_count(cluster: &Client, role: &str) -> i64 {
     cluster
@@ -1638,6 +2051,19 @@ async fn world_role_count(cluster: &Client, role: &str) -> i64 {
         .await
         .expect("read the role catalog")
         .get("n")
+}
+
+/// The same manifest told apart by its compiler label.
+///
+/// `catalog::accept` answers a second deploy of an identical hash from the
+/// stored receipt, and a replay performs no admission of its own. A label makes
+/// the second deploy a DIFFERENT artifact, so it is admitted rather than
+/// replayed - while its `runtime_descriptor` keeps the hash and the database set
+/// of the build that went live before the migration.
+fn manifest_labelled(label: &str, entries: Vec<(&str, &DatabaseId, bool)>) -> Manifest {
+    let mut manifest = manifest(entries);
+    manifest.metadata.compiler = Some(label.to_owned());
+    manifest
 }
 
 /// A manifest whose runtime descriptor names `entries`, one entry per database.
