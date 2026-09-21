@@ -1454,9 +1454,10 @@ column lists withhold plaintext), a write quiesce with a straggler deadline, man
 advancement, and a cutover. That is a large amount of machinery for one operation. It is not needed
 for hardware refresh: physical replication, promote, and repoint the service config that reaches
 the cluster. The datastore row is keyed on `system_identifier`, which a promoted replica carries
-forward, so the whole cluster moves with no entity changed, no epoch rotated and no app aware. What is given up is rebalancing a hot cluster,
-consolidating two half-empty ones, and offering a dedicated cluster as an *upgrade* - if that tier
-ships it must be chosen when the database is created.
+forward, so the whole cluster moves with no entity changed, no epoch rotated and no app aware. What
+is given up is rebalancing a hot cluster and consolidating two half-empty ones. It does not cost a
+dedicated-cluster tier: open item 1 decides against offering one, and relocation is that tier's
+prerequisite rather than its consequence.
 
 **`transaction_timeout` does not exist on the deployed major. RE-DERIVED**:
 `SELECT count(*) FROM pg_settings WHERE name='transaction_timeout'` returns zero on 16.15; the GUC
@@ -1662,8 +1663,12 @@ app's requests and cannot protect a shared cluster from an app under its limit. 
    Cluster-to-cluster relocation stays unsupported at no product cost, and
    `Retire a datastore` keeps its "only when it holds no database" rule without
    needing a drain path. If dedicated clusters are ever wanted, relocation is the
-   prerequisite and should be built first - offering the tier without it is the
-   ordering this decision rejects.
+   prerequisite and must be built first. Relocation does not merely supply the
+   missing upgrade path: it removes the creation-time choice altogether, because a
+   creator who outgrew the shared tier would simply move. So a tier shipped without
+   relocation is the exact artifact this reasoning rejects - an irreversible
+   creation-time choice - built by someone who believes they are honouring the
+   decision.
 
 2. **Supply the schema epoch producer.** PARTLY BUILT, and the two halves must not be confused.
 
