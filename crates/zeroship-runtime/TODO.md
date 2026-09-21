@@ -31,7 +31,7 @@ baseline (16 crypto + 34 crypto_native + 69 crypto_node + 204 lib).
 
 ### Reorg the source tree (`feature/runtime-reorg`)
 
-`crates/runtime/src/` is now grouped into four roots:
+`crates/zeroship-runtime/src/` is now grouped into four roots:
 
 ```
 core/      runtime/state/dispatch/init/channel/modules/panic_util/plugin/cpu_timer/server/serve

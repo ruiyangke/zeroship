@@ -8,7 +8,7 @@ exposes, whether a declaration was applied or silently dropped.
 
 ## Why this tier exists
 
-The Rust suites in `crates/auth/tests/` drive handlers over HTTP and assert on
+The Rust suites in `crates/zeroship-auth/tests/` drive handlers over HTTP and assert on
 response bytes. That is the right level for flow logic, and it is blind by
 construction to everything the browser decides afterwards. Two defects found on
 the day this was written are both invisible to a response-body assertion:
