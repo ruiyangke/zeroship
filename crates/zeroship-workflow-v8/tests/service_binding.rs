@@ -12,11 +12,12 @@ use zeroship_runtime::{
 use zeroship_workflow::{
     operations::{RunState, StartOptions},
     service::{
-        runner::ready::ReadyApps, AppPolicy, AppWorkflows, DeployRegistration, HostPolicies,
-        PolicyBinding, PolicySnapshot, RequestId, WorkerIdentity, WorkflowService,
+        AppPolicy, AppWorkflows, DeployRegistration, HostPolicies, PolicyBinding,
+        PolicySnapshot, RequestId, WorkerIdentity, WorkflowService,
     },
     WorkflowExecution,
 };
+use zeroship_workflow_runner::ready::ReadyApps;
 use zeroship_workflow_v8::WorkflowBinding;
 
 struct Fixture {

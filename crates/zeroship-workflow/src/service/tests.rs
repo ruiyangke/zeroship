@@ -7,30 +7,9 @@ use super::{
 };
 use crate::operations::{ConflictPolicy, SignalOptions, StartOptions};
 use crate::WorkflowServiceError;
-use compio_postgres::NoTls;
 use serde_json::json;
 use std::{path::Path, rc::Rc, sync::Arc};
-use testcontainers::{
-    core::{IntoContainerPort, WaitFor},
-    runners::SyncRunner,
-    Container, GenericImage, ImageExt,
-};
 use zeroship_core::{app_id::AppId, typed_id};
-
-/// A manager-issued epoch for fixtures whose acceptance needs open responsibility.
-pub(super) fn open_epoch() -> zeroship_core::workflow_coordination::Revision {
-    1.try_into().unwrap()
-}
-
-fn leased_policy(revision: i64, policy: AppPolicy) -> PolicySnapshot {
-    PolicySnapshot::lease(
-        revision.try_into().unwrap(),
-        policy,
-        std::time::Instant::now() + std::time::Duration::from_secs(3600),
-    )
-    .unwrap()
-    .with_ingress_epoch(Some(open_epoch()))
-}
 
 impl HostPolicies {
     pub(super) fn fixture_binding(
@@ -63,41 +42,6 @@ impl HostPolicies {
         app: &AppId,
     ) -> Result<AppPolicy, WorkflowServiceError> {
         self.current_binding(app)?.resolve()
-    }
-}
-
-impl WorkflowService {
-    pub(super) fn fixture_app(&self, app: AppId) -> super::AppWorkflows {
-        let binding = self
-            .policies
-            .current_binding(&app)
-            .or_else(|_| self.policies.bind(app))
-            .unwrap();
-        self.bind_app(&binding).unwrap()
-    }
-
-    #[expect(
-        clippy::future_not_send,
-        reason = "fixture bindings own compio-local journals"
-    )]
-    pub(super) async fn fixture_register(
-        &self,
-        app: &AppId,
-        snapshot: PolicySnapshot,
-    ) -> Result<(), WorkflowServiceError> {
-        let binding = self.policies.fixture_binding(app)?;
-        binding.begin_refresh()?.install(snapshot)?;
-        self.register_app(&binding).await.map(|_| ())
-    }
-
-    /// Install over this service's existing binding without re-registering the
-    /// app, so a fixture can reissue policy after its setup already ran.
-    pub(super) fn fixture_install(
-        &self,
-        app: &AppId,
-        snapshot: PolicySnapshot,
-    ) -> Result<(), WorkflowServiceError> {
-        self.policies.fixture_install(app, snapshot)
     }
 }
 
@@ -156,10 +100,15 @@ mod hold_release;
 mod ingress_models;
 mod journal_models;
 mod management;
+#[path = "../../../../tests/fixtures/workflow_manager_queue.rs"]
+pub(super) mod manager_queue;
+#[path = "../../../../tests/fixtures/workflow_journal.rs"]
+pub(super) mod journal_fixture;
+#[path = "../../../../tests/fixtures/workflow_service_binding.rs"]
+pub(super) mod service_binding;
 mod orm;
 mod outcomes;
 mod output_reads;
-mod output_writes;
 mod payload_models;
 mod payloads;
 mod policy;
@@ -168,7 +117,6 @@ pub(super) mod publication;
 mod reconciliation;
 mod requests;
 mod restart_models;
-mod runner;
 #[path = "../../../../tests/fixtures/s3.rs"]
 mod s3_fixture;
 mod schema_binding;
@@ -176,9 +124,14 @@ mod schema_metadata;
 mod signal_models;
 mod step_retries;
 mod task_models;
-mod task_scope;
 mod topic_initialization;
 use deployment_fixture::{Deployments, Sources};
+pub(super) use manager_queue::open_epoch;
+pub(super) use journal_fixture::{
+    connect, leased_policy, orm_store, registered_service, registered_with_deployments,
+    sqlite_store, PostgresFixture,
+};
+pub(super) use service_binding::ServiceFixture;
 
 async fn journal_rows(
     tx: &Transaction,
@@ -433,29 +386,6 @@ pub(super) async fn deliver_propagations(
     deliver_propagations_with(scope, super::propagation::PropagationOptions::default()).await
 }
 
-async fn sqlite_store(path: &Path) -> OrmStore {
-    let store = orm_store(
-        &format!(
-            "sqlite:{}",
-            path.parent().unwrap().join("orm.sqlite").display()
-        ),
-        super::store::SchemaName::new("workflow").unwrap(),
-    )
-    .await;
-    schema::initialize_local(&store).await.unwrap();
-    store
-}
-
-async fn orm_store(url: &str, schema: super::store::SchemaName) -> OrmStore {
-    OrmStore::connect(
-        zeroship_data_orm::binding::DbBinding::platform("workflow", "test-deployment", schema),
-        &zeroship_data_orm::connection::ConnectionFactory::for_platform_url(url).unwrap(),
-        zeroship_data_orm::encryption::ProjectKeySource::unavailable(),
-    )
-    .await
-    .unwrap()
-}
-
 #[compio::test]
 async fn sqlite_app_operations_are_scoped_and_retryable() {
     let dir = tempfile::tempdir().unwrap();
@@ -468,46 +398,6 @@ async fn sqlite_app_operations_are_scoped_and_retryable() {
 async fn postgres_app_operations_are_scoped_and_retryable() {
     let fixture = PostgresFixture::start().await;
     app_contract(Rc::new(fixture.store.clone())).await;
-}
-
-async fn registered_service(store: Rc<OrmStore>) -> (WorkflowService, AppId, AppId, Deployments) {
-    registered_with_deployments(store, Deployments::new().await).await
-}
-
-async fn registered_with_deployments(
-    store: Rc<OrmStore>,
-    deployments: Deployments,
-) -> (WorkflowService, AppId, AppId, Deployments) {
-    let a = AppId::mint();
-    let b = AppId::mint();
-    let service = WorkflowService::open(store, Arc::new(HostPolicies::default()))
-        .await
-        .unwrap()
-        .with_deployments(deployments.binding(&[&a, &b]));
-    for app in [&a, &b] {
-        service
-            .fixture_register(app, leased_policy(1, AppPolicy::default()))
-            .await
-            .unwrap();
-        service
-            .fixture_register(app, leased_policy(1, AppPolicy::default()))
-            .await
-            .unwrap();
-        deployments
-            .activate(
-                &service,
-                app,
-                &DeployRegistration {
-                    id: typed_id::generate("dep"),
-                    hash: "a".repeat(64),
-                    workflows: ["Example".into(), "Child".into()].into(),
-                    schedules: Vec::new(),
-                },
-            )
-            .await
-            .unwrap();
-    }
-    (service, a, b, deployments)
 }
 
 async fn app_contract(store: Rc<OrmStore>) {
@@ -580,66 +470,6 @@ async fn app_contract(store: Rc<OrmStore>) {
         a.start(&RequestId::mint(), "Example", options).await,
         Err(WorkflowServiceError::PermissionDenied)
     ));
-}
-
-struct PostgresFixture {
-    _container: Container<GenericImage>,
-    store: OrmStore,
-    admin_url: String,
-}
-impl PostgresFixture {
-    async fn start() -> Self {
-        let container = GenericImage::new("postgres", "18")
-            .with_exposed_port(5432.tcp())
-            .with_wait_for(WaitFor::message_on_stderr(
-                "database system is ready to accept connections",
-            ))
-            .with_env_var("POSTGRES_HOST_AUTH_METHOD", "trust")
-            .start()
-            .expect("workflow PostgreSQL container");
-        let host = container.get_host().unwrap();
-        let port = container.get_host_port_ipv4(5432).unwrap();
-        let admin_url = format!("postgres://postgres@{host}:{port}/postgres");
-        let admin = connect(&admin_url).await;
-        admin
-            .batch_execute(
-                "CREATE ROLE customer_migrator NOLOGIN; \
-             CREATE ROLE customer_worker LOGIN; CREATE ROLE app_customer_role NOLOGIN; \
-             GRANT app_customer_role TO customer_worker; CREATE ROLE zeroship_worker LOGIN; \
-             CREATE ROLE zeroship_gateway LOGIN; CREATE ROLE zeroship_app LOGIN; \
-             CREATE ROLE zeroship_control LOGIN; CREATE ROLE zeroship_workflow LOGIN; \
-             CREATE SCHEMA customer AUTHORIZATION customer_migrator; \
-             SET ROLE customer_migrator;",
-            )
-            .await
-            .unwrap();
-        let schema = super::store::SchemaName::new("customer").unwrap();
-        admin
-            .batch_execute(&schema::postgres_sql(&schema))
-            .await
-            .unwrap();
-        admin.batch_execute(
-            "RESET ROLE; GRANT USAGE ON SCHEMA customer TO app_customer_role; \
-             GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA customer TO app_customer_role;"
-        ).await.unwrap();
-        Self {
-            _container: container,
-            store: orm_store(
-                &format!("postgres://customer_worker@{host}:{port}/postgres"),
-                schema,
-            )
-            .await,
-            admin_url,
-        }
-    }
-}
-async fn connect(url: &str) -> compio_postgres::Client {
-    let (client, connection) = compio_postgres::connect(url, NoTls).await.unwrap();
-    compio::runtime::spawn(async move {
-        connection.run().await.unwrap();
-    })
-    .detach();
-    client
 }
 
 #[compio::test]
@@ -2194,4 +2024,55 @@ async fn ingress_contract(store: Rc<OrmStore>) {
             .await,
         Err(WorkflowServiceError::Unauthenticated)
     );
+}
+
+/// The task protocol bound to one worker identity, over the host service.
+pub(super) struct TaskHandle {
+    service: super::WorkflowService,
+    worker: super::WorkerIdentity,
+}
+impl TaskHandle {
+    pub(super) fn new(service: &super::WorkflowService, worker: &str) -> Self {
+        Self {
+            service: service.clone(),
+            worker: super::WorkerIdentity::new(worker.into()).unwrap(),
+        }
+    }
+    pub(super) async fn poll(
+        &self,
+    ) -> Result<Option<super::TaskAssignment>, WorkflowServiceError> {
+        self.service.poll(&self.worker).await
+    }
+    pub(super) async fn executable(
+        &self,
+        task: &super::TaskAssignment,
+    ) -> Result<zeroship_bundle::LoadedWorker, WorkflowServiceError> {
+        self.service
+            .task_executable(&self.worker, &task.id, &task.token)
+            .await
+    }
+    pub(super) async fn heartbeat(
+        &self,
+        task: &str,
+        token: &super::TaskToken,
+    ) -> Result<super::Heartbeat, WorkflowServiceError> {
+        self.service.heartbeat(&self.worker, task, token).await
+    }
+    pub(super) async fn complete(
+        &self,
+        task: &str,
+        token: &super::TaskToken,
+        execution: crate::WorkflowExecution,
+    ) -> Result<super::CompletionReceipt, WorkflowServiceError> {
+        self.service
+            .complete(&self.worker, task, token, execution)
+            .await
+    }
+    pub(super) async fn release(
+        &self,
+        task: &str,
+        token: &super::TaskToken,
+    ) -> Result<(), WorkflowServiceError> {
+        self.service.release(&self.worker, task, token).await
+    }
 }

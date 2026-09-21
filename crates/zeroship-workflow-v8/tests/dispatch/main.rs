@@ -13,7 +13,7 @@ use zeroship_runtime::{
 };
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::runtime::Runtime;
-use zeroship_workflow::service::runner::ready::ReadyApps;
+use zeroship_workflow_runner::ready::ReadyApps;
 use zeroship_workflow_v8::WorkflowBinding;
 
 /// The binding registers the host dispatch module, so a runtime without it

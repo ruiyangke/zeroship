@@ -38,7 +38,7 @@ impl Default for FanoutOptions {
     }
 }
 impl FanoutOptions {
-    pub(super) fn validate(self) -> Result<(), WorkflowServiceError> {
+    pub fn validate(self) -> Result<(), WorkflowServiceError> {
         if self.page_size == 0 || self.page_size > 1024 {
             return Err(WorkflowServiceError::InvalidRequest(
                 "invalid workflow fanout page bound".into(),

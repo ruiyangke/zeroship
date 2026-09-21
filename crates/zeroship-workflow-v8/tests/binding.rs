@@ -8,7 +8,7 @@ use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::{
     init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, Runtime, SettledFetch,
 };
-use zeroship_workflow::service::runner::ready::ReadyApps;
+use zeroship_workflow_runner::ready::ReadyApps;
 use zeroship_workflow_v8::{is_excluded_workflow_property, WorkflowBinding};
 
 fn modules(source: &str) -> Vec<ModuleEntry> {

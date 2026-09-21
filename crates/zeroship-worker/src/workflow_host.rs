@@ -56,20 +56,20 @@ use zeroship_workflow::{
         fanout::FanoutOptions,
         propagation::PropagationOptions,
         reconciliation::ReconciliationOptions,
-        runner::{
-            assignments::AssignmentOptions,
-            consumer::ConsumerOptions,
-            delivery::DeliveryOptions,
-            host::{HostOptions, WorkerHost},
-            ready::ReadyApps,
-            TaskPayloadLimits,
-        },
         store::HostStorage,
         AppDeployments, HostPolicies,
     },
     WorkflowServiceError,
 };
 use zeroship_workflow_client::{Options as ClientOptions, Transport, WorkerCoordinator};
+use zeroship_workflow_runner::{
+    assignments::AssignmentOptions,
+    consumer::ConsumerOptions,
+    delivery::DeliveryOptions,
+    host::{HostOptions, WorkerHost},
+    ready::ReadyApps,
+    TaskPayloadLimits,
+};
 
 /// Bound on one delivered job's execution.
 const EXECUTION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -228,7 +228,7 @@ impl WorkflowHost {
         config.validate()?;
         let (stop, stopped) = oneshot::channel::<()>();
         let (finished, exit) = oneshot::channel::<Result<(), String>>();
-        let thread = zeroship_workflow::service::runner::host::thread()
+        let thread = zeroship_workflow_runner::host::thread()
             .spawn(move || {
                 let result = match compio::runtime::Runtime::new() {
                     Ok(runtime) => runtime.block_on(run(config, resources, ready, stopped)),

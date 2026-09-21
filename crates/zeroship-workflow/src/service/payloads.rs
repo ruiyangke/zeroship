@@ -831,7 +831,11 @@ async fn payload_usage(tx: &Transaction, app: &AppId) -> Result<(i64, i64), Work
     };
     Ok((total, objects))
 }
-pub(crate) fn validate_reference(
+/// Check a payload descriptor before it reaches the journal or storage.
+///
+/// # Errors
+/// Rejects a malformed hash, a negative size and an invalid content type.
+pub fn validate_reference(
     reference: &WorkflowOutputRef,
 ) -> Result<(), WorkflowServiceError> {
     if reference.hash.len() != 64

@@ -37,7 +37,7 @@ impl Default for CollectionOptions {
     }
 }
 impl CollectionOptions {
-    pub(super) fn validate(self) -> Result<(), WorkflowServiceError> {
+    pub fn validate(self) -> Result<(), WorkflowServiceError> {
         if self.page_size == 0
             || self.page_size as usize > payloads::MAX_COLLECTION_BATCH
             || i64::from(self.page_size) > zeroship_data_orm::sql::MAX_ROW_LIMIT

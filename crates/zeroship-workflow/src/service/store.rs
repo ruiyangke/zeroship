@@ -259,7 +259,9 @@ impl std::fmt::Debug for Transaction {
     }
 }
 impl Transaction {
-    pub(crate) fn database(&self) -> &Database {
+    /// The ORM handle this transaction scopes to the creator journal.
+    #[must_use]
+    pub fn database(&self) -> &Database {
         &self.database
     }
     pub(crate) fn host_app_ids(&self) -> Result<Vec<AppId>, WorkflowServiceError> {

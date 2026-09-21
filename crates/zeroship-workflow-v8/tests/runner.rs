@@ -13,12 +13,14 @@ use zeroship_runtime::{runtime::InnerProbe, EnvSnapshot, ModuleEntry, Runtime};
 use zeroship_workflow::{
     operations::{RunOperation, RunState, SignalOptions, StartOptions},
     service::{
-        runner::{RunnerOutcome, RunnerSlot, TaskPayloadLimits, TaskPayloads, WorkerTasks},
         AppPolicy, AppWorkflows, CompletionReceipt, DeployRegistration, HostPolicies, PayloadRead,
         PayloadSlot, PolicySnapshot, RequestId, StagedPayload, TaskAssignment, TaskToken,
         WorkerIdentity, WorkflowService,
     },
     WorkflowServiceError,
+};
+use zeroship_workflow_runner::{
+    RunnerOutcome, RunnerSlot, TaskPayloadLimits, TaskPayloads, WorkerBinding, WorkerTasks,
 };
 use zeroship_workflow_v8::{
     LoadedWorkflow, V8TaskExecutor, WorkflowBinding, WorkflowRuntimeLoader,
@@ -350,7 +352,7 @@ async fn oversized_input_never_initializes_the_creator_module() {
 
 struct UnavailablePayloads(Rc<WorkerTasks>);
 #[async_trait(?Send)]
-impl zeroship_workflow::service::runner::TaskPayloads for UnavailablePayloads {
+impl zeroship_workflow_runner::TaskPayloads for UnavailablePayloads {
     async fn executable(
         &self,
         task: &str,
@@ -1025,7 +1027,7 @@ async fn replay_loads_retained_dependencies_after_redeploy_and_host_restart() {
 
 #[compio::test]
 async fn missing_executable_never_constructs_an_app_isolate() {
-    use zeroship_workflow::service::runner::TaskTransport;
+    use zeroship_workflow_runner::TaskTransport;
     let fixture =
         Fixture::new("throw new Error('must not evaluate'); export class Example {}").await;
     let run = fixture
@@ -1116,16 +1118,16 @@ impl Manager {
         self: &Rc<Self>,
         fixture: &Fixture,
         slots: usize,
-    ) -> zeroship_workflow::service::runner::consumer::JobConsumer<Self> {
+    ) -> zeroship_workflow_runner::consumer::JobConsumer<Self> {
         use zeroship_workflow::service::{
             collection::CollectionOptions,
             fanout::FanoutOptions,
             propagation::PropagationOptions,
             reconciliation::ReconciliationOptions,
-            runner::{
-                consumer::{ConsumerOptions, ConsumerScope, JobConsumer},
-                delivery::DeliveryOptions,
-            },
+        };
+        use zeroship_workflow_runner::{
+            consumer::{ConsumerOptions, ConsumerScope, JobConsumer},
+            delivery::DeliveryOptions,
         };
         let tasks = Rc::new(
             fixture
@@ -1180,7 +1182,7 @@ fn manager_error(error: zeroship_workflow_manager::Error) -> WorkflowServiceErro
     WorkflowServiceError::Unavailable(error.to_string())
 }
 
-impl zeroship_workflow::service::runner::delivery::JobTransport for Manager {
+impl zeroship_workflow_runner::delivery::JobTransport for Manager {
     type Lease = zeroship_workflow_manager::DeliveryGrant;
 
     async fn claim(
@@ -1242,7 +1244,7 @@ impl zeroship_workflow::service::publication::JobPublisher for Manager {
         &self,
         job: &zeroship_core::workflow_jobs::JobSpec,
     ) -> Result<zeroship_core::workflow_jobs::JobSpec, WorkflowServiceError> {
-        zeroship_workflow::service::runner::delivery::JobTransport::submit(self, &self.scope, job)
+        zeroship_workflow_runner::delivery::JobTransport::submit(self, &self.scope, job)
             .await
     }
 }

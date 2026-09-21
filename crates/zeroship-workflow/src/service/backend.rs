@@ -72,7 +72,7 @@ impl AppBackend {
     }
 
     /// The policy generation every call through this backend is bound to.
-    pub(crate) const fn binding(&self) -> &PolicyBinding {
+    pub const fn binding(&self) -> &PolicyBinding {
         &self.binding
     }
 
