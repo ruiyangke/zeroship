@@ -232,4 +232,12 @@ CREATE TABLE "__zeroship_workflow_schema"."__zeroship_workflow_propagation_pages
 CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_propagation_page_revision" ON "__zeroship_workflow_schema"."__zeroship_workflow_propagation_pages" ("app_id", "propagation_id", "revision");
 
 CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_propagation_pages_scope_key" ON "__zeroship_workflow_schema"."__zeroship_workflow_propagation_pages" ("app_id", "id");
-INSERT INTO "__zeroship_workflow_schema".__zeroship_workflow_schema_version (id, version, fingerprint) VALUES ('workflow', 1, '33a65afb0738653d993ad62390c981fc0af4245253b02bde5fbae2295d93daf7');
+
+
+
+DROP TABLE "__zeroship_workflow_schema"."__zeroship_workflow_advance_publications";
+
+DROP TABLE "__zeroship_workflow_schema"."__zeroship_workflow_fanout_publications";
+
+DROP TABLE "__zeroship_workflow_schema"."__zeroship_workflow_propagation_publications";
+INSERT INTO "__zeroship_workflow_schema".__zeroship_workflow_schema_version (id, version, fingerprint) VALUES ('workflow', 2, '3292677db1efdf400dd959ec755d41849636178c5cabe4af549ccf6e11fabfd6');

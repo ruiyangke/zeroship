@@ -223,15 +223,7 @@ async fn replay_and_order(store: Rc<OrmStore>) {
     );
     platform.assert_held(&app, &old.id).await;
     platform.assert_held(&app, &new.id).await;
-    for table in [
-        "runs",
-        "tasks",
-        "schedules",
-        "job_publications",
-        "advance_publications",
-        "fanout_publications",
-        "propagation_publications",
-    ] {
+    for table in ["runs", "tasks", "schedules", "job_publications"] {
         assert!(snapshot(&service, table, &app).await.is_empty());
     }
     let current = snapshot(&service, "activation_scopes", &app).await;

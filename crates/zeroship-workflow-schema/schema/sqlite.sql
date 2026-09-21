@@ -230,4 +230,12 @@ CREATE TABLE "__zeroship_workflow_propagation_pages" ("id" TEXT COLLATE BINARY P
 CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_propagation_page_revision" ON "__zeroship_workflow_propagation_pages" ("app_id", "propagation_id", "revision");
 
 CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_propagation_pages_scope_key" ON "__zeroship_workflow_propagation_pages" ("app_id", "id");
-INSERT INTO "main".__zeroship_workflow_schema_version (id, version, fingerprint) VALUES ('workflow', 1, 'ac97024a1d23a6e59c6d57f606205f0a3651c267eab5b44b8fed739199afe5c8');
+
+
+
+DROP TABLE "__zeroship_workflow_advance_publications";
+
+DROP TABLE "__zeroship_workflow_fanout_publications";
+
+DROP TABLE "__zeroship_workflow_propagation_publications";
+INSERT INTO "main".__zeroship_workflow_schema_version (id, version, fingerprint) VALUES ('workflow', 2, '658bbb257f01e1f6c73ac242ad138fea0de9bc625ab70a794e88eda8a9b5b9df');

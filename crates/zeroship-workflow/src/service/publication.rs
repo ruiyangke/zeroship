@@ -3,6 +3,17 @@
 //! Journal transitions write intents before COMMIT. Network publication happens
 //! after it; only a matching manager receipt confirms an intent. Neither history
 //! collection nor an unknown remote outcome retires this deduplication state.
+//!
+//! # The key carries the identity
+//!
+//! A publishable job's id is [`publication_id`] of the work it names, not a
+//! minted value, so the intent table's PRIMARY KEY is its deduplication key.
+//! Recording an intent is a lookup by that id followed by an insert: two
+//! transactions observing the same frontier, broadcast page or propagation page
+//! compute the same id, both find nothing, and the second insert collides on the
+//! key rather than adding a second job for the same work. Every read re-derives
+//! the id from the specification it decoded, so a row whose content does not
+//! produce the key it is stored under is a damaged journal.
 
 #![expect(
     clippy::future_not_send,
@@ -11,10 +22,7 @@
 
 use super::{
     app::{decode, encode, lock_app, not_found, parse_state},
-    models::{
-        advance_publications, fanout_publications, job_publications as publications,
-        propagation_publications, runs,
-    },
+    models::{job_publications as publications, runs},
     store::Transaction,
     AppWorkflows,
 };
@@ -22,9 +30,10 @@ use crate::WorkflowServiceError;
 use std::future::Future;
 use zeroship_core::{
     app_id::AppId,
-    workflow_coordination::{AssignedScope, FailureCode, Revision, RunId},
+    workflow_coordination::{AssignedScope, FailureCode, Revision, RunId, UnixMillis},
     workflow_jobs::{
-        BroadcastId, DeploymentId, JobId, JobOperation, JobSpec, PropagationId, SubmitJob,
+        publication_id, BroadcastId, DeploymentId, JobId, JobOperation, JobSpec, PropagationId,
+        SubmitJob,
     },
 };
 use zeroship_data_orm::{
@@ -86,11 +95,11 @@ impl JobPublisher for AssignedPublisher<'_> {
     }
 }
 
-/// What a reader that has not yet decoded the specification needs. The
-/// operation's own projection lives in that operation's table.
+/// One intent row: its identity, the specification that identity is derived
+/// from, and whether a manager receipt confirmed it.
 #[derive(FromRow, Insertable)]
 #[orm(entity = publications)]
-struct Intent {
+struct Record {
     id: String,
     app_id: String,
     specification: String,
@@ -98,7 +107,7 @@ struct Intent {
     confirmed_at: Option<i64>,
 }
 
-impl Intent {
+impl Record {
     fn new(job: &JobSpec, now: i64) -> Result<Self, WorkflowServiceError> {
         Ok(Self {
             id: job.id.as_str().to_owned(),
@@ -108,212 +117,49 @@ impl Intent {
             confirmed_at: None,
         })
     }
-}
 
-/// The frontier an advance intent names. Its due time is part of the identity
-/// the scoped unique key deduplicates on, so it is stored here rather than
-/// beside the specification.
-#[derive(FromRow, Insertable)]
-#[orm(entity = advance_publications)]
-struct Advance {
-    id: String,
-    app_id: String,
-    deploy_id: String,
-    run_id: String,
-    generation: i64,
-    frontier_revision: i64,
-    available_at: i64,
-}
-
-#[derive(FromRow, Insertable)]
-#[orm(entity = fanout_publications)]
-struct Fanout {
-    id: String,
-    app_id: String,
-    broadcast_id: String,
-    revision: i64,
-}
-
-#[derive(FromRow, Insertable)]
-#[orm(entity = propagation_publications)]
-struct Propagation {
-    id: String,
-    app_id: String,
-    propagation_id: String,
-    revision: i64,
-}
-
-/// An intent and the projection of the one operation it publishes. Every column
-/// of that projection is required, and its foreign key ties it to this intent,
-/// so the only thing left to check is that the row belongs to the operation the
-/// specification names.
-struct Record {
-    intent: Intent,
-    advance: Option<Advance>,
-    fanout: Option<Fanout>,
-    propagation: Option<Propagation>,
-}
-
-impl Record {
+    /// Decode the specification and check it against the key it is stored
+    /// under.
+    ///
+    /// [`JobSpec::publication_id`] is `None` for the seven operations a creator
+    /// journal never publishes, so an intent wearing one of them is refused
+    /// here; for the three it does publish, the derived id must be the row's
+    /// own id. That single equality replaces every column-by-column comparison
+    /// a second copy of the tuple would need, and it covers the whole operation
+    /// rather than the part a projection happened to carry.
     fn job(&self, app: &AppId) -> Result<JobSpec, WorkflowServiceError> {
-        let job: JobSpec = decode(&self.intent.specification)?;
+        let job: JobSpec = decode(&self.specification)?;
         if job.app_id != *app
-            || self.intent.app_id != app.as_str()
-            || job.id.as_str() != self.intent.id
+            || self.app_id != app.as_str()
+            || job.id.as_str() != self.id
+            || job.publication_id() != Some(job.id.clone())
         {
-            return Err(invalid());
-        }
-        let projections = usize::from(self.advance.is_some())
-            + usize::from(self.fanout.is_some())
-            + usize::from(self.propagation.is_some());
-        let valid = projections == 1
-            && match (
-                &job.operation,
-                &self.advance,
-                &self.fanout,
-                &self.propagation,
-            ) {
-                (
-                    JobOperation::Advance {
-                        deployment_id,
-                        run_id,
-                        generation,
-                        revision,
-                    },
-                    Some(frontier),
-                    ..,
-                ) => {
-                    frontier.deploy_id == deployment_id.as_str()
-                        && frontier.run_id == run_id.as_str()
-                        && frontier.generation == i64::from(*generation)
-                        && frontier.frontier_revision == revision.get()
-                        && frontier.available_at == job.available_at.get()
-                }
-                (
-                    JobOperation::Fanout {
-                        broadcast_id,
-                        revision,
-                    },
-                    _,
-                    Some(page),
-                    _,
-                ) => page.broadcast_id == broadcast_id.as_str() && page.revision == revision.get(),
-                (
-                    JobOperation::Propagate {
-                        propagation_id,
-                        revision,
-                    },
-                    ..,
-                    Some(page),
-                ) => {
-                    page.propagation_id == propagation_id.as_str()
-                        && page.revision == revision.get()
-                }
-                _ => false,
-            };
-        if !valid {
             return Err(invalid());
         }
         Ok(job)
     }
 }
 
-/// One intent row beside each projection the outer join may or may not find.
-type Row = (Intent, Option<Advance>, Option<Fanout>, Option<Propagation>);
-type Projection = (
-    EntityProjection<publications::Entity, Intent, false>,
-    EntityProjection<advance_publications::Entity, Advance, true>,
-    EntityProjection<fanout_publications::Entity, Fanout, true>,
-    EntityProjection<propagation_publications::Entity, Propagation, true>,
-);
-
-/// The intent table outer-joined to all three projections. A read that already
-/// knows its operation still joins all three, because reading exactly one of
-/// them is what proves the intent publishes exactly one.
-struct Sources {
+/// The intent table under its own alias, so predicates and projections name one
+/// source rather than repeating the entity lookup.
+struct Source {
     intents: EntityAlias<publications::Entity>,
-    advance: EntityAlias<advance_publications::Entity>,
-    fanout: EntityAlias<fanout_publications::Entity>,
-    propagation: EntityAlias<propagation_publications::Entity>,
 }
 
-impl Sources {
+impl Source {
     fn new(tx: &Transaction) -> Result<Self, WorkflowServiceError> {
         Ok(Self {
             intents: tx.database().entity::<publications::Entity>()?.alias("p")?,
-            advance: tx
-                .database()
-                .entity::<advance_publications::Entity>()?
-                .alias("a")?,
-            fanout: tx
-                .database()
-                .entity::<fanout_publications::Entity>()?
-                .alias("f")?,
-            propagation: tx
-                .database()
-                .entity::<propagation_publications::Entity>()?
-                .alias("g")?,
         })
     }
 
-    fn scan(&self, tx: &Transaction) -> Result<ReadBuilder, WorkflowServiceError> {
-        Ok(tx
-            .database()
-            .from(&self.intents)
-            .left_join(
-                &self.advance,
-                self.advance
-                    .column(advance_publications::app_id)
-                    .eq(self.intents.column(publications::app_id))?
-                    .and(
-                        self.advance
-                            .column(advance_publications::id)
-                            .eq(self.intents.column(publications::id))?,
-                    ),
-            )?
-            .left_join(
-                &self.fanout,
-                self.fanout
-                    .column(fanout_publications::app_id)
-                    .eq(self.intents.column(publications::app_id))?
-                    .and(
-                        self.fanout
-                            .column(fanout_publications::id)
-                            .eq(self.intents.column(publications::id))?,
-                    ),
-            )?
-            .left_join(
-                &self.propagation,
-                self.propagation
-                    .column(propagation_publications::app_id)
-                    .eq(self.intents.column(publications::app_id))?
-                    .and(
-                        self.propagation
-                            .column(propagation_publications::id)
-                            .eq(self.intents.column(publications::id))?,
-                    ),
-            )?)
+    fn scan(&self, tx: &Transaction) -> ReadBuilder {
+        tx.database().from(&self.intents)
     }
 
-    fn projection(&self) -> Projection {
-        (
-            self.intents.row::<Intent>(),
-            self.advance.optional_row::<Advance>(),
-            self.fanout.optional_row::<Fanout>(),
-            self.propagation.optional_row::<Propagation>(),
-        )
+    fn projection(&self) -> EntityProjection<publications::Entity, Record, false> {
+        self.intents.row::<Record>()
     }
-}
-
-fn records(rows: Vec<Row>) -> Vec<Record> {
-    rows.into_iter()
-        .map(|(intent, advance, fanout, propagation)| Record {
-            intent,
-            advance,
-            fanout,
-            propagation,
-        })
-        .collect()
 }
 
 impl AppWorkflows {
@@ -337,34 +183,30 @@ impl AppWorkflows {
             .run(async {
                 captured.check()?;
                 let tx = self.service.begin().await?;
-                let sources = Sources::new(&tx)?;
-                let mut predicate = sources
+                let source = Source::new(&tx)?;
+                let mut predicate = source
                     .intents
                     .column(publications::app_id)
                     .eq(self.app.as_str())?
                     .and(
-                        sources
+                        source
                             .intents
                             .column(publications::confirmed_at)
                             .eq(None::<i64>)?,
                     );
                 if let Some(after) = after {
-                    predicate = predicate.and(
-                        sources
-                            .intents
-                            .column(publications::id)
-                            .gt(after.as_str())?,
-                    );
+                    predicate =
+                        predicate.and(source.intents.column(publications::id).gt(after.as_str())?);
                 }
-                let rows = sources
-                    .scan(&tx)?
+                let rows: Vec<Record> = source
+                    .scan(&tx)
                     .filter(predicate)
-                    .order_by(sources.intents.column(publications::id).asc())
-                    .select(sources.projection())?
+                    .order_by(source.intents.column(publications::id).asc())
+                    .select(source.projection())?
                     .limit(i64::from(limit))?
                     .all()
                     .await?;
-                let jobs = records(rows)
+                let jobs = rows
                     .iter()
                     .map(|row| row.job(&self.app))
                     .collect::<Result<_, _>>()?;
@@ -410,7 +252,7 @@ impl AppWorkflows {
                 let job = intent.job(&self.app)?;
                 captured.recheck()?;
                 tx.commit().await?;
-                if intent.intent.confirmed_at.is_some() {
+                if intent.confirmed_at.is_some() {
                     return Ok(job);
                 }
                 captured.check()?;
@@ -433,7 +275,7 @@ impl AppWorkflows {
                 if current.job(&self.app)? != job {
                     return Err(invalid());
                 }
-                if current.intent.confirmed_at.is_none() {
+                if current.confirmed_at.is_none() {
                     let now = tx.now().await?;
                     captured.check()?;
                     if let Some(authority) = authority {
@@ -506,7 +348,7 @@ pub(super) async fn advance_job(
 }
 
 /// Record the final runnable frontier in the same transaction as its cause.
-/// The scoped unique key coalesces repeated observations without changing a
+/// The derived identity coalesces repeated observations without changing a
 /// previously published job's due time or immutable identity.
 pub(super) async fn record(
     tx: &Transaction,
@@ -543,84 +385,45 @@ pub(super) async fn record_job(
         generation: frontier.generation.try_into().map_err(|_| invalid())?,
         revision: Revision::try_from(frontier.frontier_revision).map_err(|_| invalid())?,
     };
-    let sources = Sources::new(tx)?;
-    let existing = records(
-        sources
-            .scan(tx)?
-            .filter(
-                sources
-                    .intents
-                    .column(publications::app_id)
-                    .eq(app.as_str())?
-                    .and(
-                        sources
-                            .advance
-                            .column(advance_publications::run_id)
-                            .eq(run)?,
-                    )
-                    .and(
-                        sources
-                            .advance
-                            .column(advance_publications::generation)
-                            .eq(frontier.generation)?,
-                    )
-                    .and(
-                        sources
-                            .advance
-                            .column(advance_publications::frontier_revision)
-                            .eq(frontier.frontier_revision)?,
-                    )
-                    .and(
-                        sources
-                            .advance
-                            .column(advance_publications::available_at)
-                            .eq(due)?,
-                    ),
-            )
-            .select(sources.projection())?
-            .limit(1)?
-            .all()
-            .await?,
-    );
-    let job = JobSpec {
-        id: existing
-            .first()
-            .map(|row| JobId::parse(&row.intent.id).map_err(|_| invalid()))
-            .transpose()?
-            .unwrap_or_else(JobId::mint),
-        app_id: app.clone(),
+    Box::pin(publish(
+        tx,
+        app,
         operation,
-        available_at: due.try_into().map_err(|_| invalid())?,
-    };
-    if let Some(existing) = existing.first() {
-        if existing.job(app)? != job {
-            return Err(invalid());
-        }
-        return Ok(Some(job));
-    }
-    insert(tx, &job, now).await?;
-    Ok(Some(job))
+        due.try_into().map_err(|_| invalid())?,
+        now,
+    ))
+    .await
+    .map(Some)
 }
 
 async fn read(tx: &Transaction, app: &AppId, id: &JobId) -> Result<Record, WorkflowServiceError> {
-    let sources = Sources::new(tx)?;
-    let rows = sources
-        .scan(tx)?
+    existing(tx, app, id)
+        .await?
+        .ok_or_else(|| not_found("workflow job publication"))
+}
+
+/// The intent stored under one derived id, if the journal already holds it.
+async fn existing(
+    tx: &Transaction,
+    app: &AppId,
+    id: &JobId,
+) -> Result<Option<Record>, WorkflowServiceError> {
+    let source = Source::new(tx)?;
+    Ok(source
+        .scan(tx)
         .filter(
-            sources
+            source
                 .intents
                 .column(publications::app_id)
                 .eq(app.as_str())?
-                .and(sources.intents.column(publications::id).eq(id.as_str())?),
+                .and(source.intents.column(publications::id).eq(id.as_str())?),
         )
-        .select(sources.projection())?
+        .select(source.projection())?
         .limit(1)?
         .all()
-        .await?;
-    records(rows)
+        .await?
         .into_iter()
-        .next()
-        .ok_or_else(|| not_found("workflow job publication"))
+        .next())
 }
 
 fn one() -> FindOptions {
@@ -634,90 +437,48 @@ fn invalid() -> WorkflowServiceError {
     WorkflowServiceError::Internal("invalid workflow job publication journal".into())
 }
 
-/// Write the intent and the one projection its operation owns. The projection's
-/// foreign key needs its intent first, and the seven operations that are never
-/// published have no projection to write, so they are refused here.
-async fn insert(tx: &Transaction, job: &JobSpec, now: i64) -> Result<(), WorkflowServiceError> {
-    let id = job.id.as_str().to_owned();
-    let app_id = job.app_id.as_str().to_owned();
-    let intent = Box::pin(
+/// Record one publishable operation, returning the immutable job that now owns
+/// its identity.
+///
+/// The id is derived first, so an equal observation reads the intent it already
+/// wrote instead of writing a second one, and two transactions racing the same
+/// observation compute the same key: the loser's insert collides on the primary
+/// key rather than committing a duplicate job. The seven operations that are
+/// never published derive no identity and are refused here.
+async fn publish(
+    tx: &Transaction,
+    app: &AppId,
+    operation: JobOperation,
+    available_at: UnixMillis,
+    now: i64,
+) -> Result<JobSpec, WorkflowServiceError> {
+    let job = JobSpec {
+        id: publication_id(app, &operation, available_at).ok_or_else(invalid)?,
+        app_id: app.clone(),
+        operation,
+        available_at,
+    };
+    if let Some(stored) = existing(tx, app, &job.id).await? {
+        // The recorded specification wins, not the one just built. A fanout or
+        // propagation page is identified by its obligation and revision alone,
+        // so an equal observation at a later moment carries a later
+        // `available_at` and must still resolve to the job already published.
+        let recorded = stored.job(app)?;
+        if recorded.operation != job.operation {
+            return Err(invalid());
+        }
+        return Ok(recorded);
+    }
+    let saved = Box::pin(
         tx.database()
             .entity::<publications::Entity>()?
-            .insert::<_, Intent>(Intent::new(job, now)?),
+            .insert::<_, Record>(Record::new(&job, now)?),
     )
     .await?;
-    let mut saved = Record {
-        intent,
-        advance: None,
-        fanout: None,
-        propagation: None,
-    };
-    match &job.operation {
-        JobOperation::Advance {
-            deployment_id,
-            run_id,
-            generation,
-            revision,
-        } => {
-            saved.advance = Some(
-                Box::pin(
-                    tx.database()
-                        .entity::<advance_publications::Entity>()?
-                        .insert::<_, Advance>(Advance {
-                            id,
-                            app_id,
-                            deploy_id: deployment_id.as_str().to_owned(),
-                            run_id: run_id.as_str().to_owned(),
-                            generation: i64::from(*generation),
-                            frontier_revision: revision.get(),
-                            available_at: job.available_at.get(),
-                        }),
-                )
-                .await?,
-            );
-        }
-        JobOperation::Fanout {
-            broadcast_id,
-            revision,
-        } => {
-            saved.fanout = Some(
-                Box::pin(
-                    tx.database()
-                        .entity::<fanout_publications::Entity>()?
-                        .insert::<_, Fanout>(Fanout {
-                            id,
-                            app_id,
-                            broadcast_id: broadcast_id.as_str().to_owned(),
-                            revision: revision.get(),
-                        }),
-                )
-                .await?,
-            );
-        }
-        JobOperation::Propagate {
-            propagation_id,
-            revision,
-        } => {
-            saved.propagation = Some(
-                Box::pin(
-                    tx.database()
-                        .entity::<propagation_publications::Entity>()?
-                        .insert::<_, Propagation>(Propagation {
-                            id,
-                            app_id,
-                            propagation_id: propagation_id.as_str().to_owned(),
-                            revision: revision.get(),
-                        }),
-                )
-                .await?,
-            );
-        }
-        _ => return Err(invalid()),
-    }
-    if saved.job(&job.app_id)? != *job {
+    if saved.job(&job.app_id)? != job {
         return Err(invalid());
     }
-    Ok(())
+    Ok(job)
 }
 
 pub(super) async fn exact(tx: &Transaction, job: &JobSpec) -> Result<(), WorkflowServiceError> {
@@ -742,56 +503,21 @@ pub(super) async fn fanout(
     revision: Revision,
     now: i64,
 ) -> Result<JobSpec, WorkflowServiceError> {
-    let sources = Sources::new(tx)?;
-    let existing = records(
-        sources
-            .scan(tx)?
-            .filter(
-                sources
-                    .intents
-                    .column(publications::app_id)
-                    .eq(app.as_str())?
-                    .and(
-                        sources
-                            .fanout
-                            .column(fanout_publications::broadcast_id)
-                            .eq(broadcast.as_str())?,
-                    )
-                    .and(
-                        sources
-                            .fanout
-                            .column(fanout_publications::revision)
-                            .eq(revision.get())?,
-                    ),
-            )
-            .select(sources.projection())?
-            .limit(1)?
-            .all()
-            .await?,
-    );
-    let operation = JobOperation::Fanout {
-        broadcast_id: broadcast.clone(),
-        revision,
-    };
-    if let Some(existing) = existing.first() {
-        let job = existing.job(app)?;
-        if job.operation != operation {
-            return Err(invalid());
-        }
-        return Ok(job);
-    }
-    let job = JobSpec {
-        id: JobId::mint(),
-        app_id: app.clone(),
-        operation,
-        available_at: now.try_into().map_err(|_| invalid())?,
-    };
-    insert(tx, &job, now).await?;
-    Ok(job)
+    Box::pin(publish(
+        tx,
+        app,
+        JobOperation::Fanout {
+            broadcast_id: broadcast.clone(),
+            revision,
+        },
+        now.try_into().map_err(|_| invalid())?,
+        now,
+    ))
+    .await
 }
 
-/// Record one propagation page intent. The scoped unique projection returns the
-/// same immutable job when an equal page was already recorded.
+/// Record one propagation page intent. The derived identity returns the same
+/// immutable job when an equal page was already recorded.
 pub(super) async fn propagate(
     tx: &Transaction,
     app: &AppId,
@@ -799,89 +525,52 @@ pub(super) async fn propagate(
     revision: Revision,
     now: i64,
 ) -> Result<JobSpec, WorkflowServiceError> {
-    let sources = Sources::new(tx)?;
-    let existing = records(
-        sources
-            .scan(tx)?
-            .filter(
-                sources
-                    .intents
-                    .column(publications::app_id)
-                    .eq(app.as_str())?
-                    .and(
-                        sources
-                            .propagation
-                            .column(propagation_publications::propagation_id)
-                            .eq(propagation.as_str())?,
-                    )
-                    .and(
-                        sources
-                            .propagation
-                            .column(propagation_publications::revision)
-                            .eq(revision.get())?,
-                    ),
-            )
-            .select(sources.projection())?
-            .limit(1)?
-            .all()
-            .await?,
-    );
-    let operation = JobOperation::Propagate {
-        propagation_id: propagation.clone(),
-        revision,
-    };
-    if let Some(existing) = existing.first() {
-        let job = existing.job(app)?;
-        if job.operation != operation {
-            return Err(invalid());
-        }
-        return Ok(job);
-    }
-    let job = JobSpec {
-        id: JobId::mint(),
-        app_id: app.clone(),
-        operation,
-        available_at: now.try_into().map_err(|_| invalid())?,
-    };
-    insert(tx, &job, now).await?;
-    Ok(job)
+    Box::pin(publish(
+        tx,
+        app,
+        JobOperation::Propagate {
+            propagation_id: propagation.clone(),
+            revision,
+        },
+        now.try_into().map_err(|_| invalid())?,
+        now,
+    ))
+    .await
 }
 
 /// The app lock prevents new intents while every pending specification is checked.
-/// Reading the specification, rather than the advance projection's deployment,
-/// is what keeps a damaged projection from concealing a code-dependent
-/// publication from release.
+/// Reading the specification, rather than a denormalized deployment column, is
+/// what keeps a damaged intent from concealing a code-dependent publication from
+/// release.
 pub(super) async fn retains_deployment(
     tx: &Transaction,
     app: &AppId,
     deployment: &str,
 ) -> Result<bool, WorkflowServiceError> {
-    let sources = Sources::new(tx)?;
+    let source = Source::new(tx)?;
     let mut after: Option<String> = None;
     loop {
-        let mut predicate = sources
+        let mut predicate = source
             .intents
             .column(publications::app_id)
             .eq(app.as_str())?
             .and(
-                sources
+                source
                     .intents
                     .column(publications::confirmed_at)
                     .eq(None::<i64>)?,
             );
         if let Some(after) = after.as_deref() {
-            predicate = predicate.and(sources.intents.column(publications::id).gt(after)?);
+            predicate = predicate.and(source.intents.column(publications::id).gt(after)?);
         }
-        let rows = records(
-            sources
-                .scan(tx)?
-                .filter(predicate)
-                .order_by(sources.intents.column(publications::id).asc())
-                .select(sources.projection())?
-                .limit(128)?
-                .all()
-                .await?,
-        );
+        let rows: Vec<Record> = source
+            .scan(tx)
+            .filter(predicate)
+            .order_by(source.intents.column(publications::id).asc())
+            .select(source.projection())?
+            .limit(128)?
+            .all()
+            .await?;
         if rows.is_empty() {
             return Ok(false);
         }
@@ -894,6 +583,6 @@ pub(super) async fn retains_deployment(
                 return Ok(true);
             }
         }
-        after = rows.last().map(|row| row.intent.id.clone());
+        after = rows.last().map(|row| row.id.clone());
     }
 }
