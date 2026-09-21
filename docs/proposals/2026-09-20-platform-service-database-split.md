@@ -331,8 +331,22 @@ platform-schema reach. The change is a separate database, a role with no grant
 on it, and extending `crates/zeroship-worker/src/db_posture.rs` to check
 database identity rather than schema reachability.
 
-**2. CDC relay.** One narrow read - `worker_instances.public_key` - and an
-in-memory replay store already. It becomes a control API call.
+**2. CDC relay.** Two production reads, not one. `worker_instances.public_key`
+is the narrow one and becomes a control API call. The other is
+`bound_database_schema` in `crates/zeroship-data-cdc-server/src/source.rs`,
+which resolves an app to its live binding by composing
+`zeroship_core::live_binding::LIVE_BINDINGS_FROM_WHERE` - a JOIN of
+`zeroship.database_bindings` to `zeroship.databases`, both control's.
+
+That fragment is a coupling this document should name, because it is shared
+SQL rather than a shared table: `crates/zeroship-control/src/internal.rs`,
+`crates/zeroship-data-cdc-server/src/source.rs` and
+`crates/zeroship-migrate-server/src/bindings.rs` each compose the same `const`
+into their own statement, deliberately, so that what counts as a live binding
+cannot drift between them. A split has to preserve that agreement without the
+shared string - one API that answers "is this binding live, and which schema",
+consumed by all three. Replacing the fragment service by service reintroduces
+exactly the drift the constant exists to prevent.
 
 **3. Gateway.** No production read-joins; every statement is single-table. That
 property is what makes this step mechanical, but it is not what makes it small.
@@ -342,6 +356,13 @@ Beyond the session and anchor tables this document gives it, the gateway reads
 `audit_events`. Every one of those becomes an API call. The step is ordered
 third because single-table reads convert one at a time without decomposing a
 join, not because there are few of them.
+
+Checked through its libraries as well as its own source: gateway links
+`zeroship-authz` but calls only `wrapper_revocation`, which touches
+`zeroship.token_revocations` and contains no JOIN, and it links
+`zeroship-authn` for `service_replay::claim_replay_key` alone. Both tables are
+already in its column above, so the single-table property holds for what the
+gateway PROCESS executes, not merely for what its crate spells.
 
 **4. Workflow.** Already a separate schema with its own migrator role: the
 corpus carries `zeroship_workflow` and `zeroship_workflow_migrator`, and
