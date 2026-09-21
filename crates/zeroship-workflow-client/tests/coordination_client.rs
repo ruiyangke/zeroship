@@ -858,3 +858,53 @@ async fn native_clients_mint_fresh_full_assertions_for_the_workflow_audience() {
         .expect("signed coordinator exchanges completed");
     }
 }
+
+/// `transition` is `manage` with the command assembled for the caller: the same
+/// endpoint and the same body. The harness asserts both, so if this ever grows a
+/// route of its own the test fails - which is the property the relocation plan
+/// warns about at step 4, where a parallel endpoint doubles the manager's
+/// request rate for no new capability.
+///
+/// All four outcome arms are exercised, plus the `null` outcome that means the
+/// manager accepted the command and has not applied it yet.
+#[compio::test]
+async fn control_transition_reuses_the_manage_exchange() {
+    let request_id = RequestId::mint();
+    let app_id = AppId::mint();
+    let run_id = RunId::mint();
+    let expected = ManageRun {
+        request_id: request_id.clone(),
+        app_id: app_id.clone(),
+        run_id: run_id.clone(),
+        command: ManagementOperation::Transition {
+            operation: RunOperation::Pause,
+        },
+    };
+    for outcome in [
+        json!(null),
+        json!({"kind":"applied","state":"paused"}),
+        json!({"kind":"not_found"}),
+        json!({"kind":"conflict"}),
+        json!({"kind":"denied"}),
+    ] {
+        let receipt = json!({"appId":app_id,"requestId":request_id,"outcome":outcome});
+        control_reply(
+            response(200, &receipt),
+            endpoints::WORKFLOW_MANAGE,
+            &expected,
+            async |client| {
+                assert_eq!(
+                    serde_json::to_value(
+                        client
+                            .transition(&request_id, &app_id, &run_id, RunOperation::Pause)
+                            .await
+                            .unwrap()
+                    )
+                    .unwrap(),
+                    receipt
+                );
+            },
+        )
+        .await;
+    }
+}
