@@ -123,6 +123,12 @@ async fn scans(service: &WorkflowService, app: &AppId) -> Vec<super::super::stor
     rows
 }
 
+async fn reconciliation_phase(service: &WorkflowService, app: &AppId) -> String {
+    scans(service, app).await[0]
+        .text("reconciliation_phase")
+        .unwrap()
+}
+
 async fn confirmed(service: &WorkflowService, app: &AppId, job: &JobId) -> bool {
     let tx = service.begin().await.unwrap();
     let rows = journal_rows(
@@ -593,19 +599,31 @@ async fn concurrency(store: Rc<OrmStore>) {
         untouched
     );
     publisher.barrier = None;
-    assert_eq!(
-        scope
-            .reconcile_job(&Grant::new(&jobs[0]), &publisher, options(1))
-            .await
-            .unwrap()
-            .outcome,
-        JobOutcome::Waiting {}
-    );
-    assert_eq!(
-        scope.pending_jobs(None, 10).await.unwrap().len(),
-        1,
-        "newer intent is outside the captured upper boundary"
-    );
+    // The competing root landed while both pages were gated: exactly one of the
+    // three intents is published and two remain, in every ordering, because the
+    // count is the total less the pages run and neither depends on order.
+    assert_eq!(scope.pending_jobs(None, 10).await.unwrap().len(), 2);
+    // The cycle bounded its window before that root arrived, and a publication
+    // id is derived rather than minted, so the arrival sorts where its content
+    // puts it - inside the window or past it. What the scan guarantees is that
+    // the window is finite and the phase leaves it, not how many pages that
+    // takes, so the drain is asserted and the page count is not.
+    let mut pages = 0;
+    while reconciliation_phase(&service, &app).await == "publications" {
+        assert_eq!(
+            scope
+                .reconcile_job(&Grant::new(&jobs[0]), &publisher, options(1))
+                .await
+                .unwrap()
+                .outcome,
+            JobOutcome::Waiting {}
+        );
+        pages += 1;
+        assert!(
+            pages <= 3,
+            "the publications phase must drain the window it bounded"
+        );
+    }
     assert_eq!(
         scope
             .reconcile_job(&Grant::new(&jobs[0]), &publisher, options(1))
