@@ -68,8 +68,8 @@ Ownership is not recorded anywhere in the tree today.
 
     gateway_sessions            CONTESTED - auth deletes from it
     app_session_anchors         CONTESTED - auth revokes through it
-    app_user_identities         CONTESTED - three writers
-    token_revocations           CONTESTED - three writers
+    app_user_identities         CONTESTED - auth, control and gateway write it
+    token_revocations           CONTESTED - auth, control, and gateway via authz
     dpop_jti                    no reader found; edge-shaped
 
 ### `control` - organizations, projects, apps, billing, deploys
@@ -94,7 +94,7 @@ Ownership is not recorded anywhere in the tree today.
     payouts                     payout_failures          stripe_events_seen
     provider_dead_letter        execution_zones          authz_decisions
     audit_events                CONTESTED - auth and gateway both write
-    worker_instances            CONTESTED - three consumers
+    worker_instances            CONTESTED - control, cdc relay, workflow-server
     worker_join_tokens          worker_join_token_claims
     worker_join_signers         worker_join_signer_zones
 
@@ -281,8 +281,11 @@ reinstates exactly what was deleted to get that guarantee, and on `locked_until`
 the consequence is concrete: an account locked in auth keeps authorising in
 control for the length of the lag.
 
-That makes this cut a distributed-systems problem rather than a refactor, and it
-is why the sequencing puts it last - with the caveat recorded there.
+That makes this cut a distributed-systems problem rather than a refactor. It
+does not make it the LAST problem: `enforce` has a second production caller in
+migrate-server, so the projection is owed at sequencing step 5, one step before
+the cut this claim is filed under. The sequencing records that and the caveat
+that ordering alone may not close it.
 
 **3. Auth takes a row lock on control's `organizations` while deleting `users`.**
 `refuse_if_it_strands_an_organization` holds `SELECT ... FOR UPDATE` on a
