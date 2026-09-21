@@ -538,8 +538,20 @@ and it was the wrong measure.
    store per service exists in the tree, and the live contest is a two-service
    one between auth and gateway - which this document's sequencing splits
    across step 3 and step 6.
-3. **Does `service_assertion_replay` stay shared?** The argument for sharing is
-   weaker than its header claims.
+3. **ANSWERED: `service_assertion_replay` does not need to stay shared.** The
+   key is `format!("{}|{}", claims.iss, claims.jti)` in
+   `crates/zeroship-core/src/service_assertion.rs` - `aud` is checked
+   separately and is not in the key - so a claim is only ever contended by
+   replicas of the one service the assertion is addressed to. Four services
+   build the Postgres-backed store today (`crates/zeroship-control/src/internal.rs`,
+   `crates/zeroship-gateway/src/main.rs`,
+   `crates/zeroship-migrate-server/src/main.rs`,
+   `crates/zeroship-workflow-server/src/server.rs`) and the CDC relay already
+   opts out with `InMemoryReplayStore`. A per-service table satisfies the
+   requirement the module header states; what it does not satisfy is the
+   header's own reasoning, which argues from "this deployment already has
+   exactly one such thing" - a premise this split removes. Retire that sentence
+   with the cut, or it will read as an argument against it.
 4. **Which database holds an auth-domain row no auth process writes?**
    `zeroship.identity_links` is the case. Every production statement against it
    lives in the `zeroship-authn` library, and the writer,
