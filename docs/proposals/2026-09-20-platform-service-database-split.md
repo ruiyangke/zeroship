@@ -59,7 +59,7 @@ Ownership is not recorded anywhere in the tree today.
     signing_keys                read by gateway today
     totp_credentials
     totp_backup_codes
-    identity_links              CONTESTED - written only by control's pool
+    identity_links              CONTESTED - control and migrate-server write it
     principal_grants            CONTESTED - same
     rate_limits                 written by the authn library on two pools
     cron_state                  no reader found; auth-granted
@@ -212,11 +212,28 @@ the shape `database_bindings` already uses for convergence.
 role and project tables in one statement, and `zeroship-authz` is linked into
 auth, gateway, control and migrate-server.
 
-*Measured: per decision, uncached.* `authority::resolve` has exactly one
-production caller, `enforce` in `crates/zeroship-authz/src/eval.rs`, reached
-from `crates/zeroship-control/src/authz_guard.rs`. The only cache in the crate
-is `RevocationCache` in `crates/zeroship-authz/src/wrapper_revocation.rs`,
-which caches revocations and not authority.
+*Measured: per decision, uncached, and reached from TWO services.*
+`authority::resolve` is called by `enforce` in
+`crates/zeroship-authz/src/eval.rs`, and `enforce` has two production callers:
+`crates/zeroship-control/src/authz_guard.rs` and
+`crates/zeroship-migrate-server/src/auth.rs`, the latter inside `authorize` and
+against `self.control_pg` - migrate-server authorizes by querying control's
+database directly. The only cache in the crate is `RevocationCache` in
+`crates/zeroship-authz/src/wrapper_revocation.rs`, which caches revocations and
+not authority.
+
+**So the `users` crossing is not confined to the auth/control cut.** Any
+service that links `zeroship-authz` and calls `enforce` needs the same
+projection, and migrate-server is such a service today. A per-crate read of
+`crates/<service>/src` cannot see this: the SQL lives in a library, and a
+library's tables are reached by every service that links it. `zeroship-authn`
+is the same shape - it carries `zeroship.users`, `zeroship.identity_links`,
+`zeroship.principal_grants`, `zeroship.rate_limits` and
+`service_authn.service_assertion_replay`, and auth, control, gateway,
+migrate-server and workflow-server all depend on it. Which of those tables a
+given service actually reaches is a question about its CALLS, not its
+dependency list: workflow-server links `zeroship-authn` but uses only
+`service_replay`, so it touches only the assertion-replay table.
 
 **So the auth/control cut needs a `users` PROJECTION in control's database, not
 an API call.** A network round trip per authorization decision, in four
@@ -332,12 +349,21 @@ corpus carries `zeroship_workflow` and `zeroship_workflow_migrator`, and
 `db/migrations-ts/20260911000000_workflow_coordination.ts` build the schema. Its
 cross-service reads are column-scoped projections of control tables.
 
-**5. migrate-server.** Needs a role of its own first - it currently logs in with
-control's credential, and there is no `zeroship_migrate` role in the corpus.
+**5. migrate-server.** Needs a role of its own first - it currently logs in
+with control's credential, and there is no `zeroship_migrate` role in the
+corpus. **And it is not the cheap step this ordering implies.** Its `authorize`
+calls `authz::enforce` against `self.control_pg`, so it runs the same ladder
+join on `zeroship.users` that claim 2 describes, per decision. Everything the
+`users` projection has to solve for control has to be solved for
+migrate-server too, which means the unresolved blocker in this document
+surfaces HERE, one step before the cut it is filed under. Either this step
+moves after the projection exists, or the projection is built for two
+consumers at step 5 rather than one at step 6.
 
-**6. auth and control together.** Last, and the only one that requires
-solving erasure, the authorization join and the cross-service CTEs. Nothing
-above it is blocked by it.
+**6. auth and control together.** Last, and the only one that requires solving
+erasure and the cross-service CTEs. It no longer owns the authorization join
+alone: step 5 reaches the same join, so steps 1 through 4 are unblocked by this
+step but step 5 is not.
 
 *Ordering alone may not be enough for it.* "Last" is the right position, but
 position is not the mechanism. If the `users` projection cannot be made
@@ -473,8 +499,10 @@ and it was the wrong measure.
 ## Open
 
 1. **ANSWERED: the authorization ladder join is per-decision and uncached, and
-   it crosses on `users` alone.** It requires a projection in control carrying
-   `id`, `email_verified_at` and `locked_until`, not an API call - see claim 2.
+   it crosses on `users` alone.** It requires a projection carrying `id`,
+   `email_verified_at` and `locked_until`, not an API call - see claim 2. It is
+   needed by every service that calls `enforce`, which today is control AND
+   migrate-server, so it is a step-5 dependency rather than a step-6 one.
    **Still open, and the only unresolved blocker in this document: can that
    projection be made synchronous with the lock write?** If it cannot, the
    authorization gap is a property of the cut rather than of its timing, and
@@ -491,8 +519,14 @@ and it was the wrong measure.
    across step 3 and step 6.
 3. **Does `service_assertion_replay` stay shared?** The argument for sharing is
    weaker than its header claims.
-4. **Which database holds an auth-domain row written only by control?**
-   `identity_links` is the case; both answers cost something.
+4. **Which database holds an auth-domain row no auth process writes?**
+   `zeroship.identity_links` is the case. Every production statement against it
+   lives in the `zeroship-authn` library, and the writer,
+   `platform_cli::materialize_default_grants`, has two callers:
+   `crates/zeroship-control/src/authz_guard.rs` and
+   `crates/zeroship-migrate-server/src/auth.rs`. So it is an auth-domain table
+   written by control's pool and migrate-server's, and read by neither auth
+   service path. Both answers cost something.
 5. **`cron_state` and `dpop_jti` are created and never used.** Neither name
    appears in any crate, in `src` or in tests, qualified or bare; outside the
    corpus and the owners registry they occur only in test-run Postgres logs.
