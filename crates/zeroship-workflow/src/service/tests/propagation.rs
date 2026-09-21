@@ -141,9 +141,6 @@ async fn snapshot(service: &WorkflowService, app: &AppId) -> Vec<Vec<zeroship_da
     for table in [
         "runs",
         "job_publications",
-        "advance_publications",
-        "fanout_publications",
-        "propagation_publications",
         "job_receipts",
         "propagations",
         "propagation_pages",

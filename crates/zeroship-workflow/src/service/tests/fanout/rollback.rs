@@ -46,8 +46,8 @@ async fn rollback(store: Rc<OrmStore>, database: Database) {
     let grant = Grant::new(&job(&scope, &accepted.id, 1).await);
     let before = snapshot(&scope).await;
     // A final page publishes its recipients' Advance intents, not a successor
-    // fanout page, so the projection it writes is the advance one.
-    for table in ["job_publications", "advance_publications", "fanout_pages"] {
+    // fanout page, so the intent row it writes carries an Advance.
+    for table in ["job_publications", "fanout_pages"] {
         database.fault(table, true).await;
         assert!(scope
             .fanout_job(&grant, FanoutOptions::default())

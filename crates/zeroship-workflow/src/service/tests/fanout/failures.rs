@@ -1,5 +1,5 @@
 use super::*;
-use crate::service::models::{app_state, broadcasts, fanout_pages, fanout_publications, topics};
+use crate::service::models::{app_state, broadcasts, fanout_pages, topics};
 
 pub(super) async fn damage(store: Rc<OrmStore>) {
     let (service, app, _, _deployments) = registered_service(store).await;
@@ -81,24 +81,19 @@ pub(super) async fn damage(store: Rc<OrmStore>) {
     );
 }
 
+/// An intent whose specification no longer derives the key it is stored under
+/// cannot pass as this page or any other, and it is repaired by putting the
+/// original specification back.
 async fn damaged_publication(service: &WorkflowService, scope: &AppWorkflows, job: &JobSpec) {
-    for revision in [2_i64, 1] {
-        let tx = service.begin().await.unwrap();
-        tx.database()
-            .entity::<fanout_publications::Entity>()
-            .unwrap()
-            .update_many(
-                fanout_publications::id.eq(job.id.as_str()).unwrap(),
-                fanout_publications::revision.set(revision).unwrap(),
-            )
-            .await
-            .unwrap();
-        tx.commit().await.unwrap();
-        if revision != 1 {
-            refused(scope, job).await;
-            assert!(scope.pending_jobs(None, 100).await.is_err());
-        }
-    }
+    let tx = service.begin().await.unwrap();
+    let original = damage_specification(&tx, scope.app_id(), job.id.as_str()).await;
+    tx.commit().await.unwrap();
+    refused(scope, job).await;
+    assert!(scope.pending_jobs(None, 100).await.is_err());
+    let tx = service.begin().await.unwrap();
+    write_specification(&tx, job.id.as_str(), &original).await;
+    tx.commit().await.unwrap();
+    assert!(scope.pending_jobs(None, 100).await.is_ok());
 }
 
 async fn refused(scope: &AppWorkflows, job: &JobSpec) {

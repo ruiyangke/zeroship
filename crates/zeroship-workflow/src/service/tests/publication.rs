@@ -12,8 +12,9 @@ use crate::{
 use std::{cell::Cell, time::Duration};
 use zeroship_core::{
     schema_name::SchemaName,
+    workflow_coordination::Revision,
     workflow_deployments::{HoldGeneration, HoldReceipt, HoldScope, HoldState},
-    workflow_jobs::{DeploymentId, JobOperation, JobSpec},
+    workflow_jobs::{BroadcastId, DeploymentId, JobOperation, JobSpec, PropagationId},
 };
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_workflow_manager::{
@@ -108,16 +109,20 @@ case!(
     executable_identity
 );
 case!(
-    sqlite_publication_projections_are_bound_by_their_own_tables,
-    postgres_publication_projections_are_bound_by_their_own_tables,
-    kind_projections
+    sqlite_publication_keys_are_derived_from_their_specification,
+    postgres_publication_keys_are_derived_from_their_specification,
+    derived_keys
+);
+case!(
+    sqlite_publication_deduplicates_equal_work_across_transactions,
+    postgres_publication_deduplicates_equal_work_across_transactions,
+    dedup
 );
 
-/// Each operation's projection is a row in that operation's table with a
-/// foreign key onto its intent, so the database refuses a projection with no
-/// intent, and an intent wearing another operation's projection, or none, is
-/// not the job its specification names.
-async fn kind_projections(store: Rc<OrmStore>, _: &FaultDb) {
+/// A publishable job's id is the one its own content derives, so an intent
+/// whose specification moved off that key is refused, and an intent wearing an
+/// operation no creator journal publishes derives no key at all.
+async fn derived_keys(store: Rc<OrmStore>, _: &FaultDb) {
     let (service, app, _, _platform) = registered_service(store).await;
     let scope = service.fixture_app(app.clone());
     scope
@@ -128,83 +133,59 @@ async fn kind_projections(store: Rc<OrmStore>, _: &FaultDb) {
     let manager = Manager::new(&app).await;
     let publisher = Publisher::new(&app, manager.queue.clone());
 
-    let tx = service.begin().await.unwrap();
-    let orphan = journal_insert(
-        &tx,
-        "fanout_publications",
-        json!({"id":zeroship_core::workflow_jobs::JobId::mint().as_str(),
-            "app_id":app.as_str(), "broadcast_id":"unpublished", "revision":1}),
-    )
-    .await;
-    assert!(orphan.is_err(), "{orphan:?}");
-    drop(tx);
+    // The key the journal holds this intent under is the one its content
+    // derives; another app's, another due time's and an unpublishable
+    // operation's are not.
+    assert_eq!(advance.publication_id(), Some(advance.id.clone()));
+    let mut elsewhere = advance.clone();
+    elsewhere.app_id = AppId::mint();
+    assert_ne!(elsewhere.publication_id(), Some(advance.id.clone()));
+    let mut rescheduled = advance.clone();
+    rescheduled.available_at = (advance.available_at.get() + 1).try_into().unwrap();
+    assert_ne!(rescheduled.publication_id(), Some(advance.id.clone()));
+    let mut unpublishable = advance.clone();
+    unpublishable.operation = JobOperation::Reconcile {};
+    assert_eq!(unpublishable.publication_id(), None);
 
-    let tx = service.begin().await.unwrap();
-    let stored = journal_rows(
-        &tx,
-        "advance_publications",
-        json!({"app_id":app.as_str(), "id":advance.id.as_str()}),
-    )
-    .await;
-    assert_eq!(stored.len(), 1);
-    let frontier = json!({
-        "id": advance.id.as_str(), "app_id": app.as_str(),
-        "deploy_id": stored[0].text("deploy_id").unwrap(),
-        "run_id": stored[0].text("run_id").unwrap(),
-        "generation": stored[0].integer("generation").unwrap(),
-        "frontier_revision": stored[0].integer("frontier_revision").unwrap(),
-        "available_at": stored[0].integer("available_at").unwrap(),
-    });
-    tx.commit().await.unwrap();
-
-    for extension in ["fanout_publications", "advance_publications"] {
+    // Each of those, written under the key the intact intent owns, is a
+    // damaged journal rather than a job.
+    for changed in [elsewhere, rescheduled, unpublishable] {
         let tx = service.begin().await.unwrap();
-        if extension == "fanout_publications" {
-            journal_insert(
-                &tx,
-                extension,
-                json!({"id":advance.id.as_str(), "app_id":app.as_str(),
-                    "broadcast_id":advance.id.as_str(), "revision":1}),
-            )
-            .await
-            .unwrap();
-        } else {
-            tx.database()
-                .collection("__zeroship_workflow_fanout_publications")
-                .unwrap()
-                .delete(json!({"app_id":app.as_str(), "id":advance.id.as_str()}).into())
-                .await
-                .unwrap();
-            tx.database()
-                .collection("__zeroship_workflow_advance_publications")
-                .unwrap()
-                .delete(json!({"app_id":app.as_str(), "id":advance.id.as_str()}).into())
-                .await
-                .unwrap();
-        }
+        journal_update(
+            &tx,
+            "job_publications",
+            json!({"id":advance.id.as_str()}),
+            json!({"specification":serde_json::to_string(&changed).unwrap()}),
+        )
+        .await;
         tx.commit().await.unwrap();
         assert!(
             matches!(
                 scope.pending_jobs(None, 1).await,
                 Err(WorkflowServiceError::Internal(_))
             ),
-            "{extension}"
+            "{changed:?}"
         );
         assert!(
             matches!(
                 scope.publish_job(&advance.id, &publisher).await,
                 Err(WorkflowServiceError::Internal(_))
             ),
-            "{extension}"
+            "{changed:?}"
         );
         assert_eq!(publisher.calls.get(), 0);
         assert_eq!(manager.count(), 0);
     }
 
+    // The control: the specification that does derive this key publishes.
     let tx = service.begin().await.unwrap();
-    journal_insert(&tx, "advance_publications", frontier)
-        .await
-        .unwrap();
+    journal_update(
+        &tx,
+        "job_publications",
+        json!({"id":advance.id.as_str()}),
+        json!({"specification":serde_json::to_string(&advance).unwrap()}),
+    )
+    .await;
     tx.commit().await.unwrap();
     assert_eq!(
         scope.pending_jobs(None, 1).await.unwrap(),
@@ -215,6 +196,116 @@ async fn kind_projections(store: Rc<OrmStore>, _: &FaultDb) {
         advance
     );
     assert_eq!(manager.count(), 1);
+}
+
+/// Recording the same work twice, in two separate committed transactions,
+/// leaves ONE intent under ONE id.
+///
+/// This is what the derived key buys: the recorder does not search for an
+/// earlier row by a tuple of business columns, it computes the key and finds
+/// the row already there. Each of the three publishable kinds is exercised,
+/// because each derives from a different tuple, and each is PAIRED WITH A
+/// CONTROL that moves one component of that tuple and must therefore produce a
+/// SECOND intent - without it a derivation that ignored its inputs entirely
+/// would print exactly what this prints.
+async fn dedup(store: Rc<OrmStore>, _: &FaultDb) {
+    let (service, app, _, _platform) = registered_service(store).await;
+    let scope = service.fixture_app(app.clone());
+    let run = scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let broadcast = BroadcastId::mint();
+    let obligation = PropagationId::mint();
+
+    let first = record_each(&service, &app, &run.id, &broadcast, &obligation, 1).await;
+    let again = record_each(&service, &app, &run.id, &broadcast, &obligation, 1).await;
+    assert_eq!(again, first, "equal work must resolve to the same jobs");
+    let moved = record_each(&service, &app, &run.id, &broadcast, &obligation, 2).await;
+    assert_eq!(moved.len(), first.len());
+    for (repeated, control) in first.iter().zip(&moved) {
+        assert_ne!(
+            repeated.id, control.id,
+            "a moved revision must be a different job"
+        );
+    }
+
+    // One intent per distinct identity, and every one of them still keyed by
+    // what it derives.
+    let tx = service.begin().await.unwrap();
+    let intents = publication_intents(&tx, &app).await;
+    tx.commit().await.unwrap();
+    assert!(!intents.is_empty());
+    let mut keys: Vec<&str> = intents.iter().map(|job| job.id.as_str()).collect();
+    let total = keys.len();
+    keys.sort_unstable();
+    keys.dedup();
+    assert_eq!(keys.len(), total, "every intent must own a distinct key");
+    for job in &intents {
+        assert_eq!(job.publication_id(), Some(job.id.clone()));
+    }
+    for recorded in first.iter().chain(&moved) {
+        assert_eq!(
+            intents.iter().filter(|job| job.id == recorded.id).count(),
+            1,
+            "{:?} must have exactly one intent",
+            recorded.operation
+        );
+    }
+}
+
+/// Record one Advance, one Fanout and one Propagate page, each in its own
+/// committed transaction, at the given frontier and page revision.
+async fn record_each(
+    service: &WorkflowService,
+    app: &AppId,
+    run: &str,
+    broadcast: &BroadcastId,
+    obligation: &PropagationId,
+    revision: i64,
+) -> Vec<JobSpec> {
+    use crate::service::publication;
+    let page = Revision::try_from(revision).unwrap();
+    let mut recorded = Vec::new();
+
+    // The run's frontier is re-observed, not advanced: `record_job` reads the
+    // revision the row carries, so setting it is how this names one identity
+    // twice and a second one once.
+    let mut tx = service.begin().await.unwrap();
+    let now = tx.now().await.unwrap();
+    journal_update(
+        &tx,
+        "runs",
+        json!({"app_id":app.as_str(), "id":run}),
+        json!({"frontier_revision":revision}),
+    )
+    .await;
+    recorded.push(
+        publication::record_job(&tx, app, run, now)
+            .await
+            .unwrap()
+            .expect("a runnable frontier publishes an Advance"),
+    );
+    tx.commit().await.unwrap();
+
+    let mut tx = service.begin().await.unwrap();
+    let now = tx.now().await.unwrap();
+    recorded.push(
+        publication::fanout(&tx, app, broadcast, page, now)
+            .await
+            .unwrap(),
+    );
+    tx.commit().await.unwrap();
+
+    let mut tx = service.begin().await.unwrap();
+    let now = tx.now().await.unwrap();
+    recorded.push(
+        publication::propagate(&tx, app, obligation, page, now)
+            .await
+            .unwrap(),
+    );
+    tx.commit().await.unwrap();
+    recorded
 }
 
 async fn executable_identity(store: Rc<OrmStore>, _: &FaultDb) {

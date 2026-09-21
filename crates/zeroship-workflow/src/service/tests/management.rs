@@ -627,15 +627,7 @@ async fn assert_rolled_back(service: &WorkflowService, local: &AppId, run: &str,
         .await,
         0
     );
-    assert_eq!(
-        journal_count(
-            &tx,
-            "advance_publications",
-            json!({"app_id":local.as_str(),"run_id":run,"generation":1})
-        )
-        .await,
-        0
-    );
+    assert!(advance_intents(&tx, local, run, Some(1)).await.is_empty());
     let generation = journal_rows(
         &tx,
         "generations",

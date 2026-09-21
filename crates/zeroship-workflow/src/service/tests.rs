@@ -222,6 +222,89 @@ async fn journal_insert(
     Ok(())
 }
 
+/// Every publication intent the app's journal holds, confirmed or not, decoded
+/// from the specification its key is derived from.
+///
+/// The intent row carries no per-kind column to filter on, so a test that wants
+/// one kind's intents decodes the specification here and matches on the
+/// operation, which is the same thing the service does.
+async fn publication_intents(
+    tx: &Transaction,
+    app: &AppId,
+) -> Vec<zeroship_core::workflow_jobs::JobSpec> {
+    journal_rows(tx, "job_publications", json!({"app_id":app.as_str()}))
+        .await
+        .into_iter()
+        .map(|row| serde_json::from_str(&row.text("specification").unwrap()).unwrap())
+        .collect()
+}
+
+/// The intents among them that advance one run's frontier, optionally narrowed
+/// to a single generation.
+async fn advance_intents(
+    tx: &Transaction,
+    app: &AppId,
+    run: &str,
+    generation: Option<i64>,
+) -> Vec<zeroship_core::workflow_jobs::JobSpec> {
+    use zeroship_core::workflow_jobs::JobOperation;
+    publication_intents(tx, app)
+        .await
+        .into_iter()
+        .filter(|job| match &job.operation {
+            JobOperation::Advance {
+                run_id,
+                generation: recorded,
+                ..
+            } => {
+                run_id.as_str() == run
+                    && generation.is_none_or(|wanted| i64::from(*recorded) == wanted)
+            }
+            _ => false,
+        })
+        .collect()
+}
+
+/// Rewrite one intent's specification so the key it is stored under is no
+/// longer the key its own content derives, and hand back the text it replaced.
+///
+/// Moving the operation's revision is the smallest such change, and it is the
+/// same one for all three publishable kinds: every one of them carries the
+/// revision in its derived identity.
+async fn damage_specification(tx: &Transaction, app: &AppId, id: &str) -> String {
+    use zeroship_core::workflow_jobs::{JobOperation, JobSpec};
+    let rows = journal_rows(
+        tx,
+        "job_publications",
+        json!({"app_id":app.as_str(), "id":id}),
+    )
+    .await;
+    assert_eq!(rows.len(), 1, "one intent must be stored under {id}");
+    let original = rows[0].text("specification").unwrap();
+    let mut damaged: JobSpec = serde_json::from_str(&original).unwrap();
+    {
+        let revision = match &mut damaged.operation {
+            JobOperation::Advance { revision, .. }
+            | JobOperation::Fanout { revision, .. }
+            | JobOperation::Propagate { revision, .. } => revision,
+            other => panic!("an intent must carry a publishable operation: {other:?}"),
+        };
+        *revision = (revision.get() + 1).try_into().unwrap();
+    }
+    write_specification(tx, id, &serde_json::to_string(&damaged).unwrap()).await;
+    original
+}
+
+async fn write_specification(tx: &Transaction, id: &str, specification: &str) {
+    journal_update(
+        tx,
+        "job_publications",
+        json!({"id":id}),
+        json!({"specification":specification}),
+    )
+    .await;
+}
+
 async fn journal_count(tx: &Transaction, table: &str, filter: serde_json::Value) -> i64 {
     let zeroship_data_orm::orm::Output::Count(count) = tx
         .database()
@@ -295,7 +378,10 @@ impl zeroship_core::workflow_jobs::JobLease for JobGrant {
     }
 }
 
-/// Committed propagation pages that have no receipt yet, in publication order.
+/// Committed propagation pages that have no receipt yet, in journal id order.
+/// A publication key is derived rather than minted, so that order says nothing
+/// about when a page was recorded; at most one page per obligation is open at a
+/// time, so the delivery loop below does not need one.
 pub(super) async fn open_propagations(
     scope: &super::AppWorkflows,
 ) -> Vec<zeroship_core::workflow_jobs::JobSpec> {
@@ -1408,7 +1494,10 @@ async fn review_contract(store: Rc<OrmStore>) {
         (&json!(2), &json!(1), &json!(1))
     );
     assert_eq!(summary["failures"][0]["ordinal"], json!(1));
-    assert_eq!(summary["failures"][0]["error"]["message"], json!("exhausted"));
+    assert_eq!(
+        summary["failures"][0]["error"]["message"],
+        json!("exhausted")
+    );
 
     // An app with a full execution allocation must not hide another app behind
     // its backlog in the candidate page.
