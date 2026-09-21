@@ -2014,11 +2014,14 @@ Each records something that was tried or specified and broke.
   schema from `database_derivation::schema_name`, so a creator's tables follow the database
   while the journal stays where the app id puts it. That is why the tripwire below did not fire
   and why the journal's home is still an open decision rather than one this change made.
-  `the_journal_schema_is_derived_from_the_app_not_from_a_database_binding`
-  (`crates/zeroship-worker/src/workflow_host/tests.rs`) trips on exactly that change and explains
-  the consequence where the person doing the re-key will meet it. The reasoning lives in that
-  test, deliberately not restated here: two copies of an argument drift and the test is the one
-  that fails.
+  Where a journal lives is the host's choice: `JournalLocation::CreatorSchema` puts it beside
+  the creator's tables and `JournalLocation::Service` puts it in a schema the service owns
+  (`crates/zeroship-worker/src/workflow_host.rs`), so a re-key moves the first arm only.
+  `a_creator_journal_answers_each_app_its_own_schema`
+  (`crates/zeroship-worker/src/workflow_host/tests.rs`) asserts that arm answers the app id
+  itself, so it trips on exactly that change and explains the consequence where the person doing
+  the re-key will meet it. The reasoning lives in that test, deliberately not restated here: two
+  copies of an argument drift and the test is the one that fails.
 
 - **Do not reintroduce a control-side record of what migrations ran.** The engine journal in the
   creator's own schema is the only record. A creator can destroy their own journal, and that is
