@@ -389,8 +389,6 @@ impl From<DbError> for WorkflowServiceError {
 }
 
 pub(crate) fn database_error(error: DbError) -> WorkflowServiceError {
-    #[cfg(test)]
-    eprintln!("workflow database error: {error:?}");
     match error {
         DbError::PermissionDenied { .. } => WorkflowServiceError::PermissionDenied,
         DbError::Transient { .. }
@@ -398,6 +396,17 @@ pub(crate) fn database_error(error: DbError) -> WorkflowServiceError {
         | DbError::LockContention { .. } => {
             WorkflowServiceError::Unavailable("workflow database temporarily unavailable".into())
         }
-        _ => WorkflowServiceError::Internal("workflow database operation failed".into()),
+        // The arms above name what they classify. This one does not, so it
+        // reports what it swallowed: a caller reading only the returned
+        // message learns that a database operation failed and nothing about
+        // which. The previous diagnostic was `cfg(test)`, which is absent from
+        // the deployed binaries that reach this arm.
+        error => {
+            tracing::warn!(
+                error = ?error,
+                "workflow database error has no classification; reporting it as internal"
+            );
+            WorkflowServiceError::Internal("workflow database operation failed".into())
+        }
     }
 }
