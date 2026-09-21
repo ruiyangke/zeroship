@@ -10,6 +10,28 @@ entirely.
 service's data through that service's API, never through a shared connection.
 The worker cannot reach the control plane's data at all.
 
+**What this settles, and what it needs from you.** Every table the corpus
+creates is assigned to a service, and every assignment has been checked against
+the service that actually writes it - see "The assignment, checked against the
+writers". The sequencing orders the six cuts and states what each one costs.
+The ladder-join question and the assertion-replay question are answered from
+the code and marked ANSWERED in "Open".
+
+What is yours to decide sits in "Open": whether audit is one store or one per
+service; where `identity_links` lives, given that it breaks this document's own
+ownership rule; whether `cron_state` and `dpop_jti` are dropped rather than
+assigned; and whether the owners registry is pruned or made derivable. One
+further question sits outside "Open", in the writers section - two tables
+control is granted but never writes - and that one is about control rather than
+about this split.
+
+**One thing is not shown to be buildable as specified.** The authorization
+ladder join needs a `users` projection, and whether that projection can be made
+synchronous with the account-lock write is unresolved. It surfaces at
+sequencing step 5, not step 6 where the cut it belongs to sits. Everything
+else here is a matter of sequencing and effort; that one is a matter of
+mechanism.
+
 ---
 
 ## What exists today
