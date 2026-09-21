@@ -48,6 +48,23 @@ use crate::service_assertion::{
 /// `db/migrations-ts/20260914000450_execution_zones_default_zone.ts`.
 pub const DEFAULT_EXECUTION_ZONE: &str = "default";
 
+/// The route Control serves the join on, and the route a joining worker
+/// addresses.
+///
+/// A bare path and NOT a [`crate::service_identity::ServiceEndpoint`], because
+/// there is nothing here to authorize. Every declaration in that table pairs a
+/// route with the service principals allowed to reach it, and a joining process
+/// holds no service identity yet: it presents a join token a trusted signer
+/// minted, verified by [`verify_join_token`] under Control's own signer
+/// registry and its own `typ`. Declaring it would assert a machine-identity
+/// grant that no caller of this route can hold.
+///
+/// It lives here rather than in either process because both spell it: Control
+/// registers this path and the worker builds its URL from it. Two spellings
+/// would be a route Control serves and a route the worker never reaches, with
+/// every test on either side still green.
+pub const WORKER_JOIN_PATH: &str = "/internal/workers/join";
+
 /// The `typ` header every join token carries, and no other token in this stack
 /// does.
 ///

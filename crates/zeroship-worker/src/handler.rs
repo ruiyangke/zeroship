@@ -186,9 +186,13 @@ fn wall_limit(runtime: &Runtime) -> Option<std::time::Duration> {
 /// enforced by the route's `PayloadConfig`, not by the handler body, so a test
 /// that wires the route itself would be measuring a limit the server does not
 /// have.
+///
+/// The path is the declaration the gateway is granted and this handler
+/// authorizes against, so the route the worker serves and the route the
+/// gateway is admitted to are one statement rather than two copies.
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
-        web::resource("/dispatch/{app_id}")
+        web::resource(endpoints::WORKER_DISPATCH.path_template())
             .state(web::types::PayloadConfig::new(
                 zeroship_core::dispatch_frame::MAX_DISPATCH_FRAME_BYTES,
             ))

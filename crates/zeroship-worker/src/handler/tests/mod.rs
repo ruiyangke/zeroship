@@ -17,4 +17,5 @@ mod lifecycle;
 mod logging;
 mod metering;
 mod request;
+mod routes;
 mod streaming;
