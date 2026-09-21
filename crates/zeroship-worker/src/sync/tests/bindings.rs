@@ -5,10 +5,11 @@
 //! # Where the fixture shape comes from
 //!
 //! `zeroship_control::internal::get_app_bindings` selects
-//! `b.id AS binding_id, b.database_id, d.schema_epoch`, narrows the epoch out
-//! of its `i32` column with `u32::try_from`, and serves one JSON object per row
-//! under a `bindings` array. [`control_entry`] mirrors that object key for key
-//! and [`control_body`] mirrors the envelope.
+//! `b.id AS binding_id, b.database_id, b.capability, d.schema_epoch`, narrows
+//! the epoch out of its `i32` column with `u32::try_from`, reads the capability
+//! back through `DatabaseCapability::from_wire` and serves one JSON object per
+//! row under a `bindings` array. [`control_entry`] mirrors that object key for
+//! key and [`control_body`] mirrors the envelope.
 //!
 //! # Where the route comes from
 //!
@@ -31,16 +32,37 @@
 //! declaration and a registration that disagree are invisible from here.
 
 use super::*;
+use zeroship_core::database_role::DatabaseCapability;
 use zeroship_core::{BindingId, DatabaseId};
 use zeroship_data_orm::resolved_bindings::ResolvedBinding;
 
-/// One entry exactly as control builds it: two typed ids as JSON strings and
-/// the schema epoch as a JSON number.
+/// The capability every entry below carries unless the test is about the
+/// capability. Read-write, so a refusal in one of those tests is the variable
+/// that test changes rather than the fixture's own choice.
+const FIXTURE_CAPABILITY: DatabaseCapability = DatabaseCapability::ReadWrite;
+
+/// One entry exactly as control builds it: two typed ids and the capability as
+/// JSON strings, and the schema epoch as a JSON number.
 fn control_entry(binding: &BindingId, database: &DatabaseId, epoch: u32) -> serde_json::Value {
+    capability_entry(binding, database, epoch, FIXTURE_CAPABILITY)
+}
+
+/// The same entry at a stated capability, for the tests that vary it.
+///
+/// The text comes from [`DatabaseCapability::as_wire`], the one codec control
+/// serves through, so a fixture cannot pin a spelling the producer stopped
+/// using.
+fn capability_entry(
+    binding: &BindingId,
+    database: &DatabaseId,
+    epoch: u32,
+    capability: DatabaseCapability,
+) -> serde_json::Value {
     serde_json::json!({
         "binding_id": binding.as_str(),
         "database_id": database.as_str(),
         "schema_epoch": epoch,
+        "capability": capability.as_wire(),
     })
 }
 
@@ -96,11 +118,13 @@ fn every_entry_is_decoded_field_for_field_at_a_non_zero_epoch() {
                 database: first.1.clone(),
                 binding: first.0.clone(),
                 epoch: first.2,
+                capability: FIXTURE_CAPABILITY,
             },
             ResolvedBinding {
                 database: second.1,
                 binding: second.0,
                 epoch: second.2,
+                capability: FIXTURE_CAPABILITY,
             },
         ]
     );
@@ -130,6 +154,7 @@ fn a_zero_epoch_is_a_value_not_an_absence() {
             database,
             binding,
             epoch: 0,
+            capability: FIXTURE_CAPABILITY,
         }],
         "control mints a database at epoch zero, so zero is the first value this \
          carries and must not read as a missing field"
@@ -304,6 +329,7 @@ fn the_two_ids_are_held_apart_by_their_prefixes() {
             database,
             binding,
             epoch: 2,
+            capability: FIXTURE_CAPABILITY,
         }]
     );
 }
@@ -329,6 +355,7 @@ fn an_empty_bindings_array_resolves_no_binding_without_refusing() {
             database,
             binding,
             epoch: 13,
+            capability: FIXTURE_CAPABILITY,
         }]
     );
 }
@@ -738,5 +765,105 @@ fn a_response_behind_the_store_is_tolerated_and_a_different_binding_is_not() {
             .expect("the refused resolution leaves the store serving")
             .session_role(),
         installed.session_role()
+    );
+}
+
+#[test]
+fn a_capability_that_is_absent_or_unknown_composes_no_binding() {
+    let binding = BindingId::mint();
+    let database = DatabaseId::mint();
+    let entry = control_entry(&binding, &database, 4);
+
+    // The acceptance control: this exact entry decodes, so each refusal below
+    // is caused by the one key it changes.
+    parse_resolved_bindings(&control_body(std::slice::from_ref(&entry)))
+        .expect("the unmutated entry is accepted");
+
+    for (label, body) in [
+        ("absent", without_field(&entry, "capability")),
+        (
+            "a number",
+            with_field(&entry, "capability", serde_json::json!(1)),
+        ),
+        (
+            "null",
+            with_field(&entry, "capability", serde_json::Value::Null),
+        ),
+        (
+            "text outside the two spellings",
+            with_field(&entry, "capability", serde_json::json!("read-write")),
+        ),
+    ] {
+        let error = parse_resolved_bindings(&body)
+            .expect_err("a capability outside the two spellings composes no binding");
+        assert!(
+            error.contains("capability"),
+            "a capability that is {label} must be refused by name: {error}"
+        );
+    }
+}
+
+/// BOTH capabilities decode, each to itself.
+///
+/// The paired assertion is what makes the refusals above mean something: a
+/// parse that resolved every entry to one capability would satisfy either half
+/// of this alone, and a binding whose capability is read as the other one is
+/// the failure the field exists to prevent - silently, in the read-write
+/// direction, where nothing refuses and `PostgreSQL` produces a bare `42501` at
+/// the first write.
+#[test]
+fn each_capability_decodes_to_itself() {
+    let mut seen = 0;
+    for capability in [DatabaseCapability::ReadWrite, DatabaseCapability::ReadOnly] {
+        let binding = BindingId::mint();
+        let database = DatabaseId::mint();
+        let entry = capability_entry(&binding, &database, 6, capability);
+
+        assert_eq!(
+            parse_resolved_bindings(&control_body(std::slice::from_ref(&entry)))
+                .unwrap_or_else(|error| panic!("{capability:?} is a capability control serves: {error}")),
+            vec![ResolvedBinding {
+                database,
+                binding,
+                epoch: 6,
+                capability,
+            }],
+            "{capability:?} must decode to itself and not to the other capability"
+        );
+        seen += 1;
+    }
+    assert_eq!(seen, 2, "both capabilities must be exercised");
+}
+
+/// One response's entries keep their OWN capabilities.
+///
+/// An app may bind one database read-write and another read-only, so a parse
+/// that read the field once and stamped it across the set would leave the
+/// second handle claiming the first's privilege.
+#[test]
+fn two_entries_keep_their_own_capabilities() {
+    let writable = (BindingId::mint(), DatabaseId::mint());
+    let read_only = (BindingId::mint(), DatabaseId::mint());
+    let body = control_body(&[
+        capability_entry(&writable.0, &writable.1, 1, DatabaseCapability::ReadWrite),
+        capability_entry(&read_only.0, &read_only.1, 2, DatabaseCapability::ReadOnly),
+    ]);
+
+    assert_eq!(
+        parse_resolved_bindings(&body).expect("a mixed set decodes"),
+        vec![
+            ResolvedBinding {
+                database: writable.1,
+                binding: writable.0,
+                epoch: 1,
+                capability: DatabaseCapability::ReadWrite,
+            },
+            ResolvedBinding {
+                database: read_only.1,
+                binding: read_only.0,
+                epoch: 2,
+                capability: DatabaseCapability::ReadOnly,
+            },
+        ]
     );
 }

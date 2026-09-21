@@ -258,6 +258,7 @@ mod tests {
     // -----------------------------------------------------------------
 
     use crate::binding::DbBinding;
+    use zeroship_core::database_role::DatabaseCapability;
     use zeroship_core::{BindingId, DatabaseId};
 
     fn creator_binding(epoch: u32) -> DbBinding {
@@ -267,6 +268,7 @@ mod tests {
             DatabaseId::mint(),
             BindingId::mint(),
             epoch,
+            DatabaseCapability::ReadWrite,
         )
         .expect("the fixture ids compose a legal role name")
     }
@@ -284,8 +286,15 @@ mod tests {
     #[test]
     fn the_data_plane_and_the_reconciler_compose_one_binding_role() {
         let edge = BindingId::mint();
-        let binding = DbBinding::to_database("app_parity", "d", DatabaseId::mint(), edge.clone(), 4)
-            .expect("the fixture ids compose");
+        let binding = DbBinding::to_database(
+            "app_parity",
+            "d",
+            DatabaseId::mint(),
+            edge.clone(),
+            4,
+            DatabaseCapability::ReadWrite,
+        )
+        .expect("the fixture ids compose");
 
         let granted = zeroship_migrate_server::datastore::cluster::binding_role(&edge, 4)
             .expect("the reconciler composes the same name");
@@ -353,10 +362,24 @@ mod tests {
 
         let database = DatabaseId::mint();
         let edge = BindingId::mint();
-        let at_one = DbBinding::to_database("app_e", "d", database.clone(), edge.clone(), 1)
-            .expect("composes");
-        let at_two =
-            DbBinding::to_database("app_e", "d", database, edge, 2).expect("composes");
+        let at_one = DbBinding::to_database(
+            "app_e",
+            "d",
+            database.clone(),
+            edge.clone(),
+            1,
+            DatabaseCapability::ReadWrite,
+        )
+        .expect("composes");
+        let at_two = DbBinding::to_database(
+            "app_e",
+            "d",
+            database,
+            edge,
+            2,
+            DatabaseCapability::ReadWrite,
+        )
+        .expect("composes");
         let retired = at_one.session_role().expect("narrows");
         let live = at_two.session_role().expect("narrows");
         assert_ne!(retired, live, "the control: two epochs are two roles");
@@ -472,7 +495,6 @@ mod tests {
             );
         }
     }
-
 
     /// Pin the explicit free-function translator shape. A driver `From` impl
     /// would put the vendor back into the crate that owns [`DbError`].

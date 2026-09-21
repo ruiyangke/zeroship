@@ -33,6 +33,10 @@ fn binding_body(
             "binding_id": resolved.binding.as_str(),
             "database_id": resolved.database.as_str(),
             "schema_epoch": epoch,
+            // The capability the response carries is the one the store already
+            // holds: a rotation advances the epoch and nothing else, and
+            // `supply` refuses a reading that disagrees about the capability.
+            "capability": resolved.capability.as_wire(),
         }]
     })
     .to_string()

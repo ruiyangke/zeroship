@@ -756,10 +756,37 @@ fn parse_resolved_binding(
     let binding =
         zeroship_core::BindingId::parse(&field("binding_id")?).map_err(|error| error.to_string())?;
     let epoch = parse_schema_epoch(value)?;
+    let capability = parse_capability(&field("capability")?)?;
     Ok(zeroship_data_orm::resolved_bindings::ResolvedBinding {
         database,
         binding,
         epoch,
+        capability,
+    })
+}
+
+/// The capability of one binding entry, or the reason it is not one.
+///
+/// REQUIRED, with no serde default and no fallback arm, for the reason
+/// `AppVersionInfo::binding_epochs` refuses one: both capabilities are values
+/// this field carries, so whichever a default picked would be the correct
+/// reading for some live binding and a silent misreading for the other. A
+/// producer that stopped emitting the field would then not fail - it would turn
+/// every binding on every worker into whichever capability was defaulted to,
+/// and the direction that goes wrong quietly is the read-write one, where the
+/// data plane says nothing and `PostgreSQL` produces a bare `42501` at the
+/// first write.
+///
+/// The spelling is read through the one codec that writes it
+/// (`DatabaseCapability::from_wire`), so this cannot admit a text the cluster
+/// reconciler could not compose a capability role from.
+///
+/// The offending text is NOT quoted back, for the reason [`json_kind`] gives:
+/// the worker does not bound the length of a field in a control response, and
+/// every refusal here reaches a log.
+fn parse_capability(text: &str) -> Result<zeroship_core::database_role::DatabaseCapability, String> {
+    zeroship_core::database_role::DatabaseCapability::from_wire(text).ok_or_else(|| {
+        "control binding response has a capability that is neither capability".to_owned()
     })
 }
 

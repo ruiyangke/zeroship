@@ -1831,6 +1831,7 @@ mod tests {
                         edge.database().clone(),
                         edge.binding().clone(),
                         edge.epoch(),
+                        edge.database_capability(),
                     )
                     .expect("the co-tenant binding composes")
                 },

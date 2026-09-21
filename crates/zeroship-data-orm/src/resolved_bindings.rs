@@ -18,9 +18,10 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+use zeroship_core::database_role::DatabaseCapability;
 use zeroship_core::{BindingId, DatabaseId};
 
-use crate::binding::{DbBinding, DatabaseEdge};
+use crate::binding::{DatabaseEdge, DbBinding};
 use crate::error::DbError;
 
 /// [`SuppliedAppBindings::supply`] was handed the edge it already holds at an
@@ -34,11 +35,18 @@ use crate::error::DbError;
 pub const STALE_APP_BINDING: &str = "stale_app_binding";
 
 /// One app's resolved edge, before a deploy token is attached to it.
+///
+/// The capability is the control-plane spelling,
+/// [`zeroship_core::database_role::DatabaseCapability`], and not a second enum
+/// local to the data plane: the cluster reconciler composes the capability ROLE
+/// from the same value, so two spellings of it would let this store and the
+/// cluster disagree about which text names which capability.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedBinding {
     pub database: DatabaseId,
     pub binding: BindingId,
     pub epoch: u32,
+    pub capability: DatabaseCapability,
 }
 
 /// App bindings supplied through the trusted Rust host boundary.
@@ -54,7 +62,8 @@ pub struct SuppliedAppBindings {
 
 impl std::fmt::Debug for SuppliedAppBindings {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SuppliedAppBindings").finish_non_exhaustive()
+        f.debug_struct("SuppliedAppBindings")
+            .finish_non_exhaustive()
     }
 }
 
@@ -73,7 +82,10 @@ impl SuppliedAppBindings {
     /// - A DIFFERENT BINDING is refused. Two edges for one database disagree
     ///   about which edge the app has, and installing either under running
     ///   isolates would let one dispatch narrow to a role another dispatch's
-    ///   descriptor was never built against.
+    ///   descriptor was never built against. So is the SAME binding at a
+    ///   different CAPABILITY: control declares both off one row, so two
+    ///   readings that disagree are two readings of something that cannot have
+    ///   both values, and choosing either is choosing which host was wrong.
     /// - The SAME BINDING at a HIGHER EPOCH replaces the stored edge. This is
     ///   the same edge advanced by a rotation, not a second one: an apply that
     ///   commits a schema delta mints the binding's role at the next epoch and
@@ -121,6 +133,12 @@ impl SuppliedAppBindings {
                 "app binding conflicts with the binding already installed",
             ));
         }
+        if current.capability != resolved.capability {
+            return Err(DbError::validation(
+                "invalid_app_binding",
+                "app binding names a capability other than the one already installed",
+            ));
+        }
         match resolved.epoch.cmp(&current.epoch) {
             std::cmp::Ordering::Greater => {
                 current.epoch = resolved.epoch;
@@ -157,11 +175,7 @@ impl SuppliedAppBindings {
     /// database twice - two edges for one database disagree about which edge
     /// the app has, and this call cannot choose between them.
     /// `app_binding_store_unavailable` when the lock is poisoned.
-    pub fn replace_app(
-        &self,
-        app_id: &str,
-        resolved: Vec<ResolvedBinding>,
-    ) -> Result<(), DbError> {
+    pub fn replace_app(&self, app_id: &str, resolved: Vec<ResolvedBinding>) -> Result<(), DbError> {
         if app_id.is_empty() {
             return Err(DbError::validation(
                 "invalid_app_binding",
@@ -252,6 +266,7 @@ impl SuppliedAppBindings {
             resolved.database,
             resolved.binding,
             resolved.epoch,
+            resolved.capability,
         )
         .ok()
     }
@@ -273,6 +288,7 @@ impl SuppliedAppBindings {
                             edge.database.clone(),
                             edge.binding.clone(),
                             edge.epoch,
+                            edge.capability,
                         )
                         .ok()
                     })
@@ -306,6 +322,7 @@ impl From<&DatabaseEdge> for ResolvedBinding {
             database: edge.database().clone(),
             binding: edge.binding().clone(),
             epoch: edge.epoch(),
+            capability: edge.database_capability(),
         }
     }
 }
@@ -319,6 +336,8 @@ mod tests {
             database: DatabaseId::mint(),
             binding: BindingId::mint(),
             epoch: 3,
+
+            capability: DatabaseCapability::ReadWrite,
         }
     }
 
@@ -401,12 +420,15 @@ mod tests {
         let store = SuppliedAppBindings::new();
         let edge = resolved();
         store.supply("app_x", edge.clone()).expect("first supply");
-        store.supply("app_x", edge.clone()).expect("an equal re-supply");
+        store
+            .supply("app_x", edge.clone())
+            .expect("an equal re-supply");
 
         let moved = ResolvedBinding {
             database: edge.database.clone(),
             binding: BindingId::mint(),
             epoch: edge.epoch,
+            capability: edge.capability,
         };
         let error = store
             .supply("app_x", moved)
@@ -442,6 +464,7 @@ mod tests {
             database: edge.database.clone(),
             binding: edge.binding.clone(),
             epoch: edge.epoch + 1,
+            capability: edge.capability,
         };
         store
             .supply("app_x", rotated.clone())
@@ -468,6 +491,7 @@ mod tests {
             database: edge.database.clone(),
             binding: BindingId::mint(),
             epoch: rotated.epoch + 1,
+            capability: edge.capability,
         };
         let error = store
             .supply("app_x", moved)
@@ -507,6 +531,7 @@ mod tests {
             database: edge.database.clone(),
             binding: edge.binding.clone(),
             epoch: edge.epoch - 1,
+            capability: edge.capability,
         };
         let error = store
             .supply("app_x", behind)
@@ -533,7 +558,9 @@ mod tests {
         let store = SuppliedAppBindings::new();
         let kept = resolved();
         let dropped = resolved();
-        store.supply("app_x", kept.clone()).expect("supply the first");
+        store
+            .supply("app_x", kept.clone())
+            .expect("supply the first");
         store
             .supply("app_x", dropped.clone())
             .expect("supply the second");
@@ -547,6 +574,7 @@ mod tests {
             database: kept.database.clone(),
             binding: BindingId::mint(),
             epoch: kept.epoch + 1,
+            capability: kept.capability,
         };
         assert_ne!(moved.binding, kept.binding);
         store
@@ -620,6 +648,7 @@ mod tests {
             database: edge.database.clone(),
             binding: BindingId::mint(),
             epoch: edge.epoch + 1,
+            capability: edge.capability,
         };
         let error = store
             .replace_app("app_x", vec![edge.clone(), twin])
@@ -656,6 +685,7 @@ mod tests {
             database: DatabaseId::mint(),
             binding: BindingId::mint(),
             epoch: main.epoch + 4,
+            capability: main.capability,
         };
         assert!(store.epochs_for("app_x").is_empty());
 
@@ -698,7 +728,9 @@ mod tests {
         store.supply("app_x", edge.clone()).expect("supply");
         store.supply("app_x", resolved()).expect("supply a second");
         store.remove_app("app_x").expect("remove");
-        assert!(store.binding_for("app_x", "deploy_1", &edge.database).is_none());
+        assert!(store
+            .binding_for("app_x", "deploy_1", &edge.database)
+            .is_none());
         assert!(store.bindings_for("app_x", "deploy_1").is_empty());
     }
 
@@ -718,5 +750,76 @@ mod tests {
         assert_eq!(first.session_role(), second.session_role());
         assert_eq!(first.route(), second.route());
         assert_ne!(first.deploy_token(), second.deploy_token());
+    }
+
+    /// The capability a host resolved reaches the composed binding, and both
+    /// values do.
+    ///
+    /// The store is the only thing between control's response and the value
+    /// `env.db` operations consult, so a store that dropped the field would
+    /// leave every binding claiming whichever capability `DbBinding` defaulted
+    /// to. Both arms, because one of them alone would pass over a store that
+    /// answered the same way for everything.
+    #[test]
+    fn each_supplied_capability_reaches_the_composed_binding() {
+        let mut seen = 0;
+        for capability in [DatabaseCapability::ReadWrite, DatabaseCapability::ReadOnly] {
+            let store = SuppliedAppBindings::new();
+            let edge = ResolvedBinding {
+                capability,
+                ..resolved()
+            };
+            store.supply("app_x", edge.clone()).expect("supply");
+
+            let bound = store
+                .binding_for("app_x", "d1", &edge.database)
+                .expect("a supplied app composes a binding");
+            assert_eq!(bound.database_capability(), Some(capability));
+            assert_eq!(bound.permits_writes(), capability.permits_writes());
+            assert_eq!(
+                store.bindings_for("app_x", "d1")[0].database_capability(),
+                Some(capability),
+                "the plural accessor must carry the capability the singular one does"
+            );
+            seen += 1;
+        }
+        assert_eq!(seen, 2, "both capabilities must be exercised");
+    }
+
+    /// A second reading that disagrees about the CAPABILITY of an edge the app
+    /// already holds is refused, and the store keeps what it had.
+    ///
+    /// Control declares the binding id and the capability off one row, so two
+    /// readings that differ cannot both be of that row. Its control is the
+    /// equal re-supply above it, which is accepted - without that, a store that
+    /// had begun refusing every re-supply would pass this.
+    #[test]
+    fn a_capability_that_disagrees_with_the_installed_edge_is_refused() {
+        let store = SuppliedAppBindings::new();
+        let edge = ResolvedBinding {
+            capability: DatabaseCapability::ReadWrite,
+            ..resolved()
+        };
+        store.supply("app_x", edge.clone()).expect("first supply");
+        store
+            .supply("app_x", edge.clone())
+            .expect("the control: an equal re-supply is accepted");
+
+        let widened = ResolvedBinding {
+            capability: DatabaseCapability::ReadOnly,
+            ..edge.clone()
+        };
+        let error = store
+            .supply("app_x", widened)
+            .expect_err("one edge cannot hold two capabilities");
+        assert_eq!(error.code(), "invalid_app_binding");
+        assert_eq!(
+            store
+                .binding_for("app_x", "d1", &edge.database)
+                .expect("the refused supply leaves the store serving")
+                .database_capability(),
+            Some(DatabaseCapability::ReadWrite),
+            "the refusal must leave the installed capability standing"
+        );
     }
 }

@@ -85,6 +85,7 @@ fn session_setup_sql(
 mod tests {
     use super::*;
     use crate::sql::SchemaName;
+    use zeroship_core::database_role::DatabaseCapability;
     use zeroship_core::{BindingId, DatabaseId};
 
     fn creator_binding() -> DbBinding {
@@ -94,6 +95,7 @@ mod tests {
             DatabaseId::mint(),
             BindingId::mint(),
             3,
+            DatabaseCapability::ReadWrite,
         )
         .expect("the fixture ids compose a legal role name")
     }
@@ -151,12 +153,33 @@ mod tests {
     fn the_batch_names_the_epoch_the_binding_was_resolved_at() {
         let database = DatabaseId::mint();
         let edge = BindingId::mint();
-        let at_one =
-            DbBinding::to_database("app_demo", "d", database.clone(), edge.clone(), 1).unwrap();
-        let at_two =
-            DbBinding::to_database("app_demo", "d", database.clone(), edge.clone(), 2).unwrap();
-        let again =
-            DbBinding::to_database("app_demo", "d", database, edge, 1).unwrap();
+        let at_one = DbBinding::to_database(
+            "app_demo",
+            "d",
+            database.clone(),
+            edge.clone(),
+            1,
+            DatabaseCapability::ReadWrite,
+        )
+        .unwrap();
+        let at_two = DbBinding::to_database(
+            "app_demo",
+            "d",
+            database.clone(),
+            edge.clone(),
+            2,
+            DatabaseCapability::ReadWrite,
+        )
+        .unwrap();
+        let again = DbBinding::to_database(
+            "app_demo",
+            "d",
+            database,
+            edge,
+            1,
+            DatabaseCapability::ReadWrite,
+        )
+        .unwrap();
 
         let batch = |binding: &DbBinding| {
             tx_session_setup_sql(binding, SessionAuthority::PerBindingRole).unwrap()

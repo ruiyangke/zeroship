@@ -93,6 +93,7 @@ async fn relay_process_authenticates_workers_and_streams_commits_without_worker_
         zeroship_core::DatabaseId::mint(),
         zeroship_core::BindingId::mint(),
         1,
+        zeroship_core::database_role::DatabaseCapability::ReadWrite,
     )
     .unwrap();
     let schema = binding.schema().as_str().to_owned();

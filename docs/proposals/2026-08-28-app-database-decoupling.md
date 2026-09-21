@@ -840,13 +840,33 @@ The set is built end to end: Control serves every live binding, `install_resolve
 descriptor, and `env.databases` (`crates/zeroship-data-v8/src/lib.rs`) publishes one handle per
 declared database, with `env.db` the primary's.
 
-Still owed: the capability. `DatabaseCapability` (`crates/zeroship-core/src/database_derivation.rs`)
-reaches the cluster roles and the reconciler and appears nowhere in `zeroship-data-orm`,
-`zeroship-data-v8` or `zeroship-worker`, so the data plane cannot tell a read-only binding from a
-read-write one. PostgreSQL can - the binding role inherits one capability role and not the other -
-so serving it buys a refusal a creator can read rather than a permission error at the first write.
-It is not the boundary, and building it as though it were would put a check where the process
-running creator code could reach it.
+The capability travels with the rest of it. Control's binding response carries `capability`
+(`get_app_bindings`, `crates/zeroship-control/src/internal.rs`), read out of
+`zeroship.database_bindings.capability` through `DatabaseCapability::from_wire`
+(`crates/zeroship-core/src/database_role.rs`) so the handler serves the one codec's spelling
+rather than whatever the column holds. `parse_resolved_binding`
+(`crates/zeroship-worker/src/sync.rs`) requires the field - both capabilities are values it
+carries, so a default would be the right reading for one live binding and a silent misreading of
+the other - and `ResolvedBinding`, `DatabaseEdge` and `DbBinding`
+(`crates/zeroship-data-orm/src/{resolved_bindings,binding}.rs`) carry it to the isolate. The
+capability is CARRIED and never derived: the schema and the role name come off the ids, and the
+capability comes off the control-plane row the reconciler granted from.
+
+`PreparedOperation::new` and the two typed constructors beside it
+(`crates/zeroship-data-orm/src/orm.rs`) refuse a row-modifying operation on a read-only binding
+with `READ_ONLY_BINDING`. That is the one seam that knows both halves before any work happens:
+`Operation::writes_rows` classifies off an exhaustive match, and the binding is the value the
+isolate was minted with.
+
+**It is not the boundary and nothing may be built as though it were.** PostgreSQL is: the binding
+role inherits one capability role and not the other (`grant_binding_statements`,
+`crates/zeroship-migrate-server/src/datastore/cluster.rs`), so the statement is refused by the
+server whatever the data plane believes and whatever path reached it. The check runs in the process
+that runs creator code, so it buys a creator a refusal they can read rather than a permission error
+at the first write, and nothing else. Two paths deliberately do not pass it: the unmask audit
+append (`backend.append_unmask_audit`, `crates/zeroship-data-orm/src/protection/unmask.rs`), which
+is a platform write on the creator's behalf, and the identity reservation inside a write already
+refused upstream.
 
 The worker does not compare `epoch` in Rust to authorize a transaction; the epoch is a substring
 of the role name the setup batch sends.

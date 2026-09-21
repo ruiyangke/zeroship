@@ -33,6 +33,7 @@ mod nested_temporal;
 mod nested_values;
 mod protected_projections;
 mod protected_updates;
+mod read_only_binding;
 mod relations;
 mod schema_updates;
 mod session_leases;
