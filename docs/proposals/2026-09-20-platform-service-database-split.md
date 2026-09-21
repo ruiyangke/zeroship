@@ -483,15 +483,29 @@ inside one, against stand-in tables it creates itself. Before those exclusions
 the sweep reported control and gateway writing `zeroship.users`, which neither
 does.
 
-**A residue worth deciding on.** These carry no literal-SQL write in any crate
-or in the corpus: `app_deploy_commands`, `app_lifecycle_intents`, `app_usage`,
-`app_usage_history`, `execution_zones`, plus `cron_state` and `dpop_jti` from
-open question 5. That is not proof they are unwritten - a table named through a
-`format!` or reached by an ORM is invisible to this sweep - but the first five
-are read by code that never writes them, which is the shape `cron_state` and
-`dpop_jti` have. `organization_roles`, `worker_join_tokens` and
-`worker_join_token_claims` looked the same and are not: the corpus writes them
-directly.
+**A residue worth deciding on.** The sweep's absences are stronger than they
+look, because unqualified SQL cannot hide a writer: auth, control and gateway
+set `search_path` in no production file, and
+`crates/zeroship-authn/src/service_replay.rs` states the reason - "every
+statement here is schema-qualified because no role carries that schema on its
+`search_path`". A platform table is therefore written by a schema-qualified
+statement or not at all. Three groups fall out:
+
+    no reference anywhere in any crate
+      app_usage, app_usage_history, cron_state, dpop_jti
+    referenced ONLY by control's tests, which SELECT and COUNT them, and one of
+    which installs a BEFORE INSERT trigger on app_lifecycle_intents
+      app_deploy_commands, app_lifecycle_intents
+    read by production code that never writes them; the corpus writes them
+      execution_zones, organization_roles, worker_join_tokens,
+      worker_join_token_claims
+
+The first group is unreferenced and should be dropped rather than assigned. The
+third is explained. The second is the one that needs a person: a test that
+installs a trigger to make an insert fail implies an insert exists, and no
+statement in any crate or in the corpus performs one. Either the tests assert a
+negative, or a writer is reached by a path none of the instruments in this
+document can see. Resolve it before assigning those two.
 
 ---
 
