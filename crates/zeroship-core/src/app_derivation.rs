@@ -41,10 +41,15 @@ pub enum DerivationError {
 
 /// The physical `PostgreSQL` schema this app's PLATFORM-owned state lives in.
 ///
-/// The schema IS the tenant string. Its one composer is
-/// `zeroship_worker::workflow_host::app_schema`, which reaches it through
+/// The schema IS the tenant string, and the hosts that need it derive it
+/// independently, in separate processes.
+/// `zeroship_worker::workflow_host::app_schema` reaches it through
 /// `DbBinding::platform` - the trusted-service constructor, which carries no
-/// database edge and consults no binding. A creator's own tables are not here:
+/// database edge and consults no binding.
+/// `zeroship_control::publication::journal` derives it again to name the
+/// schema it asks the manager to INSTALL the journal in, so the installing
+/// side and the reading side agree only by both coming through here.
+/// A creator's own tables are not here:
 /// they live in the schema of the DATABASE they were migrated into, which
 /// [`crate::database_derivation::schema_name`] composes from a `DatabaseId`.
 ///
