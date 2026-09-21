@@ -572,9 +572,17 @@ role exists is the same question asked of the corpus:
 **Every command here walks the FILESYSTEM, not the repository.** A glob over
 `db/migrations-ts/*.ts` or `crates/*/src/` includes whatever is on disk,
 tracked or not, so an untracked file silently joins the population and the
-answer differs between a working copy and a clean checkout. The manifest-based
-form is `git ls-files <path>` as the input instead of a glob, and it is worth
-using for anything whose result will be quoted.
+answer differs between a working copy and a clean checkout. Which manifest
+replaces the glob depends on the question being asked:
+
+    what would CI see            git ls-tree -r HEAD --name-only <path>
+    what would a commit include   git ls-files <path>
+    what is on this disk          the glob
+
+The claims in this document are meant to be re-derivable against the
+REPOSITORY, so `git ls-tree -r HEAD --name-only` is the one that matches them.
+A reader with staged work who uses the index gets a third answer, different
+from both this document's and CI's, with nothing saying why.
 
 This is not hypothetical in this tree. `examples/meal-kit` holds hundreds of
 files and NONE of them are tracked, so a directory-walking gate reports
