@@ -1169,8 +1169,8 @@ a thread that has never held this app can still find one another thread resolved
 **The workflow host does not take part, and the fence does not catch it.** LIVE.
 `ProductionResources::resolve` (`crates/zeroship-worker/src/workflow_host.rs`) re-resolves on an
 env-version change alone and compares no epoch. A run's deployment is pinned in the journal -
-`service/app.rs` freezes `active_deploy` onto `generations.deploy_id` at `insert_run`, and
-`service/frontier.rs` resolves the hash back through that frozen key - so the workflow host is the
+`crates/zeroship-workflow/src/service/app.rs` freezes `active_deploy` onto `generations.deploy_id` at `insert_run`, and
+`crates/zeroship-workflow/src/service/frontier.rs` resolves the hash back through that frozen key - so the workflow host is the
 one builder that deliberately produces an isolate from an OLDER deployment, and its descriptor
 comes from that pinned bundle while its epoch comes from the live store. The deploy token does not
 help: `SuppliedAppBindings::binding_for` passes it to `DbBinding::to_database` as an identity
