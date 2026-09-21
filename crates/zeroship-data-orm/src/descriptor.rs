@@ -235,6 +235,7 @@ mod tests {
             edge.database().clone(),
             edge.binding().clone(),
             edge.epoch(),
+            edge.database_capability(),
         )
         .expect("the harness ids compose");
         let current = DbBinding::to_database(
@@ -243,6 +244,7 @@ mod tests {
             edge.database().clone(),
             edge.binding().clone(),
             edge.epoch(),
+            edge.database_capability(),
         )
         .expect("the harness ids compose");
         zeroship_data_orm::schema_cache::with_mut(|c| {

@@ -550,8 +550,16 @@ pub async fn get_app_data_key(
 ///
 /// **The worker composes no part of a binding.** The database id names the
 /// physical schema, the edge id and the schema epoch together name the role a
-/// session narrows to, and all three are Control facts. A worker that derived
-/// any of them would address a schema and assume a role no reconciler created.
+/// session narrows to, the capability is the privilege set that role was
+/// granted, and all four are Control facts. A worker that derived any of them
+/// would address a schema, assume a role or claim a privilege no reconciler
+/// created.
+///
+/// The capability is served so the data plane can name a read-only binding when
+/// a creator writes to it. It is NOT what stops the write: the reconciler
+/// grants the binding role membership in one capability role, so `PostgreSQL`
+/// refuses the statement regardless. Serving it buys a refusal a creator can
+/// read instead of `42501` from the server.
 ///
 /// Only a LIVE binding is served, and "live" is a predicate rather than
 /// judgement at the caller:
@@ -588,7 +596,8 @@ pub async fn get_app_bindings(
         .control_pg
         .query(
             &format!(
-                "SELECT b.id AS binding_id, b.database_id, d.schema_epoch {} ORDER BY b.id",
+                "SELECT b.id AS binding_id, b.database_id, b.capability, d.schema_epoch {} \
+                 ORDER BY b.id",
                 zeroship_core::live_binding::LIVE_BINDINGS_FROM_WHERE
             ),
             &[&id.as_str()],
@@ -614,10 +623,27 @@ pub async fn get_app_bindings(
             return web::HttpResponse::InternalServerError()
                 .json(&serde_json::json!({"error":"internal error"}));
         };
+        // Parsed here rather than passed through, on the terms the epoch above
+        // is narrowed here: a stored spelling this cannot read is one the
+        // cluster reconciler could not compose a capability role from either,
+        // so it is a row nothing can serve rather than text to hand on and let
+        // the worker refuse. Serving `as_wire` means the response carries the
+        // one codec's spelling and not whatever the column happens to hold.
+        let Some(capability) =
+            zeroship_core::database_role::DatabaseCapability::from_wire(row.get("capability"))
+        else {
+            tracing::error!(
+                app_id = %id.as_str(),
+                "control-internal: stored binding capability is not a capability"
+            );
+            return web::HttpResponse::InternalServerError()
+                .json(&serde_json::json!({"error":"internal error"}));
+        };
         bindings.push(serde_json::json!({
             "binding_id": row.get::<_, &str>("binding_id"),
             "database_id": row.get::<_, &str>("database_id"),
             "schema_epoch": epoch,
+            "capability": capability.as_wire(),
         }));
     }
     web::HttpResponse::Ok()

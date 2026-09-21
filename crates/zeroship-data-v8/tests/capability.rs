@@ -52,6 +52,7 @@ fn dispatch_zs(source: &str, name: &str) -> (u16, serde_json::Value) {
                 database: zeroship_core::DatabaseId::mint(),
                 binding: zeroship_core::BindingId::mint(),
                 epoch: 1,
+                capability: zeroship_core::database_role::DatabaseCapability::ReadWrite,
             },
         )
         .expect("a fresh store accepts its first binding");

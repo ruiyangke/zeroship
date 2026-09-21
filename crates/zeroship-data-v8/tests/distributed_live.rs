@@ -883,6 +883,7 @@ fn db_live_stream_crosses_relay_and_v8_isolates_without_worker_replication() {
         DatabaseId::mint(),
         BindingId::mint(),
         SCHEMA_EPOCH,
+        zeroship_core::database_role::DatabaseCapability::ReadWrite,
     )
     .expect("a minted database and edge compose a legal role name");
     let schema = binding.schema().as_str().to_string();

@@ -31,8 +31,20 @@
 //! opens its OWN schema on a connection whose authority is the login, not a
 //! per-binding role. It holds no database id and no binding role, and
 //! [`DbBinding::platform`] is the only way to say so.
+//!
+//! # The capability is carried, not derived
+//!
+//! The database and the binding id derive the schema and the role name, but a
+//! binding's CAPABILITY is a control-plane fact about the edge and derives from
+//! nothing here. It is the spelling [`zeroship_core::database_role`] owns
+//! ([`DatabaseCapability`]) rather than a second enum, because the reconciler
+//! composes a capability ROLE from the same value and a second spelling would
+//! name a role nothing created. The unabbreviated name is also what keeps it
+//! apart from this crate's own `Capability` vocabulary, which is about what a
+//! FIELD supports.
 
 use zeroship_core::database_derivation;
+use zeroship_core::database_role::DatabaseCapability;
 use zeroship_core::{BindingId, DatabaseId};
 
 use crate::error::DbError;
@@ -53,6 +65,7 @@ pub struct DatabaseEdge {
     database: DatabaseId,
     binding: BindingId,
     epoch: u32,
+    capability: DatabaseCapability,
     role: String,
 }
 
@@ -70,6 +83,15 @@ impl DatabaseEdge {
     /// The schema epoch the isolate holding this edge was built against.
     pub fn epoch(&self) -> u32 {
         self.epoch
+    }
+
+    /// The privilege set control declared for this edge.
+    ///
+    /// Read, never composed: the binding role is granted membership in the
+    /// database's role for exactly this capability, so the value here and the
+    /// grant on the cluster come from one control-plane row.
+    pub fn database_capability(&self) -> DatabaseCapability {
+        self.capability
     }
 
     /// `zs_bind_<bnd>_e<E>`: the role the session-setup batch narrows to.
@@ -107,6 +129,7 @@ impl DbBinding {
         database: DatabaseId,
         binding: BindingId,
         epoch: u32,
+        capability: DatabaseCapability,
     ) -> Result<Self, DbError> {
         let role = database_derivation::binding_role_name(&binding, epoch)?;
         let schema_text = database_derivation::schema_name(&database);
@@ -124,6 +147,7 @@ impl DbBinding {
                 database,
                 binding,
                 epoch,
+                capability,
                 role,
             }),
         })
@@ -181,6 +205,34 @@ impl DbBinding {
     /// binding.
     pub fn schema_epoch(&self) -> Option<u32> {
         self.edge.as_ref().map(DatabaseEdge::epoch)
+    }
+
+    /// The capability control declared for this edge, or `None` for a platform
+    /// binding.
+    pub fn database_capability(&self) -> Option<DatabaseCapability> {
+        self.edge.as_ref().map(DatabaseEdge::database_capability)
+    }
+
+    /// Whether an operation that modifies rows is one this binding was declared
+    /// to make.
+    ///
+    /// **This is not an authorization boundary and must not be presented as
+    /// one.** The process asking runs creator code, so a check it can reach is
+    /// a check creator code is on the wrong side of. `PostgreSQL` is the
+    /// authority: the reconciler grants the binding role membership in exactly
+    /// one of the database's two capability roles, so a session narrowed to a
+    /// read-only binding cannot write whatever this answers. What reading it
+    /// buys is a refusal naming the binding instead of `42501 permission denied
+    /// for table ...` from the server.
+    ///
+    /// A PLATFORM binding answers `true` and holds no capability: it narrows to
+    /// nothing, its authority is the login rather than a per-binding role, and
+    /// there is no control-plane edge to have declared one. That is the state a
+    /// trusted native service's own schema is in, never a creator app's.
+    pub fn permits_writes(&self) -> bool {
+        self.edge
+            .as_ref()
+            .is_none_or(|edge| edge.capability.permits_writes())
     }
 
     /// The key every per-thread resource this binding's work touches is held
@@ -283,8 +335,15 @@ mod tests {
     #[test]
     fn a_database_binding_derives_its_schema_and_role_from_the_ids() {
         let (database, binding) = edge_fixture();
-        let bound = DbBinding::to_database("app_x", "deploy_x", database.clone(), binding.clone(), 7)
-            .expect("the fixture ids compose");
+        let bound = DbBinding::to_database(
+            "app_x",
+            "deploy_x",
+            database.clone(),
+            binding.clone(),
+            7,
+            DatabaseCapability::ReadWrite,
+        )
+        .expect("the fixture ids compose");
 
         assert_eq!(
             bound.schema().as_str(),
@@ -307,9 +366,24 @@ mod tests {
     #[test]
     fn the_epoch_changes_the_role_and_nothing_else() {
         let (database, binding) = edge_fixture();
-        let at_one =
-            DbBinding::to_database("app_x", "d", database.clone(), binding.clone(), 1).unwrap();
-        let at_two = DbBinding::to_database("app_x", "d", database.clone(), binding, 2).unwrap();
+        let at_one = DbBinding::to_database(
+            "app_x",
+            "d",
+            database.clone(),
+            binding.clone(),
+            1,
+            DatabaseCapability::ReadWrite,
+        )
+        .unwrap();
+        let at_two = DbBinding::to_database(
+            "app_x",
+            "d",
+            database.clone(),
+            binding,
+            2,
+            DatabaseCapability::ReadWrite,
+        )
+        .unwrap();
 
         assert_ne!(at_one.session_role(), at_two.session_role());
         assert_eq!(at_one.schema(), at_two.schema());
@@ -377,5 +451,77 @@ mod tests {
             None,
             "a malformed database half must refuse, never widen into a platform route"
         );
+    }
+
+    /// The capability is CARRIED: what goes in comes out, for both values, and
+    /// it changes nothing the ids derive.
+    ///
+    /// The second half is the one that would go unnoticed: a capability that
+    /// leaked into the role name would make two bindings on one edge narrow to
+    /// two roles, and only one of them was ever created.
+    #[test]
+    fn a_binding_carries_its_capability_without_changing_what_the_ids_derive() {
+        let (database, binding) = edge_fixture();
+        let compose = |capability| {
+            DbBinding::to_database(
+                "app_x",
+                "deploy_x",
+                database.clone(),
+                binding.clone(),
+                4,
+                capability,
+            )
+            .expect("the fixture ids compose")
+        };
+        let writable = compose(DatabaseCapability::ReadWrite);
+        let read_only = compose(DatabaseCapability::ReadOnly);
+
+        assert_eq!(
+            writable.database_capability(),
+            Some(DatabaseCapability::ReadWrite)
+        );
+        assert_eq!(
+            read_only.database_capability(),
+            Some(DatabaseCapability::ReadOnly)
+        );
+        assert!(writable.permits_writes());
+        assert!(!read_only.permits_writes());
+
+        assert_eq!(
+            writable.session_role(),
+            read_only.session_role(),
+            "the role name is derived from the edge and the epoch; the capability \
+             must not reach it"
+        );
+        assert_eq!(writable.schema(), read_only.schema());
+        assert_eq!(writable.route(), read_only.route());
+    }
+
+    /// A platform binding holds no capability and writes anyway.
+    ///
+    /// Its control is the read-only creator binding beside it: without one,
+    /// this would pass over a `permits_writes` that answered `true` for
+    /// everything.
+    #[test]
+    fn a_platform_binding_holds_no_capability_and_still_writes() {
+        let platform = DbBinding::platform(
+            "platform",
+            "auth",
+            SchemaName::new("zeroship").expect("fixture schema"),
+        );
+        assert_eq!(platform.database_capability(), None);
+        assert!(platform.permits_writes());
+
+        let (database, binding) = edge_fixture();
+        let read_only = DbBinding::to_database(
+            "app_x",
+            "d",
+            database,
+            binding,
+            1,
+            DatabaseCapability::ReadOnly,
+        )
+        .expect("the fixture ids compose");
+        assert!(!read_only.permits_writes());
     }
 }
