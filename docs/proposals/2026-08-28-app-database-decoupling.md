@@ -840,13 +840,33 @@ The set is built end to end: Control serves every live binding, `install_resolve
 descriptor, and `env.databases` (`crates/zeroship-data-v8/src/lib.rs`) publishes one handle per
 declared database, with `env.db` the primary's.
 
-Still owed: the capability. `DatabaseCapability` (`crates/zeroship-core/src/database_derivation.rs`)
-reaches the cluster roles and the reconciler and appears nowhere in `zeroship-data-orm`,
-`zeroship-data-v8` or `zeroship-worker`, so the data plane cannot tell a read-only binding from a
-read-write one. PostgreSQL can - the binding role inherits one capability role and not the other -
-so serving it buys a refusal a creator can read rather than a permission error at the first write.
-It is not the boundary, and building it as though it were would put a check where the process
-running creator code could reach it.
+The capability travels with the rest of it. Control's binding response carries `capability`
+(`get_app_bindings`, `crates/zeroship-control/src/internal.rs`), read out of
+`zeroship.database_bindings.capability` through `DatabaseCapability::from_wire`
+(`crates/zeroship-core/src/database_role.rs`) so the handler serves the one codec's spelling
+rather than whatever the column holds. `parse_resolved_binding`
+(`crates/zeroship-worker/src/sync.rs`) requires the field - both capabilities are values it
+carries, so a default would be the right reading for one live binding and a silent misreading of
+the other - and `ResolvedBinding`, `DatabaseEdge` and `DbBinding`
+(`crates/zeroship-data-orm/src/{resolved_bindings,binding}.rs`) carry it to the isolate. The
+capability is CARRIED and never derived: the schema and the role name come off the ids, and the
+capability comes off the control-plane row the reconciler granted from.
+
+`PreparedOperation::new` and the two typed constructors beside it
+(`crates/zeroship-data-orm/src/orm.rs`) refuse a row-modifying operation on a read-only binding
+with `READ_ONLY_BINDING`. That is the one seam that knows both halves before any work happens:
+`Operation::writes_rows` classifies off an exhaustive match, and the binding is the value the
+isolate was minted with.
+
+**It is not the boundary and nothing may be built as though it were.** PostgreSQL is: the binding
+role inherits one capability role and not the other (`grant_binding_statements`,
+`crates/zeroship-migrate-server/src/datastore/cluster.rs`), so the statement is refused by the
+server whatever the data plane believes and whatever path reached it. The check runs in the process
+that runs creator code, so it buys a creator a refusal they can read rather than a permission error
+at the first write, and nothing else. Two paths deliberately do not pass it: the unmask audit
+append (`backend.append_unmask_audit`, `crates/zeroship-data-orm/src/protection/unmask.rs`), which
+is a platform write on the creator's behalf, and the identity reservation inside a write already
+refused upstream.
 
 The worker does not compare `epoch` in Rust to authorize a transaction; the epoch is a substring
 of the role name the setup batch sends.
@@ -1123,21 +1143,57 @@ Control has since stopped serving, and the classifier's only input is the bindin
 it would have answered `SCHEMA_EPOCH_STALE` for that case either way. What distinguishes a
 withdrawn binding is a re-resolution, which is a protocol rather than a classification.
 
-**That protocol is not built, and the epoch producer made its absence reachable.** A worker
-resolves an app's binding once, when it loads the app, and `SuppliedAppBindings` is cleared only
-by `deprovision_app` - so a binding's lifetime is the worker PROCESS while the isolate's is the
-DEPLOY, and nothing reconciles the two. An apply now advances the head, so the second
-schema-changing apply against a resident app retires the role that app's binding names, and every
-session it opens is refused at `SET LOCAL ROLE`. The fence is firing correctly there: the isolate
-IS behind the schema. What is missing is that nothing REPLACES the isolate, and re-resolution
-belongs with that replacement rather than beside it. Carrying the epoch into the store under a
-live isolate is the wrong repair - `binding_for` keys on the app and the database, `deploy_token`
-is attached rather than keyed, and `binding_for_isolate` reads the store at each `env.db` call, so
-a store that followed the epoch would let code built against an older shape succeed against the
-schema that replaced it, which is the one direction this fence exists to catch. The staleness
-signals a reload already compares - `deploy_hash`, the runtime limits, `env_version` and
-`net_policy`, in `needs_reload` (`crates/zeroship-worker/src/sync.rs`) - are where the epoch
-belongs, so that a moved epoch reloads the app.
+**That protocol is the isolate's replacement, and a binding's lifetime is the isolate's.** BUILT.
+An isolate captures the binding its sessions narrow with while it builds - `mint_db_for_binding`
+(`crates/zeroship-data-v8/src/v8_classes/db.rs`) takes a `DbBinding` by value, and
+`build_env_object` runs once per isolate - so a store that moves does not move an isolate already
+running. It keeps the epoch it captured and is refused at `SET LOCAL ROLE` once that epoch
+retires, which is the fence working. The danger of a store that followed the epoch on a bare
+environment refresh is the isolate built AFTER it from an OLDER deployment: that one would capture
+the CURRENT epoch and run code built against a shape the schema has left, which is the one
+direction this fence cannot catch. So the resolution in `fetch_app_env_supplying` stays guarded on
+`is_bound`, and the epoch joins the staleness signals a reload already compares - `deploy_hash`,
+the runtime limits, `env_version` and `net_policy`, in `needs_reload`
+(`crates/zeroship-worker/src/sync.rs`). The reload is where re-resolution happens:
+`AppVersionInfo::binding_epochs` carries the schema epoch of every live binding the app holds,
+`Registry::get_versions` projects it through `LIVE_BINDINGS_FROM_WHERE_EVERY_APP`, `LoadedMeta`
+records what the isolate was built against, and `sync::resupply_bindings` replaces the app's whole
+binding set through `SuppliedAppBindings::replace_app` BEFORE `load_app` builds its successor. The
+cold-start path resolves the same way, because the store outlives every isolate in the process and
+a thread that has never held this app can still find one another thread resolved before the apply.
+
+**The workflow host does not take part, and the fence does not catch it.** LIVE.
+`ProductionResources::resolve` (`crates/zeroship-worker/src/workflow_host.rs`) re-resolves on an
+env-version change alone and compares no epoch. A run's deployment is pinned in the journal -
+`service/app.rs` freezes `active_deploy` onto `generations.deploy_id` at `insert_run`, and
+`service/frontier.rs` resolves the hash back through that frozen key - so the workflow host is the
+one builder that deliberately produces an isolate from an OLDER deployment, and its descriptor
+comes from that pinned bundle while its epoch comes from the live store. The deploy token does not
+help: `SuppliedAppBindings::binding_for` passes it to `DbBinding::to_database` as an identity
+field, and the role is composed from the binding id and the epoch alone, so a pinned hash retrieves
+the store's CURRENT epoch. The host and every HTTP thread share one `Arc<SuppliedAppBindings>`.
+
+This pairing predates the epoch producer: a host that cold-filled the store always installed
+whatever epoch Control served at that moment. What changed is the ending. A fixed epoch eventually
+retired and `SET LOCAL ROLE` refused; a store the dispatch path advances never retires under a
+replay, so old code reaches the schema that replaced it with no role to refuse it.
+
+**Neither remedy is expressible yet, and that is the finding.** A replay must not silently follow
+the schema forward, so resolving it the way dispatch does would cement this rather than close it.
+But refusing needs the same fact resolving needs - the epoch the pinned deployment was built
+against - and nothing records it: `schema_epoch` appears nowhere in `crates/zeroship-workflow/`,
+the journal's `__zeroship_workflow_deploys` carries hash, manifest and availability but no schema
+shape, and the column comment in `db/migrations-ts/20260919000200_database_entities.ts` says the
+value is a role-name input rather than a record. So the prerequisite is a recorded fact: what
+schema epoch a deployment was built against, written where the pin is written. Until that exists,
+a replay cannot tell the two cases apart, and neither can this document.
+
+**Why the whole map and not one number.** An app binds many databases. A maximum over its epochs
+does not move when a second database advances under a higher-epoch first one, and a sum that moves
+on any advance still collides across a change of the bound SET - so equality over the per-database
+map is the comparison, which also answers the two questions no SQLSTATE can: a database the app has
+started binding, and one whose binding was withdrawn. A withdrawn binding empties the app's set,
+which is the re-resolution the arm above says is a protocol rather than a classification.
 
 The codes being pairwise distinct is bound by
 `pg_error::the_three_setup_outcomes_are_pairwise_distinct`, so a later collapse is a red test

@@ -564,6 +564,34 @@ pub enum Operation {
     },
 }
 
+impl Operation {
+    /// Whether this operation modifies rows.
+    ///
+    /// EXHAUSTIVE, with no wildcard arm, so a new operation does not inherit
+    /// the read answer by omission: adding a variant fails to compile until it
+    /// says which it is. That compiler contract is the whole reason the
+    /// question is asked here rather than at the executor, where a write is
+    /// recognised by which function the caller reached.
+    const fn writes_rows(&self) -> bool {
+        match self {
+            Self::Insert { .. }
+            | Self::InsertMany { .. }
+            | Self::Update { .. }
+            | Self::Delete { .. }
+            | Self::Purge { .. }
+            | Self::Restore { .. }
+            | Self::Upsert { .. } => true,
+            Self::Read(_)
+            | Self::Find { .. }
+            | Self::Count { .. }
+            | Self::Aggregate { .. }
+            | Self::Distinct { .. }
+            | Self::Search { .. }
+            | Self::Near { .. } => false,
+        }
+    }
+}
+
 /// Result data before the adapter encodes it for its language runtime.
 #[derive(Debug)]
 pub enum Output {
@@ -648,6 +676,9 @@ impl PreparedOperation {
         operation: Operation,
     ) -> Result<Self, DbError> {
         validate_target(&binding, collection, &route)?;
+        if operation.writes_rows() {
+            refuse_a_write_on_a_read_only_binding(&binding)?;
+        }
         let plan = match operation {
             Operation::Read(query) => {
                 if query.source.collection != collection {
@@ -777,6 +808,9 @@ impl PreparedOperation {
         many: bool,
     ) -> Result<Self, DbError> {
         validate_target(&binding, collection, &route)?;
+        // A typed update writes by construction; there is no operation to
+        // classify, so the classification is the constructor.
+        refuse_a_write_on_a_read_only_binding(&binding)?;
         Ok(Self {
             context: crate::orm_context::current(),
             binding,
@@ -801,6 +835,9 @@ impl PreparedOperation {
         many: bool,
     ) -> Result<Self, DbError> {
         validate_target(&binding, collection, &route)?;
+        // Every `mutations::Mutation` is a delete, purge or restore, so this
+        // constructor is reached only for a write.
+        refuse_a_write_on_a_read_only_binding(&binding)?;
         let query = mutation.plan(
             &binding,
             &route,
@@ -979,4 +1016,48 @@ fn validate_target(
     crate::sql::mapping::validate_collection(collection)?;
     crate::descriptor::collection_schema(binding, collection)?;
     Ok(())
+}
+
+/// Say that a binding control declared read-only was asked to write.
+///
+/// # This is not a security boundary, and nothing may be built as though it
+/// were
+///
+/// The worker runs creator code, so a check the worker can reach is a check
+/// creator code is on the wrong side of. `PostgreSQL` is the authority here and
+/// this changes none of it: the reconciler grants a binding role membership in
+/// exactly one of the database's two capability roles (`GRANT {capability} TO
+/// {binding} WITH SET FALSE` in
+/// `zeroship_migrate_server::datastore::cluster::grant_binding_statements`), so
+/// a session narrowed to a read-only binding is refused by the server whatever
+/// this function believes and whatever path reached the statement. What it buys
+/// is a creator reading [`crate::error::READ_ONLY_BINDING_MESSAGE`] instead of
+/// `42501 permission denied for table ...` at the first write.
+///
+/// # Why here
+///
+/// [`PreparedOperation`] is the one seam that knows BOTH halves before any work
+/// happens: [`Operation::writes_rows`] classifies the operation off an
+/// exhaustive match, and the binding is the value the isolate was minted with.
+/// It is also synchronous and pre-compilation - no SQL is built, no connection
+/// is taken - so the refusal costs the creator nothing and reads as a property
+/// of the request rather than as a failure partway through one.
+///
+/// The executor was the alternative and is worse on both counts: `exec_mutation`
+/// recognises a write by which function the caller reached rather than by a
+/// match anything checks, and it is downstream of planning, so a refusal there
+/// would arrive after the descriptor pass and the assignment pass had run.
+///
+/// This is deliberately NOT where a platform binding is judged.
+/// [`DbBinding::permits_writes`] answers `true` for one, because a trusted
+/// native service's store narrows to nothing and has no control-plane edge to
+/// have declared a capability.
+fn refuse_a_write_on_a_read_only_binding(binding: &DbBinding) -> Result<(), DbError> {
+    if binding.permits_writes() {
+        return Ok(());
+    }
+    Err(DbError::PermissionDenied {
+        code: crate::error::READ_ONLY_BINDING,
+        message: crate::error::READ_ONLY_BINDING_MESSAGE,
+    })
 }

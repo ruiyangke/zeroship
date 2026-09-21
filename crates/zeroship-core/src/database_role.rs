@@ -100,6 +100,30 @@ impl DatabaseCapability {
             _ => None,
         }
     }
+
+    /// Whether a binding holding this capability may modify rows.
+    ///
+    /// The answer is the definition of the two variants and lives here, once,
+    /// so a caller cannot ask with a `matches!` whose wildcard arm would give a
+    /// third capability the read-only answer by omission. The match below is
+    /// exhaustive, so a third variant does not compile until it says which it
+    /// is.
+    ///
+    /// **`PostgreSQL` is what enforces this, not the callers of this method.**
+    /// The reconciler grants a binding role membership in exactly one
+    /// capability role
+    /// (`zeroship_migrate_server::datastore::cluster::grant_binding_statements`,
+    /// `GRANT {capability} TO {binding} WITH SET FALSE`), so a session narrowed
+    /// to a read-only binding is refused by the server whatever any process
+    /// believes. A data-plane caller reading this is choosing what to SAY about
+    /// an operation the server would refuse anyway.
+    #[must_use]
+    pub const fn permits_writes(self) -> bool {
+        match self {
+            Self::ReadWrite => true,
+            Self::ReadOnly => false,
+        }
+    }
 }
 
 /// Compose the per-app `PostgreSQL` role name.
@@ -444,5 +468,23 @@ mod tests {
                 "`{refused}` is not a capability the CHECK admits"
             );
         }
+    }
+
+    /// The two capabilities disagree about writes, and the read-only one is the
+    /// one that says no.
+    ///
+    /// Both arms, because a method that answered `true` for everything would
+    /// satisfy the `ReadWrite` assertion alone, and one that answered `false`
+    /// for everything would satisfy the `ReadOnly` one alone.
+    #[test]
+    fn only_the_readwrite_capability_permits_writes() {
+        assert!(DatabaseCapability::ReadWrite.permits_writes());
+        assert!(!DatabaseCapability::ReadOnly.permits_writes());
+
+        // The capability that permits writes is the one whose role name carries
+        // the write grants, so the two answers cannot be wired to each other's
+        // role by a suffix that drifted.
+        assert_eq!(DatabaseCapability::ReadWrite.role_suffix(), "rw");
+        assert_eq!(DatabaseCapability::ReadOnly.role_suffix(), "ro");
     }
 }

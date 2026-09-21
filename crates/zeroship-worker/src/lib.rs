@@ -44,6 +44,8 @@ pub struct WorkerConfig {
 }
 
 #[cfg(test)]
+mod control_fixture;
+#[cfg(test)]
 mod identity_fixture;
 #[cfg(test)]
 mod test_database;

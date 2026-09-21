@@ -210,7 +210,14 @@ impl Fence {
     }
 
     fn binding_at(&self, database: &DatabaseId, edge: &BindingId, epoch: u32) -> DbBinding {
-        DbBinding::to_database("app_fence", "deploy_fence", database.clone(), edge.clone(), epoch)
+        DbBinding::to_database(
+            "app_fence",
+            "deploy_fence",
+            database.clone(),
+            edge.clone(),
+            epoch,
+            DatabaseCapability::ReadWrite,
+        )
             .expect("the fixture ids compose a legal role name")
     }
 
