@@ -4,10 +4,10 @@
 entities, the control-plane surface that declares them, the cluster reconciler that makes a
 cluster match, the data path that narrows to what the reconciler granted, the creator config and
 manifest made plural, `env.databases` reaching every bound database and typed under its label,
-the `zeroship db` commands, deploy verifying a live binding rather than comparing schemas, and
-at-rest column encryption keyed on the database, and the migration service applying into the
-schema of the database the request names. What remains is the subscribe request naming a
-database, capacity-aware placement, and an apply advancing an epoch.
+the `zeroship db` commands, deploy verifying a live binding rather than comparing schemas,
+at-rest column encryption keyed on the database, the migration service applying into the schema
+of the database the request names, and an apply advancing the schema epoch on the cluster. What
+remains is the subscribe request naming a database and capacity-aware placement.
 
 Built:
 
@@ -49,7 +49,7 @@ Built:
   `42501` from `22023` on it. Transaction lanes, the captured route and the V8 continuation slot
   key on `(app_id, database_id)`. The SQLite dev tier attaches one file per database under the
   schema. Control resolves an app's live binding at
-  `GET /internal/apps/{app_id}/binding` and the worker installs it into a host-supplied store
+  `GET /internal/apps/{app_id}/bindings` and the worker installs it into a host-supplied store
   (`crates/zeroship-data-orm/src/resolved_bindings.rs`); an isolate composes no part of a binding
   and an app with none has no `env.db`.
 
@@ -85,11 +85,10 @@ Built:
   binding to - `active` with `observed_generation` caught up, the same predicate the worker's own
   resolution uses - and `api::database_binding_response` carries the call that grants one,
   `POST /api/databases/{database_id}/bindings`, one per unbound database.
-  `catalog::admit_schema` and its applied-row read are gone with
-  `CatalogError::SchemaNotApplied`, `RegistryError::SchemaNotApplied` and
-  `schema_precondition_response`: equality coupled every app on a shared database to every other,
-  because one app migrating changed the newest applied row and broke every other bound app's next
-  deploy. The artifact-self-consistency arm survives where it needs no knowledge of any database -
+  Deploy admission is that binding check and nothing beside it: it carries no schema equality
+  test, because equality coupled every app on a shared database to every other - one app
+  migrating moved the compared value and broke every other bound app's next deploy. The
+  artifact-self-consistency arm stands where it needs no knowledge of any database -
   `Manifest::validate` refuses a malformed descriptor hash and `collect_expected_hashes` refuses
   an entry whose blob the archive does not carry.
 
@@ -154,11 +153,6 @@ on that wire is the routing key's remaining half. And `ThreadDbContext` holds on
 connection plus a per-app binding map rather than a connection map keyed `(app_id, database_id)`,
 because keying it that way needs per-database datastore coordinates that arrive with
 `env.databases`.
-
-`zeroship.app_schema_applies` is still keyed on the app alone, so the ledger records THAT an app
-applied a set and not WHICH database it went to. Nothing reads it - the deploy gate that did is
-deleted - so it is an audit gap rather than a correctness one, and closing it is a platform
-migration.
 
 **Control still never writes `active` itself.** The management surface declares and stops: a
 database it creates stops at `provisioning` and a binding at `pending` until a reconciler holding
@@ -380,36 +374,32 @@ datastore's convergence is a one-time bootstrap and `status` carries it.
 
 ### The control plane should record no migration at all
 
-**NOT BUILT.** `zeroship.app_schema_applies` is still created by
-`db/migrations-ts/20260702000200_control_tables.ts`, still written through
-`crates/zeroship-migrate-server/src/schema_apply_store.rs`, and still read by
-`crates/zeroship-control/src/publication/catalog.rs`. The design below says both should go;
-neither has. It exists today as the
-platform's own record of what schema an app corresponds to, because the engine journal lives in
-the creator's schema where the migrator role can drop it, and it feeds the deploy gate's
-descriptor comparison. Both halves fall under this design.
+**BUILT.** The platform schema carries no per-apply record. The migrate server applies and
+returns the outcome to its caller (`ApplyMigrationsResponse`,
+`crates/zeroship-migrate-server/src/apply.rs`), and control reads nothing about applies:
+`crates/zeroship-control/src/publication/catalog.rs` admits a deploy and a restore on bindings
+alone. The engine journal in the creator's own schema, where the migrator role can drop it, is
+the record of what ran - and the platform depends on no property of it.
 
-**The descriptor comparison is an equality test, and equality is a coupling mechanism.** An
-app's build hashes the schema it was generated against. With one app per database that hash
-answered a real question. With several, any migration - a purely additive one included -
-invalidates the build of every app bound to that database, so all of them stop being deployable
-while all of them keep running correctly. Forcing every app on a database to move together is
-precisely the property this design exists to remove. It is not a transient window either: a
-database owned by a project and apps built on their own cadence do not move together, and a
-database that outlives its apps never moves together with any of them.
+**A descriptor comparison is an equality test, and equality is a coupling mechanism.** An app's
+build hashes the schema it was generated against. With one app per database that hash answers a
+real question. With several, comparing it would invalidate the build of every app bound to that
+database on any migration, a purely additive one included, so all of them would stop being
+deployable while all of them kept running correctly. Forcing every app on a database to move
+together is precisely the property this design exists to remove. It is not a transient window
+either: a database owned by a project and apps built on their own cadence do not move together,
+and a database that outlives its apps never moves together with any of them.
 
-**The remaining columns have no production reader.** The control-side model
-(`crates/zeroship-control/src/publication/models.rs`) declares only `id`, `app_id`, `status`,
-`descriptor_sha256`, `submitted_at` and `applied_at`, under a comment saying it declares "only
-the columns these operations read or write". `migration_id`, `request_body`,
-`effective_profile`, `ceiling_id`, `ceiling_version`, `applied_versions`, `submitted_by` and
-`last_error` are written and read by nothing - the same one-writer-zero-readers test
-`docs/proposals/2026-08-28-migration-record-consolidation.md` used to delete
-`zeroship.migrated_migration_audit`.
+The rule is the one-writer-zero-readers test
+`docs/proposals/2026-08-28-migration-record-consolidation.md` applies to
+`zeroship.migrated_migration_audit`: a column no production path reads earns no table to sit
+in. The control-side catalog model (`crates/zeroship-control/src/publication/models.rs`)
+declares "only the columns these operations read or write", and every column it declares
+belongs to a table the deploy, archive and restore paths read.
 
-So the engine journal in the creator's own schema becomes the only record of what ran, which is
-what that consolidation set out to achieve and stopped one table short of. Per-apply audit, if
-it is wanted, is an audit event in the audit system rather than a bespoke ledger.
+So the engine journal in the creator's own schema is the only record of what ran, which is what
+that consolidation set out to achieve and stopped one table short of. Per-apply audit, if it is
+wanted, is an audit event in the audit system rather than a bespoke ledger.
 
 ### Changes to existing tables
 
@@ -420,8 +410,6 @@ projects  + execution_zone_id, NOT NULL, frozen by trigger
 apps      + UNIQUE ("apps_project_identity_key")   (id, project_id)
           + FOREIGN KEY (project_id, execution_zone_id)
                      -> projects(id, execution_zone_id)
-
-zeroship.app_schema_applies   unchanged - the drop above is proposed, not done
 ```
 
 **The zone moves to the project.** `apps.execution_zone_id`
@@ -831,8 +819,8 @@ by roles.
 
 ## Binding resolution
 
-BUILT for one binding per app. Control answers `GET /internal/apps/{app_id}/binding`
-(`crates/zeroship-control/src/internal.rs`, `get_app_binding`) with the database id, the edge id
+BUILT, for the SET of databases a deployment declares. Control answers `GET /internal/apps/{app_id}/bindings`
+(`crates/zeroship-control/src/internal.rs`, `get_app_bindings`) with the database id, the edge id
 and the schema epoch, serving only a binding whose status is `active` and whose
 `observed_generation` has caught up. The worker installs it into a process-wide
 `SuppliedAppBindings` (`crates/zeroship-data-orm/src/resolved_bindings.rs`) beside the project key
@@ -846,8 +834,19 @@ every `Db` and `Collection` wrapper travels with. It carries the database, the s
 role and the epoch, and DERIVES the last two from the ids rather than accepting them, so no call
 site can hand it a name that disagrees with the cluster.
 
-Still owed: a SET rather than one binding, which is the creator surface and the manifest reshape,
-and the capability, which Control knows and does not yet serve.
+The set is built end to end: Control serves every live binding, `install_resolved_bindings`
+(`crates/zeroship-worker/src/sync.rs`) installs each one, `databases_of`
+(`crates/zeroship-runtime/src/core/databases.rs`) reads the declared set out of the deployment
+descriptor, and `env.databases` (`crates/zeroship-data-v8/src/lib.rs`) publishes one handle per
+declared database, with `env.db` the primary's.
+
+Still owed: the capability. `DatabaseCapability` (`crates/zeroship-core/src/database_derivation.rs`)
+reaches the cluster roles and the reconciler and appears nowhere in `zeroship-data-orm`,
+`zeroship-data-v8` or `zeroship-worker`, so the data plane cannot tell a read-only binding from a
+read-write one. PostgreSQL can - the binding role inherits one capability role and not the other -
+so serving it buys a refusal a creator can read rather than a permission error at the first write.
+It is not the boundary, and building it as though it were would put a check where the process
+running creator code could reach it.
 
 The worker does not compare `epoch` in Rust to authorize a transaction; the epoch is a substring
 of the role name the setup batch sends.
@@ -967,13 +966,19 @@ lock follows the database rather than the app. The publication reconciler's lock
 is keyed on the datastore publication, because that is the object being edited and every
 database on the cluster contends for it.
 
-**The deploy gate stops comparing schemas.** `crates/zeroship-control/src/registry.rs` today
-predicates the deploy UPDATE on one `descriptor_sha256` matching the newest applied row and
-reports `RegistryError::SchemaNotApplied { descriptor_sha256, applied_sha256 }`. That comparison
-is deleted, along with the catalog read behind it
-(`crates/zeroship-control/src/publication/catalog.rs`). The descriptor-mismatch arm of
-`SchemaNotApplied` goes with it; the artifact-inconsistency arm survives as a manifest
-self-consistency check that needs no knowledge of any database.
+**The deploy gate verifies bindings, not schemas. This landed.** `265f988a9` ("verify database
+bindings at deploy, not schemas") made the precondition binding admission.
+`crates/zeroship-control/src/registry.rs` predicates the deploy UPDATE on nothing about schema,
+and `admit_bindings` (`crates/zeroship-control/src/publication/catalog.rs`) is the admission
+for `accept` and for `restore` alike, refusing either when the app holds no LIVE binding to a
+database the artifact names. Restore admits on the same predicate as deploy, so the two cannot
+disagree about what an app may run against, and neither asks anything about an apply.
+
+The artifact-inconsistency check stands on its own beside them: a manifest self-consistency test
+needing no knowledge of any database. `Manifest::validate`
+(`crates/zeroship-bundle/src/manifest.rs`) refuses a malformed descriptor hash and
+`collect_expected_hashes` (`crates/zeroship-bundle/src/unpack.rs`) refuses an entry whose blob
+the archive does not carry.
 
 `Manifest.runtime_descriptor` (`crates/zeroship-bundle/src/manifest.rs`) still changes shape,
 because an app now carries one descriptor per database: entries of `{ label, database_id }` plus
@@ -1117,6 +1122,22 @@ worker's store is process-wide and cleared only by `deprovision_app`, so a worke
 Control has since stopped serving, and the classifier's only input is the binding it was handed -
 it would have answered `SCHEMA_EPOCH_STALE` for that case either way. What distinguishes a
 withdrawn binding is a re-resolution, which is a protocol rather than a classification.
+
+**That protocol is not built, and the epoch producer made its absence reachable.** A worker
+resolves an app's binding once, when it loads the app, and `SuppliedAppBindings` is cleared only
+by `deprovision_app` - so a binding's lifetime is the worker PROCESS while the isolate's is the
+DEPLOY, and nothing reconciles the two. An apply now advances the head, so the second
+schema-changing apply against a resident app retires the role that app's binding names, and every
+session it opens is refused at `SET LOCAL ROLE`. The fence is firing correctly there: the isolate
+IS behind the schema. What is missing is that nothing REPLACES the isolate, and re-resolution
+belongs with that replacement rather than beside it. Carrying the epoch into the store under a
+live isolate is the wrong repair - `binding_for` keys on the app and the database, `deploy_token`
+is attached rather than keyed, and `binding_for_isolate` reads the store at each `env.db` call, so
+a store that followed the epoch would let code built against an older shape succeed against the
+schema that replaced it, which is the one direction this fence exists to catch. The staleness
+signals a reload already compares - `deploy_hash`, the runtime limits, `env_version` and
+`net_policy`, in `needs_reload` (`crates/zeroship-worker/src/sync.rs`) - are where the epoch
+belongs, so that a moved epoch reloads the app.
 
 The codes being pairwise distinct is bound by
 `pg_error::the_three_setup_outcomes_are_pairwise_distinct`, so a later collapse is a red test
@@ -1673,7 +1694,7 @@ app's requests and cannot protect a shared cluster from an app under its limit. 
 2. **Supply the schema epoch producer.** PARTLY BUILT, and the two halves must not be confused.
 
    The EPOCH FENCE ships: the epoch is the last component of the binding role, Control serves it
-   at `GET /internal/apps/{app_id}/binding` from `databases.schema_epoch`, the binding composes
+   at `GET /internal/apps/{app_id}/bindings` from `databases.schema_epoch`, the binding composes
    the role from it, and a role the cluster never minted is `SCHEMA_EPOCH_STALE`
    (`crates/zeroship-data-orm/tests/postgres_binding_fence.rs`). Nothing in the worker compares an
    epoch; PostgreSQL does, by whether the role exists.
@@ -1686,7 +1707,13 @@ app's requests and cannot protect a shared cluster from an app under its limit. 
    binding's own epoch is the remaining work, and it is a different mechanism from the role name:
    one fences the session at setup, the other would fence an admitted transaction mid-flight.
 
-   Still owed: the migration-service write that advances `databases.schema_epoch` on an apply.
+   The EPOCH PRODUCER ships. An apply that commits a schema delta rotates the head the cluster
+   holds (`crates/zeroship-migrate-server/src/rotation.rs`): it retires `E-1` before any DDL
+   commits and refuses the apply if it cannot, then mints `E+1` for every live binding once all of
+   it has, in the transaction that advances the head. `databases.schema_epoch` follows as a
+   projection, so losing that write costs a re-resolve rather than an exactly-once obligation
+   across two servers. The head carries the journal position it was minted at, which is what
+   decides whether a rotation is still owed after a crash between the last DDL and the mint.
 
 3. **What bounds total transaction duration?** NEEDS-DECISION. Not `transaction_timeout`: it does
    not exist on 16 and does from 17, so in a mixed fleet the answer differs per cluster and a design

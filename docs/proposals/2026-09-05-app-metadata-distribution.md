@@ -1281,23 +1281,23 @@ name term grows substantially; that is the single largest future mover of the
 total, and it is a design decision, not a distribution.
 
 MEASURED bound on the name, and the hole it exposes: `Registry::create_app`
-(`crates/zeroship-control/src/registry.rs`) refuses a name that is empty, is over
-a hardcoded length ceiling, or is not `[A-Za-z0-9_-]`. That is the ONLY check -
-`zeroship.apps.name` carries no CHECK constraint, and other live
-`INSERT INTO zeroship.apps` sites bypass it entirely
-(`crates/zeroship-migrate-server/src/schema_apply_store.rs`,
-`crates/zeroship-worker/src/handler.rs`,
-`crates/zeroship-control/src/cron/spend_recompute.rs`). Two consequences for the
-encoder: a one-byte `name_length` is only safe while that one Rust function
-holds, and **the ceiling is wrong anyway**. A DNS label has a hard length ceiling
+(`crates/zeroship-control/src/registry.rs`) opens with `validate_app_name(name)?`
+and then issues the `INSERT INTO zeroship.apps` itself, and `validate_app_name`
+in that same file refuses a name that is empty, is over a hardcoded length
+ceiling, or fails
+`name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')`. That
+is the ONLY check - `zeroship.apps.name` carries no CHECK constraint, so the
+bound is held by that one Rust function and the schema re-derives nothing behind
+it. Two consequences for the encoder: a one-byte `name_length` is only safe
+while that function holds AND stays the sole production writer of the column,
+and **the ceiling is wrong anyway**. A DNS label has a hard length ceiling
 fixed by RFC 1035 (sections 2.3.4 and 3.1: the length octet's high two bits are
 zero, so six bits bound the label), and `_` is not a legal hostname character
 (RFC 1123 section 2.1); a name at or over the label ceiling, or bearing an
 underscore, is a name that cannot be resolved or certificated. The validator
 should say the RFC ceiling and LDH. Both halves are arms below: one enumerates
-the insert sites and rules that each passes the single validator (it is red
-today), and one rules that the validator's ceiling is within the encoded length
-field's width.
+the insert sites and rules that each passes the single validator, and one rules
+that the validator's ceiling is within the encoded length field's width.
 
 ASSUMED, and this is the only invented distribution in the section: names cluster
 short. The only sample available is this repository's own app-shaped directories
@@ -2076,13 +2076,20 @@ enum, which is the only event that can invalidate the byte and the one no prose
 would notice. FLOOR: the number of enum variants enumerated, read from the enums.
 
 **A3. Every app-name insert passes the one validator.** Enumerates every
-`INSERT INTO zeroship.apps` site in the tree and rules that each passes through
-`Registry::create_app`'s name validation. It is RED today: the validator is in
-`crates/zeroship-control/src/registry.rs` and there are live insert sites that
-bypass it (`crates/zeroship-migrate-server/src/schema_apply_store.rs`,
-`crates/zeroship-worker/src/handler.rs`,
-`crates/zeroship-control/src/cron/spend_recompute.rs`). FLOOR: the number of insert
-sites the arm itself discovers, never a transcribed count.
+`INSERT INTO zeroship.apps` site in the tree, partitions it into production and
+fixture code, and rules that every production member writes its name through
+`Registry::create_app`'s name validation. It is GREEN today, and it earns its
+place as a regression guard rather than as a finding: the production partition
+is `crates/zeroship-control/src/registry.rs`, where `create_app` runs
+`validate_app_name(name)?` and then issues the `INSERT INTO zeroship.apps`
+itself, so the validator's caller IS the production writer of
+`zeroship.apps.name`. It goes RED the moment a second production writer appears,
+which is exactly the event a one-byte `name_length` cannot survive. Fixture
+inserts are raw SQL against test databases and fall in the other partition, so
+the production partition carries its own nonempty assertion - without it, a
+rename that moves the production site out of the arm's reach passes the arm over
+an empty set. FLOOR: the number of insert sites the arm itself discovers, never
+a transcribed count.
 
 **A4. The name ceiling fits the encoded length field.** Rules that the validator's
 length ceiling is within the width of the packed record's name-length field. With

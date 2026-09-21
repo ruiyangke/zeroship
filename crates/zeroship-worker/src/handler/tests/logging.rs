@@ -15,10 +15,13 @@ async fn dispatch_console_lines_are_queryable_from_logs_endpoint() {
     worker
         .load(source, AppRuntimeLimits::default(), &Manifest::default())
         .await;
+    // Both surfaces are mounted the way the worker binary mounts them, so the
+    // URIs below address the routes the process serves rather than a second
+    // registration that only this test has.
     let app = test::init_service(
         web::App::new()
             .configure(worker.configure())
-            .service(web::resource("/logs/{app_id}").route(web::get().to(crate::logs::get_logs))),
+            .configure(crate::logs::configure),
     )
     .await;
 

@@ -84,6 +84,31 @@ impl BindingStore {
             .map_err(BindingStoreError::Query)?;
         Ok(!rows.is_empty())
     }
+
+    /// Answer whether the control plane is reachable, for `/readyz`.
+    ///
+    /// This service holds no shared client, so the probe opens a connection of
+    /// its own; the readiness gate's TTL is what keeps an unauthenticated probe
+    /// flood from becoming a connection flood.
+    ///
+    /// # Errors
+    /// [`BindingStoreError::Connect`] when the control plane will not connect,
+    /// [`BindingStoreError::Query`] when it will not answer.
+    pub async fn probe(&self) -> Result<(), BindingStoreError> {
+        let (client, connection) = compio_postgres::connect(&self.dsn, NoTls)
+            .await
+            .map_err(BindingStoreError::Connect)?;
+        compio::runtime::spawn(async move {
+            if let Err(err) = connection.run().await {
+                tracing::debug!(error = %err, "migrate-server: readiness probe connection ended");
+            }
+        })
+        .detach();
+        client
+            .check_connection()
+            .await
+            .map_err(BindingStoreError::Query)
+    }
 }
 
 #[cfg(test)]

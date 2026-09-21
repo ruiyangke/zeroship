@@ -22,8 +22,8 @@
 //!   under the `__zeroship_` prefix, so the migrator owns the journal too. That is
 //!   accepted: an owner's privileges are implicit and cannot be revoked away, so
 //!   the only honest position is that the record of what ran belongs to the tenant
-//!   whose schema it describes. The platform keeps its own record in
-//!   `zeroship.app_schema_applies` and never treats this one as a trust anchor.
+//!   whose schema it describes. The platform keeps no counter-record, so this
+//!   journal is the only record of what ran - and it belongs to the tenant.
 //! - `search_path` = project schema FIRST, then extension schema(s) (default
 //!   `public`, resolution-only) so unqualified `vector(N)`/`geography(...)`
 //!   resolve.
@@ -235,8 +235,8 @@ pub async fn provision_migrator(
     // which this role OWNS, so there is nothing to deny - owner privileges are
     // implicit and cannot be revoked away. A creator can destroy their own
     // journal, which is accepted - it is their database and corrupting it
-    // breaks only them - and it is why the platform keeps its own record in
-    // `zeroship.app_schema_applies` rather than trusting this one.
+    // breaks only them - and the platform keeps no counter-record to
+    // fall back on.
     //
     // A revoke here would not be merely vacuous: with
     // `meta_schema == project_schema` it would name the PROJECT schema and undo

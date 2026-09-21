@@ -80,7 +80,6 @@ use zeroship_migrate_server::apply::{apply_ir_documents, ApplyMigrationsRequest,
 use zeroship_migrate_server::datastore::control::ControlStore;
 use zeroship_migrate_server::datastore::{PassReport, Reconciler};
 use zeroship_migrate_server::policy::ManagedPolicyConfig;
-use zeroship_migrate_server::schema_apply_store::SchemaApplyStore;
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::Runtime;
@@ -429,6 +428,7 @@ async fn apply_into(
     let tmp = tmpdir(label);
     let report = apply_ir_documents(
         tenant_url,
+        control_url,
         &tmp,
         zeroship_migrate_server::apply::ApplyTarget {
             app_id: app,
@@ -436,7 +436,6 @@ async fn apply_into(
         },
         &request,
         &policy_config(),
-        &SchemaApplyStore::new(control_url.to_owned()),
         principal,
     )
     .await

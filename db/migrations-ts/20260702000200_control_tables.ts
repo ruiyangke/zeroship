@@ -2,7 +2,6 @@ import { table, t, now, uuidV4 } from "@zeroship/migrate";
 
 const userIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
   app_audit: ["actor_user_id"],
-  app_schema_applies: ["submitted_by"],
 };
 
 export default {
@@ -46,52 +45,6 @@ export default {
       primaryKey: ["id"],
     });
     table("app_oauth_clients", { schema: "zeroship" }).unique("app_oauth_clients_natural_key").add({ columns: ["app_id"] });
-    // ONE ROW PER SCHEMA-APPLY REQUEST the migration service accepted. It is the
-    // platform's own record of what an app's schema corresponds to, and it exists
-    // BECAUSE the engine journal is not usable as one: that journal now lives in
-    // the app's own schema, which the app's migrator role OWNS, and an owner can
-    // DROP it. So the platform keeps its own row and never treats the tenant's
-    // journal as a trust anchor.
-    //
-    // The reader is the control plane's deploy precondition
-    // (`catalog::admit_schema`), which compares the PRIMARY database's
-    // `runtime_descriptor` hash against the NEWEST applied row's
-    // `descriptor_sha256`. `zeroship_control` holds the grant
-    // (`20260702000900_grants.ts`) and no other service reads it.
-    //
-    // A ROW IS WRITTEN PER REQUEST, EVEN WHEN NOTHING APPLIED, and that is a
-    // requirement rather than an accident of where the insert sits: an engine
-    // upgrade that changes descriptor bytes without changing any schema would
-    // otherwise halt every app's next deploy forever. `applied_versions` is what
-    // the engine reported as applied for that request, so a re-run that applied
-    // nothing is visible as `[]` rather than being indistinguishable from one
-    // that advanced the schema.
-    table("app_schema_applies", { schema: "zeroship" }).create({
-      columns: {
-        id: t.bigInt().required().identity(),
-        app_id: t.text().required(),
-        migration_id: t.uuid().required(),
-        status: t.text().required(),
-        request_body: t.json().required(),
-        effective_profile: t.json().required(),
-        ceiling_id: t.text().required(),
-        ceiling_version: t.bigInt().required(),
-        // The runtime descriptor this document set folds to, lowercase sha256 hex.
-        // Validated at the migration service's door, so the spelling recorded here
-        // is the one a manifest hash can be compared to with a plain `=`.
-        descriptor_sha256: t.text().required(),
-        // The engine's own `outcome.applied` for this request.
-        applied_versions: t.json().required().default([]),
-        submitted_by: t.text(),
-        submitted_at: t.timestamp().required().default(now()),
-        applied_at: t.timestamp(),
-        last_error: t.text(),
-      },
-      primaryKey: ["id"],
-    });
-    table("app_schema_applies", { schema: "zeroship" }).unique("app_schema_applies_natural_key").add({ columns: ["app_id", "migration_id"] });
-    table("app_schema_applies", { schema: "zeroship" }).check("app_schema_applies_ceiling_version_check").add({ expr: (col) => col("ceiling_version").gt(0) });
-    table("app_schema_applies", { schema: "zeroship" }).check("app_schema_applies_status_check").add({ expr: (col) => col("status").in(["submitted", "applied", "failed"]) });
     table("app_scope_defs", { schema: "zeroship" }).create({
       columns: {
         id: t.bigInt().required().identity(),

@@ -40,6 +40,34 @@ fn journal_tables() -> Vec<String> {
     names
 }
 
+/// Every ordinary table under the reserved journal prefix that `pg_class` holds
+/// in `schemas`, as (schema, table).
+///
+/// One predicate behind two call sites, so the schema list is the only thing
+/// that can differ between a check that demands a journal table and a check
+/// that forbids one. A prefix, a `starts_with` or a `relkind` that stopped
+/// matching would take both readings with it rather than turning the forbidding
+/// one into a silent pass.
+async fn journal_tables_in(
+    fixture: &platform::Platform,
+    schemas: &[&str],
+) -> Vec<(String, String)> {
+    fixture
+        .admin
+        .query(
+            "SELECT n.nspname, c.relname FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE c.relkind = 'r' AND starts_with(c.relname::text, $1) \
+             AND n.nspname::text = ANY($2)",
+            &[&JOURNAL_PREFIX, &schemas],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| (row.get::<_, String>(0), row.get::<_, String>(1)))
+        .collect()
+}
+
 /// The journal lives in the SERVICE's own schema, is stamped once for the whole
 /// installation, and is read by nobody.
 ///
@@ -118,24 +146,26 @@ async fn journal_is_installed_and_unread(fixture: &platform::Platform) {
     // by the migration service's bundle path. This installation adds a second
     // site; it must not have moved the first, and it must not have scattered
     // journal tables through the platform's other schemas.
-    let elsewhere = fixture
-        .admin
-        .query(
-            "SELECT n.nspname, c.relname FROM pg_class c \
-             JOIN pg_namespace n ON n.oid = c.relnamespace \
-             WHERE c.relkind = 'r' AND starts_with(c.relname::text, $1) \
-             AND n.nspname IN ('zeroship', 'public', 'service_authn', 'zeroship_migrations')",
-            &[&JOURNAL_PREFIX],
-        )
-        .await
-        .unwrap();
+    //
+    // The scatter check reads a NEGATIVE, so it is only worth the ink if the
+    // predicate producing it can produce a positive. The control runs first,
+    // with the same prefix and the same predicate, against the schema the
+    // journal is installed in; the two calls differ in the schema list alone.
+    let installed = journal_tables_in(fixture, &["workflow_manager"]).await;
+    assert!(
+        !installed.is_empty(),
+        "no table in workflow_manager matches {JOURNAL_PREFIX}, so the scatter check below is \
+         reading an empty result out of a predicate that matches nothing rather than out of a \
+         journal that stayed where it was installed"
+    );
+    let elsewhere = journal_tables_in(
+        fixture,
+        &["zeroship", "public", "service_authn", "zeroship_migrations"],
+    )
+    .await;
     assert!(
         elsewhere.is_empty(),
-        "journal tables were installed outside the workflow service's schema: {:?}",
-        elsewhere
-            .iter()
-            .map(|row| (row.get::<_, String>(0), row.get::<_, String>(1)))
-            .collect::<Vec<_>>()
+        "journal tables were installed outside the workflow service's schema: {elsewhere:?}"
     );
     let creator = fixture
         .admin
