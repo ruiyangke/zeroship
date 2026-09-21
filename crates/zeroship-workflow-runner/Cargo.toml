@@ -25,6 +25,7 @@ compio-postgres = { workspace = true, features = ["with-chrono-0_4", "with-serde
 zeroship-workflow-manager = { workspace = true }
 rusqlite = { workspace = true, features = ["bundled"] }
 tempfile = { workspace = true }
+libc = { workspace = true }
 testcontainers = { version = "0.28", features = ["blocking"] }
 
 [lints]

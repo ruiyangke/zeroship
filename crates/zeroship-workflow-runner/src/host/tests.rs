@@ -511,20 +511,34 @@ fn the_host_thread_runs_on_the_declared_stack_budget() {
     );
 }
 
-/// Bytes the kernel mapped for the stack of a thread this builder spawns.
+/// Bytes the kernel gave the stack of a thread this builder spawns.
+///
+/// Read from the thread's own attributes. The kernel merges adjacent mappings
+/// that share permissions, so the `/proc/self/maps` range holding a stack
+/// address can span unrelated memory and answers "large" for any thread.
+#[allow(
+    unsafe_code,
+    reason = "the thread's own stack attributes are only readable through pthread"
+)]
 fn mapped_stack_bytes(builder: std::thread::Builder) -> Option<usize> {
     builder
         .spawn(|| {
-            let anchor = 0u8;
-            let address = std::ptr::addr_of!(anchor) as usize;
-            let maps = std::fs::read_to_string("/proc/self/maps").ok()?;
-            maps.lines().find_map(|line| {
-                let (range, _) = line.split_once(' ')?;
-                let (start, end) = range.split_once('-')?;
-                let start = usize::from_str_radix(start, 16).ok()?;
-                let end = usize::from_str_radix(end, 16).ok()?;
-                (start..end).contains(&address).then_some(end - start)
-            })
+            // SAFETY: `pthread_getattr_np` fills an attribute object for the
+            // calling thread and `pthread_attr_getstack` reads the base and
+            // size recorded in it. Both receive pointers to locals that outlive
+            // the call, and the attribute object is destroyed before return.
+            unsafe {
+                let mut attr = std::mem::MaybeUninit::<libc::pthread_attr_t>::uninit();
+                if libc::pthread_getattr_np(libc::pthread_self(), attr.as_mut_ptr()) != 0 {
+                    return None;
+                }
+                let mut attr = attr.assume_init();
+                let mut base = std::ptr::null_mut();
+                let mut size = 0usize;
+                let read = libc::pthread_attr_getstack(&attr, &mut base, &mut size);
+                libc::pthread_attr_destroy(&mut attr);
+                (read == 0).then_some(size)
+            }
         })
         .ok()?
         .join()
