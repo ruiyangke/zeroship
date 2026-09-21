@@ -571,7 +571,7 @@ async fn renew<T: JobTransport>(
     loop {
         let delay = available(&claims.borrow())?.min(phase.remaining()?) / 3;
         compio::time::sleep(delay).await;
-        let (task, original) = snapshot(claims);
+        let (mut task, original) = snapshot(claims);
         let timeout = available(&claims.borrow())?
             .min(options.operation_timeout)
             .min(phase.remaining()?);
@@ -585,7 +585,9 @@ async fn renew<T: JobTransport>(
                 .filter(|remaining| !remaining.is_zero())
                 .ok_or(WorkflowServiceError::Timeout)?;
             task.remaining()?;
-            let (task, control) = app.heartbeat_job(&task, &renewed).await?;
+            let renewal = app.heartbeat_job(&task, &renewed).await?;
+            let control = renewal.control();
+            task.renew(renewal);
             Ok((task, renewed, control))
         })
         .await?;

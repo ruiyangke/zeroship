@@ -1263,11 +1263,19 @@ async fn policy_bounds(store: Rc<OrmStore>) {
         .heartbeat(&owner, grant.delivery())
         .await
         .unwrap();
-    let (renewed, control) = scope.heartbeat_job(&claimed, &renewed_grant).await.unwrap();
-    assert_eq!(control, crate::service::ControlIntent::None);
+    let mut renewed = claimed.clone();
+    let renewal = scope.heartbeat_job(&renewed, &renewed_grant).await.unwrap();
+    assert_eq!(renewal.control(), crate::service::ControlIntent::None);
+    let previous = claimed.remaining().unwrap();
+    renewed.renew(renewal);
     assert_eq!(
         renewed.assignment().token.as_str(),
         claimed.assignment().token.as_str()
+    );
+    assert!(
+        renewed.remaining().unwrap() > previous,
+        "the applied renewal left the task on its original creator expiration, \
+         so the refreshed bound below proves nothing"
     );
     compio::time::sleep(renewed.remaining().unwrap() + Duration::from_millis(10)).await;
     assert!(renewed_grant.remaining().is_some());
