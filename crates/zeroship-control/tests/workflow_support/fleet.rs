@@ -475,8 +475,7 @@ impl Fleet {
             "workflow schema generation: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let descriptor = fs::read(schema_work.join("generated/schema.runtime.json")).unwrap();
-        pack(&bundle, &descriptor);
+        pack(&bundle);
         let owner = UserId::mint();
         let output = Command::new(&binaries["dev-provision"])
             .args([
@@ -791,14 +790,18 @@ impl Drop for Fleet {
     }
 }
 
-fn pack(path: &Path, descriptor: &[u8]) {
+fn pack(path: &Path) {
     let source = include_bytes!("fixtures/keystone.js");
     let hash = zeroship_bundle::sha256_hex(source);
     let mut manifest: Value = serde_json::from_str(include_str!("fixtures/manifest.json")).unwrap();
     manifest["worker"]["modules"]["index.js"] = hash.clone().into();
     manifest["metadata"]["built_at"] = chrono::Utc::now().to_rfc3339().into();
-    let descriptor_hash = zeroship_bundle::sha256_hex(descriptor);
-    manifest["runtime_descriptor"] = json!({"hash": descriptor_hash});
+    // No `runtime_descriptor`. Its entries are CREATOR databases: `executable.rs`
+    // turns each into an `env.databases` member, and control's publication
+    // command collects their ids into the set Deploy verifies a live binding
+    // for. This app declares no database, so the field stays absent - the arm
+    // `absent_descriptor_ingests_to_an_empty_set` covers. The workflow journal
+    // schema reaches the service from `zeroship-workflow-schema`, not a bundle.
     let encoder = zstd::Encoder::new(File::create(path).unwrap(), 0).unwrap();
     let mut archive = tar::Builder::new(encoder);
     for (name, body) in [
@@ -807,7 +810,6 @@ fn pack(path: &Path, descriptor: &[u8]) {
             serde_json::to_vec(&manifest).unwrap(),
         ),
         (format!("blobs/{hash}"), source.to_vec()),
-        (format!("blobs/{descriptor_hash}"), descriptor.to_vec()),
     ] {
         let mut header = tar::Header::new_ustar();
         header.set_size(body.len() as u64);
