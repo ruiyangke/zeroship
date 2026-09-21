@@ -666,11 +666,25 @@ name, which is why its tables are unqualified here, and
 
 Four are not real anywhere. `workflow_blobs`,
 `workflow_deploy_notifications`, `workflow_scheduler_inflight` and
-`workflow_scheduler_timers` appear in no tracked file but the registry itself,
-which `git grep -w` confirms. They are what a consolidated corpus left behind,
-and they matter here because a registry is the one artifact a reader would
-trust to enumerate the tables - a split planned from it would assign four
-tables that do not exist.
+`workflow_scheduler_timers` appear in no tracked file but the registry and this
+document:
+
+    git grep -lw workflow_blobs \
+      -- ':!policies/platform-table-owners.json' \
+         ':!docs/proposals/2026-09-20-platform-service-database-split.md'
+
+The second exclusion is not bookkeeping. Naming the four here PUT THEM IN A
+TRACKED FILE, so the unexcluded check that was true when this paragraph was
+written now returns two hits and tells a reader the opposite. An absence claim
+is the one kind that recording can refute, because the recording is itself an
+occurrence - and it misleads exactly the reader who runs the check instead of
+trusting the prose.
+
+They are what a consolidated corpus left behind, and they matter here because a
+registry is the one artifact a reader would trust to enumerate the tables - a
+split planned from it would assign four tables that do not exist. A gate binding
+the registry to the corpus in both directions therefore FAILS today on these
+four, which makes removing them and adding the gate one change rather than two.
 
 The same caution applies to a comment that states an invariant.
 `crates/zeroship-control/src/databases.rs` carries a header asserting that
