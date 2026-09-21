@@ -83,12 +83,14 @@ pub fn run() -> Result<()> {
                 "zeroship-control",
                 "--test",
                 "workflow_e2e",
+                "--test",
+                "control_boot_test",
             ])
             .env(
                 "ZEROSHIP_WORKFLOW_TEST_ENVIRONMENT_BIN",
                 root().join("target/debug/examples/workflow-test-environment"),
             ),
-        "workflow API, persistence and deployed acceptance tests",
+        "workflow API, persistence, boot and deployed acceptance tests",
     )?;
     for package in ["packages/workflows", "packages/eslint-plugin-workflow"] {
         checked(
