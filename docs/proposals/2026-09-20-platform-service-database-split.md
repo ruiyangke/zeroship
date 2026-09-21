@@ -349,9 +349,27 @@ exists there at all, so the answer is false whatever the role was granted. The
 gate would pass without testing anything, and it would pass identically on the
 right database and on a wrong one.
 
+The arm knows what it is for. Its comment calls it the zone arm and says "A
+login that can so much as resolve `zeroship` is connected to the wrong
+database" - so schema reachability is being used as a PROXY for database
+identity, and the proxy is sound only while exactly one database carries that
+schema. The cut is what breaks it.
+
+Two sentences in that file go false together, which is why neither reviewer
+would catch it. `validate` refuses on four things: the login is not
+`zeroship_worker`; the role is SUPERUSER, CREATEROLE or CREATEDB; it is
+REPLICATION or BYPASSRLS; and it reaches the platform schema. The first three
+bound the ROLE and survive any move. Only the fourth was ever about the
+database. And the fence arm below it opens "Everything above bounds which
+database this login may be on", which is true today because the proxy holds,
+and false the day step 1 lands.
+
 A boot gate that cannot fail is the same defect as a check that passes over
 empty input. After the cut, the question worth refusing on is which DATABASE
-the worker opened, which is why the probe has to name it.
+the worker opened, which is why the probe has to name it - and why the identity
+check has to land in the SAME change as the move, not after it. A reviewer who
+checks the comment finds it accurate; a reviewer who checks the arm finds it
+present; the gate distinguishes nothing.
 
 **2. CDC relay.** Two production reads, not one. `worker_instances.public_key`
 is the narrow one and becomes a control API call. The other is
