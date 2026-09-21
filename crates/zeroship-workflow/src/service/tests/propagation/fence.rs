@@ -237,10 +237,10 @@ pub(super) async fn delivered_renewal(store: Rc<OrmStore>) {
     .await;
     // The child holds a delivered task when its parent's cascade begins.
     let grant = JobGrant::new(&frontier_job(&scope, &child).await);
-    let JobAcceptance::Execute(task) = scope.accept_job(&grant).await.unwrap() else {
+    let JobAcceptance::Execute(mut task) = scope.accept_job(&grant).await.unwrap() else {
         panic!("the idle child is delivered for execution")
     };
-    let (_, control) = scope.heartbeat_job(&task, &grant).await.unwrap();
+    let control = scope.heartbeat_job(&task, &grant).await.unwrap().control();
     assert_eq!(control, ControlIntent::None);
     cancel_idle(&scope, &parent).await;
     assert_eq!(
@@ -251,10 +251,11 @@ pub(super) async fn delivered_renewal(store: Rc<OrmStore>) {
         "none"
     );
     // Renewal reports the fence before any page records the cancellation.
-    let (task, control) = scope.heartbeat_job(&task, &grant).await.unwrap();
-    assert_eq!(control, ControlIntent::Cancel);
+    let renewal = scope.heartbeat_job(&task, &grant).await.unwrap();
+    assert_eq!(renewal.control(), ControlIntent::Cancel);
+    task.renew(renewal);
     deliver_propagations(&scope).await;
-    let (_, control) = scope.heartbeat_job(&task, &grant).await.unwrap();
+    let control = scope.heartbeat_job(&task, &grant).await.unwrap().control();
     assert_eq!(control, ControlIntent::Cancel);
     assert_eq!(
         run_row(&service, &app, &child)
