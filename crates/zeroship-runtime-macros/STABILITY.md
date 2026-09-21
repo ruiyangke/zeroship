@@ -152,7 +152,7 @@ When breaking-changing an emitted symbol, the workflow is:
 
 1. Open the change in this file (`STABILITY.md`).
 2. Migrate every internal caller in the same PR.
-3. Update the snapshot fixtures (`crates/runtime-macros/src/v8_class/snapshots/`).
+3. Update the snapshot fixtures (`crates/zeroship-runtime-macros/src/v8_class/snapshots/`).
 4. If the change adds a new emitted path, add the corresponding
    re-export in `crates/zeroship-runtime/src/macro_runtime.rs`.
 

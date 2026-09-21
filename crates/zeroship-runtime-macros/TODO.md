@@ -126,7 +126,7 @@ Consumer-side migrations: `crates/zeroship-runtime/TODO.md`.
   - Compile-fail diagnostics for the four malformed shapes
     (missing fn, wrong signature, non-string value, non-ident string)
     are locked in via `trybuild` in
-    `crates/runtime/tests/compile_fail_post_init/`.
+    `crates/zeroship-runtime/tests/compile_fail_post_init/`.
   - Design: `docs/proposals/macro-constructor-post-init.md`.
   - Lands: commit `edecd62` (codegen + 9 smoke tests in
     `tests/v8_post_init_smoke.rs` + 4 trybuild compile-fail
