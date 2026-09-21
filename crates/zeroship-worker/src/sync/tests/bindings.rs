@@ -635,3 +635,108 @@ async fn the_control_reads_address_the_routes_control_declares() {
     );
     refused.expect_err("a control plane that answers nothing supplies no project key");
 }
+
+/// A later install carries an advanced epoch into the store.
+///
+/// This binds `install_resolved_bindings` and the store beneath it, not the
+/// cadence that calls them: it installs twice directly, where a resident app
+/// resolves its binding once. The assertion is on the composed ROLE rather
+/// than the stored number, because the role is the string `SET LOCAL ROLE`
+/// sends, and an epoch that moved without moving the role would fence
+/// nothing.
+#[test]
+fn a_later_install_carries_a_rotation_into_the_store() {
+    let binding = BindingId::mint();
+    let database = DatabaseId::mint();
+    let store = zeroship_data_orm::resolved_bindings::SuppliedAppBindings::new();
+
+    install_resolved_bindings(
+        &store,
+        "app_x",
+        &control_body(&[control_entry(&binding, &database, 7)]),
+    )
+    .expect("the first resolution installs the edge");
+    let before = store
+        .binding_for("app_x", "d1", &database)
+        .expect("the installed edge composes a binding");
+
+    install_resolved_bindings(
+        &store,
+        "app_x",
+        &control_body(&[control_entry(&binding, &database, 8)]),
+    )
+    .expect("a later resolution carries the rotation in");
+
+    let after = store
+        .binding_for("app_x", "d1", &database)
+        .expect("the rotated edge composes a binding");
+    assert_eq!(after.schema_epoch(), Some(8));
+    assert_ne!(
+        before.session_role(),
+        after.session_role(),
+        "the epoch is part of the role name, so following the rotation has to \
+         change the role the session narrows to"
+    );
+    assert_eq!(
+        store.bindings_for("app_x", "d1").len(),
+        1,
+        "the rotation replaces the edge rather than joining the set"
+    );
+}
+
+/// A response behind the store does not take the environment down with it,
+/// and a response naming a different binding still does.
+///
+/// The pair is the point. Two resolutions can be in flight at once now, so the
+/// losing one carries an older reading of a value that only advances; failing
+/// on it would refuse an environment over a race that resolved correctly.
+/// Its control differs in ONE variable - the binding id - and must still
+/// refuse, because that one says control resolved a different edge rather than
+/// an older reading of this one.
+#[test]
+fn a_response_behind_the_store_is_tolerated_and_a_different_binding_is_not() {
+    let binding = BindingId::mint();
+    let database = DatabaseId::mint();
+    let store = zeroship_data_orm::resolved_bindings::SuppliedAppBindings::new();
+    install_resolved_bindings(
+        &store,
+        "app_x",
+        &control_body(&[control_entry(&binding, &database, 8)]),
+    )
+    .expect("the first resolution installs the edge");
+    let installed = store
+        .binding_for("app_x", "d1", &database)
+        .expect("the installed edge composes a binding");
+
+    install_resolved_bindings(
+        &store,
+        "app_x",
+        &control_body(&[control_entry(&binding, &database, 7)]),
+    )
+    .expect("a response behind the store resolves an environment");
+    assert_eq!(
+        store
+            .binding_for("app_x", "d1", &database)
+            .expect("the store still serves")
+            .session_role(),
+        installed.session_role(),
+        "the store keeps the later reading of a value that only advances"
+    );
+
+    // THE CONTROL: one variable changed, and the refusal comes back.
+    let moved = BindingId::mint();
+    assert_ne!(moved.as_str(), binding.as_str());
+    install_resolved_bindings(
+        &store,
+        "app_x",
+        &control_body(&[control_entry(&moved, &database, 9)]),
+    )
+    .expect_err("a different binding for one database refuses the resolution");
+    assert_eq!(
+        store
+            .binding_for("app_x", "d1", &database)
+            .expect("the refused resolution leaves the store serving")
+            .session_role(),
+        installed.session_role()
+    );
+}
