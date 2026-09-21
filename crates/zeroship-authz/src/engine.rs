@@ -166,7 +166,9 @@ mod tests {
 
     use cedar_policy::{PolicySet, Schema, ValidationMode, Validator};
 
-    use super::{load_platform_policies, PLATFORM_SCHEMA_SOURCE};
+    use std::path::{Path, PathBuf};
+
+    use super::{load_platform_policies, PLATFORM_POLICY_SOURCES, PLATFORM_SCHEMA_SOURCE};
 
     /// The shipped set validates STRICTLY, with no warnings. On its own this
     /// assertion is worthless - a validator wired to nothing passes too - so it
@@ -204,5 +206,94 @@ mod tests {
                 .any(|error| error.to_string().contains("apps:raed")),
             "the diagnostic must name the offending id"
         );
+    }
+
+    /// Every `.cedar` file under `deploy/policies/` must be loaded by the
+    /// engine. `build.rs` walks that directory and parses and schema-validates
+    /// everything it finds, but it LOADS nothing, and
+    /// `the_shipped_set_validates_strictly_with_no_warnings` validates only
+    /// what the array already holds. So a policy file that is committed,
+    /// reviewed and valid against the schema, but absent from
+    /// `PLATFORM_POLICY_SOURCES`, authorizes nothing while every other check
+    /// stays green. This is the only check that reads the directory and the
+    /// array together.
+    #[test]
+    fn every_policy_file_on_disk_is_loaded_by_the_engine() {
+        let root = policy_dir();
+        let mut on_disk = Vec::new();
+        collect_cedar_files(&root, &mut on_disk);
+        on_disk.sort();
+
+        assert!(
+            !on_disk.is_empty(),
+            "no .cedar files under {}: the walk found the wrong directory, so a \
+             clean comparison here would be a statement about nothing",
+            root.display()
+        );
+
+        let unloaded = on_disk
+            .iter()
+            .filter(|(_, body)| !PLATFORM_POLICY_SOURCES.contains(&body.as_str()))
+            .map(|(path, _)| path.clone())
+            .collect::<Vec<_>>();
+
+        assert!(
+            unloaded.is_empty(),
+            "on disk and schema-valid but absent from PLATFORM_POLICY_SOURCES, \
+             so they authorize nothing: {unloaded:?}"
+        );
+
+        assert_eq!(
+            on_disk.len(),
+            PLATFORM_POLICY_SOURCES.len(),
+            "the array holds a different number of entries than the walk found, \
+             so an entry is duplicated or the walk missed a file"
+        );
+    }
+
+    /// The control for the check above. Its comparison is membership of a
+    /// file's body in the loaded array, which is only worth something if a body
+    /// absent from that array is actually reported - otherwise an empty
+    /// `unloaded` would be indistinguishable from a broken comparison.
+    #[test]
+    fn the_inclusion_check_reports_a_file_the_array_does_not_hold() {
+        let loaded = ["permit (principal, action, resource);"];
+        let on_disk = [
+            ("kept.cedar", "permit (principal, action, resource);"),
+            ("dropped.cedar", "forbid (principal, action, resource);"),
+        ];
+
+        let unloaded = on_disk
+            .iter()
+            .filter(|(_, body)| !loaded.contains(body))
+            .map(|(path, _)| *path)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            unloaded,
+            vec!["dropped.cedar"],
+            "the membership test must name exactly the file whose body is absent"
+        );
+    }
+
+    fn policy_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/policies")
+    }
+
+    /// Mirrors `build.rs`'s walk deliberately: same recursion, same extension
+    /// test. The two must see the same files, or this check compares the array
+    /// against a directory the build never gated.
+    fn collect_cedar_files(dir: &Path, found: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(dir).expect("read the policies directory") {
+            let entry = entry.expect("read a policies directory entry");
+            let path = entry.path();
+
+            if path.is_dir() {
+                collect_cedar_files(&path, found);
+            } else if path.extension().is_some_and(|ext| ext == "cedar") {
+                let body = std::fs::read_to_string(&path).expect("read a .cedar file");
+                found.push((path.display().to_string(), body));
+            }
+        }
     }
 }
