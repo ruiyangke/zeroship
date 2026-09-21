@@ -464,6 +464,34 @@ async fn recover_lost_release(
     );
 }
 
+async fn reconciliation_phase(service: &WorkflowService, app: &AppId) -> String {
+    scans(service, app).await[0]
+        .text("reconciliation_phase")
+        .unwrap()
+}
+
+async fn pending_publication_ids(scope: &AppWorkflows) -> Vec<JobId> {
+    scope
+        .pending_jobs(None, 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|job| job.id)
+        .collect()
+}
+
+/// Start one workflow and answer the publication intent it added.
+async fn arrival(scope: &AppWorkflows, before: &[JobId]) -> JobId {
+    let mut added = start(scope, 1)
+        .await
+        .into_iter()
+        .map(|job| job.id)
+        .filter(|id| !before.contains(id))
+        .collect::<Vec<_>>();
+    assert_eq!(added.len(), 1, "one publication intent must arrive");
+    added.remove(0)
+}
+
 async fn fairness(store: Rc<OrmStore>) {
     let (service, app, _, platform) = registered_service(store).await;
     let client = HoldClient::new(&platform, &app);
@@ -478,10 +506,43 @@ async fn fairness(store: Rc<OrmStore>) {
     let scope = service.fixture_app(app.clone());
     let jobs = start(&scope, 2).await;
     let publisher = Publisher::new(&app).await;
+    let opened = pending_publication_ids(&scope).await;
+    assert_eq!(opened.len(), 2, "the cycle must open over pending work");
     page(&scope, &jobs[0], &publisher, 1, JobOutcome::Waiting {}).await;
-    start(&scope, 1).await;
-    page(&scope, &jobs[0], &publisher, 1, JobOutcome::Waiting {}).await;
-    assert_eq!(scope.pending_jobs(None, 10).await.unwrap().len(), 1);
+    // A publication id is derived from the work it names, so one arriving
+    // mid-cycle sorts where its own content puts it: inside the window this
+    // cycle bounded at its first page, or past it. Both are correct and the
+    // cycle drains either way, so what is asserted here is that the window is
+    // finite and the phase leaves it. The number of pages that takes is not a
+    // property of the journal and reading creation order off id order is the
+    // one inference `JobId::derived` refuses.
+    let churned = arrival(&scope, &opened).await;
+    let mut pages = 1;
+    while reconciliation_phase(&service, &app).await == "publications" {
+        page(&scope, &jobs[0], &publisher, 1, JobOutcome::Waiting {}).await;
+        pages += 1;
+        assert!(
+            pages <= opened.len() + 1,
+            "the publications phase must drain the window it bounded"
+        );
+    }
+    let published = publisher.calls.borrow().clone();
+    for opened in &opened {
+        assert!(
+            published.contains(opened),
+            "a publication pending when the cycle opened must be published before the phase leaves it"
+        );
+    }
+    assert_eq!(
+        published.len(),
+        pages,
+        "a page of one publishes exactly one intent"
+    );
+    // This one arrives after the phase left, so no window can hold it and the
+    // hold page below is measured against a journal that certainly has
+    // publication work waiting on it.
+    let waiting = arrival(&scope, &pending_publication_ids(&scope).await).await;
+    assert_ne!(waiting, churned, "the two arrivals must be distinct intents");
     assert_eq!(
         scope
             .reconcile_job(&Grant::new(&jobs[0]), &publisher, options(2))
@@ -516,14 +577,18 @@ async fn fairness(store: Rc<OrmStore>) {
             .map(|deployment| deployment.id.clone())
             .collect::<Vec<_>>()
     );
-    assert_eq!(
-        publisher.calls.borrow().as_slice(),
-        &[jobs[0].id.clone(), jobs[1].id.clone()]
-    );
-    assert_eq!(
-        scope.pending_jobs(None, 10).await.unwrap().len(),
-        1,
+    assert!(
+        scope
+            .pending_jobs(None, 10)
+            .await
+            .unwrap()
+            .iter()
+            .any(|job| job.id == waiting),
         "new publication must wait while holds receive their turn"
+    );
+    assert!(
+        !publisher.calls.borrow().contains(&waiting),
+        "a publication arriving after the phase left is not published by the hold page"
     );
     client.hang.borrow_mut().take();
     page(&scope, &jobs[0], &publisher, 2, JobOutcome::Waiting {}).await;
@@ -534,6 +599,10 @@ async fn fairness(store: Rc<OrmStore>) {
         .unwrap()
         .is_empty());
     assert!(scope.pending_jobs(None, 10).await.unwrap().is_empty());
+    assert!(
+        publisher.calls.borrow().contains(&churned),
+        "a publication arriving mid-cycle is published rather than lost"
+    );
 }
 
 async fn authority_loss(store: Rc<OrmStore>) {
