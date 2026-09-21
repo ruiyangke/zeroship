@@ -11,6 +11,23 @@ use zeroship_runtime::state::OpError;
 use zeroship_workflow::WorkflowServiceError;
 
 pub(crate) fn to_op_error(error: WorkflowServiceError) -> OpError {
+    // The two opaque arms below replace their message deliberately: a
+    // creator cannot act on a host condition, and
+    // `opaque_refusals_replace_their_message` asserts that contract. It is
+    // not a reason for the OPERATOR to lose the wording too - dozens of
+    // sites construct `Unavailable` with distinct text and every one of
+    // them arrives here as a single sentence, so this is the last place
+    // the distinction exists.
+    if matches!(
+        error,
+        WorkflowServiceError::Internal(_) | WorkflowServiceError::Unavailable(_)
+    ) {
+        tracing::warn!(
+            code = error.code(),
+            detail = %error,
+            "workflow refusal reported opaquely to creator code"
+        );
+    }
     let message = match &error {
         WorkflowServiceError::Internal(_) => "workflow operation failed".to_owned(),
         WorkflowServiceError::Unavailable(_) => "workflow service is unavailable".to_owned(),
@@ -119,6 +136,60 @@ mod tests {
         assert_eq!(
             to_op_error(E::Unavailable("connection refused".into())).message,
             "workflow service is unavailable"
+        );
+    }
+
+    /// The opaque arms discard their wording for the CREATOR by contract. The
+    /// operator must still get it, so the discard is paired with a `warn!`
+    /// carrying the original. Without that pairing a host condition reaches the
+    /// log as one sentence no matter which of the dozens of construction sites
+    /// produced it.
+    #[test]
+    fn an_opaque_refusal_records_its_discarded_wording() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::fmt::MakeWriter;
+
+        #[derive(Clone)]
+        struct Buffer(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Buffer {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().expect("capture buffer").extend_from_slice(data);
+                Ok(data.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for Buffer {
+            type Writer = Self;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buffer = Buffer(Arc::new(Mutex::new(Vec::new())));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buffer.clone())
+            .with_ansi(false)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            to_op_error(E::Unavailable("workflow host policy not bound".into()));
+            // The control: a variant whose message CROSSES intact needs no
+            // warn, so its wording must not appear in the log either.
+            to_op_error(E::Conflict("restart target already settled".into()));
+        });
+
+        let logged = String::from_utf8(buffer.0.lock().expect("capture buffer").clone())
+            .expect("captured log is utf8");
+
+        assert!(
+            logged.contains("workflow host policy not bound"),
+            "the discarded wording must reach the operator: {logged}"
+        );
+        assert!(
+            !logged.contains("restart target already settled"),
+            "a refusal that keeps its message must not also be logged: {logged}"
         );
     }
 }
