@@ -697,22 +697,20 @@ mod tests {
     /// pass if the code were stamped on an empty string.
     #[test]
     fn schema_epoch_stale_survives_the_5xx_rail_in_both_spellings() {
+        // The ORM owns the wording (`zeroship_data_orm::error::STALE_EPOCH_MESSAGE`)
+        // and this crate does not depend on it. What is under test is that the
+        // rail carries the message it was handed, so this stands in for that
+        // message rather than copying it - a copy here would be a second
+        // spelling that drifts the moment the ORM reworded its own.
+        let message = "a stand-in for the ORM's stale-epoch wording, carried verbatim";
         for code in ["schema_epoch_stale", "SCHEMA_EPOCH_STALE"] {
-            let body = build_error_body(
-                500,
-                1,
-                "this app's database binding is not live at the schema epoch this \
-                 build was resolved at. Retry the request; a redeploy resolves the \
-                 binding afresh.",
-                "Error",
-                extras_with_code(code),
-            );
+            let body = build_error_body(500, 1, message, "Error", extras_with_code(code));
             assert!(
                 body.contains(&format!(r#""code":"{code}""#)),
                 "code {code:?} must survive the 5xx rail, got: {body}"
             );
             assert!(
-                body.contains("a redeploy resolves the binding afresh"),
+                body.contains(message),
                 "the creator must learn the remedy from the RESPONSE, not a worker \
                  log they cannot see; got: {body}"
             );

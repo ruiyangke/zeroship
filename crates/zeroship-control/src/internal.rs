@@ -15,6 +15,7 @@ use zeroship_core::service_identity::{
 use zeroship_core::service_peers::{
     service_issuer, CONTROL_SERVICE_NAME, WORKER_SERVICE_NAME,
 };
+use zeroship_core::worker_join::WORKER_JOIN_PATH;
 
 use crate::AppState;
 
@@ -858,5 +859,274 @@ pub async fn force_spend_reconcile(
             web::HttpResponse::InternalServerError()
                 .json(&serde_json::json!({"error": e.to_string()}))
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Routes
+// ---------------------------------------------------------------------------
+
+/// Register the internal API on an application.
+///
+/// Every declared route reads its path from
+/// [`zeroship_core::service_identity::endpoints`] - the same declaration the
+/// handler behind it hands to its authorization check - so the route control
+/// SERVES and the route control AUTHORIZES are one statement rather than two
+/// copies that agree until someone edits one. A path written out here would
+/// 404 exactly the callers the allowlist admits, and no existing test would
+/// notice.
+///
+/// `tests::every_declared_internal_route_is_served_under_its_declared_method`
+/// holds each declaration to a route that answers.
+pub fn configure(cfg: &mut web::ServiceConfig) {
+    cfg.service(
+        web::resource(endpoints::CONTROL_VERSIONS.path_template())
+            .route(web::get().to(get_versions)),
+    )
+    .service(
+        web::resource(endpoints::CONTROL_APP.path_template())
+            .route(web::get().to(get_app_version)),
+    )
+    .service(
+        web::resource(endpoints::CONTROL_APP_ENV.path_template())
+            .route(web::get().to(get_app_env)),
+    )
+    .service(
+        web::resource(endpoints::CONTROL_APP_DATA_KEY.path_template())
+            .route(web::get().to(get_app_data_key)),
+    )
+    .service(
+        web::resource(endpoints::CONTROL_APP_BINDINGS.path_template())
+            .route(web::get().to(get_app_bindings)),
+    )
+    .service(
+        web::resource(endpoints::CONTROL_ROUTES.path_template())
+            .route(web::get().to(get_routes)),
+    )
+    // The join route carries no declaration and takes none: a joining
+    // process holds no service identity yet, so there is nothing for the
+    // endpoint allowlist to grant. Its path is shared with the worker that
+    // addresses it instead, which is the same one-statement arrangement by a
+    // different means.
+    .service(web::resource(WORKER_JOIN_PATH).route(web::post().to(join_worker_instance)))
+    .service(
+        web::resource(endpoints::CONTROL_WORKER_RETIRE.path_template())
+            .route(web::post().to(retire_worker_instance)),
+    )
+    .service(
+        web::resource(endpoints::CONTROL_WORKER_RENEW.path_template())
+            .route(web::post().to(renew_worker_instance)),
+    )
+    .service(
+        web::resource(endpoints::CONTROL_BILLING_RECONCILE.path_template())
+            .route(web::post().to(force_reconcile)),
+    )
+    .service(
+        web::resource(endpoints::CONTROL_SPEND_RECONCILE.path_template())
+            .route(web::post().to(force_spend_reconcile)),
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ntex::http::{Method, StatusCode};
+    use ntex::web::test;
+
+    /// Every declared route [`configure`] registers.
+    ///
+    /// A hand-written list of the ENDPOINTS, never of their paths: `configure`
+    /// reads each path from `zeroship_core::service_identity::endpoints`, and a
+    /// path written out here would be the second copy this arrangement exists
+    /// to remove.
+    const DECLARED: [ServiceEndpoint; 10] = [
+        endpoints::CONTROL_VERSIONS,
+        endpoints::CONTROL_APP,
+        endpoints::CONTROL_APP_ENV,
+        endpoints::CONTROL_APP_DATA_KEY,
+        endpoints::CONTROL_APP_BINDINGS,
+        endpoints::CONTROL_ROUTES,
+        endpoints::CONTROL_WORKER_RETIRE,
+        endpoints::CONTROL_WORKER_RENEW,
+        endpoints::CONTROL_BILLING_RECONCILE,
+        endpoints::CONTROL_SPEND_RECONCILE,
+    ];
+
+    /// What every path parameter is filled with.
+    ///
+    /// Any one segment does: these arms rule on ROUTING alone, and every
+    /// handler behind these routes refuses the caller before it reads a
+    /// segment.
+    const SEGMENT: &str = "routing-probe";
+
+    /// The service name this module answers for.
+    const SERVED_DESTINATION: &str = "control";
+
+    /// One declared template with every path parameter filled.
+    ///
+    /// Derived from the SHAPE of the template - its `{...}` spans - rather than
+    /// from any parameter's name, so this and `web::resource` reach the served
+    /// path by different routes and a renamed parameter separates them.
+    fn addressed(endpoint: ServiceEndpoint) -> String {
+        let template = endpoint.path_template();
+        let mut addressed = String::new();
+        let mut rest = template;
+        while let Some(open) = rest.find('{') {
+            let close = open
+                + rest[open..]
+                    .find('}')
+                    .unwrap_or_else(|| panic!("{template} closes every path parameter"));
+            addressed.push_str(&rest[..open]);
+            addressed.push_str(SEGMENT);
+            rest = &rest[close + 1..];
+        }
+        addressed.push_str(rest);
+        addressed
+    }
+
+    /// The method one endpoint declares, as a method a request can carry.
+    fn declared_method(endpoint: ServiceEndpoint) -> Method {
+        Method::from_bytes(endpoint.method().as_bytes())
+            .unwrap_or_else(|_| panic!("{} declares an HTTP method", endpoint.method()))
+    }
+
+    /// A method the endpoint does NOT declare.
+    fn undeclared_method(endpoint: ServiceEndpoint) -> Method {
+        if declared_method(endpoint) == Method::GET {
+            Method::POST
+        } else {
+            Method::GET
+        }
+    }
+
+    /// Mount the internal API with NO state.
+    ///
+    /// What is under test is the router. A request that reaches a handler fails
+    /// its `State` extractor, which is neither of the two statuses these arms
+    /// read, so a route that matched stays distinguishable from one that did
+    /// not without any handler running against a database.
+    macro_rules! served {
+        () => {
+            test::init_service(web::App::new().configure(configure)).await
+        };
+    }
+
+    #[compio::test]
+    async fn every_declared_internal_route_is_served_under_its_declared_method() {
+        assert!(
+            !DECLARED.is_empty(),
+            "an empty table would pass every assertion below"
+        );
+        let app = served!();
+
+        for endpoint in DECLARED {
+            assert_eq!(
+                endpoint.destination(),
+                SERVED_DESTINATION,
+                "{} is not a route this process serves",
+                endpoint.path_template()
+            );
+            let path = addressed(endpoint);
+            assert!(
+                !path.contains('{') && !path.contains('}'),
+                "the declared parameter must be filled rather than addressed as \
+                 a literal: {path}"
+            );
+
+            let served = test::call_service(
+                &app,
+                test::TestRequest::default()
+                    .method(declared_method(endpoint))
+                    .uri(&path)
+                    .to_request(),
+            )
+            .await;
+            assert_ne!(
+                served.status(),
+                StatusCode::NOT_FOUND,
+                "{path} is declared and must be served"
+            );
+            assert_ne!(
+                served.status(),
+                StatusCode::METHOD_NOT_ALLOWED,
+                "{path} must answer the method its declaration names"
+            );
+
+            // The control on the method: the SAME path under a method the
+            // declaration does not name is refused as a method, so the arm
+            // above is the declared method matching rather than the resource
+            // answering anything sent to it.
+            let wrong_method = test::call_service(
+                &app,
+                test::TestRequest::default()
+                    .method(undeclared_method(endpoint))
+                    .uri(&path)
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(
+                wrong_method.status(),
+                StatusCode::METHOD_NOT_ALLOWED,
+                "{path} must answer only the method its declaration names"
+            );
+
+            // The control on the path: one segment past the declared path is
+            // not routed, so the arm above is this path matching rather than a
+            // prefix that swallows everything under it.
+            let beyond = format!("{path}/{SEGMENT}");
+            let unrouted = test::call_service(
+                &app,
+                test::TestRequest::default()
+                    .method(declared_method(endpoint))
+                    .uri(&beyond)
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(
+                unrouted.status(),
+                StatusCode::NOT_FOUND,
+                "{beyond} is not a declared route and must not be served"
+            );
+        }
+    }
+
+    /// The join is served at the path the JOINING WORKER builds its URL from.
+    ///
+    /// `zeroship_core::worker_join::WORKER_JOIN_PATH` is the one spelling, and
+    /// both sides read it: Control registers it above and
+    /// `zeroship_worker::join::ask_control` addresses it. It is a bare path
+    /// rather than a declaration because a joining process holds no service
+    /// identity for the endpoint allowlist to grant against.
+    #[compio::test]
+    async fn the_worker_join_route_is_served_at_the_path_a_joining_worker_addresses() {
+        let app = served!();
+
+        let served_join = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri(WORKER_JOIN_PATH)
+                .to_request(),
+        )
+        .await;
+        assert_ne!(
+            served_join.status(),
+            StatusCode::NOT_FOUND,
+            "a worker that cannot reach the join route never becomes an instance"
+        );
+        assert_ne!(
+            served_join.status(),
+            StatusCode::METHOD_NOT_ALLOWED,
+            "the join is a POST"
+        );
+
+        // The control: a `GET` at the same path is refused as a METHOD, which
+        // is what says the arm above measured this route rather than a
+        // catch-all that answers anything.
+        let wrong_method = test::call_service(
+            &app,
+            test::TestRequest::get().uri(WORKER_JOIN_PATH).to_request(),
+        )
+        .await;
+        assert_eq!(wrong_method.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
 }

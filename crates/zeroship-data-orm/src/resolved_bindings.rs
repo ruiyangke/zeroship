@@ -23,6 +23,16 @@ use zeroship_core::{BindingId, DatabaseId};
 use crate::binding::{DbBinding, DatabaseEdge};
 use crate::error::DbError;
 
+/// [`SuppliedAppBindings::supply`] was handed the edge it already holds at an
+/// EARLIER schema epoch.
+///
+/// A named code and not a spelling each caller repeats, because the host that
+/// re-resolves bindings has to tell this refusal apart from the others: this
+/// one leaves the store holding a LATER reading of the same edge and is the
+/// ordinary outcome of two resolutions racing, where every other refusal says
+/// the store was handed something it cannot reconcile.
+pub const STALE_APP_BINDING: &str = "stale_app_binding";
+
 /// One app's resolved edge, before a deploy token is attached to it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedBinding {
@@ -56,18 +66,38 @@ impl SuppliedAppBindings {
 
     /// Install one of an app's resolved bindings.
     ///
-    /// Re-supplying the SAME edge is a no-op, so a second isolate for one app
-    /// does not have to know whether the first already asked. Supplying a
-    /// DIFFERENT edge FOR THE SAME DATABASE is refused: an app whose binding
-    /// moved is a new resolution, and silently replacing it under running
-    /// isolates would let one dispatch narrow to a role another dispatch's
-    /// descriptor was never built against. An edge naming ANOTHER database
-    /// joins the set, because that is the whole of plurality.
+    /// An edge naming ANOTHER database joins the set, because that is the whole
+    /// of plurality. For a database the app already holds, the three answers
+    /// split on what actually differs:
+    ///
+    /// - A DIFFERENT BINDING is refused. Two edges for one database disagree
+    ///   about which edge the app has, and installing either under running
+    ///   isolates would let one dispatch narrow to a role another dispatch's
+    ///   descriptor was never built against.
+    /// - The SAME BINDING at a HIGHER EPOCH replaces the stored edge. This is
+    ///   the same edge advanced by a rotation, not a second one: an apply that
+    ///   commits a schema delta mints the binding's role at the next epoch and
+    ///   retires the one before the head, so the epoch a host resolved earlier
+    ///   names a role the cluster drops on the apply after next. Keeping the
+    ///   lower epoch composes that dropped role.
+    /// - The SAME BINDING at a LOWER EPOCH is refused, and the store stays at
+    ///   the higher one. The epoch is monotone on the cluster, so a response
+    ///   that arrives late or out of order carries an older reading of it, and
+    ///   following one backwards would walk a live binding onto a role the next
+    ///   apply already retired.
+    ///
+    /// Re-supplying the same binding at the same epoch is a no-op, so a second
+    /// isolate for one app does not have to know whether the first already
+    /// asked.
     ///
     /// # Errors
     ///
-    /// `invalid_app_binding` on an empty app id, or on an edge that conflicts
-    /// with the one already installed for that database.
+    /// `invalid_app_binding` on an empty app id, or on an edge naming a
+    /// different binding for a database this app already holds -- both say some
+    /// host resolved something this store cannot reconcile with what it has.
+    /// `stale_app_binding` on the same binding at a lower epoch, which is the
+    /// ordinary outcome of a race between two resolutions rather than a
+    /// disagreement about the edge, and leaves the store serving.
     pub fn supply(&self, app_id: &str, resolved: ResolvedBinding) -> Result<(), DbError> {
         if app_id.is_empty() {
             return Err(DbError::validation(
@@ -77,19 +107,30 @@ impl SuppliedAppBindings {
         }
         let mut apps = self.apps.write().map_err(|_| store_unavailable())?;
         let edges = apps.entry(app_id.to_owned()).or_default();
-        match edges
+        let Some(position) = edges
             .iter()
-            .find(|current| current.database == resolved.database)
-        {
-            Some(current) if current == &resolved => Ok(()),
-            Some(_) => Err(DbError::validation(
+            .position(|current| current.database == resolved.database)
+        else {
+            edges.push(resolved);
+            return Ok(());
+        };
+        let current = &mut edges[position];
+        if current.binding != resolved.binding {
+            return Err(DbError::validation(
                 "invalid_app_binding",
                 "app binding conflicts with the binding already installed",
-            )),
-            None => {
-                edges.push(resolved);
+            ));
+        }
+        match resolved.epoch.cmp(&current.epoch) {
+            std::cmp::Ordering::Greater => {
+                current.epoch = resolved.epoch;
                 Ok(())
             }
+            std::cmp::Ordering::Equal => Ok(()),
+            std::cmp::Ordering::Less => Err(DbError::validation(
+                STALE_APP_BINDING,
+                "app binding names a schema epoch behind the one already installed",
+            )),
         }
     }
 
@@ -327,7 +368,112 @@ mod tests {
         assert_eq!(store.bindings_for("app_x", "d1").len(), 1);
     }
 
-    /// Retiring an app removes every binding, so a redeploy resolves afresh.
+    /// A rotation advances the epoch on an edge the app already holds, and the
+    /// store follows it.
+    ///
+    /// The epoch is the last component of the binding role name, and an apply
+    /// that commits a schema delta mints the role at the next epoch and retires
+    /// the one before the head. A store that kept the epoch it first resolved
+    /// therefore composes a role the apply after next drops, and every session
+    /// this app opens is refused at `SET LOCAL ROLE` from then on. So the
+    /// assertion is on the composed ROLE and not only on the stored number:
+    /// the role is what the session sends.
+    ///
+    /// Its rejection control is the same database at a HIGHER epoch naming a
+    /// DIFFERENT binding, which is still refused. Without it this test would
+    /// pass over a store that had simply stopped comparing edges at all.
+    #[test]
+    fn a_rotation_advances_the_stored_edge_and_a_moved_binding_is_still_refused() {
+        let store = SuppliedAppBindings::new();
+        let edge = resolved();
+        store.supply("app_x", edge.clone()).expect("supply");
+        let before = store
+            .binding_for("app_x", "d1", &edge.database)
+            .expect("the resolved edge composes a binding");
+
+        let rotated = ResolvedBinding {
+            database: edge.database.clone(),
+            binding: edge.binding.clone(),
+            epoch: edge.epoch + 1,
+        };
+        store
+            .supply("app_x", rotated.clone())
+            .expect("the same edge at the next epoch is the rotation, not a conflict");
+
+        let after = store
+            .binding_for("app_x", "d1", &edge.database)
+            .expect("the rotated edge composes a binding");
+        assert_eq!(after.schema_epoch(), Some(rotated.epoch));
+        assert_ne!(
+            before.session_role(),
+            after.session_role(),
+            "the epoch is part of the role name, so following the rotation has to \
+             change the role the session narrows to"
+        );
+        assert_eq!(
+            store.bindings_for("app_x", "d1").len(),
+            1,
+            "the rotation replaces the edge rather than joining the set"
+        );
+
+        // THE CONTROL: a higher epoch does not license a different binding.
+        let moved = ResolvedBinding {
+            database: edge.database.clone(),
+            binding: BindingId::mint(),
+            epoch: rotated.epoch + 1,
+        };
+        let error = store
+            .supply("app_x", moved)
+            .expect_err("a different binding for one database stays refused");
+        assert_eq!(error.code(), "invalid_app_binding");
+        assert_eq!(
+            store
+                .binding_for("app_x", "d1", &edge.database)
+                .expect("the refused supply leaves the store serving")
+                .session_role(),
+            after.session_role()
+        );
+    }
+
+    /// The stored epoch is monotone: a response carrying an older reading of it
+    /// is refused and the store stays at the higher one.
+    ///
+    /// The cluster only ever advances the head, so a lower epoch is a late or
+    /// reordered resolution rather than news. Following one backwards would
+    /// walk a live binding onto the role the next apply retires - the stranding
+    /// the rotation arm above exists to avoid, reintroduced from the other
+    /// side.
+    ///
+    /// It is a separate code from the different-binding refusal because the two
+    /// say different things: that one is two hosts disagreeing about which edge
+    /// the app has, this one is one edge arriving twice out of order.
+    #[test]
+    fn a_lower_epoch_is_refused_and_leaves_the_higher_one_installed() {
+        let store = SuppliedAppBindings::new();
+        let edge = resolved();
+        store.supply("app_x", edge.clone()).expect("supply");
+        let installed = store
+            .binding_for("app_x", "d1", &edge.database)
+            .expect("the resolved edge composes a binding");
+
+        let behind = ResolvedBinding {
+            database: edge.database.clone(),
+            binding: edge.binding.clone(),
+            epoch: edge.epoch - 1,
+        };
+        let error = store
+            .supply("app_x", behind)
+            .expect_err("an epoch behind the installed one must be refused");
+        assert_eq!(error.code(), STALE_APP_BINDING);
+
+        let still = store
+            .binding_for("app_x", "d1", &edge.database)
+            .expect("the refused supply leaves the store serving");
+        assert_eq!(still.schema_epoch(), Some(edge.epoch));
+        assert_eq!(still.session_role(), installed.session_role());
+    }
+
+    /// Retiring an app removes every binding.
     #[test]
     fn retiring_an_app_removes_its_bindings() {
         let store = SuppliedAppBindings::new();

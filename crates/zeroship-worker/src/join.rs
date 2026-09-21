@@ -76,11 +76,12 @@ use base64::Engine as _;
 use zeroship_core::service_assertion::{
     ServiceIssuer, ServiceTrustBundle, TransportAssertionVerifier,
 };
+use zeroship_core::service_identity::{endpoints, ServiceEndpoint};
 use zeroship_core::service_peers::{
     service_issuer, InstanceSigningKey, ServiceAuth, CONTROL_SERVICE_NAME, WORKER_SERVICE_NAME,
 };
 use zeroship_core::user_envelope::UserEnvelopeVerifier;
-use zeroship_core::worker_join::{instance_renewal_interval, join_proof_message};
+use zeroship_core::worker_join::{instance_renewal_interval, join_proof_message, WORKER_JOIN_PATH};
 
 /// How long one join attempt may take.
 const JOIN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -307,7 +308,14 @@ pub fn read_join_token(path: &std::path::Path) -> Result<String, String> {
 ///
 /// Returns a message naming what failed. The caller logs it and exits anyway.
 pub async fn retire(auth: &ServiceAuth, control_url: &str) -> Result<(), String> {
-    match post_signed(auth, control_url, "/internal/workers/retire", RETIREMENT_TIMEOUT).await {
+    match post_signed(
+        auth,
+        control_url,
+        endpoints::CONTROL_WORKER_RETIRE,
+        RETIREMENT_TIMEOUT,
+    )
+    .await
+    {
         Ok((204, _)) => Ok(()),
         Ok((status, body)) => Err(format!("control refused the retirement: HTTP {status} {body}")),
         Err(message) => Err(message),
@@ -322,7 +330,7 @@ pub async fn retire(auth: &ServiceAuth, control_url: &str) -> Result<(), String>
 /// renewal - the identity lapsed or was retired, and neither can be revived -
 /// and [`RenewalUnreachable`] when nothing answered.
 async fn renew_once(auth: &ServiceAuth, control_url: &str) -> Result<(), RenewalFailure> {
-    match post_signed(auth, control_url, "/internal/workers/renew", RENEWAL_TIMEOUT).await {
+    match post_signed(auth, control_url, endpoints::CONTROL_WORKER_RENEW, RENEWAL_TIMEOUT).await {
         Ok((200, _)) => Ok(()),
         Ok((status, body)) => Err(RenewalFailure::Refused(format!("HTTP {status} {body}"))),
         Err(message) => Err(RenewalFailure::Unreachable(message)),
@@ -376,15 +384,22 @@ pub async fn renew_forever(auth: Arc<ServiceAuth>, control_url: String) {
 /// status and body.
 ///
 /// ONE implementation for retirement and renewal, because they differ in the
-/// path and in nothing else: both carry no body, no selector and one assertion
-/// minted under the instance identity, and Control acts on the instance whose
-/// key verified the call.
+/// endpoint and in nothing else: both carry no body, no selector and one
+/// assertion minted under the instance identity, and Control acts on the
+/// instance whose key verified the call.
+///
+/// The path is read from the declaration Control authorizes the call against,
+/// so the route this worker addresses and the route Control serves are one
+/// statement. `tests::retirement_presents_the_instance_assertion_to_the_retirement_route`
+/// and `tests::a_renewal_presents_the_instance_assertion_and_no_join_token`
+/// hold the request line to that declaration, method included.
 async fn post_signed(
     auth: &ServiceAuth,
     control_url: &str,
-    path: &str,
+    endpoint: ServiceEndpoint,
     timeout: Duration,
 ) -> Result<(u16, String), String> {
+    let path = endpoint.path_template();
     let control = service_issuer(CONTROL_SERVICE_NAME)
         .map_err(|error| format!("control service issuer is malformed: {error}"))?;
     let authorization = auth
@@ -408,8 +423,14 @@ async fn post_signed(
 }
 
 /// POST the join and return the instance id control minted.
+///
+/// The path is [`WORKER_JOIN_PATH`], which Control registers this route at. It
+/// is a bare path rather than a
+/// [`zeroship_core::service_identity::ServiceEndpoint`] because there is
+/// nothing to authorize: this process holds no service identity until the call
+/// below succeeds, so no row of the endpoint allowlist can name it.
 async fn ask_control(token: &str, control_url: &str, request: String) -> Result<String, String> {
-    let url = format!("{control_url}/internal/workers/join");
+    let url = format!("{control_url}{WORKER_JOIN_PATH}");
     let authorization = format!("Bearer {token}");
     let deadline = std::time::Instant::now() + UNREACHABLE_BUDGET;
     loop {
@@ -500,6 +521,20 @@ mod tests {
     use zeroship_core::worker_join::{
         mint_join_token, verify_join_proof, JoinTokenGrant, DEFAULT_EXECUTION_ZONE,
     };
+
+    /// The HTTP request line one declared endpoint says a caller must send.
+    ///
+    /// Read from the declaration rather than written out: a path or a method
+    /// spelled here would be one more copy of the thing these assertions exist
+    /// to bind. Both halves come from the declaration, so a method that moved
+    /// without [`post_signed`] following it separates them too.
+    fn declared_request_line(endpoint: ServiceEndpoint) -> String {
+        format!(
+            "{} {} HTTP/1.1",
+            endpoint.method(),
+            endpoint.path_template()
+        )
+    }
 
     /// A bundle publishing the GATEWAY's key and nothing else - which is all a
     /// worker's peer document needs, and in particular no `svc/worker` key.
@@ -964,7 +999,16 @@ mod tests {
             join(material, &url, 8085)
         );
         assert!(outcome.is_ok(), "{outcome:?}");
-        assert_eq!(received.head[0], "POST /internal/workers/join HTTP/1.1");
+        // The PATH comes from the constant Control registers the route at, so
+        // a route that moved without this caller following it separates the
+        // two here. The method is written out because the join has no
+        // declaration to read one from - it is the one half of this request
+        // line that the two sides still spell separately.
+        assert_eq!(
+            received.head[0],
+            format!("POST {WORKER_JOIN_PATH} HTTP/1.1"),
+            "the join addresses the route Control registers it at"
+        );
         assert_eq!(
             received.header("authorization"),
             Some(format!("Bearer {token}")),
@@ -1056,7 +1100,12 @@ mod tests {
             retire(&auth, &url)
         );
         assert_eq!(outcome, Ok(()), "a 204 is a recorded retirement");
-        assert_eq!(received.head[0], "POST /internal/workers/retire HTTP/1.1");
+        assert_eq!(
+            received.head[0],
+            declared_request_line(endpoints::CONTROL_WORKER_RETIRE),
+            "the retirement addresses the route Control declares, by the method \
+             it declares"
+        );
         let claims = claims(
             &received
                 .header("authorization")
@@ -1111,7 +1160,12 @@ mod tests {
             renew_once(&auth, &url)
         );
         assert!(outcome.is_ok(), "{outcome:?}");
-        assert_eq!(received.head[0], "POST /internal/workers/renew HTTP/1.1");
+        assert_eq!(
+            received.head[0],
+            declared_request_line(endpoints::CONTROL_WORKER_RENEW),
+            "the renewal addresses the route Control declares, by the method it \
+             declares"
+        );
         let authorization = received
             .header("authorization")
             .expect("the renewal carries an assertion");

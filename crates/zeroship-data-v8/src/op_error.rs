@@ -155,10 +155,10 @@ mod tests {
             }
             other => panic!("expected CodedError, got {other:?}"),
         }
-        assert!(
-            op.message.contains("redeploy resolves the binding afresh"),
-            "the response must name the remedy for a retired epoch: {}",
-            op.message
+        assert_eq!(
+            op.message, STALE_EPOCH_MESSAGE,
+            "the response must carry the retired epoch's own remedy, and it is the \
+             platform constant rather than a spelling restated here"
         );
         assert!(
             !op.message.contains("zeroship migrate"),

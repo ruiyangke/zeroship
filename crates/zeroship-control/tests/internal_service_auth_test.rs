@@ -409,33 +409,17 @@ async fn build_fixture() -> Fixture {
 /// guard alone.
 const BAD_APP_ID: &str = "not-a-uuid";
 
+/// The internal API as the control plane serves it.
+///
+/// `internal::configure` is what `zeroship-control`'s own binary mounts, so
+/// every arm below addresses the route the production process registers and
+/// the handler it registers behind it. Re-registering the routes here would
+/// make this suite rule on an application nothing runs, and the URIs it sends
+/// would be checked against a second copy of the path rather than the served
+/// one.
 macro_rules! internal_app {
     ($state:expr) => {
-        test::init_service(
-            web::App::new()
-                .state($state)
-                .service(
-                    web::resource("/internal/apps/{app_id}/env")
-                        .route(web::get().to(internal::get_app_env)),
-                )
-                .service(
-                    web::resource("/internal/apps/{app_id}")
-                        .route(web::get().to(internal::get_app_version)),
-                )
-                .service(
-                    web::resource("/internal/workers/join")
-                        .route(web::post().to(internal::join_worker_instance)),
-                )
-                .service(
-                    web::resource("/internal/workers/renew")
-                        .route(web::post().to(internal::renew_worker_instance)),
-                )
-                .service(
-                    web::resource("/internal/workers/retire")
-                        .route(web::post().to(internal::retire_worker_instance)),
-                ),
-        )
-        .await
+        test::init_service(web::App::new().state($state).configure(internal::configure)).await
     };
 }
 
