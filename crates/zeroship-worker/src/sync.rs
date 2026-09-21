@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use zeroship_core::app_id::AppId;
+use zeroship_core::service_identity::{endpoints, ServiceEndpoint};
 use zeroship_core::types::{AppVersionInfo, VersionMap};
 use zeroship_runtime::{EnvSnapshot, RuntimeLimits};
 
@@ -151,7 +152,11 @@ fn version_poll_authorization(config: &WorkerConfig) -> Option<String> {
 }
 
 async fn poll_versions(config: &WorkerConfig) -> Result<VersionMap, String> {
-    let url = format!("{}/internal/versions", config.control_url);
+    let url = format!(
+        "{}{}",
+        config.control_url,
+        endpoints::CONTROL_VERSIONS.path_template()
+    );
     let response = http_get(&url, version_poll_authorization(config).as_deref())
         .await
         .map_err(|e| format!("fetch versions: {e}"))?;
@@ -417,6 +422,29 @@ async fn reconcile_once(
     Ok(())
 }
 
+/// The URL of one app-addressed control endpoint under `url_base`.
+///
+/// Built from the route declaration control authorizes the call against, so
+/// the caller and the destination are one statement of the path rather than
+/// two that drift apart silently: a route that moves in
+/// `zeroship_core::service_identity::endpoints` moves here with it.
+///
+/// `ServiceEndpoint::path_template` spells the app-addressed parameter
+/// `{app_id}`. A template that named it otherwise would leave the parameter in
+/// the URL unfilled, which
+/// `sync::tests::bindings::every_app_addressed_control_url_is_the_declared_route_with_its_parameter_filled`
+/// refuses.
+fn control_app_url(url_base: &str, endpoint: ServiceEndpoint, app_id: &str) -> String {
+    /// The parameter an app-addressed route declares, as the declaration
+    /// spells it.
+    const APP_ID_PARAMETER: &str = "{app_id}";
+
+    format!(
+        "{url_base}{}",
+        endpoint.path_template().replace(APP_ID_PARAMETER, app_id)
+    )
+}
+
 /// Fetch just one app's version info. Used by `load_on_demand` in `handler.rs`
 /// when a request arrives for an app that's not yet in the thread-local cache.
 pub async fn fetch_app_version(
@@ -424,7 +452,7 @@ pub async fn fetch_app_version(
     service_auth: &zeroship_core::service_peers::ServiceAuth,
     app_id: &AppId,
 ) -> Result<AppVersionInfo, String> {
-    let url = format!("{url_base}/internal/apps/{}", app_id.as_str());
+    let url = control_app_url(url_base, endpoints::CONTROL_APP, app_id.as_str());
     let body = http_get(&url, control_authorization(service_auth)?.as_deref()).await?;
     serde_json::from_str(&body).map_err(|e| e.to_string())
 }
@@ -467,7 +495,7 @@ pub async fn fetch_app_env_supplying(
     if let Some(keys) = keys {
         let app = app_id.as_str();
         if !keys.is_bound(app).map_err(|error| error.to_string())? {
-            let url = format!("{url_base}/internal/apps/{}/data-key", app_id.as_str());
+            let url = control_app_url(url_base, endpoints::CONTROL_APP_DATA_KEY, app);
             let body = http_get(&url, control_authorization(service_auth)?.as_deref()).await?;
             let key = zeroship_core::project_data_key::ProjectDataKey::from_json(body)
                 .map_err(|_| "invalid control project key response".to_string())?;
@@ -482,7 +510,7 @@ pub async fn fetch_app_env_supplying(
     if let Some(bindings) = bindings {
         let app = app_id.as_str();
         if !bindings.is_bound(app).map_err(|error| error.to_string())? {
-            let url = format!("{url_base}/internal/apps/{app}/bindings");
+            let url = control_app_url(url_base, endpoints::CONTROL_APP_BINDINGS, app);
             match http_get(&url, control_authorization(service_auth)?.as_deref()).await {
                 Ok(body) => {
                     // EVERY live binding, because `env.databases` reaches every
@@ -505,7 +533,7 @@ pub async fn fetch_app_env_supplying(
             }
         }
     }
-    let url = format!("{url_base}/internal/apps/{}/env", app_id.as_str());
+    let url = control_app_url(url_base, endpoints::CONTROL_APP_ENV, app_id.as_str());
     http_get(&url, control_authorization(service_auth)?.as_deref()).await
 }
 
@@ -527,25 +555,74 @@ fn parse_resolved_bindings(
     entries.iter().map(parse_resolved_binding).collect()
 }
 
+/// The JSON type of a value, for a refusal that names what it found.
+///
+/// The type rather than the value: the worker does not bound the length of a
+/// field in a control response, and every refusal here reaches a log.
+const fn json_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "text",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "an object",
+    }
+}
+
+/// The schema epoch of one binding entry, or the reason it is not one.
+///
+/// Four conditions and four refusals. An absent field, a field that is not a
+/// number, a number that is not whole and a number outside the range an epoch
+/// holds are four different things to go and look at, and only the first is an
+/// absence: one message for all four sends an operator after a field the
+/// response carries. A number is quoted back, because the JSON grammar bounds
+/// how long one is.
+fn parse_schema_epoch(entry: &serde_json::Value) -> Result<u32, String> {
+    let Some(found) = entry.get("schema_epoch") else {
+        return Err("control binding response has no schema_epoch".to_owned());
+    };
+    let serde_json::Value::Number(number) = found else {
+        return Err(format!(
+            "control binding response has a schema_epoch that is {}, not a number",
+            json_kind(found)
+        ));
+    };
+    let outside_the_range = || {
+        format!(
+            "control binding response has a schema_epoch outside the range an epoch holds: \
+             {number}"
+        )
+    };
+    match number.as_u64() {
+        Some(epoch) => u32::try_from(epoch).map_err(|_| outside_the_range()),
+        // A whole number that is negative: in the grammar, outside the range.
+        None if number.is_i64() => Err(outside_the_range()),
+        None => Err(format!(
+            "control binding response has a schema_epoch that is not a whole number: {number}"
+        )),
+    }
+}
+
 fn parse_resolved_binding(
     value: &serde_json::Value,
 ) -> Result<zeroship_data_orm::resolved_bindings::ResolvedBinding, String> {
     let field = |name: &str| -> Result<String, String> {
-        value
-            .get(name)
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned)
-            .ok_or_else(|| format!("control binding response has no {name}"))
+        let Some(found) = value.get(name) else {
+            return Err(format!("control binding response has no {name}"));
+        };
+        found.as_str().map(str::to_owned).ok_or_else(|| {
+            format!(
+                "control binding response has a {name} that is {}, not text",
+                json_kind(found)
+            )
+        })
     };
     let database = zeroship_core::DatabaseId::parse(&field("database_id")?)
         .map_err(|error| error.to_string())?;
     let binding =
         zeroship_core::BindingId::parse(&field("binding_id")?).map_err(|error| error.to_string())?;
-    let epoch = value
-        .get("schema_epoch")
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|epoch| u32::try_from(epoch).ok())
-        .ok_or_else(|| "control binding response has no schema_epoch".to_string())?;
+    let epoch = parse_schema_epoch(value)?;
     Ok(zeroship_data_orm::resolved_bindings::ResolvedBinding {
         database,
         binding,
