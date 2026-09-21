@@ -464,12 +464,6 @@ async fn recover_lost_release(
     );
 }
 
-async fn reconciliation_phase(service: &WorkflowService, app: &AppId) -> String {
-    scans(service, app).await[0]
-        .text("reconciliation_phase")
-        .unwrap()
-}
-
 async fn pending_publication_ids(scope: &AppWorkflows) -> Vec<JobId> {
     scope
         .pending_jobs(None, 10)
