@@ -98,10 +98,19 @@ pub(crate) async fn invocation(
     })
 }
 
-/// Dispatches of this run's current frontier that were reclaimed without the
-/// executor reporting an outcome. Committing a frontier transition advances the
-/// run's revision, so a dispatch that reported anything durable leaves the
-/// strikes behind with the frontier they were counted against.
+/// Dispatches reclaimed without the executor reporting an outcome, counted
+/// against the journal state they died on.
+///
+/// Two revisions identify that state, because each covers writes the other does
+/// not. The frontier revision moves when a committed creator transition opens or
+/// settles work, which is what leaves the strikes behind once a dispatch reports
+/// anything durable. The journal revision moves when a step a replay has already
+/// been handed is rewritten in place - a durable wait settled against the
+/// database clock is the case nothing publishes, so no frontier transition
+/// covers it. Counting on the frontier revision alone keeps a dead dispatch's
+/// strike alive across a wait that genuinely came due, and the run stalls on a
+/// frontier it is no longer stuck at; counting on the journal revision alone
+/// keeps it alive across a batch that only opened new steps.
 async fn stuck_dispatches(
     tx: &mut Transaction,
     app: &AppId,
@@ -113,7 +122,8 @@ async fn stuck_dispatches(
         .execute(Operation::Count {
             filter: value!({"app_id":app.as_str(), "run_id":run.text("id")?,
                 "generation":run.integer("generation")?,
-                "frontier_revision":run.integer("frontier_revision")?, "state":"expired"}),
+                "frontier_revision":run.integer("frontier_revision")?,
+                "journal_revision":run.integer("journal_revision")?, "state":"expired"}),
             options: value!({}),
         })
         .await?;

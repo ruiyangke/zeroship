@@ -266,6 +266,21 @@ pub(crate) async fn update(
     save_checkpoint(tx, app, id, generation, step, None).await
 }
 
+/// Rewrite one step row in place, and record that the journal moved.
+///
+/// This is the single funnel for rewriting a step a replay has already been
+/// handed, so the run's journal revision is advanced here rather than at each
+/// caller: a caller added later inherits the bookkeeping instead of having to
+/// remember it, and a rewrite that reached the row without advancing the
+/// revision would leave two dispatches disagreeing about one revision.
+///
+/// The frontier revision cannot carry this. It authorizes one dispatch and is
+/// pinned for that authorization's whole lifetime - the advance job is
+/// published at it, `publication_id` hashes it into an immutable operation,
+/// [`super::tasks::assign`] stamps it on the task inside the transaction that
+/// consumes that job, and `authorize_task` refuses every later claim whose task
+/// disagrees with the run. Moving it from here would dispatch runs that could
+/// never report.
 async fn save_checkpoint(
     tx: &Transaction,
     app: &AppId,
@@ -320,6 +335,20 @@ async fn save_checkpoint(
     if changed != 1 {
         return Err(WorkflowServiceError::Internal(
             "workflow checkpoint changed".into(),
+        ));
+    }
+    let moved = tx
+        .database()
+        .collection(models::runs::Entity::COLLECTION)?
+        .execute(Operation::Update {
+            filter: value!({"app_id":app.as_str(), "id":id, "journal_revision":{"$lt":i64::MAX}}),
+            patch: value!({"$inc":{"journal_revision":1}}),
+            many: true,
+        })
+        .await?;
+    if !matches!(moved, Output::Count(1)) {
+        return Err(WorkflowServiceError::ResourceExhausted(
+            "workflow journal revision exhausted".into(),
         ));
     }
     Ok(())
