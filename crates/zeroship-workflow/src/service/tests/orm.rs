@@ -1,3 +1,4 @@
+use super::objects::{Objects, StepOutputs};
 use super::*;
 use crate::{backend::WorkflowBackend, service::WorkerIdentity};
 use futures::{channel::oneshot, FutureExt};
@@ -61,8 +62,15 @@ async fn native_client_crosses_runtime_threads_without_losing_app_scope() {
     let directory = tempfile::tempdir().unwrap();
     let store = Rc::new(sqlite_store(&directory.path().join("zs-workflow.sqlite")).await);
     let (service, app, other, _deployments) = registered_service(store).await;
-    let client = service.fixture_app(app.clone()).into_backend(&service, 1024).unwrap();
-    let other_client = service.fixture_app(other).into_backend(&service, 1024).unwrap();
+    let objects = Objects::new();
+    let client = service
+        .fixture_app(app.clone())
+        .into_backend(&service, StepOutputs::shared(&objects, 1024))
+        .unwrap();
+    let other_client = service
+        .fixture_app(other)
+        .into_backend(&service, StepOutputs::shared(&objects, 1024))
+        .unwrap();
     let (reply, result) = oneshot::channel();
     let thread = std::thread::spawn(move || {
         let runtime = compio::runtime::Runtime::new().unwrap();
@@ -106,9 +114,10 @@ async fn mutating_backend_calls_hint_the_host_and_reads_do_not() {
     let (service, app, _, _deployments) = registered_service(store).await;
     let hints = Arc::new(AtomicUsize::new(0));
     let observed = hints.clone();
+    let objects = Objects::new();
     let client = service
         .fixture_app(app)
-        .into_backend(&service, 1024)
+        .into_backend(&service, StepOutputs::shared(&objects, 1024))
         .unwrap()
         .with_commit_hint(Arc::new(move || {
             observed.fetch_add(1, Ordering::SeqCst);
@@ -140,7 +149,7 @@ async fn mutating_backend_calls_hint_the_host_and_reads_do_not() {
     assert_eq!(hints.load(Ordering::SeqCst), 3, "clones share the hint");
     let plain = service
         .fixture_app(client.app_id().clone())
-        .into_backend(&service, 1024)
+        .into_backend(&service, StepOutputs::shared(&objects, 1024))
         .unwrap();
     plain
         .start("Example".into(), StartOptions::default())
@@ -154,7 +163,11 @@ async fn cancelled_queued_requests_do_not_mutate_and_overload_is_bounded() {
     let directory = tempfile::tempdir().unwrap();
     let store = Rc::new(sqlite_store(&directory.path().join("zs-workflow.sqlite")).await);
     let (service, app, _, _deployments) = registered_service(store.clone()).await;
-    let client = service.fixture_app(app).into_backend(&service, 1024).unwrap();
+    let objects = Objects::new();
+    let client = service
+        .fixture_app(app)
+        .into_backend(&service, StepOutputs::shared(&objects, 1024))
+        .unwrap();
     let mut waiting = Vec::new();
     // Do not yield to the engine until the request queue rejects admission.
     loop {
@@ -198,7 +211,11 @@ async fn cancelled_queued_requests_do_not_mutate_and_overload_is_bounded() {
 async fn cancelling_a_database_wait_rolls_back_before_the_next_request() {
     let fixture = PostgresFixture::start().await;
     let (service, app, _, _deployments) = registered_service(Rc::new(fixture.store.clone())).await;
-    let client = service.fixture_app(app.clone()).into_backend(&service, 1024).unwrap();
+    let objects = Objects::new();
+    let client = service
+        .fixture_app(app.clone())
+        .into_backend(&service, StepOutputs::shared(&objects, 1024))
+        .unwrap();
     let blocker = connect(&fixture.admin_url).await;
     blocker.batch_execute("BEGIN").await.unwrap();
     blocker

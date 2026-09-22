@@ -129,7 +129,10 @@ pub(in crate::service) async fn prepare_draft<'tx>(
                 "restart target is missing or ambiguous".into(),
             )));
         }
-        Some(matches[0].ordinal)
+        // `from` carries the retained prefix, so a target at the first ordinal
+        // retains nothing and is the whole run: it takes the same `None` the
+        // receipt reports for a restart that named no target at all.
+        Some(matches[0].ordinal).filter(|ordinal| *ordinal > 0)
     } else {
         None
     };

@@ -81,6 +81,44 @@ fn the_workflow_schema_crate_reaches_nothing_else_in_the_workspace() {
     );
 }
 
+/// The walk above follows only non-dev edges, so a `[dev-dependencies]` entry
+/// is invisible to it - and that entry is exactly how payload bytes would
+/// return to admission, as a contract that stages and reads objects there.
+/// This reads what the manifest declares, of every dependency kind.
+#[test]
+fn the_workflow_admission_crate_declares_no_payload_storage_dependency() {
+    let metadata = workspace_metadata();
+    let package = metadata["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|package| package["name"] == "zeroship-workflow")
+        .expect("zeroship-workflow is a workspace member");
+    let declared: Vec<(&str, &str)> = package["dependencies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|dependency| {
+            (
+                dependency["name"].as_str().unwrap(),
+                dependency["kind"].as_str().unwrap_or("normal"),
+            )
+        })
+        .collect();
+    assert!(
+        declared.iter().any(|(name, _)| *name == "zeroship-data-orm"),
+        "no dependencies were read, so an empty result is not evidence"
+    );
+    let storage: Vec<_> = declared
+        .iter()
+        .filter(|(name, _)| *name == "zeroship-storage")
+        .collect();
+    assert!(
+        storage.is_empty(),
+        "zeroship-workflow declares payload storage: {storage:?}"
+    );
+}
+
 fn workspace_metadata() -> serde_json::Value {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let output = Command::new(env!("CARGO"))
@@ -132,6 +170,7 @@ fn workflow_process_dependencies_follow_crate_ownership() {
         "zeroship-workflow-calendar",
         "zeroship-workflow-client",
         "zeroship-workflow-manager",
+        "zeroship-workflow-runner",
         "zeroship-workflow-server",
         "zeroship-worker",
     ] {
@@ -149,16 +188,30 @@ fn workflow_process_dependencies_follow_crate_ownership() {
             let dependency = packages[id];
             if name == "zeroship-workflow-calendar" {
                 assert!(
-                    !["zeroship-core", "zeroship-workflow", "zeroship-workflow-manager", "zeroship-data-orm", "zeroship-storage", "compio", "tokio"]
+                    !["zeroship-core", "zeroship-workflow", "zeroship-workflow-manager", "zeroship-workflow-runner", "zeroship-data-orm", "zeroship-storage", "compio", "tokio"]
                         .contains(&dependency),
                     "calendar calculation reaches a host or storage implementation through {dependency}"
                 );
             }
-            if matches!(name, "zeroship-workflow" | "zeroship-worker") {
+            if matches!(
+                name,
+                "zeroship-workflow" | "zeroship-workflow-runner" | "zeroship-worker"
+            ) {
                 assert!(
                     !["zeroship-workflow-manager", "zeroship-workflow-server"]
                         .contains(&dependency),
                     "{name} reaches a platform workflow implementation through {dependency}"
+                );
+            }
+            // Admission records which payload a run owns and proves that
+            // ownership. The bytes are execution's: a writer, an opener and a
+            // deleter arrive as arguments, supplied by the host that holds the
+            // store. Reaching the store from here would let an execution path
+            // grow back into admission behind a green gate.
+            if name == "zeroship-workflow" {
+                assert!(
+                    dependency != "zeroship-storage",
+                    "{name} reaches payload storage through {dependency}"
                 );
             }
             if matches!(
@@ -166,13 +219,13 @@ fn workflow_process_dependencies_follow_crate_ownership() {
                 "zeroship-workflow-manager" | "zeroship-workflow-server"
             ) {
                 assert!(
-                    !["zeroship-workflow", "zeroship-storage"].contains(&dependency),
-                    "{name} reaches customer engine or payload storage through {dependency}"
+                    !["zeroship-workflow-runner", "zeroship-storage"].contains(&dependency),
+                    "{name} reaches workflow execution or payload storage through {dependency}"
                 );
             }
             if name == "zeroship-workflow-client" {
                 assert!(
-                    !["zeroship-workflow", "zeroship-workflow-manager", "zeroship-data-orm", "zeroship-storage"]
+                    !["zeroship-workflow", "zeroship-workflow-manager", "zeroship-workflow-runner", "zeroship-data-orm", "zeroship-storage"]
                         .contains(&dependency),
                     "metadata client reaches engine or database implementation through {dependency}"
                 );

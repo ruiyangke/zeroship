@@ -68,7 +68,7 @@ impl WorkflowExecution {
     }
 }
 
-pub(crate) fn decode_runtime_outcomes(
+pub fn decode_runtime_outcomes(
     mut value: Value,
 ) -> Result<Vec<Value>, WorkflowServiceError> {
     let error = value.get_mut("error").map(Value::take);

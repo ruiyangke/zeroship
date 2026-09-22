@@ -3,7 +3,7 @@ use super::{
     WorkflowServiceError,
 };
 use crate::{
-    operations::{RestartDeploy, RestartOptions},
+    operations::{RestartDeploy, RestartOptions, RestartedRun},
     service::{
         control::{self, Preparation},
         delivery,
@@ -14,6 +14,21 @@ use zeroship_core::{workflow_coordination::ManagementOutcome, workflow_jobs::Dep
 pub(super) enum Prepared {
     Outcome(ManagementOutcome),
     Latest(DeploymentId),
+}
+
+/// Carry the whole restart result onto the wire.
+///
+/// The journal stores a deployment as bare text, so the pin is typed here, at
+/// the boundary that publishes it: an id that cannot be a `DeploymentId` is a
+/// corrupted journal row, not a receipt to acknowledge.
+fn restarted(run: RestartedRun) -> Result<ManagementOutcome, WorkflowServiceError> {
+    Ok(ManagementOutcome::Restarted {
+        state: run.state,
+        restarted_from_ordinal: run.restarted_from_ordinal,
+        pinned_to: DeploymentId::parse_owned(run.pinned_to).map_err(|_| {
+            WorkflowServiceError::Internal("invalid workflow restart deployment id".into())
+        })?,
+    })
 }
 
 pub(super) async fn prepare(
@@ -68,9 +83,7 @@ pub(super) async fn prepare(
             {
                 Preparation::Ready(plan) => {
                     authority.check(scope)?;
-                    ManagementOutcome::Applied {
-                        state: plan.apply().await?.state,
-                    }
+                    restarted(plan.apply().await?)?
                 }
                 Preparation::Rejected(reason) => reason.outcome(),
             };
@@ -126,9 +139,7 @@ pub(super) async fn latest(
     match draft.bind_exact(target.registration()).await? {
         Preparation::Ready(plan) => {
             authority.check(scope)?;
-            Ok(ManagementOutcome::Applied {
-                state: plan.apply().await?.state,
-            })
+            restarted(plan.apply().await?)
         }
         Preparation::Rejected(reason) => Ok(reason.outcome()),
     }

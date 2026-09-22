@@ -644,6 +644,7 @@ export default { fetch() { return new Response("ok"); } };
             zeroship_core::DatabaseId::mint(),
             zeroship_core::BindingId::mint(),
             7,
+            zeroship_core::database_role::DatabaseCapability::ReadWrite,
         )
         .expect("a minted database and edge compose a legal role name");
         assert_ne!(primary.database(), secondary.database());

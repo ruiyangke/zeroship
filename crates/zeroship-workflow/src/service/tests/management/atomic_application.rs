@@ -114,9 +114,7 @@ async fn authority_loss(store: Rc<OrmStore>) {
             if refusal {
                 ManagementOutcome::NotFound {}
             } else {
-                ManagementOutcome::Applied {
-                    state: RunState::Queued,
-                }
+                restarted(&active(&service, &app_id).await.id)
             }
         );
         assert_eq!(receipt_count(&service, &request).await, 1);
@@ -164,9 +162,7 @@ async fn original_expiry(store: Rc<OrmStore>) {
     assert_eq!(persisted(&service, &app_id).await, before);
     assert_eq!(
         scope.management_outcome(&request.retry()).await.unwrap(),
-        ManagementOutcome::Applied {
-            state: RunState::Queued
-        }
+        restarted(&active(&service, &app_id).await.id)
     );
     assert_eq!(receipt_count(&service, &request).await, 1);
 }

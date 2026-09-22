@@ -257,7 +257,7 @@ pub async fn validate_job(tx: &Database, spec: &JobSpec, next: bool) -> Result<(
 pub fn settle<'a>(
     tx: &'a Database,
     spec: &'a JobSpec,
-    result: JobOutcome,
+    result: &'a JobOutcome,
     replay: bool,
 ) -> impl std::future::Future<Output = Result<(), Error>> + 'a {
     Box::pin(async move {
@@ -275,7 +275,7 @@ pub fn settle<'a>(
             return Err(Error::Storage);
         }
         if replay {
-            return if outcome(&row)? == Some(result) && job.state == "settled" {
+            return if outcome(&row)?.as_ref() == Some(result) && job.state == "settled" {
                 Ok(())
             } else {
                 Err(Error::Storage)
@@ -290,7 +290,7 @@ pub fn settle<'a>(
         {
             return Err(Error::Storage);
         }
-        let encoded = serde_json::to_string(&result).map_err(|_| Error::Storage)?;
+        let encoded = serde_json::to_string(result).map_err(|_| Error::Storage)?;
         let _: Management = tx
             .entity::<management::Entity>()?
             .update(

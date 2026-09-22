@@ -261,7 +261,7 @@ whole engine moves server-side and the wire carries `start`, `status`, `signal`,
 
 Say plainly that those six are the creator-facing surface and not the whole wire. A worker also
 has to be given work and report it, and that path is not a trait at all. `DeliverySlot` in
-`crates/zeroship-workflow/src/service/runner/delivery.rs` is what production runs, and it calls
+`crates/zeroship-workflow-runner/src/delivery.rs` is what production runs, and it calls
 `AppWorkflows::accept_job`, `heartbeat_job` and `complete_job` directly, in process. There is a
 `TaskTransport` trait beside it, but its only consumer, `RunnerSlot`, appears solely in tests -
 do not plan against it, and do not read `WorkerTasks` implementing it as evidence that the
@@ -433,9 +433,9 @@ stall the defect fixes that motivate the move.
    `main` in `crates/zeroship-cli/src/main.rs` opens a `StorageStore` unconditionally - the
    comment there reads "Storage plugin: always on in dev" and the backend defaults to
    `file://.zeroship/storage`, the `LocalFs` backend in
-   `crates/zeroship-storage/src/backend/local.rs` - and hands it to the workflow host as
-   `HostStorage.objects`. `LocalHost::start` in `crates/zeroship-cli/src/workflow/host.rs` then
-   calls `.with_payload_storage(storage.objects)`, the same call
+   `crates/zeroship-storage/src/backend/local.rs` - and hands it to the workflow host beside its
+   journal binding. `LocalHost::start` in `crates/zeroship-cli/src/workflow/host.rs` then opens
+   it as a `zeroship_workflow_runner::PayloadObjects`, the same call
    `crates/zeroship-worker/src/workflow_creator.rs` makes in production. A dev-tier journal can
    reach object storage on the same code path a production one does, so the SQLite tier takes
    the payload-free shape too.
@@ -445,7 +445,7 @@ stall the defect fixes that motivate the move.
    storage: it takes a `WorkflowOutputRef` that a worker already staged through `stage_payload`,
    resolves the owning row with `owned_reference`, and attaches it through `payload_refs`. The
    only promotion of an inline value anywhere is `PreparedExecution::from_runtime_json` in
-   `crates/zeroship-workflow/src/service/runner/outputs.rs`, which runs in the worker and
+   `crates/zeroship-workflow-runner/src/outputs.rs`, which runs in the worker and
    references a value only when the creator asked for it or it exceeds
    `TaskPayloadLimits::max_inline_bytes`; it covers `RunCompleted`, `ContinueAsNew` and a
    `step.run` completion, and nothing else.

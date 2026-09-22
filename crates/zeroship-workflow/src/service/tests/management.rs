@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use zeroship_core::workflow_coordination::{
     ManagementOutcome, RestartOptions, RestartTarget, RunId, RunOperation, RunState,
 };
-use zeroship_core::workflow_jobs::ManagementCommand;
+use zeroship_core::workflow_jobs::{DeploymentId, ManagementCommand};
 use zeroship_data_orm::{orm::Operation, value};
 
 mod atomic_application;
@@ -17,7 +17,7 @@ pub(super) mod fixture;
 mod latest;
 mod ordering;
 mod readback;
-use fixture::{started, transition, Grant};
+use fixture::{active, restarted, started, transition, Grant};
 
 #[compio::test]
 async fn sqlite_management_receipts_survive_app_receipt_loss_and_worker_reopen() {
@@ -129,9 +129,7 @@ async fn postgres_management_receipt_wait_keeps_original_authority_after_refresh
         .unwrap();
     assert_eq!(
         scope.management_outcome(&request).await.unwrap(),
-        ManagementOutcome::Applied {
-            state: RunState::Queued
-        }
+        restarted(&active(&service, &local).await.id)
     );
     assert_eq!(head(&service, &local, &run).await, (1, "queued".into()));
     assert_eq!(receipt_count(&service, &request).await, 1);
@@ -172,9 +170,7 @@ async fn postgres_management_database_denial_remains_retryable() {
         .unwrap();
     assert_eq!(
         scope.management_outcome(&request).await.unwrap(),
-        ManagementOutcome::Applied {
-            state: RunState::Queued
-        }
+        restarted(&active(&service, &local).await.id)
     );
     assert_eq!(receipt_count(&service, &request).await, 1);
     assert_eq!(head(&service, &local, &run).await, (1, "queued".into()));
@@ -187,6 +183,23 @@ async fn start(service: &WorkflowService, app: &AppId) -> String {
         .await
         .unwrap()
         .id
+}
+
+async fn generation_steps(
+    service: &WorkflowService,
+    app_id: &AppId,
+    run: &str,
+    generation: i64,
+) -> i64 {
+    let tx = service.begin().await.unwrap();
+    let count = journal_count(
+        &tx,
+        "steps",
+        json!({"app_id":app_id.as_str(), "run_id":run, "generation":generation}),
+    )
+    .await;
+    tx.commit().await.unwrap();
+    count
 }
 
 async fn head(service: &WorkflowService, app_id: &AppId, run: &str) -> (i64, String) {
@@ -219,18 +232,123 @@ async fn receipt_count(service: &WorkflowService, command: &Grant) -> i64 {
     count
 }
 
+#[compio::test]
+async fn sqlite_partial_restart_receipt_carries_its_prefix_and_source_pin() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
+    prefix_receipt_contract(Rc::new(store)).await;
+}
+
+#[compio::test]
+async fn postgres_partial_restart_receipt_carries_its_prefix_and_source_pin() {
+    let fixture = PostgresFixture::start().await;
+    prefix_receipt_contract(Rc::new(fixture.store.clone())).await;
+}
+
+/// A restart decides two things a transition does not: how much of the journal
+/// it keeps, and which deployment the new generation replays against. Both ride
+/// the receipt, so this drives a partial restart whose prefix is not the whole
+/// run and whose source deployment is no longer the active one, then replays
+/// the command so the assertion crosses the journal's encode and decode instead
+/// of only reading the value the transaction just built.
+///
+/// The whole-run restart beside it is the control: same run, same source pin,
+/// and only the target differs, so a prefix reported from a constant fails one
+/// of the two. A third restart names the head generation's first step, which
+/// retains nothing and is therefore the whole restart under another spelling;
+/// the receipts of the two must agree.
+///
+/// This does NOT catch a receipt that reports the right pair while the journal
+/// restarted somewhere else - the head generation and the retained step count
+/// are asserted separately for that - and it does not exercise a restart onto
+/// the latest deployment, which `latest::exact_target` binds.
+async fn prefix_receipt_contract(store: Rc<OrmStore>) {
+    use super::super::WorkerIdentity;
+    let (service, local, _, deployments) = registered_service(store).await;
+    let scope = service.fixture_app(local.clone());
+    let worker = WorkerIdentity::new("worker".into()).unwrap();
+    let source = active(&service, &local).await;
+    let run = start(&service, &local).await;
+    let task = service.poll(&worker).await.unwrap().unwrap();
+    service
+        .complete(
+            &worker,
+            &task.id,
+            &task.token,
+            execution(json!([
+                {"kind":"StepCompleted","ordinal":0,"name":"keep","output":1},
+                {"kind":"StepCompleted","ordinal":1,"name":"redo","output":2},
+                {"kind":"RunCompleted","output":"original"}
+            ])),
+        )
+        .await
+        .unwrap();
+    let replacement = deployments.deploy(&local).await;
+    service.activate_deploy(&local, &replacement).await.unwrap();
+    assert_ne!(active(&service, &local).await.id, source.id);
+
+    let partial = Grant::new(
+        &local,
+        &run,
+        1,
+        ManagementCommand::RestartStarted {
+            from: Some(RestartTarget {
+                name: "redo".into(),
+                occurrence: None,
+            }),
+        },
+    );
+    let expected = ManagementOutcome::Restarted {
+        state: RunState::Queued,
+        restarted_from_ordinal: Some(1),
+        pinned_to: DeploymentId::parse(&source.id).unwrap(),
+    };
+    assert_eq!(scope.management_outcome(&partial).await.unwrap(), expected);
+    assert_eq!(
+        scope.management_outcome(&partial.retry()).await.unwrap(),
+        expected
+    );
+    assert_eq!(head(&service, &local, &run).await, (1, "queued".into()));
+    assert_eq!(generation_steps(&service, &local, &run, 1).await, 1);
+
+    // Naming the head generation's first step keeps none of it, so the receipt
+    // reports the empty prefix the way a whole restart does. The retained step
+    // count beside it is what makes the two the same restart rather than two
+    // spellings this assertion merely agrees to call equal.
+    let first = Grant::new(
+        &local,
+        &run,
+        2,
+        ManagementCommand::RestartStarted {
+            from: Some(RestartTarget {
+                name: "keep".into(),
+                occurrence: None,
+            }),
+        },
+    );
+    assert_eq!(
+        scope.management_outcome(&first).await.unwrap(),
+        restarted(&source.id)
+    );
+    assert_eq!(head(&service, &local, &run).await, (2, "queued".into()));
+    assert_eq!(generation_steps(&service, &local, &run, 2).await, 0);
+
+    let whole = started(&local, &run, 3);
+    assert_eq!(
+        scope.management_outcome(&whole).await.unwrap(),
+        restarted(&source.id)
+    );
+    assert_eq!(head(&service, &local, &run).await, (3, "queued".into()));
+    assert_eq!(generation_steps(&service, &local, &run, 3).await, 0);
+}
+
 async fn replay_contract(store: Rc<OrmStore>) {
     let (service, local, foreign, deployments) = registered_service(store.clone()).await;
     let run = start(&service, &local).await;
     let scope = service.fixture_app(local.clone());
     let request = started(&local, &run, 1);
     let original = scope.management_outcome(&request).await.unwrap();
-    assert_eq!(
-        original,
-        ManagementOutcome::Applied {
-            state: RunState::Queued
-        }
-    );
+    assert_eq!(original, restarted(&active(&service, &local).await.id));
     assert_eq!(head(&service, &local, &run).await, (1, "queued".into()));
     assert_eq!(receipt_count(&service, &request).await, 1);
 
@@ -292,7 +410,7 @@ async fn replay_contract(store: Rc<OrmStore>) {
         .await
         .unwrap()
         .with_deployments(deployments.binding(&[&local, &foreign]));
-    unconfigured_replay(&service, &request, original).await;
+    unconfigured_replay(&service, &request, &original).await;
     for app_id in [&local, &foreign] {
         service
             .fixture_register(app_id, leased_policy(2, AppPolicy::default()))
@@ -336,12 +454,12 @@ async fn replay_contract(store: Rc<OrmStore>) {
 async fn unconfigured_replay(
     service: &WorkflowService,
     request: &Grant,
-    original: ManagementOutcome,
+    original: &ManagementOutcome,
 ) {
     let local = &request.delivery.job.app_id;
     let unconfigured = service.fixture_app(local.clone());
     assert_eq!(
-        unconfigured.management_outcome(request).await.unwrap(),
+        &unconfigured.management_outcome(request).await.unwrap(),
         original
     );
     let mut changed = request.clone();
@@ -367,7 +485,7 @@ async fn unconfigured_replay(
         )
         .unwrap();
     assert_eq!(
-        unconfigured.management_outcome(request).await.unwrap(),
+        &unconfigured.management_outcome(request).await.unwrap(),
         original
     );
     assert!(matches!(
@@ -479,9 +597,7 @@ async fn outcome_contract(store: Rc<OrmStore>) {
     let accepted = started(&local, &run, 4);
     assert_eq!(
         scope.management_outcome(&accepted).await.unwrap(),
-        ManagementOutcome::Applied {
-            state: RunState::Queued
-        }
+        restarted(&active(&service, &local).await.id)
     );
     assert_eq!(head(&service, &local, &run).await, (2, "queued".into()));
 
@@ -511,9 +627,7 @@ async fn outcome_contract(store: Rc<OrmStore>) {
         .unwrap();
     assert_eq!(
         scope.management_outcome(&capacity).await.unwrap(),
-        ManagementOutcome::Applied {
-            state: RunState::Queued
-        }
+        restarted(&active(&service, &local).await.id)
     );
     assert_eq!(head(&service, &local, &run).await, (3, "queued".into()));
 
@@ -529,9 +643,7 @@ async fn outcome_contract(store: Rc<OrmStore>) {
     // previously unseen commands need renewed mutation authority.
     assert_eq!(
         scope.management_outcome(&capacity).await.unwrap(),
-        ManagementOutcome::Applied {
-            state: RunState::Queued
-        }
+        restarted(&active(&service, &local).await.id)
     );
     let expired = transition(&local, &run, 6, RunOperation::Pause);
     assert!(matches!(
@@ -582,12 +694,7 @@ async fn atomicity_contract(store: Rc<OrmStore>, fault: ReceiptFault) {
     );
     fault.remove().await;
     let outcome = scope.management_outcome(&request).await.unwrap();
-    assert_eq!(
-        outcome,
-        ManagementOutcome::Applied {
-            state: RunState::Queued
-        }
-    );
+    assert_eq!(outcome, restarted(&active(&service, &local).await.id));
     assert_eq!(scope.management_outcome(&request).await.unwrap(), outcome);
     assert_eq!(head(&service, &local, &run).await, (1, "queued".into()));
     assert_eq!(receipt_count(&service, &request).await, 1);
@@ -826,12 +933,7 @@ async fn cancellation_contract(site: BarrierSite) {
     barrier.remove().await;
     assert_rolled_back(&service, &local, &run, &request).await;
     let outcome = scope.management_outcome(&request).await.unwrap();
-    assert_eq!(
-        outcome,
-        ManagementOutcome::Applied {
-            state: RunState::Queued
-        }
-    );
+    assert_eq!(outcome, restarted(&active(&service, &local).await.id));
     assert_eq!(scope.management_outcome(&request).await.unwrap(), outcome);
     assert_eq!(head(&service, &local, &run).await, (1, "queued".into()));
     assert_eq!(receipt_count(&service, &request).await, 1);
@@ -893,9 +995,7 @@ async fn postgres_management_revocation_during_app_lock_is_retryable() {
             .management_outcome(&started(&local, &run, 2))
             .await
             .unwrap(),
-        ManagementOutcome::Applied {
-            state: RunState::Queued
-        }
+        restarted(&active(&service, &local).await.id)
     );
 }
 
@@ -952,9 +1052,7 @@ async fn postgres_management_app_lock_wait_keeps_original_policy_deadline() {
     assert_rolled_back(&service, &local, &run, &request).await;
     assert_eq!(
         scope.management_outcome(&request).await.unwrap(),
-        ManagementOutcome::Applied {
-            state: RunState::Queued
-        }
+        restarted(&active(&service, &local).await.id)
     );
     assert_eq!(receipt_count(&service, &request).await, 1);
 }
@@ -1053,9 +1151,7 @@ async fn waiting_authority_contract(store: Rc<OrmStore>) {
     assert_rolled_back(&service, &local, &run, &request).await;
     assert_eq!(
         scope.management_outcome(&request).await.unwrap(),
-        ManagementOutcome::Applied {
-            state: RunState::Queued
-        }
+        restarted(&active(&service, &local).await.id)
     );
     assert_eq!(receipt_count(&service, &request).await, 1);
 }

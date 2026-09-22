@@ -7912,6 +7912,7 @@ dependencies = [
  "zeroship-storage-v8",
  "zeroship-workflow",
  "zeroship-workflow-manager",
+ "zeroship-workflow-runner",
  "zeroship-workflow-v8",
 ]
 
@@ -8665,6 +8666,7 @@ dependencies = [
  "zeroship-workflow",
  "zeroship-workflow-client",
  "zeroship-workflow-manager",
+ "zeroship-workflow-runner",
  "zeroship-workflow-v8",
  "zstd",
 ]
@@ -8697,7 +8699,6 @@ dependencies = [
  "zeroship-bundle",
  "zeroship-core",
  "zeroship-data-orm",
- "zeroship-storage",
  "zeroship-workflow-calendar",
  "zeroship-workflow-client",
  "zeroship-workflow-manager",
@@ -8750,6 +8751,34 @@ dependencies = [
  "zeroship-core",
  "zeroship-data-orm",
  "zeroship-workflow-calendar",
+]
+
+[[package]]
+name = "zeroship-workflow-runner"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "compio",
+ "compio-postgres",
+ "compio-s3",
+ "flume 0.11.1",
+ "futures",
+ "libc",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "testcontainers",
+ "tracing",
+ "zeroship-bundle",
+ "zeroship-core",
+ "zeroship-data-orm",
+ "zeroship-storage",
+ "zeroship-workflow",
+ "zeroship-workflow-client",
+ "zeroship-workflow-manager",
 ]
 
 [[package]]
@@ -8807,6 +8836,7 @@ dependencies = [
  "zeroship-storage",
  "zeroship-workflow",
  "zeroship-workflow-manager",
+ "zeroship-workflow-runner",
 ]
 
 [[package]]

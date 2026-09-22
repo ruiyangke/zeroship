@@ -87,7 +87,7 @@ impl AppWorkflows {
                 let state = history::inspect(&tx, command).await?;
                 if let history::Observed::Replay(receipt) = state {
                     tx.commit().await?;
-                    return Ok(receipt);
+                    return Ok(*receipt);
                 }
                 let (scope, authority) = captured?;
                 authority.check(&scope)?;
@@ -129,7 +129,7 @@ impl AppWorkflows {
         let state = history::inspect(&tx, command).await?;
         if let history::Observed::Replay(receipt) = state {
             tx.commit().await?;
-            return Ok(receipt);
+            return Ok(*receipt);
         }
         authority.check(self)?;
         state.require_next(command.revision)?;
@@ -149,7 +149,7 @@ pub(super) async fn receipt(
     job: &JobSpec,
 ) -> Result<Option<JobReceipt>, WorkflowServiceError> {
     match history::inspect(tx, Command::read(job)?).await? {
-        history::Observed::Replay(receipt) => Ok(Some(receipt)),
+        history::Observed::Replay(receipt) => Ok(Some(*receipt)),
         history::Observed::Fresh(_) => Ok(None),
     }
 }

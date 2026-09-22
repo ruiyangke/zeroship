@@ -82,7 +82,7 @@ impl Case {
                     .await
             }
             JobOperation::Advance { .. } => match scope.accept_job(&self.lease).await? {
-                JobAcceptance::Settled(receipt) => Ok(receipt),
+                JobAcceptance::Settled(receipt) => Ok(*receipt),
                 other => panic!("completed job must never create another task: {other:?}"),
             },
             _ => panic!("only implemented creator operations belong in fixture"),

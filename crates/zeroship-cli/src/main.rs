@@ -365,8 +365,8 @@ fn cmd_serve(args: &[String]) {
                 )
                 .expect("local database binding"),
             ),
-            objects: storage,
         },
+        storage,
         env_vars.clone(),
         plugins.clone(),
         zeroship_runtime::RuntimeLimits {

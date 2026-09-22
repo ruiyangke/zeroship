@@ -4,8 +4,9 @@ use std::fmt::Debug;
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{
-        AssignedScope, InvalidRestart, ManagementOutcome, RequestId, RestartDeploy, RestartOptions,
-        RestartTarget, RunId, RunOperation, RunState, WorkerId,
+        AssignedScope, InvalidRestart, ManagementOutcome, ManagementReceipt, RequestId,
+        RestartDeploy, RestartOptions, RestartTarget, RunId, RunOperation, RunState, ScopePage,
+        WorkerId,
     },
     workflow_jobs::{
         BroadcastId, Delivery, DeliveryLease, DeploymentId, JobId, JobOperation, JobOutcome,
@@ -25,6 +26,41 @@ fn refuses<T: DeserializeOwned>(wire: Value) {
         serde_json::from_value::<T>(wire.clone()).is_err(),
         "unexpectedly accepted metadata: {wire}"
     );
+}
+
+/// Drop each key of each named object in turn and require the decode to fail.
+///
+/// `round_trip` is the control: the untouched wire has to decode back to the
+/// same value, so a shape the sweep could never have accepted cannot pass by
+/// being refused for an unrelated reason.
+fn requires_every_key<T: Debug + PartialEq + Serialize + DeserializeOwned>(
+    value: &T,
+    paths: &[&str],
+) {
+    let wire = round_trip(value);
+    for path in paths {
+        let fields = wire.pointer(path).unwrap().as_object().unwrap();
+        assert!(!fields.is_empty(), "no keys to drop at {path:?}");
+        for field in fields.keys() {
+            let mut missing = wire.clone();
+            missing
+                .pointer_mut(path)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            refuses::<T>(missing);
+        }
+    }
+}
+
+/// Require a field carrying `None` to spell that null on the wire, and to
+/// decode back from it unchanged.
+///
+/// `round_trip` alone passes over a field serde omitted, and an omitted key is
+/// exactly the shape `requires_every_key` has to be able to see.
+fn spells_its_null<T: Debug + PartialEq + Serialize + DeserializeOwned>(value: &T, path: &str) {
+    assert_eq!(*round_trip(value).pointer(path).unwrap(), Value::Null);
 }
 
 fn operations() -> Vec<(JobOperation, Value)> {
@@ -124,12 +160,27 @@ fn operations() -> Vec<(JobOperation, Value)> {
     operations
 }
 
+/// The applied result a command asks for, so a fixture settlement answers the
+/// command it carries rather than standing in for any of them.
+fn management_result(command: &ManagementCommand) -> ManagementOutcome {
+    match command {
+        ManagementCommand::Transition { .. } => ManagementOutcome::Applied {
+            state: RunState::Paused,
+        },
+        ManagementCommand::RestartStarted { .. } | ManagementCommand::RestartLatest { .. } => {
+            ManagementOutcome::Restarted {
+                state: RunState::Queued,
+                restarted_from_ordinal: Some(2),
+                pinned_to: DeploymentId::mint(),
+            }
+        }
+    }
+}
+
 fn settlement(operation: JobOperation) -> Settlement {
-    let outcome = match operation {
-        JobOperation::Management { .. } => JobOutcome::Management {
-            outcome: ManagementOutcome::Applied {
-                state: RunState::Paused,
-            },
+    let outcome = match &operation {
+        JobOperation::Management { command, .. } => JobOutcome::Management {
+            outcome: management_result(command),
         },
         JobOperation::Close { .. } => JobOutcome::Closed { drained: true },
         _ => JobOutcome::Waiting {},
@@ -181,12 +232,31 @@ fn outcomes() -> Vec<(JobOutcome, Value)> {
             json!({"kind":"closed","drained":false}),
         ),
     ];
+    let pinned_to = DeploymentId::mint();
     for (outcome, wire) in [
         (
             ManagementOutcome::Applied {
                 state: RunState::Paused,
             },
             json!({"kind":"applied","state":"paused"}),
+        ),
+        (
+            ManagementOutcome::Restarted {
+                state: RunState::Queued,
+                restarted_from_ordinal: Some(7),
+                pinned_to: pinned_to.clone(),
+            },
+            json!({"kind":"restarted","state":"queued","restartedFromOrdinal":7,
+                "pinnedTo":pinned_to}),
+        ),
+        (
+            ManagementOutcome::Restarted {
+                state: RunState::Queued,
+                restarted_from_ordinal: None,
+                pinned_to: pinned_to.clone(),
+            },
+            json!({"kind":"restarted","state":"queued","restartedFromOrdinal":null,
+                "pinnedTo":pinned_to}),
         ),
         (ManagementOutcome::NotFound {}, json!({"kind":"not_found"})),
         (ManagementOutcome::Conflict {}, json!({"kind":"conflict"})),
@@ -210,11 +280,44 @@ const fn operation_family(operation: &JobOperation) -> u8 {
     }
 }
 
-const fn outcome_family(outcome: JobOutcome) -> u8 {
+const fn outcome_family(outcome: &JobOutcome) -> u8 {
     match outcome {
         JobOutcome::Management { .. } => 1,
         JobOutcome::Closed { .. } => 2,
         _ => 0,
+    }
+}
+
+/// Whether a management result answers the command that asked for it. Sharing
+/// the management family is necessary but not sufficient: the applied arms are
+/// command-shaped, while the refusals answer any command.
+const fn command_answered(operation: &JobOperation, outcome: &JobOutcome) -> bool {
+    let (
+        JobOperation::Management { command, .. },
+        JobOutcome::Management {
+            outcome: management,
+        },
+    ) = (operation, outcome)
+    else {
+        return true;
+    };
+    match (command, management) {
+        (ManagementCommand::Transition { .. }, ManagementOutcome::Applied { .. })
+        | (
+            ManagementCommand::RestartStarted { .. } | ManagementCommand::RestartLatest { .. },
+            ManagementOutcome::Restarted { .. },
+        )
+        | (
+            _,
+            ManagementOutcome::NotFound {}
+            | ManagementOutcome::Conflict {}
+            | ManagementOutcome::Denied {},
+        ) => true,
+        (ManagementCommand::Transition { .. }, ManagementOutcome::Restarted { .. })
+        | (
+            ManagementCommand::RestartStarted { .. } | ManagementCommand::RestartLatest { .. },
+            ManagementOutcome::Applied { .. },
+        ) => false,
     }
 }
 
@@ -224,9 +327,10 @@ fn outcome_objects_preserve_closed_management_results_and_operation_families() {
     for (outcome, wire) in outcomes() {
         assert_eq!(round_trip(&outcome), wire);
         for (operation, _) in operations() {
-            let expected = operation_family(&operation) == outcome_family(outcome);
+            let expected = operation_family(&operation) == outcome_family(&outcome)
+                && command_answered(&operation, &outcome);
             if expected {
-                families.insert(outcome_family(outcome));
+                families.insert(outcome_family(&outcome));
             }
             assert_eq!(
                 outcome.valid_for(&operation),
@@ -235,14 +339,14 @@ fn outcome_objects_preserve_closed_management_results_and_operation_families() {
             );
             if expected {
                 let mut command = settlement(operation);
-                command.outcome = outcome;
+                command.outcome = outcome.clone();
                 let encoded = round_trip(&command);
                 assert_eq!(encoded["outcome"], wire);
                 let receipt = SettlementReceipt {
                     app_id: command.delivery.job.app_id,
                     job_id: command.delivery.job.id,
                     attempt: command.delivery.attempt,
-                    outcome,
+                    outcome: outcome.clone(),
                 };
                 assert_eq!(round_trip(&receipt)["outcome"], wire);
             }
@@ -255,6 +359,114 @@ fn outcome_objects_preserve_closed_management_results_and_operation_families() {
     );
 }
 
+/// A management result must answer the command that asked for it.
+///
+/// Both directions are asserted, because either alone is passed by a degenerate
+/// check: a refusal-only test passes a `valid_for` that answers `false` for
+/// everything, and an acceptance-only test passes the family check this
+/// replaces. The two controls below pin the table to both verdicts, so a table
+/// that drifted to one of them fails before the pairing is exercised.
+///
+/// What this does not catch: `valid_for` is a check a caller applies, not a
+/// constraint on the type, so nothing here stops a mismatched
+/// `JobOutcome::Management` being constructed, serialized or stored; only the
+/// sites that call it refuse one. It says nothing about which commands or
+/// states the creator lifecycle allows, whether the command was authorized, or
+/// whether the transaction that produced the outcome committed. It also does
+/// not bind the restart arms apart: both restart commands accept the same
+/// result, so it cannot tell a started restart's pin from a latest restart's.
+#[test]
+fn management_outcomes_pair_with_the_command_that_asked_for_them() {
+    let applied = ManagementOutcome::Applied {
+        state: RunState::Cancelled,
+    };
+    let restarted = ManagementOutcome::Restarted {
+        state: RunState::Queued,
+        restarted_from_ordinal: Some(3),
+        pinned_to: DeploymentId::mint(),
+    };
+    let mut cases = Vec::new();
+    for (command, applied_answers, restarted_answers) in [
+        (
+            ManagementCommand::Transition {
+                operation: RunOperation::Cancel,
+            },
+            true,
+            false,
+        ),
+        (
+            ManagementCommand::RestartStarted {
+                from: Some(RestartTarget {
+                    name: "charge".into(),
+                    occurrence: Some(2),
+                }),
+            },
+            false,
+            true,
+        ),
+        (ManagementCommand::RestartStarted { from: None }, false, true),
+        (
+            ManagementCommand::RestartLatest {
+                deployment_id: DeploymentId::mint(),
+            },
+            false,
+            true,
+        ),
+    ] {
+        cases.push((command.clone(), applied.clone(), applied_answers));
+        cases.push((command.clone(), restarted.clone(), restarted_answers));
+        // A refusal is the same refusal whichever command was asked, and
+        // nothing it carries is command-shaped.
+        for refusal in [
+            ManagementOutcome::NotFound {},
+            ManagementOutcome::Conflict {},
+            ManagementOutcome::Denied {},
+        ] {
+            cases.push((command.clone(), refusal, true));
+        }
+    }
+    assert!(
+        cases.iter().any(|(.., valid)| *valid),
+        "the table must accept some pairing"
+    );
+    assert!(
+        cases.iter().any(|(.., valid)| !*valid),
+        "the table must refuse some pairing"
+    );
+    for (command, outcome, valid) in cases {
+        let operation = JobOperation::Management {
+            request_id: RequestId::mint(),
+            run_id: RunId::mint(),
+            revision: 1.try_into().unwrap(),
+            command,
+        };
+        let settled = JobOutcome::Management {
+            outcome: outcome.clone(),
+        };
+        assert_eq!(
+            settled.valid_for(&operation),
+            valid,
+            "{operation:?}: {outcome:?}"
+        );
+        // The pairing narrows the management family; it does not widen it.
+        assert!(!settled.valid_for(&JobOperation::Reconcile {}), "{outcome:?}");
+        assert!(
+            !settled.valid_for(&JobOperation::Close {
+                epoch: 1.try_into().unwrap(),
+            }),
+            "{outcome:?}"
+        );
+        for other in [
+            JobOutcome::Completed {},
+            JobOutcome::Waiting {},
+            JobOutcome::Rejected {},
+            JobOutcome::Closed { drained: true },
+        ] {
+            assert!(!other.valid_for(&operation), "{other:?}");
+        }
+    }
+}
+
 #[test]
 fn outcome_objects_reject_private_data_missing_fields_and_secondary_results() {
     for (outcome, wire) in outcomes() {
@@ -263,7 +475,7 @@ fn outcome_objects_reject_private_data_missing_fields_and_secondary_results() {
             app_id: command.delivery.job.app_id.clone(),
             job_id: command.delivery.job.id.clone(),
             attempt: command.delivery.attempt,
-            outcome,
+            outcome: outcome.clone(),
         };
         let mut paths = vec![""];
         if matches!(outcome, JobOutcome::Management { .. }) {
@@ -820,24 +1032,68 @@ fn workflow_operations_require_native_revisions_and_cron_identity() {
     }
 }
 
+/// Every key a coordination envelope declares has to be on the wire.
+///
+/// A bare `Option` field decodes a dropped key as `None`, which is a value
+/// each of these types gives its own meaning: an absent `after` scans from the
+/// first app instead of the page that was asked for, and an absent `outcome`
+/// reports a settled command as one the manager has not applied yet. Each
+/// nullable field is swept from both sides, because a change that refused the
+/// explicit null as well would satisfy a refusal-only sweep while breaking
+/// every producer.
+///
+/// What this does not catch: it walks the types named here, so a coordination
+/// type nobody added to it keeps the tolerance unobserved. It says nothing
+/// about the fields that are deliberately absence-tolerant, the ones carrying
+/// `skip_serializing_if`, whose omission is how they spell `None`. It binds
+/// the encoding only; it cannot tell whether a producer computed the right
+/// cursor or the right outcome, nor whether a transport preserved the key
+/// between them.
 #[test]
 fn missing_fields_and_unknown_operations_or_outcomes_are_rejected() {
     for (operation, _) in operations() {
-        let wire = round_trip(&settlement(operation));
-        for path in ["", "/delivery", "/delivery/job", "/delivery/job/operation"] {
-            let fields = wire.pointer(path).unwrap().as_object().unwrap();
-            assert!(!fields.is_empty());
-            for field in fields.keys() {
-                let mut missing = wire.clone();
-                missing
-                    .pointer_mut(path)
-                    .unwrap()
-                    .as_object_mut()
-                    .unwrap()
-                    .remove(field);
-                refuses::<Settlement>(missing);
-            }
-        }
+        requires_every_key(
+            &settlement(operation),
+            &["", "/delivery", "/delivery/job", "/delivery/job/operation"],
+        );
+    }
+    let app = AppId::mint();
+    let request = RequestId::mint();
+    let page = ScopePage { after: None };
+    spells_its_null(&page, "/after");
+    requires_every_key(&page, &[""]);
+    requires_every_key(
+        &ScopePage {
+            after: Some(app.clone()),
+        },
+        &[""],
+    );
+    let pending = ManagementReceipt {
+        app_id: app.clone(),
+        request_id: request.clone(),
+        outcome: None,
+    };
+    spells_its_null(&pending, "/outcome");
+    requires_every_key(&pending, &[""]);
+    for outcome in [
+        ManagementOutcome::Applied {
+            state: RunState::Paused,
+        },
+        ManagementOutcome::Restarted {
+            state: RunState::Queued,
+            restarted_from_ordinal: None,
+            pinned_to: DeploymentId::mint(),
+        },
+        ManagementOutcome::Denied {},
+    ] {
+        requires_every_key(
+            &ManagementReceipt {
+                app_id: app.clone(),
+                request_id: request.clone(),
+                outcome: Some(outcome),
+            },
+            &["", "/outcome"],
+        );
     }
     let wire = round_trip(&settlement(JobOperation::Reconcile {}));
     for operation in [

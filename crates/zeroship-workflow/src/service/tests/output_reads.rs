@@ -2,29 +2,8 @@ use super::*;
 use crate::backend::WorkflowBackend;
 use crate::{
     operations::{RestartOptions, RunOperation},
-    service::WorkerIdentity,
+    service::{StepOutput, WorkerIdentity},
 };
-
-#[compio::test]
-async fn buffered_payload_reads_consume_integrity_verification_at_eof() {
-    use crate::{engine::WorkflowOutputRef, service::PayloadRead};
-    use zeroship_storage::backend::OnceChunk;
-    let bytes = b"valid";
-    for actual in [b"wrong".as_slice(), b"truncated", b""] {
-        let reference = WorkflowOutputRef {
-            hash: crate::service::types::hash(bytes),
-            size: bytes.len() as i64,
-            content_type: None,
-        };
-        let read =
-            PayloadRead::checked(reference, Box::new(OnceChunk::new(actual.to_vec().into())))
-                .unwrap();
-        assert!(matches!(
-            read.into_bytes(1024).await,
-            Err(WorkflowServiceError::Unavailable(_))
-        ));
-    }
-}
 
 #[compio::test]
 async fn sqlite_named_outputs_follow_the_current_generation_without_object_storage() {
@@ -44,9 +23,12 @@ async fn output_contract(store: Rc<OrmStore>) {
     let (service, app, other, _deployments) = registered_service(store).await;
     let app = service.fixture_app(app);
     let other = service.fixture_app(other);
-    let backend = app.clone().into_backend(&service, 1024).unwrap();
+    let objects = objects::Objects::new();
+    let backend = app
+        .clone()
+        .into_backend(&service, objects::StepOutputs::shared(&objects, 1024))
+        .unwrap();
     assert_eq!(backend.app_id(), app.app_id());
-    assert!(app.clone().into_backend(&service, 0).is_err());
     let worker = WorkerIdentity::new("output-reader".into()).unwrap();
     let run = backend
         .start("Example".into(), StartOptions::default())
@@ -59,48 +41,44 @@ async fn output_contract(store: Rc<OrmStore>) {
         {"kind":"Wait", "ordinal":2, "name":"pending", "signalType":"ready"}
     ]))).await.unwrap();
     for (occurrence, value) in [(0, 1), (1, 2)] {
-        let read = app
-            .read_step_output(&run.id, "value", occurrence)
+        // A step small enough to stay in the journal is answered from it, and
+        // the object store is never asked.
+        let StepOutput::Inline(read) = app
+            .read_step_output(&run.id, "value", occurrence, objects.open())
             .await
-            .unwrap();
-        assert_eq!(
-            read.reference.content_type.as_deref(),
-            Some("application/json")
-        );
-        let bytes = read.into_bytes(1024).await.unwrap();
+            .unwrap()
+        else {
+            panic!("step output left the journal");
+        };
+        assert_eq!(read, json!({"value":value}));
         assert_eq!(
             backend
                 .read_step_output(run.id.clone(), "value".into(), occurrence)
                 .await
                 .unwrap(),
-            bytes
-        );
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
-            json!({"value":value})
+            serde_json::to_vec(&read).unwrap()
         );
     }
     assert!(matches!(
-        other.read_step_output(&run.id, "value", 0).await,
+        other
+            .read_step_output(&run.id, "value", 0, objects.open())
+            .await,
         Err(WorkflowServiceError::NotFound(_))
     ));
     for (name, occurrence) in [("missing", 0), ("pending", 0), ("value", 2)] {
         assert!(matches!(
-            app.read_step_output(&run.id, name, occurrence).await,
+            app.read_step_output(&run.id, name, occurrence, objects.open())
+                .await,
             Err(WorkflowServiceError::NotFound(_))
         ));
     }
     for (name, occurrence) in [("", 0), ("value", u32::MAX)] {
         assert!(matches!(
-            app.read_step_output(&run.id, name, occurrence).await,
+            app.read_step_output(&run.id, name, occurrence, objects.open())
+                .await,
             Err(WorkflowServiceError::InvalidRequest(_))
         ));
     }
-    let read = app.read_step_output(&run.id, "value", 0).await.unwrap();
-    assert!(matches!(
-        read.into_bytes(1).await,
-        Err(WorkflowServiceError::PayloadTooLarge)
-    ));
 
     backend
         .transition(run.id.clone(), RunOperation::Cancel)
@@ -111,7 +89,8 @@ async fn output_contract(store: Rc<OrmStore>) {
         .await
         .unwrap();
     assert!(matches!(
-        app.read_step_output(&run.id, "value", 0).await,
+        app.read_step_output(&run.id, "value", 0, objects.open())
+            .await,
         Err(WorkflowServiceError::NotFound(_))
     ));
     let task = service.poll(&worker).await.unwrap().unwrap();
@@ -127,6 +106,19 @@ async fn output_contract(store: Rc<OrmStore>) {
         )
         .await
         .unwrap();
-    let read = app.read_step_output(&run.id, "value", 0).await.unwrap();
-    assert_eq!(read.into_bytes(1024).await.unwrap(), b"null");
+    let StepOutput::Inline(read) = app
+        .read_step_output(&run.id, "value", 0, objects.open())
+        .await
+        .unwrap()
+    else {
+        panic!("step output left the journal");
+    };
+    assert_eq!(read, serde_json::Value::Null);
+    assert_eq!(
+        backend
+            .read_step_output(run.id.clone(), "value".into(), 0)
+            .await
+            .unwrap(),
+        b"null"
+    );
 }

@@ -86,18 +86,17 @@ async fn uncertain_delete(store: Rc<OrmStore>, fault: Option<Fault>) {
     if let Some(fault) = &fault {
         fault.confirmation(true).await;
     } else {
-        fixture
-            .backend
-            .faults
-            .lock()
-            .unwrap()
-            .push(super::fixture::Fault::LostDeleteReply(id.clone()));
+        fixture.objects.lose_delete_reply(&id);
     }
     let grant = Grant::new(fixture.scope.app_id());
-    let receipt = fixture.scope.collect_job(&grant, options(1)).await.unwrap();
+    let receipt = fixture
+        .scope
+        .collect_job(&grant, options(1), &fixture.objects)
+        .await
+        .unwrap();
     assert_eq!(receipt.outcome, JobOutcome::Completed {});
     assert!(
-        !fixture.exists(fixture.scope.app_id(), &id).await,
+        !fixture.exists(fixture.scope.app_id(), &id),
         "the external deletion happened before the injected failure"
     );
     let pending = fixture.payload(&id).await;
@@ -105,15 +104,15 @@ async fn uncertain_delete(store: Rc<OrmStore>, fault: Option<Fault>) {
     assert_eq!(pending.expires_at, 0);
     assert_eq!(fixture.page(&grant.delivery.job).await.next_index, 1);
     let closed = fixture.scan().await;
-    let reopened = fixture.reopen(true).await;
+    let reopened = fixture.reopen().await;
     assert_eq!(
         reopened
-            .collect_job(&grant.retry(), options(1))
+            .collect_job(&grant.retry(), options(1), &fixture.objects)
             .await
             .unwrap(),
         receipt
     );
-    assert_eq!(fixture.backend.calls(), std::slice::from_ref(&id));
+    assert_eq!(fixture.objects.deletes(), std::slice::from_ref(&id));
     assert_eq!(fixture.payload(&id).await, pending);
     assert_eq!(fixture.scan().await, closed);
     if let Some(fault) = &fault {
@@ -121,7 +120,11 @@ async fn uncertain_delete(store: Rc<OrmStore>, fault: Option<Fault>) {
     }
     assert_eq!(
         reopened
-            .collect_job(&Grant::new(fixture.scope.app_id()), options(1))
+            .collect_job(
+                &Grant::new(fixture.scope.app_id()),
+                options(1),
+                &fixture.objects
+            )
             .await
             .unwrap()
             .outcome,
@@ -130,8 +133,8 @@ async fn uncertain_delete(store: Rc<OrmStore>, fault: Option<Fault>) {
     let recovered = fixture.payload(&id).await;
     assert_eq!(recovered.state, "deleted");
     assert!(recovered.expires_at > pending.expires_at);
-    assert!(!fixture.exists(fixture.scope.app_id(), &id).await);
-    assert_eq!(fixture.backend.calls(), [id.clone(), id]);
+    assert!(!fixture.exists(fixture.scope.app_id(), &id));
+    assert_eq!(fixture.objects.deletes(), [id.clone(), id]);
 }
 
 async fn rollback(store: Rc<OrmStore>, fault: Fault) {
@@ -140,9 +143,13 @@ async fn rollback(store: Rc<OrmStore>, fault: Fault) {
     fixture.expire(&id).await;
     let grant = Grant::new(fixture.scope.app_id());
     fault.set(true).await;
-    assert!(fixture.scope.collect_job(&grant, options(1)).await.is_err());
+    assert!(fixture
+        .scope
+        .collect_job(&grant, options(1), &fixture.objects)
+        .await
+        .is_err());
     assert_eq!(fixture.payload(&id).await.state, "deleted");
-    assert_eq!(fixture.backend.calls(), std::slice::from_ref(&id));
+    assert_eq!(fixture.objects.deletes(), std::slice::from_ref(&id));
     assert_eq!(fixture.page(&grant.delivery.job).await.next_index, 1);
     let uncommitted = fixture.scan().await;
     assert_eq!(uncommitted.collection_revision, 1);
@@ -158,16 +165,16 @@ async fn rollback(store: Rc<OrmStore>, fault: Fault) {
         .unwrap()
         .is_none());
     fault.set(false).await;
-    let reopened = fixture.reopen(true).await;
+    let reopened = fixture.reopen().await;
     assert_eq!(
         reopened
-            .collect_job(&grant.retry(), options(1))
+            .collect_job(&grant.retry(), options(1), &fixture.objects)
             .await
             .unwrap()
             .outcome,
         JobOutcome::Completed {}
     );
-    assert_eq!(fixture.backend.calls(), [id]);
+    assert_eq!(fixture.objects.deletes(), [id]);
     let committed = fixture.scan().await;
     assert_eq!(
         committed.collection_revision,

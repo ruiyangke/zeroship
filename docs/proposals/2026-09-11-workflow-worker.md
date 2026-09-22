@@ -845,10 +845,10 @@ table has the `__zeroship_workflow_` prefix; none belongs in Control's schema.
 | `deployment_holds` | Customer dependency intent and observed hold generation; not the platform hold ledger. |
 | `activations` | Immutable readiness per manager activation job, app revision and deployment; committed with the logical job receipt. |
 | `activation_scopes` | Highest manager activation revision selected for new work. Older readiness remains independently replayable. |
-| `runs` | Run identity, lifecycle state, current generation, relationships and logical frontier revision, independent of the task lease epoch. |
+| `runs` | Run identity, lifecycle state, current generation, relationships, the logical frontier revision a dispatch is authorized at, and the journal revision its replay history stands at. Both are independent of the task lease epoch, and of each other: the frontier revision is pinned for the life of one dispatch's authorization, while a durable wait settled against the database clock moves the journal revision with nothing published. |
 | `generations` | Pinned deployment, input, output/error references and generation lifecycle. |
 | `steps` | Replay history, checkpoints and compensation state. |
-| `tasks` | Customer execution claims, frontier and lease fences, job/delivery identity and exact task completion receipts. |
+| `tasks` | Customer execution claims, frontier and lease fences, the journal revision the dispatch was minted against, job/delivery identity and exact task completion receipts. |
 | `waits` | Recorded sleep, signal and child waits and their execution scope. |
 | `topics`, `broadcasts`, `signals`, `subscriptions` | Customer event bodies, accepted/completed topic ordering, app-scoped signal delivery order, targets, subscription state and fanout cursors. |
 | `fanout_pages` | Exact delivered broadcast page, committed cursor transition, semantic outcome and successor specifications linked to the retained job receipt and publication. |
@@ -2138,7 +2138,8 @@ claim, renewal, settlement and successor insertion enforce retention only for
 operations that actually require code.
 
 The representation is implemented across core, queue, creator readers and metadata
-transport. Settlement preflight checks the outcome family, and creator receipts
+transport. Settlement preflight checks the outcome family and pairs a
+management result with the command that asked for it, and creator receipts
 also enforce the operation's supported result. Manager settlement now validates
 the authoritative command/job/order linkage and commits its lifecycle outcome,
 settled revision and queue receipt together. Exact settled replay validates the

@@ -278,6 +278,8 @@ zeroship_data_orm::orm::schema! {
             signal_epoch: BigInt,
             compensation_target: Nullable<Text>,
             schedule_id: Nullable<Text>,
+            #[orm(default = 1)]
+            journal_revision: BigInt,
         }
 
         __zeroship_workflow_schedules {
@@ -370,6 +372,8 @@ zeroship_data_orm::orm::schema! {
             assignment_revision: Nullable<BigInt>,
             created_at: BigInt,
             finished_at: Nullable<BigInt>,
+            #[orm(default = 1)]
+            journal_revision: BigInt,
         }
 
         __zeroship_workflow_topics {

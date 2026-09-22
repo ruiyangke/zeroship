@@ -570,7 +570,7 @@ impl Queue {
                             job_id: delivery.job.id.clone(),
                             app_id: assignment.app_id.clone(),
                             attempt: delivery.attempt,
-                            outcome: settlement.outcome,
+                            outcome: settlement.outcome.clone(),
                         };
                         if job.state == "settled" {
                             if job.settlement_digest.as_deref() != Some(digest.as_str())
@@ -578,8 +578,13 @@ impl Queue {
                             {
                                 return Err(Error::Conflict);
                             }
-                            crate::management::settle(&tx, &delivery.job, settlement.outcome, true)
-                                .await?;
+                            crate::management::settle(
+                                &tx,
+                                &delivery.job,
+                                &settlement.outcome,
+                                true,
+                            )
+                            .await?;
                             if authorize_replay(tx.clone()).await? != delivery.worker_id {
                                 return Err(Error::Denied);
                             }
@@ -606,7 +611,7 @@ impl Queue {
                         for successor in successors.values() {
                             self.insert(&tx, successor, sample.millis).await?;
                         }
-                        crate::management::settle(&tx, &delivery.job, settlement.outcome, false)
+                        crate::management::settle(&tx, &delivery.job, &settlement.outcome, false)
                             .await?;
                         update(
                             &tx,
@@ -619,14 +624,14 @@ impl Queue {
                         crate::recovery::settled_page(
                             &tx,
                             &delivery.job,
-                            settlement.outcome,
+                            &settlement.outcome,
                             sample.millis,
                         )
                         .await?;
                         Box::pin(crate::recovery::settled_close(
                             &tx,
                             &delivery.job,
-                            settlement.outcome,
+                            &settlement.outcome,
                             sample.millis,
                         ))
                         .await?;
@@ -688,7 +693,7 @@ impl Queue {
             &delivery.worker_id,
             delivery.assignment_revision,
             delivery.attempt,
-            settlement.outcome,
+            &settlement.outcome,
             successors.values().collect::<Vec<_>>(),
         ))?);
         Ok(PreparedSettlement { successors, digest })

@@ -326,7 +326,7 @@ async fn settle_release(queue: &Queue, app: &AppId, outcome: JobOutcome) -> JobS
         let settlement = Settlement {
             delivery: grant.delivery().clone(),
             outcome: if release {
-                outcome
+                outcome.clone()
             } else {
                 JobOutcome::Completed {}
             },

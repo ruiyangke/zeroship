@@ -493,7 +493,9 @@ async fn management_is_durable_bounded_typed_and_assignment_scoped() {
     };
     let settlement = Settlement {
         delivery: grant.delivery().clone(),
-        outcome: JobOutcome::Management { outcome },
+        outcome: JobOutcome::Management {
+            outcome: outcome.clone(),
+        },
         successors: vec![],
     };
     let foreign_worker = WorkerId::mint();

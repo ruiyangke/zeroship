@@ -21,6 +21,19 @@ use zeroship_data_orm::resolved_bindings::{ResolvedBinding, SuppliedAppBindings}
 /// first one and the role name it composes never rotates.
 const DEV_EPOCH: u32 = 1;
 
+/// The capability a development binding is minted with.
+///
+/// Read-write, because `zeroship dev` is the creator's own database on the
+/// creator's own machine and there is no control plane to have declared
+/// anything else. It is a constant here rather than a field of the persisted
+/// material, for the reason the epoch beside it is: the file records the
+/// binding's IDENTITY, which a restart must not change, and the dev tier has
+/// exactly one capability to mint. A stored capability would be a value nothing
+/// on this tier can set and every reader would have to have an opinion about
+/// when it was absent.
+const DEV_CAPABILITY: zeroship_core::database_role::DatabaseCapability =
+    zeroship_core::database_role::DatabaseCapability::ReadWrite;
+
 #[derive(Serialize, Deserialize)]
 struct DevBindingFile {
     database_id: String,
@@ -97,6 +110,7 @@ fn load_material(directory: &Path) -> Result<ResolvedBinding, Box<dyn std::error
         database: DatabaseId::parse(&stored.database_id)?,
         binding: BindingId::parse(&stored.binding_id)?,
         epoch: stored.epoch,
+        capability: DEV_CAPABILITY,
     })
 }
 
