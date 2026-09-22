@@ -83,6 +83,7 @@ pub struct GenerationOutcome {
     pub output: Option<String>,
     pub output_ref: Option<String>,
     pub error: Option<String>,
+    pub continued_as_new_run_id: Option<String>,
 }
 
 #[derive(FromRow)]

@@ -57,6 +57,16 @@ paired!(
     postgres_continuation_owing_a_compensator_fails_under_its_own_name,
     compensable_carry
 );
+paired!(
+    sqlite_a_creator_output_shaped_like_a_continuation_is_not_one,
+    postgres_a_creator_output_shaped_like_a_continuation_is_not_one,
+    successor_is_platform_typed
+);
+paired!(
+    sqlite_a_continued_predecessor_is_at_rest,
+    postgres_a_continued_predecessor_is_at_rest,
+    continued_is_terminal
+);
 
 async fn parent(
     service: &WorkflowService,
@@ -138,10 +148,13 @@ async fn continue_run(
         )
         .await
         .unwrap();
-    scope.status(expected).await.unwrap().output.unwrap()["continuedAsNew"]
-        .as_str()
-        .unwrap()
-        .to_owned()
+    let status = scope.status(expected).await.unwrap();
+    assert_eq!(status.state, RunState::ContinuedAsNew);
+    assert!(
+        status.output.is_none(),
+        "a continuation carries no creator output"
+    );
+    status.continued_as_new_run_id.unwrap()
 }
 
 async fn finish_run(
@@ -412,10 +425,10 @@ async fn rollback(store: Rc<OrmStore>) {
         .await
         .unwrap();
     let scope = service.fixture_app(app_id);
-    let successor = scope.status(&child).await.unwrap().output.unwrap()["continuedAsNew"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let predecessor = scope.status(&child).await.unwrap();
+    assert_eq!(predecessor.state, RunState::ContinuedAsNew);
+    assert!(predecessor.output.is_none());
+    let successor = predecessor.continued_as_new_run_id.unwrap();
     assert_ne!(successor, child);
     assert_eq!(
         scope.status(&successor).await.unwrap().state,
@@ -473,8 +486,9 @@ async fn compensable_carry(store: Rc<OrmStore>) {
         .unwrap();
     let status = scope.status(&owing.id).await.unwrap();
     assert_eq!(status.state, RunState::Failed);
+    assert!(status.output.is_none());
     assert!(
-        status.output.is_none(),
+        status.continued_as_new_run_id.is_none(),
         "a refused continuation records no successor"
     );
     let error = status.error.unwrap();
@@ -503,13 +517,147 @@ async fn compensable_carry(store: Rc<OrmStore>) {
         .await
         .unwrap();
     let status = scope.status(&carried.id).await.unwrap();
-    assert_eq!(status.state, RunState::Completed);
-    let successor = status.output.unwrap()["continuedAsNew"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    assert_eq!(status.state, RunState::ContinuedAsNew);
+    assert!(status.output.is_none());
+    let successor = status.continued_as_new_run_id.unwrap();
     assert_eq!(
         scope.status(&successor).await.unwrap().state,
         RunState::Queued
     );
+}
+
+/// The successor a continuation mints is PLATFORM data, so it has a column of
+/// its own and the creator's output column is left to the creator.
+///
+/// The control differs in the transition alone. Both runs are the same
+/// workflow under the same deployment; one reports `ContinueAsNew` and one
+/// reports `RunCompleted` whose creator output is an object with a
+/// `continuedAsNew` key naming a real run. Reading the typed field is what
+/// tells them apart: a creator cannot mint a successor by returning a shape,
+/// and a continuation cannot be mistaken for a creator result.
+async fn successor_is_platform_typed(store: Rc<OrmStore>) {
+    let (service, app_id, _, _deployments) = registered_service(store).await;
+    let scope = service.fixture_app(app_id.clone());
+    let worker = WorkerIdentity::new("successor-is-typed".into()).unwrap();
+
+    let continued = scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let task = service.poll(&worker).await.unwrap().unwrap();
+    assert_eq!(task.invocation.run_id, continued.id);
+    service
+        .complete(
+            &worker,
+            &task.id,
+            &task.token,
+            execution(json!([{"kind":"ContinueAsNew", "input":"next"}])),
+        )
+        .await
+        .unwrap();
+    let continued_status = scope.status(&continued.id).await.unwrap();
+    assert_eq!(continued_status.state, RunState::ContinuedAsNew);
+    assert!(
+        continued_status.output.is_none(),
+        "a continuation leaves the creator output column empty"
+    );
+    let successor = continued_status
+        .continued_as_new_run_id
+        .clone()
+        .expect("a continuation names its successor");
+    assert_ne!(successor, continued.id);
+    assert_eq!(
+        scope.status(&successor).await.unwrap().state,
+        RunState::Queued
+    );
+
+    // The forgery: a creator return value with the marker's exact shape, and a
+    // value in it that names the run the creator would most like to be handed.
+    let forged = json!({"continuedAsNew": successor});
+    let completed = scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let task = service.poll(&worker).await.unwrap().unwrap();
+    assert_eq!(task.invocation.run_id, completed.id);
+    service
+        .complete(
+            &worker,
+            &task.id,
+            &task.token,
+            execution(json!([{"kind":"RunCompleted", "output":forged}])),
+        )
+        .await
+        .unwrap();
+    let completed_status = scope.status(&completed.id).await.unwrap();
+    assert_eq!(
+        completed_status.state,
+        RunState::Completed,
+        "a creator output shaped like a continuation is still a completion"
+    );
+    assert_eq!(
+        completed_status.output.as_ref(),
+        Some(&forged),
+        "the creator's output round-trips unread"
+    );
+    assert_eq!(
+        completed_status.continued_as_new_run_id, None,
+        "nothing a creator returns can populate the successor field"
+    );
+}
+
+/// A run that handed its work to a successor is at rest: the platform will not
+/// dispatch it again, and the queries that select live runs by reading
+/// `RunState::TERMINAL` must not return it.
+async fn continued_is_terminal(store: Rc<OrmStore>) {
+    let (service, app_id, _, _deployments) = registered_service(store).await;
+    let scope = service.fixture_app(app_id.clone());
+    let worker = WorkerIdentity::new("continued-is-terminal".into()).unwrap();
+
+    let idle = live(&service, &app_id).await;
+    let first = scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        live(&service, &app_id).await,
+        idle + 1,
+        "a queued run is live, so the counter is not stuck at zero"
+    );
+    let successor = continue_run(&service, &scope, &worker, &first.id).await;
+    assert_eq!(
+        live(&service, &app_id).await,
+        idle + 1,
+        "the predecessor left the live set as the successor entered it"
+    );
+    assert!(
+        RunState::TERMINAL.contains(&stored_state(&service, &app_id, &first.id).await.as_str()),
+        "the state the journal stores for a continued run is one of the terminal names"
+    );
+    finish_run(&service, &worker, &successor, "done").await;
+    assert_eq!(
+        live(&service, &app_id).await,
+        idle,
+        "the completed successor leaves the live set too"
+    );
+}
+
+/// How many runs `live_runs` counts for this app, which is the query every
+/// caller of `RunState::TERMINAL` shares.
+async fn live(service: &WorkflowService, app_id: &AppId) -> i64 {
+    let mut tx = service.begin().await.unwrap();
+    app::lock_app(&mut tx, app_id).await.unwrap();
+    let count = app::live_runs(&tx, app_id).await.unwrap();
+    tx.commit().await.unwrap();
+    count
+}
+
+/// The state string the journal's own run row carries.
+async fn stored_state(service: &WorkflowService, app_id: &AppId, run: &str) -> String {
+    let mut tx = service.begin().await.unwrap();
+    app::lock_app(&mut tx, app_id).await.unwrap();
+    let row = app::lock_run(&mut tx, app_id, run).await.unwrap();
+    let state = row.text("state").unwrap();
+    tx.commit().await.unwrap();
+    state
 }

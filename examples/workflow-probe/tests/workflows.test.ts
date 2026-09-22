@@ -32,7 +32,7 @@ async function until(target: Target, run: Run, state: string): Promise<Status> {
   do {
     status = await rpc<Status>(target, "status", run);
     if (status.state === state) return status;
-    if (["completed", "failed", "cancelled", "stalled"].includes(status.state)) {
+    if (["completed", "failed", "cancelled", "stalled", "continuedAsNew"].includes(status.state)) {
       throw new Error(`${target.name}: expected ${state}, received ${JSON.stringify(status)}`);
     }
     await sleep(100);

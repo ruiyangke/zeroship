@@ -380,7 +380,7 @@ impl RunUpdate {
             Self::Sleeping { .. } => "sleeping",
             Self::Waiting { .. } => "waiting",
             Self::Completed { .. } => "completed",
-            Self::ContinuedAsNew { .. } => "completed",
+            Self::ContinuedAsNew { .. } => "continuedAsNew",
             Self::Failed { .. } => "failed",
             Self::Stalled { .. } => "stalled",
             Self::Cancelled => "cancelled",
@@ -814,10 +814,11 @@ pub fn compensation_outcomes_from_step_outcomes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::operations::RunState;
     use serde_json::json;
 
     #[test]
-    fn fold_continue_as_new_is_completed_terminal_update() {
+    fn fold_continue_as_new_is_its_own_terminal_update() {
         let input = json!({"generation": 1, "carry": "state"});
         let (checkpoints, update) = fold_outcomes(&[StepOutcome::ContinueAsNew {
             input: Some(input.clone()),
@@ -826,7 +827,8 @@ mod tests {
         .expect("continue-as-new should fold");
 
         assert!(checkpoints.is_empty());
-        assert_eq!(update.state(), "completed");
+        assert_eq!(update.state(), RunState::ContinuedAsNew.as_str());
+        assert_ne!(update.state(), RunState::Completed.as_str());
         assert!(update.output().is_none());
         match update {
             RunUpdate::ContinuedAsNew {
