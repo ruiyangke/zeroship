@@ -7,20 +7,30 @@
  * the worker, one collection at a time in registration order, is backwards and
  * is the root of the "SCHEMA-INIT" class of dev-only bugs.
  *
- * PATHS — these are the exact files the worker opens, verified rather than
+ * PATHS - these are the exact files the worker opens, verified rather than
  * assumed:
  *
  *   DATABASE_URL           `sqlite:.zeroship/dev.sqlite`   (dev-db.ts)
- *   SqliteBackend::open    a FILE arg ⇒ session = that file,
+ *   SqliteBackend::open    a FILE arg gives session = that file,
  *                          `db_dir = path.parent()`        (backend/sqlite/mod.rs)
- *   per-app file           `<db_dir>/zs-<app_id>.sqlite`   (backend/sqlite/mod.rs)
- *   app_id in dev          `env_vars["APP_ID"]`, else the shared local AppId
- *                          (crates/zeroship-id/local-dev-app-id.json)
+ *   per-DATABASE file      `<db_dir>/zs-<alias>.sqlite`, and the alias is the
+ *                          binding's schema                 (`attach_alias_file`,
+ *                          `database_alias`, backend/sqlite/mod.rs)
+ *   the schema             `db_<database_id>`               (`schema_name`,
+ *                          crates/zeroship-core/src/database_derivation.rs)
+ *   database_id in dev     `databases.<label>.id` of zeroship.jsonc, the app's
+ *                          `primary` (`resolve_dev_database`,
+ *                          crates/zeroship-cli/src/main.rs)
  *
- * Both the migration apply and runtime use that identity in their file names.
- * Getting `app_id` wrong is the failure worth guarding against: `applyIrSqlite`
- * would report `applied: [...]` against a file nobody opens, and the app would
- * still be broken with a success line in the log.
+ * ONE IDENTITY, and it is the declared one: the apply and the runtime compose
+ * the same name because they read the same `dbs_` id out of the same file.
+ * Getting it wrong is the failure worth guarding against: `applyIrSqlite` would
+ * report `applied: [...]` against a file nobody opens, and the app would still
+ * be broken with a success line in the log.
+ *
+ * The app id is a different fact and keeps its own job here: it stamps
+ * `owner_app` provenance on every applied migration and owns each collection in
+ * the registry. It names no file.
  */
 import { mkdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -92,19 +102,39 @@ export function devSqliteDir(root: string, databaseUrl?: string): string {
   return dirname(resolve(root, sqliteDevFilePath(databaseUrl)));
 }
 
-/** The app file + journal the worker's SQLite backend derives for dev. */
+/**
+ * The ATTACH alias one database is addressable under, which is its schema.
+ *
+ * Mirrors `schema_name` in `crates/zeroship-core/src/database_derivation.rs`.
+ * The SQLite backend names the file after the alias, so this is the only place
+ * on this side that turns a `dbs_` id into a file name.
+ */
+export function devDatabaseAlias(databaseId: string): string {
+  return `db_${databaseId}`;
+}
+
+/**
+ * The database file + migration journal for one declared database.
+ *
+ * `databaseId` is REQUIRED and has no default. The runtime opens the file the
+ * BINDING names, and the binding names the database the project declared; a
+ * default here would be this side inventing an identity for a fact the file
+ * already states, which is how the apply and the runtime came to fill two
+ * different files.
+ */
 export function devSqlitePaths(
   root: string,
-  appId: string = DEV_APP_ID,
+  databaseId: string,
   databaseUrl?: string,
 ): {
   appPath: string;
   journalPath: string;
 } {
   const dir = devSqliteDir(root, databaseUrl);
+  const alias = devDatabaseAlias(databaseId);
   return {
-    appPath: join(dir, `zs-${appId}.sqlite`),
-    journalPath: join(dir, `zs-${appId}.migrations.sqlite`),
+    appPath: join(dir, `zs-${alias}.sqlite`),
+    journalPath: join(dir, `zs-${alias}.migrations.sqlite`),
   };
 }
 
@@ -125,6 +155,11 @@ export async function applyMigrationsToDevSqlite(opts: {
   migrationsDir: string;
   /** Collection names from the generated descriptor; every one maps to the dev app. */
   collections: string[];
+  /**
+   * The `dbs_` id `databases.<label>.id` declares for the database being
+   * migrated. It names the FILE, and the dev runtime attaches the same one.
+   */
+  databaseId: string;
   appId?: string;
   /**
    * The resolved `DATABASE_URL` the runtime will be spawned with. Pass the
@@ -135,7 +170,11 @@ export async function applyMigrationsToDevSqlite(opts: {
   databaseUrl?: string;
 }): Promise<ApplyReply> {
   const appId = opts.appId ?? DEV_APP_ID;
-  const { appPath, journalPath } = devSqlitePaths(opts.root, appId, opts.databaseUrl);
+  const { appPath, journalPath } = devSqlitePaths(
+    opts.root,
+    opts.databaseId,
+    opts.databaseUrl,
+  );
 
   // The apply runs BEFORE the runtime spawns, and `.zeroship/` is normally
   // created by the runtime — so on a cold checkout (or after `rm -rf

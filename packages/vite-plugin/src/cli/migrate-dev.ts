@@ -22,7 +22,7 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { genTypesFromMigrations } from "../gen-types/index.js";
-import { applyMigrationsToDevSqlite, DEV_APP_ID, devSqlitePaths } from "../gen-types/dev-apply.js";
+import { applyMigrationsToDevSqlite, devSqlitePaths } from "../gen-types/dev-apply.js";
 import {
   collectionNamesFrom,
   readGeneratedRuntimeDescriptorAt,
@@ -43,6 +43,9 @@ interface Argv {
    *  come from the file; `env.db.ts` keys `EnvDatabases` on the label. */
   label: string;
   primary: boolean;
+  /** The database's declared `dbs_` id. It names the file this applies into,
+   *  and the dev runtime attaches that same file for the same id. */
+  databaseId: string;
   /** The zeroship.jsonc that supplied them. Never null: the database has to
    *  be declared somewhere, and `databases` lives only in that file. */
   configPath: string;
@@ -119,12 +122,13 @@ function parseArgv(argv: string[]): Argv {
     outDir: resolveMember(out, "out"),
     label: selected.label,
     primary: selected.primary,
+    databaseId: selected.id,
     configPath,
   };
 }
 
 async function main(): Promise<number> {
-  const { root, migrationsDir, outDir, label, primary, configPath } = parseArgv(
+  const { root, migrationsDir, outDir, label, primary, databaseId, configPath } = parseArgv(
     process.argv.slice(2),
   );
   console.log(`[zeroship] migrations=${migrationsDir} out=${outDir} (from ${configPath})`);
@@ -153,11 +157,12 @@ async function main(): Promise<number> {
   );
   logDatabaseUrlSource(source, databaseUrl);
 
-  const { appPath } = devSqlitePaths(root, DEV_APP_ID, databaseUrl);
+  const { appPath } = devSqlitePaths(root, databaseId, databaseUrl);
   const reply = await applyMigrationsToDevSqlite({
     root,
     migrationsDir,
     collections,
+    databaseId,
     databaseUrl,
   });
 
@@ -166,7 +171,7 @@ async function main(): Promise<number> {
   // Report the COUNTS, not "ok". `applied=0 skipped=0` on a fresh database means
   // nothing ran, which is a failure wearing a success's clothes.
   console.log(
-    `[zeroship] migrations applied=${applied} skipped=${skipped} (${DEV_APP_ID}) → ${appPath}`
+    `[zeroship] migrations applied=${applied} skipped=${skipped} (${label}=${databaseId}) -> ${appPath}`
   );
   if (applied === 0 && skipped === 0) {
     console.error("[zeroship] nothing was applied and nothing was skipped — the schema is UNCHANGED");

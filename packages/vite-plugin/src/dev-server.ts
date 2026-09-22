@@ -97,11 +97,18 @@ export interface DevServerOptions {
  * are fixed, so each database owns its own pair.
  *
  * `label` and `primary` ride along because the emitted `env.db.ts` keys
- * `EnvDatabases` on the label and only the primary declares `Env.db`. A
- * `TargetDatabase` from `selectDatabase` satisfies this shape, so the dev
- * server passes the same record it already resolved.
+ * `EnvDatabases` on the label and only the primary declares `Env.db`. `id` is
+ * the declared `dbs_` id, which names the SQLite file both the apply and the
+ * runtime open. A `TargetDatabase` from `selectDatabase` satisfies this shape,
+ * so the dev server passes the same record it already resolved.
  */
-type MigrationPaths = { migrations: string; out: string; label: string; primary: boolean };
+type MigrationPaths = {
+  migrations: string;
+  out: string;
+  label: string;
+  primary: boolean;
+  id: string;
+};
 
 type FetchMethod = "fetchModule" | "getBuiltins";
 
@@ -430,7 +437,7 @@ function reportDevSchemaState(
   }
   if (expected.length === 0) return;
 
-  const { appPath } = devSqlitePaths(root, DEV_APP_ID, databaseUrl);
+  const { appPath } = devSqlitePaths(root, migrations.id, databaseUrl);
 
   let present: Set<string>;
   try {
@@ -1128,6 +1135,12 @@ export function devServerPlugin(
                 devPublisher?.path ?? bootstrapPath,
                 `--port=${devPort}`,
                 "--workers=1",
+                // The child reads `databases.<label>.id` off the same
+                // zeroship.jsonc to resolve the database it binds, so it has
+                // to select the SAME app this plugin did. A workspace with one
+                // app implies it on both sides; with several, only this is
+                // told which, so only this can say.
+                ...(options.app != null ? [`--app=${options.app}`] : []),
                 ...(devPublisher ? [`--dev-bootstrap=${bootstrapPath}`] : []),
                 "--dev-entry-loader=createDevEntryLoader",
               ],
