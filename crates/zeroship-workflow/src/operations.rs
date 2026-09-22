@@ -56,6 +56,17 @@ pub struct RunStatus {
     pub state: RunState,
     pub output: Option<Value>,
     pub error: Option<Value>,
+    /// The run a `continuedAsNew` close handed this run's work to.
+    ///
+    /// Typed and platform-minted, so it is not confusable with whatever JSON a
+    /// creator returned in `output`. Absent from the response unless the run
+    /// actually produced a successor.
+    #[serde(
+        default,
+        rename = "continuedAsNew",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub continued_as_new_run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

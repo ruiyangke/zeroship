@@ -416,12 +416,13 @@ pub(crate) async fn apply(
             continuations::member(tx, app, &run.text("id")?, run.integer("generation")?).await?;
         let id = typed_id::new_workflow_run_id();
         let key = run.optional_text("key")?;
-        let completed = Terminal {
-            state: RunState::Completed,
-            output: Some(json!({"continuedAsNew":id})),
+        let continued = Terminal {
+            state: RunState::ContinuedAsNew,
+            output: None,
             error: None,
+            successor: Some(id.clone()),
         };
-        finish_run(tx, app, run, completed, now, false).await?;
+        finish_run(tx, app, run, continued, now, false).await?;
         let options = StartOptions {
             input: seed_input.unwrap_or(Value::Null),
             key,
@@ -457,7 +458,7 @@ pub(crate) async fn apply(
                 .await?;
         }
         link_continuation(tx, app, run, &id).await?;
-        return Ok(RunState::Completed);
+        return Ok(RunState::ContinuedAsNew);
     }
     if intent == ControlIntent::Pause {
         park(tx, app, run).await?;
@@ -798,6 +799,7 @@ pub(crate) async fn finish(
         state,
         output,
         error,
+        successor: None,
     };
     finish_run(tx, app, run, terminal, now, true).await
 }
@@ -807,6 +809,13 @@ struct Terminal {
     state: RunState,
     output: Option<Value>,
     error: Option<Value>,
+    /// The run this close handed its work to, when it produced one.
+    ///
+    /// Platform data with a column of its own, so it cannot be confused with
+    /// the creator JSON `output` carries. Every close writes this field, so a
+    /// close that begins producing a successor sets it here and needs no second
+    /// mechanism to record one.
+    successor: Option<String>,
 }
 
 async fn finish_run(
@@ -821,6 +830,7 @@ async fn finish_run(
         state,
         output,
         error,
+        successor,
     } = terminal;
     let id = run.text("id")?;
     let generation = run.integer("generation")?;
@@ -833,7 +843,8 @@ async fn finish_run(
         .update(
             value!({"app_id":app.as_str(), "run_id":id.clone(), "generation":generation}),
             value!({"state":state.as_str(), "output":output.map(|value|encode(&value)).transpose()?,
-            "error":error.map(|value|encode(&value)).transpose()?, "terminal_at":now}),
+            "error":error.map(|value|encode(&value)).transpose()?, "terminal_at":now,
+            "continued_as_new_run_id":successor}),
         )
         .await?;
     for table in [

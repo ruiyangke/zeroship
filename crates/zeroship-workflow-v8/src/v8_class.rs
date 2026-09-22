@@ -497,7 +497,10 @@ impl WorkflowRun {
         Ok(promise.into())
     }
 
-    /// `run.status()` → Promise<{ state, output, error }>.
+    /// `run.status()` → Promise<{ state, output, error, continuedAsNew? }>.
+    ///
+    /// `continuedAsNew` is present only on a run that closed by handing its
+    /// work to a successor, and names that successor.
     #[v8_method]
     fn status<'s>(
         &self,
