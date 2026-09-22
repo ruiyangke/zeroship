@@ -103,6 +103,28 @@ the missing column, which is a better diagnostic than a role that does not exist
   promised and enforced. What is withdrawn is a promise about a creator's own code meeting a
   creator's own schema change.
 
+## What this moots rather than fixes
+
+Two items recorded in `docs/proposals/2026-08-28-app-database-decoupling.md` stop being open. Both
+stop for the same reason, and it is not that anyone repaired them. Saying which is which matters:
+"we fixed it" and "we stopped promising it" leave very different traces for the next reader, and
+only one of them is true here.
+
+**The availability defect.** A second schema-changing apply retired the role a live binding named,
+so that app's sessions were refused until the process dropped the binding it was holding. Nothing
+fixes this. The rotation that produced it is gone, so the defect has no mechanism left - which is
+also the cleanest statement of what the fence cost: it could take a serving app off the air for a
+schema change the app did not make and, on a shared database, did not ask for.
+
+**The workflow-replay exposure.** A pinned deployment replayed against a store that follows the
+schema forward meant old code reaching a shape it was not built against, with no role to refuse it.
+The remedy needed a fact nobody recorded - which schema shape a deployment was built against -
+and it was blocked on that. With no epoch there is nothing to record and nothing to compare, but
+the honest reading is not that the item dissolved. It is that its behaviour became the contract:
+every build now meets the current schema, replay and live dispatch alike, and a mismatch surfaces
+at query time as `42703 undefined_column` naming the column. That is the same answer this proposal
+gives everywhere else, applied to a replay.
+
 ## Open
 
 1. **Does the reaper still need the epoch arm?** `classify_role_name` attributes a stray role by
@@ -117,9 +139,14 @@ the missing column, which is a better diagnostic than a role that does not exist
    the same spirit. The relay resolves a subscriber's schema from the binding rows and never reads
    the value. The fixtures move with the column; nothing depends on it.
 
-3. **Is the dev-tier divergence row now shorter?** `docs/reference/sqlite-divergences.md` owes an
-   epoch row because the dev tier has no carrier for one. If production has no epoch either, the
-   divergence is gone rather than owed.
+3. **Is the dev-tier divergence row now shorter?** SETTLED: the divergence is gone rather than
+   owed, and it is the only item here that this change makes SIMPLER rather than smaller. The dev
+   tier never carried an epoch - the only `epoch` in `crates/zeroship-data-orm/src/backend/sqlite/`
+   is `UNIX_EPOCH` in `snapshot_fixture.rs`, which is a clock - and
+   `docs/reference/sqlite-divergences.md` carries no row for an epoch, a role or a grant. Both tiers
+   now agree by having the same nothing, so the register needs no row and the dev tier owes no
+   equivalent. Control for the absence: `sqlite` matches throughout that same file, so the empty
+   result is the register's content and not a mis-scoped search.
 
 ## Acceptance
 
