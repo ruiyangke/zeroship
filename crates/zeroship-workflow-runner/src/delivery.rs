@@ -392,7 +392,7 @@ impl<T: JobTransport> DeliverySlot<T> {
         let lease = active.claims.borrow().lease.clone();
         self.active = None;
         match result? {
-            ExecutionResult::Complete(receipt) => self.acknowledge(receipt, &lease).await,
+            ExecutionResult::Complete(receipt) => self.acknowledge(*receipt, &lease).await,
             ExecutionResult::Interrupted(control) => Ok(DeliveryOutcome::Interrupted(control)),
         }
     }
@@ -464,7 +464,7 @@ impl<T: JobTransport> JobPublisher for Submission<'_, T> {
 }
 
 enum ExecutionResult {
-    Complete(JobReceipt),
+    Complete(Box<JobReceipt>),
     Interrupted(ControlIntent),
 }
 
@@ -532,7 +532,7 @@ async fn run_active<T: JobTransport>(
             }
         }
     };
-    result.map(ExecutionResult::Complete)
+    result.map(|receipt| ExecutionResult::Complete(Box::new(receipt)))
 }
 
 fn snapshot<L: Clone>(claims: &RefCell<Claims<L>>) -> (DeliveredTask, L) {
