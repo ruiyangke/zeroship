@@ -540,40 +540,10 @@ async fn successor_is_platform_typed(store: Rc<OrmStore>) {
     let scope = service.fixture_app(app_id.clone());
     let worker = WorkerIdentity::new("successor-is-typed".into()).unwrap();
 
-    let continued = scope
-        .start(&RequestId::mint(), "Example", StartOptions::default())
-        .await
-        .unwrap();
-    let task = service.poll(&worker).await.unwrap().unwrap();
-    assert_eq!(task.invocation.run_id, continued.id);
-    service
-        .complete(
-            &worker,
-            &task.id,
-            &task.token,
-            execution(json!([{"kind":"ContinueAsNew", "input":"next"}])),
-        )
-        .await
-        .unwrap();
-    let continued_status = scope.status(&continued.id).await.unwrap();
-    assert_eq!(continued_status.state, RunState::ContinuedAsNew);
-    assert!(
-        continued_status.output.is_none(),
-        "a continuation leaves the creator output column empty"
-    );
-    let successor = continued_status
-        .continued_as_new_run_id
-        .clone()
-        .expect("a continuation names its successor");
-    assert_ne!(successor, continued.id);
-    assert_eq!(
-        scope.status(&successor).await.unwrap().state,
-        RunState::Queued
-    );
-
-    // The forgery: a creator return value with the marker's exact shape, and a
-    // value in it that names the run the creator would most like to be handed.
-    let forged = json!({"continuedAsNew": successor});
+    // The forgery: a creator return value carrying a `continuedAsNew` key over
+    // a well-formed run id the creator minted for itself. It is a plain result
+    // and the column it lands in is the whole of what says so.
+    let forged = json!({"continuedAsNew": typed_id::new_workflow_run_id()});
     let completed = scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
@@ -598,11 +568,29 @@ async fn successor_is_platform_typed(store: Rc<OrmStore>) {
     assert_eq!(
         completed_status.output.as_ref(),
         Some(&forged),
-        "the creator's output round-trips unread"
+        "the creator output round-trips unread"
     );
     assert_eq!(
         completed_status.continued_as_new_run_id, None,
         "nothing a creator returns can populate the successor field"
+    );
+
+    // The control: the same workflow under the same deployment, differing in
+    // the reported transition alone.
+    let continued = scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let successor = continue_run(&service, &scope, &worker, &continued.id).await;
+    assert_ne!(successor, continued.id);
+    assert_ne!(
+        Some(successor.as_str()),
+        forged["continuedAsNew"].as_str(),
+        "the forged name is not the one the platform minted"
+    );
+    assert_eq!(
+        scope.status(&successor).await.unwrap().state,
+        RunState::Queued
     );
 }
 
