@@ -54,8 +54,8 @@ schema, a `zeroship_workflow_migrator` role and a `zeroship_workflow` login whos
 `["workflow_manager", "pg_catalog"]`.
 
 **The creator-facing seam is small.** `crates/zeroship-workflow/src/backend.rs` defines
-`WorkflowBackend` with six methods: `start`, `status`, `signal`, `transition`, `restart`,
-`read_step_output`. `crates/zeroship-workflow-v8/src/lib.rs` already composes it through a
+`WorkflowBackend` as `start`, `status`, `signal`, `transition`, `restart`, `read_step_output`
+and `read_output`. `crates/zeroship-workflow-v8/src/lib.rs` already composes it through a
 `WorkflowBackendFactory` with `Service` and `Ready` variants.
 
 **Durability does not rest on transactions.** `crates/zeroship-workflow/src/execution.rs`:
@@ -124,14 +124,13 @@ The first three are true now.
     service  metadata coordination, placement, journal provisioning
 
   TARGET
-    worker   V8 task executor + WorkflowBackend RPC client (six methods)
+    worker   V8 task executor + WorkflowBackend RPC client (creator seam)
     service  durable fold + journal store (SQL, workflow_manager) + coordination
 ```
 
-The seam already exists and is narrow. `WorkflowBackend`'s six methods are the whole
-creator-facing surface, `crates/zeroship-workflow/src/engine.rs` is "Pure durable-workflow fold
-and DTO contracts" with no storage in it, and the V8 binding is already built to take a backend
-rather than a database.
+The seam already exists and is narrow. `WorkflowBackend` is the whole creator-facing surface,
+`crates/zeroship-workflow/src/engine.rs` is "Pure durable-workflow fold and DTO contracts" with
+no storage in it, and the V8 binding is already built to take a backend rather than a database.
 
 **The journal becomes ordinary service schema.** It is installed into `workflow_manager` by a
 platform migration, with one stamp row for the whole installation. That is what `STAMP_ROW_ID`
@@ -253,13 +252,13 @@ coordination metadata login; no customer database credentials". The service has 
 platform state out of customer databases since it was written; the journal is the piece that
 did not move.
 
-**The creator seam is six methods; the execution seam is its own.** It would be a much larger
+**The creator seam is seven methods; the execution seam is its own.** It would be a much larger
 proposal if the storage seam were the RPC boundary, because the store spans roughly twenty
 tables. It is not: the engine's fold is pure and the creator-facing backend is narrow, so the
 whole engine moves server-side and the wire carries `start`, `status`, `signal`, `transition`,
-`restart` and `read_step_output`.
+`restart`, `read_step_output` and `read_output`.
 
-Say plainly that those six are the creator-facing surface and not the whole wire. A worker also
+Say plainly that those are the creator-facing surface and not the whole wire. A worker also
 has to be given work and report it, and that path is not a trait at all. `DeliverySlot` in
 `crates/zeroship-workflow-runner/src/delivery.rs` is what production runs, and it calls
 `AppWorkflows::accept_job`, `heartbeat_job` and `complete_job` directly, in process. There is a
@@ -271,7 +270,7 @@ Those three direct calls are what has to cross, and they are the half carrying t
 properties: `renewal` in `crates/zeroship-workflow-manager/src/queue.rs` is what advances the
 manager's evidence that an execution began, `complete_job` carries the outcome batch the fold
 consumes, and `settle_attempt` in `crates/zeroship-workflow/src/service/journal.rs` counts a
-reported execution of a run body. A reader who takes "six methods" as the whole surface will
+reported execution of a run body. A reader who takes the creator seam as the whole surface will
 under-plan the cutover.
 
 ---
@@ -311,8 +310,8 @@ the decoupling needs nothing from the journal except that it not be in the way.
 Each step below lands on its own and is verifiable on its own. Nothing here is a flag day except
 step 5, and that one is a switch rather than a migration only because of Open 5.
 
-**What is easy, and what is not.** The creator seam is the easy half: `WorkflowBackend` is six
-methods with two implementations already behind a factory in `crates/zeroship-workflow-v8/src/lib.rs`,
+**What is easy, and what is not.** The creator seam is the easy half: `WorkflowBackend` is
+narrow, with two implementations already behind a factory in `crates/zeroship-workflow-v8/src/lib.rs`,
 so a third that speaks HTTP is mechanical. The execution seam is the work. `TaskTransport`'s only
 production implementor, `WorkerTasks`, holds the service and calls it directly, so it has to
 become remote - and it is the half carrying the durability semantics. Read the steps with that
@@ -330,7 +329,7 @@ protocol. This extends a working client rather than inventing one.
    today it assumes a creator binding. Make the binding a parameter rather than an assumption.
    Still nothing remote. Verify the existing suites pass with the service store behind it.
 
-3. **Serve the six creator methods, and add a client for them** in `zeroship-workflow-client`.
+3. **Serve the creator methods, and add a client for them** in `zeroship-workflow-client`.
    Not yet wired into the worker. Verify each method round-trips against the service store.
 
 4. **Carry the three direct calls across, merged into the claims that already cross.** This is
@@ -345,6 +344,10 @@ protocol. This extends a working client rather than inventing one.
    execution began, `complete_job` must still carry the outcome batch the fold consumes, and a
    reported execution of a run body must still be counted once. Verify by mutation rather than
    by suite: break each property in turn and require a test to fail on it.
+
+   The scope may be wider than these three. Open 6 leaves it undecided whether `collect_job`
+   joins them on the wire, and that is settled there rather than here. Read it before sizing
+   this step.
 
 5. **Cut the worker over** to the remote variants.
 
@@ -417,9 +420,46 @@ stall the defect fixes that motivate the move.
    transport will carry? Deciding how the journal crosses is the real design work behind this
    move. See Open 2, which is the same question seen from the payload side.
 
-2. **Payload size on the wire.** `read_step_output` and step inputs cross the boundary.
-   `WorkflowOutputRef` in `crates/zeroship-workflow/src/engine.rs` suggests large outputs are already referenced rather than
-   inlined; whether that covers every payload path needs checking before the cutover, not after.
+2. **MEASURED - referencing does not cover the creator-facing reads, and which bound governs
+   them is undecided.** The measurement settles what the paths are and leaves open which side
+   is the authority, so this item stays open on the decision rather than on the measurement.
+
+   **Referencing covers the journal, not the read.** `WorkflowOutputRef` in
+   `crates/zeroship-workflow/src/engine.rs` keeps the stored row a reference rather than an
+   inline value, and that is the whole of what it covers. The creator-facing reads materialize
+   bytes: `read_step_output` and `read_output` in `crates/zeroship-workflow/src/backend.rs` both
+   answer `Vec<u8>`, so a named step's output and a run's final output arrive whole in the
+   caller's process however they are stored.
+
+   **What bounds those reads is a host budget, not the policy.** `ObjectStepOutputs` in
+   `crates/zeroship-workflow-runner/src/payloads/objects.rs` resolves both "inside the host
+   memory budget", holds a read limit it refuses to have empty, and applies it to each read
+   through `into_bytes`, which rejects an oversized reference rather than streaming it. The
+   worker takes that limit from `TaskPayloadLimits::max_payload_bytes` in
+   `crates/zeroship-workflow-runner/src/outputs.rs`, declared there as a host budget under which
+   "Service policy remains authoritative", and `crates/zeroship-cli/src/workflow/host.rs`
+   composes the dev tier's reader the same way. The policy bound it defers to,
+   `AppPolicy::max_payload_bytes` in `crates/zeroship-core/src/workflow_policy.rs`, is enforced
+   on the way in, by `stage_payload` in `crates/zeroship-workflow/src/service/payloads.rs`, and
+   nowhere on the way out. So the payload path has the shape Open 1 records for the journal: a
+   policy bound and a host bound set independently, with nothing reconciling them, and a host
+   budget below the policy admits a payload that cannot be read back.
+
+   **The conflict is prospective rather than live.** Nothing of this crosses that transport
+   today. `zeroship-workflow-client` does not depend on `zeroship-workflow`, and the
+   `Assignment` it exchanges in `crates/zeroship-core/src/workflow_coordination.rs` carries an
+   app, a worker, a revision and an expiry. The pairs Open 1 names are also not like for like,
+   and neither is this one: the policy bounds count stored `StepCheckpoint` JSON while the
+   client bounds count a single HTTP message, and `replay` in
+   `crates/zeroship-workflow/src/service/journal.rs` narrows `StepCheckpoint` to `JournalStep`
+   and drops retrying rows, so a policy bound is an upper bound on wire bytes rather than a
+   measure of them.
+
+   **What stays undecided.** Which side is the authority once these reads cross: does the
+   transport bound rise to admit what the policy already admits, or does the policy bound fall
+   to what the transport will carry? That is the decision Plan step 4 cannot avoid, stated from
+   the payload side rather than the journal side. It is one decision, not two, so this item and
+   Open 1 close together or not at all.
 
 3. **Does `workflow_manager` become its own database?** NEEDS-DECISION, deferrable. It is a
    schema in the control database today with its own migrator, login and search path. Moving
@@ -438,10 +478,70 @@ stall the defect fixes that motivate the move.
    answer expires, and the design should say so rather than let a later reader assume a
    migration exists.
 
-6. **Does the fold moving server-side change what a worker may do?** Today the worker holds the
-   engine and can therefore observe and advance any run it is executing. Server-side, the
-   service decides what a worker is told. That is a stronger boundary and probably a better
-   one, but it is a change in authority that should be described rather than arrived at.
+6. **ANSWERED as a description - the worker loses a fold it holds only because the journal is
+   under it, and one credential does not move with it.**
+
+   **What it holds today is a store, not a run.** `build` in
+   `crates/zeroship-worker/src/workflow_creator.rs` opens the journal itself through
+   `HostStorage::open` (`crates/zeroship-workflow/src/service/store.rs`) and constructs a
+   `WorkflowService` over it. That yields `WorkflowService::begin` in
+   `crates/zeroship-workflow/src/service/app.rs` and `Transaction::database` in `store.rs`, so
+   the ORM handle for every row in the schema is held by the process that executes creator code.
+   `AppWorkflows::into_backend` (`crates/zeroship-workflow/src/service/backend.rs`) states the
+   ownership plainly: "Which store the backend reaches is a choice its construction site makes,
+   not one the handle carries." The construction site is the worker.
+
+   **What it does with that reach is not its own run.** Before `DeliverySlot::run`
+   (`crates/zeroship-workflow-runner/src/delivery.rs`) reaches `accept_job` it dispatches
+   `activate_job`, `reconcile_job`, `cron_job`, `management_job`, `release_hold_job`,
+   `collect_job`, `close_job`, `fanout_job` and `propagation_job`, and none of those starts an
+   executor. They are the fold's own sweeps over the app's journal, run in the worker because
+   that is where the journal is.
+
+   **It is also the manager's only source.** `crates/zeroship-workflow/src/service/publication.rs`
+   opens with "Creator-owned, immutable queue publication intents": a transition writes the
+   intent before COMMIT, and "Network publication happens after it". `publish_pending`
+   (`crates/zeroship-workflow-runner/src/publication.rs`) pages `AppWorkflows::pending_jobs` and
+   submits each through a `JobPublisher`, and `prepare` in
+   `crates/zeroship-workflow-runner/src/assignments.rs` marks an app the first time it binds,
+   because "A previous process may have committed intents it never published." No lease asks for
+   that sweep. It is recovery the worker owes because nothing else reads the journal.
+
+   **Nothing in the database scopes any of it.** The journal declares no role, no row-level
+   security and no grant (`crates/zeroship-workflow-schema/schema/schema.ts`). What binds the
+   handle is the schema the host composes and a check in Rust. `JournalLocation`
+   (`crates/zeroship-worker/src/workflow_host.rs`) answers `CreatorSchema` through
+   `app_derivation::schema_name`, which returns the app id, so a schema holds a single app; its
+   other arm is one journal "for every app, in a schema the service owns". `Transaction::check_app`
+   (`crates/zeroship-workflow/src/service/store.rs`) refuses a foreign app, and engages only
+   where a policy binding is set, while `OrmStore::begin` in the same file sets none and the
+   worker holds the store. Under that other arm the Rust check is the whole fence, which is Why
+   it is this way seen from the worker's side.
+
+   **What it would hold afterwards is its task and the reply.** `accept_job` answers a
+   `JobAcceptance`, `heartbeat_job` a `TaskRenewal` - "Everything one renewal changes about a
+   live delivered task, with the run control intent read in the same transaction" - and
+   `complete_job` a `JobReceipt` (`crates/zeroship-workflow/src/service/delivery.rs`). The worker
+   derives each of those for itself: the replayed receipt, the frontier decision, the reclaimed
+   lease, the control intent. Afterwards each is told to it, and a worker that disagrees has no
+   second source.
+
+   **What it costs.** Not the sweeps. They run no creator code, so they move with the fold, and
+   the recovery duty above dissolves rather than transferring: the side that commits the intent
+   is the side that publishes it. The credential is the cost. `collect_job`
+   (`crates/zeroship-workflow/src/service/collection.rs`) takes a `PayloadDeleter`
+   (`crates/zeroship-workflow/src/service/payloads.rs`), whose production implementation is
+   `PayloadObjects` (`crates/zeroship-workflow-runner/src/payloads/objects.rs`), opened over "a
+   store whose credentials are private to the workflow host". Collection needs the journal and
+   the object store in one operation, so either that credential reaches the service or collection
+   joins `accept_job`, `heartbeat_job` and `complete_job` on the wire. That is undecided.
+
+   **It is not purely subtractive.** The worker loses authority it holds as a consequence of
+   where the journal sits rather than because anything granted it. The service gains authority it
+   has never had: `workflow.database_url` is a "Platform coordination metadata login; no customer
+   database credentials" (`crates/zeroship-workflow-server/src/config.rs`), and holding the
+   journal puts creator values at rest under that login. Open 7 is where that gain is bounded,
+   and this is why it is not a formality.
 
 7. **ANSWERED - no, and the assertion is not narrowed.** Creator payload does not live in the
    platform's coordination schema. `metadata_schema_has_no_customer_authority_and_ids_are_bytewise`
@@ -510,24 +610,75 @@ stall the defect fixes that motivate the move.
    `workflow_manager` is what puts creator payload at rest in the platform schema, so the
    promotion lands before the reader rather than beside it.
 
-8. **Four creator-visible decisions the payload-free journal forces.** These are not
-   implementation detail: each changes something a creator can observe, so they are settled here
-   before a slice assumes one.
+8. **ANSWERED - a run input is an ordinary payload object, and the continuation marker becomes a
+   typed field.** These are not implementation detail: each changes something a creator can
+   observe, so they are settled here before a slice assumes one.
 
-   - Does a `Value::Null` run input mint a storage object, or does `input_ref` stay nullable? The
-     second turns `trigger.input` into `undefined` for a run started without one.
-   - Do run inputs count against `max_payload_objects` and `max_payload_storage_bytes`? They are
-     creator-visible limits, and run inputs have never consumed them.
-   - Does `RunStatus.output` materialize the object, or return a reference descriptor? The first
-     keeps the shape and adds a read to every status call; the second changes the contract.
-   - Where does `{"continuedAsNew":id}` live? `finish_run` writes it into
-     `generations.output` today, and it is platform data, so a payload reference is the wrong
-     home for it.
+   **A run input is an ordinary payload object.** `generations.input_ref` stays nullable, an empty
+   input mints no object, and an input that does become one counts against
+   `AppPolicy::max_payload_objects` and `AppPolicy::max_payload_storage_bytes` in
+   `crates/zeroship-core/src/workflow_policy.rs`, with no exemption. Those are the same decision,
+   not separate ones: `WorkflowService::stage_payload` in
+   `crates/zeroship-workflow/src/service/payloads.rs` is the single admission gate, and an input
+   consumes a counter only by minting an object there. A continuation seed already does.
+   `PreparedExecution::from_runtime_json` in `crates/zeroship-workflow-runner/src/outputs.rs`
+   references a `StepOutcome::ContinueAsNew` seed, and `PreparedExecution::stage` uploads it
+   through that gate.
 
-   Two of the four `insert_run` callers also have no reference form for their input to arrive in
-   at all - a child run's `child_input` and a schedule's input - so making them referenceable is
-   a change to `StepOutcome` and to the deploy manifest rather than a mechanism added beside
-   them.
+   A nullable reference does not reach the creator as `undefined`. `start_body` in
+   `crates/zeroship-workflow-v8/src/v8_class.rs` resolves a missing input to `Value::Null` before
+   anything durable sees it, and `WorkflowTrigger.input` in
+   `crates/zeroship-workflow/src/execution.rs` carries no `skip_serializing_if`, so `trigger.input`
+   reads the same either way. An `undefined` trigger input is a separate change to both.
+
+   The accepted cost: "no input" and "reference never attached" become one observable state,
+   because `TaskPayloadReader::input` in `crates/zeroship-workflow-runner/src/payloads.rs` returns
+   success on absence.
+
+   **The continuation marker becomes a typed field beside a distinct terminal state.** A nullable
+   typed successor column on the generation holds the successor run id and is set on any close that
+   produces a successor, and continued-as-new becomes its own `RunState` in
+   `crates/zeroship-core/src/workflow_coordination/lifecycle.rs`, joining `RunState::TERMINAL`. The
+   `{"continuedAsNew":id}` marker that the `RunUpdate::ContinuedAsNew` arm of `apply` in
+   `crates/zeroship-workflow/src/service/frontier.rs` hands to `finish_run` goes away. Temporal
+   shapes it this way: the successor is the typed `new_execution_run_id` and never rides in the
+   result payload, and the typed field and the distinct status are independent, since
+   `new_execution_run_id` also appears on an ordinary completed execution for a cron successor.
+   What it buys: a caller can tell a run that returned a value from a run that continued, without
+   matching a key inside creator-controlled JSON that a creator can also produce.
+
+   **`RunStatus.output` already returns a reference descriptor, so what is left there is a
+   defect.** `AppWorkflows::status` in `crates/zeroship-workflow/src/service/app.rs` emits a
+   descriptor for a referenced output, `StatusOutput` in `packages/workflows/src/index.ts` declares
+   the union, and `docs/reference/workflows.md` states it under "Large Outputs". The open part is
+   tracked as a defect rather than decided here: the descriptor `status` emits and the
+   `StepOutputRef` the SDK declares disagree on `kind`, and a creator holding only a run id cannot
+   dereference what `status` returns, because `WorkflowBackend::read_step_output` in
+   `crates/zeroship-workflow/src/backend.rs` addresses a step by name and a run's final output has
+   none - `finish_run` records the terminal outcome on the generation row and on no step.
+
+   **Staging is task-scoped, and that is the constraint on emptying `generations.input`.**
+   `stage_payload` requires a worker identity, a task id and a task token, and its only non-test
+   caller is `HostPayloads::stage` in `crates/zeroship-workflow-runner/src/payloads/objects.rs`,
+   reached from a worker that is executing a task. `promote` in
+   `crates/zeroship-workflow/src/service/payloads.rs` creates no object; it takes a reference a
+   worker already staged. So the continuation stages today, and a child's input leaves a worker
+   holding a task and could stage on the same path, while `AppWorkflows::start` called from a
+   request handler has no task at all and `AppWorkflows::cron_job` in
+   `crates/zeroship-workflow/src/service/cron.rs` starts its scheduled run under a `JobLease`
+   rather than a task token. Emptying the run-input column therefore needs either a task-less
+   staging path or a decision that some inputs stay inline. That is open.
+
+   The `insert_run` callers also differ in how far a reference form is from them.
+   `AppWorkflows::start` is additive: `StartOptions` in `crates/zeroship-workflow/src/operations.rs`
+   can grow a reference field beside its `input`. The child run and the schedule are not. A child's
+   input arrives on `StepOutcome::Child` in `crates/zeroship-workflow/src/engine.rs`, and a
+   schedule's on `ScheduleRegistration` in `crates/zeroship-workflow/src/service/schedules.rs`,
+   which `record_verified` in `crates/zeroship-workflow/src/service/deploys.rs` stores in
+   `__zeroship_workflow_deploys.manifest`, so both are wire-format changes. None of this lands in
+   `zeroship-control`: `DeployRegistration` appears in the worker, workflow, workflow-runner and
+   workflow-v8 crates and not in control, and control receives only the identity projection
+   `manager_schedules` in `crates/zeroship-workflow/src/service/bundle.rs`.
 
 ---
 
@@ -544,7 +695,7 @@ stall the defect fixes that motivate the move.
   and is only a filter.
 
 - **Do not make the storage seam the RPC boundary.** The store spans roughly twenty tables; the
-  creator-facing backend is six methods. Move the whole engine, not the store.
+  creator-facing backend is seven methods. Move the whole engine, not the store.
 
 - **Do not leave the journal in a creator schema and grant it explicitly.** That is the interim
   repair for defect 3, and it re-establishes the two ownership defects it was written to work

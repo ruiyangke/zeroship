@@ -16,7 +16,7 @@
 //! creator-visible state.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 
 use zeroship_core::database_role::DatabaseCapability;
 use zeroship_core::{BindingId, DatabaseId};

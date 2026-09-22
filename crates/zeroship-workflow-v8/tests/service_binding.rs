@@ -4,12 +4,15 @@
 )]
 
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::{sync::Arc, time::Duration};
 use zeroship_core::{app_id::AppId, typed_id};
 use zeroship_runtime::{
     CancelFlag, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, Runtime, SettledFetch,
 };
+use zeroship_storage::backend::OnceChunk;
 use zeroship_workflow::{
+    engine::WorkflowOutputRef,
     operations::{RunState, StartOptions},
     service::{
         AppPolicy, AppWorkflows, DeployRegistration, HostPolicies, PolicyBinding,
@@ -17,7 +20,9 @@ use zeroship_workflow::{
     },
     WorkflowExecution,
 };
-use zeroship_workflow_runner::{ready::ReadyApps, ObjectStepOutputs, PayloadObjects};
+use zeroship_workflow_runner::{
+    ready::ReadyApps, ObjectStepOutputs, PayloadObjects, WorkerPayloads,
+};
 use zeroship_workflow_v8::WorkflowBinding;
 
 struct Fixture {
@@ -236,6 +241,123 @@ async fn binding_reads_outputs_and_denies_foreign_run_handles() {
     ))
     .await;
     assert_eq!(stranger, json!({"code":"workflow_not_found"}));
+}
+
+/// A creator holding only a run id reads that run's final output. The three
+/// fetches below share one handler source and one call, and differ in exactly
+/// one variable each: who is asking, and where the run's output was stored.
+#[compio::test]
+async fn binding_reads_blob_backed_run_output_and_denies_foreign_run_handles() {
+    let fixture = Fixture::new().await;
+    let worker = WorkerIdentity::new("output-binding".into()).unwrap();
+    let bytes = br#"{"secret":"app-a"}"#;
+    let reference = WorkflowOutputRef {
+        hash: format!("{:x}", Sha256::digest(bytes)),
+        size: i64::try_from(bytes.len()).unwrap(),
+        content_type: Some("application/json".into()),
+    };
+    let blob = fixture
+        .app
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let task = fixture.service.poll(&worker).await.unwrap().unwrap();
+    fixture
+        .service
+        .payloads(&fixture.objects)
+        .stage(
+            &worker,
+            &task.id,
+            &task.token,
+            &RequestId::mint(),
+            reference.clone(),
+            Box::new(OnceChunk::new(bytes.to_vec().into())),
+        )
+        .await
+        .unwrap();
+    fixture
+        .service
+        .complete(
+            &worker,
+            &task.id,
+            &task.token,
+            WorkflowExecution::from_runtime_value(json!({"outcomes":[
+                {"kind":"RunCompleted","outputRef":reference}
+            ]}))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    // The premise this capability exists for: status hands out a descriptor,
+    // so the bytes are unreachable without a read of their own.
+    let described = fixture.app.status(&blob.id).await.unwrap().output.unwrap();
+    assert_eq!(described["kind"], "ref", "{described}");
+    assert_eq!(described["hash"], reference.hash);
+
+    // The control: same app, same call, an output small enough to have stayed
+    // in the journal, so no object was ever written for it.
+    let inline = fixture
+        .app
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let task = fixture.service.poll(&worker).await.unwrap().unwrap();
+    fixture
+        .service
+        .complete(
+            &worker,
+            &task.id,
+            &task.token,
+            WorkflowExecution::from_runtime_value(json!({"outcomes":[
+                {"kind":"RunCompleted","output":{"secret":"app-a"}}
+            ]}))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture.app.status(&inline.id).await.unwrap().output.unwrap(),
+        json!({"secret":"app-a"}),
+        "the control's output must reach status whole, not as a descriptor"
+    );
+
+    let source = |run: &str| {
+        format!(
+            r"
+        export default {{ async fetch(_request, env) {{
+            const run = env.workflows.Example.get({});
+            try {{
+                const output = await run.readOutput();
+                return Response.json({{output:JSON.parse(new TextDecoder().decode(output))}});
+            }} catch (error) {{ return Response.json({{code:error.code}}); }}
+        }} }};
+    ",
+            serde_json::to_string(run).unwrap()
+        )
+    };
+    let owner = fetch(fixture.runtime(
+        &fixture.app,
+        Some(fixture.app.app_id().clone()),
+        &source(&blob.id),
+    ))
+    .await;
+    assert_eq!(owner, json!({"output":{"secret":"app-a"}}));
+    let stranger = fetch(fixture.runtime(
+        &fixture.other,
+        Some(fixture.other.app_id().clone()),
+        &source(&blob.id),
+    ))
+    .await;
+    assert_eq!(stranger, json!({"code":"workflow_not_found"}));
+    // An inline output owns no object, so there is nothing here to open. The
+    // creator reads that value off `status`, which carried it whole above.
+    let inline_read = fetch(fixture.runtime(
+        &fixture.app,
+        Some(fixture.app.app_id().clone()),
+        &source(&inline.id),
+    ))
+    .await;
+    assert_eq!(inline_read, json!({"code":"workflow_not_found"}));
 }
 
 #[compio::test]
