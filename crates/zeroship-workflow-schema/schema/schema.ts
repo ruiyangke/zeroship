@@ -310,7 +310,7 @@ export function workflowSchema(namespace) {
     fk("occurrence_run", ["app_id", "run_id"], "runs", ["app_id", "id"]),
   ], [{ name: "occurrence_job_identity", columns: ["app_id", "job_id"] }]);
   create("payloads", {
-    ...generation(), id: text(), task_id: text(), request_id: text(), hash: text(), size: integer(),
+    ...generation(), id: text(), task_id: t.text(), request_id: text(), hash: text(), size: integer(),
     content_type: t.text(), state: text(), created_at: integer(), expires_at: integer(),
   }, ["app_id", "id"], [
     generationFk("payloads"),

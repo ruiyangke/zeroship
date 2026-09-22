@@ -14,6 +14,7 @@ use zeroship_data_orm::orm::{FindOptions, FromRow};
 
 mod authority;
 pub(in crate::service::tests) mod fixture;
+mod ownerless;
 mod pages;
 mod references;
 mod retirement;
@@ -117,4 +118,9 @@ paired!(
     sqlite_collect_unsettled_page_resumes_on_its_frozen_plan,
     postgres_collect_unsettled_page_resumes_on_its_frozen_plan,
     pages::frozen_plan
+);
+paired!(
+    sqlite_collect_reclaims_an_expired_staged_payload_that_names_no_task,
+    postgres_collect_reclaims_an_expired_staged_payload_that_names_no_task,
+    ownerless::ownerless
 );

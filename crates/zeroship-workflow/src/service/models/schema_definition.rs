@@ -203,7 +203,7 @@ zeroship_data_orm::orm::schema! {
             app_id: Text,
             run_id: Text,
             generation: BigInt,
-            task_id: Text,
+            task_id: Nullable<Text>,
             request_id: Text,
             hash: Text,
             size: BigInt,

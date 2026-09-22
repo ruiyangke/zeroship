@@ -169,7 +169,7 @@ CREATE INDEX IF NOT EXISTS "__zeroship_workflow_occurrence_run_idx" ON "__zerosh
 
 CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_occurrences_scope_key" ON "__zeroship_workflow_schema"."__zeroship_workflow_occurrences" ("app_id", "schedule_id", "revision", "at");
 
-CREATE TABLE "__zeroship_workflow_schema"."__zeroship_workflow_payloads" ("id" text COLLATE "C" PRIMARY KEY NOT NULL, "app_id" text COLLATE "C" NOT NULL, "run_id" text NOT NULL, "generation" bigint NOT NULL, "task_id" text NOT NULL, "request_id" text NOT NULL, "hash" text NOT NULL, "size" bigint NOT NULL, "content_type" text, "state" text NOT NULL, "created_at" bigint NOT NULL, "expires_at" bigint NOT NULL, CONSTRAINT "__zeroship_workflow_payload_task" FOREIGN KEY ("app_id", "run_id", "generation", "task_id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_tasks" ("app_id", "run_id", "generation", id) ON DELETE RESTRICT, CONSTRAINT "__zeroship_workflow_payloads_generation" FOREIGN KEY ("app_id", "run_id", "generation") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_generations" ("app_id", "run_id", "generation") ON DELETE RESTRICT);
+CREATE TABLE "__zeroship_workflow_schema"."__zeroship_workflow_payloads" ("id" text COLLATE "C" PRIMARY KEY NOT NULL, "app_id" text COLLATE "C" NOT NULL, "run_id" text NOT NULL, "generation" bigint NOT NULL, "task_id" text, "request_id" text NOT NULL, "hash" text NOT NULL, "size" bigint NOT NULL, "content_type" text, "state" text NOT NULL, "created_at" bigint NOT NULL, "expires_at" bigint NOT NULL, CONSTRAINT "__zeroship_workflow_payload_task" FOREIGN KEY ("app_id", "run_id", "generation", "task_id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_tasks" ("app_id", "run_id", "generation", id) ON DELETE RESTRICT, CONSTRAINT "__zeroship_workflow_payloads_generation" FOREIGN KEY ("app_id", "run_id", "generation") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_generations" ("app_id", "run_id", "generation") ON DELETE RESTRICT);
 
 CREATE INDEX IF NOT EXISTS "__zeroship_workflow_payload_task_idx" ON "__zeroship_workflow_schema"."__zeroship_workflow_payloads" ("app_id", "run_id", "generation", "task_id");
 
@@ -250,4 +250,4 @@ ALTER TABLE "__zeroship_workflow_schema"."__zeroship_workflow_tasks" ADD COLUMN 
 
 
 ALTER TABLE "__zeroship_workflow_schema"."__zeroship_workflow_generations" ADD COLUMN "continued_as_new_run_id" text;
-INSERT INTO "__zeroship_workflow_schema".__zeroship_workflow_schema_version (id, version, fingerprint) VALUES ('workflow', 4, '5d5040adcc4fbf36fe281ba6613447328f211da3cd8b1a921f355e66cad14a78');
+INSERT INTO "__zeroship_workflow_schema".__zeroship_workflow_schema_version (id, version, fingerprint) VALUES ('workflow', 4, '4179c74bc151a5f24105312eaedffd078cdb12c119f7208d387e9110464cd27b');
