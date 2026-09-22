@@ -1,5 +1,4 @@
 use super::*;
-use crate::service::{runner::TaskTransport, WorkerIdentity};
 use futures::channel::oneshot;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -131,7 +130,7 @@ async fn fault_contract(store: Rc<OrmStore>) {
     let deployments = Deployments::with_source(dir, faults.clone()).await;
     let (service, app, _, deployments) = registered_with_deployments(store, deployments).await;
     let scope = service.fixture_app(app.clone());
-    let tasks = service.tasks(WorkerIdentity::new("artifact-worker".into()).unwrap());
+    let tasks = TaskHandle::new(&service, "artifact-worker");
     let old = scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await

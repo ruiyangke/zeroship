@@ -12,10 +12,10 @@ use zeroship_workflow::{
     operations::{RunState, StartOptions},
     service::{
         delivery::{DeliveredTask, JobAcceptance},
-        runner::ExecutionGuard,
         AppPolicy, RequestId,
     },
 };
+use zeroship_workflow_runner::{ExecutionGuard, RunPayloads};
 
 #[path = "../../../../tests/fixtures/workflow_deployments.rs"]
 mod deployment_fixture;
@@ -230,7 +230,7 @@ async fn factory_executes_delivered_v8_frontiers_with_its_creator_artifact_and_p
             Some(receipt.clone())
         );
         assert!(
-            matches!(runtime.app.accept_job(&lease).await.unwrap(), JobAcceptance::Settled(replayed) if replayed == receipt)
+            matches!(runtime.app.accept_job(&lease).await.unwrap(), JobAcceptance::Settled(replayed) if *replayed == receipt)
         );
         let status = runtime.app.status(&started.id).await.unwrap();
         if status.state == RunState::Completed {
@@ -246,6 +246,7 @@ async fn factory_executes_delivered_v8_frontiers_with_its_creator_artifact_and_p
     );
     let saved = runtime
         .app
+        .payloads(&runtime.objects)
         .read_step_output(&started.id, "saved", 0)
         .await
         .unwrap()

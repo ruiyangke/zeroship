@@ -3,24 +3,23 @@
     reason = "background contracts run customer storage on their compio thread"
 )]
 
+use super::objects::Objects;
 use super::*;
 use crate::{engine::WorkflowOutputRef, service::WorkerIdentity};
 use std::time::Instant;
-use zeroship_storage::{backend::OnceChunk, LocalFs, StorageStore};
 
 #[compio::test]
 async fn sqlite_background_work_uses_only_host_assigned_apps() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("zs-workflow.sqlite");
     schema::initialize_sqlite(&path).unwrap();
-    background_contract(Rc::new(sqlite_store(&path).await), dir.path()).await;
+    background_contract(Rc::new(sqlite_store(&path).await)).await;
 }
 
 #[compio::test]
 async fn postgres_background_work_uses_only_host_assigned_apps() {
     let fixture = PostgresFixture::start().await;
-    let dir = tempfile::tempdir().unwrap();
-    background_contract(Rc::new(fixture.store.clone()), dir.path()).await;
+    background_contract(Rc::new(fixture.store.clone())).await;
 }
 
 async fn seed_app(
@@ -28,6 +27,7 @@ async fn seed_app(
     service: &WorkflowService,
     app: &AppId,
     worker: &WorkerIdentity,
+    objects: &Objects,
 ) -> String {
     deployments
         .activate(
@@ -61,7 +61,7 @@ async fn seed_app(
                 size: i64::try_from(body.len()).unwrap(),
                 content_type: None,
             },
-            Box::new(OnceChunk::new(bytes::Bytes::from_static(body))),
+            objects.upload(body),
         )
         .await
         .unwrap()
@@ -120,13 +120,12 @@ async fn seed_unassigned_backlog(service: &WorkflowService, source: &AppId) {
     clippy::too_many_lines,
     reason = "the restart contract checks selection, isolation and expiry recovery together"
 )]
-async fn background_contract(store: Rc<OrmStore>, path: &Path) {
+async fn background_contract(store: Rc<OrmStore>) {
     let (service, assigned, foreign, deployments) = registered_service(store.clone()).await;
-    let storage = StorageStore::from_backend(Arc::new(LocalFs::new(path.join("objects"))));
-    let service = service.with_payload_storage(storage.clone()).unwrap();
+    let objects = Objects::new();
     let worker = WorkerIdentity::new("customer-worker".into()).unwrap();
-    let assigned_payload = seed_app(&deployments, &service, &assigned, &worker).await;
-    let foreign_payload = seed_app(&deployments, &service, &foreign, &worker).await;
+    let assigned_payload = seed_app(&deployments, &service, &assigned, &worker, &objects).await;
+    let foreign_payload = seed_app(&deployments, &service, &foreign, &worker, &objects).await;
     seed_unassigned_backlog(&service, &foreign).await;
     let assigned_broadcast = service
         .fixture_app(assigned.clone())
@@ -165,8 +164,6 @@ async fn background_contract(store: Rc<OrmStore>, path: &Path) {
 
     let reopened = WorkflowService::open(store, Arc::new(HostPolicies::default()))
         .await
-        .unwrap()
-        .with_payload_storage(storage)
         .unwrap();
     assert!(reopened.poll(&worker).await.unwrap().is_none());
     assert!(matches!(
@@ -179,7 +176,7 @@ async fn background_contract(store: Rc<OrmStore>, path: &Path) {
             .await,
         Err(WorkflowServiceError::Unavailable(_))
     ));
-    assert_eq!(reopened.collect_payloads(1).await.unwrap(), 0);
+    assert_eq!(reopened.collect_payloads(1, &objects).await.unwrap(), 0);
     reopened
         .fixture_register(&assigned, leased_policy(1, AppPolicy::default()))
         .await
@@ -212,18 +209,9 @@ async fn background_contract(store: Rc<OrmStore>, path: &Path) {
                 .unwrap(),
         )
         .unwrap();
-    assert_eq!(reopened.collect_payloads(1).await.unwrap(), 1);
-    let payloads = service.payload_storage.as_ref().unwrap();
-    assert!(payloads
-        .get(assigned.as_str(), &assigned_payload)
-        .await
-        .unwrap()
-        .is_none());
-    assert!(payloads
-        .get(foreign.as_str(), &foreign_payload)
-        .await
-        .unwrap()
-        .is_some());
+    assert_eq!(reopened.collect_payloads(1, &objects).await.unwrap(), 1);
+    assert!(!objects.exists(&assigned, &assigned_payload));
+    assert!(objects.exists(&foreign, &foreign_payload));
 
     let tx = service.begin().await.unwrap();
     journal_update(&tx, "tasks", json!({"id":task.id}), json!({"deadline":0})).await;

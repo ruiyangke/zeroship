@@ -70,12 +70,12 @@ impl JobReceipt {
         if lease.delivery().job != self.job {
             return Err(conflict());
         }
-        if !valid_outcome(&self.job.operation, self.outcome) {
+        if !valid_outcome(&self.job.operation, &self.outcome) {
             return Err(invalid());
         }
         Ok(Settlement {
             delivery: lease.delivery().clone(),
-            outcome: self.outcome,
+            outcome: self.outcome.clone(),
             successors: Vec::new(),
         })
     }
@@ -84,7 +84,7 @@ impl JobReceipt {
 #[derive(Debug)]
 pub enum JobAcceptance {
     Execute(Box<DeliveredTask>),
-    Settled(JobReceipt),
+    Settled(Box<JobReceipt>),
     /// The job remains unsettled: code, policy, a live task or creator time
     /// prevents execution. This is not a durable rejection or an ACK.
     Deferred,
@@ -108,11 +108,53 @@ impl DeliveredTask {
     /// # Errors
     /// Refuses execution or renewal after the confirmed creator lease expires.
     pub fn remaining(&self) -> Result<Duration, WorkflowServiceError> {
-        self.expires
-            .checked_duration_since(Instant::now())
-            .filter(|duration| !duration.is_zero())
-            .ok_or(WorkflowServiceError::Timeout)
+        expires_in(self.expires)
     }
+
+    /// Adopt a renewal whole. The creator deadline, the granted lease and the
+    /// monotonic expiration derived from them take effect together, so no
+    /// caller can extend the stored deadline without the expiration that
+    /// bounds execution under it.
+    pub fn renew(&mut self, renewal: TaskRenewal) {
+        self.delivery = renewal.delivery;
+        self.expires = renewal.expires;
+        self.assignment.deadline = renewal.deadline;
+        self.assignment.lease_ms = renewal.lease_ms;
+    }
+}
+
+/// Everything one renewal changes about a live delivered task, with the run
+/// control intent read in the same transaction.
+///
+/// The renewal answers a task its holder already has, so it carries no
+/// [`TaskAssignment`]: the invocation and its journal stay on the holder's copy
+/// instead of crossing the reply on every heartbeat of a long step.
+#[derive(Debug, Clone)]
+pub struct TaskRenewal {
+    delivery: Delivery,
+    expires: Instant,
+    deadline: i64,
+    lease_ms: i64,
+    control: ControlIntent,
+}
+
+impl TaskRenewal {
+    /// The run's effective control intent when this renewal committed.
+    #[must_use]
+    pub const fn control(&self) -> ControlIntent {
+        self.control
+    }
+}
+
+/// Creator authority left on the monotonic clock.
+///
+/// # Errors
+/// Refuses execution or renewal at or after the confirmed expiration.
+fn expires_in(expires: Instant) -> Result<Duration, WorkflowServiceError> {
+    expires
+        .checked_duration_since(Instant::now())
+        .filter(|duration| !duration.is_zero())
+        .ok_or(WorkflowServiceError::Timeout)
 }
 
 pub(super) struct CapturedLease {
@@ -219,7 +261,7 @@ impl Record {
         match (&self.outcome, self.completed_at) {
             (Some(outcome), Some(_)) => {
                 let outcome = decode(outcome)?;
-                self.check_outcome(job, outcome)?;
+                self.check_outcome(job, &outcome)?;
                 Ok(Some(JobReceipt {
                     job: job.clone(),
                     outcome,
@@ -233,7 +275,7 @@ impl Record {
     fn check_outcome(
         &self,
         job: &JobSpec,
-        outcome: JobOutcome,
+        outcome: &JobOutcome,
     ) -> Result<(), WorkflowServiceError> {
         if !valid_outcome(&job.operation, outcome) {
             return Err(invalid());
@@ -254,20 +296,22 @@ impl Record {
     }
 }
 
-const fn valid_outcome(operation: &JobOperation, outcome: JobOutcome) -> bool {
+const fn valid_outcome(operation: &JobOperation, outcome: &JobOutcome) -> bool {
     if !outcome.valid_for(operation) {
         return false;
     }
     match operation {
         JobOperation::Activate { .. } => matches!(outcome, JobOutcome::Completed {}),
-        JobOperation::Advance { .. } => true,
+        // Advance admits every scheduling outcome, and `JobOutcome::valid_for`
+        // settles Management on its own: it pairs the result with the command
+        // that asked for it, which no family test here could narrow further.
+        JobOperation::Advance { .. } | JobOperation::Management { .. } => true,
         JobOperation::Cron { .. } => {
             matches!(outcome, JobOutcome::Completed {} | JobOutcome::Rejected {})
         }
         JobOperation::Reconcile {} => {
             matches!(outcome, JobOutcome::Completed {} | JobOutcome::Waiting {})
         }
-        JobOperation::Management { .. } => matches!(outcome, JobOutcome::Management { .. }),
         JobOperation::Close { .. } => matches!(outcome, JobOutcome::Closed { .. }),
         JobOperation::Collect {}
         | JobOperation::Fanout { .. }
@@ -328,7 +372,7 @@ impl AppWorkflows {
         if let Some(existing) = &existing {
             if let Some(receipt) = existing.receipt(job)? {
                 tx.commit().await?;
-                return Ok(JobAcceptance::Settled(receipt));
+                return Ok(JobAcceptance::Settled(Box::new(receipt)));
             }
         }
         let lease = &captured?;
@@ -355,7 +399,7 @@ impl AppWorkflows {
             let receipt = finish(&tx, job, JobOutcome::Rejected {}, now).await?;
             lease.check(self)?;
             tx.commit().await?;
-            return Ok(JobAcceptance::Settled(receipt));
+            return Ok(JobAcceptance::Settled(Box::new(receipt)));
         }
         let Some(run) = reclaim(&mut tx, &self.app, run.ok_or_else(invalid)?, now).await? else {
             lease.check(self)?;
@@ -378,7 +422,7 @@ impl AppWorkflows {
             let receipt = finish(&tx, job, outcome, now).await?;
             lease.check(self)?;
             tx.commit().await?;
-            return Ok(JobAcceptance::Settled(receipt));
+            return Ok(JobAcceptance::Settled(Box::new(receipt)));
         }
         let worker = WorkerIdentity::new(delivery.worker_id.as_str().into())?;
         let lease_ms = remaining_millis(lease)?;
@@ -412,6 +456,8 @@ impl AppWorkflows {
 
     /// Renew a creator task only under an identity-matching manager grant.
     /// The executor's original hard budget remains independent of this renewal.
+    /// The reply carries only what the renewal changed, which the caller applies
+    /// to the task it already holds.
     ///
     /// # Errors
     /// Refuses stale task/delivery identity, expired authority and storage errors.
@@ -419,7 +465,7 @@ impl AppWorkflows {
         &self,
         task: &DeliveredTask,
         grant: &impl JobLease,
-    ) -> Result<(DeliveredTask, ControlIntent), WorkflowServiceError> {
+    ) -> Result<TaskRenewal, WorkflowServiceError> {
         let delivery = self.task_delivery(task, grant)?;
         task.remaining()?;
         let lease = CapturedLease::capture(self, grant)?;
@@ -442,14 +488,17 @@ impl AppWorkflows {
                 super::propagation::effective_control(&tx, &claim.app, &claim.run).await?;
             if !lease.policy.policy.admission || !lease.policy.policy.dispatch {
                 tx.commit().await?;
-                return Ok((
-                    task.clone(),
-                    if control == ControlIntent::None {
+                return Ok(TaskRenewal {
+                    delivery: task.delivery.clone(),
+                    expires: task.expires,
+                    deadline: task.assignment.deadline,
+                    lease_ms: task.assignment.lease_ms,
+                    control: if control == ControlIntent::None {
                         ControlIntent::Pause
                     } else {
                         control
                     },
-                ));
+                });
             }
             let lease_ms = remaining_millis(&lease)?;
             let deadline = super::app::deadline(claim.now, lease_ms)?;
@@ -464,13 +513,14 @@ impl AppWorkflows {
             tx.commit().await?;
             lease.check(self)?;
             task.remaining()?;
-            let mut renewed = task.clone();
-            renewed.delivery = delivery;
-            renewed.expires = expires;
-            renewed.assignment.deadline = deadline;
-            renewed.assignment.lease_ms = lease_ms;
-            renewed.remaining()?;
-            Ok((renewed, control))
+            expires_in(expires)?;
+            Ok(TaskRenewal {
+                delivery,
+                expires,
+                deadline,
+                lease_ms,
+                control,
+            })
         })
         .await
     }
@@ -840,7 +890,7 @@ pub(super) async fn finish(
     if record.receipt(job)?.is_some() {
         return Err(conflict());
     }
-    record.check_outcome(job, outcome)?;
+    record.check_outcome(job, &outcome)?;
     let changed = tx.database().collection(job_receipts::Entity::COLLECTION)?.execute(Operation::Update {
         filter:value!({"app_id":job.app_id.as_str(), "id":job.id.as_str(), "outcome":null, "completed_at":null}),
         patch:value!({"outcome":encode(&outcome)?, "completed_at":now}), many:true,

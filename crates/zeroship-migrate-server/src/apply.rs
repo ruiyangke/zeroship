@@ -54,14 +54,21 @@ pub struct ApplyMigrationsRequest {
     /// sha256 of the `schema.runtime.json` the SAME build emitted from these
     /// documents, lowercase hex.
     ///
-    /// This is the deploy precondition's anchor. `genTypesFromMigrations` calls
-    /// `genArtifacts` ONCE and writes both `schema.runtime.json` and
-    /// `migrations.ir.json` from that single reply, so the hash names the
-    /// descriptor that corresponds to exactly this document set. The control
-    /// plane later refuses to make a deploy live unless the manifest's
-    /// `runtime_descriptor.hash` equals the hash on the app's newest APPLIED
-    /// row - which is how a descriptor claiming a column is masked cannot go
-    /// live over a database that still holds plaintext there.
+    /// `genTypesFromMigrations` calls `genArtifacts` ONCE and writes both
+    /// `schema.runtime.json` and `migrations.ir.json` from that single reply,
+    /// so the hash names the descriptor that corresponds to exactly this
+    /// document set.
+    ///
+    /// NOTHING ON THE DEPLOY PATH COMPARES IT, and that is the design rather
+    /// than an omission. `admit_bindings`
+    /// (`crates/zeroship-control/src/publication/catalog.rs`) admits a deploy on
+    /// bindings alone, because a descriptor comparison is an equality test and
+    /// equality couples every app on a shared database to every other: one
+    /// app's migration, a purely additive one included, would invalidate the
+    /// build of every co-tenant while all of them kept running correctly. The
+    /// check that belongs in its place is a SUBSET test at isolate build in the
+    /// worker - refuse when the database lacks something the app requires, say
+    /// nothing when it has grown what the app does not use.
     ///
     /// WHAT THIS PROVES IS ORDERING, NOT TRUTH. The value is client-declared: a
     /// creator who hand-edits both generated files can make them agree about a

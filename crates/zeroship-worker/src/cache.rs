@@ -12,7 +12,7 @@ use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::{Runtime, RuntimeLimits};
 use zeroship_runtime::{EnvSnapshot, ModuleEntry, NetPolicy};
 use zeroship_storage::StorageBackendConfig;
-use zeroship_workflow::service::runner::ready::ReadyApps;
+use zeroship_workflow_runner::ready::ReadyApps;
 
 #[cfg(test)]
 pub(crate) mod fixture;
@@ -654,6 +654,17 @@ pub struct LoadedMeta {
     pub env_version: i64,
     /// Worker-facing raw-TCP policy snapshot the isolate was built with.
     pub net_policy: AppNetPolicy,
+    /// Per-database schema epochs control reported when this isolate was
+    /// built.
+    ///
+    /// The isolate captured the binding its sessions narrow with while it
+    /// built, and the epoch is the last component of that binding's role
+    /// name. An apply that rotates the epoch retires that role, so an isolate
+    /// left standing across one is refused at `SET LOCAL ROLE` on every
+    /// session it opens. Recording what it was built against is what lets
+    /// `sync::needs_reload` see the rotation - nothing else about the app
+    /// changes when a schema does.
+    pub binding_epochs: std::collections::BTreeMap<zeroship_core::DatabaseId, u32>,
 }
 
 thread_local! {

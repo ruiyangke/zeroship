@@ -237,6 +237,7 @@ impl Cluster {
             database.clone(),
             edge.clone(),
             LIVE_EPOCH as u32,
+            DatabaseCapability::ReadWrite,
         )
         .expect("the fixture ids compose a legal role name")
     }

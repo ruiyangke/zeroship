@@ -30,9 +30,10 @@ use zeroship_core::{
 };
 use zeroship_workflow::{
     deployment_holds::DeploymentHoldClient,
-    service::{publication::JobPublisher, runner::delivery::JobTransport},
+    service::publication::JobPublisher,
     WorkflowServiceError,
 };
+use zeroship_workflow_runner::delivery::JobTransport;
 use zeroship_workflow_manager::{
     capacity::LocalCapacity,
     coordinator::{Coordinator, Options as CoordinatorOptions, Placed},

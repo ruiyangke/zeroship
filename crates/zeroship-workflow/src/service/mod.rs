@@ -31,11 +31,14 @@ mod policy;
 pub mod propagation;
 pub mod publication;
 pub mod reconciliation;
-pub use payloads::{PayloadRead, PayloadSlot, StagedPayload};
-pub use policy::{
-    AssignedPolicies, HostPolicies, IngressEpochs, PolicyBinding, PolicyRefresh, PolicySnapshot,
+pub use payloads::{
+    validate_reference, PayloadDeleter, PayloadOpener, PayloadSlot, PayloadTarget, PayloadWriter,
+    StagedPayload, StepOutput,
 };
-pub mod runner;
+pub use policy::{
+    AssignedPolicies, HostPolicies, IngressEpochs, PolicyAuthority, PolicyBinding, PolicyRefresh,
+    PolicySnapshot,
+};
 mod schedules;
 mod signals;
 pub use schedules::{

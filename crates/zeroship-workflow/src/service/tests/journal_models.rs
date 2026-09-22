@@ -266,3 +266,111 @@ async fn read_contract(store: Rc<OrmStore>) {
         tx.commit().await.unwrap();
     }
 }
+
+#[compio::test]
+async fn sqlite_model_replayed_failure_carries_only_the_bridge_keys() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
+    replayed_error_contract(Rc::new(store)).await;
+}
+
+#[compio::test]
+async fn postgres_model_replayed_failure_carries_only_the_bridge_keys() {
+    let fixture = PostgresFixture::start().await;
+    replayed_error_contract(Rc::new(fixture.store.clone())).await;
+}
+
+/// The failure a dispatch replays, narrowed to what rebuilds the thrown object.
+///
+/// `wfDeserializeError` in `crates/zeroship-workflow-v8/js/dispatch.js` picks a
+/// class by `type`, takes `message`, overwrites `stack` and copies `retryable`
+/// when it is a boolean, and reads nothing else, so a key outside that set can
+/// never reach a creator's `catch`. The dispatch view drops it rather than
+/// carrying it to the worker to be discarded there.
+///
+/// The `journal::load` half is the control that keeps the narrowing where it
+/// belongs: the stored checkpoint still holds the recorded value whole. Applied
+/// at the storage site the same projection would take `retryable`, which is what
+/// decides whether a failed step gets another execution, and the child-join
+/// comparisons, which match a settled join against the error the child itself
+/// recorded.
+///
+/// What this does not catch: the surviving `message` and `stack` are ordinary
+/// strings under no cap, so this narrows the row rather than bounding it. It
+/// says nothing about which producers write a key outside the set, nothing about
+/// the stored row's own size, and nothing about the bridge continuing to read
+/// only those four - that stays pinned by the bridge's own suite.
+async fn replayed_error_contract(store: Rc<OrmStore>) {
+    let (service, app_id, _, _deployments) = registered_service(store).await;
+    let run_id = typed_id::new_workflow_run_id();
+    let recorded = json!({
+        "type":"PermanentError", "message":"order did not pass review",
+        "stack":"PermanentError: order did not pass review\n    at review",
+        "retryable":false, "strikes":3, "cause":{"code":"REVIEW_DECLINED"},
+    });
+    let crossing = json!({
+        "type":"PermanentError", "message":"order did not pass review",
+        "stack":"PermanentError: order did not pass review\n    at review",
+        "retryable":false,
+    });
+    let withheld = ["strikes", "cause"];
+
+    let mut tx = service.begin().await.unwrap();
+    app::lock_app(&mut tx, &app_id).await.unwrap();
+    let now = tx.now().await.unwrap();
+    let deploy = app::active_deploy(&mut tx, &app_id).await.unwrap();
+    app::insert_root_run(
+        &mut tx,
+        &app_id,
+        &run_id,
+        "Example",
+        &deploy.id,
+        &StartOptions::default(),
+        now,
+    )
+    .await
+    .unwrap();
+    let mut step = StepCheckpoint::completed_run(0, "review", json!(null));
+    step.state = "failed".into();
+    step.output = None;
+    step.error = Some(recorded.clone());
+    tx.database()
+        .collection(models::steps::Entity::COLLECTION)
+        .unwrap()
+        .insert(value!({
+            "id":storage_id(), "app_id":app_id.as_str(), "run_id":run_id.as_str(), "generation":0,
+            "ordinal":i64::from(step.ordinal), "name":step.name.clone(), "occurrence":0,
+            "origin_generation":0, "kind":step.kind.clone(), "state":step.state.clone(),
+            "record":journal::encode_checkpoint(&step, None, None).unwrap(),
+        }))
+        .await
+        .unwrap();
+
+    let stored = journal::load(&mut tx, &app_id, &run_id, 0).await.unwrap();
+    assert_eq!(stored.len(), 1, "{stored:?}");
+    assert_eq!(
+        stored[0].error.as_ref(),
+        Some(&recorded),
+        "the stored checkpoint keeps the recorded failure whole: {stored:?}"
+    );
+
+    let run = app::lock_run(&mut tx, &app_id, &run_id).await.unwrap();
+    let invocation = frontier::invocation(&mut tx, &app_id, &run).await.unwrap();
+    assert_eq!(invocation.journal.len(), 1, "{invocation:?}");
+    let replayed = invocation.journal[0]
+        .error
+        .clone()
+        .expect("a failed step replays its failure");
+    assert_eq!(replayed, crossing, "{replayed}");
+    for key in withheld {
+        assert!(
+            recorded.get(key).is_some(),
+            "{key} must be recorded for this case to bind: {recorded}"
+        );
+        assert!(
+            replayed.get(key).is_none(),
+            "{key} must not reach the bridge: {replayed}"
+        );
+    }
+    tx.commit().await.unwrap();
+}

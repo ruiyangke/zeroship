@@ -101,9 +101,7 @@ async fn exact_target(store: Rc<OrmStore>) {
     assert_eq!(
         original.outcome,
         JobOutcome::Management {
-            outcome: ManagementOutcome::Applied {
-                state: RunState::Queued
-            }
+            outcome: restarted(&target.id)
         }
     );
     assert_deployment(&service, &app_id, &run, &target).await;

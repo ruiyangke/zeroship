@@ -12,6 +12,14 @@
 //! `zeroship_data_orm::backend::postgres::pg_session_sql` and read by
 //! `pg_error::classify_pg_per_app_session_setup`.
 //!
+//! Open 7's pooled-connection reset rides the same target, because the claim
+//! that a narrowing cannot outlive its transaction spans three mechanisms -
+//! the `BEGIN` that
+//! `crates/zeroship-data-orm/src/backend/postgres/executor.rs` issues before
+//! the setup batch, the transaction scope of `SET LOCAL`, and the release path
+//! of `libs/compio-postgres/src/pool.rs` - and no one of them can be argued
+//! from the others.
+//!
 //! **Every arm carries its control.** A denial arm that ran against a fixture
 //! which granted nothing passes for the wrong reason, so each denial is paired
 //! with the grant shape that must still succeed. Two arms have controls that
@@ -30,7 +38,15 @@ mod postgres_fixture;
 use compio_postgres::error::{DbError, SqlState};
 use compio_postgres::Pool;
 use std::rc::Rc;
+use std::time::Duration;
+use zeroship_core::database_role::DatabaseCapability;
+use zeroship_core::{BindingId, DatabaseId};
+use zeroship_data_orm::backend::postgres::PostgresBackend;
+use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::budgets::{DB_LOCK_TIMEOUT_MS, DB_STATEMENT_TIMEOUT_MS};
+use zeroship_data_orm::encryption::ProjectKeySource;
+use zeroship_data_orm::error::{BeginIntent, SettleIntent};
+use zeroship_data_orm::executor::ScopedExecutor;
 
 /// The deploy pin is `postgres:16` (`deploy/compose/docker-compose.yml`), and
 /// `inherit_option` - the whole inherit arm - does not exist below it. An arm
@@ -824,4 +840,345 @@ async fn the_driver_reports_the_setup_batch_s_first_failure_by_sqlstate() {
     }
 
     drain(vec![worker, admin]).await;
+}
+
+/// The login every lease in the pooled-reset arm authenticates as.
+const POOLED_RESET_LOGIN: &str = "zeroship_worker";
+
+/// **Arm 8.** A lease abandoned mid-statement under a binding role hands the
+/// next checkout no reach into that binding's database.
+///
+/// `SET LOCAL ROLE` is transaction scoped, and the pool queues a ROLLBACK for
+/// a session it cannot prove idle (`libs/compio-postgres/src/pool.rs`,
+/// `Pool::return_client`), so the narrowing dies with the transaction. That is
+/// a claim about mechanisms in two crates, and what it protects is a tenant
+/// boundary: a role that survived the return would hand the next borrower of
+/// the same physical backend the previous borrower's database.
+///
+/// **The narrowing here is the production one.**
+/// `zeroship_data_orm::executor::ScopedExecutor::open_tx_session` for
+/// `PostgresBackend` (`crates/zeroship-data-orm/src/backend/postgres/executor.rs`)
+/// issues the `BEGIN` and only then calls `apply_session_authority`
+/// (`crates/zeroship-data-orm/src/backend/postgres/implementation.rs`), which
+/// sends the batch
+/// `crates/zeroship-data-orm/src/backend/postgres/pg_session_sql.rs`
+/// composes in `tx_session_setup_sql`. Nothing below spells `SET LOCAL ROLE`,
+/// so moving the narrowing out of the transaction, or changing what the batch
+/// says, lands here.
+///
+/// **Mid-flight is an abandoned future, not a cancellation.** A statement is
+/// put on the wire and the future holding the lease is dropped while it is
+/// still unsettled: no `COMMIT`, no `ROLLBACK`, no `CancelRequest`. That is
+/// the residue path the design reasons about - a lane whose isolate was
+/// evicted or whose request future was dropped - and the alternatives destroy
+/// what this arm has to measure. Delivering a cancellation through
+/// `zeroship_data_orm::driver::DriverSession::canceller` clones the client's
+/// pool cancel lease, and `Pool::return_client` force-closes any session whose
+/// lease outlived it (`libs/compio-postgres/src/client.rs`,
+/// `Client::pool_cancel_lease_prevents_reuse`), so a cancelled lease is
+/// retired rather than reused and the refusal below would be measured on a
+/// brand-new backend. Terminating the backend takes the session with it, for
+/// the same reason.
+///
+/// **Both ends of the transaction, because they fail differently.** The
+/// abandoned arm is the subject; a second arm narrows the same connection
+/// again, settles it with a COMMIT, and checks out once more. A bare
+/// `SET ROLE` is indistinguishable from `SET LOCAL ROLE` on the abandoned
+/// path - `PostgreSQL` undoes a plain `SET` when the transaction rolls back -
+/// so the COMMIT arm is what makes the LOCAL in the batch load-bearing
+/// against a live server rather than only against the composer's own string.
+///
+/// **What would make this pass for free, and what forecloses it:**
+/// - *The narrowing never took effect, so there was nothing to leak.* The
+///   bare login is refused the row BEFORE any narrowing, the narrowed session
+///   is asserted to be running as the binding role, and it reads the row the
+///   bare login was just refused. A fixture that granted nothing fails that
+///   middle arm.
+/// - *The next checkout was a different physical connection.* The pool caps at
+///   one, every checkout's backend process id is compared - against the
+///   driver's own startup value and against `pg_backend_pid()` - and the
+///   pool's creation and eviction counters must not move across either
+///   residue path. The superuser's backend supplies the instrument control
+///   that these ids do distinguish connections.
+/// - *The next checkout got a broken connection, so everything fails.* Each
+///   recycled checkout reads a table the bare login is entitled to, and the
+///   connection narrows again through the same production call and reaches the
+///   database.
+#[compio::test]
+async fn a_lease_abandoned_mid_statement_lends_the_next_checkout_no_database() {
+    let postgres = postgres_fixture::Postgres::start();
+    let admin = superuser(&postgres).await;
+
+    // The role and the schema are DERIVED by the binding the data plane
+    // carries; the DDL follows them. A fixture that named its own role would
+    // fail at session setup instead of measuring the reset.
+    let binding = DbBinding::to_database(
+        "app_fence",
+        "deploy_fence",
+        DatabaseId::mint(),
+        BindingId::mint(),
+        1,
+        DatabaseCapability::ReadWrite,
+    )
+    .expect("the fixture ids compose a legal role name");
+    let role = binding.session_role().expect("a creator binding narrows");
+    let schema = binding.schema().as_str();
+    let orders = format!("SELECT total FROM \"{schema}\".orders WHERE id = 1");
+
+    admin
+        .batch_execute(&format!(
+            "CREATE ROLE zs_fence_db NOLOGIN;
+             CREATE ROLE \"{role}\" NOLOGIN;
+             CREATE ROLE {POOLED_RESET_LOGIN} LOGIN PASSWORD '{FIXTURE_PASSWORD}'
+               NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+             CREATE SCHEMA \"{schema}\";
+             CREATE TABLE \"{schema}\".orders (id int PRIMARY KEY, total int NOT NULL);
+             INSERT INTO \"{schema}\".orders VALUES (1, 42);
+             GRANT USAGE ON SCHEMA \"{schema}\" TO zs_fence_db;
+             GRANT SELECT ON \"{schema}\".orders TO zs_fence_db;
+             GRANT zs_fence_db TO \"{role}\" WITH SET FALSE;
+             GRANT \"{role}\" TO {POOLED_RESET_LOGIN} WITH INHERIT FALSE;
+             CREATE TABLE public.heartbeat (id int PRIMARY KEY);
+             INSERT INTO public.heartbeat VALUES (1);
+             GRANT SELECT ON public.heartbeat TO PUBLIC"
+        ))
+        .await
+        .expect("the binding ladder, its database, and a table the login owns");
+
+    let worker_url = {
+        let mut url = url::Url::parse(&postgres.url()).expect("the fixture URL parses");
+        url.set_username(POOLED_RESET_LOGIN)
+            .expect("the fixture URL accepts a username");
+        url.set_password(Some(FIXTURE_PASSWORD))
+            .expect("the fixture URL accepts a password");
+        url.to_string()
+    };
+    // ONE physical connection, so "the next checkout" is the same backend
+    // rather than a fresh one that never held the role.
+    let pool = Rc::new(
+        Pool::connect(&worker_url, 1)
+            .await
+            .expect("the worker login connects"),
+    );
+    let created_before = pool.metrics().connections_created.get();
+    let evicted_before = pool.metrics().evictions.get();
+    let backend = PostgresBackend::new(
+        Rc::clone(&pool),
+        worker_url.clone(),
+        ProjectKeySource::unavailable(),
+    );
+
+    // BEFORE: the bare login cannot reach the database, so the read the
+    // narrowed session performs below is one only the role can perform.
+    let lease = pool.acquire().await.expect("a pooled lease");
+    let backend_pid = lease.process_id();
+    let baseline = lease
+        .query(&orders, &[])
+        .await
+        .expect_err("the bare worker login must not reach the binding's database");
+    assert_eq!(
+        server_error(&baseline).code(),
+        &SqlState::INSUFFICIENT_PRIVILEGE,
+        "the login holds the binding role WITH INHERIT FALSE, so it reaches nothing on its own",
+    );
+    drop(lease);
+
+    // The instrument control for every process-id comparison below: two
+    // different backends report different ids.
+    let other_backend_pid: i32 = admin
+        .query("SELECT pg_backend_pid() AS pid", &[])
+        .await
+        .expect("the superuser reports its own backend")[0]
+        .get("pid");
+    assert_ne!(
+        other_backend_pid, backend_pid,
+        "pg_backend_pid must distinguish connections, or reuse cannot be measured",
+    );
+
+    // NARROW, through the call the data plane makes.
+    let session = backend
+        .open_tx_session(&binding, BeginIntent::Default)
+        .await
+        .expect("the ORM opens a transaction and narrows it to the binding role");
+    assert_eq!(
+        session.server_process_id(),
+        Some(backend_pid),
+        "the capped pool must hand back the same backend",
+    );
+    let narrowed = session
+        .query(
+            "SELECT current_user::text AS who, pg_backend_pid() AS pid",
+            &[],
+        )
+        .await
+        .expect("the narrowed session answers");
+    assert_eq!(
+        narrowed[0]["who"].as_str(),
+        Some(role),
+        "the narrowing must have taken effect before there is anything to leak",
+    );
+    assert_eq!(
+        narrowed[0]["pid"].as_i64(),
+        Some(i64::from(backend_pid)),
+        "the server must agree with the driver about which backend this is",
+    );
+    let reached = session
+        .query(&orders, &[])
+        .await
+        .expect("the narrowed session reaches the database its binding names");
+    assert_eq!(
+        reached[0]["total"].as_i64(),
+        Some(42),
+        "the row the bare login was refused"
+    );
+
+    // MID-FLIGHT. A statement goes on the wire and the lease is dropped while
+    // it is still unsettled - no COMMIT, no ROLLBACK, no cancellation.
+    let abandoned = compio::time::timeout(
+        Duration::from_millis(100),
+        session.query("SELECT pg_sleep(2)", &[]),
+    )
+    .await;
+    assert!(
+        abandoned.is_err(),
+        "the statement must still be unsettled when the lease is dropped",
+    );
+    drop(session);
+
+    // THE NEXT CHECKOUT, of the same physical connection.
+    let reused = pool
+        .acquire()
+        .await
+        .expect("the pool hands the abandoned session back out");
+    assert_eq!(
+        reused.process_id(),
+        backend_pid,
+        "the next checkout must be the backend the previous borrower narrowed",
+    );
+    assert_eq!(
+        pool.metrics().connections_created.get(),
+        created_before,
+        "a replacement connection would make the refusal below meaningless",
+    );
+    assert_eq!(
+        pool.metrics().evictions.get(),
+        evicted_before,
+        "the abandoned session must have been recycled, not retired",
+    );
+    assert_eq!(pool.total_count(), 1, "the pool never grew past its cap");
+
+    // THE SUBJECT. The role is gone, and with it the reach it carried.
+    let identity = reused
+        .query(
+            "SELECT current_user::text AS who, pg_backend_pid() AS pid",
+            &[],
+        )
+        .await
+        .expect("the recycled session answers");
+    assert_eq!(
+        identity[0].get::<_, String>("who"),
+        POOLED_RESET_LOGIN,
+        "a narrowing that outlived its transaction would still be current_user here",
+    );
+    assert_eq!(
+        identity[0].get::<_, i32>("pid"),
+        backend_pid,
+        "the server must agree that this is the same backend",
+    );
+    let refused = reused
+        .query(&orders, &[])
+        .await
+        .expect_err("the next checkout must not reach the database the previous borrower held");
+    assert_eq!(
+        server_error(&refused).code(),
+        &SqlState::INSUFFICIENT_PRIVILEGE,
+        "the refusal must be PostgreSQL's, on the same statement the narrowed session ran",
+    );
+
+    // CONTROL: the same checkout reads what the bare login is entitled to, so
+    // the refusal is the role's absence and not a broken connection.
+    let heartbeat = reused
+        .query("SELECT id FROM public.heartbeat WHERE id = 1", &[])
+        .await
+        .expect("the recycled session is usable");
+    assert_eq!(heartbeat.len(), 1, "the login's own table must still read");
+    drop(reused);
+
+    // THE SECOND RESIDUE PATH, differing in one variable: the lease settles
+    // with a COMMIT instead of being abandoned. It doubles as the control that
+    // the fence is re-establishable on this same connection through the same
+    // production call.
+    //
+    // The abandoned path above cannot tell `SET LOCAL ROLE` from a bare
+    // `SET ROLE`, because PostgreSQL undoes a plain `SET` when the transaction
+    // rolls back. A COMMIT keeps one and reverts the other, so this is where
+    // the LOCAL in the batch is load-bearing.
+    let committed = backend
+        .open_tx_session(&binding, BeginIntent::Default)
+        .await
+        .expect("the recycled connection narrows again");
+    assert_eq!(
+        committed.server_process_id(),
+        Some(backend_pid),
+        "still the same backend",
+    );
+    let again = committed
+        .query(&orders, &[])
+        .await
+        .expect("the re-narrowed session reaches its database again");
+    assert_eq!(again[0]["total"].as_i64(), Some(42));
+    let (_terminal, settle_error) = committed.settle(SettleIntent::Commit).await;
+    assert!(settle_error.is_none(), "{settle_error:?}");
+    drop(committed);
+
+    let after_commit = pool
+        .acquire()
+        .await
+        .expect("the pool hands the committed session back out");
+    assert_eq!(
+        after_commit.process_id(),
+        backend_pid,
+        "the checkout after the COMMIT must be the same backend too",
+    );
+    assert_eq!(
+        pool.metrics().connections_created.get(),
+        created_before,
+        "no replacement connection across either residue path",
+    );
+    assert_eq!(
+        pool.metrics().evictions.get(),
+        evicted_before,
+        "no eviction across either residue path",
+    );
+    let after_identity = after_commit
+        .query("SELECT current_user::text AS who", &[])
+        .await
+        .expect("the session recycled after a COMMIT answers");
+    assert_eq!(
+        after_identity[0].get::<_, String>("who"),
+        POOLED_RESET_LOGIN,
+        "a role that was not transaction scoped would survive the COMMIT",
+    );
+    let refused_after_commit = after_commit
+        .query(&orders, &[])
+        .await
+        .expect_err("a committed transaction must not leave its database reachable either");
+    assert_eq!(
+        server_error(&refused_after_commit).code(),
+        &SqlState::INSUFFICIENT_PRIVILEGE,
+        "the refusal must be PostgreSQL's, on the same statement the narrowed session ran",
+    );
+    let heartbeat_after_commit = after_commit
+        .query("SELECT id FROM public.heartbeat WHERE id = 1", &[])
+        .await
+        .expect("the session recycled after a COMMIT is usable");
+    assert_eq!(
+        heartbeat_after_commit.len(),
+        1,
+        "the login's own table must still read"
+    );
+    drop(after_commit);
+
+    drop(backend);
+    drain(vec![pool, admin]).await;
 }

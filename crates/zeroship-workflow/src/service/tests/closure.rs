@@ -4,6 +4,7 @@
     reason = "closure fixtures stay on their compio runtime"
 )]
 
+use super::objects::{Objects, StepOutputs};
 use super::*;
 use crate::{
     operations::{SignalOptions, StartOptions},
@@ -839,7 +840,11 @@ async fn sqlite_fenced_acceptance_establishes_a_newer_epoch_and_retries_once() {
     // call; its retry captures the binding's newly installed epoch instead.
     epochs.fails.set(false);
     epochs.installs.set(true);
-    let backend = scope.clone().into_backend(&fixture.service, 1024).unwrap();
+    let objects = Objects::new();
+    let backend = scope
+        .clone()
+        .into_backend(&fixture.service, StepOutputs::shared(&objects, 1024))
+        .unwrap();
     backend
         .signal(started.id.clone(), approved())
         .await

@@ -120,6 +120,7 @@ pub fn harness_binding(app_id: &str) -> zeroship_data_orm::binding::DbBinding {
                     zeroship_core::DatabaseId::mint(),
                     zeroship_core::BindingId::mint(),
                     HARNESS_EPOCH,
+                    HARNESS_CAPABILITY,
                 )
                 .expect("a minted database and edge compose a legal role name")
             })
@@ -145,6 +146,7 @@ pub fn harness_binding_at_deploy(
         edge.database().clone(),
         edge.binding().clone(),
         edge.epoch(),
+        edge.database_capability(),
     )
     .expect("a harness binding's ids compose a legal role name")
 }
@@ -241,6 +243,15 @@ pub fn harness_database(app_id: &str) -> zeroship_core::DatabaseId {
 /// ladder and a test that asserts against a retired epoch cannot disagree about
 /// which epoch is live.
 pub const HARNESS_EPOCH: u32 = 1;
+
+/// The capability every harness binding is minted with.
+///
+/// Read-write, because a harness provisions BOTH capability roles on the
+/// cluster and then exercises the engine, which writes. A read-only harness
+/// binding is composed per test by the one test that is about a read-only
+/// binding, so this constant is what every other test varies nothing about.
+pub const HARNESS_CAPABILITY: zeroship_core::database_role::DatabaseCapability =
+    zeroship_core::database_role::DatabaseCapability::ReadWrite;
 
 /// The capability role a binding's column grants are issued to.
 ///
@@ -355,6 +366,7 @@ pub fn harness_binding_at_deploy_for(
         edge.database().clone(),
         edge.binding().clone(),
         edge.epoch(),
+        edge.database_capability(),
     )
     .expect("a harness binding composes a legal role name at any deploy")
 }

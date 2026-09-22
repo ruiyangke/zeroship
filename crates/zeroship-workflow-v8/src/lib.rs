@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use zeroship_runtime::plugin::{JavaScriptModule, NativePlugin, NativeRegistrar};
 use zeroship_workflow::backend::SharedWorkflowBackend;
-use zeroship_workflow::service::runner::ready::ReadyApps;
+use zeroship_workflow_runner::ready::ReadyApps;
 
 pub use v8_class::{is_excluded_workflow_property, mint_workflows};
 

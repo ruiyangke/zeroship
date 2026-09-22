@@ -123,7 +123,7 @@ stateless app credentials without a per-request database lookup. If
 `manifest_json` is missing, unparsable, or fails `Manifest::validate()`, the
 registry falls back to `Manifest::passthrough()` and logs an error.
 
-`Registry::get_versions()` builds `VersionMap<Uuid, AppVersionInfo>` for workers. The manifest in that feed is optional, so undeployed apps can still appear in the version map with `manifest = None`.
+`Registry::get_versions()` builds `VersionMap<Uuid, AppVersionInfo>` for workers. The manifest in that feed is optional, so undeployed apps can still appear in the version map with `manifest = None`. Each entry also carries `binding_epochs`, the schema epoch of every database the app holds a live binding to, read through `zeroship_core::live_binding::LIVE_BINDINGS_FROM_WHERE_EVERY_APP`. It is what tells a worker that an apply rotated the role a resident isolate's sessions narrow to, so the isolate is replaced and its binding re-resolved rather than fenced at `SET LOCAL ROLE`; an app with no live binding carries the empty map, which is how a withdrawn binding reaches the worker too.
 
 Gateway polls `/internal/routes` every 5 seconds. Worker polls `/internal/versions` every 5 seconds and fetches env snapshots lazily from `/internal/apps/{app_id}/env` when `env_version` changes.
 These feeds are polled rather than pushed so the control plane stays stateless with respect to gateway and worker consumers.
@@ -142,11 +142,16 @@ commits a schema delta advances, and the epoch is part of the binding role
 name - so a worker holding the epoch it first resolved composes a role the
 apply after next drops, and every session that app opens is then refused at
 `SET LOCAL ROLE`. The binding is deliberately not re-read on a bare environment
-refresh: live isolates consult the store at each `env.db` call, so carrying a
-rotation into it under a resident isolate would let code built against an older
-shape succeed against the schema that replaced it, which is the direction the
-epoch fence exists to catch. Resolving the epoch belongs with replacing the
-isolate, and nothing does that today.
+refresh. An isolate captures the binding its sessions narrow with while it
+BUILDS, by value, so a store that moves cannot reach one already running - that
+isolate keeps the epoch it captured and is refused once the epoch retires, which
+is the fence working. What a re-read would reach is the isolate built AFTER it
+from an older deployment, which would capture the current epoch and run code
+against a shape the schema has left, the one direction the fence cannot catch.
+So the epoch is installed where the isolate is replaced: `needs_reload`
+(`crates/zeroship-worker/src/sync.rs`) compares `AppVersionInfo::binding_epochs`
+alongside the deploy hash and the env version, and `resupply_bindings` installs
+the current set before the replacement is built.
 
 Control resolves the app's project from the registry and serializes initial
 provisioning by locking that project. The wrapped key lives

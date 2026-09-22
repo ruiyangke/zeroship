@@ -95,11 +95,43 @@ pub(crate) fn replay(steps: &[StepCheckpoint]) -> Vec<JournalStep> {
             state: step.state.clone(),
             output: step.output.clone(),
             output_ref: step.output_ref.clone(),
-            error: step.error.clone(),
+            error: replay_error(step.error.as_ref()),
             child_run_id: step.child_run_id.clone(),
             compensation_state: step.compensation_state.clone(),
         })
         .collect()
+}
+
+/// The keys the replay bridge rebuilds a thrown error from.
+const REPLAYED_ERROR_KEYS: [&str; 4] = ["type", "message", "stack", "retryable"];
+
+/// A recorded failure as the replay bridge reads it.
+///
+/// `wfDeserializeError` in `crates/zeroship-workflow-v8/js/dispatch.js` picks a
+/// class by `type`, takes `message`, overwrites `stack` and copies `retryable`
+/// when it is a boolean. It reads nothing else, so every other key a body
+/// recorded is already dropped there rather than reaching a `catch`. This is the
+/// one unbounded field of the row with no reference form at any size, and the
+/// view is rebuilt for every dispatch, so it is narrowed here instead of
+/// travelling to the worker to be discarded.
+///
+/// The stored checkpoint keeps its value whole: [`retryable`] decides whether a
+/// failed step gets another execution, [`validate_child_checkpoint`] reads the
+/// type of an unsettled child join, and [`validate_child_result`] matches a
+/// settled one against the error the child itself recorded.
+///
+/// A recorded value that is not an object carries none of these keys and leaves
+/// an empty one, which is what the bridge already makes of it: neither spelling
+/// selects a class or a message, so both reach the body as a bare `Error`.
+fn replay_error(error: Option<&Value>) -> Option<Value> {
+    let error = error?;
+    let mut projected = serde_json::Map::new();
+    for key in REPLAYED_ERROR_KEYS {
+        if let Some(value) = error.get(key) {
+            projected.insert(key.to_owned(), value.clone());
+        }
+    }
+    Some(Value::Object(projected))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -266,6 +298,21 @@ pub(crate) async fn update(
     save_checkpoint(tx, app, id, generation, step, None).await
 }
 
+/// Rewrite one step row in place, and record that the journal moved.
+///
+/// This is the single funnel for rewriting a step a replay has already been
+/// handed, so the run's journal revision is advanced here rather than at each
+/// caller: a caller added later inherits the bookkeeping instead of having to
+/// remember it, and a rewrite that reached the row without advancing the
+/// revision would leave two dispatches disagreeing about one revision.
+///
+/// The frontier revision cannot carry this. It authorizes one dispatch and is
+/// pinned for that authorization's whole lifetime - the advance job is
+/// published at it, `publication_id` hashes it into an immutable operation,
+/// [`super::tasks::assign`] stamps it on the task inside the transaction that
+/// consumes that job, and `authorize_task` refuses every later claim whose task
+/// disagrees with the run. Moving it from here would dispatch runs that could
+/// never report.
 async fn save_checkpoint(
     tx: &Transaction,
     app: &AppId,
@@ -320,6 +367,20 @@ async fn save_checkpoint(
     if changed != 1 {
         return Err(WorkflowServiceError::Internal(
             "workflow checkpoint changed".into(),
+        ));
+    }
+    let moved = tx
+        .database()
+        .collection(models::runs::Entity::COLLECTION)?
+        .execute(Operation::Update {
+            filter: value!({"app_id":app.as_str(), "id":id, "journal_revision":{"$lt":i64::MAX}}),
+            patch: value!({"$inc":{"journal_revision":1}}),
+            many: true,
+        })
+        .await?;
+    if !matches!(moved, Output::Count(1)) {
+        return Err(WorkflowServiceError::ResourceExhausted(
+            "workflow journal revision exhausted".into(),
         ));
     }
     Ok(())

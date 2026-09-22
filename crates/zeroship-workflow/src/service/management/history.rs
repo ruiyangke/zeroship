@@ -38,7 +38,7 @@ struct PendingReceipt {
 }
 
 pub(super) enum Observed {
-    Replay(JobReceipt),
+    Replay(Box<JobReceipt>),
     /// The run's applied management revision, absent until its first command.
     Fresh(Option<i64>),
 }
@@ -94,7 +94,7 @@ pub(super) async fn inspect(
         if current.is_none_or(|revision| revision < command.revision) {
             return Err(invalid());
         }
-        return Ok(Observed::Replay(receipt));
+        return Ok(Observed::Replay(Box::new(receipt)));
     }
     // Independent anchors prevent a damaged request projection from hiding a
     // retained receipt or allowing a new revision to replace its command.
@@ -231,7 +231,9 @@ pub(super) async fn finish(
         command,
         &JobReceipt {
             job: command.job.clone(),
-            outcome: JobOutcome::Management { outcome },
+            outcome: JobOutcome::Management {
+                outcome: outcome.clone(),
+            },
         },
     )?;
     delivery::finish(tx, command.job, JobOutcome::Management { outcome }, now).await

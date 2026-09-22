@@ -583,6 +583,7 @@ pub(super) async fn assign(
         "id":task_id.clone(), "app_id":app.as_str(), "run_id":id.clone(), "generation":generation,
         "worker":worker.as_str(), "epoch":epoch, "token_hash":token.hash(), "deadline":expires,
         "state":"leased", "created_at":now, "frontier_revision":run.integer("frontier_revision")?,
+        "journal_revision":run.integer("journal_revision")?,
     })).await?;
     let state = if run.text("state")? == "compensating" {
         "compensating"

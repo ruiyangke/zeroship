@@ -240,4 +240,10 @@ DROP TABLE "__zeroship_workflow_schema"."__zeroship_workflow_advance_publication
 DROP TABLE "__zeroship_workflow_schema"."__zeroship_workflow_fanout_publications";
 
 DROP TABLE "__zeroship_workflow_schema"."__zeroship_workflow_propagation_publications";
-INSERT INTO "__zeroship_workflow_schema".__zeroship_workflow_schema_version (id, version, fingerprint) VALUES ('workflow', 2, '3292677db1efdf400dd959ec755d41849636178c5cabe4af549ccf6e11fabfd6');
+
+
+
+ALTER TABLE "__zeroship_workflow_schema"."__zeroship_workflow_runs" ADD COLUMN "journal_revision" bigint NOT NULL DEFAULT 1;
+
+ALTER TABLE "__zeroship_workflow_schema"."__zeroship_workflow_tasks" ADD COLUMN "journal_revision" bigint NOT NULL DEFAULT 1;
+INSERT INTO "__zeroship_workflow_schema".__zeroship_workflow_schema_version (id, version, fingerprint) VALUES ('workflow', 3, 'abbf48f238a6635e2346ec6ab7208ffede474ad72ebb213a1f597b06285cf7ed');

@@ -343,7 +343,7 @@ application event log written by `emit` in `crates/zeroship-workflow/src/service
 by nothing, its `delivered_at` declared in `crates/zeroship-workflow/src/service/models/schema_definition.rs` and never written or
 read. Tests in `crates/zeroship-workflow/src/service/tests/management.rs` and `crates/zeroship-workflow/src/service/tests/management/atomic_application.rs` use it as a rollback
 witness and need a different one. The confusion is in the code as well as in this document:
-`crates/zeroship-workflow/src/service/delivery.rs` and `crates/zeroship-workflow/src/service/runner/delivery.rs` both say "the creator outbox" in comments that are about
+`crates/zeroship-workflow/src/service/delivery.rs` and `crates/zeroship-workflow-runner/src/delivery.rs` both say "the creator outbox" in comments that are about
 the publication intents, so the name already refers to two different things.
 
 The per-kind tables go only under Open 3's second shape. Under the first they move rather than
