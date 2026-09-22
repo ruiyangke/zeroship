@@ -423,6 +423,7 @@ impl AppWorkflows {
                 outcome.output.map(|value| decode(&value)).transpose()?
             },
             error: outcome.error.map(|value| decode(&value)).transpose()?,
+            continued_as_new_run_id: outcome.continued_as_new_run_id,
         };
         tx.commit().await?;
         Ok(status)

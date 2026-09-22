@@ -38,6 +38,7 @@ pub(super) struct Generation {
     pub output: Option<String>,
     pub output_ref: Option<String>,
     pub error: Option<String>,
+    pub continued_as_new_run_id: Option<String>,
 }
 
 #[derive(FromRow)]
@@ -88,6 +89,7 @@ impl Generation {
             output: self.output,
             output_ref: self.output_ref,
             error: self.error,
+            continued_as_new_run_id: self.continued_as_new_run_id,
         }
     }
 }
@@ -115,6 +117,7 @@ impl Membership {
                 output: generation.output.clone(),
                 output_ref: generation.output_ref.clone(),
                 error: generation.error.clone(),
+                continued_as_new_run_id: generation.continued_as_new_run_id.clone(),
             },
         })
     }
