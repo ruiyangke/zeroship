@@ -1318,37 +1318,54 @@ fn only_intent_producing_operations_can_re_establish_responsibility() {
     assert!(producing > 0 && maintenance > 0);
 }
 
+/// `RunState::ALL` is what every other check here enumerates, so a variant
+/// missing from it would take all of them past a state nothing covers.
+///
+/// `position` is an exhaustive match, so the compiler refuses a variant with no
+/// arm; reading `ALL[position]` back is what refuses an arm pointing anywhere
+/// but the slot that holds the variant, and `ALL` cannot offer such a slot
+/// without listing it. The two together are what make the array the variant set
+/// rather than a hand-list beside it.
+#[test]
+fn every_run_state_occupies_the_slot_it_names() {
+    for state in RunState::ALL {
+        assert_eq!(
+            RunState::ALL[state.position()],
+            state,
+            "{} does not occupy the slot it names",
+            state.as_str()
+        );
+    }
+    let mut names = RunState::ALL.map(RunState::as_str).to_vec();
+    names.sort_unstable();
+    let distinct = names.len();
+    names.dedup();
+    assert_eq!(names.len(), distinct, "two run states share a name");
+}
+
 /// Queries that select live runs by state string read `RunState::TERMINAL`, and
 /// code that decides whether a run is at rest reads `is_terminal`. A state in
 /// only one of them is a run the platform stops dispatching but keeps counting
 /// as live, so the two must enumerate the same set.
 #[test]
 fn the_terminal_state_names_and_the_terminal_predicate_agree() {
-    let all = [
-        RunState::Queued,
-        RunState::Running,
-        RunState::Sleeping,
-        RunState::Waiting,
-        RunState::Paused,
-        RunState::Stalled,
-        RunState::Compensating,
-        RunState::Completed,
-        RunState::Failed,
-        RunState::Cancelled,
-    ];
-    // Every declared variant is covered, so a new one cannot slip past unnamed.
     for name in RunState::TERMINAL {
         assert!(
-            all.iter().any(|state| state.as_str() == name),
+            RunState::ALL.iter().any(|state| state.as_str() == name),
             "terminal name is not a run state: {name}"
         );
     }
     let mut terminal = 0;
     let mut live = 0;
-    for state in all {
+    for state in RunState::ALL {
         let named = RunState::TERMINAL.contains(&state.as_str());
         assert_eq!(named, state.is_terminal(), "{}", state.as_str());
         assert_eq!(state.as_str().parse::<RunState>().unwrap(), state);
+        assert_eq!(
+            serde_json::to_value(state).unwrap(),
+            serde_json::Value::String(state.as_str().to_owned()),
+            "the serialized name differs from as_str",
+        );
         if state.is_terminal() {
             terminal += 1;
         } else {
@@ -1357,4 +1374,20 @@ fn the_terminal_state_names_and_the_terminal_predicate_agree() {
     }
     assert_eq!(terminal, RunState::TERMINAL.len());
     assert!(live > 0);
+}
+
+/// A run that continued as new is at rest: its work moved to the successor, so
+/// nothing further dispatches it and a live-run query must not return it.
+#[test]
+fn a_continued_run_is_terminal_and_names_itself_distinctly() {
+    assert!(RunState::ContinuedAsNew.is_terminal());
+    assert!(RunState::TERMINAL.contains(&RunState::ContinuedAsNew.as_str()));
+    assert_ne!(
+        RunState::ContinuedAsNew.as_str(),
+        RunState::Completed.as_str()
+    );
+    assert_eq!(
+        "continuedAsNew".parse::<RunState>().unwrap(),
+        RunState::ContinuedAsNew
+    );
 }

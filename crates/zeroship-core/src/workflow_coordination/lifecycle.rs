@@ -82,7 +82,7 @@ impl RestartOptions {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "camelCase")]
 pub enum RunState {
     Queued,
     Running,
@@ -94,29 +94,75 @@ pub enum RunState {
     Completed,
     Failed,
     Cancelled,
+    ContinuedAsNew,
 }
 
 impl RunState {
+    /// Every state the enum declares, in declaration order.
+    ///
+    /// [`Self::position`] is an exhaustive match into this array, so a variant
+    /// missing here has no slot to point at and the pair fails
+    /// `every_run_state_occupies_the_slot_it_names`.
+    pub const ALL: [Self; 11] = [
+        Self::Queued,
+        Self::Running,
+        Self::Sleeping,
+        Self::Waiting,
+        Self::Paused,
+        Self::Stalled,
+        Self::Compensating,
+        Self::Completed,
+        Self::Failed,
+        Self::Cancelled,
+        Self::ContinuedAsNew,
+    ];
+
     /// Every state a run can rest in for good, as the journal stores them.
     ///
     /// Queries that select live runs by state string read this rather than
     /// spelling the set again, so a new terminal state reaches them too.
-    pub const TERMINAL: [&'static str; 4] = [
+    pub const TERMINAL: [&'static str; 5] = [
         Self::Completed.as_str(),
         Self::Failed.as_str(),
         Self::Cancelled.as_str(),
         Self::Stalled.as_str(),
+        Self::ContinuedAsNew.as_str(),
     ];
 
-    /// `Stalled` rests here with the other three: the platform has given up on
-    /// the run, so nothing further will dispatch it, its parents are owed their
-    /// notification, and its delivery job can settle instead of being kept
-    /// alive by a manager that reads this to decide.
+    /// This state's index in [`Self::ALL`].
+    ///
+    /// The match is exhaustive, so a new variant cannot compile without an arm,
+    /// and the only arm that survives the round trip through `ALL` is one whose
+    /// index holds that same variant — which `ALL` cannot offer without listing
+    /// it. That is what binds the array to the variant set.
+    #[must_use]
+    pub const fn position(self) -> usize {
+        match self {
+            Self::Queued => 0,
+            Self::Running => 1,
+            Self::Sleeping => 2,
+            Self::Waiting => 3,
+            Self::Paused => 4,
+            Self::Stalled => 5,
+            Self::Compensating => 6,
+            Self::Completed => 7,
+            Self::Failed => 8,
+            Self::Cancelled => 9,
+            Self::ContinuedAsNew => 10,
+        }
+    }
+
+    /// `Stalled` and `ContinuedAsNew` rest here with the outcomes: the platform
+    /// will dispatch none of them again. A stalled run is one the platform gave
+    /// up on, so its parents are owed their notification and its delivery job
+    /// can settle instead of being kept alive by a manager that reads this to
+    /// decide. A continued run handed its work to a successor, so the identity
+    /// that carries on is the successor's and this one is finished.
     #[must_use]
     pub const fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::Completed | Self::Failed | Self::Cancelled | Self::Stalled
+            Self::Completed | Self::Failed | Self::Cancelled | Self::Stalled | Self::ContinuedAsNew
         )
     }
 
@@ -133,6 +179,7 @@ impl RunState {
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
+            Self::ContinuedAsNew => "continuedAsNew",
         }
     }
 }
@@ -152,6 +199,7 @@ impl std::str::FromStr for RunState {
             "completed" => Ok(Self::Completed),
             "failed" => Ok(Self::Failed),
             "cancelled" => Ok(Self::Cancelled),
+            "continuedAsNew" => Ok(Self::ContinuedAsNew),
             _ => Err(format!("unknown workflow state: {value}")),
         }
     }

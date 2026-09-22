@@ -23,7 +23,7 @@
   "scripts": {
     "build": "tsup",
     "lint:pkg": "publint && attw --pack .",
-    "typecheck:types": "tsc --noEmit --target ES2022 --module ESNext --moduleResolution Bundler --strict --skipLibCheck --allowImportingTsExtensions --types node tests/status-output.test.ts",
+    "typecheck:types": "tsc --noEmit --target ES2022 --module ESNext --moduleResolution Bundler --strict --skipLibCheck --allowImportingTsExtensions --types node tests/status-output.test.ts tests/status-successor.test.ts",
     "test": "pnpm run typecheck:types && node --import tsx --test tests/*.test.ts"
   },
   "devDependencies": {

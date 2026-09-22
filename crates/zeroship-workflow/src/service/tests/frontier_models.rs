@@ -212,10 +212,9 @@ async fn continuation_contract(store: Rc<OrmStore>) {
             .await,
         Err(WorkflowServiceError::NotFound(_))
     ));
-    let successor = status.output.unwrap()["continuedAsNew"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    assert_eq!(status.state, crate::operations::RunState::ContinuedAsNew);
+    assert!(status.output.is_none());
+    let successor = status.continued_as_new_run_id.unwrap();
     assert_ne!(successor, child);
     let mut tx = service.begin().await.unwrap();
     for (app_id, child_id, parents) in scopes {

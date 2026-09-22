@@ -131,6 +131,7 @@ zeroship_data_orm::orm::schema! {
             state: Text,
             started_at: BigInt,
             terminal_at: Nullable<BigInt>,
+            continued_as_new_run_id: Nullable<Text>,
         }
 
         __zeroship_workflow_job_publications {

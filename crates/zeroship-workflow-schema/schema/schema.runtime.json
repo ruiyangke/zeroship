@@ -1110,6 +1110,16 @@
           "storage": {
             "valueColumn": "terminal_at"
           }
+        },
+        "continued_as_new_run_id": {
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "continued_as_new_run_id"
+          }
         }
       },
       "options": {
