@@ -1,9 +1,10 @@
 //! What a parent run is handed when its child ends.
 //!
 //! Error identity crosses the journal by name, under the `type` key the V8
-//! replay bridge reconstructs a class from. These cases assert the value the
-//! engine *writes*, read back off the parent's own replay journal, because that
-//! row is what the bridge is handed and what a creator's `catch` matches on.
+//! replay bridge reconstructs a class from. These cases read the parent's own
+//! replay journal, because that row is what the bridge is handed and what a
+//! creator's `catch` matches on; the value the engine *writes* is asserted where
+//! it is stored, on the child's own status.
 //!
 //! A child that recorded an error of its own hands the parent that error; the
 //! engine's own verdict stands in only for a child that recorded none. Both
@@ -58,8 +59,8 @@ paired!(
     untimed_child_wait
 );
 paired!(
-    sqlite_a_failed_childs_own_error_reaches_its_parent_unchanged,
-    postgres_a_failed_childs_own_error_reaches_its_parent_unchanged,
+    sqlite_a_failed_childs_own_error_reaches_its_parent_rather_than_a_verdict,
+    postgres_a_failed_childs_own_error_reaches_its_parent_rather_than_a_verdict,
     failed_child
 );
 
@@ -296,14 +297,34 @@ fn child_error(ordinal: i32) -> serde_json::Value {
     }
 }
 
-/// The error a child recorded, reaching its parent unchanged.
+/// The same failure as the parent's replayed join carries it.
+///
+/// `journal::replay` narrows the row to the keys the replay bridge rebuilds a
+/// thrown error from, so `strikes` is absent from the view while the child's own
+/// record still holds it. What discriminates the two children survives: they
+/// differ in `type`, `message` and `retryable`.
+fn joined_child_error(ordinal: i32) -> serde_json::Value {
+    match ordinal {
+        0 => json!({
+            "type":"LimitExceededError", "message":"child output exceeded the payload limit",
+            "retryable":false,
+        }),
+        _ => json!({
+            "type":"StalledError", "message":"child stopped reporting", "retryable":true,
+        }),
+    }
+}
+
+/// The error a child recorded, reaching its parent as the child's own value.
 ///
 /// `ChildCancelledError` is the engine's verdict for a child that recorded
 /// nothing; a child that failed on its own recorded something, and the parent's
 /// join carries that instead. Creator code rests on the difference: a body that
 /// catches `LimitExceededError` at its `step.call` is catching an error the
 /// child raised, and it reaches the body only because this row is the child's
-/// own value rather than a verdict about it.
+/// own value rather than a verdict about it. The child's own status is where the
+/// recorded value is asserted whole; the join replays it narrowed to what the
+/// bridge reads.
 ///
 /// The control differing in one variable: two children of the same parent, in
 /// the same batch and resolved by the same dispatch, failing with different
@@ -364,10 +385,20 @@ async fn failed_child(store: Rc<OrmStore>) {
             .unwrap();
     }
     for (ordinal, child) in &children {
+        let status = scope.status(child).await.unwrap();
         assert_eq!(
-            scope.status(child).await.unwrap().state,
+            status.state,
             RunState::Failed,
             "child at {ordinal} records its own failure"
+        );
+        // The control that keeps the narrowing in the replay view alone: the
+        // child's own record carries every key it reported. That is what
+        // `retryable` and the join comparisons in `journal.rs` read, so a
+        // projection applied where the row is stored would take them with it.
+        assert_eq!(
+            status.error.as_ref(),
+            Some(&child_error(*ordinal)),
+            "child at {ordinal} keeps its recorded failure whole"
         );
     }
     deliver_propagations(&scope).await;
@@ -381,7 +412,11 @@ async fn failed_child(store: Rc<OrmStore>) {
             .iter()
             .find(|step| step.name == format!("join-{ordinal}"))
             .unwrap_or_else(|| panic!("the parent replays every join: {:?}", task.invocation));
-        assert_eq!(row.error.as_ref(), Some(&child_error(*ordinal)), "{row:?}");
+        assert_eq!(
+            row.error.as_ref(),
+            Some(&joined_child_error(*ordinal)),
+            "{row:?}"
+        );
         assert!(row.output.is_none(), "{row:?}");
     }
 }
