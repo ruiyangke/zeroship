@@ -116,10 +116,27 @@ impl Fixture {
     fn settlement(&self) -> Settlement {
         Settlement {
             delivery: self.delivery.clone(),
-            outcome: match self.delivery.job.operation {
-                JobOperation::Management { .. } => JobOutcome::Management {
+            outcome: match &self.delivery.job.operation {
+                // The result has to answer the command the job carries, so a
+                // restart job settles restarted and a transition applied.
+                JobOperation::Management {
+                    command: ManagementCommand::Transition { .. },
+                    ..
+                } => JobOutcome::Management {
                     outcome: ManagementOutcome::Applied {
                         state: RunState::Paused,
+                    },
+                },
+                JobOperation::Management {
+                    command:
+                        ManagementCommand::RestartStarted { .. }
+                        | ManagementCommand::RestartLatest { .. },
+                    ..
+                } => JobOutcome::Management {
+                    outcome: ManagementOutcome::Restarted {
+                        state: RunState::Queued,
+                        restarted_from_ordinal: Some(2),
+                        pinned_to: DeploymentId::mint(),
                     },
                 },
                 JobOperation::Close { .. } => JobOutcome::Closed { drained: true },
