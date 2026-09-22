@@ -137,7 +137,7 @@
   {
     "file": "20260919000200_database_entities.ts",
     "name": "database_entities",
-    "opCount": 35
+    "opCount": 34
   },
   {
     "file": "20260919000300_database_placement_keys.ts",

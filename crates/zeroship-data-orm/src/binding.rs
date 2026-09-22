@@ -16,9 +16,9 @@
 //!
 //! # What the session-setup batch needs
 //!
-//! A creator dispatch narrows with `SET LOCAL ROLE "zs_bind_<bnd>_e<E>"` as the
+//! A creator dispatch narrows with `SET LOCAL ROLE "zs_bind_<bnd>"` as the
 //! first statement of the batch. That role is composed HERE, once, from the
-//! binding id and the schema epoch, so no call site can compose a second
+//! binding id, so no call site can compose a second
 //! spelling and no call site can compose one from the tenant. The reconciler
 //! (`zeroship_migrate_server::datastore::cluster::grant_binding`) creates
 //! exactly this name through the same `zeroship_core::database_derivation`
@@ -54,7 +54,7 @@ use crate::sql::SchemaName;
 /// dev, raw-JS deploys, and narrow test harnesses).
 pub const COLD_START_DEPLOY_TOKEN: &str = "cold_start";
 
-/// One app's edge to one project-owned database, at one schema epoch.
+/// One app's edge to one project-owned database.
 ///
 /// The role name is composed at construction rather than on use: composing it
 /// per statement would let the setup batch and the error classifier derive it
@@ -64,7 +64,6 @@ pub const COLD_START_DEPLOY_TOKEN: &str = "cold_start";
 pub struct DatabaseEdge {
     database: DatabaseId,
     binding: BindingId,
-    epoch: u32,
     capability: DatabaseCapability,
     role: String,
 }
@@ -80,11 +79,6 @@ impl DatabaseEdge {
         &self.binding
     }
 
-    /// The schema epoch the isolate holding this edge was built against.
-    pub fn epoch(&self) -> u32 {
-        self.epoch
-    }
-
     /// The privilege set control declared for this edge.
     ///
     /// Read, never composed: the binding role is granted membership in the
@@ -94,7 +88,7 @@ impl DatabaseEdge {
         self.capability
     }
 
-    /// `zs_bind_<bnd>_e<E>`: the role the session-setup batch narrows to.
+    /// `zs_bind_<bnd>`: the role the session-setup batch narrows to.
     pub fn role(&self) -> &str {
         &self.role
     }
@@ -120,18 +114,17 @@ impl DbBinding {
     ///
     /// [`DbError`] carrying [`RoleNameTooLong`] when the composed binding role
     /// would not fit a `PostgreSQL` identifier. It is refused rather than
-    /// shortened, because the epoch is the LAST component of the name and a
-    /// truncation drops its digits first, collapsing two epochs of one binding
-    /// onto one role.
+    /// shortened, because the binding id is the LAST component of the name and
+    /// a truncation drops the bytes that tell two bindings apart, collapsing
+    /// them onto one role.
     pub fn to_database(
         app_id: impl Into<String>,
         deploy_token: impl Into<String>,
         database: DatabaseId,
         binding: BindingId,
-        epoch: u32,
         capability: DatabaseCapability,
     ) -> Result<Self, DbError> {
-        let role = database_derivation::binding_role_name(&binding, epoch)?;
+        let role = database_derivation::binding_role_name(&binding)?;
         let schema_text = database_derivation::schema_name(&database);
         let schema = SchemaName::new(&schema_text).map_err(|error| {
             DbError::config(
@@ -146,7 +139,6 @@ impl DbBinding {
             edge: Some(DatabaseEdge {
                 database,
                 binding,
-                epoch,
                 capability,
                 role,
             }),
@@ -199,12 +191,6 @@ impl DbBinding {
     /// narrows to nothing.
     pub fn session_role(&self) -> Option<&str> {
         self.edge.as_ref().map(DatabaseEdge::role)
-    }
-
-    /// The schema epoch this binding was resolved at, or `None` for a platform
-    /// binding.
-    pub fn schema_epoch(&self) -> Option<u32> {
-        self.edge.as_ref().map(DatabaseEdge::epoch)
     }
 
     /// The capability control declared for this edge, or `None` for a platform
@@ -340,7 +326,6 @@ mod tests {
             "deploy_x",
             database.clone(),
             binding.clone(),
-            7,
             DatabaseCapability::ReadWrite,
         )
         .expect("the fixture ids compose");
@@ -352,42 +337,43 @@ mod tests {
         assert_eq!(
             bound.session_role(),
             Some(
-                database_derivation::binding_role_name(&binding, 7)
+                database_derivation::binding_role_name(&binding)
                     .expect("the fixture role name fits")
                     .as_str()
             )
         );
-        assert_eq!(bound.schema_epoch(), Some(7));
         assert_eq!(bound.database(), Some(&database));
     }
 
-    /// The epoch is part of the role name, so two epochs of one binding are two
-    /// roles. Without this the fence catches a revoked binding and nothing else.
+    /// Two edges to ONE database are two roles, and the schema they qualify
+    /// with is the same one. The role is what a revoke withdraws, so two apps
+    /// on one database sharing a role name would make either revoke withdraw
+    /// both.
     #[test]
-    fn the_epoch_changes_the_role_and_nothing_else() {
+    fn the_edge_changes_the_role_and_nothing_else() {
         let (database, binding) = edge_fixture();
-        let at_one = DbBinding::to_database(
-            "app_x",
-            "d",
-            database.clone(),
-            binding.clone(),
-            1,
-            DatabaseCapability::ReadWrite,
-        )
-        .unwrap();
-        let at_two = DbBinding::to_database(
+        let other = BindingId::mint();
+        assert_ne!(other, binding, "the control: two mints are two edges");
+        let mine = DbBinding::to_database(
             "app_x",
             "d",
             database.clone(),
             binding,
-            2,
+            DatabaseCapability::ReadWrite,
+        )
+        .unwrap();
+        let theirs = DbBinding::to_database(
+            "app_x",
+            "d",
+            database.clone(),
+            other,
             DatabaseCapability::ReadWrite,
         )
         .unwrap();
 
-        assert_ne!(at_one.session_role(), at_two.session_role());
-        assert_eq!(at_one.schema(), at_two.schema());
-        assert_eq!(at_one.route(), at_two.route());
+        assert_ne!(mine.session_role(), theirs.session_role());
+        assert_eq!(mine.schema(), theirs.schema());
+        assert_eq!(mine.route(), theirs.route());
     }
 
     /// A platform store narrows to nothing and carries no database.
@@ -400,7 +386,6 @@ mod tests {
         );
         assert_eq!(platform.database(), None);
         assert_eq!(platform.session_role(), None);
-        assert_eq!(platform.schema_epoch(), None);
         assert_eq!(platform.route(), DbRoute::platform("platform"));
     }
 
@@ -468,7 +453,6 @@ mod tests {
                 "deploy_x",
                 database.clone(),
                 binding.clone(),
-                4,
                 capability,
             )
             .expect("the fixture ids compose")
@@ -490,8 +474,8 @@ mod tests {
         assert_eq!(
             writable.session_role(),
             read_only.session_role(),
-            "the role name is derived from the edge and the epoch; the capability \
-             must not reach it"
+            "the role name is derived from the edge; the capability must not \
+             reach it"
         );
         assert_eq!(writable.schema(), read_only.schema());
         assert_eq!(writable.route(), read_only.route());
@@ -518,7 +502,6 @@ mod tests {
             "d",
             database,
             binding,
-            1,
             DatabaseCapability::ReadOnly,
         )
         .expect("the fixture ids compose");

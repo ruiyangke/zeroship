@@ -595,9 +595,7 @@ async fn placement_never_reaches_a_cluster_in_another_zone() {
 /// Nothing this surface writes reaches a converged state.
 ///
 /// Read back from `PostgreSQL` rather than from the returned records: the record
-/// is what the module says, the row is what it did. `schema_epoch` is asserted
-/// at zero for the same reason - it is a role-name input the cluster owns, and
-/// Control minting one would be a claim about roles that do not exist.
+/// is what the module says, the row is what it did.
 #[compio::test]
 async fn a_created_database_and_its_binding_stop_short_of_convergence() {
     let fx = Fx::new().await;
@@ -634,7 +632,6 @@ async fn a_created_database_and_its_binding_stop_short_of_convergence() {
 
     assert_eq!(stored_database.as_deref(), Some("provisioning"));
     assert_eq!(stored_binding.as_deref(), Some("pending"));
-    assert_eq!(created.schema_epoch, 0, "Control mints no schema epoch");
     assert_eq!(bound.generation, 1);
     assert_eq!(
         bound.observed_generation, 0,

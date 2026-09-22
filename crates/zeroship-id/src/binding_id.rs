@@ -4,10 +4,10 @@
 //! # Why the edge has an identity of its own
 //!
 //! The `PostgreSQL` role the data plane narrows to is derived from it:
-//! `zs_bind_<binding>_e<epoch>`. A composite natural key would put two ids in
-//! one identifier, and `max_identifier_length` truncates silently past 63 with
-//! the epoch at the END of the name - so two epochs would collapse onto one
-//! role rather than error.
+//! `zs_bind_<binding>`. A composite natural key would put two ids in one
+//! identifier, and `max_identifier_length` truncates silently past 63 with the
+//! id at the END of the name - so two bindings would collapse onto one role
+//! rather than error, and revoking either would withdraw both.
 //!
 //! # Why `bnd` and not `grt`
 //!

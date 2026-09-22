@@ -7,12 +7,11 @@
 //! was meant to be reaped.
 //!
 //! The database-keyed names are where that refusal is load-bearing rather than
-//! defensive. [`binding_role_name`] carries the schema epoch as the LAST
-//! component of `zs_bind_<binding>_e<epoch>`, so a truncation drops the epoch
-//! digits first and two epochs of one binding land on one role - the role the
-//! newer epoch exists to leave behind. The collision and the refusal that
-//! prevents it are exhibited by
-//! `tests::truncating_an_over_long_binding_role_would_collapse_two_epochs`.
+//! defensive. [`binding_role_name`] ends in the binding id, so a truncation
+//! eats exactly the component that tells one binding's role from another's and
+//! two bindings land on one role - the role each of them is the only way to
+//! revoke. The collision and the refusal that prevents it are exhibited by
+//! `tests::truncating_an_over_long_binding_role_would_collapse_two_bindings`.
 //!
 //! Every composer here takes text and returns text, because a role name is a
 //! physical identifier and not an identity: the app-keyed composer takes a
@@ -174,18 +173,18 @@ pub fn database_capability_role_name(
     refuse_truncation(format!("zs_db_{database_id}_{}", capability.role_suffix()))
 }
 
-/// Compose the role one binding narrows to at one schema epoch.
+/// Compose the role one binding narrows to.
 ///
-/// The epoch is last, which is exactly why this composer may not truncate:
-/// `PostgreSQL` drops the tail, so a shortened name is the SAME name at every
-/// epoch. The role is then no longer the thing that expires, and an isolate
-/// built against a retired epoch keeps its access.
+/// One role per binding, and the binding id is last, which is exactly why this
+/// composer may not truncate: `PostgreSQL` drops the tail, so a shortened name
+/// is the same name for two bindings whose ids share a prefix, and revoking
+/// either would withdraw the other's access as well.
 ///
 /// # Errors
 ///
 /// [`RoleNameTooLong`] rather than a name `PostgreSQL` would truncate.
-pub fn binding_role_name(binding_id: &str, epoch: u32) -> Result<String, RoleNameTooLong> {
-    refuse_truncation(format!("zs_bind_{binding_id}_e{epoch}"))
+pub fn binding_role_name(binding_id: &str) -> Result<String, RoleNameTooLong> {
+    refuse_truncation(format!("zs_bind_{binding_id}"))
 }
 
 /// Return `role` unchanged, or refuse it if `PostgreSQL` would have shortened it.
@@ -270,10 +269,7 @@ mod tests {
             database_capability_role_name("dbs_demo", DatabaseCapability::ReadOnly).unwrap(),
             "zs_db_dbs_demo_ro"
         );
-        assert_eq!(
-            binding_role_name("bnd_demo", 7).unwrap(),
-            "zs_bind_bnd_demo_e7"
-        );
+        assert_eq!(binding_role_name("bnd_demo").unwrap(), "zs_bind_bnd_demo");
     }
 
     /// The four names one database and one binding produce are four roles.
@@ -287,7 +283,7 @@ mod tests {
             database_migrator_role_name("dbs_demo").unwrap(),
             database_capability_role_name("dbs_demo", DatabaseCapability::ReadWrite).unwrap(),
             database_capability_role_name("dbs_demo", DatabaseCapability::ReadOnly).unwrap(),
-            binding_role_name("bnd_demo", 1).unwrap(),
+            binding_role_name("bnd_demo").unwrap(),
         ];
         let mut distinct = names.to_vec();
         distinct.sort();
@@ -306,8 +302,8 @@ mod tests {
             database_capability_role_name("dbs_demo", DatabaseCapability::ReadWrite).unwrap()
         );
         assert_ne!(
-            binding_role_name("bnd-demo", 1).unwrap(),
-            binding_role_name("bnd_demo", 1).unwrap()
+            binding_role_name("bnd-demo").unwrap(),
+            binding_role_name("bnd_demo").unwrap()
         );
     }
 
@@ -317,17 +313,17 @@ mod tests {
     /// everything would pass that arm.
     #[test]
     fn binding_role_name_accepts_exactly_63_bytes() {
-        let binding = "b".repeat(POSTGRES_IDENTIFIER_MAX_BYTES - "zs_bind__e1".len());
-        let role = binding_role_name(&binding, 1).expect("63-byte role name");
+        let binding = "b".repeat(POSTGRES_IDENTIFIER_MAX_BYTES - "zs_bind_".len());
+        let role = binding_role_name(&binding).expect("63-byte role name");
         assert_eq!(role.len(), POSTGRES_IDENTIFIER_MAX_BYTES);
-        assert_eq!(role, format!("zs_bind_{binding}_e1"));
+        assert_eq!(role, format!("zs_bind_{binding}"));
     }
 
     #[test]
     fn binding_role_name_refuses_64_bytes_without_shortening() {
-        let binding = "b".repeat(POSTGRES_IDENTIFIER_MAX_BYTES - "zs_bind__e1".len() + 1);
+        let binding = "b".repeat(POSTGRES_IDENTIFIER_MAX_BYTES - "zs_bind_".len() + 1);
         assert_eq!(
-            binding_role_name(&binding, 1),
+            binding_role_name(&binding),
             Err(RoleNameTooLong {
                 actual_bytes: POSTGRES_IDENTIFIER_MAX_BYTES + 1,
                 max_bytes: POSTGRES_IDENTIFIER_MAX_BYTES,
@@ -337,62 +333,39 @@ mod tests {
 
     /// What truncation would cost, exhibited rather than described.
     ///
-    /// The epoch is the last component, so `PostgreSQL` shortening the name
-    /// eats the epoch digits first. This arm builds the two names the composer
-    /// is handed - independently of the composer, so the composed shape is
-    /// checked too - shows that their first
+    /// The binding id is the last component, so `PostgreSQL` shortening the
+    /// name eats the bytes that tell two bindings apart. This arm builds the
+    /// two names the composer is handed - independently of the composer, so
+    /// the composed shape is checked too - shows that their first
     /// [`POSTGRES_IDENTIFIER_MAX_BYTES`] bytes are ONE name, and then shows
     /// the composer refusing both rather than returning it.
     #[test]
-    fn truncating_an_over_long_binding_role_would_collapse_two_epochs() {
-        let binding = "b".repeat(POSTGRES_IDENTIFIER_MAX_BYTES - "zs_bind__e".len());
-        let first = format!("zs_bind_{binding}_e1");
-        let second = format!("zs_bind_{binding}_e2");
+    fn truncating_an_over_long_binding_role_would_collapse_two_bindings() {
+        let shared = "b".repeat(POSTGRES_IDENTIFIER_MAX_BYTES - "zs_bind_".len());
+        let first = format!("zs_bind_{shared}1");
+        let second = format!("zs_bind_{shared}2");
 
-        assert_ne!(first, second, "the two epochs are two names in full");
+        assert_ne!(first, second, "the two bindings are two names in full");
         assert_eq!(first.len(), POSTGRES_IDENTIFIER_MAX_BYTES + 1);
         assert_eq!(second.len(), POSTGRES_IDENTIFIER_MAX_BYTES + 1);
         assert_eq!(
             first[..POSTGRES_IDENTIFIER_MAX_BYTES],
             second[..POSTGRES_IDENTIFIER_MAX_BYTES],
             "the collision being prevented: shortened to the identifier limit, \
-             two epochs of one binding are one role"
+             two bindings are one role"
         );
 
-        for epoch in [1u32, 2] {
+        for suffix in ['1', '2'] {
+            let binding = format!("{shared}{suffix}");
             assert_eq!(
-                binding_role_name(&binding, epoch),
+                binding_role_name(&binding),
                 Err(RoleNameTooLong {
                     actual_bytes: POSTGRES_IDENTIFIER_MAX_BYTES + 1,
                     max_bytes: POSTGRES_IDENTIFIER_MAX_BYTES,
                 }),
-                "epoch {epoch} must be refused, not shortened onto its neighbour"
+                "binding {binding} must be refused, not shortened onto its neighbour"
             );
         }
-    }
-
-    /// A long epoch is refused on the same terms as a long id.
-    ///
-    /// The digits are the part of this name that grows at runtime, so the
-    /// limit has to be compared against the composed name and not against its
-    /// id half.
-    #[test]
-    fn binding_role_name_counts_the_epoch_digits() {
-        let binding = "b".repeat(POSTGRES_IDENTIFIER_MAX_BYTES - "zs_bind__e".len() - 1);
-        assert_eq!(
-            binding_role_name(&binding, 9)
-                .expect("one digit fits")
-                .len(),
-            POSTGRES_IDENTIFIER_MAX_BYTES
-        );
-        assert_eq!(
-            binding_role_name(&binding, 10),
-            Err(RoleNameTooLong {
-                actual_bytes: POSTGRES_IDENTIFIER_MAX_BYTES + 1,
-                max_bytes: POSTGRES_IDENTIFIER_MAX_BYTES,
-            }),
-            "the second digit is past the limit"
-        );
     }
 
     #[test]

@@ -234,7 +234,6 @@ mod tests {
             "deploy_pinned",
             edge.database().clone(),
             edge.binding().clone(),
-            edge.epoch(),
             edge.database_capability(),
         )
         .expect("the harness ids compose");
@@ -243,7 +242,6 @@ mod tests {
             "deploy_current",
             edge.database().clone(),
             edge.binding().clone(),
-            edge.epoch(),
             edge.database_capability(),
         )
         .expect("the harness ids compose");

@@ -337,7 +337,7 @@ pub(crate) async fn apply_session_authority(
     client.simple_query(&sql).await.map_err(|e| {
         let mut classified = match authority {
             crate::connection::SessionAuthority::PerBindingRole => {
-                crate::backend::postgres::pg_error::classify_pg_binding_session_setup(&e, binding)
+                crate::backend::postgres::pg_error::classify_pg_binding_session_setup(&e)
             }
             crate::connection::SessionAuthority::Connection => {
                 zeroship_data_orm::error::SessionSetupError::failed(

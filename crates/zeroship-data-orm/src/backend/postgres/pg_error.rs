@@ -13,47 +13,10 @@
 //! a PostgreSQL crate without pulling the vendor into the crate that owns
 //! [`DbError`].
 
-use crate::binding::DbBinding;
 use zeroship_data_orm::error::{
     DbError, DenyReason, GRANT_REVOKED, GRANT_REVOKED_MESSAGE, NOT_MIGRATED_HINT,
-    NOT_MIGRATED_MESSAGE, SCHEMA_EPOCH_STALE, SCHEMA_NOT_MIGRATED, STALE_EPOCH_HINT,
-    STALE_EPOCH_MESSAGE, SessionSetupDisposition, SessionSetupError,
+    NOT_MIGRATED_MESSAGE, SCHEMA_NOT_MIGRATED, SessionSetupDisposition, SessionSetupError,
 };
-
-/// Does this server error name the binding role the setup batch asked for?
-///
-/// This discriminator is called only where the caller knows it just issued
-/// `SET LOCAL ROLE` for `binding`. Provenance is the primary guard; SQLSTATE
-/// and the exact role name pin the measured server response.
-///
-/// The SQLSTATE alone is not enough. `SET LOCAL ROLE "missing"` reports **22023
-/// `invalid_parameter_value`** (measured against postgres:16 -- `LOCATION:
-/// call_string_check_hook, guc.c`), not 42704 `undefined_object`. 22023 is the
-/// generic "bad GUC value" code, shared with `SET statement_timeout = 'yes'`,
-/// so matching it alone would reclassify unrelated configuration failures as
-/// creator-facing.
-///
-/// # Why the parameter is the binding
-///
-/// It has to recognise the SAME role the setup batch asked for, and that role
-/// is composed once, on the binding. Taking the binding is what makes composing
-/// a second spelling here impossible: the epoch is the last component of the
-/// name, so a classifier that recomposed from the wrong epoch would stop
-/// matching and a retired epoch would report a generic failure instead of
-/// [`SCHEMA_EPOCH_STALE`].
-fn is_missing_binding_role(
-    code: &compio_postgres::error::SqlState,
-    primary_message: &str,
-    binding: &DbBinding,
-) -> bool {
-    use compio_postgres::error::SqlState;
-
-    let Some(expected_role) = binding.session_role() else {
-        return false;
-    };
-    code == &SqlState::INVALID_PARAMETER_VALUE
-        && primary_message == format!("role \"{expected_role}\" does not exist")
-}
 
 /// Classify an error returned by the binding's `SET LOCAL ROLE` batch.
 ///
@@ -61,38 +24,24 @@ fn is_missing_binding_role(
 /// and transaction start have succeeded. All other PostgreSQL errors, including
 /// pool connection failures, must use [`classify`].
 ///
-/// The two refusals this splits are the whole runtime fence, and they differ in
-/// what the caller should do:
+/// TWO outcomes, and the first is the whole runtime fence:
 ///
 /// - **42501** means the role exists and this login may not assume it, which is
 ///   a revoked binding. Terminal: the reconciler withdrew the membership and
-///   left the role standing precisely so this stays distinguishable.
-/// - **22023** means there is no such role. The epoch is part of the name, so
-///   this is the shape this isolate was built against no longer being the shape
-///   the database has - or a database not yet converged. Either is answered by
-///   resolving the binding again.
+///   left the role standing precisely so this stays distinguishable from every
+///   other way a `SET LOCAL ROLE` can fail.
+/// - Anything else is unclassified and reaches [`classify`]. A database nothing
+///   has converged answers **22023 `invalid_parameter_value`** here - the
+///   generic "bad GUC value" code, shared with `SET statement_timeout = 'yes'` -
+///   and it carries no creator remedy the platform can state, so it is not
+///   given one.
 ///
-/// `binding` must be the SAME value handed to
-/// [`crate::backend::postgres::pg_session_sql::tx_session_setup_sql`] /
-/// `autocommit_local_session_setup_sql` on the call this is classifying.
+/// Call it only where the setup batch just issued `SET LOCAL ROLE` for a
+/// creator binding: provenance is the whole guard, because 42501 from any other
+/// statement is an ordinary privilege refusal and not a withdrawn membership.
 pub(crate) fn classify_pg_binding_session_setup(
     e: &compio_postgres::Error,
-    binding: &DbBinding,
 ) -> SessionSetupError {
-    if e.as_db_error()
-        .is_some_and(|db| is_missing_binding_role(db.code(), db.message(), binding))
-    {
-        let msg = walk_pg_chain(e);
-        tracing::warn!(
-            error = %msg,
-            "binding role missing; the schema epoch this build was resolved at is retired"
-        );
-        return SessionSetupError::new(
-            SessionSetupDisposition::ReResolve,
-            DbError::config_hinted(SCHEMA_EPOCH_STALE, STALE_EPOCH_MESSAGE, STALE_EPOCH_HINT),
-        );
-    }
-
     if e.code() == Some(&compio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE) {
         let msg = walk_pg_chain(e);
         tracing::warn!(
@@ -109,16 +58,6 @@ pub(crate) fn classify_pg_binding_session_setup(
     }
 
     SessionSetupError::new(SessionSetupDisposition::Failed, classify(e))
-}
-
-/// Test-only view of the contextual classifier's creator-facing error.
-/// Production transaction code also consumes the private disposition.
-#[cfg(test)]
-pub fn classify_pg_binding_session_setup_for_tests(
-    e: &compio_postgres::Error,
-    binding: &DbBinding,
-) -> DbError {
-    classify_pg_binding_session_setup(e, binding).into_db_error()
 }
 
 /// Classify a `compio_postgres::Error` by SQLSTATE. Falls back to
@@ -246,32 +185,18 @@ mod tests {
         assert_eq!(scrub_constraint_detail(plain.clone()), plain);
     }
 
-
     // -----------------------------------------------------------------
-    // `schema_epoch_stale` -- the missing binding-role classification.
+    // The setup-boundary taxonomy.
     //
-    // These drive `is_missing_binding_role` directly rather than the contextual
-    // converter because `compio_postgres::Error` has no public constructor. The
-    // real converter path against a live server is covered by
-    // `crates/zeroship-data-v8/src/tests/postgres/roles.rs`; these pin the
-    // discriminator's cheap edge cases.
+    // `compio_postgres::Error` has no public constructor, so the SQLSTATE
+    // arm itself is measured against a live server in
+    // `crates/zeroship-data-orm/tests/postgres_binding_fence.rs`. What is
+    // pinned here is what a binding NAMES and what the codes are.
     // -----------------------------------------------------------------
 
     use crate::binding::DbBinding;
     use zeroship_core::database_role::DatabaseCapability;
     use zeroship_core::{BindingId, DatabaseId};
-
-    fn creator_binding(epoch: u32) -> DbBinding {
-        DbBinding::to_database(
-            "app_classifier",
-            "deploy_classifier",
-            DatabaseId::mint(),
-            BindingId::mint(),
-            epoch,
-            DatabaseCapability::ReadWrite,
-        )
-        .expect("the fixture ids compose a legal role name")
-    }
 
     /// The data plane and the cluster reconciler compose one role name.
     ///
@@ -291,12 +216,11 @@ mod tests {
             "d",
             DatabaseId::mint(),
             edge.clone(),
-            4,
             DatabaseCapability::ReadWrite,
         )
         .expect("the fixture ids compose");
 
-        let granted = zeroship_migrate_server::datastore::cluster::binding_role(&edge, 4)
+        let granted = zeroship_migrate_server::datastore::cluster::binding_role(&edge)
             .expect("the reconciler composes the same name");
         assert_eq!(
             binding.session_role(),
@@ -318,102 +242,52 @@ mod tests {
         );
     }
 
-    /// The classifier recognises the role the batch asked for.
+    /// Two edges are two roles, so the setup batch one sends is not the batch
+    /// the other sends.
     ///
-    /// CONTROL, differing in one variable: a message naming a DIFFERENT
-    /// binding's role must be refused, so the passing arm measures the
-    /// derivation rather than a predicate that says yes to any
-    /// "role ... does not exist" text.
+    /// The role is what a revoke withdraws, so two bindings narrowing to one
+    /// name would make revoking either refuse both. Its control is the same
+    /// edge composed twice, which must produce one name - without it this would
+    /// pass over a composer that returned a fresh string every call.
     #[test]
-    fn a_missing_binding_role_is_classified_and_a_neighbours_is_not() {
-        use compio_postgres::error::SqlState;
-
-        let mine = creator_binding(1);
-        let neighbour = creator_binding(1);
-        let my_role = mine.session_role().expect("a creator binding narrows");
-        let their_role = neighbour
-            .session_role()
-            .expect("a creator binding narrows");
-        assert_ne!(my_role, their_role, "the control: two edges are two roles");
-
-        assert!(is_missing_binding_role(
-            &SqlState::INVALID_PARAMETER_VALUE,
-            &format!("role \"{my_role}\" does not exist"),
-            &mine,
-        ));
-        assert!(
-            !is_missing_binding_role(
-                &SqlState::INVALID_PARAMETER_VALUE,
-                &format!("role \"{their_role}\" does not exist"),
-                &mine,
-            ),
-            "a role this binding did not compose must not be classified"
-        );
-    }
-
-    /// The epoch is part of what the classifier recognises.
-    ///
-    /// The epoch fence is the whole reason the role name carries one: an
-    /// isolate built against a retired epoch must be told the shape moved, and
-    /// a classifier blind to the epoch would report a generic failure instead.
-    #[test]
-    fn the_classifier_is_not_blind_to_the_epoch() {
-        use compio_postgres::error::SqlState;
-
+    fn two_edges_narrow_to_two_roles_and_one_edge_to_one() {
         let database = DatabaseId::mint();
-        let edge = BindingId::mint();
-        let at_one = DbBinding::to_database(
-            "app_e",
-            "d",
-            database.clone(),
-            edge.clone(),
-            1,
-            DatabaseCapability::ReadWrite,
-        )
-        .expect("composes");
-        let at_two = DbBinding::to_database(
-            "app_e",
-            "d",
-            database,
-            edge,
-            2,
-            DatabaseCapability::ReadWrite,
-        )
-        .expect("composes");
-        let retired = at_one.session_role().expect("narrows");
-        let live = at_two.session_role().expect("narrows");
-        assert_ne!(retired, live, "the control: two epochs are two roles");
+        let compose = |edge: &BindingId| {
+            DbBinding::to_database(
+                "app_e",
+                "d",
+                database.clone(),
+                edge.clone(),
+                DatabaseCapability::ReadWrite,
+            )
+            .expect("composes")
+        };
+        let mine = BindingId::mint();
+        let theirs = BindingId::mint();
+        assert_ne!(mine, theirs, "the control: two mints are two edges");
 
-        assert!(
-            is_missing_binding_role(
-                &SqlState::INVALID_PARAMETER_VALUE,
-                &format!("role \"{retired}\" does not exist"),
-                &at_one,
-            ),
-            "the isolate at the retired epoch must be told its shape moved"
+        assert_ne!(
+            compose(&mine).session_role(),
+            compose(&theirs).session_role(),
+            "two edges on one database must be two roles"
         );
-        assert!(
-            !is_missing_binding_role(
-                &SqlState::INVALID_PARAMETER_VALUE,
-                &format!("role \"{retired}\" does not exist"),
-                &at_two,
-            ),
-            "a live isolate must not classify another epoch's missing role as its own"
+        assert_eq!(
+            compose(&mine).session_role(),
+            compose(&mine).session_role(),
+            "one edge must be one role"
         );
     }
 
-    /// A binding that narrows to nothing composes no role, so it can recognise
-    /// none. Its control is a creator binding on the same message shape.
-    /// The taxonomy has three outcomes and they are pairwise distinct.
+    /// The setup taxonomy has two outcomes and they are distinct.
     ///
-    /// Two are SQLSTATE classifications at the setup boundary; the third is
+    /// One is a SQLSTATE classification at the setup boundary; the other is
     /// decided before a statement is sent, because a role name exists only
-    /// because a binding carries a database edge. Collapsing any pair would
-    /// make an unbound app indistinguishable from a rotation, or a revoked
-    /// binding indistinguishable from a retired epoch.
+    /// because a binding carries a database edge. Collapsing them would make an
+    /// unbound app indistinguishable from a revoked binding, and only one of
+    /// those is terminal.
     #[test]
-    fn the_three_setup_outcomes_are_pairwise_distinct() {
-        use zeroship_data_orm::error::{GRANT_REVOKED, SCHEMA_EPOCH_STALE};
+    fn the_two_setup_outcomes_are_distinct() {
+        use zeroship_data_orm::error::GRANT_REVOKED;
 
         let unbound = crate::backend::postgres::pg_session_sql::tx_session_setup_sql(
             &DbBinding::platform(
@@ -425,75 +299,11 @@ mod tests {
         )
         .expect_err("a narrowing connection needs a role to narrow to");
 
-        let codes = [GRANT_REVOKED, SCHEMA_EPOCH_STALE, unbound.code()];
-        for (first, second) in [(0, 1), (0, 2), (1, 2)] {
-            assert_ne!(
-                codes[first], codes[second],
-                "the setup taxonomy must not collapse two conditions onto one code"
-            );
-        }
-    }
-
-    #[test]
-    fn a_platform_binding_recognises_no_missing_role() {
-        use compio_postgres::error::SqlState;
-
-        let platform = DbBinding::platform(
-            "platform",
-            "fixture",
-            crate::sql::SchemaName::new("zeroship").expect("fixture schema"),
+        assert_ne!(
+            GRANT_REVOKED,
+            unbound.code(),
+            "the setup taxonomy must not collapse two conditions onto one code"
         );
-        let creator = creator_binding(1);
-        let role = creator.session_role().expect("narrows");
-        let message = format!("role \"{role}\" does not exist");
-
-        assert!(!is_missing_binding_role(
-            &SqlState::INVALID_PARAMETER_VALUE,
-            &message,
-            &platform,
-        ));
-        assert!(
-            is_missing_binding_role(&SqlState::INVALID_PARAMETER_VALUE, &message, &creator),
-            "control: the same message against the binding that composed the role"
-        );
-    }
-
-    #[test]
-    fn same_sqlstate_different_message_stays_unclassified() {
-        use compio_postgres::error::SqlState;
-
-        assert!(!is_missing_binding_role(
-            &SqlState::INVALID_PARAMETER_VALUE,
-            r#"invalid value for parameter "statement_timeout": "yes""#,
-            &creator_binding(1),
-        ));
-    }
-
-    #[test]
-    fn same_message_shape_different_sqlstate_stays_unclassified() {
-        use compio_postgres::error::SqlState;
-
-        let binding = creator_binding(1);
-        let role = binding.session_role().expect("narrows");
-        for code in [
-            SqlState::UNDEFINED_TABLE,
-            SqlState::UNDEFINED_OBJECT,
-            SqlState::INVALID_AUTHORIZATION_SPECIFICATION,
-            // The revoked-binding refusal. It reaches `GRANT_REVOKED` through a
-            // separate arm of the classifier and must never be read as a
-            // retired epoch: one is terminal and the other is not.
-            SqlState::INSUFFICIENT_PRIVILEGE,
-        ] {
-            assert!(
-                !is_missing_binding_role(
-                    &code,
-                    &format!("role \"{role}\" does not exist"),
-                    &binding,
-                ),
-                "SQLSTATE {} must not reach the retired-epoch classification",
-                code.code()
-            );
-        }
     }
 
     /// Pin the explicit free-function translator shape. A driver `From` impl

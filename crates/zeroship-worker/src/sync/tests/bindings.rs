@@ -5,11 +5,10 @@
 //! # Where the fixture shape comes from
 //!
 //! `zeroship_control::internal::get_app_bindings` selects
-//! `b.id AS binding_id, b.database_id, b.capability, d.schema_epoch`, narrows
-//! the epoch out of its `i32` column with `u32::try_from`, reads the capability
-//! back through `DatabaseCapability::from_wire` and serves one JSON object per
-//! row under a `bindings` array. [`control_entry`] mirrors that object key for
-//! key and [`control_body`] mirrors the envelope.
+//! `b.id AS binding_id, b.database_id, b.capability`, reads the capability back
+//! through `DatabaseCapability::from_wire` and serves one JSON object per row
+//! under a `bindings` array. [`control_entry`] mirrors that object key for key
+//! and [`control_body`] mirrors the envelope.
 //!
 //! # Where the route comes from
 //!
@@ -42,9 +41,9 @@ use zeroship_data_orm::resolved_bindings::ResolvedBinding;
 const FIXTURE_CAPABILITY: DatabaseCapability = DatabaseCapability::ReadWrite;
 
 /// One entry exactly as control builds it: two typed ids and the capability as
-/// JSON strings, and the schema epoch as a JSON number.
-fn control_entry(binding: &BindingId, database: &DatabaseId, epoch: u32) -> serde_json::Value {
-    capability_entry(binding, database, epoch, FIXTURE_CAPABILITY)
+/// JSON strings.
+fn control_entry(binding: &BindingId, database: &DatabaseId) -> serde_json::Value {
+    capability_entry(binding, database, FIXTURE_CAPABILITY)
 }
 
 /// The same entry at a stated capability, for the tests that vary it.
@@ -55,13 +54,11 @@ fn control_entry(binding: &BindingId, database: &DatabaseId, epoch: u32) -> serd
 fn capability_entry(
     binding: &BindingId,
     database: &DatabaseId,
-    epoch: u32,
     capability: DatabaseCapability,
 ) -> serde_json::Value {
     serde_json::json!({
         "binding_id": binding.as_str(),
         "database_id": database.as_str(),
-        "schema_epoch": epoch,
         "capability": capability.as_wire(),
     })
 }
@@ -98,32 +95,30 @@ fn without_field(entry: &serde_json::Value, name: &str) -> String {
 }
 
 #[test]
-fn every_entry_is_decoded_field_for_field_at_a_non_zero_epoch() {
-    let first = (BindingId::mint(), DatabaseId::mint(), 7_u32);
-    let second = (BindingId::mint(), DatabaseId::mint(), 19_u32);
+fn every_entry_is_decoded_field_for_field() {
+    let first = (BindingId::mint(), DatabaseId::mint());
+    let second = (BindingId::mint(), DatabaseId::mint());
     let body = control_body(&[
-        control_entry(&first.0, &first.1, first.2),
-        control_entry(&second.0, &second.1, second.2),
+        control_entry(&first.0, &first.1),
+        control_entry(&second.0, &second.1),
     ]);
 
     let resolved = parse_resolved_bindings(&body).expect("control's own shape decodes");
 
     // Value equality over the WHOLE set, in order: an app binds many databases
     // and each entry composes its own role, so a parse that dropped one, or
-    // carried one entry's epoch onto another, must not pass here.
+    // carried one entry's edge onto another, must not pass here.
     assert_eq!(
         resolved,
         vec![
             ResolvedBinding {
                 database: first.1.clone(),
                 binding: first.0.clone(),
-                epoch: first.2,
                 capability: FIXTURE_CAPABILITY,
             },
             ResolvedBinding {
                 database: second.1,
                 binding: second.0,
-                epoch: second.2,
                 capability: FIXTURE_CAPABILITY,
             },
         ]
@@ -133,7 +128,7 @@ fn every_entry_is_decoded_field_for_field_at_a_non_zero_epoch() {
     // installing the entries that happened to parse.
     let partial = format!(
         r#"{{"bindings":[{},{{"binding_id":"{}"}}]}}"#,
-        control_entry(&first.0, &first.1, first.2),
+        control_entry(&first.0, &first.1),
         first.0.as_str(),
     );
     parse_resolved_bindings(&partial)
@@ -141,104 +136,8 @@ fn every_entry_is_decoded_field_for_field_at_a_non_zero_epoch() {
 }
 
 #[test]
-fn a_zero_epoch_is_a_value_not_an_absence() {
-    let binding = BindingId::mint();
-    let database = DatabaseId::mint();
-    let entry = control_entry(&binding, &database, 0);
-
-    let resolved =
-        parse_resolved_bindings(&control_body(std::slice::from_ref(&entry))).expect("zero decodes");
-    assert_eq!(
-        resolved,
-        vec![ResolvedBinding {
-            database,
-            binding,
-            epoch: 0,
-            capability: FIXTURE_CAPABILITY,
-        }],
-        "control mints a database at epoch zero, so zero is the first value this \
-         carries and must not read as a missing field"
-    );
-
-    // The control differing in one variable: the same entry with the epoch
-    // outside what a `u32` holds is refused, so the acceptance above is the
-    // value being accepted rather than the check being absent.
-    let out_of_range = with_field(&entry, "schema_epoch", serde_json::json!(-1));
-    parse_resolved_bindings(&out_of_range).expect_err("a negative epoch is refused");
-}
-
-#[test]
-fn the_accepted_epoch_range_ends_at_u32_max() {
-    let binding = BindingId::mint();
-    let database = DatabaseId::mint();
-    let entry = control_entry(&binding, &database, 1);
-
-    // Control narrows an `i32` column, so `i32::MAX` is the largest epoch it
-    // can serve, and `u32::MAX` the largest this parse accepts.
-    for accepted in [
-        u32::try_from(i32::MAX).expect("i32::MAX is non-negative"),
-        u32::MAX,
-    ] {
-        let body = with_field(&entry, "schema_epoch", serde_json::json!(accepted));
-        let resolved = parse_resolved_bindings(&body).unwrap_or_else(|error| {
-            panic!("{accepted} is inside the epoch range this parse accepts: {error}")
-        });
-        assert_eq!(
-            resolved.first().expect("one entry in, one entry out").epoch,
-            accepted
-        );
-    }
-
-    let over = u64::from(u32::MAX) + 1;
-    let body = with_field(&entry, "schema_epoch", serde_json::json!(over));
-    let error = parse_resolved_bindings(&body)
-        .expect_err("an epoch above u32::MAX composes no role and is refused");
-    assert!(
-        error.contains("schema_epoch"),
-        "the refusal must name the field that failed: {error}"
-    );
-}
-
-#[test]
-fn a_schema_epoch_that_is_absent_or_not_a_number_is_refused() {
-    let binding = BindingId::mint();
-    let database = DatabaseId::mint();
-    let entry = control_entry(&binding, &database, 3);
-
-    // The acceptance control: this exact entry parses, so each rejection below
-    // is caused by the one key it changes.
-    parse_resolved_bindings(&control_body(std::slice::from_ref(&entry)))
-        .expect("the unmutated entry is accepted");
-
-    let refusals = [
-        ("absent", without_field(&entry, "schema_epoch")),
-        (
-            "a string",
-            with_field(&entry, "schema_epoch", serde_json::json!("3")),
-        ),
-        (
-            "null",
-            with_field(&entry, "schema_epoch", serde_json::Value::Null),
-        ),
-        (
-            "negative",
-            with_field(&entry, "schema_epoch", serde_json::json!(-1)),
-        ),
-    ];
-    for (label, body) in refusals {
-        let Err(error) = parse_resolved_bindings(&body) else {
-            panic!("an epoch that is {label} must refuse, not compose a role name");
-        };
-        assert!(
-            error.contains("schema_epoch"),
-            "an epoch that is {label} must be refused by name: {error}"
-        );
-    }
-}
-
-#[test]
 fn a_bindings_envelope_that_is_absent_or_not_an_array_is_refused() {
-    let entry = control_entry(&BindingId::mint(), &DatabaseId::mint(), 5);
+    let entry = control_entry(&BindingId::mint(), &DatabaseId::mint());
 
     // The acceptance control: the envelope control serves.
     assert_eq!(
@@ -274,7 +173,7 @@ fn a_bindings_envelope_that_is_absent_or_not_an_array_is_refused() {
 fn an_id_that_is_absent_or_unparseable_is_refused() {
     let binding = BindingId::mint();
     let database = DatabaseId::mint();
-    let entry = control_entry(&binding, &database, 11);
+    let entry = control_entry(&binding, &database);
 
     parse_resolved_bindings(&control_body(std::slice::from_ref(&entry)))
         .expect("the unmutated entry is accepted");
@@ -311,7 +210,7 @@ fn the_two_ids_are_held_apart_by_their_prefixes() {
     let swapped = serde_json::json!({
         "binding_id": database.as_str(),
         "database_id": binding.as_str(),
-        "schema_epoch": 2,
+        "capability": FIXTURE_CAPABILITY.as_wire(),
     });
     let error = parse_resolved_bindings(&control_body(&[swapped]))
         .expect_err("a database id in the binding slot is refused");
@@ -321,14 +220,13 @@ fn the_two_ids_are_held_apart_by_their_prefixes() {
     );
 
     // The control: the same two ids in their own slots decode.
-    let resolved = parse_resolved_bindings(&control_body(&[control_entry(&binding, &database, 2)]))
+    let resolved = parse_resolved_bindings(&control_body(&[control_entry(&binding, &database)]))
         .expect("the same ids in their own slots decode");
     assert_eq!(
         resolved,
         vec![ResolvedBinding {
             database,
             binding,
-            epoch: 2,
             capability: FIXTURE_CAPABILITY,
         }]
     );
@@ -349,12 +247,11 @@ fn an_empty_bindings_array_resolves_no_binding_without_refusing() {
     let binding = BindingId::mint();
     let database = DatabaseId::mint();
     assert_eq!(
-        parse_resolved_bindings(&control_body(&[control_entry(&binding, &database, 13)]))
+        parse_resolved_bindings(&control_body(&[control_entry(&binding, &database)]))
             .expect("one entry decodes"),
         vec![ResolvedBinding {
             database,
             binding,
-            epoch: 13,
             capability: FIXTURE_CAPABILITY,
         }]
     );
@@ -366,102 +263,11 @@ fn refusal(body: &str) -> String {
     parse_resolved_bindings(body).expect_err("this body composes no binding")
 }
 
-/// One refusal with the offending value's rendering removed, leaving the part
-/// of the message that names the CONDITION. Two inputs that failed the same
-/// way share this; two that failed differently must not.
-fn condition(message: &str, value: &str) -> String {
-    message.replace(value, "")
-}
-
-#[test]
-fn a_refused_schema_epoch_names_which_condition_failed_rather_than_absence() {
-    let binding = BindingId::mint();
-    let database = DatabaseId::mint();
-    let entry = control_entry(&binding, &database, 3);
-
-    // The acceptance control: this exact entry decodes, so every refusal below
-    // is caused by the one key it changes.
-    parse_resolved_bindings(&control_body(std::slice::from_ref(&entry)))
-        .expect("the unmutated entry is accepted");
-
-    let absent = refusal(&without_field(&entry, "schema_epoch"));
-    let text = refusal(&with_field(&entry, "schema_epoch", serde_json::json!("3")));
-    let null = refusal(&with_field(&entry, "schema_epoch", serde_json::Value::Null));
-    let negative = refusal(&with_field(&entry, "schema_epoch", serde_json::json!(-1)));
-    let over = refusal(&with_field(
-        &entry,
-        "schema_epoch",
-        serde_json::json!(u64::from(u32::MAX) + 1),
-    ));
-    let fractional = refusal(&with_field(&entry, "schema_epoch", serde_json::json!(3.5)));
-
-    // In four of these five the field is PRESENT, so a refusal reporting an
-    // absence sends the operator after a field control served.
-    for (label, present) in [
-        ("text", &text),
-        ("null", &null),
-        ("negative", &negative),
-        ("above the range", &over),
-        ("fractional", &fractional),
-    ] {
-        assert_ne!(
-            present, &absent,
-            "a schema_epoch that is {label} is present, so its refusal must not \
-             be the one an absent field produces"
-        );
-        assert!(
-            present.contains("schema_epoch"),
-            "a schema_epoch that is {label} must be refused by name: {present}"
-        );
-    }
-    assert!(
-        absent.contains("schema_epoch"),
-        "an absent schema_epoch must be refused by name: {absent}"
-    );
-
-    // A number the range cannot hold and a number that is not whole are
-    // different repairs, so their conditions differ with the value stripped
-    // out - value inequality alone would leave a single message wearing
-    // whatever it was handed.
-    assert_ne!(
-        condition(&negative, "-1"),
-        condition(&fractional, "3.5"),
-        "a value outside the range and a value that is not whole are different \
-         conditions"
-    );
-    assert_ne!(
-        condition(&text, "3"),
-        condition(&negative, "-1"),
-        "a field that is not a number at all and a number outside the range are \
-         different conditions"
-    );
-    assert_ne!(
-        text, null,
-        "a refusal must name the type it found, so text and null differ"
-    );
-
-    // The control on that stripping: two inputs that failed the SAME way share
-    // one condition, so the inequalities above are the wording differing and
-    // not merely the value appearing inside it.
-    assert_eq!(
-        condition(&negative, "-1"),
-        condition(&over, "4294967296"),
-        "both of these are epochs outside the range, and report it the same way"
-    );
-
-    // And the value is carried, so an operator reads what control served
-    // rather than only that it was wrong.
-    assert!(
-        negative.contains("-1") && over.contains("4294967296") && fractional.contains("3.5"),
-        "a numeric refusal must carry the value it refused: {negative} / {over} / {fractional}"
-    );
-}
-
 #[test]
 fn a_refused_id_says_whether_it_was_absent_or_present_and_not_text() {
     let binding = BindingId::mint();
     let database = DatabaseId::mint();
-    let entry = control_entry(&binding, &database, 17);
+    let entry = control_entry(&binding, &database);
 
     parse_resolved_bindings(&control_body(std::slice::from_ref(&entry)))
         .expect("the unmutated entry is accepted");
@@ -663,100 +469,43 @@ async fn the_control_reads_address_the_routes_control_declares() {
     refused.expect_err("a control plane that answers nothing supplies no project key");
 }
 
-/// A later install carries an advanced epoch into the store.
+/// A conflicting install refuses and leaves the store serving what it had.
 ///
-/// This binds `install_resolved_bindings` and the store beneath it, not the
-/// cadence that calls them: it installs twice directly, where a resident app
-/// resolves its binding once. The assertion is on the composed ROLE rather
-/// than the stored number, because the role is the string `SET LOCAL ROLE`
-/// sends, and an epoch that moved without moving the role would fence
-/// nothing.
+/// This binds `install_resolved_bindings` and the store beneath it: the
+/// assertion is on the composed ROLE, because the role is the string
+/// `SET LOCAL ROLE` sends. Its acceptance control is the equal re-install
+/// beside it, without which this would pass over a call that refused
+/// everything.
 #[test]
-fn a_later_install_carries_a_rotation_into_the_store() {
-    let binding = BindingId::mint();
-    let database = DatabaseId::mint();
-    let store = zeroship_data_orm::resolved_bindings::SuppliedAppBindings::new();
-
-    install_resolved_bindings(
-        &store,
-        "app_x",
-        &control_body(&[control_entry(&binding, &database, 7)]),
-    )
-    .expect("the first resolution installs the edge");
-    let before = store
-        .binding_for("app_x", "d1", &database)
-        .expect("the installed edge composes a binding");
-
-    install_resolved_bindings(
-        &store,
-        "app_x",
-        &control_body(&[control_entry(&binding, &database, 8)]),
-    )
-    .expect("a later resolution carries the rotation in");
-
-    let after = store
-        .binding_for("app_x", "d1", &database)
-        .expect("the rotated edge composes a binding");
-    assert_eq!(after.schema_epoch(), Some(8));
-    assert_ne!(
-        before.session_role(),
-        after.session_role(),
-        "the epoch is part of the role name, so following the rotation has to \
-         change the role the session narrows to"
-    );
-    assert_eq!(
-        store.bindings_for("app_x", "d1").len(),
-        1,
-        "the rotation replaces the edge rather than joining the set"
-    );
-}
-
-/// A response behind the store does not take the environment down with it,
-/// and a response naming a different binding still does.
-///
-/// The pair is the point. Two resolutions can be in flight at once now, so the
-/// losing one carries an older reading of a value that only advances; failing
-/// on it would refuse an environment over a race that resolved correctly.
-/// Its control differs in ONE variable - the binding id - and must still
-/// refuse, because that one says control resolved a different edge rather than
-/// an older reading of this one.
-#[test]
-fn a_response_behind_the_store_is_tolerated_and_a_different_binding_is_not() {
+fn a_conflicting_install_refuses_and_leaves_the_store_serving() {
     let binding = BindingId::mint();
     let database = DatabaseId::mint();
     let store = zeroship_data_orm::resolved_bindings::SuppliedAppBindings::new();
     install_resolved_bindings(
         &store,
         "app_x",
-        &control_body(&[control_entry(&binding, &database, 8)]),
+        &control_body(&[control_entry(&binding, &database)]),
     )
     .expect("the first resolution installs the edge");
     let installed = store
         .binding_for("app_x", "d1", &database)
         .expect("the installed edge composes a binding");
 
+    // THE CONTROL: an equal re-install is accepted.
     install_resolved_bindings(
         &store,
         "app_x",
-        &control_body(&[control_entry(&binding, &database, 7)]),
+        &control_body(&[control_entry(&binding, &database)]),
     )
-    .expect("a response behind the store resolves an environment");
-    assert_eq!(
-        store
-            .binding_for("app_x", "d1", &database)
-            .expect("the store still serves")
-            .session_role(),
-        installed.session_role(),
-        "the store keeps the later reading of a value that only advances"
-    );
+    .expect("an equal resolution is a no-op rather than a conflict");
 
-    // THE CONTROL: one variable changed, and the refusal comes back.
+    // One variable changed: a DIFFERENT edge for the same database.
     let moved = BindingId::mint();
     assert_ne!(moved.as_str(), binding.as_str());
     install_resolved_bindings(
         &store,
         "app_x",
-        &control_body(&[control_entry(&moved, &database, 9)]),
+        &control_body(&[control_entry(&moved, &database)]),
     )
     .expect_err("a different binding for one database refuses the resolution");
     assert_eq!(
@@ -766,13 +515,18 @@ fn a_response_behind_the_store_is_tolerated_and_a_different_binding_is_not() {
             .session_role(),
         installed.session_role()
     );
+    assert_eq!(
+        store.bindings_for("app_x", "d1").len(),
+        1,
+        "the refusal must not join a second edge to the set"
+    );
 }
 
 #[test]
 fn a_capability_that_is_absent_or_unknown_composes_no_binding() {
     let binding = BindingId::mint();
     let database = DatabaseId::mint();
-    let entry = control_entry(&binding, &database, 4);
+    let entry = control_entry(&binding, &database);
 
     // The acceptance control: this exact entry decodes, so each refusal below
     // is caused by the one key it changes.
@@ -817,7 +571,7 @@ fn each_capability_decodes_to_itself() {
     for capability in [DatabaseCapability::ReadWrite, DatabaseCapability::ReadOnly] {
         let binding = BindingId::mint();
         let database = DatabaseId::mint();
-        let entry = capability_entry(&binding, &database, 6, capability);
+        let entry = capability_entry(&binding, &database, capability);
 
         assert_eq!(
             parse_resolved_bindings(&control_body(std::slice::from_ref(&entry)))
@@ -825,7 +579,6 @@ fn each_capability_decodes_to_itself() {
             vec![ResolvedBinding {
                 database,
                 binding,
-                epoch: 6,
                 capability,
             }],
             "{capability:?} must decode to itself and not to the other capability"
@@ -845,8 +598,8 @@ fn two_entries_keep_their_own_capabilities() {
     let writable = (BindingId::mint(), DatabaseId::mint());
     let read_only = (BindingId::mint(), DatabaseId::mint());
     let body = control_body(&[
-        capability_entry(&writable.0, &writable.1, 1, DatabaseCapability::ReadWrite),
-        capability_entry(&read_only.0, &read_only.1, 2, DatabaseCapability::ReadOnly),
+        capability_entry(&writable.0, &writable.1, DatabaseCapability::ReadWrite),
+        capability_entry(&read_only.0, &read_only.1, DatabaseCapability::ReadOnly),
     ]);
 
     assert_eq!(
@@ -855,13 +608,11 @@ fn two_entries_keep_their_own_capabilities() {
             ResolvedBinding {
                 database: writable.1,
                 binding: writable.0,
-                epoch: 1,
                 capability: DatabaseCapability::ReadWrite,
             },
             ResolvedBinding {
                 database: read_only.1,
                 binding: read_only.0,
-                epoch: 2,
                 capability: DatabaseCapability::ReadOnly,
             },
         ]

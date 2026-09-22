@@ -167,7 +167,7 @@ CREATE INDEX IF NOT EXISTS "notes_created_by_idx" ON "{alias}"."notes" ("created
         // The `DROP SCHEMA ... CASCADE` above destroys every GRANT on the
         // schema and its tables along with the schema itself. Recreating the
         // schema does not bring them back, so the data path - which runs
-        // `SET LOCAL ROLE zs_bind_<bnd>_e<E>` - is denied for the schema, and
+        // `SET LOCAL ROLE zs_bind_<bnd>` - is denied for the schema, and
         // the sanitization rail reports that as a bare `internal error`. A
         // fixture that skipped this step would therefore fail every test
         // expecting a READ and pass every test expecting a refusal.

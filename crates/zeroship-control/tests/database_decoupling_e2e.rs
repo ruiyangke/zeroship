@@ -284,16 +284,15 @@ impl World {
         app
     }
 
-    async fn database_row(&self, database: &DatabaseId) -> (String, i32) {
-        let row = self
-            .pg
+    async fn database_status(&self, database: &DatabaseId) -> String {
+        self.pg
             .query_one(
-                "SELECT status, schema_epoch FROM zeroship.databases WHERE id = $1",
+                "SELECT status FROM zeroship.databases WHERE id = $1",
                 &[&database.as_str()],
             )
             .await
-            .expect("the database row must exist to be read");
-        (row.get("status"), row.get("schema_epoch"))
+            .expect("the database row must exist to be read")
+            .get("status")
     }
 
     /// The deploy hash the app row carries, which is the projection the gateway
@@ -339,7 +338,7 @@ impl World {
     /// reads the same rows through the same SQL rather than restating it.
     async fn live_bindings(&self, app: &AppId) -> Vec<ResolvedBinding> {
         let sql = format!(
-            "SELECT b.id AS binding_id, b.database_id, b.capability, d.schema_epoch {} \
+            "SELECT b.id AS binding_id, b.database_id, b.capability {} \
              ORDER BY b.id",
             zeroship_core::live_binding::LIVE_BINDINGS_FROM_WHERE
         );
@@ -349,13 +348,11 @@ impl World {
             .expect("read this app's live bindings")
             .iter()
             .map(|row| {
-                let epoch: i32 = row.get("schema_epoch");
                 ResolvedBinding {
                     database: DatabaseId::parse(row.get::<_, String>("database_id").as_str())
                         .expect("control stores a typed database id"),
                     binding: BindingId::parse(row.get::<_, String>("binding_id").as_str())
                         .expect("control stores a typed binding id"),
-                    epoch: u32::try_from(epoch).expect("a schema epoch is not negative"),
                     // Read through the one codec, exactly as the handler does.
                     // The column's CHECK admits these two spellings and nothing
                     // else, so a row this cannot read is a row the handler
@@ -494,7 +491,6 @@ fn private_migration() -> Json {
 /// does not promise the order the earlier apply reported.
 async fn apply_into(
     tenant_url: &str,
-    control_url: &str,
     target: ApplyTarget<'_>,
     principal: &UserId,
     request: Json,
@@ -506,7 +502,6 @@ async fn apply_into(
     let tmp = tmpdir(label);
     let report = apply_ir_documents(
         tenant_url,
-        control_url,
         &tmp,
         target,
         &request,
@@ -1230,7 +1225,7 @@ async fn the_whole_decoupled_path_runs_in_one_exercise() {
     }
     for database in [&shared_id, &private_id] {
         assert_eq!(
-            world.database_row(database).await.0,
+            world.database_status(database).await,
             "active",
             "a converged database is active"
         );
@@ -1252,7 +1247,6 @@ async fn the_whole_decoupled_path_runs_in_one_exercise() {
 
     let shared_first_apply = apply_into(
         cluster_fixture.url(),
-        &world.control_url,
         ApplyTarget {
             app_id: &app_a,
             database_id: &shared_id,
@@ -1265,7 +1259,6 @@ async fn the_whole_decoupled_path_runs_in_one_exercise() {
     .await;
     apply_into(
         cluster_fixture.url(),
-        &world.control_url,
         ApplyTarget {
             app_id: &app_a,
             database_id: &private_id,
@@ -1581,8 +1574,8 @@ async fn the_whole_decoupled_path_runs_in_one_exercise() {
     // The isolate has no handle, which is the first fence; this is the second.
     // The role app B's session narrows to is real and converged, and it is
     // pointed at the neighbouring schema.
-    let b_role = database_derivation::binding_role_name(&b_shared, b_bindings[0].epoch)
-        .expect("the binding role name fits");
+    let b_role =
+        database_derivation::binding_role_name(&b_shared).expect("the binding role name fits");
     // CONTROL: the same role, the same statement shape, its OWN database.
     assert_eq!(
         count_under_role(&mut cluster, &b_role, &shared_id, SHARED_COLLECTION)
@@ -1609,16 +1602,16 @@ async fn the_whole_decoupled_path_runs_in_one_exercise() {
     // -----------------------------------------------------------------------
     // STAGE 6. PROPERTY 4: a revoked binding is observable.
     //
-    // The data path separates a REVOKED binding from a RETIRED schema epoch by
-    // which error `SET LOCAL ROLE` returns - 42501 means the role stands and
-    // this login may not assume it, 22023 means there is no such role - and
-    // the reconciler's revoke arm exists to keep the first reachable: it
-    // withdraws both edges and leaves the role standing.
+    // The data path reads a REVOKED binding off the SQLSTATE `SET LOCAL ROLE`
+    // returns - 42501 means the role stands and this login may not assume it,
+    // 22023 means there is no such role - and the reconciler's revoke arm
+    // exists to keep the first reachable: it withdraws both edges and leaves
+    // the role standing.
     //
     // WHAT THE CONTROL SURFACE ACTUALLY DOES IS THE OTHER ONE.
     // `databases::unbind_database` DELETES the binding row, and a role no
     // declaration names is REAPED, so the refusal a creator reaches through the
-    // only call a creator has is the retired-epoch one. The two halves below
+    // only call a creator has is the generic 22023. The two halves below
     // measure both, in that order.
     // -----------------------------------------------------------------------
     databases::unbind_database(&world.registry, &world.owner, &shared_id, &app_b, None)
@@ -1665,9 +1658,8 @@ async fn the_whole_decoupled_path_runs_in_one_exercise() {
     assert_eq!(
         reaped.code(),
         &SqlState::INVALID_PARAMETER_VALUE,
-        "a REAPED role answers 22023, which the data path classifies as a retired \
-         epoch and re-resolves; the terminal 42501 is not what an unbind produces: \
-         {reaped:?}"
+        "a REAPED role answers 22023, the generic bad-GUC code; the terminal 42501 \
+         is not what an unbind produces: {reaped:?}"
     );
     assert_eq!(
         reaped.message(),
@@ -1680,20 +1672,22 @@ async fn the_whole_decoupled_path_runs_in_one_exercise() {
     // `zeroship.database_bindings.status = 'revoking'` is what the reconciler's
     // revoke arm reads, and NO caller in the control plane writes it, so it is
     // declared here directly.
-    let a_shared_epoch = a_bindings
-        .iter()
-        .find(|resolved| resolved.database == shared_id)
-        .expect("app A holds a live binding to the shared database")
-        .epoch;
-    let a_shared_role = database_derivation::binding_role_name(&a_shared, a_shared_epoch)
-        .expect("the binding role name fits");
-    let a_private_epoch = a_bindings
-        .iter()
-        .find(|resolved| resolved.database == private_id)
-        .expect("app A holds a live binding to its own database")
-        .epoch;
-    let a_private_role = database_derivation::binding_role_name(&a_private, a_private_epoch)
-        .expect("the binding role name fits");
+    assert!(
+        a_bindings
+            .iter()
+            .any(|resolved| resolved.database == shared_id),
+        "app A holds a live binding to the shared database"
+    );
+    let a_shared_role =
+        database_derivation::binding_role_name(&a_shared).expect("the binding role name fits");
+    assert!(
+        a_bindings
+            .iter()
+            .any(|resolved| resolved.database == private_id),
+        "app A holds a live binding to its own database"
+    );
+    let a_private_role =
+        database_derivation::binding_role_name(&a_private).expect("the binding role name fits");
     world
         .pg
         .execute(
@@ -1897,9 +1891,9 @@ async fn a_migration_one_app_applies_to_a_shared_database_does_not_fail_the_othe
         );
         rows_before.push((binding, what, row));
     }
-    let (database_status, epoch_before) = world.database_row(shared).await;
     assert_eq!(
-        database_status, "active",
+        world.database_status(shared).await,
+        "active",
         "the shared database must be active, the third conjunct of LIVE"
     );
 
@@ -1930,7 +1924,6 @@ async fn a_migration_one_app_applies_to_a_shared_database_does_not_fail_the_othe
     );
     let report = apply_into(
         tenant_url,
-        &world.control_url,
         ApplyTarget {
             app_id: applying,
             database_id: shared,
@@ -1956,17 +1949,11 @@ async fn a_migration_one_app_applies_to_a_shared_database_does_not_fail_the_othe
         ],
         "the shared database now carries a relation it did not carry before"
     );
-    let (database_status, epoch_after) = world.database_row(shared).await;
     assert_eq!(
-        database_status, "active",
+        world.database_status(shared).await,
+        "active",
         "an apply does not take the database out of the state that makes a \
          binding live - which is the only way it could fail a deploy from here"
-    );
-    assert!(
-        epoch_after > epoch_before,
-        "the committed delta rotated the schema epoch and control's projection \
-         followed it ({epoch_before} -> {epoch_after}), so the control plane has \
-         seen this migration and could compare on it if it compared at all"
     );
     // AND IT MOVED NOTHING LIVENESS DEPENDS ON. The deploy below succeeding
     // because the apply left every binding row exactly where it was is the

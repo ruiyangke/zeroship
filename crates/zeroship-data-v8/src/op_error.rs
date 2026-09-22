@@ -133,53 +133,6 @@ mod tests {
         assert!(op.message.is_ascii(), "ASCII only: {}", op.message);
     }
 
-    /// The OTHER database refusal must not borrow this one's remedy.
-    ///
-    /// A retired epoch is resolved by resolving the binding again, which the
-    /// platform does on its own. Telling that creator to run a migration sends
-    /// them to change their schema to fix a rotation that needed nothing from
-    /// them, so the two messages are asserted apart rather than merely asserted
-    /// non-empty.
-    #[test]
-    fn a_retired_epoch_names_its_own_remedy_and_not_the_migrate_command() {
-        let err = DbError::config_hinted(
-            SCHEMA_EPOCH_STALE,
-            STALE_EPOCH_MESSAGE,
-            STALE_EPOCH_HINT,
-        );
-        let op = err.to_op_error();
-        match &op.kind {
-            zeroship_runtime::state::OpErrorKind::CodedError { code, hint, .. } => {
-                assert_eq!(code, SCHEMA_EPOCH_STALE);
-                assert!(hint.is_some(), "hint is set for direct env.db callers");
-            }
-            other => panic!("expected CodedError, got {other:?}"),
-        }
-        assert_eq!(
-            op.message, STALE_EPOCH_MESSAGE,
-            "the response must carry the retired epoch's own remedy, and it is the \
-             platform constant rather than a spelling restated here"
-        );
-        assert!(
-            !op.message.contains("zeroship migrate"),
-            "a rotation is not fixed by migrating: {}",
-            op.message
-        );
-        // The role name embeds the binding id and the epoch; neither leaves
-        // the operator log.
-        assert!(
-            !op.message.contains("zs_bind_"),
-            "no role name: {}",
-            op.message
-        );
-        assert!(
-            !op.message.contains("ERROR:"),
-            "no server text: {}",
-            op.message
-        );
-        assert!(op.message.is_ascii(), "ASCII only: {}", op.message);
-    }
-
     #[test]
     fn prefix_message_leaves_the_binding_refusal_message_alone() {
         // `exec.rs` adds "db: per-app session setup: " to ordinary setup
@@ -187,12 +140,12 @@ mod tests {
         // creator-facing string stays clean. If that skip is ever removed,
         // operator-only setup context would leak through a public code.
         let mut err = DbError::config_hinted(
-            SCHEMA_EPOCH_STALE,
-            STALE_EPOCH_MESSAGE,
-            STALE_EPOCH_HINT,
+            SCHEMA_NOT_MIGRATED,
+            NOT_MIGRATED_MESSAGE,
+            NOT_MIGRATED_HINT,
         );
         prefix_message(&mut err, "db: per-app session setup: ");
-        assert_eq!(err.message_str(), STALE_EPOCH_MESSAGE);
+        assert_eq!(err.message_str(), NOT_MIGRATED_MESSAGE);
     }
 
     #[test]

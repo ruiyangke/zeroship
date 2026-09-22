@@ -304,16 +304,6 @@ async fn cleanup_database(conn: &Client, database: &DatabaseId) {
             &[&database.as_str()],
         )
         .await;
-    let _ = conn
-        .execute(
-            &format!(
-                "DELETE FROM {}.{} WHERE database_id = $1::text",
-                cluster::ADMIN_SCHEMA,
-                cluster::EPOCH_TABLE
-            ),
-            &[&database.as_str()],
-        )
-        .await;
 }
 
 async fn cleanup_user(conn: &Client, user_id: &UserId) {
@@ -396,7 +386,7 @@ async fn converge_database_schema(database: &DatabaseId) {
     cluster::apply_bootstrap_corpus(&client)
         .await
         .expect("bootstrap this cluster's platform roles and admin schema");
-    cluster::converge_database(&mut client, database, 1)
+    cluster::converge_database(&mut client, database)
         .await
         .expect("converge the declared database");
 }

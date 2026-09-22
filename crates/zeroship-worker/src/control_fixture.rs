@@ -93,18 +93,3 @@ fn http_response(status: &str, body: &str) -> String {
         body.len()
     )
 }
-
-/// The path one app-addressed control route declares, with its parameter
-/// filled - read from the declaration rather than spelled here.
-pub fn route(
-    endpoint: zeroship_core::service_identity::ServiceEndpoint,
-    app_id: &zeroship_core::app_id::AppId,
-) -> String {
-    /// The parameter an app-addressed route declares, as the declaration
-    /// spells it - the same one `sync::control_app_url` fills.
-    const APP_ID_PARAMETER: &str = "{app_id}";
-
-    endpoint
-        .path_template()
-        .replace(APP_ID_PARAMETER, app_id.as_str())
-}

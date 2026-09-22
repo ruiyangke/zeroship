@@ -76,7 +76,7 @@ async fn with_scoped_transaction<T>(
     tx.simple_query(&setup_sql).await.map_err(|e| {
         let mut classified = match authority {
             SessionAuthority::PerBindingRole => {
-                pg_error::classify_pg_binding_session_setup(&e, binding)
+                pg_error::classify_pg_binding_session_setup(&e)
             }
             SessionAuthority::Connection => {
                 zeroship_data_orm::error::SessionSetupError::failed(pg_error::classify(&e))

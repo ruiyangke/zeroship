@@ -299,7 +299,7 @@ mod tests {
         pool.batch_execute(
             "CREATE SCHEMA IF NOT EXISTS zeroship;
              CREATE TABLE IF NOT EXISTS zeroship.databases (
-               id text PRIMARY KEY, status text NOT NULL, schema_epoch int NOT NULL DEFAULT 1
+               id text PRIMARY KEY, status text NOT NULL
              );
              CREATE TABLE IF NOT EXISTS zeroship.database_bindings (
                id text PRIMARY KEY, app_id text NOT NULL, database_id text NOT NULL,

@@ -549,11 +549,10 @@ pub async fn get_app_data_key(
 /// Host-only database-binding delivery.
 ///
 /// **The worker composes no part of a binding.** The database id names the
-/// physical schema, the edge id and the schema epoch together name the role a
-/// session narrows to, the capability is the privilege set that role was
-/// granted, and all four are Control facts. A worker that derived any of them
-/// would address a schema, assume a role or claim a privilege no reconciler
-/// created.
+/// physical schema, the edge id names the role a session narrows to, the
+/// capability is the privilege set that role was granted, and all three are
+/// Control facts. A worker that derived any of them would address a schema,
+/// assume a role or claim a privilege no reconciler created.
 ///
 /// The capability is served so the data plane can name a read-only binding when
 /// a creator writes to it. It is NOT what stops the write: the reconciler
@@ -567,11 +566,6 @@ pub async fn get_app_data_key(
 /// each conjunct and why it is there. It is shared with the CDC relay and the
 /// migration service because a binding one of them calls live and another does
 /// not is a tenant-boundary disagreement.
-///
-/// A stale epoch is not a failure of this read: the cluster's own epoch row is
-/// the authority, so composing a retired one makes `SET LOCAL ROLE` fail and
-/// the caller re-resolve. That is the fail-closed direction and it is why this
-/// serves a projection rather than reading the cluster.
 pub async fn get_app_bindings(
     req: web::HttpRequest,
     state: State<Arc<AppState>>,
@@ -596,7 +590,7 @@ pub async fn get_app_bindings(
         .control_pg
         .query(
             &format!(
-                "SELECT b.id AS binding_id, b.database_id, b.capability, d.schema_epoch {} \
+                "SELECT b.id AS binding_id, b.database_id, b.capability {} \
                  ORDER BY b.id",
                 zeroship_core::live_binding::LIVE_BINDINGS_FROM_WHERE
             ),
@@ -617,18 +611,12 @@ pub async fn get_app_bindings(
     }
     let mut bindings = Vec::with_capacity(rows.len());
     for row in &rows {
-        let epoch: i32 = row.get("schema_epoch");
-        let Ok(epoch) = u32::try_from(epoch) else {
-            tracing::error!(app_id = %id.as_str(), "control-internal: negative schema epoch");
-            return web::HttpResponse::InternalServerError()
-                .json(&serde_json::json!({"error":"internal error"}));
-        };
-        // Parsed here rather than passed through, on the terms the epoch above
-        // is narrowed here: a stored spelling this cannot read is one the
-        // cluster reconciler could not compose a capability role from either,
-        // so it is a row nothing can serve rather than text to hand on and let
-        // the worker refuse. Serving `as_wire` means the response carries the
-        // one codec's spelling and not whatever the column happens to hold.
+        // Parsed here rather than passed through: a stored spelling this cannot
+        // read is one the cluster reconciler could not compose a capability
+        // role from either, so it is a row nothing can serve rather than text
+        // to hand on and let the worker refuse. Serving `as_wire` means the
+        // response carries the one codec's spelling and not whatever the column
+        // happens to hold.
         let Some(capability) =
             zeroship_core::database_role::DatabaseCapability::from_wire(row.get("capability"))
         else {
@@ -642,7 +630,6 @@ pub async fn get_app_bindings(
         bindings.push(serde_json::json!({
             "binding_id": row.get::<_, &str>("binding_id"),
             "database_id": row.get::<_, &str>("database_id"),
-            "schema_epoch": epoch,
             "capability": capability.as_wire(),
         }));
     }

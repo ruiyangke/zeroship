@@ -1,7 +1,9 @@
 //! Classify real PostgreSQL role-setup failures at the adapter boundary.
 //!
-//! A binding role the cluster never minted must produce a re-resolvable error
-//! during session setup; ordinary SQL errors retain generic classification. The
+//! `SET LOCAL ROLE` to a role that does not exist reports **22023**
+//! `invalid_parameter_value` - the generic "bad GUC value" code, shared with
+//! `SET statement_timeout = 'yes'`. The platform states no creator remedy for
+//! it, so both reach the caller as `internal` and are blanked at the rail. The
 //! fixture uses PostgreSQL's English messages. These assertions cover error
 //! lowering, not HTTP delivery.
 
@@ -175,14 +177,13 @@ async fn classify_missing_role(app_id: &str) -> DbError {
 }
 
 #[compio::test]
-async fn a_binding_role_the_cluster_never_minted_is_creator_facing_not_internal() {
+async fn a_binding_role_the_cluster_never_minted_carries_no_creator_remedy() {
     // A name no cluster will have: a freshly minted edge that no reconciler has
-    // converged, which is the production shape of this condition.
+    // converged, which is the production shape of this condition. There is
+    // nothing a creator does about it and nothing the platform can tell them to
+    // run, so it reaches them blanked rather than carrying a code that invites
+    // a repair.
     let app_id = uuid::Uuid::new_v4().simple().to_string();
-    let role = crate::tests::fixtures::harness_binding(&app_id)
-        .session_role()
-        .expect("a harness binding narrows to a role")
-        .to_owned();
     let classified = classify_missing_role(&app_id).await;
 
     let op = classified.to_op_error();
@@ -192,61 +193,20 @@ async fn a_binding_role_the_cluster_never_minted_is_creator_facing_not_internal(
     };
 
     assert_eq!(
-        code, "schema_epoch_stale",
-        "a binding role the cluster never minted is a re-resolvable CONFIGURATION \
-         state, not an internal fault. Got {code:?} with message {:?}",
+        code, "internal",
+        "a role `SET LOCAL ROLE` cannot find carries no creator-facing code, so it \
+         is blanked at the 5xx rail. Got {code:?} with message {:?}",
         op.message
     );
-
-    // The message is the platform CONSTANT -- not a composition -- so nothing
-    // from the server can appear in it. Asserting equality rather than absence
-    // is the stronger form: an absence list can only rule out the leaks someone
-    // thought of.
-    assert_eq!(
-        op.message,
-        zeroship_data_orm::error::STALE_EPOCH_MESSAGE,
-        "the wire message must be the fixed platform constant"
-    );
-
-    // The three specific things that WOULD ride out on an `Internal` path,
-    // spelled out so a future edit that starts composing the message fails here
-    // with a readable reason rather than only on the equality above. The role
-    // name identifies the binding and its epoch; `ERROR:` is
-    // `compio_postgres::DbError`'s severity prefix; `caused by` is
-    // `walk_pg_chain`'s source-chain joiner.
-    //
-    // The witness is the role the batch actually SENT. Composing a second
-    // spelling here would rule out a string the classifier could never have
-    // interpolated, which reads as protection and measures nothing.
-    assert!(
-        !op.message.contains(&role),
-        "the role name (which identifies the binding) must not ride out: {:?}",
-        op.message
-    );
-    assert!(
-        !op.message.contains("ERROR:"),
-        "server severity prefix must not ride out: {:?}",
-        op.message
-    );
-    assert!(
-        !op.message.contains("caused by"),
-        "the walked source chain must not ride out: {:?}",
-        op.message
-    );
-    assert!(op.message.is_ascii(), "ASCII only: {:?}", op.message);
 }
 
 #[compio::test]
 async fn a_real_internal_pg_failure_is_still_internal() {
-    // ONE-VARIABLE CONTROL, run against the SAME live server through the
-    // SAME classifier: a statement that fails for a reason resolving the
-    // binding again cannot change. If the arm had widened into "any
-    // configuration-shaped SQLSTATE is creator-facing", this would come back
-    // `schema_epoch_stale` too.
-    //
-    // 22023 deliberately -- the SAME SQLSTATE the missing-role case reports. The only thing separating the two is the server's primary
-    // message, so this proves the discriminator narrows rather than
-    // rubber-stamping the SQLSTATE.
+    // THE PAIR for the case above, run against the SAME live server through the
+    // SAME classifier, differing in one variable: the GUC that fails. Both are
+    // 22023, and after the schema-epoch fence was retired both land in one
+    // place - so this arm is what shows the missing-role classification is the
+    // generic one rather than a second arm that happens to agree.
     let postgres = crate::tests::fixtures::postgres::Postgres::start();
     let url = postgres.url();
     let (client, connection) = compio_postgres::connect(&url, NoTls)

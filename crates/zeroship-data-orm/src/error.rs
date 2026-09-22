@@ -22,7 +22,7 @@
 //! | [`DbError::Serialization`] | Postgres 40001 | SSI conflict in REPEATABLE READ / SERIALIZABLE |
 //! | [`DbError::LockContention`] | Postgres 55P03 / lock-not-available | `SELECT … FOR UPDATE NOWAIT` |
 //! | [`DbError::Transient`] | Postgres class 08, deadlock, out-of-memory | connection drop, 40P01 |
-//! | [`DbError::Configuration`] | Plugin mis-configured, OR the binding does not resolve on the cluster, OR the bound database holds no such relation | `DB_URL` not set; `schema_epoch_stale` (the binding role for this epoch does not exist); `schema_not_migrated` (Postgres 42P01/42703, fix: `zeroship migrate`) |
+//! | [`DbError::Configuration`] | Plugin mis-configured, OR the bound database holds no such relation | `DB_URL` not set; `schema_not_migrated` (Postgres 42P01/42703, fix: `zeroship migrate`) |
 //! | [`DbError::PermissionDenied`] | A classified authorization refusal with a terminal HTTP remedy | revoked database binding; `READ_ONLY_BINDING` (a write asked of a read-only binding) |
 //! | [`DbError::Coded`] | Pre-typed code from another subsystem | migrations.rs `migration_*` codes |
 //! | [`DbError::Internal`] | Anything else; logged but stamped `internal` | a `JSON.stringify` that lost a column |
@@ -368,10 +368,13 @@ pub enum DbError {
 pub enum SessionSetupDisposition {
     /// End this attempt and re-resolve its authority.
     ///
-    /// The binding role names the schema epoch, so a role that does not exist
-    /// says the shape this build was resolved against is not the shape the
-    /// cluster has. Nothing local can repair that and retrying the same
-    /// statement cannot either; the binding has to be resolved again.
+    /// No PostgreSQL setup classification selects this: the boundary reads
+    /// `42501` as a denial and leaves everything else unclassified
+    /// (`crates/zeroship-data-orm/src/backend/postgres/pg_error.rs`). It is the
+    /// seam by which a setup classifier reaches the reducer's retryable
+    /// verdict, which the authority classifier
+    /// (`crate::transaction::reducer::identity`) still produces on its own
+    /// path.
     ReResolve,
     /// End this attempt with a specific terminal denial.
     Denied(DenyReason),
@@ -415,23 +418,6 @@ impl SessionSetupError {
     }
 }
 
-/// Public error code for a session whose binding role does not exist at the
-/// epoch this isolate was built against.
-///
-/// The role name carries the epoch as its last component, so one `SET LOCAL
-/// ROLE` answers both "has the schema moved under code that is behind" and
-/// "has this database been converged at all". Neither is improved by sending
-/// the same statement again, and both are answered by resolving the binding
-/// afresh, so the code names the condition rather than a command.
-///
-/// On the 5xx allow-list in `crates/zeroship-runtime/src/core/dispatch.rs` in
-/// BOTH spellings: `@zeroship/db` re-stamps every native code through
-/// `canonicalErrorCode` inside the isolate, so a creator using the SDK sees
-/// `SCHEMA_EPOCH_STALE` and a creator calling `env.db` directly sees this one.
-/// Both must be listed or the exemption is inert on the path creators actually
-/// take.
-pub const SCHEMA_EPOCH_STALE: &str = "schema_epoch_stale";
-
 /// Public error code for a session whose database-role membership was revoked.
 pub const GRANT_REVOKED: &str = DenyReason::GrantRevoked.code();
 
@@ -455,11 +441,10 @@ pub const READ_ONLY_BINDING: &str = "READ_ONLY_BINDING";
 
 /// Fixed creator-facing message for [`READ_ONLY_BINDING`].
 ///
-/// Platform-authored and interpolating NOTHING, on the terms
-/// [`STALE_EPOCH_MESSAGE`] states: the database id, the binding id and the role
-/// name stay in the operator log. It names the condition and the action that
-/// changes it, which is a control-plane rebind and not anything the app can do
-/// to itself.
+/// Platform-authored and interpolating NOTHING: the database id, the binding id
+/// and the role name stay in the operator log. It names the condition and the
+/// action that changes it, which is a control-plane rebind and not anything the
+/// app can do to itself.
 pub const READ_ONLY_BINDING_MESSAGE: &str =
     "this app's binding to that database is read-only, so an operation that writes rows is \
      refused before any statement runs. Bind the app to the database with the readwrite \
@@ -469,26 +454,6 @@ pub const READ_ONLY_BINDING_MESSAGE: &str =
 /// and role name remain in the operator log.
 pub const GRANT_REVOKED_MESSAGE: &str =
     "this app's database grant has been revoked. Restore the database grant before retrying.";
-
-/// The wire message for [`SCHEMA_EPOCH_STALE`]. Platform-authored and fixed: it
-/// names the condition and the next action, and it interpolates NOTHING. The
-/// server text and the role name (which embeds the binding id and the epoch)
-/// stay in the operator log.
-///
-/// The remediation lives in the MESSAGE, not the hint, because `hint` is
-/// populated by `OpError::coded` and then dropped -- `build_verbose_error_body`
-/// emits `message`/`name`/`code`/`details`/`retryable` and never `hint`. A
-/// creator reading the HTTP response only ever sees the message.
-pub const STALE_EPOCH_MESSAGE: &str =
-    "this app's database binding is not live at the schema epoch this build was \
-     resolved at, so the request is refused before any statement runs.";
-
-/// Operator/`env.db`-caller hint for [`SCHEMA_EPOCH_STALE`]. Reaches app JS as
-/// `err.hint` on a direct native throw; does NOT reach the HTTP wire.
-pub const STALE_EPOCH_HINT: &str =
-    "The binding role names the schema epoch. A migration that changed the \
-     schema retires the previous epoch's role, and a database that has not been \
-     converged has none yet.";
 
 /// Public error code for a query naming a relation its database does not hold.
 ///
@@ -503,7 +468,11 @@ pub const STALE_EPOCH_HINT: &str =
 /// role exists and the grant stands, and only the relation is absent.
 ///
 /// On the 5xx allow-list in `crates/zeroship-runtime/src/core/dispatch.rs` in
-/// BOTH spellings, for the same reason [`SCHEMA_EPOCH_STALE`] is.
+/// BOTH spellings: `@zeroship/db` re-stamps every native code through
+/// `canonicalErrorCode` inside the isolate, so a creator using the SDK sees
+/// `SCHEMA_NOT_MIGRATED` and a creator calling `env.db` directly sees this one.
+/// Both must be listed or the exemption is inert on the path creators actually
+/// take.
 pub const SCHEMA_NOT_MIGRATED: &str = "schema_not_migrated";
 
 /// The wire message for [`SCHEMA_NOT_MIGRATED`]. Platform-authored and fixed:

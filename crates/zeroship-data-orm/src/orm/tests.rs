@@ -411,13 +411,10 @@ async fn platform_service_credentials_drive_orm_authority() {
         .await
         .expect_err("the Control login must not read a creator schema");
     assert!(denied.message_str().contains("permission denied"));
-    assert!(!matches!(
-        denied,
-        DbError::Configuration {
-            code: crate::error::SCHEMA_EPOCH_STALE,
-            ..
-        }
-    ));
+    assert!(
+        !matches!(denied, DbError::Configuration { .. }),
+        "a privilege refusal is not a configuration condition the creator can fix: {denied}"
+    );
 
     drop(creator_db);
     drop(db);

@@ -89,7 +89,6 @@ pub(crate) fn bind_app(
             zeroship_data_orm::resolved_bindings::ResolvedBinding {
                 database: database.clone(),
                 binding: zeroship_core::BindingId::mint(),
-                epoch: 1,
                 capability: zeroship_core::database_role::DatabaseCapability::ReadWrite,
             },
         )

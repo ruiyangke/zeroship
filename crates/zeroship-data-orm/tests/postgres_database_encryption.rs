@@ -46,9 +46,6 @@ use zeroship_migrate_server::datastore::cluster;
 /// away with the test.
 const WORKER_PASSWORD: &str = "fixture";
 
-/// The epoch the reconciler converges these databases at.
-const LIVE_EPOCH: i32 = 1;
-
 /// The deploy pin is `postgres:16` (`deploy/compose/docker-compose.yml`), and
 /// the grant options the whole ladder rests on do not exist below it.
 const MINIMUM_SERVER_VERSION_NUM: i32 = 160_000;
@@ -177,10 +174,9 @@ impl Cluster {
         let a_on_other = BindingId::mint();
 
         for database in [&shared, &other] {
-            let epoch = cluster::converge_database(&mut admin, database, LIVE_EPOCH)
+            cluster::converge_database(&mut admin, database)
                 .await
                 .expect("the reconciler converges the database");
-            assert_eq!(epoch, LIVE_EPOCH, "the cluster records the declared epoch");
             seed_table(&admin, database).await;
         }
         for (binding, database) in [
@@ -188,15 +184,9 @@ impl Cluster {
             (&b_on_shared, &shared),
             (&a_on_other, &other),
         ] {
-            cluster::grant_binding(
-                &admin,
-                binding,
-                database,
-                DatabaseCapability::ReadWrite,
-                LIVE_EPOCH,
-            )
-            .await
-            .expect("the reconciler grants the binding's two edges");
+            cluster::grant_binding(&admin, binding, database, DatabaseCapability::ReadWrite)
+                .await
+                .expect("the reconciler grants the binding's two edges");
         }
 
         admin
@@ -236,7 +226,6 @@ impl Cluster {
             "deploy_fixture",
             database.clone(),
             edge.clone(),
-            LIVE_EPOCH as u32,
             DatabaseCapability::ReadWrite,
         )
         .expect("the fixture ids compose a legal role name")

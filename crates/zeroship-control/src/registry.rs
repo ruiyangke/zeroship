@@ -1,12 +1,11 @@
 //! Registry — application CRUD backed by PostgreSQL (compio-postgres).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use compio_postgres::error::SqlState;
 use compio_postgres::{Client, NoTls};
 use zeroship_core::app_derivation;
 use zeroship_core::app_id::AppId;
-use zeroship_core::DatabaseId;
 
 use crate::publication::{
     catalog, Acceptance, AcceptanceResult, Catalog, CatalogError, CatalogOptions, CommandBinding,
@@ -802,84 +801,6 @@ impl Registry {
                 &[],
             )
             .await?;
-        // The schema epoch of every LIVE binding, by app. A worker isolate
-        // captures the binding its sessions narrow with when it builds, so an
-        // apply that rotates the role reaches a resident app only by this
-        // feed: the worker compares it and replaces the isolate.
-        //
-        // `LIVE_BINDINGS_FROM_WHERE_EVERY_APP` is the shared liveness
-        // predicate, over every app in one statement rather than one statement
-        // per app on every poll. Which bindings are live is the same question
-        // the CDC relay and the migration service ask, and it is answered here
-        // by the same clause they use.
-        let binding_rows = conn
-            .query(
-                &format!(
-                    "SELECT b.app_id, b.database_id, d.schema_epoch {}",
-                    zeroship_core::live_binding::LIVE_BINDINGS_FROM_WHERE_EVERY_APP
-                ),
-                &[],
-            )
-            .await?;
-        // A ROW THIS LOOP CANNOT DESCRIBE LEAVES THE APP'S MAP, AND THE WORKER
-        // READS THAT AS A BINDING THE APP NO LONGER HOLDS. The three refusals
-        // below are each held off by a corpus constraint, and the skip is only
-        // safe while they are:
-        //
-        // - `app_id` is foreign-keyed to `zeroship.apps.id`, which carries
-        //   `apps_id_shape` - the grammar `AppId::parse` accepts;
-        // - `database_id` is foreign-keyed to `zeroship.databases.id`, which
-        //   carries `databases_id_shape`;
-        // - `schema_epoch` is an `int` under `databases_schema_epoch_nonnegative`,
-        //   so every value it holds fits a `u32`.
-        //
-        // All three are authored in
-        // `db/migrations-ts/20260919000200_database_entities.ts` and
-        // `db/migrations-ts/20260702000200_control_tables.ts`. Widening any of
-        // them makes a skip reachable, and a skip is not a quiet degradation:
-        // a worker holding that binding sees the app's map shrink, replaces
-        // the isolate, and either unbinds the database outright (when the app
-        // has no other live binding, because an empty map is read as "control
-        // serves none" and no binding read is made) or re-resolves against
-        // `GET /internal/apps/{app_id}/bindings`, which refuses the same row
-        // rather than skipping it - so the reload is abandoned and retried on
-        // every poll with nothing converging. The refusal is logged at ERROR
-        // for that reason: it names a row whose repair is the only thing that
-        // settles it.
-        let mut binding_epochs: HashMap<AppId, BTreeMap<DatabaseId, u32>> = HashMap::new();
-        for row in &binding_rows {
-            let app_id_raw: String = row.get("app_id");
-            let Ok(app_id) = AppId::parse(&app_id_raw) else {
-                tracing::error!(
-                    app_id = %app_id_raw,
-                    "registry: database_bindings row has a malformed app id; its app's \
-                     version feed entry omits this binding"
-                );
-                continue;
-            };
-            let database_raw: String = row.get("database_id");
-            let Ok(database) = DatabaseId::parse(&database_raw) else {
-                tracing::error!(
-                    app_id = %app_id.as_str(),
-                    database_id = %database_raw,
-                    "registry: database_bindings row has a malformed database id; this \
-                     app's version feed entry omits this binding"
-                );
-                continue;
-            };
-            let epoch_i32: i32 = row.get("schema_epoch");
-            let Ok(epoch) = u32::try_from(epoch_i32) else {
-                tracing::error!(
-                    app_id = %app_id.as_str(),
-                    database_id = %database.as_str(),
-                    schema_epoch = epoch_i32,
-                    "registry: databases row has a negative schema epoch; this app's \
-                     version feed entry omits this binding"
-                );
-                continue;
-            };
-            binding_epochs.entry(app_id).or_default().insert(database, epoch);
-        }
         let mut rules: HashMap<AppId, Vec<NetEgressEntry>> = HashMap::new();
         for row in &rule_rows {
             let app_id_raw: String = row.get("app_id");
@@ -965,10 +886,6 @@ impl Registry {
                 }
             });
             let runtime = runtime_limits_from_catalog(runtime_limits_json.as_ref(), &id);
-            // An app with no live binding carries the empty map, which is a
-            // statement and not an absence: it is what the worker compares its
-            // isolate against to find that a binding was withdrawn.
-            let epochs = binding_epochs.remove(&id).unwrap_or_default();
             map.insert(
                 id,
                 AppVersionInfo {
@@ -978,7 +895,6 @@ impl Registry {
                     env_version,
                     manifest,
                     net_policy,
-                    binding_epochs: epochs,
                 },
             );
         }

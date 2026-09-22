@@ -106,7 +106,7 @@ std::thread_local! {
 /// The binding a harness with no live isolate runs `app_id` under.
 ///
 /// Stable for the life of the calling thread, and a real database edge: the
-/// schema is `db_<dbs>` and the session narrows to `zs_bind_<bnd>_e1`, exactly
+/// schema is `db_<dbs>` and the session narrows to `zs_bind_<bnd>`, exactly
 /// as a resolved production binding does.
 pub fn harness_binding(app_id: &str) -> zeroship_data_orm::binding::DbBinding {
     HARNESS_BINDINGS.with(|bindings| {
@@ -119,7 +119,6 @@ pub fn harness_binding(app_id: &str) -> zeroship_data_orm::binding::DbBinding {
                     zeroship_data_orm::binding::COLD_START_DEPLOY_TOKEN,
                     zeroship_core::DatabaseId::mint(),
                     zeroship_core::BindingId::mint(),
-                    HARNESS_EPOCH,
                     HARNESS_CAPABILITY,
                 )
                 .expect("a minted database and edge compose a legal role name")
@@ -130,8 +129,8 @@ pub fn harness_binding(app_id: &str) -> zeroship_data_orm::binding::DbBinding {
 
 /// One app's binding as a SECOND deploy of it holds it.
 ///
-/// Same tenant, same database, same edge, same epoch - only the deploy token
-/// differs, which is what the descriptor and protection-floor caches key on.
+/// Same tenant, same database, same edge - only the deploy token differs, which
+/// is what the descriptor and protection-floor caches key on.
 pub fn harness_binding_at_deploy(
     app_id: &str,
     deploy_token: &str,
@@ -145,7 +144,6 @@ pub fn harness_binding_at_deploy(
         deploy_token,
         edge.database().clone(),
         edge.binding().clone(),
-        edge.epoch(),
         edge.database_capability(),
     )
     .expect("a harness binding's ids compose a legal role name")
@@ -236,13 +234,6 @@ pub fn harness_database(app_id: &str) -> zeroship_core::DatabaseId {
         .expect("a harness binding addresses a database")
         .clone()
 }
-
-/// The schema epoch every harness binding is minted at.
-///
-/// Named rather than spelled at each site so a fixture that provisions the
-/// ladder and a test that asserts against a retired epoch cannot disagree about
-/// which epoch is live.
-pub const HARNESS_EPOCH: u32 = 1;
 
 /// The capability every harness binding is minted with.
 ///
@@ -365,7 +356,6 @@ pub fn harness_binding_at_deploy_for(
         deploy_token,
         edge.database().clone(),
         edge.binding().clone(),
-        edge.epoch(),
         edge.database_capability(),
     )
     .expect("a harness binding composes a legal role name at any deploy")

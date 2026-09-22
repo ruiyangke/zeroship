@@ -554,7 +554,7 @@ counts, and handles settlement, cancellation, cleanup, and discard.
 `executor::ScopedExecutor` takes the whole `DbBinding` and resolves the physical
 SQL namespace and the authority from it on the connection that executes its
 statements. PostgreSQL narrows the transaction to the binding's own role
-(`zs_bind_<bnd>_e<E>`) and applies the timeout settings. SQLite attaches the
+(`zs_bind_<bnd>`) and applies the timeout settings. SQLite attaches the
 database file under the binding's schema and selects that database's
 transaction lane before exposing a physical connection source, so the dev tier
 is one `zs-<schema>.sqlite` per database and the ATTACH alias is the same string

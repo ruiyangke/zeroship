@@ -442,9 +442,8 @@ fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
             let coll = "patients";
 
             // Resets the schema this binding addresses. The ladder below creates
-            // the role the read path checks for -- without it the unmask SELECT
-            // refuses with `schema_epoch_stale` before authorization is ever
-            // reached.
+            // the role the session narrows to -- without it `SET LOCAL ROLE`
+            // fails and the unmask SELECT never reaches authorization.
             let role = provision_binding_schema(&pool, app).await;
             crate::tests::fixtures::roles::ensure_binding_ladder(&pool, &crate::tests::fixtures::harness_binding(app))
                 .await

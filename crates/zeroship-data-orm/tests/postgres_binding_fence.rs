@@ -28,7 +28,7 @@ use zeroship_core::database_role::DatabaseCapability;
 use zeroship_core::{BindingId, DatabaseId};
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::encryption::ProjectKeySource;
-use zeroship_data_orm::error::{DbError, GRANT_REVOKED, SCHEMA_EPOCH_STALE};
+use zeroship_data_orm::error::{DbError, GRANT_REVOKED};
 use zeroship_data_orm::orm::{Database, Output};
 use zeroship_data_orm::schema::{CollectionSchema, ColumnSchema, LogicalType, Schema};
 use zeroship_data_orm::value;
@@ -38,9 +38,6 @@ use zeroship_migrate_server::datastore::cluster;
 /// The password the fixture gives the worker login. The container is thrown
 /// away with the test.
 const WORKER_PASSWORD: &str = "fixture";
-
-/// The epoch the reconciler converges these databases at.
-const LIVE_EPOCH: i32 = 1;
 
 /// The deploy pin is `postgres:16` (`deploy/compose/docker-compose.yml`), and
 /// the grant options the whole ladder rests on do not exist below it.
@@ -114,19 +111,12 @@ async fn converge(
     database: &DatabaseId,
     binding: &BindingId,
 ) {
-    let epoch = cluster::converge_database(admin, database, LIVE_EPOCH)
+    cluster::converge_database(admin, database)
         .await
         .expect("the reconciler converges the database");
-    assert_eq!(epoch, LIVE_EPOCH, "the cluster records the declared epoch");
-    cluster::grant_binding(
-        admin,
-        binding,
-        database,
-        DatabaseCapability::ReadWrite,
-        LIVE_EPOCH,
-    )
-    .await
-    .expect("the reconciler grants the binding's two edges");
+    cluster::grant_binding(admin, binding, database, DatabaseCapability::ReadWrite)
+        .await
+        .expect("the reconciler grants the binding's two edges");
 }
 
 /// The URL the worker login opens, built from the fixture's own.
@@ -209,24 +199,23 @@ impl Fence {
         }
     }
 
-    fn binding_at(&self, database: &DatabaseId, edge: &BindingId, epoch: u32) -> DbBinding {
+    fn binding_at(&self, database: &DatabaseId, edge: &BindingId) -> DbBinding {
         DbBinding::to_database(
             "app_fence",
             "deploy_fence",
             database.clone(),
             edge.clone(),
-            epoch,
             DatabaseCapability::ReadWrite,
         )
-            .expect("the fixture ids compose a legal role name")
+        .expect("the fixture ids compose a legal role name")
     }
 
     fn mine(&self) -> DbBinding {
-        self.binding_at(&self.mine, &self.my_edge, LIVE_EPOCH as u32)
+        self.binding_at(&self.mine, &self.my_edge)
     }
 
     fn theirs(&self) -> DbBinding {
-        self.binding_at(&self.theirs, &self.their_edge, LIVE_EPOCH as u32)
+        self.binding_at(&self.theirs, &self.their_edge)
     }
 }
 
@@ -267,7 +256,7 @@ async fn a_narrowed_session_reaches_its_own_database_and_is_refused_its_neighbou
     // schema, so PostgreSQL refuses the statement.
     let crossed = read_total(
         &fence.url,
-        fence.binding_at(&fence.theirs, &fence.my_edge, LIVE_EPOCH as u32),
+        fence.binding_at(&fence.theirs, &fence.my_edge),
     )
     .await
     .expect_err("a binding must not reach a database it does not name");
@@ -280,11 +269,13 @@ async fn a_narrowed_session_reaches_its_own_database_and_is_refused_its_neighbou
     drain().await;
 }
 
-/// A revoked binding is a terminal `GRANT_REVOKED`, not a retryable one.
+/// A revoked binding is a terminal `GRANT_REVOKED`, and its ROLE SURVIVES.
 ///
 /// The reconciler withdraws both edges and leaves the role standing precisely
-/// so the data plane can tell a revocation from a retired epoch by SQLSTATE
-/// alone. Its control is the same read before the revoke.
+/// so the refusal stays `42501` - the role exists and this session may not
+/// assume it - rather than the `22023` a dropped role would produce. Its
+/// control is the same read before the revoke, and the catalog read below is
+/// what distinguishes a withdrawn membership from a removed object.
 #[compio::test]
 async fn a_revoked_binding_is_reported_as_a_terminal_grant_refusal() {
     let postgres = postgres_fixture::Postgres::start();
@@ -303,7 +294,6 @@ async fn a_revoked_binding_is_reported_as_a_terminal_grant_refusal() {
         &fence.my_edge,
         &fence.mine,
         DatabaseCapability::ReadWrite,
-        LIVE_EPOCH,
     )
     .await
     .expect("the reconciler withdraws both of the binding's edges");
@@ -314,12 +304,13 @@ async fn a_revoked_binding_is_reported_as_a_terminal_grant_refusal() {
     assert_eq!(
         refused.code(),
         GRANT_REVOKED,
-        "a revoked binding is terminal and must not be reported as a retired epoch: {refused}"
+        "a revoked binding is terminal and must be reported as the withdrawn \
+         membership it is: {refused}"
     );
 
-    // The role survived the revoke, which is what keeps the two refusals
-    // distinguishable. Read it from the catalog rather than inferring it.
-    let role = database_derivation::binding_role_name(&fence.my_edge, LIVE_EPOCH as u32)
+    // The role survived the revoke, which is what keeps the refusal `42501`.
+    // Read it from the catalog rather than inferring it.
+    let role = database_derivation::binding_role_name(&fence.my_edge)
         .expect("the fixture role name fits");
     let rows = fence
         .admin
@@ -334,84 +325,6 @@ async fn a_revoked_binding_is_reported_as_a_terminal_grant_refusal() {
             .await
             .expect("the neighbour's binding is unaffected by another's revoke"),
         99
-    );
-
-    drop(fence);
-    drain().await;
-}
-
-/// An isolate left behind by a REAL epoch rotation is told its shape moved.
-///
-/// The rotation is the production one: the reconciler mints `E+1` for the live
-/// binding and the previous epoch's role is reaped. An isolate still holding
-/// `E` then names a role that does not exist - `22023`, re-resolvable - rather
-/// than the terminal `42501` a revoke produces.
-///
-/// Three controls, because this arm could otherwise pass for three wrong
-/// reasons: the epoch reads before the rotation, the NEW epoch reads after it,
-/// and the retired role is gone from the catalog rather than merely unreachable.
-#[compio::test]
-async fn an_isolate_left_behind_by_an_epoch_rotation_is_reported_as_stale() {
-    let postgres = postgres_fixture::Postgres::start();
-    let fence = Fence::build(postgres.url()).await;
-    let retired = fence.mine();
-
-    // CONTROL 1: the live epoch reads before anything rotates.
-    assert_eq!(
-        read_total(&fence.url, retired.clone())
-            .await
-            .expect("the live epoch reaches the database"),
-        42
-    );
-
-    // THE ROTATION. The reconciler mints the next epoch's role and grants the
-    // same two edges; the previous epoch's role is then reaped, which is what
-    // an apply does once every live binding has moved.
-    let next = LIVE_EPOCH + 1;
-    cluster::grant_binding(
-        &fence.admin,
-        &fence.my_edge,
-        &fence.mine,
-        DatabaseCapability::ReadWrite,
-        next,
-    )
-    .await
-    .expect("the reconciler mints the next epoch's role");
-    let retired_role = database_derivation::binding_role_name(&fence.my_edge, LIVE_EPOCH as u32)
-        .expect("the fixture role name fits");
-    cluster::drop_binding_role(&fence.admin, &retired_role)
-        .await
-        .expect("the reconciler reaps the previous epoch's role");
-
-    // CONTROL 2: the role really is gone, so the refusal below is about the
-    // catalog rather than about a membership that merely changed.
-    let rows = fence
-        .admin
-        .query("SELECT 1 FROM pg_roles WHERE rolname = $1", &[&retired_role])
-        .await
-        .expect("read the role catalog");
-    assert!(rows.is_empty(), "the reap must remove the retired role");
-
-    // CONTROL 3: a binding resolved at the NEW epoch reads, so the refusal is
-    // about the isolate being behind rather than about the database being gone.
-    assert_eq!(
-        read_total(
-            &fence.url,
-            fence.binding_at(&fence.mine, &fence.my_edge, next as u32),
-        )
-        .await
-        .expect("a binding resolved at the new epoch reaches the database"),
-        42
-    );
-
-    let stale = read_total(&fence.url, retired)
-        .await
-        .expect_err("an isolate at the retired epoch must be refused");
-    assert_eq!(
-        stale.code(),
-        SCHEMA_EPOCH_STALE,
-        "a role that does not exist is a re-resolvable epoch condition, \
-         not a terminal grant refusal: {stale}"
     );
 
     drop(fence);
@@ -487,7 +400,7 @@ async fn one_app_holds_a_transaction_on_each_of_its_two_databases() {
     // key. Transaction lanes live on the context, so two handles built through
     // `Database::connect` would hold two lane maps and never contend at all -
     // and a worker thread holds ONE context for every database an app reaches.
-    let second_binding = fence.binding_at(&fence.theirs, &fence.their_edge, LIVE_EPOCH as u32);
+    let second_binding = fence.binding_at(&fence.theirs, &fence.their_edge);
     let second_backend =
         zeroship_data_orm::ConnectOptions::new(&fence.url, ProjectKeySource::unavailable())
             .connect()

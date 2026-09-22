@@ -157,7 +157,7 @@ impl NativePlugin for DbPlugin {
     /// host resolved FOR THAT DATABASE.
     ///
     /// The isolate composes no part of a binding: the database id, the edge id
-    /// and the schema epoch are control-plane facts, so this READS what the
+    /// are control-plane facts, so this READS what the
     /// trusted host resolved and refuses a database it resolved nothing for.
     fn bind_runtime_descriptor<'s>(
         &self,
@@ -643,7 +643,6 @@ export default { fetch() { return new Response("ok"); } };
             zeroship_data_orm::binding::COLD_START_DEPLOY_TOKEN,
             zeroship_core::DatabaseId::mint(),
             zeroship_core::BindingId::mint(),
-            7,
             zeroship_core::database_role::DatabaseCapability::ReadWrite,
         )
         .expect("a minted database and edge compose a legal role name");

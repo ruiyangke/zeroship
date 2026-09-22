@@ -1663,9 +1663,9 @@ fn a_classified_setup_failure_does_not_collapse_into_begin_failed() {
     );
 }
 
-/// A role-name epoch fence can report `ReResolve` through the same begin event
-/// without another event-shape change. This tests the seam only; there is no
-/// schema-epoch producer in this task.
+/// A setup classifier can report `ReResolve` through the same begin event
+/// without another event-shape change. This tests the seam only; no PostgreSQL
+/// setup classification produces it.
 #[test]
 fn a_begin_setup_re_resolve_uses_the_existing_retryable_verdict_arm() {
     let mut harness = Harness::at(TxState::Starting);

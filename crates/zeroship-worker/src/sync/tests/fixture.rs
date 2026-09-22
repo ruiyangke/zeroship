@@ -77,13 +77,6 @@ impl DeployedApp {
             "worker": { "entry": "index.js", "modules": { "index.js": blob_hash } },
         }))
         .expect("deployment manifest");
-        // The epochs the app's isolate is built against are the ones the host
-        // has already resolved, exactly as control would be reporting them
-        // for a converged app: a fixture that started them apart would make
-        // every case below reload for the binding reason.
-        let binding_epochs = crate::cache::app_bindings()
-            .map(|bindings| bindings.epochs_for(worker.app_id.as_str()))
-            .unwrap_or_default();
         let case = Self {
             control_url: worker.config.control_url.clone(),
             worker,
@@ -94,7 +87,6 @@ impl DeployedApp {
                 env_version: 1,
                 manifest: Some(manifest),
                 net_policy: AppNetPolicy::default(),
-                binding_epochs: binding_epochs.clone(),
             },
         };
         case.set_environment(1, "var-old", "sec-old");
@@ -117,7 +109,6 @@ impl DeployedApp {
                 deploy_hash: case.version.deploy_hash.clone(),
                 env_version: case.version.env_version,
                 net_policy: case.version.net_policy.clone(),
-                binding_epochs,
             },
         );
         case
@@ -158,12 +149,6 @@ impl DeployedApp {
             shutdown_timeout_secs: self.worker.config.shutdown_timeout_secs,
             blob_store: self.worker.config.blob_store.clone(),
         }
-    }
-
-    /// The epochs the host's binding store holds for this app - what an
-    /// isolate built now would narrow with.
-    pub fn installed_epochs(&self) -> std::collections::BTreeMap<zeroship_core::DatabaseId, u32> {
-        binding_store().epochs_for(self.worker.app_id.as_str())
     }
 
     /// The single edge the host has resolved for this app.

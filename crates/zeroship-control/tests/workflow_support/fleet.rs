@@ -533,13 +533,9 @@ impl Fleet {
         zeroship_migrate_server::datastore::cluster::apply_bootstrap_corpus(&creator_pg)
             .await
             .expect("bootstrap the creator cluster");
-        zeroship_migrate_server::datastore::cluster::converge_database(
-            &mut creator_pg,
-            &database,
-            1,
-        )
-        .await
-        .expect("converge the creator database");
+        zeroship_migrate_server::datastore::cluster::converge_database(&mut creator_pg, &database)
+            .await
+            .expect("converge the creator database");
         if fleet.manager_url.is_some() {
             // The creator journal is migration-path DDL: the worker's host
             // never creates it. Installing it before the apply below leaves it
@@ -562,7 +558,6 @@ impl Fleet {
         .unwrap();
         zeroship_migrate_server::apply::apply_ir_documents(
             &fleet.database.creator_url(),
-            &fleet.database.url(),
             &schema_work,
             zeroship_migrate_server::apply::ApplyTarget {
                 app_id: &fleet.app_id,

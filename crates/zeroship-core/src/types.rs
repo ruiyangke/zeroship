@@ -1,9 +1,9 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use zeroship_bundle::Manifest;
 
-use crate::{AppId, DatabaseId, UserId};
+use crate::{AppId, UserId};
 
 /// A registered application record.
 ///
@@ -150,31 +150,6 @@ pub struct AppVersionInfo {
     /// operator-internal runtimes.
     #[serde(default)]
     pub net_policy: AppNetPolicy,
-    /// The schema epoch of every database this app holds a LIVE binding to,
-    /// keyed by the database whose epoch it is.
-    ///
-    /// An isolate captures the binding its sessions narrow with when it builds,
-    /// and the epoch is the last component of that binding's role name. An
-    /// apply that commits a schema delta mints the next epoch's roles and
-    /// retires the one before the head, so a resident isolate whose epoch has
-    /// been retired is refused at `SET LOCAL ROLE` on every session it opens.
-    /// This is the fact `zeroship_worker::sync::needs_reload` compares to
-    /// decide that the isolate has to be replaced, exactly as it compares
-    /// [`AppVersionInfo::env_version`] for a rotated secret.
-    ///
-    /// The whole MAP and not one number, because an app binds many databases: a
-    /// maximum over them does not move when a second database advances under a
-    /// higher-epoch first one, and a sum that moves says nothing about which
-    /// binding moved and collides across a change of the bound SET. Equality
-    /// over the map detects an advance on any one database, a database the app
-    /// has stopped binding, and one it has started binding.
-    ///
-    /// No serde default, deliberately. An absent field would decode as "this
-    /// app binds nothing", which is a value this map also carries for the
-    /// common app with no database, so a producer that stopped emitting it
-    /// would silently disable the comparison on every worker. Required, it
-    /// fails the version-feed parse by name instead.
-    pub binding_epochs: BTreeMap<DatabaseId, u32>,
 }
 
 /// Per-app spend-enforcement state, derived by the control-plane spend engine

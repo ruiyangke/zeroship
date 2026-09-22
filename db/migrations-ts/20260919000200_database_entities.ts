@@ -95,16 +95,6 @@ export default {
         execution_zone_id: t.text().required(),
         datastore_id: t.text().required(),
         name: t.text().required(),
-        // A ROLE-NAME INPUT, NOT A RECORD OF THE SCHEMA. It answers which
-        // zs_bind_<binding>_e<epoch> Control should compose, and nothing else.
-        // Its authority is the epoch row on the cluster, written inside the
-        // transaction that mints the epoch's roles; this is a projection kept so
-        // a binding can be composed without a cross-zone read. A stale copy
-        // composes a role name that does not exist, SET LOCAL ROLE fails, and
-        // the caller re-resolves - fail-closed and self-correcting. Reading it
-        // as a description of shape rebuilds the deleted deploy gate under
-        // another name.
-        schema_epoch: t.int().required().default(0),
         status: t.text().required().default("provisioning"),
         created_at: t.timestamp().required().default(now()),
         updated_at: t.timestamp().required().default(now()),
@@ -133,9 +123,6 @@ export default {
     table("databases", { schema: "zeroship" })
       .check("databases_status_check")
       .add({ expr: (col) => col("status").in(["provisioning", "active", "draining", "deleting"]) });
-    table("databases", { schema: "zeroship" })
-      .check("databases_schema_epoch_nonnegative")
-      .add({ expr: (col) => col("schema_epoch").ge(0) });
     // Display text the CLI dereferences locally. A database is addressed by its
     // id on every wire; there is no (project, name) resolution anywhere.
     table("databases", { schema: "zeroship" })
@@ -167,16 +154,16 @@ export default {
     // ---- database_bindings -------------------------------------------------
     //
     // The edge carries its own id because the PostgreSQL role name is derived
-    // from it - zs_bind_<binding>_e<epoch>. A composite natural key would put
-    // two ids in one identifier, and max_identifier_length truncates silently
-    // past 63 with the epoch at the END of the name, so two epochs would
-    // collapse onto one role rather than error.
+    // from it - zs_bind_<binding>. A composite natural key would put two ids in
+    // one identifier, and max_identifier_length truncates silently past 63 with
+    // the id at the END of the name, so two bindings would collapse onto one
+    // role rather than error, and revoking either would withdraw both.
     //
     // It carries no label: the creator's local name for a database rides in the
     // manifest, so Control never treats a creator-chosen name as an identifier
-    // and two apps may call one database different things. It carries no epoch:
-    // which role names exist for a binding is answerable from the cluster
-    // catalog, which is authoritative, and a stored copy could only be wrong.
+    // and two apps may call one database different things. It carries no role
+    // name: which roles exist is answerable from the cluster catalog, which is
+    // authoritative, and a stored copy could only be wrong.
     table("database_bindings", { schema: "zeroship" }).create({
       columns: {
         id: t.text().required(),
