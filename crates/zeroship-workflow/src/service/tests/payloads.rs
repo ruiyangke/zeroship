@@ -429,9 +429,20 @@ async fn payload_contract(store: Rc<OrmStore>, objects: Objects) {
         )
         .await
         .unwrap();
+    // The whole descriptor, not just the hash: the status reply crosses into V8
+    // through `dispatch_json`, so these fields and this `kind` are the entire
+    // contract a creator narrows on. `StatusOutputRef` in
+    // `packages/workflows/src/index.ts` declares the same shape, and nothing
+    // mechanical ties the two literals together.
     assert_eq!(
-        scope.status(&run.id).await.unwrap().output.unwrap()["hash"],
-        output.hash
+        scope.status(&run.id).await.unwrap().output.unwrap(),
+        json!({
+            "kind": "ref",
+            "ref": format!("wfblob:sha256:{}", output.hash),
+            "hash": output.hash,
+            "size": output.size,
+            "contentType": output.content_type,
+        })
     );
     assert!(recovered
         .read_task_payload(

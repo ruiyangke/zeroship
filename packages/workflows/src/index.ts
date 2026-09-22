@@ -24,6 +24,11 @@ export interface RetryConfig {
   maxAttempts?: number;
 }
 
+/**
+ * What a by-reference `step.run` resolves to inside a workflow body. The replay
+ * bridge builds it in the isolate, so it closes over the run's native reader and
+ * carries the readers below.
+ */
 export interface StepOutputRef {
   readonly kind: "workflow-step-output-ref";
   readonly ref: string;
@@ -145,7 +150,21 @@ export interface WorkflowStep {
 }
 
 export type Step = WorkflowStep;
-export type StatusOutput<T = unknown> = T | StepOutputRef;
+
+/**
+ * What `run.status()` reports for a blob-backed final output. The host serialises
+ * the status reply as JSON, so this descriptor is inert data: it locates the blob
+ * and carries no readers. The bytes come from `run.readOutput()`.
+ */
+export interface StatusOutputRef {
+  readonly kind: "ref";
+  readonly ref: string;
+  readonly hash: string;
+  readonly size: number;
+  readonly contentType?: string;
+}
+
+export type StatusOutput<T = unknown> = T | StatusOutputRef;
 
 export type WorkflowRunState =
   | "queued"
@@ -172,6 +191,8 @@ export interface RestartOptions {
 export interface WorkflowRun<Output = unknown> {
   /** Read a completed step through this run's app-scoped native backend. */
   readStepOutput(name: string, occurrence: number): Promise<Uint8Array>;
+  /** Read the run's final output. This is how a `StatusOutputRef` is dereferenced. */
+  readOutput(): Promise<Uint8Array>;
   readonly id: string;
   signal(opts: { type: string; payload?: unknown; idempotencyKey?: string }): Promise<void>;
   status(): Promise<{ state: WorkflowRunState; output?: StatusOutput<Output>; error?: unknown }>;
