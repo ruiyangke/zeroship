@@ -166,6 +166,15 @@ fn start_with<C: Composition>(
     .unwrap()
 }
 
+/// The database a project file declares, standing in for the one
+/// `resolve_dev_database` reads off `databases.<label>.id`. `zeroship serve`
+/// binds what the file says, so a harness that minted its own would exercise
+/// an identity the host has no way to produce.
+fn declared_database() -> zeroship_core::DatabaseId {
+    zeroship_core::DatabaseId::parse("dbs_03evr3oqx1200cfkwyailh8l8")
+        .expect("a canonical database id")
+}
+
 /// The metered `env.db` plugin `zeroship serve` gives every isolate. Building a
 /// workflow isolate stamps its meter on that thread for all later ORM calls.
 fn metered_database(
@@ -181,7 +190,12 @@ fn metered_database(
             ))
             .unwrap(),
             project_keys: crate::project_keys::load(&root.join(".zeroship/private"), app).unwrap(),
-            app_bindings: crate::dev_binding::load(&root.join(".zeroship/private"), app).unwrap(),
+            app_bindings: crate::dev_binding::load(
+                &root.join(".zeroship/private"),
+                app,
+                Some(&declared_database()),
+            )
+            .unwrap(),
             cdc_relay: None,
             meter: Some(meter.clone()),
         })

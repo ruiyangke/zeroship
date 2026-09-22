@@ -21,7 +21,7 @@ Current internal endpoints are:
 - `GET /internal/apps/{app_id}`
 - `GET /internal/apps/{app_id}/env`
 - `GET /internal/apps/{app_id}/data-key`
-- `GET /internal/apps/{app_id}/binding`
+- `GET /internal/apps/{app_id}/bindings`
 - `POST /internal/workers/join`, `POST /internal/workers/renew`, `POST /internal/workers/retire`
 - `POST /internal/billing/reconcile`
 - `POST /internal/spend/reconcile`
@@ -123,7 +123,7 @@ stateless app credentials without a per-request database lookup. If
 `manifest_json` is missing, unparsable, or fails `Manifest::validate()`, the
 registry falls back to `Manifest::passthrough()` and logs an error.
 
-`Registry::get_versions()` builds `VersionMap<Uuid, AppVersionInfo>` for workers. The manifest in that feed is optional, so undeployed apps can still appear in the version map with `manifest = None`.
+`Registry::get_versions()` builds `VersionMap<Uuid, AppVersionInfo>` for workers. The manifest in that feed is optional, so undeployed apps can still appear in the version map with `manifest = None`. Each entry also carries `live_bindings`, the capability the app holds on every database it holds a live binding to, read through `zeroship_core::live_binding::LIVE_BINDINGS_FROM_WHERE_EVERY_APP`. It is what tells a worker that the binding set a resident isolate was built from is no longer the set Control serves, so the isolate is replaced and its bindings re-resolved; an app with no live binding carries the empty set, which is how a withdrawn binding reaches the worker too. It says nothing about any schema's shape - a creator's own migration moves nothing in it.
 
 Gateway polls `/internal/routes` every 5 seconds. Worker polls `/internal/versions` every 5 seconds and fetches env snapshots lazily from `/internal/apps/{app_id}/env` when `env_version` changes.
 These feeds are polled rather than pushed so the control plane stays stateless with respect to gateway and worker consumers.
@@ -131,17 +131,27 @@ These feeds are polled rather than pushed so the control plane stays stateless w
 Before loading an app with a database service, the worker fetches its project
 column key from `/internal/apps/{app_id}/data-key` into the host's shared
 `SuppliedProjectKeys`, and its resolved database binding from
-`/internal/apps/{app_id}/binding` into the host's shared `SuppliedAppBindings`.
+`/internal/apps/{app_id}/bindings` into the host's shared `SuppliedAppBindings`.
 The binding response carries the database id, the edge id and the capability;
 the worker composes no part of it, and Control serves only a binding whose
 status is active and whose `observed_generation` has caught up to its
 `generation`. An app Control serves no live binding for has no `env.db`.
-Both reads happen once per app per worker process. The key is one value for the
-life of the app, and a binding is one role for the life of the binding: the role
+The key read happens once per app per worker process: it is one value for the
+life of the app. The binding read happens once per app per worker process AND
+again wherever an isolate is replaced, because the set an app binds is not a
+constant. A binding is still one role for the life of that binding: the role
 name is derived from the edge id alone, so nothing about a creator's own schema
 change moves it. An isolate captures the binding its sessions narrow with while
-it BUILDS, by value, so a store that moved could not reach one already running
-in any case.
+it BUILDS, by value, so a store that moved could not reach one already running.
+That is why the binding is not re-read on a bare environment refresh, and why a
+bind or an unbind reaches a resident app only through the version feed:
+`needs_reload` (`crates/zeroship-worker/src/sync.rs`) compares
+`AppVersionInfo::live_bindings` alongside the deploy hash and the env version,
+and `resupply_bindings` replaces the app's whole binding set through
+`SuppliedAppBindings::replace_app` before the successor isolate is built. A
+cold start on a thread takes the same path in
+`crates/zeroship-worker/src/handler.rs`, because the store is process-wide and
+outlives every isolate in it.
 
 Control resolves the app's project from the registry and serializes initial
 provisioning by locking that project. The wrapped key lives
@@ -149,9 +159,14 @@ in `zeroship.project_data_keys`, accessible only to control's database role.
 Wrapping-key rotation preserves the data key. App environments, runtime
 descriptors, and bundles contain no key material. Standalone local development
 persists a separate key in `.zeroship/private/project-data-key.json` and its own
-binding in `.zeroship/private/dev-database-binding.json`; both are minted on
-first start and never replaced, because a new database id would abandon the
-schema the existing rows are in.
+edge id in `.zeroship/private/dev-database-binding.json`; both are minted on
+first start and never replaced. The DATABASE that edge reaches is not minted at
+all: `resolve_dev_database` (`crates/zeroship-cli/src/main.rs`) reads
+`databases.<label>.id` for the app's `primary` out of `zeroship.jsonc`, so the
+dev host binds the id the archive declares and the id whose schema the dev
+apply's SQLite file is named after. An app declaring no database gets no
+binding, and `env.db` refuses rather than reaching a database nothing wrote
+down.
 
 ## Deploy ingest
 

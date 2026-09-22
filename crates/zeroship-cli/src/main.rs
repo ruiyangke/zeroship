@@ -106,11 +106,11 @@ fn cmd_serve(args: &[String]) {
     zeroship_runtime::set_dev_mode(zeroship_runtime::dev_mode_from_process_env());
 
     let input = args.get(2).expect(
-        "Usage: zeroship serve <file> [--port=3000] [--workers=0] [--cpu-limit=MS] [--wall-timeout=MS]",
+        "Usage: zeroship serve <file> [--app=<label>] [--port=3000] [--workers=0] [--cpu-limit=MS] [--wall-timeout=MS]",
     );
     if let Err(e) = check_unknown_serve_flags(args) {
         eprintln!("zeroship serve: {e}");
-        eprintln!("Usage: zeroship serve <file> [--port=3000] [--workers=0] [--cpu-limit=MS] [--wall-timeout=MS]");
+        eprintln!("Usage: zeroship serve <file> [--app=<label>] [--port=3000] [--workers=0] [--cpu-limit=MS] [--wall-timeout=MS]");
         std::process::exit(1);
     }
     let port = parse_flag_u16(args, "--port").unwrap_or(3000);
@@ -207,6 +207,16 @@ fn cmd_serve(args: &[String]) {
         eprintln!("zeroship serve: {error}");
         std::process::exit(2);
     });
+    // The database this host binds, read off the project file. Resolved BEFORE
+    // anything opens a connection, because a project whose file does not parse
+    // is not a project this host can serve one database of.
+    let dev_database = std::env::current_dir()
+        .map_err(|e| format!("cannot read the working directory: {e}"))
+        .and_then(|cwd| resolve_dev_database(args, &cwd))
+        .unwrap_or_else(|error| {
+            eprintln!("zeroship serve: {error}");
+            std::process::exit(2);
+        });
 
     let mut plugins: Vec<Arc<dyn NativePlugin>> = Vec::new();
 
@@ -247,6 +257,7 @@ fn cmd_serve(args: &[String]) {
                 app_bindings: dev_binding::load(
                     std::path::Path::new(".zeroship/private"),
                     &dev_app_id,
+                    dev_database.as_ref(),
                 )
                 .map_err(|error| {
                     zeroship_data_orm::error::DbError::config("local_dev_binding", error)
@@ -261,7 +272,17 @@ fn cmd_serve(args: &[String]) {
             std::process::exit(2);
         });
     plugins.push(database.plugin());
-    eprintln!("[zeroship] db plugin registered");
+    // Name the database the binding was installed for, or say there is none.
+    // The failure this line exists for is silent otherwise: a host bound to a
+    // database the archive does not declare serves every `env.db` call a
+    // "no resolved binding" refusal with a healthy boot log above it.
+    match &dev_database {
+        Some(id) => eprintln!("[zeroship] db plugin registered (database={})", id.as_str()),
+        None => eprintln!(
+            "[zeroship] db plugin registered (no database declared in {} - env.db is unavailable)",
+            project_config::CONFIG_FILENAME
+        ),
+    }
 
     // Storage plugin: always on in dev. `$ZEROSHIP_STORAGE_URL` selects the
     // backend through the SAME parser the worker uses (`--storage-url`): a
@@ -1297,6 +1318,53 @@ fn deploy_command_id(args: &[String]) -> Result<DeployCommandId, String> {
     )
 }
 
+/// The database `zeroship serve` binds, dereferenced from the project file.
+///
+/// ONE identity, and it is the declared one. `databases.<label>.id` is a
+/// required key, so a file that parses has named the database; that same id is
+/// what the packed archive carries into `env.db` and what the `SQLite` backend
+/// renders into the file it attaches. Deriving a second one here - minting, or
+/// composing from the app id - is what leaves `pnpm migrate` filling one file
+/// while the runtime opens another.
+///
+/// `None` means NO DATABASE WAS DECLARED, never "fall back to a convention":
+/// a project with no file, and an app whose `databases` list is empty, both
+/// have nothing for `env.db` to reach, and a composed id would name a schema
+/// nobody wrote down.
+///
+/// The label is the app's `primary`, the one `env.db` resolves to. A workspace
+/// declaring several apps is told to pass `--app=<label>` rather than guessed
+/// at, on the same terms every other command applies.
+fn resolve_dev_database(
+    args: &[String],
+    cwd: &std::path::Path,
+) -> Result<Option<zeroship_core::DatabaseId>, String> {
+    let Some(path) = project_config::locate(args, cwd)? else {
+        return Ok(None);
+    };
+    let resolved = project_config::ProjectConfig::load(&path)?.resolve(None)?;
+    let label = project_config::select_app(args, Some(&resolved))?
+        .label
+        .ok_or_else(|| {
+            format!(
+                "{} declares no app for this dev host to serve",
+                resolved.path.display()
+            )
+        })?;
+    let Some(database) = resolved.app_primary(&label) else {
+        return Ok(None);
+    };
+    let declared = resolved.database_id(database)?;
+    zeroship_core::DatabaseId::parse(declared)
+        .map(Some)
+        .map_err(|error| {
+            format!(
+                "{}: `databases.{database}.id` is `{declared}`, which is not a database id: {error}",
+                resolved.path.display()
+            )
+        })
+}
+
 fn resolve_dev_app_id(
     env_vars: &mut std::collections::HashMap<String, String>,
 ) -> Result<AppId, String> {
@@ -1370,9 +1438,14 @@ fn print_usage() {
     eprintln!("zeroship — JavaScript runtime powered by V8 + io_uring");
     eprintln!();
     eprintln!("Usage:");
-    eprintln!("  zeroship serve    <app.zship|file.js> [--port=3000] [--workers=0]");
+    eprintln!(
+        "  zeroship serve    <app.zship|file.js> [--app=<label>] [--port=3000] [--workers=0]"
+    );
     eprintln!("                   [--workflow-config=PATH]");
     eprintln!("                   Run the app deployment or a JS file with the V8 runtime.");
+    eprintln!("                   --app names a zeroship.jsonc `apps` label, and the database");
+    eprintln!("                   env.db reaches is that app's `primary`. A workspace declaring");
+    eprintln!("                   one app implies it.");
     eprintln!("  zeroship deploy   [<path-to-.zship>] [--app=<id>] [--app-name=<name>] [--control=URL] [--token=TOKEN] [--no-create] [--command-id=<id>] [--config=PATH] [--env=NAME]");
     eprintln!("                   Upload a pre-built .zship to the control plane.");
     eprintln!("                   --app takes the app's ID; --app-name its routing label.");
@@ -1462,6 +1535,7 @@ fn parse_flag_u64(args: &[String], flag_name: &str) -> Option<u64> {
 
 /// Known flags accepted by `zeroship serve` (bare names, no `=`).
 const SERVE_KNOWN_FLAGS: &[&str] = &[
+    "--app",
     "--port",
     "--workers",
     "--cpu-limit",
@@ -2398,5 +2472,192 @@ mod tests {
 
         assert!(err.contains("zeroship login"), "{err}");
         assert!(err.contains("--token=<token>"), "{err}");
+    }
+}
+
+/// The dev tier gives one database ONE identity: the id the project declares.
+///
+/// These arms drive the whole seam the declaration crosses - the project file,
+/// the resolved binding, and the file the live connection actually attaches -
+/// because every pair of them agreeing is compatible with the third naming
+/// something else, which is the shape the disagreement had.
+#[cfg(test)]
+mod dev_database_identity {
+    use std::path::Path;
+
+    use zeroship_data_orm::{
+        binding::COLD_START_DEPLOY_TOKEN, connection::ConnectionFactory,
+        encryption::ProjectKeySource, Value,
+    };
+
+    use crate::project_config;
+
+    /// The committed project file `examples/db-todos` serves under.
+    ///
+    /// Read rather than hand-written, so the id these arms resolve is the id
+    /// that example declares and `pnpm migrate` reads. A hand-built config
+    /// would agree with itself and with nothing else.
+    const DB_TODOS_CONFIG: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/db-todos/zeroship.jsonc"
+    );
+
+    fn serve_args() -> Vec<String> {
+        ["zeroship", "serve", "dist/app.zship"]
+            .iter()
+            .map(|arg| (*arg).to_string())
+            .collect()
+    }
+
+    /// `examples/db-todos`' own file, in a directory the test may write into.
+    fn project() -> tempfile::TempDir {
+        let directory = tempfile::tempdir().expect("a project directory");
+        let declared = std::fs::read_to_string(DB_TODOS_CONFIG)
+            .unwrap_or_else(|error| panic!("{DB_TODOS_CONFIG} must be readable: {error}"));
+        assert!(
+            declared.contains("\"dbs_"),
+            "{DB_TODOS_CONFIG} must declare a database id for these arms to resolve"
+        );
+        std::fs::write(
+            directory.path().join(project_config::CONFIG_FILENAME),
+            declared,
+        )
+        .expect("write the project file");
+        directory
+    }
+
+    /// The dev host binds the id the file declares, and mints none.
+    #[test]
+    fn the_declared_database_is_the_one_the_dev_host_binds() {
+        let directory = project();
+        let resolved = super::resolve_dev_database(&serve_args(), directory.path())
+            .expect("the committed example resolves")
+            .expect("the example declares a primary database");
+
+        // The reader this arm is about is `databases.<label>.id`, so read the
+        // same key by a second route and require the two to agree. A resolver
+        // that returned any parseable id at all would pass the type check.
+        let config = project_config::ProjectConfig::load(
+            &directory.path().join(project_config::CONFIG_FILENAME),
+        )
+        .expect("load")
+        .resolve(None)
+        .expect("resolve");
+        assert_eq!(
+            resolved.as_str(),
+            config.database_id("main").expect("the declared label"),
+            "the dev host must bind `databases.main.id`"
+        );
+    }
+
+    /// A project declaring no database resolves to none rather than to one.
+    #[test]
+    fn a_project_declaring_no_database_resolves_to_none() {
+        let directory = tempfile::tempdir().expect("a project directory");
+        std::fs::write(
+            directory.path().join(project_config::CONFIG_FILENAME),
+            r#"{
+  "$schema": "https://zeroship.ai/schema/project-v1.json",
+  "name": "no-database",
+  "control": "http://localhost:9090",
+  "runtime_date": "2026-08-14",
+  "build": { "mode": "full", "dist": "dist", "output": "dist/app.zship" },
+  "databases": {},
+  "apps": { "no_database": { "databases": [] } }
+}
+"#,
+        )
+        .expect("write the project file");
+        assert_eq!(
+            super::resolve_dev_database(&serve_args(), directory.path()).expect("resolves"),
+            None,
+            "an app that declares no database has none, and nothing is composed for it"
+        );
+
+        // Control: the same resolver over a file that DOES declare one answers
+        // with it, so the `None` above is the declaration and not the resolver.
+        assert!(super::resolve_dev_database(&serve_args(), project().path())
+            .expect("resolves")
+            .is_some());
+    }
+
+    /// The file the dev runtime ATTACHES is the file the dev apply WRITES.
+    ///
+    /// The path is asked for rather than recomposed: `PRAGMA database_list`
+    /// reports the file behind the binding's namespace, which is the same
+    /// question `initialize_local` in `crates/zeroship-workflow/src/service/
+    /// schema.rs` asks. It is compared against the path `devSqlitePaths`
+    /// (`packages/vite-plugin/src/gen-types/dev-apply.ts`) composes for the
+    /// declared id, which is the file `pnpm migrate` applies into.
+    ///
+    /// With a minted database id both sides still produce a path and neither
+    /// errors; they simply name two files, and every `env.db` call fails
+    /// against an empty one.
+    #[compio::test]
+    async fn the_dev_runtime_attaches_the_file_the_dev_apply_writes() {
+        let directory = project();
+        let declared = super::resolve_dev_database(&serve_args(), directory.path())
+            .expect("the committed example resolves")
+            .expect("the example declares a primary database");
+        let app = zeroship_core::app_id::local_dev_app_id();
+        let private = directory.path().join(".zeroship/private");
+
+        let bindings = crate::dev_binding::load(&private, &app, Some(&declared))
+            .expect("the dev binding installs");
+        let binding = bindings
+            .binding_for(app.as_str(), COLD_START_DEPLOY_TOKEN, &declared)
+            .expect("the declared database has a binding");
+
+        // The dev host's own DATABASE_URL shape: a session file, with one file
+        // per database placed beside it.
+        let state = directory.path().join(".zeroship");
+        let backend = ConnectionFactory::for_app_url(&format!(
+            "sqlite:{}",
+            state.join("dev.sqlite").display()
+        ))
+        .expect("a sqlite connection")
+        .connect(ProjectKeySource::supplied(
+            crate::project_keys::load(&private, &app).expect("the dev project key"),
+        ))
+        .await
+        .expect("open the dev session");
+
+        // A dispatch under the binding is what attaches its database, so this
+        // is the attachment the runtime makes and not one the test arranged.
+        let rows = backend
+            .query(&binding, "PRAGMA database_list", &[])
+            .await
+            .expect("list the attached databases");
+        let namespace = backend.namespace(&binding);
+        let attached = rows
+            .iter()
+            .find(|row| row.get("name").and_then(Value::as_str) == Some(namespace))
+            .and_then(|row| row.get("file"))
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("`{namespace}` must be attached; database_list: {rows:?}"));
+
+        // What `devSqlitePaths(root, databaseId)` names, spelled the way that
+        // function spells it.
+        let apply_target = state.join(format!("zs-db_{}.sqlite", declared.as_str()));
+        assert_eq!(
+            Path::new(attached),
+            apply_target,
+            "the attached file and the dev apply's target must be one file"
+        );
+        // Second oracle: the same name, through the derivation the backend
+        // composes the alias from. The literal above catches that derivation
+        // moving; this catches the literal being edited to match a mistake.
+        assert_eq!(
+            apply_target,
+            state.join(format!(
+                "zs-{}.sqlite",
+                zeroship_core::database_derivation::schema_name(&declared)
+            ))
+        );
+        assert!(
+            apply_target.is_file(),
+            "attaching must have created {}",
+            apply_target.display()
+        );
     }
 }
