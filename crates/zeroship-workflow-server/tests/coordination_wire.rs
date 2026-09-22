@@ -4,7 +4,7 @@ use std::fmt::Debug;
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{
-        AssignedScope, Assignment, Failure, ManageRun, ManagementOperation,
+        AssignedScope, Assignment, DeploymentId, Failure, ManageRun, ManagementOperation,
         ManagementOutcome, ManagementReceipt, ManagementStatus, RegisterWorker, RegisteredWorker,
         ReleaseScope, RequestId, Revision, RunId, ScopePage, UnixMillis, VerifyAssignment,
         WorkerId,
@@ -124,6 +124,10 @@ fn management_and_nested_receipts_cannot_carry_execution_data() {
     }
     for outcome in [
         json!({"kind":"applied","state":"paused"}),
+        json!({"kind":"restarted","state":"queued","restartedFromOrdinal":3,
+            "pinnedTo":DeploymentId::mint()}),
+        json!({"kind":"restarted","state":"queued","restartedFromOrdinal":null,
+            "pinnedTo":DeploymentId::mint()}),
         json!({"kind":"not_found"}),
         json!({"kind":"conflict"}),
         json!({"kind":"denied"}),

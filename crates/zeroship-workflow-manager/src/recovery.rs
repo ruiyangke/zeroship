@@ -942,13 +942,13 @@ async fn touch(
 pub(crate) async fn settled_close(
     tx: &Database,
     job: &JobSpec,
-    outcome: JobOutcome,
+    outcome: &JobOutcome,
     now: i64,
 ) -> Result<(), Error> {
     let JobOperation::Close { epoch } = job.operation else {
         return Ok(());
     };
-    let JobOutcome::Closed { drained } = outcome else {
+    let JobOutcome::Closed { drained } = *outcome else {
         return Err(Error::Invalid);
     };
     let current = load(tx, &job.app_id)
@@ -1176,7 +1176,7 @@ async fn load(tx: &Database, app: &AppId) -> Result<Option<Stored>, Error> {
 pub(crate) async fn settled_page(
     tx: &Database,
     job: &JobSpec,
-    outcome: JobOutcome,
+    outcome: &JobOutcome,
     now: i64,
 ) -> Result<(), Error> {
     if !matches!(outcome, JobOutcome::Waiting {}) {

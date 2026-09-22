@@ -3,14 +3,10 @@
     reason = "restart integrity tests own compio-local journal transactions"
 )]
 
-use super::super::management::fixture::{latest, started};
+use super::super::management::fixture::{active, latest, restarted, started};
 use super::super::*;
-use crate::{
-    deployment_holds::HoldScope,
-    service::{app, store::Row},
-};
+use crate::{deployment_holds::HoldScope, service::store::Row};
 use std::collections::BTreeMap;
-use zeroship_core::workflow_coordination::{ManagementOutcome, RunState};
 use zeroship_data_orm::{orm::Operation, value, Value};
 
 macro_rules! case {
@@ -53,19 +49,6 @@ async fn start(service: &WorkflowService, app: &AppId) -> String {
         .await
         .unwrap()
         .id
-}
-
-fn applied() -> ManagementOutcome {
-    ManagementOutcome::Applied {
-        state: RunState::Queued,
-    }
-}
-
-async fn active(service: &WorkflowService, app: &AppId) -> DeployRegistration {
-    let mut tx = service.begin().await.unwrap();
-    let deployment = app::active_deploy(&mut tx, app).await.unwrap();
-    tx.commit().await.unwrap();
-    deployment
 }
 
 async fn one(service: &WorkflowService, table: &str, filter: serde_json::Value) -> Row {
@@ -293,7 +276,7 @@ async fn damaged_identity(store: Rc<OrmStore>) {
         restore(&service, damaged.table, stored.0).await;
         assert_eq!(
             scope.management_outcome(&request).await.unwrap(),
-            applied(),
+            restarted(&original.id),
             "{}",
             damaged.name
         );
@@ -326,7 +309,10 @@ async fn damaged_identity(store: Rc<OrmStore>) {
     assert_eq!(snapshot(&journal).await, before);
     restore(&journal, "generations", source.0).await;
     restore(&journal, "runs", head.0).await;
-    assert_eq!(scope.management_outcome(&request).await.unwrap(), applied());
+    assert_eq!(
+        scope.management_outcome(&request).await.unwrap(),
+        restarted(&original.id)
+    );
     assert_generation(&journal, &owner, &run, generation + 1, &original.id).await;
 }
 
@@ -342,7 +328,7 @@ async fn current_source(store: Rc<OrmStore>) {
             .management_outcome(&latest(&owner, &run, 1, &replacement))
             .await
             .unwrap(),
-        applied()
+        restarted(&replacement.id)
     );
     assert_generation(&service, &owner, &run, 1, &replacement.id).await;
 
@@ -357,7 +343,7 @@ async fn current_source(store: Rc<OrmStore>) {
             .management_outcome(&started(&owner, &run, 2))
             .await
             .unwrap(),
-        applied()
+        restarted(&replacement.id)
     );
     assert_generation(&journal, &owner, &run, 2, &replacement.id).await;
     assert_eq!(active(&journal, &owner).await.id, newer.id);
@@ -383,7 +369,7 @@ async fn receipt_replay(store: Rc<OrmStore>) {
     let completed = started(&owner, &run, 1);
     assert_eq!(
         scope.management_outcome(&completed).await.unwrap(),
-        applied()
+        restarted(&deployment.id)
     );
     let hold = one(
         &journal,
@@ -401,7 +387,7 @@ async fn receipt_replay(store: Rc<OrmStore>) {
     let before = snapshot(&journal).await;
     assert_eq!(
         scope.management_outcome(&completed).await.unwrap(),
-        applied()
+        restarted(&deployment.id)
     );
     assert_eq!(snapshot(&journal).await, before);
 
@@ -409,6 +395,9 @@ async fn receipt_replay(store: Rc<OrmStore>) {
     assert!(scope.management_outcome(&pending).await.is_err());
     assert_eq!(snapshot(&journal).await, before);
     restore(&journal, "deployment_holds", hold.0).await;
-    assert_eq!(scope.management_outcome(&pending).await.unwrap(), applied());
+    assert_eq!(
+        scope.management_outcome(&pending).await.unwrap(),
+        restarted(&deployment.id)
+    );
     assert_generation(&journal, &owner, &run, 2, &deployment.id).await;
 }

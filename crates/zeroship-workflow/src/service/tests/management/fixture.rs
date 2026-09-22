@@ -99,6 +99,26 @@ pub fn latest(app: &AppId, run: &str, revision: i64, deployment: &DeployRegistra
     )
 }
 
+/// The app's current deployment, which a latest restart pins a run to.
+pub async fn active(service: &WorkflowService, app: &AppId) -> DeployRegistration {
+    let mut tx = service.begin().await.unwrap();
+    let deployment = app::active_deploy(&mut tx, app).await.unwrap();
+    tx.commit().await.unwrap();
+    deployment
+}
+
+/// The receipt a whole restart pinned to `deployment` produces.
+///
+/// The pin is named by the caller rather than read back from the run, so a
+/// restart that moved it fails here instead of agreeing with what it wrote.
+pub fn restarted(deployment: &str) -> ManagementOutcome {
+    ManagementOutcome::Restarted {
+        state: RunState::Queued,
+        restarted_from_ordinal: None,
+        pinned_to: DeploymentId::parse(deployment).unwrap(),
+    }
+}
+
 pub fn transition(app: &AppId, run: &str, revision: i64, operation: RunOperation) -> Grant {
     Grant::new(
         app,
