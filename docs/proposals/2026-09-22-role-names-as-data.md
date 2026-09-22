@@ -140,6 +140,24 @@ channel the binding id arrives on now, and PostgreSQL still decides what it open
    name rather than an entity id, so it has no obvious row to sit on. Left out of this proposal
    deliberately; it should be named rather than assumed to follow.
 
+4. **Is `mig` the right suffix, and does it survive at all?** The role's authority is OWNERSHIP of
+   the schema - `apply.rs` calls it "THE OWNER IS THE RECONCILER'S ROLE" and
+   `crates/zeroship-core/src/database_role.rs` speaks of "the owner's role" - while `mig` names a
+   consumer of that ownership. Migration is what uses the role today; ownership is what the role
+   IS, and a second consumer of owner-level DDL would make the suffix read false. The usual defence
+   does not apply: `zs_db_` plus a database id plus `_mig` is 39 of
+   [`POSTGRES_IDENTIFIER_MAX_BYTES`], so nothing was bought by abbreviating, and the truncation
+   pressure is on the binding roles where the epoch varies. `rw` and `ro` are universal
+   abbreviations a reader decodes on sight; `mig` is project-local and sits beside them looking
+   like a third of a set.
+
+   This belongs here rather than in its own change because the answer rides on the answer to Open
+   1. If `classify_role_name` retires, the suffix convention goes with it and a stored name simply
+   reads `..._owner` from the start; if it survives as a fallback, renaming means editing a parser
+   this proposal is otherwise deleting. One migration rather than two. Note also that
+   `database_role.rs` currently REFUSES `"owner"` as a capability spelling, so promoting it to a
+   role suffix is a collision to make deliberately rather than discover.
+
 ## Acceptance
 
 Each arm names what makes it fail, because an arm that cannot fail measures nothing.
