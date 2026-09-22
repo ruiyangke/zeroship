@@ -63,7 +63,7 @@ enum Admission {
 }
 enum Progress {
     Item(String),
-    Settled(JobReceipt),
+    Settled(Box<JobReceipt>),
 }
 
 #[derive(Insertable)]
@@ -124,7 +124,7 @@ impl AppWorkflows {
                 loop {
                     let id =
                         match Box::pin(scope.next_collection_item(job, &plan, &authority)).await? {
-                            Progress::Settled(receipt) => return Ok(receipt),
+                            Progress::Settled(receipt) => return Ok(*receipt),
                             Progress::Item(id) => id,
                         };
                     let check = || authority.check(&scope);
@@ -230,7 +230,7 @@ impl AppWorkflows {
         let stored = inspect(&tx, job).await?;
         if let Stored::Settled(receipt) = stored {
             tx.commit().await?;
-            return Ok(Progress::Settled(receipt));
+            return Ok(Progress::Settled(Box::new(receipt)));
         }
         authority.check(self)?;
         tx.capture_mutation(self.app_id())?;
@@ -246,7 +246,9 @@ impl AppWorkflows {
         } else {
             Box::pin(advance(&tx, job, &plan)).await?;
             let now = tx.now().await?;
-            Progress::Settled(delivery::finish(&tx, job, outcome(&plan), now).await?)
+            Progress::Settled(Box::new(
+                delivery::finish(&tx, job, outcome(&plan), now).await?,
+            ))
         };
         authority.check(self)?;
         tx.commit().await?;

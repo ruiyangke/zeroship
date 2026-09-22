@@ -60,7 +60,7 @@ enum Admission {
 }
 enum Progress {
     Item(String),
-    Settled(JobReceipt),
+    Settled(Box<JobReceipt>),
 }
 
 impl AppWorkflows {
@@ -108,7 +108,7 @@ impl AppWorkflows {
                         .next_reconciliation_item(job, &plan, &authority)
                         .await?
                     {
-                        Progress::Settled(receipt) => return Ok(receipt),
+                        Progress::Settled(receipt) => return Ok(*receipt),
                         Progress::Item(id) => id,
                     };
                     let result = async {
@@ -264,7 +264,7 @@ impl AppWorkflows {
         let (record, page) = read_page(&tx, job).await?.ok_or_else(invalid)?;
         if let Some(receipt) = record.receipt(job)? {
             tx.commit().await?;
-            return Ok(Progress::Settled(receipt));
+            return Ok(Progress::Settled(Box::new(receipt)));
         }
         authority.check(self)?;
         if decode::<Plan>(&page.plan)? != *plan {
@@ -317,7 +317,7 @@ impl AppWorkflows {
                 changed_once(changed, invalid)?;
             }
             let now = tx.now().await?;
-            Progress::Settled(
+            Progress::Settled(Box::new(
                 delivery::finish(
                     &tx,
                     job,
@@ -329,7 +329,7 @@ impl AppWorkflows {
                     now,
                 )
                 .await?,
-            )
+            ))
         };
         authority.check(self)?;
         tx.commit().await?;
