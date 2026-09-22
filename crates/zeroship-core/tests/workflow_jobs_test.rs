@@ -124,12 +124,27 @@ fn operations() -> Vec<(JobOperation, Value)> {
     operations
 }
 
+/// The applied result a command asks for, so a fixture settlement answers the
+/// command it carries rather than standing in for any of them.
+fn management_result(command: &ManagementCommand) -> ManagementOutcome {
+    match command {
+        ManagementCommand::Transition { .. } => ManagementOutcome::Applied {
+            state: RunState::Paused,
+        },
+        ManagementCommand::RestartStarted { .. } | ManagementCommand::RestartLatest { .. } => {
+            ManagementOutcome::Restarted {
+                state: RunState::Queued,
+                restarted_from_ordinal: Some(2),
+                pinned_to: DeploymentId::mint(),
+            }
+        }
+    }
+}
+
 fn settlement(operation: JobOperation) -> Settlement {
-    let outcome = match operation {
-        JobOperation::Management { .. } => JobOutcome::Management {
-            outcome: ManagementOutcome::Applied {
-                state: RunState::Paused,
-            },
+    let outcome = match &operation {
+        JobOperation::Management { command, .. } => JobOutcome::Management {
+            outcome: management_result(command),
         },
         JobOperation::Close { .. } => JobOutcome::Closed { drained: true },
         _ => JobOutcome::Waiting {},
@@ -237,13 +252,47 @@ const fn outcome_family(outcome: &JobOutcome) -> u8 {
     }
 }
 
+/// Whether a management result answers the command that asked for it. Sharing
+/// the management family is necessary but not sufficient: the applied arms are
+/// command-shaped, while the refusals answer any command.
+const fn command_answered(operation: &JobOperation, outcome: &JobOutcome) -> bool {
+    let (
+        JobOperation::Management { command, .. },
+        JobOutcome::Management {
+            outcome: management,
+        },
+    ) = (operation, outcome)
+    else {
+        return true;
+    };
+    match (command, management) {
+        (ManagementCommand::Transition { .. }, ManagementOutcome::Applied { .. })
+        | (
+            ManagementCommand::RestartStarted { .. } | ManagementCommand::RestartLatest { .. },
+            ManagementOutcome::Restarted { .. },
+        )
+        | (
+            _,
+            ManagementOutcome::NotFound {}
+            | ManagementOutcome::Conflict {}
+            | ManagementOutcome::Denied {},
+        ) => true,
+        (ManagementCommand::Transition { .. }, ManagementOutcome::Restarted { .. })
+        | (
+            ManagementCommand::RestartStarted { .. } | ManagementCommand::RestartLatest { .. },
+            ManagementOutcome::Applied { .. },
+        ) => false,
+    }
+}
+
 #[test]
 fn outcome_objects_preserve_closed_management_results_and_operation_families() {
     let mut families = std::collections::BTreeSet::new();
     for (outcome, wire) in outcomes() {
         assert_eq!(round_trip(&outcome), wire);
         for (operation, _) in operations() {
-            let expected = operation_family(&operation) == outcome_family(&outcome);
+            let expected = operation_family(&operation) == outcome_family(&outcome)
+                && command_answered(&operation, &outcome);
             if expected {
                 families.insert(outcome_family(&outcome));
             }
@@ -272,6 +321,114 @@ fn outcome_objects_preserve_closed_management_results_and_operation_families() {
         [0, 1, 2],
         "every outcome family must meet a valid operation"
     );
+}
+
+/// A management result must answer the command that asked for it.
+///
+/// Both directions are asserted, because either alone is passed by a degenerate
+/// check: a refusal-only test passes a `valid_for` that answers `false` for
+/// everything, and an acceptance-only test passes the family check this
+/// replaces. The two controls below pin the table to both verdicts, so a table
+/// that drifted to one of them fails before the pairing is exercised.
+///
+/// What this does not catch: `valid_for` is a check a caller applies, not a
+/// constraint on the type, so nothing here stops a mismatched
+/// `JobOutcome::Management` being constructed, serialized or stored; only the
+/// sites that call it refuse one. It says nothing about which commands or
+/// states the creator lifecycle allows, whether the command was authorized, or
+/// whether the transaction that produced the outcome committed. It also does
+/// not bind the restart arms apart: both restart commands accept the same
+/// result, so it cannot tell a started restart's pin from a latest restart's.
+#[test]
+fn management_outcomes_pair_with_the_command_that_asked_for_them() {
+    let applied = ManagementOutcome::Applied {
+        state: RunState::Cancelled,
+    };
+    let restarted = ManagementOutcome::Restarted {
+        state: RunState::Queued,
+        restarted_from_ordinal: Some(3),
+        pinned_to: DeploymentId::mint(),
+    };
+    let mut cases = Vec::new();
+    for (command, applied_answers, restarted_answers) in [
+        (
+            ManagementCommand::Transition {
+                operation: RunOperation::Cancel,
+            },
+            true,
+            false,
+        ),
+        (
+            ManagementCommand::RestartStarted {
+                from: Some(RestartTarget {
+                    name: "charge".into(),
+                    occurrence: Some(2),
+                }),
+            },
+            false,
+            true,
+        ),
+        (ManagementCommand::RestartStarted { from: None }, false, true),
+        (
+            ManagementCommand::RestartLatest {
+                deployment_id: DeploymentId::mint(),
+            },
+            false,
+            true,
+        ),
+    ] {
+        cases.push((command.clone(), applied.clone(), applied_answers));
+        cases.push((command.clone(), restarted.clone(), restarted_answers));
+        // A refusal is the same refusal whichever command was asked, and
+        // nothing it carries is command-shaped.
+        for refusal in [
+            ManagementOutcome::NotFound {},
+            ManagementOutcome::Conflict {},
+            ManagementOutcome::Denied {},
+        ] {
+            cases.push((command.clone(), refusal, true));
+        }
+    }
+    assert!(
+        cases.iter().any(|(.., valid)| *valid),
+        "the table must accept some pairing"
+    );
+    assert!(
+        cases.iter().any(|(.., valid)| !*valid),
+        "the table must refuse some pairing"
+    );
+    for (command, outcome, valid) in cases {
+        let operation = JobOperation::Management {
+            request_id: RequestId::mint(),
+            run_id: RunId::mint(),
+            revision: 1.try_into().unwrap(),
+            command,
+        };
+        let settled = JobOutcome::Management {
+            outcome: outcome.clone(),
+        };
+        assert_eq!(
+            settled.valid_for(&operation),
+            valid,
+            "{operation:?}: {outcome:?}"
+        );
+        // The pairing narrows the management family; it does not widen it.
+        assert!(!settled.valid_for(&JobOperation::Reconcile {}), "{outcome:?}");
+        assert!(
+            !settled.valid_for(&JobOperation::Close {
+                epoch: 1.try_into().unwrap(),
+            }),
+            "{outcome:?}"
+        );
+        for other in [
+            JobOutcome::Completed {},
+            JobOutcome::Waiting {},
+            JobOutcome::Rejected {},
+            JobOutcome::Closed { drained: true },
+        ] {
+            assert!(!other.valid_for(&operation), "{other:?}");
+        }
+    }
 }
 
 #[test]

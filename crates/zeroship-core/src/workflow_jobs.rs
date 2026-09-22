@@ -103,6 +103,40 @@ pub enum ManagementCommand {
     },
 }
 
+impl ManagementCommand {
+    /// Whether a management result is the answer this command asks for.
+    ///
+    /// The applied arms are command-shaped, so neither can stand for the other:
+    /// a transition's whole result is the state the run settled in, while a
+    /// restart additionally decides the retained journal prefix and the
+    /// deployment the new generation replays against. Answering a transition
+    /// with `Restarted` would attach a pin and a prefix to a run that kept its
+    /// generation, and answering a restart with `Applied` would drop both.
+    ///
+    /// The three refusals are shared: a refused command is refused the same way
+    /// whichever one it was, and nothing a refusal carries is command-shaped.
+    const fn answered_by(&self, outcome: &ManagementOutcome) -> bool {
+        match (outcome, self) {
+            (ManagementOutcome::Applied { .. }, Self::Transition { .. })
+            | (
+                ManagementOutcome::Restarted { .. },
+                Self::RestartStarted { .. } | Self::RestartLatest { .. },
+            )
+            | (
+                ManagementOutcome::NotFound {}
+                | ManagementOutcome::Conflict {}
+                | ManagementOutcome::Denied {},
+                _,
+            ) => true,
+            (
+                ManagementOutcome::Applied { .. },
+                Self::RestartStarted { .. } | Self::RestartLatest { .. },
+            )
+            | (ManagementOutcome::Restarted { .. }, Self::Transition { .. }) => false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct JobSpec {
@@ -372,13 +406,16 @@ pub enum JobOutcome {
 }
 
 impl JobOutcome {
-    /// Match the outcome family to its operation. Creator handlers separately
-    /// enforce their lifecycle rules; this check grants no execution authority.
+    /// Match the outcome family to its operation, and a management result to
+    /// the command that asked for it. Creator handlers separately enforce their
+    /// lifecycle rules; this check grants no execution authority.
     #[must_use]
     pub const fn valid_for(&self, operation: &JobOperation) -> bool {
         match (self, operation) {
-            (Self::Management { .. }, JobOperation::Management { .. })
-            | (Self::Closed { .. }, JobOperation::Close { .. }) => true,
+            (Self::Management { outcome }, JobOperation::Management { command, .. }) => {
+                command.answered_by(outcome)
+            }
+            (Self::Closed { .. }, JobOperation::Close { .. }) => true,
             (Self::Management { .. } | Self::Closed { .. }, _)
             | (_, JobOperation::Management { .. } | JobOperation::Close { .. }) => false,
             (Self::Completed {} | Self::Waiting {} | Self::Rejected {}, _) => true,

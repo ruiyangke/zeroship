@@ -6,7 +6,7 @@ use zeroship_core::{
         ManageRun, ManagementOperation, ManagementOutcome, RequestId, RestartDeploy,
         RestartOptions, RestartTarget, RunOperation, RunState,
     },
-    workflow_jobs::{BroadcastId, PropagationId},
+    workflow_jobs::{BroadcastId, ManagementCommand, PropagationId},
 };
 use zeroship_workflow_manager::{
     coordinator::Options as CoordinatorOptions,
@@ -221,15 +221,27 @@ async fn journal_commands(fixture: &Fixture, queue: &Queue) {
             };
             super::outcomes::refused(fixture, queue, &authority, &rejected, Error::Invalid).await;
         }
-        let settlement = Settlement {
-            delivery: renewed.delivery().clone(),
-            outcome: JobOutcome::Management {
-                outcome: ManagementOutcome::Restarted {
+        // A management result has to answer the command the enqueued job
+        // carries, so the settled outcome is read off that command rather than
+        // standing in for every one of them.
+        let JobOperation::Management { command, .. } = &renewed.delivery().job.operation else {
+            panic!("a management request must enqueue a management job");
+        };
+        let result = match command {
+            ManagementCommand::Transition { .. } => ManagementOutcome::Applied {
+                state: RunState::Paused,
+            },
+            ManagementCommand::RestartStarted { .. } | ManagementCommand::RestartLatest { .. } => {
+                ManagementOutcome::Restarted {
                     state: RunState::Queued,
                     restarted_from_ordinal: Some(4),
                     pinned_to: DeploymentId::mint(),
-                },
-            },
+                }
+            }
+        };
+        let settlement = Settlement {
+            delivery: renewed.delivery().clone(),
+            outcome: JobOutcome::Management { outcome: result },
             successors: vec![],
         };
         let settled = queue.settle(&authority, &settlement).await.unwrap();
