@@ -1488,8 +1488,8 @@ One file per database, `zs-db-<dbs>.sqlite`, ATTACHed under alias `db_<dbs>`. `a
 different name, with a dedup set because SQLite errors on a duplicate alias; the dedup key becomes
 the database id. There is no Datastore entity on this tier and no control plane at all.
 
-Two fidelity gaps, both owed to `docs/reference/sqlite-divergences.md`, which carries no grants
-row today:
+Two fidelity gaps, both carried by `docs/reference/sqlite-divergences.md`, which is the register
+for them and states each one's contract:
 
 - **Bindings map to no physical object.** SQLite has no roles and no column ACLs, so everything the
   production tier enforces in the catalog the dev tier enforces in process. A dev-tier pass is
