@@ -46,6 +46,8 @@ pub trait WorkflowBackend: Send + Sync + std::fmt::Debug {
         name: String,
         occurrence: u32,
     ) -> Result<Vec<u8>, WorkflowServiceError>;
+
+    async fn read_output(&self, run_id: String) -> Result<Vec<u8>, WorkflowServiceError>;
 }
 
 /// Resolves a completed step's recorded output to bytes.
@@ -62,6 +64,16 @@ pub trait StepOutputReader: Send + Sync + std::fmt::Debug {
         run_id: &str,
         name: &str,
         occurrence: u32,
+    ) -> Result<Vec<u8>, WorkflowServiceError>;
+
+    /// Resolve the run's final output to bytes, under the same read budget.
+    ///
+    /// # Errors
+    /// Reports a run whose output no object holds, and object failures.
+    async fn read_output(
+        &self,
+        api: &crate::service::AppWorkflows,
+        run_id: &str,
     ) -> Result<Vec<u8>, WorkflowServiceError>;
 }
 

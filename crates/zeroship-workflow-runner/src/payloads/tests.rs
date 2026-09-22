@@ -39,7 +39,7 @@ use zeroship_workflow::{
     engine::WorkflowOutputRef,
     operations::StartOptions,
     service::{AppPolicy, AppWorkflows, PayloadSlot, PolicySnapshot, RequestId, WorkerIdentity},
-    WorkflowServiceError,
+    StepOutputReader, WorkflowServiceError,
 };
 
 fn reference(bytes: &[u8]) -> WorkflowOutputRef {
@@ -141,6 +141,102 @@ async fn inline_step_bodies(store: Rc<zeroship_workflow::service::store::OrmStor
     assert!(matches!(
         read.into_bytes(1).await,
         Err(WorkflowServiceError::PayloadTooLarge)
+    ));
+}
+
+#[compio::test]
+async fn sqlite_run_outputs_read_as_bodies_inside_the_host_read_budget() {
+    let directory = tempfile::tempdir().unwrap();
+    Box::pin(run_output_bodies(Rc::new(
+        sqlite_store(&directory.path().join("app.sqlite")).await,
+    )))
+    .await;
+}
+
+#[compio::test]
+async fn postgres_run_outputs_read_as_bodies_inside_the_host_read_budget() {
+    let fixture = PostgresFixture::start().await;
+    Box::pin(run_output_bodies(Rc::new(fixture.store.clone()))).await;
+}
+
+/// A run's final output reaches a caller holding only the run id: under this
+/// app's ownership, under the host's read budget, and only when an object
+/// holds it.
+async fn run_output_bodies(store: Rc<zeroship_workflow::service::store::OrmStore>) {
+    let directory = tempfile::tempdir().unwrap();
+    let objects =
+        PayloadObjects::open(StorageStore::from_backend(Arc::new(LocalFs::new(
+            directory.path(),
+        ))))
+        .unwrap();
+    let (service, app, other, _deployments) = registered_service(store).await;
+    let scope = service.fixture_app(app);
+    let stranger = service.fixture_app(other);
+    let worker = WorkerIdentity::new("run-output-reader".into()).unwrap();
+    let blob = scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let task = service.poll(&worker).await.unwrap().unwrap();
+    let bytes = br#"{"value":"final"}"#;
+    let output = reference(bytes);
+    service
+        .payloads(&objects)
+        .stage(
+            &worker,
+            &task.id,
+            &task.token,
+            &RequestId::mint(),
+            output.clone(),
+            Box::new(OnceChunk::new(bytes.to_vec().into())),
+        )
+        .await
+        .unwrap();
+    service
+        .complete(
+            &worker,
+            &task.id,
+            &task.token,
+            execution(json!([{"kind":"RunCompleted", "outputRef":output}])),
+        )
+        .await
+        .unwrap();
+    let reader = ObjectStepOutputs::new(objects.clone(), 1024).unwrap();
+    assert_eq!(reader.read_output(&scope, &blob.id).await.unwrap(), bytes);
+    // One variable differs from the read above: the budget the host granted.
+    let budgeted = ObjectStepOutputs::new(objects.clone(), bytes.len() - 1).unwrap();
+    assert!(matches!(
+        budgeted.read_output(&scope, &blob.id).await,
+        Err(WorkflowServiceError::PayloadTooLarge)
+    ));
+    // One variable differs from the first read: who is asking.
+    assert!(matches!(
+        reader.read_output(&stranger, &blob.id).await,
+        Err(WorkflowServiceError::NotFound(_))
+    ));
+    // One variable differs from the first read: where the output was stored.
+    let inline = scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let task = service.poll(&worker).await.unwrap().unwrap();
+    service
+        .complete(
+            &worker,
+            &task.id,
+            &task.token,
+            execution(json!([{"kind":"RunCompleted", "output":{"value":"final"}}])),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        scope.status(&inline.id).await.unwrap().output.unwrap(),
+        json!({"value":"final"}),
+        "the control's output must stay in the journal for this to be a control"
+    );
+    assert!(matches!(
+        reader.read_output(&scope, &inline.id).await,
+        Err(WorkflowServiceError::NotFound(_))
     ));
 }
 

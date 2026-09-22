@@ -497,6 +497,34 @@ impl WorkflowRun {
         Ok(promise.into())
     }
 
+    /// `run.readOutput()` → Promise<Uint8Array> over the run's final output.
+    ///
+    /// No task reader can serve this: that reader resolves a step by name in
+    /// the journal it was assigned, and a run's final output has no step name.
+    #[v8_method]
+    #[v8_name = "readOutput"]
+    fn read_output<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+    ) -> Result<v8::Local<'s, v8::Value>, OpError> {
+        let state = runtime_state(scope);
+        let (resolver, request_id, promise) = setup_promise(scope, &state);
+        let backend = self.backend.clone();
+        let run_id = self.run_id.clone();
+        state.borrow_mut().spawned_ops.push(Box::pin(async move {
+            let value = match backend.read_output(run_id).await {
+                Ok(bytes) => ResolveValue::Bytes(bytes),
+                Err(error) => ResolveValue::RejectError(crate::error::to_op_error(error)),
+            };
+            OpResult::JsValue {
+                resolver,
+                value,
+                request_id,
+            }
+        }));
+        Ok(promise.into())
+    }
+
     /// `run.status()` → Promise<{ state, output, error }>.
     #[v8_method]
     fn status<'s>(
