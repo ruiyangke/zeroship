@@ -95,11 +95,43 @@ pub(crate) fn replay(steps: &[StepCheckpoint]) -> Vec<JournalStep> {
             state: step.state.clone(),
             output: step.output.clone(),
             output_ref: step.output_ref.clone(),
-            error: step.error.clone(),
+            error: replay_error(step.error.as_ref()),
             child_run_id: step.child_run_id.clone(),
             compensation_state: step.compensation_state.clone(),
         })
         .collect()
+}
+
+/// The keys the replay bridge rebuilds a thrown error from.
+const REPLAYED_ERROR_KEYS: [&str; 4] = ["type", "message", "stack", "retryable"];
+
+/// A recorded failure as the replay bridge reads it.
+///
+/// `wfDeserializeError` in `crates/zeroship-workflow-v8/js/dispatch.js` picks a
+/// class by `type`, takes `message`, overwrites `stack` and copies `retryable`
+/// when it is a boolean. It reads nothing else, so every other key a body
+/// recorded is already dropped there rather than reaching a `catch`. This is the
+/// one unbounded field of the row with no reference form at any size, and the
+/// view is rebuilt for every dispatch, so it is narrowed here instead of
+/// travelling to the worker to be discarded.
+///
+/// The stored checkpoint keeps its value whole: [`retryable`] decides whether a
+/// failed step gets another execution, [`validate_child_checkpoint`] reads the
+/// type of an unsettled child join, and [`validate_child_result`] matches a
+/// settled one against the error the child itself recorded.
+///
+/// A recorded value that is not an object carries none of these keys and leaves
+/// an empty one, which is what the bridge already makes of it: neither spelling
+/// selects a class or a message, so both reach the body as a bare `Error`.
+fn replay_error(error: Option<&Value>) -> Option<Value> {
+    let error = error?;
+    let mut projected = serde_json::Map::new();
+    for key in REPLAYED_ERROR_KEYS {
+        if let Some(value) = error.get(key) {
+            projected.insert(key.to_owned(), value.clone());
+        }
+    }
+    Some(Value::Object(projected))
 }
 
 #[derive(Serialize, Deserialize)]
