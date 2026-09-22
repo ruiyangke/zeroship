@@ -110,11 +110,12 @@ the missing column, which is a better diagnostic than a role that does not exist
    than disappears, but it interacts with Open 1 of the role-names-as-data proposal and the two
    should be settled together.
 
-2. **Does anything else read `schema_epoch` that is not the fence?** The CDC relay is granted
-   `SELECT (id, status, schema_epoch)` on `zeroship.databases`
-   (`crates/zeroship-data-cdc-server/src/source.rs` builds the same shape in its fixture). Whether
-   the relay uses the value or merely reads the column must be settled before the column is
-   dropped.
+2. **Does anything else read `schema_epoch` that is not the fence?** SETTLED: no. Both hits in the
+   CDC crates are fixtures, not reads - `crates/zeroship-data-cdc-server/src/source.rs` declares
+   the column inside a `#[cfg(test)]` helper that stands up control-table stand-ins, and
+   `crates/zeroship-data-cdc-server/tests/relay.rs` grants `SELECT (id, status, schema_epoch)` in
+   the same spirit. The relay resolves a subscriber's schema from the binding rows and never reads
+   the value. The fixtures move with the column; nothing depends on it.
 
 3. **Is the dev-tier divergence row now shorter?** `docs/reference/sqlite-divergences.md` owes an
    epoch row because the dev tier has no carrier for one. If production has no epoch either, the
