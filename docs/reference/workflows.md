@@ -584,12 +584,18 @@ type WorkflowRunState =
   | "compensating"
   | "completed"
   | "failed"
-  | "cancelled";
+  | "cancelled"
+  | "continuedAsNew";
 
 interface WorkflowRun<Output = unknown> {
   readonly id: string;
   signal(opts: { type: string; payload?: unknown; idempotencyKey?: string }): Promise<void>;
-  status(): Promise<{ state: WorkflowRunState; output?: Output | StatusOutputRef; error?: unknown }>;
+  status(): Promise<{
+    state: WorkflowRunState;
+    output?: Output | StatusOutputRef;
+    error?: unknown;
+    continuedAsNew?: string;
+  }>;
   readStepOutput(name: string, occurrence: number): Promise<Uint8Array>;
   readOutput(): Promise<Uint8Array>;
   pause(): Promise<void>;
@@ -598,6 +604,10 @@ interface WorkflowRun<Output = unknown> {
   restart(opts?: RestartOptions): Promise<WorkflowRun<Output>>;
 }
 ```
+
+A run that closed by handing its work to a successor rests in `continuedAsNew`,
+and its `status()` reply then carries `continuedAsNew`: the run id of the
+successor that generation started. The key is absent on a run that started none.
 
 The SDK type also declares `createSignalToken(opts: { types: string[]; ttl: string })`
 on `WorkflowRun`, but the runtime binding that backs `env.workflows` does not

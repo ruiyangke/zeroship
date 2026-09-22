@@ -176,7 +176,8 @@ export type WorkflowRunState =
   | "compensating"
   | "completed"
   | "failed"
-  | "cancelled";
+  | "cancelled"
+  | "continuedAsNew";
 
 export interface RestartTarget {
   name: string;
@@ -195,7 +196,13 @@ export interface WorkflowRun<Output = unknown> {
   readOutput(): Promise<Uint8Array>;
   readonly id: string;
   signal(opts: { type: string; payload?: unknown; idempotencyKey?: string }): Promise<void>;
-  status(): Promise<{ state: WorkflowRunState; output?: StatusOutput<Output>; error?: unknown }>;
+  status(): Promise<{
+    state: WorkflowRunState;
+    output?: StatusOutput<Output>;
+    error?: unknown;
+    /** The run id of the successor a `continuedAsNew` close handed this run's work to. */
+    continuedAsNew?: string;
+  }>;
   pause(): Promise<void>;
   resume(): Promise<void>;
   cancel(opts?: { mode?: "abort" | "compensate" }): Promise<void>;
