@@ -625,6 +625,70 @@ fn local_initialization_never_resets_an_incompatible_journal() {
     );
 }
 
+/// Relaxing a column in the version the series starts from moves the journal's
+/// fingerprint without moving its version. A store already stamped at that
+/// version has nothing left in the series to apply, so the fingerprint is the
+/// only thing that can tell the shape it was built with from the shape this
+/// build demands. It must refuse, by name, and leave the store alone.
+#[test]
+fn local_initialization_refuses_a_journal_whose_fingerprint_moved() {
+    use zeroship_workflow_schema::{fingerprint, SQLITE, STAMP_ROW_ID, STAMP_TABLE, VERSION};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("zs-workflow.sqlite");
+    schema::initialize_sqlite(&path).unwrap();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "INSERT INTO __zeroship_workflow_app_state (id, app_id) VALUES ('state', 'app_kept')",
+    )
+    .unwrap();
+    let stamp = |conn: &rusqlite::Connection| -> (i64, String) {
+        conn.query_row(
+            &format!("SELECT version, fingerprint FROM {STAMP_TABLE} WHERE id = ?1"),
+            [STAMP_ROW_ID],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap()
+    };
+    let installed = stamp(&conn);
+    assert_eq!(installed.0, i64::from(VERSION));
+    assert_eq!(installed.1, fingerprint(SQLITE).unwrap());
+    // Control: at the same version AND the same fingerprint it opens again.
+    schema::initialize_sqlite(&path).unwrap();
+
+    // Move only the fingerprint. The version still says the store is current,
+    // which is exactly the case a baseline change produces.
+    let moved = "0".repeat(installed.1.len());
+    assert_ne!(moved, installed.1);
+    conn.execute(
+        &format!("UPDATE {STAMP_TABLE} SET fingerprint = ?1 WHERE id = ?2"),
+        rusqlite::params![moved, STAMP_ROW_ID],
+    )
+    .unwrap();
+    assert_eq!(
+        schema::initialize_sqlite(&path).unwrap_err(),
+        schema::incompatible(),
+        "a moved fingerprint must be refused as incompatible, not as a journal ahead"
+    );
+    // Failing closed: the refusal rewrote neither the stamp nor the rows.
+    assert_eq!(stamp(&conn), (i64::from(VERSION), moved));
+    assert_eq!(
+        conn.query_row("SELECT app_id FROM __zeroship_workflow_app_state", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .unwrap(),
+        "app_kept"
+    );
+
+    // Restoring it opens again, so the fingerprint was the only variable.
+    conn.execute(
+        &format!("UPDATE {STAMP_TABLE} SET fingerprint = ?1 WHERE id = ?2"),
+        rusqlite::params![installed.1, STAMP_ROW_ID],
+    )
+    .unwrap();
+    schema::initialize_sqlite(&path).unwrap();
+}
+
 #[compio::test]
 async fn sqlite_task_leases_and_receipts_preserve_the_frontier() {
     let dir = tempfile::tempdir().unwrap();
