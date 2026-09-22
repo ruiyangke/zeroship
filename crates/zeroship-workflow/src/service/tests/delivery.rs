@@ -1306,3 +1306,401 @@ async fn policy_bounds(store: Rc<OrmStore>) {
         claimed.assignment().token.as_str()
     );
 }
+
+case!(
+    sqlite_a_renewed_delivery_counts_one_execution_per_attempt,
+    postgres_a_renewed_delivery_counts_one_execution_per_attempt,
+    renewal_seam
+);
+
+case!(
+    sqlite_a_completion_batch_applies_each_outcome_on_its_own,
+    postgres_a_completion_batch_applies_each_outcome_on_its_own,
+    outcome_identity
+);
+
+case!(
+    sqlite_a_reported_execution_of_one_ordinal_is_counted_once,
+    postgres_a_reported_execution_of_one_ordinal_is_counted_once,
+    reported_executions
+);
+
+/// The manager's stored evidence that a delivery began executing: how many
+/// executions it has counted against the job's redelivery budget, and the
+/// attempt the last of them was counted for.
+///
+/// Read off the queue's own row rather than from a reply, because the reply is
+/// what a merged renewal would carry and the row is what bounds redelivery.
+fn counted(manager: &Manager, job: &JobSpec) -> (i64, Option<i64>) {
+    rusqlite::Connection::open(&manager.path)
+        .unwrap()
+        .query_row(
+            "SELECT execution_attempts, executed_attempt FROM jobs WHERE id = ?1",
+            [job.id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap()
+}
+
+/// Long enough that the creator clock has moved between two renewals of one
+/// attempt, so the second one's deadline is distinguishable from the first's.
+const RENEWAL_GAP: Duration = Duration::from_millis(5);
+
+/// Drive one renewal the way the delivery runner drives it: the manager extends
+/// the delivery, the creator renews its task under that same grant, and the task
+/// the caller holds adopts what came back. Reports the creator deadline the
+/// renewed task is left on.
+async fn renew(
+    scope: &AppWorkflows,
+    manager: &Manager,
+    owner: &Assignment,
+    task: &mut DeliveredTask,
+    delivery: &Delivery,
+) -> i64 {
+    let grant = manager.queue.heartbeat(owner, delivery).await.unwrap();
+    assert_eq!(
+        grant.delivery().attempt,
+        delivery.attempt,
+        "the renewed grant must cover the attempt whose task is being renewed"
+    );
+    let renewal = scope.heartbeat_job(task, &grant).await.unwrap();
+    assert_eq!(renewal.control(), crate::service::ControlIntent::None);
+    task.renew(renewal);
+    task.remaining().unwrap();
+    task.assignment().deadline
+}
+
+/// Renewal is the manager's only evidence that a delivery reached creator code,
+/// and the creator renewal is what proves the execution is still alive. The two
+/// are one exchange: a task renewed without the delivery counted leaves
+/// redelivery unbounded, and a delivery counted without the task renewed
+/// bounds a claim the creator never accepted.
+///
+/// So this drives the pair and asserts the queue row, not a reply: the first
+/// renewal of an attempt counts it, a second renewal of the same attempt
+/// extends only the lease, a claim nobody renewed leaves the budget unspent,
+/// and the next attempt is counted on its own. The deadline the renewals return
+/// is asserted to move between them, so "counted once" cannot pass over a
+/// second renewal that did nothing at all.
+///
+/// What this does NOT catch: the manager's count is advanced by the manager
+/// heartbeat here, not by `heartbeat_job`, because today those are two calls
+/// and no single call reaches both stores. So this binds that driving the pair
+/// produces both effects, not that one implementation produces them. An edit
+/// that merged the calls and dropped either store would fail this; an edit that
+/// kept two calls and simply stopped issuing one of them would not, because
+/// the fixture issues them itself. Nor does it bind what the runner does
+/// between renewals - the renewal loop and its delay live in
+/// `zeroship-workflow-runner`, whose `JobTransport` cannot reach this queue.
+async fn renewal_seam(store: Rc<OrmStore>) {
+    let (service, app, _, _deployments) = registered_service(store).await;
+    let scope = service.fixture_app(app.clone());
+    scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let manager = Manager::new(&app).await;
+    let owner = assignment(&app);
+    let job = publish(&scope, &manager).await;
+
+    let grant = manager.queue.claim(&owner).await.unwrap().unwrap();
+    let first_attempt = grant.delivery().attempt.get();
+    assert_eq!(
+        counted(&manager, &job),
+        (0, None),
+        "a claim nobody has renewed must leave the redelivery budget unspent"
+    );
+    let mut claimed = task(scope.accept_job(&grant).await.unwrap());
+    assert_eq!(
+        counted(&manager, &job),
+        (0, None),
+        "accepting a delivery is not evidence that its body began executing"
+    );
+
+    let first = renew(&scope, &manager, &owner, &mut claimed, grant.delivery()).await;
+    assert_eq!(
+        counted(&manager, &job),
+        (1, Some(first_attempt)),
+        "the first renewal of an attempt must count that attempt"
+    );
+    compio::time::sleep(RENEWAL_GAP).await;
+    let second = renew(&scope, &manager, &owner, &mut claimed, grant.delivery()).await;
+    assert!(
+        second > first,
+        "the second renewal left the task on the first one's deadline, so a count \
+         that stayed at one proves nothing about deduplication: {second} after {first}"
+    );
+    assert_eq!(
+        counted(&manager, &job),
+        (1, Some(first_attempt)),
+        "two renewals inside one attempt must spend the redelivery budget once"
+    );
+
+    scope.release_job(&claimed, &grant).await.unwrap();
+    lapse_lease(&manager, &grant);
+    let next = manager.queue.claim(&owner).await.unwrap().unwrap();
+    let next_attempt = next.delivery().attempt.get();
+    assert!(next_attempt > first_attempt);
+    let mut replacement = task(scope.accept_job(&next).await.unwrap());
+    assert_eq!(
+        counted(&manager, &job),
+        (1, Some(first_attempt)),
+        "a redelivery nobody has renewed must not be counted either"
+    );
+    renew(&scope, &manager, &owner, &mut replacement, next.delivery()).await;
+    assert_eq!(
+        counted(&manager, &job),
+        (2, Some(next_attempt)),
+        "deduplication belongs to one attempt, so the next attempt that began \
+         executing must be counted on its own"
+    );
+}
+
+/// One run's journal rows keyed by ordinal, as the stored column, the stored
+/// state and the decoded record.
+async fn steps_by_ordinal(
+    service: &WorkflowService,
+    app: &AppId,
+    run: &str,
+) -> std::collections::BTreeMap<i64, (String, String, serde_json::Value)> {
+    let tx = service.begin().await.unwrap();
+    let rows = journal_rows(&tx, "steps", json!({"app_id":app.as_str(), "run_id":run})).await;
+    let stored = rows
+        .iter()
+        .map(|row| {
+            (
+                row.integer("ordinal").unwrap(),
+                (
+                    row.text("kind").unwrap(),
+                    row.text("state").unwrap(),
+                    serde_json::from_str(&row.text("record").unwrap()).unwrap(),
+                ),
+            )
+        })
+        .collect();
+    tx.commit().await.unwrap();
+    stored
+}
+
+/// Every outcome in one completion batch is applied on its own terms, so the
+/// journal says which of them did what.
+///
+/// The outcomes here are pairwise distinguishable by what they leave behind:
+/// a compensable `run` step with its own output, a `sideEffect` step with
+/// another, and a failure that keeps its ordinal open with a declared ceiling.
+/// Every one of those is asserted at its own ordinal. A batch whose entries
+/// were substituted for one another would keep its width, keep its run state
+/// and keep its receipt, and fail only here.
+///
+/// What this does NOT catch: a permutation of the batch. `journal::append`
+/// refuses a new checkpoint that is not the next journal operation, so a
+/// reordered batch is rejected before a row is written and this case would see
+/// the refusal rather than a reordered journal. It does not bind the single
+/// `JobOutcome` the receipt carries to the manager either - `stored_outcomes`
+/// owns that - only the per-outcome fold beneath it. And it says nothing about
+/// a wider batch, or about the ceiling on batch width.
+async fn outcome_identity(store: Rc<OrmStore>) {
+    let (service, app, _, _deployments) = registered_service(store).await;
+    let scope = service.fixture_app(app.clone());
+    let run = scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let manager = Manager::new(&app).await;
+    let owner = assignment(&app);
+    publish(&scope, &manager).await;
+    let grant = manager.queue.claim(&owner).await.unwrap().unwrap();
+    let claimed = task(scope.accept_job(&grant).await.unwrap());
+    let receipt = scope
+        .complete_job(
+            &claimed,
+            &grant,
+            execution(json!([
+                {"kind":"StepCompleted", "ordinal":0, "name":"reserve", "nameOccurrence":0,
+                    "stepKind":"run", "compensable":true, "output":"reserved"},
+                {"kind":"StepCompleted", "ordinal":1, "name":"charge", "nameOccurrence":0,
+                    "stepKind":"sideEffect", "output":"charged"},
+                {"kind":"RunFailed", "ordinal":2, "name":"ship", "nameOccurrence":0,
+                    "maxAttempts":3, "error":{"type":"Error", "message":"carrier unavailable"}},
+            ])),
+        )
+        .await
+        .unwrap();
+    assert_eq!(receipt.outcome, JobOutcome::Waiting {});
+
+    let stored = steps_by_ordinal(&service, &app, &run.id).await;
+    assert_eq!(
+        stored.keys().copied().collect::<Vec<_>>(),
+        vec![0, 1, 2],
+        "the batch must leave one journal row per outcome"
+    );
+
+    let (kind, state, record) = &stored[&0];
+    assert_eq!((kind.as_str(), state.as_str()), ("run", "completed"));
+    assert_eq!(record["step"]["name"], json!("reserve"));
+    assert_eq!(record["step"]["output"], json!("reserved"));
+    assert_eq!(
+        record["step"]["compensationState"],
+        json!("pending"),
+        "the compensable step's own obligation was not registered at its ordinal"
+    );
+
+    let (kind, state, record) = &stored[&1];
+    assert_eq!((kind.as_str(), state.as_str()), ("sideEffect", "completed"));
+    assert_eq!(record["step"]["name"], json!("charge"));
+    assert_eq!(record["step"]["output"], json!("charged"));
+    assert_eq!(
+        record["step"]["compensationState"],
+        serde_json::Value::Null,
+        "an effect that declared no undo was given the neighbouring step's obligation"
+    );
+
+    let (kind, state, record) = &stored[&2];
+    assert_eq!((kind.as_str(), state.as_str()), ("run", "retrying"));
+    assert_eq!(record["step"]["name"], json!("ship"));
+    assert_eq!(
+        record["step"]["error"]["message"],
+        json!("carrier unavailable")
+    );
+    assert_eq!(record["step"]["maxAttempts"], json!(3));
+    assert_eq!(record["step"]["output"], serde_json::Value::Null);
+
+    manager
+        .queue
+        .settle(&owner, &receipt.settlement(&grant).unwrap())
+        .await
+        .unwrap();
+}
+
+/// The inter-attempt delay the retrying case below runs under. The journal
+/// schedules the next attempt this far ahead on the database clock and the
+/// successor job is published for the same instant, so a case that wants that
+/// attempt has to let the delay pass rather than assume it has.
+const ATTEMPT_DELAY: Duration = Duration::from_millis(1);
+/// What that case waits instead, so the wait is the delay plus slack rather
+/// than a race against it. Waiting longer cannot turn a miscount into a match.
+const ATTEMPT_WAIT: Duration = Duration::from_millis(50);
+
+/// A reported success at the ordinal the failure below leaves open.
+fn completing_step() -> serde_json::Value {
+    json!([{"kind":"StepCompleted", "ordinal":0, "name":"charge",
+        "nameOccurrence":0, "stepKind":"run", "output":"ok"}])
+}
+
+/// A reported failure of one ordinal with attempts left.
+fn failing_step() -> serde_json::Value {
+    json!([{"kind":"RunFailed", "ordinal":0, "name":"charge", "nameOccurrence":0,
+        "maxAttempts":3, "error":{"type":"Error", "message":"intentional failure"}}])
+}
+
+/// What one ordinal has cost and where it rests.
+async fn spent_at(
+    service: &WorkflowService,
+    app: &AppId,
+    run: &str,
+    ordinal: i64,
+) -> (serde_json::Value, String) {
+    let (_, state, record) = steps_by_ordinal(service, app, run).await[&ordinal].clone();
+    (record["step"]["attempts"].clone(), state)
+}
+
+/// An execution of a run body that reported an outcome is counted once against
+/// its ordinal, and nothing else is.
+///
+/// The count has both directions and a dispatch has both fates, so every one
+/// of those is an arm here. A reported failure with attempts left counts one;
+/// the same report delivered again reads back its receipt and counts nothing
+/// further; a dispatch reclaimed with nothing reported counts nothing; and the
+/// next reported execution of that ordinal makes the count exactly two rather
+/// than at least two. Every one of them arrives through `complete_job` under a
+/// real manager grant.
+///
+/// What this does NOT catch: it binds the count, not the retry mechanics the
+/// count feeds - the declared ceiling, the delay and the hole a held ordinal
+/// leaves in the replayed journal are `step_retries`' contract, reached through
+/// `WorkflowService::complete` instead. It also cannot distinguish a count the
+/// fold applied twice from one the caller reported twice, because both arrive
+/// as the same stored number; the replay arm is what separates them.
+async fn reported_executions(store: Rc<OrmStore>) {
+    let (service, app, _, _deployments) = registered_service(store).await;
+    let scope = service.fixture_app(app.clone());
+    let run = scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    service
+        .policies
+        .fixture_install(
+            &app,
+            leased_policy(
+                2,
+                AppPolicy {
+                    retry_delay_ms: i64::try_from(ATTEMPT_DELAY.as_millis()).unwrap(),
+                    ..Default::default()
+                },
+            ),
+        )
+        .unwrap();
+    let manager = Manager::new(&app).await;
+    let owner = assignment(&app);
+    publish(&scope, &manager).await;
+
+    let mut grant = manager.queue.claim(&owner).await.unwrap().unwrap();
+    let mut claimed = task(scope.accept_job(&grant).await.unwrap());
+    let receipt = scope
+        .complete_job(&claimed, &grant, execution(failing_step()))
+        .await
+        .unwrap();
+    assert_eq!(receipt.outcome, JobOutcome::Waiting {});
+    assert_eq!(
+        spent_at(&service, &app, &run.id, 0).await,
+        (json!(1), "retrying".into()),
+        "the reported execution was not counted against its ordinal"
+    );
+    assert_eq!(
+        scope
+            .complete_job(&claimed, &grant, execution(failing_step()))
+            .await
+            .unwrap(),
+        receipt
+    );
+    assert_eq!(
+        spent_at(&service, &app, &run.id, 0).await,
+        (json!(1), "retrying".into()),
+        "redelivering one execution's own report counted it a second time"
+    );
+    manager
+        .queue
+        .settle(&owner, &receipt.settlement(&grant).unwrap())
+        .await
+        .unwrap();
+
+    compio::time::sleep(ATTEMPT_WAIT).await;
+    publish(&scope, &manager).await;
+    grant = manager.queue.claim(&owner).await.unwrap().unwrap();
+    claimed = task(scope.accept_job(&grant).await.unwrap());
+    scope.release_job(&claimed, &grant).await.unwrap();
+    lapse_lease(&manager, &grant);
+    grant = manager.queue.claim(&owner).await.unwrap().unwrap();
+    claimed = task(scope.accept_job(&grant).await.unwrap());
+    assert_eq!(
+        spent_at(&service, &app, &run.id, 0).await,
+        (json!(1), "retrying".into()),
+        "a dispatch that reported nothing spent an attempt of the ordinal"
+    );
+
+    let receipt = scope
+        .complete_job(&claimed, &grant, execution(completing_step()))
+        .await
+        .unwrap();
+    assert_eq!(
+        spent_at(&service, &app, &run.id, 0).await,
+        (json!(2), "completed".into()),
+        "the second reported execution of one ordinal was not counted exactly once"
+    );
+    manager
+        .queue
+        .settle(&owner, &receipt.settlement(&grant).unwrap())
+        .await
+        .unwrap();
+}
