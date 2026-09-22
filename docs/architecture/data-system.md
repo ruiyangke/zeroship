@@ -508,6 +508,15 @@ combination, because PostgreSQL will not.
 developer owns the bytes on their own machine. A Postgres DSN is refused in dev on purpose.
 Intentional divergences are catalogued in `docs/reference/sqlite-divergences.md`.
 
+**The dev binding carries one capability, read-write** (`DEV_CAPABILITY`,
+`crates/zeroship-cli/src/dev_binding.rs`). There is no control plane on this tier to have declared
+anything else, and SQLite has neither roles nor column ACLs, so the whole apparatus that makes a
+capability mean something in production - the binding role, its two memberships, and the
+capability roles a session's grants hang off - has no counterpart here. Capability, column masking
+and revocation are enforced in process on this tier rather than by the server. That is the
+mechanism behind the register's contract that a green dev run is not evidence about any of the
+three, and it is why the arms that assert them live in the `PostgreSQL` suites.
+
 ---
 
 ## Multi-region: NOT DESIGNED, and the shape it is forced into
