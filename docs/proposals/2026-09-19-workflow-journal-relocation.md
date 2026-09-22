@@ -650,12 +650,13 @@ stall the defect fixes that motivate the move.
    **`RunStatus.output` already returns a reference descriptor, so what is left there is a
    defect.** `AppWorkflows::status` in `crates/zeroship-workflow/src/service/app.rs` emits a
    descriptor for a referenced output, `StatusOutput` in `packages/workflows/src/index.ts` declares
-   the union, and `docs/reference/workflows.md` states it under "Large Outputs". The open part is
-   tracked as a defect rather than decided here: the descriptor `status` emits and the
-   `StepOutputRef` the SDK declares disagree on `kind`, and a creator holding only a run id cannot
-   dereference what `status` returns, because `WorkflowBackend::read_step_output` in
-   `crates/zeroship-workflow/src/backend.rs` addresses a step by name and a run's final output has
-   none - `finish_run` records the terminal outcome on the generation row and on no step.
+   the union, and `docs/reference/workflows.md` states it under "Large Outputs". A creator holding
+   a run id can now read the bytes through `WorkflowBackend::read_output` in
+   `crates/zeroship-workflow/src/backend.rs`, surfaced to creators as `readOutput` on
+   `WorkflowRun` in `crates/zeroship-workflow-v8/src/v8_class.rs`. The open part is that the
+   descriptor `status` emits and the `StepOutputRef` the SDK declares disagree on their `kind`
+   field, so the described union names output values with `kind: "workflow-step-output-ref"` that
+   the status path emits as `kind: "ref"`.
 
    **Staging is task-scoped, and that is the constraint on emptying `generations.input`.**
    `stage_payload` requires a worker identity, a task id and a task token, and its only non-test
