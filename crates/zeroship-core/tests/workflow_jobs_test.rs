@@ -181,12 +181,31 @@ fn outcomes() -> Vec<(JobOutcome, Value)> {
             json!({"kind":"closed","drained":false}),
         ),
     ];
+    let pinned_to = DeploymentId::mint();
     for (outcome, wire) in [
         (
             ManagementOutcome::Applied {
                 state: RunState::Paused,
             },
             json!({"kind":"applied","state":"paused"}),
+        ),
+        (
+            ManagementOutcome::Restarted {
+                state: RunState::Queued,
+                restarted_from_ordinal: Some(7),
+                pinned_to: pinned_to.clone(),
+            },
+            json!({"kind":"restarted","state":"queued","restartedFromOrdinal":7,
+                "pinnedTo":pinned_to}),
+        ),
+        (
+            ManagementOutcome::Restarted {
+                state: RunState::Queued,
+                restarted_from_ordinal: None,
+                pinned_to: pinned_to.clone(),
+            },
+            json!({"kind":"restarted","state":"queued","restartedFromOrdinal":null,
+                "pinnedTo":pinned_to}),
         ),
         (ManagementOutcome::NotFound {}, json!({"kind":"not_found"})),
         (ManagementOutcome::Conflict {}, json!({"kind":"conflict"})),
@@ -210,7 +229,7 @@ const fn operation_family(operation: &JobOperation) -> u8 {
     }
 }
 
-const fn outcome_family(outcome: JobOutcome) -> u8 {
+const fn outcome_family(outcome: &JobOutcome) -> u8 {
     match outcome {
         JobOutcome::Management { .. } => 1,
         JobOutcome::Closed { .. } => 2,
@@ -224,9 +243,9 @@ fn outcome_objects_preserve_closed_management_results_and_operation_families() {
     for (outcome, wire) in outcomes() {
         assert_eq!(round_trip(&outcome), wire);
         for (operation, _) in operations() {
-            let expected = operation_family(&operation) == outcome_family(outcome);
+            let expected = operation_family(&operation) == outcome_family(&outcome);
             if expected {
-                families.insert(outcome_family(outcome));
+                families.insert(outcome_family(&outcome));
             }
             assert_eq!(
                 outcome.valid_for(&operation),
@@ -235,14 +254,14 @@ fn outcome_objects_preserve_closed_management_results_and_operation_families() {
             );
             if expected {
                 let mut command = settlement(operation);
-                command.outcome = outcome;
+                command.outcome = outcome.clone();
                 let encoded = round_trip(&command);
                 assert_eq!(encoded["outcome"], wire);
                 let receipt = SettlementReceipt {
                     app_id: command.delivery.job.app_id,
                     job_id: command.delivery.job.id,
                     attempt: command.delivery.attempt,
-                    outcome,
+                    outcome: outcome.clone(),
                 };
                 assert_eq!(round_trip(&receipt)["outcome"], wire);
             }
@@ -263,7 +282,7 @@ fn outcome_objects_reject_private_data_missing_fields_and_secondary_results() {
             app_id: command.delivery.job.app_id.clone(),
             job_id: command.delivery.job.id.clone(),
             attempt: command.delivery.attempt,
-            outcome,
+            outcome: outcome.clone(),
         };
         let mut paths = vec![""];
         if matches!(outcome, JobOutcome::Management { .. }) {

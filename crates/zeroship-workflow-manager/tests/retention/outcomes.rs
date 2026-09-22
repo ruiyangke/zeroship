@@ -100,7 +100,7 @@ async fn outcome_families(fixture: &Fixture) {
             successors: vec![job(&app, &DeploymentId::mint())],
         };
         refused(fixture, &queue, &authority, &attempt, Error::Invalid).await;
-        attempt.outcome = outcome;
+        attempt.outcome = outcome.clone();
         attempt.successors = vec![successor.clone()];
         let receipt = queue.settle(&authority, &attempt).await.unwrap();
         assert_eq!(receipt.outcome, outcome);

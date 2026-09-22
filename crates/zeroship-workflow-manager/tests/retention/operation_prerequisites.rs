@@ -224,8 +224,10 @@ async fn journal_commands(fixture: &Fixture, queue: &Queue) {
         let settlement = Settlement {
             delivery: renewed.delivery().clone(),
             outcome: JobOutcome::Management {
-                outcome: ManagementOutcome::Applied {
+                outcome: ManagementOutcome::Restarted {
                     state: RunState::Queued,
+                    restarted_from_ordinal: Some(4),
+                    pinned_to: DeploymentId::mint(),
                 },
             },
             successors: vec![],

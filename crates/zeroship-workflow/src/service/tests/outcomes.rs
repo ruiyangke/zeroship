@@ -124,11 +124,11 @@ async fn stored_outcomes(store: Rc<OrmStore>) {
     assert!(!original["tasks"].is_empty());
     for case in &fixture.cases {
         let mut forbidden = vec![management()];
-        forbidden.extend(case.forbidden.iter().copied());
+        forbidden.extend(case.forbidden.iter().cloned());
         for outcome in forbidden {
             let fabricated = JobReceipt {
                 job: case.lease.delivery.job.clone(),
-                outcome,
+                outcome: outcome.clone(),
             };
             assert!(matches!(
                 fabricated.settlement(&case.lease),
@@ -143,7 +143,7 @@ async fn stored_outcomes(store: Rc<OrmStore>) {
         replace_outcome(
             &fixture.service,
             &case.receipt.job,
-            serde_json::to_value(case.receipt.outcome).unwrap(),
+            serde_json::to_value(&case.receipt.outcome).unwrap(),
         )
         .await;
         assert_eq!(

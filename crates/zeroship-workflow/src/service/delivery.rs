@@ -70,12 +70,12 @@ impl JobReceipt {
         if lease.delivery().job != self.job {
             return Err(conflict());
         }
-        if !valid_outcome(&self.job.operation, self.outcome) {
+        if !valid_outcome(&self.job.operation, &self.outcome) {
             return Err(invalid());
         }
         Ok(Settlement {
             delivery: lease.delivery().clone(),
-            outcome: self.outcome,
+            outcome: self.outcome.clone(),
             successors: Vec::new(),
         })
     }
@@ -261,7 +261,7 @@ impl Record {
         match (&self.outcome, self.completed_at) {
             (Some(outcome), Some(_)) => {
                 let outcome = decode(outcome)?;
-                self.check_outcome(job, outcome)?;
+                self.check_outcome(job, &outcome)?;
                 Ok(Some(JobReceipt {
                     job: job.clone(),
                     outcome,
@@ -275,7 +275,7 @@ impl Record {
     fn check_outcome(
         &self,
         job: &JobSpec,
-        outcome: JobOutcome,
+        outcome: &JobOutcome,
     ) -> Result<(), WorkflowServiceError> {
         if !valid_outcome(&job.operation, outcome) {
             return Err(invalid());
@@ -296,7 +296,7 @@ impl Record {
     }
 }
 
-const fn valid_outcome(operation: &JobOperation, outcome: JobOutcome) -> bool {
+const fn valid_outcome(operation: &JobOperation, outcome: &JobOutcome) -> bool {
     if !outcome.valid_for(operation) {
         return false;
     }
@@ -888,7 +888,7 @@ pub(super) async fn finish(
     if record.receipt(job)?.is_some() {
         return Err(conflict());
     }
-    record.check_outcome(job, outcome)?;
+    record.check_outcome(job, &outcome)?;
     let changed = tx.database().collection(job_receipts::Entity::COLLECTION)?.execute(Operation::Update {
         filter:value!({"app_id":job.app_id.as_str(), "id":job.id.as_str(), "outcome":null, "completed_at":null}),
         patch:value!({"outcome":encode(&outcome)?, "completed_at":now}), many:true,

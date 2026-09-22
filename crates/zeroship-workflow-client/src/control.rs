@@ -7,8 +7,8 @@ use zeroship_core::{
     service_identity::endpoints,
     service_peers::{service_issuer, ServiceAuth, CONTROL_SERVICE_NAME},
     workflow_coordination::{
-        Assignment, ManageRun, ManagementOperation, ManagementReceipt, ManagementStatus,
-        RequestId, RunId, RunOperation, VerifyAssignment, AUDIENCE,
+        Assignment, ManageRun, ManagementOperation, ManagementReceipt, ManagementStatus, RequestId,
+        RestartOptions, RunId, RunOperation, VerifyAssignment, AUDIENCE,
     },
     workflow_jobs::{JobOperation, JobSpec},
     workflow_schedules::{ActivateSchedules, DisableSchedules, RegisterSchedules},
@@ -191,6 +191,38 @@ impl ControlCoordinator {
             app_id: app_id.clone(),
             run_id: run_id.clone(),
             command: ManagementOperation::Transition { operation },
+        })
+        .await
+    }
+
+    /// Ask the manager to restart one run.
+    ///
+    /// This assembles the `Restart` command in one place instead of at every
+    /// call site. It opens no endpoint of its own: the exchange is
+    /// `WORKFLOW_MANAGE`, so serving a restart cannot add to the manager's
+    /// request rate beyond what `manage` already carries.
+    ///
+    /// The caller supplies `request_id` because an exact retry returns the
+    /// original receipt, together with the restart target the manager froze for
+    /// it; minting one here would turn every retry into a new command against a
+    /// run the first one may already have restarted. A `None` outcome means the
+    /// manager accepted the command and has not applied it yet - poll
+    /// `management_status` with the same pair.
+    ///
+    /// # Errors
+    /// Refuses failed exchanges and receipts for another app or request.
+    pub async fn restart(
+        &self,
+        request_id: &RequestId,
+        app_id: &AppId,
+        run_id: &RunId,
+        options: RestartOptions,
+    ) -> Result<ManagementReceipt, Error> {
+        self.manage(&ManageRun {
+            request_id: request_id.clone(),
+            app_id: app_id.clone(),
+            run_id: run_id.clone(),
+            command: ManagementOperation::Restart { options },
         })
         .await
     }

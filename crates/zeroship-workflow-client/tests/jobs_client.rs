@@ -135,7 +135,7 @@ fn receipt(command: &Settlement) -> SettlementReceipt {
         job_id: command.delivery.job.id.clone(),
         app_id: command.delivery.job.app_id.clone(),
         attempt: command.delivery.attempt,
-        outcome: command.outcome,
+        outcome: command.outcome.clone(),
     }
 }
 

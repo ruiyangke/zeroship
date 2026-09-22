@@ -85,7 +85,7 @@ impl JobTransport for Queue {
             job_id: settlement.delivery.job.id.clone(),
             app_id: settlement.delivery.job.app_id.clone(),
             attempt: settlement.delivery.attempt,
-            outcome: settlement.outcome,
+            outcome: settlement.outcome.clone(),
         })
     }
 }

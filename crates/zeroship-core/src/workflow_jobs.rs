@@ -355,7 +355,7 @@ pub trait JobLease {
 /// deployment back and `Waiting` that the journal still depends on it, so a
 /// later release may succeed. A release is never forced.
 /// Only `Closed` reports drain evidence, and only for the closure job's epoch.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum JobOutcome {
     Completed {},

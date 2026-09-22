@@ -231,7 +231,9 @@ pub(super) async fn finish(
         command,
         &JobReceipt {
             job: command.job.clone(),
-            outcome: JobOutcome::Management { outcome },
+            outcome: JobOutcome::Management {
+                outcome: outcome.clone(),
+            },
         },
     )?;
     delivery::finish(tx, command.job, JobOutcome::Management { outcome }, now).await

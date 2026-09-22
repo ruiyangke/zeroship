@@ -5,7 +5,7 @@
 //! Service authentication establishes the caller; IDs in messages select
 //! resources and never grant authority to them.
 
-pub use zeroship_id::workflow::{RequestId, RunId, WorkerId};
+pub use zeroship_id::workflow::{DeploymentId, RequestId, RunId, WorkerId};
 
 mod lifecycle;
 pub use lifecycle::{
@@ -201,11 +201,49 @@ pub struct ManageRun {
     pub command: ManagementOperation,
 }
 
+/// Decode a field that may be null but may never be absent.
+///
+/// A bare `Option` field reads a missing key as `None`, so a producer that
+/// dropped the retained prefix would read back as a whole restart rather than
+/// fail. Naming a `deserialize_with` makes serde raise `missing_field` for the
+/// absent key and keeps `null` a value the field still carries.
+fn nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::deserialize(deserializer)
+}
+
 /// Acknowledgements contain no free-form customer error or output data.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+///
+/// The applied arms are command-shaped: `Applied` answers a transition, whose
+/// whole result is the state the run settled in, and `Restarted` answers a
+/// restart, which additionally decides how much journal the new generation
+/// keeps and where it replays. Both are decided inside the creator transaction,
+/// so a caller cannot recover either from the command it sent. The refusal arms
+/// are shared, because a refused command is refused the same way whichever of
+/// the two it was.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum ManagementOutcome {
-    Applied { state: RunState },
+    Applied {
+        state: RunState,
+    },
+    /// `pinned_to` is the deployment the restarted generation replays against,
+    /// which a latest restart moves; `restarted_from_ordinal` is the retained
+    /// journal prefix, null when the run restarted whole.
+    Restarted {
+        state: RunState,
+        #[serde(deserialize_with = "nullable")]
+        restarted_from_ordinal: Option<u32>,
+        pinned_to: DeploymentId,
+    },
     // Empty struct variants enforce deny_unknown_fields. Internally tagged
     // unit variants otherwise discard additional fields during deserialization.
     NotFound {},
