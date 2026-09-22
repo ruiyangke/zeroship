@@ -158,7 +158,7 @@ impl WorkflowService {
             .find::<models::PayloadRecord>(
                 models::payloads::app_id
                     .eq(claim.app.as_str())?
-                    .and(models::payloads::task_id.eq(task_id)?)
+                    .and(models::payloads::task_id.eq(Some(task_id))?)
                     .and(models::payloads::request_id.eq(request.as_str())?),
                 FindOptions {
                     limit: Some(1),
@@ -661,7 +661,7 @@ async fn owned_reference(
             .eq("staged")?
             .and(object.column(models::payloads::run_id).eq(id.as_str())?)
             .and(object.column(models::payloads::generation).eq(generation)?)
-            .and(object.column(models::payloads::task_id).eq(task.as_str())?)
+            .and(object.column(models::payloads::task_id).eq(Some(task.as_str()))?)
             .and(object.column(models::payloads::expires_at).gt(now)?));
     }
     let rows = db

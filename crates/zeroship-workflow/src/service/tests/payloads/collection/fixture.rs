@@ -100,6 +100,33 @@ impl Fixture {
     pub async fn expire(&self, id: &str) {
         self.set_expiry(id, 0).await;
     }
+    /// Leave a payload with no staging-lease owner, the shape a run that holds
+    /// no task anywhere in its flow produces. The composite foreign key then
+    /// carries a NULL, which both dialects satisfy without a lookup.
+    pub async fn disown(&self, id: &str) {
+        use crate::service::models::payloads;
+        let tx = self.store.begin().await.unwrap();
+        assert_eq!(
+            tx.database()
+                .entity::<payloads::Entity>()
+                .unwrap()
+                .update_many(
+                    payloads::id.eq(id).unwrap(),
+                    payloads::task_id.set(None::<&str>).unwrap()
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        tx.commit().await.unwrap();
+    }
+    /// The journal's own clock, which is what collection compares against.
+    pub async fn now(&self) -> i64 {
+        let mut tx = self.store.begin().await.unwrap();
+        let now = tx.now().await.unwrap();
+        tx.commit().await.unwrap();
+        now
+    }
     pub async fn damage_identity(&self, id: &str) {
         use crate::service::models::payloads;
         let tx = self.store.begin().await.unwrap();
@@ -218,6 +245,7 @@ pub(super) struct Payload {
     pub id: String,
     pub state: String,
     pub expires_at: i64,
+    pub task_id: Option<String>,
 }
 #[derive(FromRow, Insertable)]
 #[orm(entity = crate::service::models::payloads)]
@@ -226,7 +254,7 @@ struct PayloadRow {
     app_id: String,
     run_id: String,
     generation: i64,
-    task_id: String,
+    task_id: Option<String>,
     request_id: String,
     hash: String,
     size: i64,
