@@ -589,8 +589,9 @@ type WorkflowRunState =
 interface WorkflowRun<Output = unknown> {
   readonly id: string;
   signal(opts: { type: string; payload?: unknown; idempotencyKey?: string }): Promise<void>;
-  status(): Promise<{ state: WorkflowRunState; output?: Output | StepOutputRef; error?: unknown }>;
+  status(): Promise<{ state: WorkflowRunState; output?: Output | StatusOutputRef; error?: unknown }>;
   readStepOutput(name: string, occurrence: number): Promise<Uint8Array>;
+  readOutput(): Promise<Uint8Array>;
   pause(): Promise<void>;
   resume(): Promise<void>;
   cancel(opts?: { mode?: "abort" | "compensate" }): Promise<void>;
@@ -744,7 +745,7 @@ the app itself is the supported path.
 
 Saved step outputs are read through the run. `run.readStepOutput(name,
 occurrence)` returns bytes; replay uses that same operation for lazy
-`StepOutputRef` reads.
+`StepOutputRef` reads. `run.readOutput()` returns the run's final output.
 
 Small JSON outputs are inlined in the journal. Larger outputs, or outputs with
 an explicit by-reference mode, are stored as workflow blobs and replayed as
@@ -778,8 +779,24 @@ const report = await ref.json<{ rows: unknown[] }>();
 ```
 
 `"blob"` and `"ref"` use the same by-reference representation. `"stream"` also
-returns a `StepOutputRef`; use `ref.stream()` to read it. `run.status()` returns
-a ref for a blob-backed final output instead of inlining it into the status JSON.
+returns a `StepOutputRef`; use `ref.stream()` to read it.
+
+`run.status()` does not inline a blob-backed final output. It reports a
+`StatusOutputRef`, a descriptor the host serialises as JSON, so it locates the
+blob and carries no readers. `run.readOutput()` returns the bytes.
+
+```ts
+interface StatusOutputRef {
+  readonly kind: "ref";
+  readonly ref: string;
+  readonly hash: string;
+  readonly size: number;
+  readonly contentType?: string;
+}
+
+const { output } = await run.status();
+const bytes = await run.readOutput();
+```
 
 The inline threshold is 1 MiB: outputs at or under it are journaled inline, and
 anything larger — or explicitly by-reference — becomes a workflow blob. A single
@@ -1008,8 +1025,9 @@ Dont:
   that are safe to compute inline once.
 - `step.call` joins the child. Use top-level starts from handlers for detached
   work.
-- Blob-backed outputs are read lazily through `StepOutputRef`; `status()` will
-  not inline them.
+- Blob-backed step outputs are read lazily through `StepOutputRef`. `status()`
+  reports a blob-backed final output as a `StatusOutputRef` descriptor rather
+  than inlining it, and `run.readOutput()` returns the bytes.
 - A compensator receives the original step output. Use that output to undo the
   exact effect the forward step produced.
 
