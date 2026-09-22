@@ -338,9 +338,11 @@ async fn cancellation(store: Rc<OrmStore>) {
         scope.status(&head).await.unwrap().state,
         RunState::Cancelled
     );
+    // The cancellation lands on the head. The source keeps the state its own
+    // close reached: it handed its work on, and nothing since is its outcome.
     assert_eq!(
         scope.status(&child).await.unwrap().state,
-        RunState::Completed
+        RunState::ContinuedAsNew
     );
 }
 
