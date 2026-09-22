@@ -4,8 +4,9 @@ use std::fmt::Debug;
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{
-        AssignedScope, InvalidRestart, ManagementOutcome, RequestId, RestartDeploy, RestartOptions,
-        RestartTarget, RunId, RunOperation, RunState, WorkerId,
+        AssignedScope, InvalidRestart, ManagementOutcome, ManagementReceipt, RequestId,
+        RestartDeploy, RestartOptions, RestartTarget, RunId, RunOperation, RunState, ScopePage,
+        WorkerId,
     },
     workflow_jobs::{
         BroadcastId, Delivery, DeliveryLease, DeploymentId, JobId, JobOperation, JobOutcome,
@@ -25,6 +26,41 @@ fn refuses<T: DeserializeOwned>(wire: Value) {
         serde_json::from_value::<T>(wire.clone()).is_err(),
         "unexpectedly accepted metadata: {wire}"
     );
+}
+
+/// Drop each key of each named object in turn and require the decode to fail.
+///
+/// `round_trip` is the control: the untouched wire has to decode back to the
+/// same value, so a shape the sweep could never have accepted cannot pass by
+/// being refused for an unrelated reason.
+fn requires_every_key<T: Debug + PartialEq + Serialize + DeserializeOwned>(
+    value: &T,
+    paths: &[&str],
+) {
+    let wire = round_trip(value);
+    for path in paths {
+        let fields = wire.pointer(path).unwrap().as_object().unwrap();
+        assert!(!fields.is_empty(), "no keys to drop at {path:?}");
+        for field in fields.keys() {
+            let mut missing = wire.clone();
+            missing
+                .pointer_mut(path)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            refuses::<T>(missing);
+        }
+    }
+}
+
+/// Require a field carrying `None` to spell that null on the wire, and to
+/// decode back from it unchanged.
+///
+/// `round_trip` alone passes over a field serde omitted, and an omitted key is
+/// exactly the shape `requires_every_key` has to be able to see.
+fn spells_its_null<T: Debug + PartialEq + Serialize + DeserializeOwned>(value: &T, path: &str) {
+    assert_eq!(*round_trip(value).pointer(path).unwrap(), Value::Null);
 }
 
 fn operations() -> Vec<(JobOperation, Value)> {
@@ -996,24 +1032,68 @@ fn workflow_operations_require_native_revisions_and_cron_identity() {
     }
 }
 
+/// Every key a coordination envelope declares has to be on the wire.
+///
+/// A bare `Option` field decodes a dropped key as `None`, which is a value
+/// each of these types gives its own meaning: an absent `after` scans from the
+/// first app instead of the page that was asked for, and an absent `outcome`
+/// reports a settled command as one the manager has not applied yet. Each
+/// nullable field is swept from both sides, because a change that refused the
+/// explicit null as well would satisfy a refusal-only sweep while breaking
+/// every producer.
+///
+/// What this does not catch: it walks the types named here, so a coordination
+/// type nobody added to it keeps the tolerance unobserved. It says nothing
+/// about the fields that are deliberately absence-tolerant, the ones carrying
+/// `skip_serializing_if`, whose omission is how they spell `None`. It binds
+/// the encoding only; it cannot tell whether a producer computed the right
+/// cursor or the right outcome, nor whether a transport preserved the key
+/// between them.
 #[test]
 fn missing_fields_and_unknown_operations_or_outcomes_are_rejected() {
     for (operation, _) in operations() {
-        let wire = round_trip(&settlement(operation));
-        for path in ["", "/delivery", "/delivery/job", "/delivery/job/operation"] {
-            let fields = wire.pointer(path).unwrap().as_object().unwrap();
-            assert!(!fields.is_empty());
-            for field in fields.keys() {
-                let mut missing = wire.clone();
-                missing
-                    .pointer_mut(path)
-                    .unwrap()
-                    .as_object_mut()
-                    .unwrap()
-                    .remove(field);
-                refuses::<Settlement>(missing);
-            }
-        }
+        requires_every_key(
+            &settlement(operation),
+            &["", "/delivery", "/delivery/job", "/delivery/job/operation"],
+        );
+    }
+    let app = AppId::mint();
+    let request = RequestId::mint();
+    let page = ScopePage { after: None };
+    spells_its_null(&page, "/after");
+    requires_every_key(&page, &[""]);
+    requires_every_key(
+        &ScopePage {
+            after: Some(app.clone()),
+        },
+        &[""],
+    );
+    let pending = ManagementReceipt {
+        app_id: app.clone(),
+        request_id: request.clone(),
+        outcome: None,
+    };
+    spells_its_null(&pending, "/outcome");
+    requires_every_key(&pending, &[""]);
+    for outcome in [
+        ManagementOutcome::Applied {
+            state: RunState::Paused,
+        },
+        ManagementOutcome::Restarted {
+            state: RunState::Queued,
+            restarted_from_ordinal: None,
+            pinned_to: DeploymentId::mint(),
+        },
+        ManagementOutcome::Denied {},
+    ] {
+        requires_every_key(
+            &ManagementReceipt {
+                app_id: app.clone(),
+                request_id: request.clone(),
+                outcome: Some(outcome),
+            },
+            &["", "/outcome"],
+        );
     }
     let wire = round_trip(&settlement(JobOperation::Reconcile {}));
     for operation in [

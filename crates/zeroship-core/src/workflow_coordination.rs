@@ -36,9 +36,27 @@ pub struct Failure {
     pub code: FailureCode,
 }
 
+/// Decode a field that may be null but may never be absent.
+///
+/// A bare `Option` field reads a missing key as `None`, so a producer that
+/// dropped the key would read back as a different valid message rather than
+/// fail: a whole restart instead of a partial one, the first page instead of
+/// the one the scan asked for, an unapplied command instead of a settled one.
+/// Naming a `deserialize_with` makes serde raise `missing_field` for the
+/// absent key and keeps `null` a value the field still carries.
+fn nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::deserialize(deserializer)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ScopePage {
+    /// The last app the previous page returned, null to scan from the first.
+    #[serde(deserialize_with = "nullable")]
     pub after: Option<AppId>,
 }
 
@@ -201,20 +219,6 @@ pub struct ManageRun {
     pub command: ManagementOperation,
 }
 
-/// Decode a field that may be null but may never be absent.
-///
-/// A bare `Option` field reads a missing key as `None`, so a producer that
-/// dropped the retained prefix would read back as a whole restart rather than
-/// fail. Naming a `deserialize_with` makes serde raise `missing_field` for the
-/// absent key and keeps `null` a value the field still carries.
-fn nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    Option::deserialize(deserializer)
-}
-
 /// Acknowledgements contain no free-form customer error or output data.
 ///
 /// The applied arms are command-shaped: `Applied` answers a transition, whose
@@ -256,5 +260,8 @@ pub enum ManagementOutcome {
 pub struct ManagementReceipt {
     pub app_id: AppId,
     pub request_id: RequestId,
+    /// The command's result, null while the manager has accepted it and not
+    /// yet applied it.
+    #[serde(deserialize_with = "nullable")]
     pub outcome: Option<ManagementOutcome>,
 }
