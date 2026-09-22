@@ -1830,7 +1830,6 @@ mod tests {
                         crate::binding::COLD_START_DEPLOY_TOKEN,
                         edge.database().clone(),
                         edge.binding().clone(),
-                        edge.epoch(),
                         edge.database_capability(),
                     )
                     .expect("the co-tenant binding composes")

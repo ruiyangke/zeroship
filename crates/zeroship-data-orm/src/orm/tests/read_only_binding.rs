@@ -35,7 +35,6 @@ fn a_pair_of_bindings_differing_only_in_capability() -> (DbBinding, DbBinding) {
             "deploy_capability",
             database.clone(),
             edge.clone(),
-            5,
             capability,
         )
         .expect("the minted ids compose a legal role name")

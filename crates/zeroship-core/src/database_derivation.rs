@@ -3,7 +3,7 @@
 //! A database is a schema owned by a project, and a binding is one app's edge
 //! to it with one capability. Both are named in `PostgreSQL` by names nobody
 //! stores: the schema, the three roles a database has, and the role a binding
-//! narrows to at one schema epoch are all derived here. Hoisting them is the
+//! narrows to are all derived here. Hoisting them is the
 //! same property [`crate::app_derivation`] exists for - the cluster
 //! reconciler, the migration service and the data plane must not be able to
 //! answer "what is this database's schema called" differently, because the
@@ -68,27 +68,25 @@ pub fn capability_role_name(
     database_role::database_capability_role_name(database.as_str(), capability)
 }
 
-/// The role this binding narrows to at this schema epoch.
+/// The role this binding narrows to.
 ///
 /// `SET LOCAL ROLE` authorizes against the memberships of the role that
 /// CONNECTED, which is the shared worker login and never the app, so the role
 /// has to be per binding: a role per database would leave one app's revoked
 /// edge with no database consequence while any parallel edge survived.
 ///
-/// The epoch is the last component of the name, which is what makes an apply
-/// able to retire access: a new epoch is a new role, and an isolate built
-/// against a retired one fails at `SET LOCAL ROLE` rather than reading through
-/// a stale grant. It is unsigned because it is a counter, so the name cannot
-/// acquire a sign character that would need quoting.
+/// ONE role per binding, and the binding id is the last component of the name.
+/// Nothing decodes it: what the role MEANS is its membership, and the name only
+/// has to be unique per binding.
 ///
 /// # Errors
 ///
 /// [`RoleNameTooLong`] if the composed name exceeds `PostgreSQL`'s identifier
-/// limit. This is the refusal the epoch's position makes load-bearing:
-/// `PostgreSQL` shortens from the tail, so a truncated name is the same name at
-/// every epoch and the roles stop expiring.
-pub fn binding_role_name(binding: &BindingId, epoch: u32) -> Result<String, RoleNameTooLong> {
-    database_role::binding_role_name(binding.as_str(), epoch)
+/// limit. `PostgreSQL` shortens from the tail, so a truncated name is the same
+/// name for two bindings whose ids share a prefix, and revoking either would
+/// withdraw the other's access too.
+pub fn binding_role_name(binding: &BindingId) -> Result<String, RoleNameTooLong> {
+    database_role::binding_role_name(binding.as_str())
 }
 
 /// The HKDF salt this database's at-rest column key is derived from.
@@ -182,12 +180,12 @@ mod tests {
         }
 
         assert_eq!(
-            binding_role_name(&binding, 3).expect("composes"),
-            "zs_bind_bnd_03coc2qj4x2ae61h80zwlnnq6_e3"
+            binding_role_name(&binding).expect("composes"),
+            "zs_bind_bnd_03coc2qj4x2ae61h80zwlnnq6"
         );
         assert_eq!(
-            binding_role_name(&binding, 3).expect("composes"),
-            database_role::binding_role_name(BINDING_FIXTURE, 3).expect("untyped"),
+            binding_role_name(&binding).expect("composes"),
+            database_role::binding_role_name(BINDING_FIXTURE).expect("untyped"),
             "the seam must compose the role the grant statements name"
         );
 
@@ -245,8 +243,8 @@ mod tests {
         let other_binding = BindingId::mint();
         assert_ne!(one_binding, other_binding, "the control: two mints");
         assert_ne!(
-            binding_role_name(&one_binding, 1).expect("composes"),
-            binding_role_name(&other_binding, 1).expect("composes")
+            binding_role_name(&one_binding).expect("composes"),
+            binding_role_name(&other_binding).expect("composes")
         );
     }
 
@@ -270,23 +268,22 @@ mod tests {
         assert_eq!(names.len(), composed, "distinct names: {names:?}");
     }
 
-    /// The epoch is what an apply rotates, so it must move the name.
+    /// One role per binding, and two bindings are two roles.
     ///
-    /// This is the property truncation destroys, stated on the typed seam:
-    /// consecutive epochs of ONE binding are different roles, and the previous
-    /// epoch's role is the one an apply drops.
+    /// This is the property truncation destroys, stated on the typed seam: the
+    /// binding role is the object a membership hangs off, so two bindings
+    /// collapsing onto one name would make revoking either withdraw both.
     #[test]
-    fn the_binding_role_varies_with_the_epoch() {
-        let binding = binding();
+    fn the_binding_role_varies_with_the_binding() {
         let mut seen = Vec::new();
-        for epoch in [0u32, 1, 2, 3, u32::MAX] {
-            seen.push(binding_role_name(&binding, epoch).expect("composes"));
+        for binding in std::iter::once(binding()).chain((0..8).map(|_| BindingId::mint())) {
+            seen.push(binding_role_name(&binding).expect("composes"));
         }
         let minted = seen.len();
-        assert_eq!(minted, 5, "the arm must compose every epoch it lists");
+        assert_eq!(minted, 9, "the arm must compose every binding it lists");
         seen.sort();
         seen.dedup();
-        assert_eq!(seen.len(), minted, "one role per epoch: {seen:?}");
+        assert_eq!(seen.len(), minted, "one role per binding: {seen:?}");
     }
 
     /// The derived schema name validates as a schema name.
@@ -308,14 +305,12 @@ mod tests {
         assert_eq!(checked, 65, "the arm must not pass over an empty iterator");
     }
 
-    /// Every name a real id and a real epoch can produce fits `PostgreSQL`.
+    /// Every name a real id can produce fits `PostgreSQL`.
     ///
     /// The refusal in [`crate::database_role`] is the fence; this is the early
     /// warning. A prefix change or a longer id body that pushed a composed
     /// name past the limit turns every one of these into a refusal at runtime,
-    /// and this arm fails at the boundary the epoch counter can actually
-    /// reach - `u32::MAX` digits - rather than waiting for a cluster to reach
-    /// it.
+    /// and this arm fails before a cluster reaches it.
     #[test]
     fn every_composable_name_fits_the_identifier_limit() {
         let database = DatabaseId::mint();
@@ -326,7 +321,7 @@ mod tests {
             migrator_role_name(&database).expect("composes"),
             capability_role_name(&database, DatabaseCapability::ReadWrite).expect("composes"),
             capability_role_name(&database, DatabaseCapability::ReadOnly).expect("composes"),
-            binding_role_name(&binding, u32::MAX).expect("the widest epoch composes"),
+            binding_role_name(&binding).expect("composes"),
         ] {
             if name.len() > widest.len() {
                 widest = name;

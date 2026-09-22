@@ -368,10 +368,8 @@ impl Reconciler {
                 // Nothing to converge and nothing to remove.
                 continue;
             }
-            match cluster::converge_database(admin, &declaration.database, declaration.schema_epoch)
-                .await
-            {
-                Ok(_epoch) => {
+            match cluster::converge_database(admin, &declaration.database).await {
+                Ok(()) => {
                     if declaration.status == DATABASE_STATUS_PROVISIONING
                         && self.control.activate_database(&declaration.database).await?
                     {
@@ -477,15 +475,6 @@ impl Reconciler {
             )));
         };
 
-        // THE EPOCH COMES FROM THE CLUSTER. Control's `schema_epoch` is a
-        // projection kept so a binding can be composed without a cross-zone
-        // read; the row in the cluster's own admin schema is the authority,
-        // because it moves inside the transaction that mints the epoch's roles.
-        let epoch = match cluster::live_schema_epoch(admin, &declaration.database).await {
-            Ok(epoch) => epoch,
-            Err(error) => return Ok(Err(error.to_string())),
-        };
-
         let revoking = declaration.status == BINDING_STATUS_REVOKING
             || declaration.status == BINDING_STATUS_REVOKED;
         if revoking {
@@ -494,7 +483,6 @@ impl Reconciler {
                 &declaration.binding,
                 &declaration.database,
                 capability,
-                epoch,
             )
             .await
             {
@@ -524,7 +512,6 @@ impl Reconciler {
             &declaration.binding,
             &declaration.database,
             capability,
-            epoch,
         )
         .await
         {
@@ -547,15 +534,11 @@ impl Reconciler {
     /// Drop the binding roles no declaration names.
     ///
     /// The declaration set carries EVERY status, `revoked` included, because a
-    /// revoked binding's role has to survive: the data plane separates a
-    /// revoked binding (`42501`) from a retired schema epoch (`22023`) by which
-    /// error `SET LOCAL ROLE` returns, and sweeping the role would report the
-    /// first as the second.
-    ///
-    /// A binding role at an epoch other than the live one is NOT swept either.
-    /// Retiring an epoch is the apply path's job and it is ordered: an apply
-    /// that cannot drop `E-1` refuses before any DDL commits. A reap that
-    /// dropped one out of band would break an isolate that is still serving.
+    /// revoked binding's role has to survive: a revoked binding is refused
+    /// `42501` at `SET LOCAL ROLE` precisely because the role stands and this
+    /// session may not assume it, and sweeping the role would answer `22023`
+    /// instead - the generic "no such role" an unconverged database also
+    /// produces.
     async fn reap(
         &self,
         admin: &Client,
@@ -569,7 +552,7 @@ impl Reconciler {
             .collect();
         for (name, classified) in cluster::classify_platform_roles(admin).await? {
             match classified {
-                ClusterRole::Binding { binding, .. } => {
+                ClusterRole::Binding { binding } => {
                     if declared.iter().any(|declared| **declared == binding) {
                         continue;
                     }

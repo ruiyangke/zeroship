@@ -94,7 +94,6 @@ mod tests {
             "deploy_demo",
             DatabaseId::mint(),
             BindingId::mint(),
-            3,
             DatabaseCapability::ReadWrite,
         )
         .expect("the fixture ids compose a legal role name")
@@ -144,48 +143,33 @@ mod tests {
         }
     }
 
-    /// The epoch rides in the role name, so the batch changes when it moves.
+    /// The EDGE rides in the role name, so the batch changes when it moves.
     ///
-    /// Its control is the same binding at the same epoch, which must produce
-    /// the same batch: without it this would pass for a batch that varied with
-    /// anything at all.
+    /// Its control is the same edge composed twice, which must produce the same
+    /// batch: without it this would pass for a batch that varied with anything
+    /// at all.
     #[test]
-    fn the_batch_names_the_epoch_the_binding_was_resolved_at() {
+    fn the_batch_names_the_edge_the_binding_was_resolved_at() {
         let database = DatabaseId::mint();
-        let edge = BindingId::mint();
-        let at_one = DbBinding::to_database(
-            "app_demo",
-            "d",
-            database.clone(),
-            edge.clone(),
-            1,
-            DatabaseCapability::ReadWrite,
-        )
-        .unwrap();
-        let at_two = DbBinding::to_database(
-            "app_demo",
-            "d",
-            database.clone(),
-            edge.clone(),
-            2,
-            DatabaseCapability::ReadWrite,
-        )
-        .unwrap();
-        let again = DbBinding::to_database(
-            "app_demo",
-            "d",
-            database,
-            edge,
-            1,
-            DatabaseCapability::ReadWrite,
-        )
-        .unwrap();
+        let mine = BindingId::mint();
+        let theirs = BindingId::mint();
+        assert_ne!(mine, theirs, "the control: two mints are two edges");
+        let compose = |edge: &BindingId| {
+            DbBinding::to_database(
+                "app_demo",
+                "d",
+                database.clone(),
+                edge.clone(),
+                DatabaseCapability::ReadWrite,
+            )
+            .unwrap()
+        };
 
         let batch = |binding: &DbBinding| {
             tx_session_setup_sql(binding, SessionAuthority::PerBindingRole).unwrap()
         };
-        assert_ne!(batch(&at_one), batch(&at_two));
-        assert_eq!(batch(&at_one), batch(&again));
+        assert_ne!(batch(&compose(&mine)), batch(&compose(&theirs)));
+        assert_eq!(batch(&compose(&mine)), batch(&compose(&mine)));
     }
 
     #[test]

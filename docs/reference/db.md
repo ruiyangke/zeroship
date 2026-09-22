@@ -108,6 +108,22 @@ refuse when the database lacks something the app requires, say nothing when it
 has grown things the app does not use — and it belongs where both the schema
 and a connection are in hand, which is the worker, not the control plane.
 
+### Changing a shape under a live build: expand, migrate, contract
+
+A deploy and a migration are two events, and a running build is not replaced
+atomically by either. Nothing refuses a build whose shape is behind the
+database's, so sequencing the two is yours:
+
+1. **Expand.** Add the new column or table. Deploy code that tolerates BOTH
+   shapes — reads the old column when the new one is absent, writes both.
+2. **Migrate.** Backfill, and let the tolerant build run against both shapes for
+   as long as it takes.
+3. **Contract.** Only once no live build reads the old shape, drop it.
+
+Get it wrong and the failure is `SCHEMA_NOT_MIGRATED` at query time, naming the
+table or column that is missing. It is the same code either direction: a build
+ahead of the database, or a build behind one that has contracted.
+
 ## Deploy verifies your bindings
 
 What deploy DOES refuse is an app that declares a database it holds no live
@@ -1363,7 +1379,6 @@ convenience; the code is the contract, and `isOptimisticLockError(e)` matches on
 | `OPTIMISTIC_CONCURRENCY` | `update` with a CAS version that didn't match. |
 | `NOT_FOUND` | A unique-row lookup matched no row. |
 | `NOT_UNIQUE` | A unique-row lookup matched more than one row. |
-| `SCHEMA_EPOCH_STALE` | The binding role for the schema epoch this build was resolved at does not exist on the cluster, so the request is refused before any statement runs. A worker resolves an app's binding once, when it loads the app, so a retry alone does not move it. |
 | `GRANT_REVOKED` | The database refused the app's role; a terminal HTTP 403. Restore the grant before retrying. |
 | `LIVE_IN_TRANSACTION` | `db.live()` was called inside a transaction. |
 | `SCHEMA_INVALID` | A schema declaration is malformed (empty or duplicate index name, unknown field). |

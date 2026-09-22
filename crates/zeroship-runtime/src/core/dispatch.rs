@@ -220,7 +220,6 @@ fn is_public_error_code(code: &str) -> bool {
     matches!(
         code,
         "capability_violation"
-            | "schema_epoch_stale"
             | "schema_not_migrated"
             | "concurrency_mismatch"
             | "concurrency_filter_must_be_top_level"
@@ -232,7 +231,6 @@ fn is_public_error_code(code: &str) -> bool {
             | "immutable_assigned_field"
             | "filter_nesting_too_deep"
             | "CAPABILITY_VIOLATION"
-            | "SCHEMA_EPOCH_STALE"
             | "SCHEMA_NOT_MIGRATED"
             | "OPTIMISTIC_CONCURRENCY"
             | "CONCURRENCY_FILTER_MUST_BE_TOP_LEVEL"
@@ -670,54 +668,6 @@ mod tests {
                     "constraint code {code:?} must keep its message blanked, got: {body}"
                 );
             }
-        }
-    }
-
-    /// A binding role that does not exist at this build's epoch must reach the
-    /// caller as `schema_epoch_stale` WITH its message, so the response itself
-    /// names the remedy. The sanitiser is right to blank unlisted codes; the
-    /// classifier is what must stamp this one.
-    ///
-    /// Both spellings, for the reason the sibling test above documents:
-    /// `@zeroship/db` re-stamps native codes through `canonicalErrorCode`
-    /// inside the isolate, so a creator using the SDK arrives here with the
-    /// upper-snake form and a creator calling `env.db` directly with the
-    /// native one. Listing only one makes the exemption inert on whichever
-    /// path is not listed.
-    ///
-    /// PAIRED with `genuinely_internal_db_failure_is_still_blanked` below,
-    /// which differs in ONE variable: the code. Same status, same message,
-    /// same extras. Without that partner this test would only show the rail
-    /// emits things, not that it DISCRIMINATES.
-    ///
-    /// WHAT THIS TEST DOES NOT CATCH: that the ORM actually produces this code
-    /// for a retired epoch (that is
-    /// `crates/zeroship-data-orm/tests/postgres_binding_fence.rs`), nor which
-    /// message it pairs with the code (that is `error.rs`). This test would
-    /// pass if the code were stamped on an empty string.
-    #[test]
-    fn schema_epoch_stale_survives_the_5xx_rail_in_both_spellings() {
-        // The ORM owns the wording (`zeroship_data_orm::error::STALE_EPOCH_MESSAGE`)
-        // and this crate does not depend on it. What is under test is that the
-        // rail carries the message it was handed, so this stands in for that
-        // message rather than copying it - a copy here would be a second
-        // spelling that drifts the moment the ORM reworded its own.
-        let message = "a stand-in for the ORM's stale-epoch wording, carried verbatim";
-        for code in ["schema_epoch_stale", "SCHEMA_EPOCH_STALE"] {
-            let body = build_error_body(500, 1, message, "Error", extras_with_code(code));
-            assert!(
-                body.contains(&format!(r#""code":"{code}""#)),
-                "code {code:?} must survive the 5xx rail, got: {body}"
-            );
-            assert!(
-                body.contains(message),
-                "the creator must learn the remedy from the RESPONSE, not a worker \
-                 log they cannot see; got: {body}"
-            );
-            assert!(
-                !body.contains(r#""message":"internal error""#),
-                "verbatim body expected for {code:?}, got sanitized: {body}"
-            );
         }
     }
 

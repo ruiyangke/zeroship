@@ -123,7 +123,7 @@ stateless app credentials without a per-request database lookup. If
 `manifest_json` is missing, unparsable, or fails `Manifest::validate()`, the
 registry falls back to `Manifest::passthrough()` and logs an error.
 
-`Registry::get_versions()` builds `VersionMap<Uuid, AppVersionInfo>` for workers. The manifest in that feed is optional, so undeployed apps can still appear in the version map with `manifest = None`. Each entry also carries `binding_epochs`, the schema epoch of every database the app holds a live binding to, read through `zeroship_core::live_binding::LIVE_BINDINGS_FROM_WHERE_EVERY_APP`. It is what tells a worker that an apply rotated the role a resident isolate's sessions narrow to, so the isolate is replaced and its binding re-resolved rather than fenced at `SET LOCAL ROLE`; an app with no live binding carries the empty map, which is how a withdrawn binding reaches the worker too.
+`Registry::get_versions()` builds `VersionMap<Uuid, AppVersionInfo>` for workers. The manifest in that feed is optional, so undeployed apps can still appear in the version map with `manifest = None`.
 
 Gateway polls `/internal/routes` every 5 seconds. Worker polls `/internal/versions` every 5 seconds and fetches env snapshots lazily from `/internal/apps/{app_id}/env` when `env_version` changes.
 These feeds are polled rather than pushed so the control plane stays stateless with respect to gateway and worker consumers.
@@ -132,26 +132,16 @@ Before loading an app with a database service, the worker fetches its project
 column key from `/internal/apps/{app_id}/data-key` into the host's shared
 `SuppliedProjectKeys`, and its resolved database binding from
 `/internal/apps/{app_id}/binding` into the host's shared `SuppliedAppBindings`.
-The binding response carries the database id, the edge id and the schema epoch;
+The binding response carries the database id, the edge id and the capability;
 the worker composes no part of it, and Control serves only a binding whose
 status is active and whose `observed_generation` has caught up to its
 `generation`. An app Control serves no live binding for has no `env.db`.
 Both reads happen once per app per worker process. The key is one value for the
-life of the app. The binding carries the schema epoch, which an apply that
-commits a schema delta advances, and the epoch is part of the binding role
-name - so a worker holding the epoch it first resolved composes a role the
-apply after next drops, and every session that app opens is then refused at
-`SET LOCAL ROLE`. The binding is deliberately not re-read on a bare environment
-refresh. An isolate captures the binding its sessions narrow with while it
-BUILDS, by value, so a store that moves cannot reach one already running - that
-isolate keeps the epoch it captured and is refused once the epoch retires, which
-is the fence working. What a re-read would reach is the isolate built AFTER it
-from an older deployment, which would capture the current epoch and run code
-against a shape the schema has left, the one direction the fence cannot catch.
-So the epoch is installed where the isolate is replaced: `needs_reload`
-(`crates/zeroship-worker/src/sync.rs`) compares `AppVersionInfo::binding_epochs`
-alongside the deploy hash and the env version, and `resupply_bindings` installs
-the current set before the replacement is built.
+life of the app, and a binding is one role for the life of the binding: the role
+name is derived from the edge id alone, so nothing about a creator's own schema
+change moves it. An isolate captures the binding its sessions narrow with while
+it BUILDS, by value, so a store that moved could not reach one already running
+in any case.
 
 Control resolves the app's project from the registry and serializes initial
 provisioning by locking that project. The wrapped key lives

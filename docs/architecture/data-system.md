@@ -78,8 +78,7 @@ Implementation: `crates/zeroship-data-orm/src/orm.rs`,
 `crates/zeroship-data-v8/src/v8_classes/dispatch.rs`.
 
 **What is DESIGNED AND NOT BUILT is marked *(designed)* throughout**: the Datastore/Database/Grant
-entities, datastore placement, the per-grant role graph, the schema epoch's producer, and the
-`__zeroship_admin` system schema. Everything else describes code in the tree. The distinction
+entities, datastore placement, the per-grant role graph, and the `__zeroship_admin` system schema. Everything else describes code in the tree. The distinction
 matters - a reader who cannot tell them apart will look for a `Database` row that does not exist
 yet, or rebuild something that does.
 
@@ -301,8 +300,9 @@ one-database-per-app, and it is load-bearing in two ways:
 Enforcement is **PostgreSQL role membership**. The worker connects once, holds no inherited
 privilege over app data, and narrows per transaction with a single `SET LOCAL ROLE`.
 
-**The role it narrows to is per GRANT, not per database, and its name carries the schema epoch:**
-`zs_bind_<gid>_e<E>`. Two independent properties ride on that one string.
+**The role it narrows to is per GRANT, not per database:** `zs_bind_<gid>`. One role per grant, for
+the whole life of the grant; nothing decodes the name, and nothing but the grant's own removal moves
+it.
 
 **Revocation** is why the role is per grant. A role per database - `zs_db_<dbsid>_<cap>`, with apps
 made members of it - is measured in the proposal, under "Why the role is per grant and not per
@@ -310,11 +310,9 @@ database", as **unrevocable under co-tenancy**:
 `SET ROLE` authorizes against the transitive closure of the *login* role's memberships, so with two
 apps holding the database role, revoking one leaves the closure non-empty and the other app's
 membership still serves the first. The shape that works holds
-`GRANT zs_db_<dbsid>_<cap> TO zs_bind_<gid>_e<E> WITH SET FALSE` - the `WITH SET FALSE` being what
+`GRANT zs_db_<dbsid>_<cap> TO zs_bind_<gid> WITH SET FALSE` - the `WITH SET FALSE` being what
 stops the worker assuming the database role directly and bypassing the per-grant edge. Revoking one
 grant then removes exactly one app's access, at the next transaction, on the same warm connection.
-
-**The schema epoch** is why the name carries `_e<E>`. See below.
 
 This follows the platform invariant that **privilege follows the process, not the function**: the
 worker executes creator code, so any capability the worker holds is reachable by whatever reaches
@@ -367,56 +365,32 @@ and `__zs_raw__<field>` holds the plaintext. Adding `.mask()` to a column that a
 a real engine backfill for unencrypted columns; the encrypted case is refused by decision, because
 the backfill is structured SQL and the engine holds no key material.
 
-### The schema epoch, and why PostgreSQL enforces it rather than Rust
+### Old code meeting a new schema is the creator's sequencing, not a platform fence
 
-A descriptor is the shape an isolate was **built** against. The epoch is how the database says which
-shape it currently **has**, so an isolate holding a descriptor from before an apply is refused rather
-than served the wrong columns.
+A descriptor is the shape an isolate was **built** against. A creator who changes the shape while a
+build is live has two events - a migration and a deploy - and nothing replaces a running build
+atomically with either. The answer is the industry's: **expand, migrate, contract.** Add the column,
+deploy code that tolerates both shapes, backfill, then drop.
 
-**The epoch is a substring of the role name, so it is enforced by PostgreSQL.** The per-grant role
-is `zs_bind_<gid>_e<E>`; an apply that advances the epoch mints the roles for `E+1` and drops those
-for `E-1`. An isolate carrying a stale epoch therefore fails at `SET LOCAL ROLE`, which is the
-**first statement of the setup batch that already exists** (`tx_session_setup_sql` and
-`autocommit_local_session_setup_sql`, `tests/fixtures/data/roles.rs` and
-`:226-233`, issued as one simple query at `crates/zeroship-data-orm/src/exec.rs`). Nothing has
-to remember to check: the batch is the only route to a usable connection, and a stale epoch never
-gets one.
+**The platform applies what it is given and does not adjudicate whether the sequence was safe.**
+`DropTable` and `DropColumn` are first-class operations in `crates/zeroship-migrate-ir/src/ir.rs`
+and the migration service executes them on request, so a fence here would be protecting code from a
+destructive change the platform itself performed because the creator asked for it. It would also be
+a property of one deployment mode rather than of the product: it works only where the platform holds
+`CREATEROLE` on the cluster, and evaporates on a database the creator brought themselves.
 
-The steady-state cost is **zero**. The epoch rides a string the batch already sends.
+**`42703 undefined_column` is the observable failure**, and it names the missing column, which is a
+better diagnostic than a role that does not exist.
+`crates/zeroship-data-orm/src/backend/postgres/pg_error.rs` maps it to `schema_not_migrated`.
 
-**The rejected alternative was to append `SELECT epoch ...` to the setup batch and compare in Rust.**
-It costs one index lookup inside an existing round trip, which is cheap, and it puts the fence in a
-statement the worker *issues* rather than a condition it *fails*. Its author nominated two objections
-that would have sunk the role-name form, and both were measured away:
+The binding role is unaffected by any of this. It is `zs_bind_<gid>`, one per grant, minted when the
+grant is declared and dropped when it is withdrawn - see the isolation section above.
 
-- **Does `CREATE ROLE` inside the apply bracket serialize applies across other databases?** Roles are
-  cluster-shared (`pg_authid` and `pg_auth_members` both carry `relisshared = t`), so this was the
-  live worry. Method: session 1 holds an uncommitted `CREATE ROLE` in one database, session 2 issues
-  `CREATE ROLE` in another database of the same cluster with `lock_timeout = '3s'` so blocking
-  surfaces as an error rather than a hang, against a control with no holder. Control and case both
-  returned `CREATE ROLE`; the case took 108 ms. No cross-database serialization.
-- **Is `SET ROLE` superlinear in `pg_auth_members`?** If it were, the role graph would tax every
-  query on the platform. Method: grow the shared catalog, then time 2000 `SET ROLE` plus 2000
-  `RESET ROLE` server-side in a plpgsql loop so client round trips are excluded and the same N runs
-  at every scale. At 3, 103, 1103 and 6103 membership rows the loop measured 6 ms throughout - about
-  1.5 us per statement, flat across a 2000x growth.
-
-So the comparison form buys nothing the name does not, and costs a statement in every setup batch
-forever.
-
-**Schema-epoch comparison exists; a live authority source is still missing.**
-`crates/zeroship-data-orm/src/transaction/reducer/identity.rs` compares observed and expected
-epochs and can return `Verdict::ReResolve`. In
+**Authority comparison exists in the reducer; a live authority source is still missing.**
+`crates/zeroship-data-orm/src/transaction/reducer/identity.rs` compares an observed authority
+record against the expected one and can return `Verdict::ReResolve`. In
 `crates/zeroship-data-orm/src/transaction/driver.rs`, `expected_authority` supplies a
 placeholder and `observation_for` echoes it. This is not a live migration fence.
-
-**Epoch retention is bounded and fails closed.** `crates/zeroship-migrate-server/src/rotation.rs`
-retires the predecessor's binding roles in a transaction that commits before any creator DDL, and a
-retirement that fails refuses the apply rather than advancing it, so the catalog cannot reach a third
-live epoch. The retirement is unconditional where the mint is not - at that point nothing yet knows
-whether a delta will follow - so two live epochs is a cap rather than a floor.
-`crates/zeroship-migrate-server/tests/apply_database_target_pg.rs` measures the pair against a live
-cluster: `E+1` minted, `E-1` gone, `E` still assumable.
 
 **What is not measured, and must not be read as covered:** per-backend membership cache construction
 at CONNECT time. The `SET ROLE` measurement above is on an established backend; a new backend still
@@ -438,14 +412,11 @@ separate service writes and the worker only reads:
   `db/migrations-ts/`: that corpus is applied to the CONTROL database, which holds no creator
   schema and no database roles, so an installer there would create the schema on the one server
   that never needs it and on none of the servers that do.
-- **Exactly one table**, holding the current schema epoch per database beside the journal position
-  that epoch was minted at, which is what decides whether a rotation is still owed after a crash.
-  The migration service writes it inside the apply transaction that mints the new epoch's roles, so
-  the recorded epoch and the roles in the catalog cannot disagree. Its grant posture is write-to-the-migration-service,
-  read-only-to-everyone-else - and **the data plane still reads nothing**: the role name carries the
-  epoch precisely so no query has to. The control plane reads it to compose the binding it injects.
-  A data-plane read of this table would reintroduce the catalog dependency the descriptor decision
-  removed.
+- **No table.** The schema exists so a bootstrapped cluster is recognisable and so a future
+  platform-owned row has one place to live under the invariant's permitted shape - state a separate
+  service writes and the worker only reads. It holds nothing today, and **the data plane reads
+  nothing from it**: a data-plane read of a platform table would reintroduce the catalog dependency
+  the descriptor decision removed.
 - **Zero worker-callable functions.** No `SECURITY DEFINER`, no `EXECUTE ... TO PUBLIC`, and no
   `GRANT USAGE ON SCHEMA` to an app or grant role - that `USAGE` was the reachability precondition
   for every public `EXECUTE` in the deleted version, so a checklist that audits the routine grants
@@ -455,7 +426,7 @@ separate service writes and the worker only reads:
 
 The name is the drawer problem the deletion diagnosed: "admin" named a collection of platform powers,
 and a name that survives its contents is how the next reader concludes there is a drawer to put
-things in. It is reinstated for exactly one row shape and nothing else.
+things in. Anything added here has to pass the invariant's shape test first.
 
 ---
 
@@ -464,7 +435,7 @@ things in. It is reinstated for exactly one row shape and nothing else.
 The deployed runtime still uses app schemas in a shared PostgreSQL database.
 Each app publication includes every top-level table in the bound app schema;
 table names do not alter CDC visibility. The CDC protocol uses the actual app
-schema rather than inventing grants or epochs.
+schema rather than inventing grants.
 
 `zeroship-data-cdc-server` owns logical decoding in a separate process. Workers
 connect through the authenticated TLS client in `zeroship-data-orm::cdc::relay`.

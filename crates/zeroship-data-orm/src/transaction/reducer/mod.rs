@@ -349,12 +349,17 @@ pub enum BeginOutcome {
     /// Setup produced a creator-facing error that should survive unchanged.
     ///
     /// No driver path selects this: every classification the PostgreSQL setup
-    /// boundary makes is a re-resolution or a denial
+    /// boundary makes is a denial or an unclassified failure
     /// (`crates/zeroship-data-orm/src/backend/postgres/pg_error.rs`). It is
     /// reducer vocabulary with its own contract test, kept for a classifier
     /// that needs an error carried through unchanged rather than acted on.
     SetupFailed,
     /// Setup says this attempt must re-resolve its authority.
+    ///
+    /// No PostgreSQL setup classification selects this either, on the same
+    /// terms as [`Self::SetupFailed`]. The retryable verdict it reaches is
+    /// produced on the AUTHORITY path
+    /// (`crate::transaction::reducer::identity::classify`), which is live.
     ReResolve,
     /// Setup produced a specific terminal denial.
     Denied(DenyReason),

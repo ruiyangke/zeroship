@@ -258,13 +258,6 @@ const EVENTS_INDEX_DDL: [&str; 3] = [
 /// two `.replace` call sites would each raise it.
 const SCHEMA_SLOT: &str = "DB_SCHEMA";
 
-/// The schema epoch this target's binding is resolved at.
-///
-/// The epoch is the last component of `zs_bind_<bnd>_e<E>`, so the ladder the
-/// fixture provisions and the role each session narrows to have to name the
-/// same one.
-const SCHEMA_EPOCH: u32 = 1;
-
 /// One isolate's runtime, reading its binding out of the store the harness
 /// resolved.
 ///
@@ -882,7 +875,6 @@ fn db_live_stream_crosses_relay_and_v8_isolates_without_worker_replication() {
         COLD_START_DEPLOY_TOKEN,
         DatabaseId::mint(),
         BindingId::mint(),
-        SCHEMA_EPOCH,
         zeroship_core::database_role::DatabaseCapability::ReadWrite,
     )
     .expect("a minted database and edge compose a legal role name");

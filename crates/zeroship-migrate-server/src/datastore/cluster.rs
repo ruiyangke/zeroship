@@ -9,7 +9,7 @@
 //! zs_db_<dbs>_mig     owns schema db_<dbs>; named by no binding
 //! zs_db_<dbs>_rw      USAGE on db_<dbs>, plus the column-listed DML an apply emits
 //! zs_db_<dbs>_ro      USAGE on db_<dbs>, plus the column-listed SELECT an apply emits
-//! zs_bind_<bnd>_e<E>  NOLOGIN, no privileges of its own, inherits exactly ONE database role
+//! zs_bind_<bnd>       NOLOGIN, no privileges of its own, inherits exactly ONE database role
 //! zeroship_worker     LOGIN, may ASSUME each live binding role and inherits none of them
 //! ```
 //!
@@ -62,35 +62,12 @@ pub const RELAY_ROLE: &str = "zeroship_cdc";
 
 /// The platform's own schema on a tenant cluster.
 ///
-/// Exactly one table, written by this service and read by nothing else. No
-/// function, no `SECURITY DEFINER`, no `EXECUTE ... TO PUBLIC`, and no
-/// `GRANT USAGE ON SCHEMA` to any app or binding role - an audit of the
-/// routine grants that left `USAGE` in place would be checking the lock and
-/// not the door.
+/// It holds no table, no function, no `SECURITY DEFINER`, no
+/// `EXECUTE ... TO PUBLIC`, and no `GRANT USAGE ON SCHEMA` to any app or
+/// binding role - an audit of the routine grants that left `USAGE` in place
+/// would be checking the lock and not the door. Its presence is what a
+/// bootstrapped cluster is recognised by.
 pub const ADMIN_SCHEMA: &str = "__zeroship_admin";
-
-/// The one table [`ADMIN_SCHEMA`] holds: the live schema epoch per database.
-///
-/// `schema_epoch` is the head, and the authority for it: a binding role name
-/// carries this number, and control's copy is a projection of it.
-/// `journal_frontier` is the engine journal's high-water mark in the
-/// database's own schema as of the transaction that minted that head, and it
-/// is what decides whether a rotation is still OWED. An apply that finds the
-/// journal past it has a committed schema delta the head does not cover, which
-/// is true whether this apply produced the delta or a crashed one did.
-pub const EPOCH_TABLE: &str = "database_schema_epoch";
-
-/// `ADMIN_SCHEMA`.`EPOCH_TABLE`, quoted, composed in one place.
-///
-/// Every statement that reads or moves the head names this table, and two
-/// spellings of it would be two tables the moment either identifier changes.
-pub(crate) fn epoch_table() -> String {
-    format!(
-        "{}.{}",
-        quote_ident(ADMIN_SCHEMA),
-        quote_ident(EPOCH_TABLE)
-    )
-}
 
 /// A cluster-side step that did not complete.
 #[derive(Debug, thiserror::Error)]
@@ -101,19 +78,6 @@ pub enum ClusterError {
     /// A derived role name would not fit a `PostgreSQL` identifier.
     #[error(transparent)]
     RoleName(#[from] RoleNameTooLong),
-    /// The database's roles exist but its epoch row does not, so no binding
-    /// role name can be composed against an authoritative epoch.
-    #[error("database {database} has no epoch row in {ADMIN_SCHEMA}.{EPOCH_TABLE}")]
-    EpochMissing { database: String },
-    /// The head stands at the largest epoch an `integer` column holds, so the
-    /// next one cannot be composed.
-    ///
-    /// Reachable from a declared epoch rather than from arithmetic this service
-    /// performed: `converge_database` seeds the head from the control row, and
-    /// nothing narrows what an operator may write there. Refusing keeps the
-    /// apply from minting a role name whose epoch wrapped.
-    #[error("database {database} stands at schema epoch {epoch}, which has no successor")]
-    EpochExhausted { database: String, epoch: i32 },
     /// The shared worker login holds a database role directly.
     ///
     /// One such membership carries every co-tenant binding's privileges on that
@@ -131,12 +95,12 @@ pub enum ClusterError {
 /// # Why there is no cluster-side journal
 ///
 /// Every step below states a DESIRED STATE rather than a delta: a role is
-/// created if absent and its attribute set is asserted, the schema and its one
-/// table are `IF NOT EXISTS`, and the revokes are idempotent. A journal exists
-/// to stop a delta being applied twice; there is no delta here, so a journal
-/// would only add a table this design has already said the platform schema on a
-/// tenant cluster must not carry. Re-runnability comes from the statements, and
-/// the convergence signal is control-side: `datastores.status`.
+/// created if absent and its attribute set is asserted, the schema is
+/// `IF NOT EXISTS`, and the revokes are idempotent. A journal exists to stop a
+/// delta being applied twice; there is no delta here, so a journal would only
+/// add a table this design has already said the platform schema on a tenant
+/// cluster must not carry. Re-runnability comes from the statements, and the
+/// convergence signal is control-side: `datastores.status`.
 ///
 /// Running it on every pass is deliberate. A corpus that only ran while the row
 /// said `pending` could never reach a cluster that was bootstrapped before the
@@ -160,7 +124,6 @@ pub async fn apply_bootstrap_corpus(admin: &Client) -> Result<(), ClusterError> 
     let relay_q = quote_ident(RELAY_ROLE);
     let relay_lit = quote_lit(RELAY_ROLE);
     let admin_schema_q = quote_ident(ADMIN_SCHEMA);
-    let epoch_table_q = epoch_table();
 
     // The worker login. NOSUPERUSER / NOCREATEDB / NOCREATEROLE keep schema
     // change out of the process that runs creator code; NOREPLICATION keeps
@@ -211,30 +174,12 @@ pub async fn apply_bootstrap_corpus(admin: &Client) -> Result<(), ClusterError> 
     )
     .await?;
 
-    // The platform's own schema, and the one table in it.
-    //
-    // THE TABLE IS STATED AS A SHAPE, NOT AS AN EXISTENCE. `IF NOT EXISTS`
-    // converges a cluster that has no admin table and says nothing at all about
-    // one that has it, so the column list beside it is re-asserted the same way
-    // every role attribute above is: a cluster is made to match, and matching
-    // is about the shape. Without the `ADD COLUMN`, a cluster keeps whichever
-    // shape it was created with and the apply's widen fails on a column
-    // `PostgreSQL` cannot find - after the creator's DDL has committed, which is
-    // the worst point in the sequence to discover it.
+    // The platform's own schema, empty and revoked from PUBLIC.
     exec_retry(
         admin,
         &format!(
             "CREATE SCHEMA IF NOT EXISTS {admin_schema_q};
-             REVOKE ALL ON SCHEMA {admin_schema_q} FROM PUBLIC;
-             CREATE TABLE IF NOT EXISTS {epoch_table_q} (
-                 database_id      text        PRIMARY KEY,
-                 schema_epoch     integer     NOT NULL,
-                 journal_frontier bigint      NOT NULL DEFAULT 0,
-                 updated_at       timestamptz NOT NULL DEFAULT now()
-             );
-             ALTER TABLE {epoch_table_q}
-                 ADD COLUMN IF NOT EXISTS journal_frontier bigint NOT NULL DEFAULT 0;
-             REVOKE ALL ON TABLE {epoch_table_q} FROM PUBLIC;"
+             REVOKE ALL ON SCHEMA {admin_schema_q} FROM PUBLIC;"
         ),
     )
     .await?;
@@ -285,14 +230,7 @@ impl DatabaseRoles {
     }
 }
 
-/// Create one database's schema, its three roles and their schema grants, and
-/// record the epoch those roles were minted at.
-///
-/// Returns the epoch the CLUSTER holds for this database, which is not always
-/// the one that was declared: `ON CONFLICT DO NOTHING` leaves an existing row
-/// alone, so the cluster stays the authority and control's copy stays a
-/// projection. A stale projection therefore composes a role name that does not
-/// exist and the caller re-resolves, which is the fail-closed direction.
+/// Create one database's schema, its three roles and their schema grants.
 ///
 /// Every statement converges to a desired state, so a second call changes
 /// nothing and a crash part way through is recovered by calling again.
@@ -300,13 +238,11 @@ impl DatabaseRoles {
 /// # Errors
 ///
 /// [`ClusterError::RoleName`] on a name `PostgreSQL` would truncate,
-/// [`ClusterError::EpochMissing`] when the epoch row is absent after the write,
 /// [`ClusterError::Query`] on any DDL failure.
 pub async fn converge_database(
     admin: &mut Client,
     database: &DatabaseId,
-    declared_epoch: i32,
-) -> Result<i32, ClusterError> {
+) -> Result<(), ClusterError> {
     let roles = DatabaseRoles::derive(database)?;
     let schema_q = quote_ident(&roles.schema);
     let migrator_q = quote_ident(&roles.migrator);
@@ -315,13 +251,11 @@ pub async fn converge_database(
     let migrator_lit = quote_lit(&roles.migrator);
     let readwrite_lit = quote_lit(&roles.readwrite);
     let readonly_lit = quote_lit(&roles.readonly);
-    let epoch_table_q = epoch_table();
 
-    // ONE transaction, because the epoch row is the authority for the role
-    // names these statements mint. A cluster carrying the roles and not the row
-    // would answer "which binding role should exist" with nothing, and a
-    // cluster carrying the row and not the roles would answer with a name
-    // nothing created.
+    // ONE transaction: the schema and the role that owns it are one fact. A
+    // cluster carrying the schema without its owner has a schema no apply can
+    // write, and one carrying the roles without the schema has three roles
+    // granted on nothing.
     let transaction = admin.transaction().await?;
     transaction
         .batch_execute(&format!(
@@ -351,64 +285,21 @@ pub async fn converge_database(
              ALTER ROLE {migrator_q} SET search_path = {schema_q}, public;"
         ))
         .await?;
-    transaction
-        .execute(
-            &format!(
-                "INSERT INTO {epoch_table_q} (database_id, schema_epoch) \
-                 VALUES ($1::text, $2::int) ON CONFLICT (database_id) DO NOTHING"
-            ),
-            &[&database.as_str(), &declared_epoch],
-        )
-        .await?;
-    let epoch: i32 = transaction
-        .query_one(
-            &format!("SELECT schema_epoch FROM {epoch_table_q} WHERE database_id = $1::text"),
-            &[&database.as_str()],
-        )
-        .await
-        .map_err(|_| ClusterError::EpochMissing {
-            database: database.as_str().to_owned(),
-        })?
-        .get("schema_epoch");
     transaction.commit().await?;
-    Ok(epoch)
+    Ok(())
 }
 
-/// Read the epoch the cluster holds for a database.
-///
-/// # Errors
-/// [`ClusterError::EpochMissing`] when the database has not been converged,
-/// [`ClusterError::Query`] on any read failure.
-pub async fn live_schema_epoch(
-    admin: &Client,
-    database: &DatabaseId,
-) -> Result<i32, ClusterError> {
-    let epoch_table_q = epoch_table();
-    let row = admin
-        .query_opt(
-            &format!("SELECT schema_epoch FROM {epoch_table_q} WHERE database_id = $1::text"),
-            &[&database.as_str()],
-        )
-        .await?
-        .ok_or_else(|| ClusterError::EpochMissing {
-            database: database.as_str().to_owned(),
-        })?;
-    Ok(row.get("schema_epoch"))
-}
-
-/// The two edges one binding is.
+/// The role one binding's two edges hang off.
 ///
 /// Composed once so the grant, the revoke and the reap cannot disagree about
 /// which role name a binding means.
 ///
 /// # Errors
-/// [`RoleNameTooLong`] on a name `PostgreSQL` would truncate. The epoch is the
-/// LAST component, so a truncation drops its digits first and two epochs of one
-/// binding collapse onto one role - the role the newer epoch exists to leave
-/// behind.
-pub fn binding_role(binding: &BindingId, epoch: i32) -> Result<String, RoleNameTooLong> {
-    let epoch = u32::try_from(epoch).unwrap_or(u32::MAX);
-    database_derivation::binding_role_name(binding, epoch)
+/// [`RoleNameTooLong`] on a name `PostgreSQL` would truncate. The binding id is
+/// the LAST component, so a truncation drops the bytes that tell two bindings
+/// apart and revoking either would withdraw the other's access.
+pub fn binding_role(binding: &BindingId) -> Result<String, RoleNameTooLong> {
+    database_derivation::binding_role_name(binding)
 }
 
 /// Grant one binding's two edges.
@@ -432,10 +323,9 @@ pub async fn grant_binding(
     binding: &BindingId,
     database: &DatabaseId,
     capability: DatabaseCapability,
-    epoch: i32,
 ) -> Result<String, ClusterError> {
     let roles = DatabaseRoles::derive(database)?;
-    let binding_name = binding_role(binding, epoch)?;
+    let binding_name = binding_role(binding)?;
     for statement in grant_binding_statements(&binding_name, roles.for_capability(capability)) {
         exec_retry(admin, &statement).await?;
     }
@@ -445,11 +335,10 @@ pub async fn grant_binding(
 /// The three statements one binding's two edges are, in the order the fence
 /// requires.
 ///
-/// Composed here rather than at each driver so the reconciler's retrying
-/// statement-at-a-time pass and the apply's one-transaction rotation issue the
-/// same SQL. A second spelling would be a second fence, and the two grant
-/// options are the whole of it.
-pub(crate) fn grant_binding_statements(binding_name: &str, capability_role: &str) -> [String; 3] {
+/// Composed here rather than at each driver so the grant and the re-grant that
+/// converges an existing membership issue the same SQL. A second spelling would
+/// be a second fence, and the two grant options are the whole of it.
+fn grant_binding_statements(binding_name: &str, capability_role: &str) -> [String; 3] {
     let binding_q = quote_ident(binding_name);
     let binding_lit = quote_lit(binding_name);
     let capability_q = quote_ident(capability_role);
@@ -470,11 +359,11 @@ pub(crate) fn grant_binding_statements(binding_name: &str, capability_role: &str
 
 /// Withdraw one binding's two edges, and leave its role standing.
 ///
-/// NEVER `DROP ROLE` here. The data plane separates a revoked binding from a
-/// retired schema epoch by SQLSTATE alone - `42501` when the role exists and
-/// this session may not assume it, `22023` when there is no such role - so
-/// dropping the role on revoke would report every revoked binding as a stale
-/// epoch, which is retryable. A revoked binding is terminal.
+/// NEVER `DROP ROLE` here. A revoked binding is terminal, and the data plane
+/// says so by the SQLSTATE the server returns: `42501` when the role exists and
+/// this session may not assume it. Dropping the role would answer `22023`
+/// instead, which is the generic "no such role" every unconverged database also
+/// produces, and a terminal refusal would be reported as an ordinary failure.
 ///
 /// The worker edge goes first, so the moment anything is withdrawn the binding
 /// has already stopped being assumable.
@@ -487,10 +376,9 @@ pub async fn revoke_binding(
     binding: &BindingId,
     database: &DatabaseId,
     capability: DatabaseCapability,
-    epoch: i32,
 ) -> Result<String, ClusterError> {
     let roles = DatabaseRoles::derive(database)?;
-    let binding_name = binding_role(binding, epoch)?;
+    let binding_name = binding_role(binding)?;
     let binding_q = quote_ident(&binding_name);
     let binding_lit = quote_lit(&binding_name);
     let capability_q = quote_ident(roles.for_capability(capability));
@@ -567,11 +455,11 @@ pub async fn require_no_direct_database_memberships(admin: &Client) -> Result<()
 /// How the reap classified one `zs_`-prefixed role in the catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClusterRole {
-    /// A binding role the composer would produce for this binding at this
-    /// epoch. The name round-trips through
+    /// A binding role the composer would produce for this binding. The name
+    /// round-trips through
     /// [`zeroship_core::database_role::binding_role_name`] byte for byte, so
     /// nothing was inferred from the shape of the text.
-    Binding { binding: BindingId, epoch: u32 },
+    Binding { binding: BindingId },
     /// One of a database's three roles. Never a reap candidate: the migrator
     /// OWNS the schema, so dropping it is teardown and teardown has its own
     /// precondition.
@@ -586,7 +474,7 @@ pub enum ClusterRole {
 /// The catalog predicate only narrows the scan. What a name MEANS is decided by
 /// recomposing it from the parsed parts and demanding the composer produce the
 /// same bytes, so a role that merely looks like a binding - a different
-/// separator, a padded epoch, an id that is not canonical - lands in
+/// separator, a trailing component, an id that is not canonical - lands in
 /// [`ClusterRole::Unattributed`] rather than being swept.
 ///
 /// # Errors
@@ -614,13 +502,9 @@ pub async fn classify_platform_roles(
 #[must_use]
 pub fn classify_role_name(name: &str) -> ClusterRole {
     if let Some(rest) = name.strip_prefix("zs_bind_") {
-        if let Some((binding_text, epoch_text)) = rest.rsplit_once("_e") {
-            if let (Ok(binding), Ok(epoch)) =
-                (BindingId::parse(binding_text), epoch_text.parse::<u32>())
-            {
-                if database_role::binding_role_name(binding_text, epoch).as_deref() == Ok(name) {
-                    return ClusterRole::Binding { binding, epoch };
-                }
+        if let Ok(binding) = BindingId::parse(rest) {
+            if database_role::binding_role_name(rest).as_deref() == Ok(name) {
+                return ClusterRole::Binding { binding };
             }
         }
         return ClusterRole::Unattributed;
@@ -675,15 +559,8 @@ pub async fn drop_database(
     let migrator_lit = quote_lit(&roles.migrator);
     let readwrite_lit = quote_lit(&roles.readwrite);
     let readonly_lit = quote_lit(&roles.readonly);
-    let epoch_table_q = epoch_table();
 
     let transaction = admin.transaction().await?;
-    transaction
-        .execute(
-            &format!("DELETE FROM {epoch_table_q} WHERE database_id = $1::text"),
-            &[&database.as_str()],
-        )
-        .await?;
     transaction
         .batch_execute(&format!(
             "DROP SCHEMA IF EXISTS {schema_q} CASCADE;
@@ -747,11 +624,10 @@ pub async fn drop_binding_role(admin: &Client, role: &str) -> Result<(), Cluster
 
 /// The statement one binding role's removal is.
 ///
-/// Shared with the apply's epoch retirement for the reason
-/// [`grant_binding_statements`] is shared: the reap by absence and the reap by
-/// epoch must remove the same thing in the same order, or one of them leaves a
-/// membership the other assumed was gone.
-pub(crate) fn drop_binding_role_sql(role: &str) -> String {
+/// Composed here rather than at the caller for the reason
+/// [`grant_binding_statements`] is: the worker membership has to be withdrawn
+/// before the role goes, or `DROP ROLE` reports a dependency.
+fn drop_binding_role_sql(role: &str) -> String {
     let role_q = quote_ident(role);
     let role_lit = quote_lit(role);
     let worker_q = quote_ident(WORKER_ROLE);
@@ -802,19 +678,18 @@ mod tests {
             );
             checked += 1;
         }
-        for epoch in [0u32, 1, 7, u32::MAX] {
-            let name = database_role::binding_role_name(BINDING, epoch).expect("composes");
+        for binding_id in [BINDING, "bnd_03cgepu94hyemwpcipafo7264"] {
+            let name = database_role::binding_role_name(binding_id).expect("composes");
             assert_eq!(
                 classify_role_name(&name),
                 ClusterRole::Binding {
-                    binding: binding(),
-                    epoch
+                    binding: BindingId::parse(binding_id).expect("canonical binding id"),
                 },
-                "`{name}` is this binding at epoch {epoch}"
+                "`{name}` is binding {binding_id}"
             );
             checked += 1;
         }
-        assert_eq!(checked, 7, "the arm must not pass over an empty set");
+        assert_eq!(checked, 5, "the arm must not pass over an empty set");
     }
 
     /// Anything the composer would NOT have produced is never a reap candidate.
@@ -830,13 +705,11 @@ mod tests {
             WORKER_ROLE,
             RELAY_ROLE,
             "postgres",
-            // A binding shape whose epoch is padded: PostgreSQL would accept
-            // the role, and `_e007` is a name no epoch composes.
-            "zs_bind_bnd_03coc2qj4x2ae61h80zwlnnq6_e007",
-            // A binding shape with no epoch at all.
-            "zs_bind_bnd_03coc2qj4x2ae61h80zwlnnq6",
+            // A binding shape carrying a trailing component: PostgreSQL would
+            // accept the role, and it is a name the composer never produces.
+            "zs_bind_bnd_03coc2qj4x2ae61h80zwlnnq6_e1",
             // A binding id that is not canonical.
-            "zs_bind_bnd_notanid_e1",
+            "zs_bind_bnd_notanid",
             // An app-keyed runtime role from the pre-decoupling derivation.
             "app_app_02xfboclmnln2ar6iblni0000_role",
             // A database shape with an unknown capability suffix.
@@ -856,21 +729,19 @@ mod tests {
         }
     }
 
-    /// The epoch travels into the role name the grant will send.
+    /// The binding id travels into the role name the grant will send.
     #[test]
-    fn the_binding_role_name_carries_the_epoch_it_was_given() {
+    fn the_binding_role_name_carries_the_binding_it_was_given() {
         assert_eq!(
-            binding_role(&binding(), 0).expect("composes"),
-            format!("zs_bind_{BINDING}_e0")
+            binding_role(&binding()).expect("composes"),
+            format!("zs_bind_{BINDING}")
         );
-        assert_eq!(
-            binding_role(&binding(), 3).expect("composes"),
-            format!("zs_bind_{BINDING}_e3")
-        );
+        let other = BindingId::mint();
+        assert_ne!(other, binding(), "the control: two mints are two bindings");
         assert_ne!(
-            binding_role(&binding(), 3).expect("composes"),
-            binding_role(&binding(), 4).expect("composes"),
-            "two epochs must be two roles"
+            binding_role(&binding()).expect("composes"),
+            binding_role(&other).expect("composes"),
+            "two bindings must be two roles"
         );
     }
 

@@ -723,9 +723,9 @@ async fn a_column_list_and_replica_identity_full_are_accepted_then_make_writes_f
 /// (`crates/zeroship-data-orm/src/backend/postgres/pg_autocommit.rs`,
 /// `with_scoped_transaction`). `PostgreSQL` aborts that batch at the first
 /// failing statement and emits exactly one `ErrorResponse`. If
-/// `compio-postgres` collapsed, dropped, reordered or masked it,
-/// `GRANT_REVOKED` and `SCHEMA_EPOCH_STALE` would be one error and the epoch
-/// fence could not report itself.
+/// `compio-postgres` collapsed, dropped, reordered or masked it, a withdrawn
+/// membership and a missing role would be one error and `GRANT_REVOKED` could
+/// not be told from any other way a narrow fails.
 #[compio::test]
 async fn the_driver_reports_the_setup_batch_s_first_failure_by_sqlstate() {
     let postgres = postgres_fixture::Postgres::start();
@@ -917,7 +917,6 @@ async fn a_lease_abandoned_mid_statement_lends_the_next_checkout_no_database() {
         "deploy_fence",
         DatabaseId::mint(),
         BindingId::mint(),
-        1,
         DatabaseCapability::ReadWrite,
     )
     .expect("the fixture ids compose a legal role name");

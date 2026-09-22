@@ -24,15 +24,14 @@
 //! body, and the binding call in the remedy - then flips the ONE variable that
 //! makes the binding live and requires the same request to succeed.
 //!
-//! # The rotation arm measures a PAIR, in one catalog read
+//! # The role arm needs a control that the apply committed something
 //!
-//! An apply that changes the schema mints `E+1` and retires `E-1`. Asserting
-//! only the first passes over a rotation that swept every earlier epoch, which
-//! fences apps that are serving correctly; asserting only the second passes
-//! over one that retired without minting, which fences all of them. So the arm
-//! requires `E+1` present, `E-1` gone and `E` standing at the same instant,
-//! and pairs the whole thing with a re-post that commits no delta, where the
-//! head must not move at all.
+//! "An apply mints no binding role and retires none" is satisfied by an apply
+//! that did nothing at all, so the arm reads the ENGINE JOURNAL either side of
+//! the apply and requires its high-water mark to have moved. The journal is
+//! `__zeroship_schema_migrations` in the database's own schema, written by the
+//! engine as each version commits, so a delta that reached the cluster moved it
+//! and a fully skipped apply did not.
 
 mod fixture;
 
@@ -52,11 +51,10 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 use zeroship_authz::Action;
 use zeroship_core::database_role::DatabaseCapability;
-use zeroship_core::{database_derivation, BindingId, DatabaseId};
+use zeroship_core::{database_derivation, DatabaseId};
 use zeroship_id::{AppId, UserId};
 use zeroship_migrate_server::apply::{apply_ir_documents, ApplyMigrationsRequest};
 use zeroship_migrate_server::auth::{AuthError, Authenticator, VerifiedCaller};
-use zeroship_migrate_server::datastore::cluster;
 use zeroship_migrate_server::datastore::control::ControlStore;
 use zeroship_migrate_server::datastore::Reconciler;
 use zeroship_migrate_server::policy::ManagedPolicyConfig;
@@ -321,7 +319,6 @@ async fn a_table_migrates_into_the_named_database_and_not_into_the_other() {
     let tmp = tmpdir("apply");
     let report = apply_ir_documents(
         cluster_fixture.url(),
-        &fixture::migrated_url(),
         &tmp,
         zeroship_migrate_server::apply::ApplyTarget {
             app_id: &app,
@@ -500,32 +497,29 @@ async fn an_apply_naming_a_database_without_a_live_binding_is_refused() {
 }
 
 
-/// An apply that changes the schema rotates the epoch: it mints `E+1` for
-/// every live binding, retires `E-1`, and never touches `E`.
+/// An apply that commits a schema delta mints no binding role and retires none.
 ///
-/// # Why three applies
+/// A binding role is the object the two membership edges hang off, and it is
+/// per BINDING and nothing else. Moving it is what a REVOKE does, so a creator
+/// changing their own schema must not move it: a creator would otherwise be
+/// able to fence their own running build, and every co-tenant of the database
+/// with it.
 ///
-/// The first has no predecessor to retire - a database converges at epoch `0` -
-/// so it can only exhibit the mint. The second is where both halves are
-/// measurable at once, and where the load-bearing pair lives: `E-1` is gone
-/// AND `E` is still standing, in the same catalog read. A rotation that swept
-/// by epoch rather than by predecessor would satisfy the first assertion and
-/// fence every app serving on `E`.
+/// # Two applies, and a control on each
 ///
-/// The third is the control for the word "changes". It re-posts the documents
-/// the second applied, so every version is already journalled and no schema
-/// delta commits; a rotation that fired on every REQUEST rather than on every
-/// committed delta would move the head here, and the binding an isolate
-/// resolved a moment ago would name a role that is about to be retired for
-/// nothing. It also pins the asymmetry: the head stays, and the retirement
-/// still runs, because a retirement that waited to learn whether a delta
-/// followed would be running after the DDL it must precede.
+/// Two, because an apply that mints on the FIRST delta and not the second, or
+/// the other way round, is refuted by only one of them. The control on each is
+/// the ENGINE JOURNAL, read either side: "nothing was minted" is satisfied by
+/// an apply that did nothing at all, so the frontier has to have moved for the
+/// role assertion to be about an apply that reached the cluster. The report's
+/// own `applied` list is asserted beside it, because the journal and the
+/// service's report are two different witnesses to the same commit.
 #[ntex::test]
-async fn an_apply_that_changes_the_schema_rotates_the_epoch_and_leaves_the_live_one_standing() {
+async fn an_apply_that_commits_a_schema_delta_mints_no_binding_role_and_retires_none() {
     let cluster_fixture = tenant::Cluster::start();
     let cluster = connect(cluster_fixture.url()).await;
     let pg = connect(&fixture::migrated_url()).await;
-    let world = World::new(&pg, "apply-rotation").await;
+    let world = World::new(&pg, "apply-roles").await;
     let reconciler = Reconciler::new(
         ControlStore::new(control_as_service().await),
         cluster_fixture.url(),
@@ -542,88 +536,47 @@ async fn an_apply_that_changes_the_schema_rotates_the_epoch_and_leaves_the_live_
     pass(&reconciler).await;
     let principal = seed_user(&pg).await;
 
-    // THE STARTING STATE, read rather than assumed. A database converges at
-    // epoch 0 on both sides and its binding role carries that epoch, so every
-    // move below is attributable to an apply.
+    // THE STARTING STATE, read rather than assumed: the pass minted exactly one
+    // binding role, and it is the one the data plane composes for this edge.
+    let minted = binding_roles(&cluster).await;
     assert_eq!(
-        cluster_epoch(&cluster, &database).await,
-        Some(0),
-        "the reconciler converges a declared database at the epoch control declared"
-    );
-    assert_eq!(
-        control_epoch(&pg, &database).await,
-        0,
-        "control's projection starts where the cluster does"
-    );
-    assert!(
-        role_exists(&cluster, &binding_role(&binding, 0)).await,
-        "the pass minted this binding's role at the converged epoch"
-    );
-    assert!(
-        !role_exists(&cluster, &binding_role(&binding, 1)).await,
-        "nothing has rotated yet, so the next epoch's role must not exist: without \
-         this the mint assertion below could pass over a role the fixture created"
+        minted,
+        vec![
+            database_derivation::binding_role_name(&binding).expect("the role name fits")
+        ],
+        "the pass mints one role per binding and nothing else"
     );
 
-    // ---- APPLY 1: 0 -> 1. Nothing to retire; the mint is what is measurable.
-    apply_through(cluster_fixture.url(), &app, &database, &principal, &[NOTES]).await;
-    assert_eq!(
-        cluster_epoch(&cluster, &database).await,
-        Some(1),
-        "an apply that committed a schema delta advances the CLUSTER's head, which \
-         is the authority for every binding role name"
-    );
-    assert_eq!(
-        control_epoch(&pg, &database).await,
-        1,
-        "and projects it onto control, which is what a binding is composed from"
-    );
+    // AND NO APPLY HAS RUN: the engine journal is what an apply installs, so a
+    // database that has none has had no delta committed into it. This is the
+    // baseline the two frontier readings below are growth FROM.
     assert!(
-        role_exists(&cluster, &binding_role(&binding, 1)).await,
-        "the widen minted this live binding's role at the new epoch; without it \
-         control names a role the cluster does not carry"
-    );
-    assert!(
-        role_exists(&cluster, &binding_role(&binding, 0)).await,
-        "epoch 0 is the head this apply ran against, and a serving app is never \
-         fenced: the apply retires E-1, not E"
+        !journal_exists(&cluster, &database).await,
+        "a database no apply has touched carries no engine journal"
     );
 
-    // ---- APPLY 2: 1 -> 2. Both halves, in one catalog read.
-    apply_through(
-        cluster_fixture.url(),
-        &app,
-        &database,
-        &principal,
-        &[NOTES, TAGS],
-    )
-    .await;
+    // ---- APPLY 1. The first delta this database has ever seen.
+    let report =
+        apply_through(cluster_fixture.url(), &app, &database, &principal, &[NOTES]).await;
+    assert!(
+        !report.applied.is_empty(),
+        "the control for the role assertion below: this apply must have committed \
+         a version, not skipped one: {report:?}"
+    );
+    let after = journal_frontier(&cluster, &database).await;
+    assert!(
+        after > 0,
+        "the engine journal must have advanced past its empty state ({after}), or \
+         the role assertion below is about an apply that touched nothing"
+    );
     assert_eq!(
-        cluster_epoch(&cluster, &database).await,
-        Some(2),
-        "the second delta advances the head again"
-    );
-    assert_eq!(
-        control_epoch(&pg, &database).await,
-        2,
-        "and the projection follows it"
-    );
-    assert!(
-        role_exists(&cluster, &binding_role(&binding, 2)).await,
-        "the new epoch's role is minted"
-    );
-    assert!(
-        role_exists(&cluster, &binding_role(&binding, 1)).await,
-        "THE PAIR: the epoch this apply ran against is still assumable. An isolate \
-         built against it goes on serving while the rotation happens underneath"
-    );
-    assert!(
-        !role_exists(&cluster, &binding_role(&binding, 0)).await,
-        "THE PAIR: E-1 is gone, so an isolate two shapes behind fails at SET LOCAL \
-         ROLE with 22023 rather than reading a schema it was not built against"
+        binding_roles(&cluster).await,
+        minted,
+        "a committed schema delta mints no binding role and retires none"
     );
 
-    // ---- APPLY 3: the control. Nothing commits, so nothing rotates.
+    // ---- APPLY 2. A second delta on the same database, for the same reason.
+    let before = after;
     let report = apply_through(
         cluster_fixture.url(),
         &app,
@@ -633,72 +586,86 @@ async fn an_apply_that_changes_the_schema_rotates_the_epoch_and_leaves_the_live_
     )
     .await;
     assert!(
-        report.applied.is_empty() && !report.skipped.is_empty(),
-        "the control only measures what it claims to if this apply committed no \
-         schema delta at all: {report:?}"
+        !report.applied.is_empty(),
+        "the second delta must commit too: {report:?}"
+    );
+    let after = journal_frontier(&cluster, &database).await;
+    assert!(
+        after > before,
+        "the journal must advance again ({before} -> {after})"
     );
     assert_eq!(
-        cluster_epoch(&cluster, &database).await,
-        Some(2),
-        "a rotation is owed by a committed schema delta, not by a request"
+        binding_roles(&cluster).await,
+        minted,
+        "the second delta moves the role catalog no more than the first did"
     );
-    assert!(
-        !role_exists(&cluster, &binding_role(&binding, 3)).await,
-        "and no epoch beyond the head is minted"
-    );
-    assert!(
-        role_exists(&cluster, &binding_role(&binding, 2)).await,
-        "the head's own role stands, whatever this apply did or did not commit"
-    );
-    assert!(
-        !role_exists(&cluster, &binding_role(&binding, 1)).await,
-        "the RETIREMENT is unconditional where the MINT is not, and that asymmetry \
-         is the only shape the ordering rule admits: the retirement runs before any \
-         DDL commits, when nothing yet knows whether a delta will follow. So the two \
-         live epochs are a CAP and not a floor - an apply that commits nothing still \
-         narrows the window an isolate on E-1 has to re-resolve in"
-    );
+
+    // AND THE TABLES LANDED, so the applies above were schema changes rather
+    // than requests the service accepted and dropped.
+    let tables = tables_in(&cluster, &database).await;
+    for expected in [NOTES.table, TAGS.table] {
+        assert!(
+            tables.contains(&expected.to_owned()),
+            "{expected} must be in the database's own schema: {tables:?}"
+        );
+    }
 }
 
-/// This binding's role name at one epoch, composed the way the data plane
-/// composes it.
-fn binding_role(binding: &BindingId, epoch: u32) -> String {
-    database_derivation::binding_role_name(binding, epoch).expect("the role name fits")
-}
-
-async fn role_exists(cluster: &Client, role: &str) -> bool {
-    !cluster
-        .query("SELECT 1 FROM pg_roles WHERE rolname = $1", &[&role])
-        .await
-        .expect("read the role catalog")
-        .is_empty()
-}
-
-/// The epoch the CLUSTER holds, which is the authority.
-async fn cluster_epoch(cluster: &Client, database: &DatabaseId) -> Option<i32> {
+/// Every `zs_bind_` role on the cluster, in catalog order.
+///
+/// The WHOLE set rather than one name: an assertion that only looked for the
+/// role it expected would pass over an apply that minted a second one beside
+/// it, which is exactly what a rotation used to do.
+async fn binding_roles(cluster: &Client) -> Vec<String> {
     cluster
-        .query_opt(
-            &format!(
-                "SELECT schema_epoch FROM {}.{} WHERE database_id = $1",
-                cluster::ADMIN_SCHEMA,
-                cluster::EPOCH_TABLE
-            ),
-            &[&database.as_str()],
+        .query(
+            "SELECT rolname FROM pg_roles WHERE left(rolname, 8) = 'zs_bind_' ORDER BY rolname",
+            &[],
         )
         .await
-        .expect("read the cluster's epoch table")
-        .map(|row| row.get("schema_epoch"))
+        .expect("read the role catalog")
+        .iter()
+        .map(|row| row.get("rolname"))
+        .collect()
 }
 
-/// The epoch CONTROL projects, which is what a binding is composed from.
-async fn control_epoch(pg: &Client, database: &DatabaseId) -> i32 {
-    pg.query_one(
-        "SELECT schema_epoch FROM zeroship.databases WHERE id = $1",
-        &[&database.as_str()],
-    )
-    .await
-    .expect("the database row must exist to be read")
-    .get("schema_epoch")
+/// Whether the engine has installed its journal in this database's schema.
+///
+/// An apply creates it, so its absence is the state a database no apply has
+/// reached. `to_regclass` answers `NULL` rather than raising, which is what
+/// lets this be asked of a schema that may not carry the table.
+async fn journal_exists(cluster: &Client, database: &DatabaseId) -> bool {
+    let schema = database_derivation::schema_name(database);
+    cluster
+        .query_one(
+            "SELECT to_regclass($1) IS NOT NULL AS present",
+            &[&format!("{schema}.__zeroship_schema_migrations")],
+        )
+        .await
+        .expect("read the catalog")
+        .get("present")
+}
+
+/// The engine journal's high-water mark in one database's schema.
+///
+/// `event_seq` is `GENERATED ALWAYS AS IDENTITY` on an append-only table, so an
+/// applied migration moves it and a fully skipped apply does not. Naming the
+/// engine's table here couples this control to the engine deliberately: a
+/// rename makes the read fail with `42P01` on a table `PostgreSQL` names,
+/// rather than silently reporting that nothing was applied.
+async fn journal_frontier(cluster: &Client, database: &DatabaseId) -> i64 {
+    let schema = database_derivation::schema_name(database);
+    cluster
+        .query_one(
+            &format!(
+                "SELECT coalesce(max(event_seq), 0)::bigint AS frontier \
+                   FROM \"{schema}\".\"__zeroship_schema_migrations\""
+            ),
+            &[],
+        )
+        .await
+        .expect("read the engine journal")
+        .get("frontier")
 }
 
 /// One `.ir.json` document, by name and by the table it creates.
@@ -753,10 +720,9 @@ async fn apply_through(
     });
     let request: ApplyMigrationsRequest =
         serde_json::from_value(body).expect("the fixture is a legal request");
-    let tmp = tmpdir("rotation");
+    let tmp = tmpdir("apply");
     let report = apply_ir_documents(
         tenant_url,
-        &fixture::migrated_url(),
         &tmp,
         zeroship_migrate_server::apply::ApplyTarget {
             app_id: app,

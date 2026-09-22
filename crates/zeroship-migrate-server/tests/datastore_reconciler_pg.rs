@@ -41,7 +41,7 @@ use fixture::world::World;
 use zeroship_core::database_role::DatabaseCapability;
 use zeroship_core::{database_derivation, BindingId, DatabaseId};
 use zeroship_migrate_server::apply::WORKER_ROLE;
-use zeroship_migrate_server::datastore::cluster::{ADMIN_SCHEMA, EPOCH_TABLE, RELAY_ROLE};
+use zeroship_migrate_server::datastore::cluster::{ADMIN_SCHEMA, RELAY_ROLE};
 use zeroship_migrate_server::datastore::control::{ControlStore, SoleZone};
 use zeroship_migrate_server::datastore::{PassReport, ReconcileError, Reconciler};
 
@@ -184,19 +184,6 @@ async fn schemas(cluster: &Client) -> Vec<String> {
     rows.iter().map(|row| row.get("nspname")).collect()
 }
 
-async fn cluster_epoch(cluster: &Client, database: &DatabaseId) -> Option<i32> {
-    cluster
-        .query_opt(
-            &format!(
-                "SELECT schema_epoch FROM {ADMIN_SCHEMA}.{EPOCH_TABLE} WHERE database_id = $1"
-            ),
-            &[&database.as_str()],
-        )
-        .await
-        .expect("read the cluster's epoch table")
-        .map(|row| row.get("schema_epoch"))
-}
-
 /// Everything about the cluster and the control rows that a converging pass
 /// could move, in one comparable value.
 #[derive(Debug, PartialEq, Eq)]
@@ -205,14 +192,14 @@ struct Snapshot {
     memberships: Vec<(String, String, bool, bool)>,
     schemas: Vec<String>,
     datastore: (String, Option<String>),
-    databases: Vec<(String, String, i32)>,
+    databases: Vec<(String, String)>,
     bindings: Vec<(String, String, i32, i32, Option<String>)>,
 }
 
 async fn snapshot(cluster: &Client, pg: &Client, datastore: &str) -> Snapshot {
     let databases = pg
         .query(
-            "SELECT id, status, schema_epoch FROM zeroship.databases \
+            "SELECT id, status FROM zeroship.databases \
               WHERE datastore_id = $1 ORDER BY id",
             &[&datastore],
         )
@@ -236,13 +223,7 @@ async fn snapshot(cluster: &Client, pg: &Client, datastore: &str) -> Snapshot {
         datastore: datastore_row(pg, datastore).await,
         databases: databases
             .iter()
-            .map(|row| {
-                (
-                    row.get("id"),
-                    row.get("status"),
-                    row.get("schema_epoch"),
-                )
-            })
+            .map(|row| (row.get("id"), row.get("status")))
             .collect(),
         bindings: bindings
             .iter()
@@ -434,13 +415,6 @@ async fn a_pass_registers_bootstraps_and_converges_then_a_second_pass_changes_no
         assert_eq!(last_error, None);
     }
 
-    // The cluster is the authority on the epoch, and the role names carry it.
-    assert_eq!(
-        cluster_epoch(&cluster, &database).await,
-        Some(0),
-        "converging a database writes its epoch row"
-    );
-
     // THE LADDER, read out of the catalog rather than inferred from the
     // statements that were sent. `set_option = false` on every
     // binding-to-database edge and `inherit_option = false` on every
@@ -452,9 +426,9 @@ async fn a_pass_registers_bootstraps_and_converges_then_a_second_pass_changes_no
     let ro = database_derivation::capability_role_name(&database, DatabaseCapability::ReadOnly)
         .expect("fits");
     let readonly_role =
-        database_derivation::binding_role_name(&readonly, 0).expect("fits");
+        database_derivation::binding_role_name(&readonly).expect("fits");
     let readwrite_role =
-        database_derivation::binding_role_name(&readwrite, 0).expect("fits");
+        database_derivation::binding_role_name(&readwrite).expect("fits");
     let roles = platform_roles(&cluster).await;
     for expected in [&migrator, &rw, &ro, &readonly_role, &readwrite_role] {
         assert!(roles.contains(expected), "`{expected}` must exist: {roles:?}");
@@ -547,8 +521,8 @@ async fn a_converged_binding_reaches_its_own_database_and_is_refused_its_neighbo
     let mut worker = connect(&cluster_fixture.url_as(WORKER_ROLE, TENANT_PASSWORD)).await;
     let my_schema = database_derivation::schema_name(&mine);
     let their_schema = database_derivation::schema_name(&theirs);
-    let my_role = database_derivation::binding_role_name(&my_binding, 0).expect("fits");
-    let their_role = database_derivation::binding_role_name(&their_binding, 0).expect("fits");
+    let my_role = database_derivation::binding_role_name(&my_binding).expect("fits");
+    let their_role = database_derivation::binding_role_name(&their_binding).expect("fits");
 
     // CONTROLS FIRST. Without these the denials below would be satisfied by a
     // cluster that granted nothing at all.
@@ -650,8 +624,8 @@ async fn revoking_withdraws_both_edges_and_keeps_the_role_so_the_refusal_stays_4
         .expect("the operator supplies the worker's authentication material");
     let mut worker = connect(&cluster_fixture.url_as(WORKER_ROLE, TENANT_PASSWORD)).await;
     let schema = database_derivation::schema_name(&database);
-    let leaving_role = database_derivation::binding_role_name(&leaving_binding, 0).expect("fits");
-    let staying_role = database_derivation::binding_role_name(&staying_binding, 0).expect("fits");
+    let leaving_role = database_derivation::binding_role_name(&leaving_binding).expect("fits");
+    let staying_role = database_derivation::binding_role_name(&staying_binding).expect("fits");
 
     // Control: both co-tenants read before anything is withdrawn.
     assert_eq!(
@@ -743,8 +717,8 @@ async fn the_reap_drops_an_undeclared_role_only_when_the_declaration_read_comple
         .await;
     pass(&reconciler).await;
 
-    let staying_role = database_derivation::binding_role_name(&staying, 0).expect("fits");
-    let leaving_role = database_derivation::binding_role_name(&leaving, 0).expect("fits");
+    let staying_role = database_derivation::binding_role_name(&staying).expect("fits");
+    let leaving_role = database_derivation::binding_role_name(&leaving).expect("fits");
     assert!(
         platform_roles(&cluster).await.contains(&leaving_role),
         "the control for the whole arm: the role to be reaped exists first"
@@ -907,11 +881,6 @@ async fn an_undeclared_schema_is_reported_and_a_deleting_declaration_removes_it(
     assert!(
         !platform_roles(&cluster).await.contains(&migrator),
         "and its roles, after it"
-    );
-    assert_eq!(
-        cluster_epoch(&cluster, &database).await,
-        None,
-        "and its epoch row"
     );
     assert_eq!(
         database_status(&pg, &database).await,
@@ -1231,126 +1200,4 @@ async fn two_services_on_one_cluster_converge_on_one_row_and_a_zone_change_is_re
         "active",
         "and the standing row is not moved"
     );
-}
-
-/// A pass converges the epoch table's SHAPE, not only its existence.
-///
-/// `CREATE TABLE IF NOT EXISTS` says nothing about a table that is already
-/// there, so a cluster carrying the epoch table in a narrower shape would keep
-/// it and the apply's widen would fail on a column `PostgreSQL` cannot find -
-/// after the creator's DDL has committed. Every other fixture in this workspace
-/// owns a fresh container, which means the table is always created new and this
-/// condition is unreachable by construction; so the cluster is put into that
-/// state here deliberately, before a pass ever runs.
-///
-/// The column arrives; the head already recorded is unchanged by its arrival
-/// and carries the declared default rather than a NULL the rotation would then
-/// compare against; and a second pass over the converged cluster is a no-op.
-/// The middle claim is what makes the first mean anything - a convergence
-/// statement that dropped and recreated the table would satisfy "the column is
-/// there" and destroy every database's epoch.
-#[ntex::test]
-async fn a_pass_converges_the_epoch_table_shape_and_keeps_the_heads_already_recorded() {
-    let cluster_fixture = tenant::Cluster::start();
-    let cluster = connect(cluster_fixture.url()).await;
-    let pg = control_superuser().await;
-    let world = World::new(&pg, "epoch-shape").await;
-    let reconciler = Reconciler::new(
-        ControlStore::new(control_as_service().await),
-        cluster_fixture.url(),
-        Some(world.zone.clone()),
-    );
-
-    // A cluster whose admin table stands WITHOUT the frontier column, and with
-    // a head already recorded in it.
-    let recorded = DatabaseId::mint();
-    cluster
-        .batch_execute(&format!(
-            "CREATE SCHEMA IF NOT EXISTS \"{ADMIN_SCHEMA}\";
-             CREATE TABLE \"{ADMIN_SCHEMA}\".\"{EPOCH_TABLE}\" (
-                 database_id  text        PRIMARY KEY,
-                 schema_epoch integer     NOT NULL,
-                 updated_at   timestamptz NOT NULL DEFAULT now()
-             );
-             INSERT INTO \"{ADMIN_SCHEMA}\".\"{EPOCH_TABLE}\" (database_id, schema_epoch)
-                 VALUES ('{}', 4);",
-            recorded.as_str()
-        ))
-        .await
-        .expect("stand the admin table up in the narrower shape");
-    let narrower = epoch_table_columns(&cluster).await;
-    assert!(
-        narrower.contains(&"schema_epoch".to_owned()),
-        "the column read must see this table at all, or every assertion below is \
-         about an empty result: {narrower:?}"
-    );
-    assert!(
-        !narrower.contains(&"journal_frontier".to_owned()),
-        "the fixture must start WITHOUT the column, or this arm passes over a \
-         convergence that never happened: {narrower:?}"
-    );
-
-    pass(&reconciler).await;
-
-    assert!(
-        epoch_table_columns(&cluster).await.contains(&"journal_frontier".to_owned()),
-        "a pass makes the cluster match the shape the corpus declares"
-    );
-    assert_eq!(
-        cluster_epoch(&cluster, &recorded).await,
-        Some(4),
-        "and the head already recorded is untouched by the column's arrival"
-    );
-    assert_eq!(
-        epoch_frontier(&cluster, &recorded).await,
-        Some(0),
-        "the row gains the declared default rather than a NULL the rotation \
-         would then compare against"
-    );
-
-    // THE CONTROL: the same pass again. A statement that converges once and
-    // then errors, or moves something, is not a desired-state one.
-    let converged = epoch_table_columns(&cluster).await;
-    pass(&reconciler).await;
-    assert_eq!(
-        epoch_table_columns(&cluster).await,
-        converged,
-        "a converged cluster's epoch table is not reshaped again"
-    );
-    assert_eq!(
-        cluster_epoch(&cluster, &recorded).await,
-        Some(4),
-        "nor is any head it carries"
-    );
-}
-
-/// The epoch table's columns, as the catalog spells them, sorted.
-async fn epoch_table_columns(cluster: &Client) -> Vec<String> {
-    cluster
-        .query(
-            "SELECT attname FROM pg_attribute \
-              WHERE attrelid = to_regclass($1)::oid AND attnum > 0 AND NOT attisdropped \
-              ORDER BY attname",
-            &[&format!("{ADMIN_SCHEMA}.{EPOCH_TABLE}")],
-        )
-        .await
-        .expect("read the epoch table's columns")
-        .iter()
-        .map(|row| row.get("attname"))
-        .collect()
-}
-
-/// The journal frontier one database's head records.
-async fn epoch_frontier(cluster: &Client, database: &DatabaseId) -> Option<i64> {
-    cluster
-        .query_opt(
-            &format!(
-                "SELECT journal_frontier FROM {ADMIN_SCHEMA}.{EPOCH_TABLE} \
-                  WHERE database_id = $1"
-            ),
-            &[&database.as_str()],
-        )
-        .await
-        .expect("read the cluster's epoch table")
-        .map(|row| row.get("journal_frontier"))
 }

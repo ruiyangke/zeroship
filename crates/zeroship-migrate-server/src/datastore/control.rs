@@ -62,10 +62,10 @@ pub const BINDING_STATUS_ACTIVE: &str = "active";
 pub const BINDING_STATUS_REVOKING: &str = "revoking";
 /// The edges are withdrawn, and the ROLE SURVIVES.
 ///
-/// The data plane's error taxonomy separates `42501` (the role exists, this
-/// session may not assume it) from `22023` (no such role), so dropping the role
-/// on revoke would report a revoked binding as a stale schema epoch - which is
-/// retryable, where a revocation is terminal.
+/// The data plane's error taxonomy reads `42501` (the role exists, this session
+/// may not assume it) as the terminal revocation, so dropping the role on
+/// revoke would answer `22023` (no such role) instead - the generic refusal an
+/// unconverged database also produces.
 pub const BINDING_STATUS_REVOKED: &str = "revoked";
 
 /// Reader and writer for the three control-plane tables this reconciler drives.
@@ -125,7 +125,6 @@ pub struct DatastoreRegistration {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DatabaseDeclaration {
     pub database: DatabaseId,
-    pub schema_epoch: i32,
     pub status: String,
 }
 
@@ -339,7 +338,7 @@ impl ControlStore {
         let database_rows = self
             .client
             .query(
-                "SELECT id, schema_epoch, status \
+                "SELECT id, status \
                    FROM zeroship.databases \
                   WHERE datastore_id = $1::text \
                   ORDER BY id",
@@ -351,7 +350,6 @@ impl ControlStore {
             let id: String = row.get("id");
             databases.push(DatabaseDeclaration {
                 database: parse_id(DatabaseId::parse, "databases.id", &id)?,
-                schema_epoch: row.get("schema_epoch"),
                 status: row.get("status"),
             });
         }
@@ -418,38 +416,6 @@ impl ControlStore {
                     &DATABASE_STATUS_ACTIVE,
                     &DATABASE_STATUS_PROVISIONING,
                 ],
-            )
-            .await?;
-        Ok(affected == 1)
-    }
-
-    /// Project a rotated schema epoch onto the database row.
-    ///
-    /// The CLUSTER is the authority: the head moves inside the transaction that
-    /// mints the epoch's roles, and this row is the copy a binding is composed
-    /// from without a cross-zone read. Losing this write is self-healing - the
-    /// composed role name is one the cluster no longer carries, `SET LOCAL ROLE`
-    /// fails and the caller re-resolves - so it closes no ledger and owes no
-    /// exactly-once guarantee.
-    ///
-    /// Monotone, so an apply whose projection lands late cannot walk the row
-    /// back behind a rotation that has already happened. Reports whether the row
-    /// moved.
-    ///
-    /// # Errors
-    /// [`ControlError::Query`] on any database failure.
-    pub async fn project_schema_epoch(
-        &self,
-        database: &DatabaseId,
-        epoch: i32,
-    ) -> Result<bool, ControlError> {
-        let affected = self
-            .client
-            .execute(
-                "UPDATE zeroship.databases \
-                    SET schema_epoch = $2::int, updated_at = now() \
-                  WHERE id = $1::text AND schema_epoch < $2::int",
-                &[&database.as_str(), &epoch],
             )
             .await?;
         Ok(affected == 1)

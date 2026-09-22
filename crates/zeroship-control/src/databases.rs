@@ -161,7 +161,6 @@ pub struct DatabaseRecord {
     pub execution_zone_id: String,
     pub datastore_id: String,
     pub name: String,
-    pub schema_epoch: i32,
     pub status: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -671,7 +670,7 @@ pub async fn list_databases<C: GenericClient + Sync>(
     let rows = pg
         .query(
             "SELECT id, project_id, execution_zone_id, datastore_id, name, \
-                    schema_epoch, status, created_at, updated_at \
+                    status, created_at, updated_at \
                FROM zeroship.databases \
               WHERE project_id = $1 \
               ORDER BY name",
@@ -714,7 +713,6 @@ fn row_to_database(row: &compio_postgres::Row) -> DatabaseRecord {
         execution_zone_id: row.get("execution_zone_id"),
         datastore_id: row.get("datastore_id"),
         name: row.get("name"),
-        schema_epoch: row.get("schema_epoch"),
         status: row.get("status"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
@@ -798,7 +796,7 @@ pub async fn create_database(
            {joins} \
           WHERE p.id = $2 AND {rank} >= {developer} \
          RETURNING id, project_id, execution_zone_id, datastore_id, name, \
-                   schema_epoch, status, created_at, updated_at",
+                   status, created_at, updated_at",
         joins = project_seat_joins("p.id", "$6"),
         rank = project_seat_rank(),
         developer = ladder_rank_of(ROLE_DEVELOPER),
@@ -1038,7 +1036,7 @@ async fn bound_apps<C: GenericClient + Sync>(
 /// app has left its project, and a binding to it would be an edge into nothing.
 ///
 /// The row stops at `pending`. Nothing grants any `PostgreSQL` role here; a
-/// cluster reconciler is what mints `zs_bind_<binding>_e<epoch>` and advances
+/// cluster reconciler is what mints `zs_bind_<binding>` and advances
 /// `observed_generation` to match.
 ///
 /// # Errors
@@ -1230,7 +1228,7 @@ async fn classify_bind_refusal<C: GenericClient + Sync>(
 /// # The row is DELETED, not marked
 ///
 /// A binding row is the DECLARED edge, and the `PostgreSQL` role name is derived
-/// from its id (`zs_bind_<binding>_e<epoch>`). A withdrawn edge whose row
+/// from its id (`zs_bind_<binding>`). A withdrawn edge whose row
 /// survived would keep that name reserved, so a later re-bind would either
 /// resurrect a role name an operator has already dropped or collide with
 /// `database_bindings_natural_key`. Withdrawal is therefore the removal of the

@@ -92,7 +92,6 @@ async fn relay_process_authenticates_workers_and_streams_commits_without_worker_
         zeroship_data_orm::binding::COLD_START_DEPLOY_TOKEN,
         zeroship_core::DatabaseId::mint(),
         zeroship_core::BindingId::mint(),
-        1,
         zeroship_core::database_role::DatabaseCapability::ReadWrite,
     )
     .unwrap();
@@ -103,7 +102,7 @@ async fn relay_process_authenticates_workers_and_streams_commits_without_worker_
     // Stand-ins for the two Control tables the relay's schema lookup reads
     // (`db/migrations-ts/20260919000200_database_entities.ts`), carrying only
     // the columns that lookup names. The relay gets SELECT on exactly those.
-    db.batch_execute(&format!("CREATE TABLE IF NOT EXISTS zeroship.databases (id text PRIMARY KEY, status text NOT NULL, schema_epoch int NOT NULL DEFAULT 1); CREATE TABLE IF NOT EXISTS zeroship.database_bindings (id text PRIMARY KEY, app_id text NOT NULL, database_id text NOT NULL, status text NOT NULL, generation bigint NOT NULL DEFAULT 1, observed_generation bigint NOT NULL DEFAULT 1); GRANT SELECT (id, status, schema_epoch) ON zeroship.databases TO \"{relay_role}\"; GRANT SELECT (id, app_id, database_id, status, generation, observed_generation) ON zeroship.database_bindings TO \"{relay_role}\"")).await.unwrap();
+    db.batch_execute(&format!("CREATE TABLE IF NOT EXISTS zeroship.databases (id text PRIMARY KEY, status text NOT NULL); CREATE TABLE IF NOT EXISTS zeroship.database_bindings (id text PRIMARY KEY, app_id text NOT NULL, database_id text NOT NULL, status text NOT NULL, generation bigint NOT NULL DEFAULT 1, observed_generation bigint NOT NULL DEFAULT 1); GRANT SELECT (id, status) ON zeroship.databases TO \"{relay_role}\"; GRANT SELECT (id, app_id, database_id, status, generation, observed_generation) ON zeroship.database_bindings TO \"{relay_role}\"")).await.unwrap();
     db.execute(
         "INSERT INTO zeroship.databases (id, status) VALUES ($1, 'active')",
         &[&database],

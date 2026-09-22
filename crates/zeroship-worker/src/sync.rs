@@ -221,8 +221,7 @@ pub fn validate_poll_interval_secs(secs: u64) -> Result<u64, String> {
 /// - the deploy hash changed (new code),
 /// - the runtime limits changed (CPU / wall / heap),
 /// - the env version changed (var/secret rotation),
-/// - the raw-TCP net policy changed (grant/revoke/cap edit),
-/// - a bound database's schema epoch changed (an apply rotated the role).
+/// - the raw-TCP net policy changed (grant/revoke/cap edit).
 ///
 /// The env arm is SEC-7: a pure env bump (dashboard secret rotation, no
 /// redeploy) must reload the isolate. The runtime materializes the `env`
@@ -240,16 +239,6 @@ pub fn validate_poll_interval_secs(secs: u64) -> Result<u64, String> {
 /// `info.env_version`, so comparing against it would mask the rotation).
 /// `loaded == None` (isolate cached but nothing recorded) is treated as
 /// "unknown state" → reload, never "assume current".
-///
-/// The epoch arm is the database half of the same argument. An isolate
-/// captures the binding its sessions narrow with while it builds, and the
-/// epoch is the last component of that binding's role name; an apply that
-/// commits a schema delta mints the next epoch's roles and retires the one
-/// before the head, so an isolate left standing across two of them opens
-/// sessions against a role the cluster has dropped and every one is refused at
-/// `SET LOCAL ROLE`. A binding's lifetime is therefore the isolate's, and this
-/// is where the isolate ends: [`resupply_bindings`] installs the set the
-/// replacement is built from before it is built.
 pub fn needs_reload(
     loaded: Option<&cache::LoadedMeta>,
     local_limits: Option<RuntimeLimits>,
@@ -262,14 +251,7 @@ pub fn needs_reload(
     let limits_changed = local_limits != Some(cache::runtime_limits_from_app(&info.runtime));
     let env_changed = loaded.map(|m| m.env_version) != Some(info.env_version);
     let net_policy_changed = loaded.map(|m| &m.net_policy) != Some(&info.net_policy);
-    // The WHOLE map, compared for equality. An app binds many databases, so a
-    // maximum over them misses a second database advancing under a
-    // higher-epoch first one, and a sum that moves on any advance still
-    // collides across a change of the bound set. Equality also catches the two
-    // set changes a number cannot: a database the app has started binding and
-    // one whose binding was withdrawn.
-    let binding_epochs_changed = loaded.map(|m| &m.binding_epochs) != Some(&info.binding_epochs);
-    hash_changed || limits_changed || env_changed || net_policy_changed || binding_epochs_changed
+    hash_changed || limits_changed || env_changed || net_policy_changed
 }
 
 async fn reconcile_once(
@@ -382,29 +364,6 @@ async fn reconcile_once(
                                 continue;
                             };
 
-                            // BEFORE the isolate is built, never after: an
-                            // isolate captures the binding its sessions narrow
-                            // with while it builds, so a re-resolution that
-                            // followed `load_app` would leave the replacement
-                            // composing the role the apply retired - the state
-                            // this reload exists to leave. A resolution that
-                            // fails leaves the previous isolate standing and
-                            // this app for the next cycle, for the same reason
-                            // the bundle and env failures above do: an isolate
-                            // built on a binding control would not serve is
-                            // worse than the one already running.
-                            if let Err(error) =
-                                resupply_bindings(config, local_id, info).await
-                            {
-                                tracing::warn!(
-                                    app_id = local_id.as_str(),
-                                    %error,
-                                    "worker-sync: binding re-resolution failed; keeping the \
-                                     previous isolate"
-                                );
-                                continue;
-                            }
-
                             match cache::load_app(
                                 local_id.clone(),
                                 executable.modules,
@@ -427,7 +386,6 @@ async fn reconcile_once(
                                             deploy_hash: info.deploy_hash.clone(),
                                             env_version: info.env_version,
                                             net_policy: info.net_policy.clone(),
-                                            binding_epochs: info.binding_epochs.clone(),
                                         },
                                     );
                                     tracing::info!(
@@ -560,13 +518,8 @@ pub async fn fetch_app_env_supplying(
     // captures the binding its sessions narrow with while it BUILDS -
     // `mint_db_for_binding` takes a `DbBinding` by value and `build_env_object`
     // runs once - so a store that moved would not move an isolate already
-    // running: it keeps the epoch it captured and is refused at `SET LOCAL
-    // ROLE` once that epoch retires, which is the fence working. What a re-read
-    // on a bare environment refresh would reach is the isolate built AFTER it
-    // from an OLDER deployment, which would capture the CURRENT epoch and run
-    // code against a shape the schema has left - the one direction the fence
-    // cannot catch. So the epoch is installed where the isolate is replaced,
-    // by `resupply_bindings`, and not here.
+    // running. The guard keeps a second isolate for an already-resolved app
+    // from re-reading what the first installed.
     if let Some(bindings) = bindings {
         let app = app_id.as_str();
         if !bindings.is_bound(app).map_err(|error| error.to_string())? {
@@ -588,64 +541,15 @@ pub async fn fetch_app_env_supplying(
     http_get(&url, control_authorization(service_auth)?.as_deref()).await
 }
 
-/// Make this host's binding store agree with the epochs Control now reports,
-/// for an app whose isolate is about to be built or rebuilt.
-///
-/// The counterpart to the `is_bound` guard in [`fetch_app_env_supplying`].
-/// That guard is what keeps a rotation from reaching an isolate already
-/// running: the binding follows the isolate, so nothing re-reads it under one.
-/// This is the point where the isolate is REPLACED, which is the only moment
-/// at which installing a different epoch is safe, and the guard would
-/// otherwise leave the replacement inheriting the edge its predecessor was
-/// built on.
-///
-/// `AppVersionInfo::binding_epochs` decides whether a read happens at all: it
-/// is the binding topology Control reports for this app, so a store that
-/// already agrees with it has nothing to resolve, and an app Control reports
-/// no live binding for is unbound here rather than read for. The read itself
-/// serves the binding ids, which no worker composes.
-pub(crate) async fn resupply_bindings(
-    config: &WorkerConfig,
-    app_id: &AppId,
-    info: &AppVersionInfo,
-) -> Result<(), String> {
-    let Some(bindings) = crate::cache::app_bindings() else {
-        return Ok(());
-    };
-    let app = app_id.as_str();
-    if bindings.epochs_for(app) == info.binding_epochs {
-        return Ok(());
-    }
-    let resolved = if info.binding_epochs.is_empty() {
-        Vec::new()
-    } else {
-        let url = control_app_url(&config.control_url, endpoints::CONTROL_APP_BINDINGS, app);
-        let body = http_get(&url, control_authorization(&config.service_auth)?.as_deref()).await?;
-        parse_resolved_bindings(&body)?
-    };
-    bindings
-        .replace_app(app, resolved)
-        .map_err(|error| error.to_string())
-}
-
 /// Install the binding set Control served for one app.
 ///
 /// EVERY live binding, because `env.databases` reaches every database this app
 /// binds. Installing only the first would leave the rest unresolvable at
 /// isolate build.
 ///
-/// # A response behind the store is not a failure
-///
-/// This runs on every resolution, so two of them can be in flight at once and
-/// the schema epoch only ever advances on the cluster. A response carrying an
-/// epoch BEHIND the one installed is therefore a slower read of a monotone
-/// value, not news, and the store keeps the later one and stays serving.
-/// Failing the resolution on it would let a lost race take the app's
-/// environment down with it.
-///
-/// Every other refusal fails the resolution, because every other refusal says
-/// Control resolved something this store cannot reconcile with what it holds -
-/// a different binding for a database the app already binds - and publishing
+/// A refusal fails the resolution, because a refusal says Control resolved
+/// something this store cannot reconcile with what it holds - a different
+/// binding or capability for a database the app already binds - and publishing
 /// an environment over that would leave one dispatch narrowing to a role
 /// another dispatch's descriptor was never built against.
 fn install_resolved_bindings(
@@ -654,20 +558,9 @@ fn install_resolved_bindings(
     body: &str,
 ) -> Result<(), String> {
     for resolved in parse_resolved_bindings(body)? {
-        match bindings.supply(app, resolved) {
-            Ok(()) => {}
-            Err(error)
-                if error.code()
-                    == zeroship_data_orm::resolved_bindings::STALE_APP_BINDING =>
-            {
-                tracing::debug!(
-                    app_id = app,
-                    %error,
-                    "worker: control served a schema epoch behind the one installed"
-                );
-            }
-            Err(error) => return Err(error.to_string()),
-        }
+        bindings
+            .supply(app, resolved)
+            .map_err(|error| error.to_string())?;
     }
     Ok(())
 }
@@ -705,40 +598,6 @@ const fn json_kind(value: &serde_json::Value) -> &'static str {
     }
 }
 
-/// The schema epoch of one binding entry, or the reason it is not one.
-///
-/// Four conditions and four refusals. An absent field, a field that is not a
-/// number, a number that is not whole and a number outside the range an epoch
-/// holds are four different things to go and look at, and only the first is an
-/// absence: one message for all four sends an operator after a field the
-/// response carries. A number is quoted back, because the JSON grammar bounds
-/// how long one is.
-fn parse_schema_epoch(entry: &serde_json::Value) -> Result<u32, String> {
-    let Some(found) = entry.get("schema_epoch") else {
-        return Err("control binding response has no schema_epoch".to_owned());
-    };
-    let serde_json::Value::Number(number) = found else {
-        return Err(format!(
-            "control binding response has a schema_epoch that is {}, not a number",
-            json_kind(found)
-        ));
-    };
-    let outside_the_range = || {
-        format!(
-            "control binding response has a schema_epoch outside the range an epoch holds: \
-             {number}"
-        )
-    };
-    match number.as_u64() {
-        Some(epoch) => u32::try_from(epoch).map_err(|_| outside_the_range()),
-        // A whole number that is negative: in the grammar, outside the range.
-        None if number.is_i64() => Err(outside_the_range()),
-        None => Err(format!(
-            "control binding response has a schema_epoch that is not a whole number: {number}"
-        )),
-    }
-}
-
 fn parse_resolved_binding(
     value: &serde_json::Value,
 ) -> Result<zeroship_data_orm::resolved_bindings::ResolvedBinding, String> {
@@ -757,23 +616,20 @@ fn parse_resolved_binding(
         .map_err(|error| error.to_string())?;
     let binding =
         zeroship_core::BindingId::parse(&field("binding_id")?).map_err(|error| error.to_string())?;
-    let epoch = parse_schema_epoch(value)?;
     let capability = parse_capability(&field("capability")?)?;
     Ok(zeroship_data_orm::resolved_bindings::ResolvedBinding {
         database,
         binding,
-        epoch,
         capability,
     })
 }
 
 /// The capability of one binding entry, or the reason it is not one.
 ///
-/// REQUIRED, with no serde default and no fallback arm, for the reason
-/// `AppVersionInfo::binding_epochs` refuses one: both capabilities are values
-/// this field carries, so whichever a default picked would be the correct
-/// reading for some live binding and a silent misreading for the other. A
-/// producer that stopped emitting the field would then not fail - it would turn
+/// REQUIRED, with no serde default and no fallback arm: both capabilities are
+/// values this field carries, so whichever a default picked would be the
+/// correct reading for some live binding and a silent misreading for the
+/// other. A producer that stopped emitting the field would then not fail - it would turn
 /// every binding on every worker into whichever capability was defaulted to,
 /// and the direction that goes wrong quietly is the read-write one, where the
 /// data plane says nothing and `PostgreSQL` produces a bare `42501` at the

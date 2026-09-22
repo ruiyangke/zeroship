@@ -73,14 +73,14 @@ impl RelayFixture {
         let database = edge.database().as_str().to_owned();
         admin.batch_execute(&format!(
             "CREATE TABLE IF NOT EXISTS zeroship.databases (
-               id text PRIMARY KEY, status text NOT NULL, schema_epoch int NOT NULL DEFAULT 1
+               id text PRIMARY KEY, status text NOT NULL
              );
              CREATE TABLE IF NOT EXISTS zeroship.database_bindings (
                id text PRIMARY KEY, app_id text NOT NULL, database_id text NOT NULL,
                status text NOT NULL, generation bigint NOT NULL DEFAULT 1,
                observed_generation bigint NOT NULL DEFAULT 1
              );
-             GRANT SELECT (id, status, schema_epoch) ON zeroship.databases TO \"{relay_role}\";
+             GRANT SELECT (id, status) ON zeroship.databases TO \"{relay_role}\";
              GRANT SELECT (id, app_id, database_id, status, generation, observed_generation)
                ON zeroship.database_bindings TO \"{relay_role}\";"
         )).await.unwrap();
