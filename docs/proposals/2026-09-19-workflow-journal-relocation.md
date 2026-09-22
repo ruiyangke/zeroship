@@ -438,10 +438,70 @@ stall the defect fixes that motivate the move.
    answer expires, and the design should say so rather than let a later reader assume a
    migration exists.
 
-6. **Does the fold moving server-side change what a worker may do?** Today the worker holds the
-   engine and can therefore observe and advance any run it is executing. Server-side, the
-   service decides what a worker is told. That is a stronger boundary and probably a better
-   one, but it is a change in authority that should be described rather than arrived at.
+6. **ANSWERED as a description - the worker loses a fold it holds only because the journal is
+   under it, and one credential does not move with it.**
+
+   **What it holds today is a store, not a run.** `build` in
+   `crates/zeroship-worker/src/workflow_creator.rs` opens the journal itself through
+   `HostStorage::open` (`crates/zeroship-workflow/src/service/store.rs`) and constructs a
+   `WorkflowService` over it. That yields `WorkflowService::begin` in
+   `crates/zeroship-workflow/src/service/app.rs` and `Transaction::database` in `store.rs`, so
+   the ORM handle for every row in the schema is held by the process that executes creator code.
+   `AppWorkflows::into_backend` (`crates/zeroship-workflow/src/service/backend.rs`) states the
+   ownership plainly: "Which store the backend reaches is a choice its construction site makes,
+   not one the handle carries." The construction site is the worker.
+
+   **What it does with that reach is not its own run.** Before `DeliverySlot::run`
+   (`crates/zeroship-workflow-runner/src/delivery.rs`) reaches `accept_job` it dispatches
+   `activate_job`, `reconcile_job`, `cron_job`, `management_job`, `release_hold_job`,
+   `collect_job`, `close_job`, `fanout_job` and `propagation_job`, and none of those starts an
+   executor. They are the fold's own sweeps over the app's journal, run in the worker because
+   that is where the journal is.
+
+   **It is also the manager's only source.** `crates/zeroship-workflow/src/service/publication.rs`
+   opens with "Creator-owned, immutable queue publication intents": a transition writes the
+   intent before COMMIT, and "Network publication happens after it". `publish_pending`
+   (`crates/zeroship-workflow-runner/src/publication.rs`) pages `AppWorkflows::pending_jobs` and
+   submits each through a `JobPublisher`, and `prepare` in
+   `crates/zeroship-workflow-runner/src/assignments.rs` marks an app the first time it binds,
+   because "A previous process may have committed intents it never published." No lease asks for
+   that sweep. It is recovery the worker owes because nothing else reads the journal.
+
+   **Nothing in the database scopes any of it.** The journal declares no role, no row-level
+   security and no grant (`crates/zeroship-workflow-schema/schema/schema.ts`). What binds the
+   handle is the schema the host composes and a check in Rust. `JournalLocation`
+   (`crates/zeroship-worker/src/workflow_host.rs`) answers `CreatorSchema` through
+   `app_derivation::schema_name`, which returns the app id, so a schema holds a single app; its
+   other arm is one journal "for every app, in a schema the service owns". `Transaction::check_app`
+   (`crates/zeroship-workflow/src/service/store.rs`) refuses a foreign app, and engages only
+   where a policy binding is set, while `OrmStore::begin` in the same file sets none and the
+   worker holds the store. Under that other arm the Rust check is the whole fence, which is Why
+   it is this way seen from the worker's side.
+
+   **What it would hold afterwards is its task and the reply.** `accept_job` answers a
+   `JobAcceptance`, `heartbeat_job` a `TaskRenewal` - "Everything one renewal changes about a
+   live delivered task, with the run control intent read in the same transaction" - and
+   `complete_job` a `JobReceipt` (`crates/zeroship-workflow/src/service/delivery.rs`). The worker
+   derives each of those for itself: the replayed receipt, the frontier decision, the reclaimed
+   lease, the control intent. Afterwards each is told to it, and a worker that disagrees has no
+   second source.
+
+   **What it costs.** Not the sweeps. They run no creator code, so they move with the fold, and
+   the recovery duty above dissolves rather than transferring: the side that commits the intent
+   is the side that publishes it. The credential is the cost. `collect_job`
+   (`crates/zeroship-workflow/src/service/collection.rs`) takes a `PayloadDeleter`
+   (`crates/zeroship-workflow/src/service/payloads.rs`), whose production implementation is
+   `PayloadObjects` (`crates/zeroship-workflow-runner/src/payloads/objects.rs`), opened over "a
+   store whose credentials are private to the workflow host". Collection needs the journal and
+   the object store in one operation, so either that credential reaches the service or collection
+   joins `accept_job`, `heartbeat_job` and `complete_job` on the wire. That is undecided.
+
+   **It is not purely subtractive.** The worker loses authority it holds as a consequence of
+   where the journal sits rather than because anything granted it. The service gains authority it
+   has never had: `workflow.database_url` is a "Platform coordination metadata login; no customer
+   database credentials" (`crates/zeroship-workflow-server/src/config.rs`), and holding the
+   journal puts creator values at rest under that login. Open 7 is where that gain is bounded,
+   and this is why it is not a formality.
 
 7. **ANSWERED - no, and the assertion is not narrowed.** Creator payload does not live in the
    platform's coordination schema. `metadata_schema_has_no_customer_authority_and_ids_are_bytewise`
