@@ -510,24 +510,75 @@ stall the defect fixes that motivate the move.
    `workflow_manager` is what puts creator payload at rest in the platform schema, so the
    promotion lands before the reader rather than beside it.
 
-8. **Four creator-visible decisions the payload-free journal forces.** These are not
-   implementation detail: each changes something a creator can observe, so they are settled here
-   before a slice assumes one.
+8. **ANSWERED - a run input is an ordinary payload object, and the continuation marker becomes a
+   typed field.** These are not implementation detail: each changes something a creator can
+   observe, so they are settled here before a slice assumes one.
 
-   - Does a `Value::Null` run input mint a storage object, or does `input_ref` stay nullable? The
-     second turns `trigger.input` into `undefined` for a run started without one.
-   - Do run inputs count against `max_payload_objects` and `max_payload_storage_bytes`? They are
-     creator-visible limits, and run inputs have never consumed them.
-   - Does `RunStatus.output` materialize the object, or return a reference descriptor? The first
-     keeps the shape and adds a read to every status call; the second changes the contract.
-   - Where does `{"continuedAsNew":id}` live? `finish_run` writes it into
-     `generations.output` today, and it is platform data, so a payload reference is the wrong
-     home for it.
+   **A run input is an ordinary payload object.** `generations.input_ref` stays nullable, an empty
+   input mints no object, and an input that does become one counts against
+   `AppPolicy::max_payload_objects` and `AppPolicy::max_payload_storage_bytes` in
+   `crates/zeroship-core/src/workflow_policy.rs`, with no exemption. Those are the same decision,
+   not separate ones: `WorkflowService::stage_payload` in
+   `crates/zeroship-workflow/src/service/payloads.rs` is the single admission gate, and an input
+   consumes a counter only by minting an object there. A continuation seed already does.
+   `PreparedExecution::from_runtime_json` in `crates/zeroship-workflow-runner/src/outputs.rs`
+   references a `StepOutcome::ContinueAsNew` seed, and `PreparedExecution::stage` uploads it
+   through that gate.
 
-   Two of the four `insert_run` callers also have no reference form for their input to arrive in
-   at all - a child run's `child_input` and a schedule's input - so making them referenceable is
-   a change to `StepOutcome` and to the deploy manifest rather than a mechanism added beside
-   them.
+   A nullable reference does not reach the creator as `undefined`. `start_body` in
+   `crates/zeroship-workflow-v8/src/v8_class.rs` resolves a missing input to `Value::Null` before
+   anything durable sees it, and `WorkflowTrigger.input` in
+   `crates/zeroship-workflow/src/execution.rs` carries no `skip_serializing_if`, so `trigger.input`
+   reads the same either way. An `undefined` trigger input is a separate change to both.
+
+   The accepted cost: "no input" and "reference never attached" become one observable state,
+   because `TaskPayloadReader::input` in `crates/zeroship-workflow-runner/src/payloads.rs` returns
+   success on absence.
+
+   **The continuation marker becomes a typed field beside a distinct terminal state.** A nullable
+   typed successor column on the generation holds the successor run id and is set on any close that
+   produces a successor, and continued-as-new becomes its own `RunState` in
+   `crates/zeroship-core/src/workflow_coordination/lifecycle.rs`, joining `RunState::TERMINAL`. The
+   `{"continuedAsNew":id}` marker that the `RunUpdate::ContinuedAsNew` arm of `apply` in
+   `crates/zeroship-workflow/src/service/frontier.rs` hands to `finish_run` goes away. Temporal
+   shapes it this way: the successor is the typed `new_execution_run_id` and never rides in the
+   result payload, and the typed field and the distinct status are independent, since
+   `new_execution_run_id` also appears on an ordinary completed execution for a cron successor.
+   What it buys: a caller can tell a run that returned a value from a run that continued, without
+   matching a key inside creator-controlled JSON that a creator can also produce.
+
+   **`RunStatus.output` already returns a reference descriptor, so what is left there is a
+   defect.** `AppWorkflows::status` in `crates/zeroship-workflow/src/service/app.rs` emits a
+   descriptor for a referenced output, `StatusOutput` in `packages/workflows/src/index.ts` declares
+   the union, and `docs/reference/workflows.md` states it under "Large Outputs". The open part is
+   tracked as a defect rather than decided here: the descriptor `status` emits and the
+   `StepOutputRef` the SDK declares disagree on `kind`, and a creator holding only a run id cannot
+   dereference what `status` returns, because `WorkflowBackend::read_step_output` in
+   `crates/zeroship-workflow/src/backend.rs` addresses a step by name and a run's final output has
+   none - `finish_run` records the terminal outcome on the generation row and on no step.
+
+   **Staging is task-scoped, and that is the constraint on emptying `generations.input`.**
+   `stage_payload` requires a worker identity, a task id and a task token, and its only non-test
+   caller is `HostPayloads::stage` in `crates/zeroship-workflow-runner/src/payloads/objects.rs`,
+   reached from a worker that is executing a task. `promote` in
+   `crates/zeroship-workflow/src/service/payloads.rs` creates no object; it takes a reference a
+   worker already staged. So the continuation stages today, and a child's input leaves a worker
+   holding a task and could stage on the same path, while `AppWorkflows::start` called from a
+   request handler has no task at all and `AppWorkflows::cron_job` in
+   `crates/zeroship-workflow/src/service/cron.rs` starts its scheduled run under a `JobLease`
+   rather than a task token. Emptying the run-input column therefore needs either a task-less
+   staging path or a decision that some inputs stay inline. That is open.
+
+   The `insert_run` callers also differ in how far a reference form is from them.
+   `AppWorkflows::start` is additive: `StartOptions` in `crates/zeroship-workflow/src/operations.rs`
+   can grow a reference field beside its `input`. The child run and the schedule are not. A child's
+   input arrives on `StepOutcome::Child` in `crates/zeroship-workflow/src/engine.rs`, and a
+   schedule's on `ScheduleRegistration` in `crates/zeroship-workflow/src/service/schedules.rs`,
+   which `record_verified` in `crates/zeroship-workflow/src/service/deploys.rs` stores in
+   `__zeroship_workflow_deploys.manifest`, so both are wire-format changes. None of this lands in
+   `zeroship-control`: `DeployRegistration` appears in the worker, workflow, workflow-runner and
+   workflow-v8 crates and not in control, and control receives only the identity projection
+   `manager_schedules` in `crates/zeroship-workflow/src/service/bundle.rs`.
 
 ---
 
