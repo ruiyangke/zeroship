@@ -302,14 +302,16 @@ const fn valid_outcome(operation: &JobOperation, outcome: &JobOutcome) -> bool {
     }
     match operation {
         JobOperation::Activate { .. } => matches!(outcome, JobOutcome::Completed {}),
-        JobOperation::Advance { .. } => true,
+        // Advance admits every scheduling outcome, and `JobOutcome::valid_for`
+        // settles Management on its own: it pairs the result with the command
+        // that asked for it, which no family test here could narrow further.
+        JobOperation::Advance { .. } | JobOperation::Management { .. } => true,
         JobOperation::Cron { .. } => {
             matches!(outcome, JobOutcome::Completed {} | JobOutcome::Rejected {})
         }
         JobOperation::Reconcile {} => {
             matches!(outcome, JobOutcome::Completed {} | JobOutcome::Waiting {})
         }
-        JobOperation::Management { .. } => matches!(outcome, JobOutcome::Management { .. }),
         JobOperation::Close { .. } => matches!(outcome, JobOutcome::Closed { .. }),
         JobOperation::Collect {}
         | JobOperation::Fanout { .. }

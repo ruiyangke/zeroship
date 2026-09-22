@@ -2138,7 +2138,8 @@ claim, renewal, settlement and successor insertion enforce retention only for
 operations that actually require code.
 
 The representation is implemented across core, queue, creator readers and metadata
-transport. Settlement preflight checks the outcome family, and creator receipts
+transport. Settlement preflight checks the outcome family and pairs a
+management result with the command that asked for it, and creator receipts
 also enforce the operation's supported result. Manager settlement now validates
 the authoritative command/job/order linkage and commits its lifecycle outcome,
 settled revision and queue receipt together. Exact settled replay validates the

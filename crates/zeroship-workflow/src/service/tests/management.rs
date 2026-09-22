@@ -254,7 +254,9 @@ async fn postgres_partial_restart_receipt_carries_its_prefix_and_source_pin() {
 ///
 /// The whole-run restart beside it is the control: same run, same source pin,
 /// and only the target differs, so a prefix reported from a constant fails one
-/// of the two.
+/// of the two. A third restart names the head generation's first step, which
+/// retains nothing and is therefore the whole restart under another spelling;
+/// the receipts of the two must agree.
 ///
 /// This does NOT catch a receipt that reports the right pair while the journal
 /// restarted somewhere else - the head generation and the retained step count
@@ -309,13 +311,35 @@ async fn prefix_receipt_contract(store: Rc<OrmStore>) {
     assert_eq!(head(&service, &local, &run).await, (1, "queued".into()));
     assert_eq!(generation_steps(&service, &local, &run, 1).await, 1);
 
-    let whole = started(&local, &run, 2);
+    // Naming the head generation's first step keeps none of it, so the receipt
+    // reports the empty prefix the way a whole restart does. The retained step
+    // count beside it is what makes the two the same restart rather than two
+    // spellings this assertion merely agrees to call equal.
+    let first = Grant::new(
+        &local,
+        &run,
+        2,
+        ManagementCommand::RestartStarted {
+            from: Some(RestartTarget {
+                name: "keep".into(),
+                occurrence: None,
+            }),
+        },
+    );
     assert_eq!(
-        scope.management_outcome(&whole).await.unwrap(),
+        scope.management_outcome(&first).await.unwrap(),
         restarted(&source.id)
     );
     assert_eq!(head(&service, &local, &run).await, (2, "queued".into()));
     assert_eq!(generation_steps(&service, &local, &run, 2).await, 0);
+
+    let whole = started(&local, &run, 3);
+    assert_eq!(
+        scope.management_outcome(&whole).await.unwrap(),
+        restarted(&source.id)
+    );
+    assert_eq!(head(&service, &local, &run).await, (3, "queued".into()));
+    assert_eq!(generation_steps(&service, &local, &run, 3).await, 0);
 }
 
 async fn replay_contract(store: Rc<OrmStore>) {
