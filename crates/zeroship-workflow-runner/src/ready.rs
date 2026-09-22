@@ -154,4 +154,8 @@ impl WorkflowBackend for ReadyBackend {
             .read_step_output(run_id, name, occurrence)
             .await
     }
+
+    async fn read_output(&self, run_id: String) -> Result<Vec<u8>, WorkflowServiceError> {
+        self.apps.current(&self.app)?.read_output(run_id).await
+    }
 }

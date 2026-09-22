@@ -475,6 +475,33 @@ impl AppWorkflows {
         slot: PayloadSlot,
         opener: O,
     ) -> Result<O::Read, WorkflowServiceError> {
+        self.retained(run_id, Some(generation), slot, opener).await
+    }
+
+    /// Read the run's final output object from the generation the run is
+    /// currently on. A run whose output stayed in the journal owns no object
+    /// here and is reported as missing: `status` already carries that value
+    /// whole, so there is nothing for this to open.
+    ///
+    /// # Errors
+    /// Rejects an unknown run, an output that was never stored as an object,
+    /// unavailable policy and failed object reads.
+    pub async fn read_output<O: PayloadOpener>(
+        &self,
+        run_id: &str,
+        opener: O,
+    ) -> Result<O::Read, WorkflowServiceError> {
+        self.retained(run_id, None, PayloadSlot::Output, opener)
+            .await
+    }
+
+    async fn retained<O: PayloadOpener>(
+        &self,
+        run_id: &str,
+        generation: Option<i64>,
+        slot: PayloadSlot,
+        opener: O,
+    ) -> Result<O::Read, WorkflowServiceError> {
         let authority = Arc::new(self.capture_policy().authority()?.clone());
         let scope = self.clone().with_authority(authority.as_ref().clone())?;
         authority
@@ -488,10 +515,12 @@ impl AppWorkflows {
             .await
     }
 
+    /// `generation` of `None` follows the run row, which the run lock holds
+    /// still for the reference resolution below exactly as restart does.
     async fn read_payload_inner<O: PayloadOpener>(
         &self,
         run_id: &str,
-        generation: i64,
+        generation: Option<i64>,
         slot: PayloadSlot,
         opener: O,
         authority: &Arc<PolicyAuthority>,
@@ -499,7 +528,11 @@ impl AppWorkflows {
         validate_run(run_id)?;
         let mut tx = self.service.begin().await?;
         lock_app(&mut tx, &self.app).await?;
-        lock_run(&mut tx, &self.app, run_id).await?;
+        let run = lock_run(&mut tx, &self.app, run_id).await?;
+        let generation = match generation {
+            Some(generation) => generation,
+            None => run.integer("generation")?,
+        };
         let row = reference_at(&mut tx, &self.app, run_id, generation, slot).await?;
         let read = open_payload(opener, &self.app, &row, Some(authority)).await?;
         tx.commit().await?;

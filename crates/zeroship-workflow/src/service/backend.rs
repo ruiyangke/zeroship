@@ -253,4 +253,11 @@ impl WorkflowBackend for AppBackend {
         })
         .await
     }
+    async fn read_output(&self, run_id: String) -> Result<Vec<u8>, WorkflowServiceError> {
+        let outputs = self.outputs.clone();
+        self.call(move |api| {
+            async move { outputs.read_output(&api, &run_id).await }.boxed_local()
+        })
+        .await
+    }
 }
