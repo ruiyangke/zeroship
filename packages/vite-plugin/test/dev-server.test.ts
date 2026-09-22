@@ -8,7 +8,6 @@ import { fileURLToPath } from "node:url";
 import { createServer, type ViteDevServer } from "vite";
 
 import {
-  ENV_RUNTIME_DESCRIPTOR,
   HMR_POLL_PATH,
   MODULE_FETCH_PATH,
   PROCEDURE_BINDINGS_PATH,
@@ -18,6 +17,7 @@ import {
   DEV_RUNTIME_FRESH_REQUIRED,
 } from "../src/constants.js";
 import { devServerPlugin } from "../src/dev-server.js";
+import { readGeneratedRuntimeDescriptorAt } from "../src/gen-types/read-descriptor.js";
 import { createProjectConfigHolder } from "../src/project-config/index.js";
 import type { TransformState } from "../src/transform.js";
 
@@ -43,6 +43,23 @@ function migrationCreating(table: string, column: string): string {
     `};`,
     ``,
   ].join("\n");
+}
+
+/** The fold on disk, read the way the dev server reads it. The harness's
+ *  `zeroship.jsonc` puts the one database's `out` at `generated/zeroship`. */
+function foldedDescriptor(root: string): string | undefined {
+  return readGeneratedRuntimeDescriptorAt(resolve(root, "generated/zeroship"));
+}
+
+/** The published app archive as text. It is a `tar.zst`, so the blobs it
+ *  carries - the folded descriptor among them - appear verbatim once the frame
+ *  is decompressed. This archive is the channel the fold reaches the runtime
+ *  through: the CLI loads it and composes the databases document the runtime
+ *  validates from the manifest entries it declares. */
+async function publishedArchive(root: string): Promise<string> {
+  const { zstdDecompressSync } = await import("node:zlib");
+  const archive = await fs.readFile(resolve(root, ".zeroship/app.zship"));
+  return zstdDecompressSync(archive).toString();
 }
 
 let removeBootstrapShim = false;
@@ -445,20 +462,34 @@ describe("devServerPlugin", () => {
     }
   });
 
-  test("injects the in-process generated runtime descriptor into the spawned dev runtime", async () => {
+  test("publishes the in-process generated runtime descriptor to the spawned dev runtime", async () => {
     const harness = await startHarness({
       devServerPort: 3904,
       migrations: { migrationSource: migrationCreating("todos", "title") },
     });
     try {
       const runtime = await harness.runtimeLog();
-      const descriptor = JSON.parse(runtime.env.ZEROSHIP_RUNTIME_DESCRIPTOR ?? "null");
+      const folded = foldedDescriptor(harness.root);
+      const descriptor = JSON.parse(folded ?? "null");
       // The in-process gen-types fold produced a valid v2 descriptor with the
       // `todos` collection + its author field (plus injected system fields).
-      assert.equal(descriptor?.version, 2, "valid v2 descriptor injected");
+      assert.equal(descriptor?.version, 2, "valid v2 descriptor folded");
       assert.ok(descriptor.collections.todos, "todos collection folded");
       assert.equal(descriptor.collections.todos.fields.title.type, "string", "author field folded");
       assert.ok(descriptor.collections.todos.fields.id, "system id injected");
+      // The fold reaches the runtime inside the published app archive, which
+      // the CLI composes the databases document from. The collections document
+      // is NOT what a runtime is handed, so a child that received this text as
+      // an environment variable would be handed a document it refuses.
+      assert.ok(
+        (await publishedArchive(harness.root)).includes(folded ?? "<unfolded>"),
+        "the published archive carries the folded descriptor",
+      );
+      assert.equal(
+        runtime.env.ZEROSHIP_RUNTIME_DESCRIPTOR,
+        undefined,
+        "the descriptor does not travel in the child's environment",
+      );
     } finally {
       await harness.close();
     }
@@ -487,11 +518,16 @@ describe("devServerPlugin", () => {
 
       const runtime = await harness.runtimeLog();
       assert.notEqual(runtime.pid, firstRuntime.pid, "descriptor change replaces the child");
-      const descriptor = JSON.parse(runtime.env.ZEROSHIP_RUNTIME_DESCRIPTOR ?? "null");
-      assert.equal(descriptor?.version, 2, "fresh child receives a valid v2 descriptor");
+      const folded = foldedDescriptor(harness.root);
+      const descriptor = JSON.parse(folded ?? "null");
+      assert.equal(descriptor?.version, 2, "the re-fold is a valid v2 descriptor");
       assert.ok(descriptor.collections.todos, "original todos collection retained");
       assert.ok(descriptor.collections.notes, "new notes collection folded in");
       assert.equal(descriptor.collections.notes.fields.body.type, "string", "new author field folded");
+      assert.ok(
+        (await publishedArchive(harness.root)).includes(folded ?? "<unfolded>"),
+        "the archive republished for the fresh child carries the re-fold",
+      );
 
       const resp = await fetch(`${harness.origin}${HMR_POLL_PATH}`);
       assert.equal(resp.status, 200);
@@ -517,10 +553,18 @@ describe("devServerPlugin", () => {
     });
     try {
       await waitFor(async () => {
-        const runtime = await harness.runtimeLog();
-        const descriptor = JSON.parse(runtime.env.ZEROSHIP_RUNTIME_DESCRIPTOR ?? "null");
+        // A child has been spawned, and the archive it is spawned from - each
+        // spawn republishes before it spawns - carries both folds, so the
+        // update that raced the first spawn was not lost.
+        assert.ok((await harness.runtimeLog()).spawnCount >= 1, "a child was spawned");
+        const folded = foldedDescriptor(harness.root);
+        const descriptor = JSON.parse(folded ?? "null");
         assert.ok(descriptor?.collections.todos, "boot collection retained");
-        assert.ok(descriptor?.collections.notes, "racing descriptor update reached a child");
+        assert.ok(descriptor?.collections.notes, "racing descriptor update folded");
+        assert.ok(
+          (await publishedArchive(harness.root)).includes(folded ?? "<unfolded>"),
+          "racing descriptor update reached the published archive",
+        );
       });
     } finally {
       await harness.close();

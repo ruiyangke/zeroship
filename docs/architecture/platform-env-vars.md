@@ -471,6 +471,11 @@ other, so scope it to the command. See [`zeroship.jsonc`](../reference/project-c
 
 **Dev-only:** `ZEROSHIP_DEV` `ZEROSHIP_DEV_AUTH_SECRET`
 
+`ZEROSHIP_RUNTIME_DESCRIPTOR` is not a setting. `zeroship serve` composes the
+databases document from the deployment it loads and installs it under that name
+for the runtime to read; a value standing in the environment is replaced, or
+removed when the deployment declares no database, before any isolate is built.
+
 **Platform-internal, read by a library rather than parsed as a setting:**
 `ZEROSHIP_LOG` `ZEROSHIP_NET_GLOBAL_MAX_SOCKETS`
 `ZEROSHIP_NET_RESOLVE_TIMEOUT_MS` `ZEROSHIP_STREAM_GLOBAL_CAP`
@@ -516,7 +521,7 @@ These are read by the tooling packages, not by app code.
 
 `ZEROSHIP_BIN` (override the `zeroship` binary the dev bootstrap spawns)
 `ZEROSHIP_CONFIG` `ZEROSHIP_ENTRY` `ZEROSHIP_DEV` `ZEROSHIP_VITE_ORIGIN`
-`ZEROSHIP_RUNTIME_DESCRIPTOR` `ZEROSHIP_DIE_WITH_PARENT`
+`ZEROSHIP_DIE_WITH_PARENT`
 `NAPI_RS_NATIVE_LIBRARY_PATH` `DATABASE_URL` `OPENAI_API_KEY` `NODE_ENV`
 
 `ZEROSHIP_BIN` is worth knowing: `pnpm dev` spawns a release binary, so a stale

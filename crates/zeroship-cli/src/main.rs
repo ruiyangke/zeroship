@@ -380,33 +380,50 @@ fn cmd_serve(args: &[String]) {
         std::process::exit(1);
     });
     plugins.push(Arc::new(workflow_host.binding()));
+    // One entry per database the loaded deployment declares, each carrying
+    // that database's schema, and composed from the deployment and nothing
+    // else. `RuntimeDatabases::document` is the sole producer of the envelope,
+    // and the workflow loader composes a pinned deployment's document through
+    // the same call, so every isolate this host builds installs `env.db` and
+    // `env.databases` from one document shape.
+    //
+    // The archive is loaded whether the request isolate evaluates the
+    // archive's own modules or the Vite development entry, and both serve the
+    // same deployment's databases, so the document does not depend on which.
+    let databases: Vec<zeroship_runtime::databases::RuntimeDatabase> = workflow_host
+        .executable
+        .as_ref()
+        .map(|executable| {
+            executable
+                .databases()
+                .iter()
+                .map(|database| zeroship_runtime::databases::RuntimeDatabase {
+                    label: database.label.clone(),
+                    database_id: database.database_id.as_str().to_owned(),
+                    primary: database.primary,
+                    schema: database.schema.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if databases.is_empty() {
+        // A deployment declaring no database has no document, and a value
+        // standing in this process's environment is not one either: the
+        // runtime validates this slot and refuses anything that is not a
+        // databases document, so forwarding one would leave the host serving
+        // nothing.
+        env_vars.remove("ZEROSHIP_RUNTIME_DESCRIPTOR");
+    } else {
+        env_vars.insert(
+            "ZEROSHIP_RUNTIME_DESCRIPTOR".into(),
+            zeroship_runtime::databases::RuntimeDatabases::document(databases),
+        );
+    }
     let modules = if is_archive && dev_bootstrap.is_none() {
         let executable = workflow_host
             .executable
             .as_ref()
             .expect("loaded app deployment");
-        // One entry per database the deployment declares, each carrying that
-        // database's schema. The dev runtime reads the same document shape the
-        // worker hands a hosted isolate, so the two tiers install `env.db` and
-        // `env.databases` through one code path.
-        let databases: Vec<_> = executable
-            .databases()
-            .iter()
-            .map(|database| zeroship_runtime::databases::RuntimeDatabase {
-                label: database.label.clone(),
-                database_id: database.database_id.as_str().to_owned(),
-                primary: database.primary,
-                schema: database.schema.clone(),
-            })
-            .collect();
-        if databases.is_empty() {
-            env_vars.remove("ZEROSHIP_RUNTIME_DESCRIPTOR");
-        } else {
-            env_vars.insert(
-                "ZEROSHIP_RUNTIME_DESCRIPTOR".into(),
-                zeroship_runtime::databases::RuntimeDatabases::document(databases),
-            );
-        }
         std::iter::once(executable.entry())
             .chain(
                 executable
