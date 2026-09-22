@@ -126,9 +126,28 @@ channel the binding id arrives on now, and PostgreSQL still decides what it open
 
 ## Open
 
-1. **What attributes an orphan role after the shape test goes?** Stated above. Until it is settled
-   the columns should not land, because the answer decides whether `classify_role_name` survives as
-   a fallback or is retired.
+1. **Must a role name be DECODABLE, or only UNIQUE?** This is the gating question, and posing it
+   this way decides the design rather than following it.
+
+   The epoch is read as a NUMBER, from a column, everywhere that matters - the fence compares
+   nothing, it relies on the retired role having stopped existing; `needs_reload` compares
+   `AppVersionInfo::binding_epochs`; the two-live-epochs cap is arithmetic on the head row. Exactly
+   one site reads an epoch back OUT of a name: `classify_role_name`
+   (`crates/zeroship-migrate-server/src/datastore/cluster.rs`), which parses `zs_bind_<id>_e<N>`
+   and then re-composes it to confirm the parse.
+
+   So the fence needs a name that is UNIQUE per rotation. The reaper needs one that is DECODABLE.
+   Nothing else needs either.
+
+   If only uniqueness is required, the convention is free, stored names cost nothing, and the
+   reaper needs a different way to attribute a role whose row is gone - by absence from the table,
+   or by a marker the mint writes onto the role itself. If decodability is required, the convention
+   stays load-bearing and a stored name is a second copy of something the name must still carry,
+   which is the defect this proposal exists to remove.
+
+   Until this is answered the columns should not land, because the answer decides whether
+   `classify_role_name` survives as a fallback or is retired - and, per Open 4, whether the suffix
+   spellings are a convention at all.
 
 2. **Is a BYOD database a creation-time choice?** Open 1 of
    `docs/proposals/2026-08-28-app-database-decoupling.md` rejected a dedicated-cluster tier for a
