@@ -390,12 +390,32 @@ stall the defect fixes that motivate the move.
    them on as separate endpoints and it doubles the manager's request rate. That is a capacity
    decision, not a latency one, and it is why Plan step 4 is written as a merge.
 
-   **Where the sign flips.** The assignment carries the whole replay journal on every dispatch,
-   so a run's bytes grow with the square of its steps. Two shipped bounds already disagree about
-   that: `AppPolicy::max_journal_bytes` against the client's `max_response_bytes`, and
+   **Where the sign flips.** `TaskAssignment` in
+   `crates/zeroship-workflow/src/service/types.rs` carries the whole replay journal on every
+   dispatch, so a run's bytes grow with the square of its steps. That cost is real today as
+   serialization rather than as transfer: `V8Execution` in
+   `crates/zeroship-workflow-v8/src/executor.rs` encodes the invocation once per dispatch, and
+   no journal crosses the client transport at all - `zeroship-workflow-client` does not depend
+   on `zeroship-workflow`, and the `Assignment` it exchanges in
+   `crates/zeroship-core/src/workflow_coordination.rs` carries no journal. Two confusably named
+   types in two crates: read any claim about "the assignment" against which one it means.
+
+   Two shipped bounds already disagree about the crossing this move would create:
+   `AppPolicy::max_journal_bytes` against the client's `max_response_bytes`, and
    `AppPolicy::max_input_bytes` against `max_request_bytes` - and the worker takes the client
-   defaults. Deciding how the journal crosses is the real design work behind this move. See
-   Open 2, which is the same question seen from the payload side.
+   defaults, `client_options` in `crates/zeroship-worker/src/workflow_host.rs` returning
+   `ClientOptions::default()` with no configuration surface to change them. The pairs are not
+   like for like. The policy bounds count stored `StepCheckpoint` JSON, one per item and one
+   accumulated per run generation; the client bounds count a single HTTP message. And `replay`
+   in `crates/zeroship-workflow/src/service/journal.rs` narrows `StepCheckpoint` to
+   `JournalStep` and drops retrying rows, so the journal bound is an upper bound on wire bytes
+   rather than a measure of them.
+
+   The decision Plan step 4 cannot avoid: when the dispatch reply carries the journal and the
+   settle request carries the execution, which side is the authority - does the transport bound
+   rise to admit what the policy already admits, or does the policy bound fall to what the
+   transport will carry? Deciding how the journal crosses is the real design work behind this
+   move. See Open 2, which is the same question seen from the payload side.
 
 2. **Payload size on the wire.** `read_step_output` and step inputs cross the boundary.
    `WorkflowOutputRef` in `crates/zeroship-workflow/src/engine.rs` suggests large outputs are already referenced rather than
