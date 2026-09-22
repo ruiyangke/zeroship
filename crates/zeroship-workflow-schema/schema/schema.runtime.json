@@ -2486,6 +2486,18 @@
           "storage": {
             "valueColumn": "schedule_id"
           }
+        },
+        "journal_revision": {
+          "type": "bigInt",
+          "required": true,
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "journal_revision"
+          }
         }
       },
       "options": {
@@ -3379,6 +3391,18 @@
           "projectable": true,
           "storage": {
             "valueColumn": "finished_at"
+          }
+        },
+        "journal_revision": {
+          "type": "bigInt",
+          "required": true,
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "journal_revision"
           }
         }
       },
