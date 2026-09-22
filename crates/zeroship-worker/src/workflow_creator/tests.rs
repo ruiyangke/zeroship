@@ -230,7 +230,7 @@ async fn factory_executes_delivered_v8_frontiers_with_its_creator_artifact_and_p
             Some(receipt.clone())
         );
         assert!(
-            matches!(runtime.app.accept_job(&lease).await.unwrap(), JobAcceptance::Settled(replayed) if replayed == receipt)
+            matches!(runtime.app.accept_job(&lease).await.unwrap(), JobAcceptance::Settled(replayed) if *replayed == receipt)
         );
         let status = runtime.app.status(&started.id).await.unwrap();
         if status.state == RunState::Completed {

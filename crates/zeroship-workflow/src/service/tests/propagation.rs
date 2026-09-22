@@ -195,7 +195,7 @@ async fn cancel_idle(scope: &AppWorkflows, run: &str) -> JobReceipt {
     else {
         panic!("a cancelled idle run settles without execution")
     };
-    receipt
+    *receipt
 }
 
 /// The single committed page of one obligation that has no receipt yet.

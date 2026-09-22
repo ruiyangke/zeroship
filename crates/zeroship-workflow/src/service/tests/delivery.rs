@@ -886,7 +886,7 @@ async fn receipts(store: Rc<OrmStore>) {
     let JobAcceptance::Settled(recovered) = scope.accept_job(&redelivered).await.unwrap() else {
         panic!("redelivery must read the committed result")
     };
-    assert_eq!(recovered, receipt);
+    assert_eq!(*recovered, receipt);
     let command = receipt.settlement(&redelivered).unwrap();
     let settled = manager.queue.settle(&owner, &command).await.unwrap();
     assert_eq!(
@@ -936,7 +936,7 @@ async fn retained_history(
     let JobAcceptance::Settled(replayed) = reopened.accept_job(expired).await.unwrap() else {
         panic!("expected retained receipt")
     };
-    assert_eq!(&replayed, receipt);
+    assert_eq!(&*replayed, receipt);
     assert!(reopened.job_receipt(changed).await.is_err());
 }
 

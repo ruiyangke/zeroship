@@ -84,7 +84,7 @@ impl JobReceipt {
 #[derive(Debug)]
 pub enum JobAcceptance {
     Execute(Box<DeliveredTask>),
-    Settled(JobReceipt),
+    Settled(Box<JobReceipt>),
     /// The job remains unsettled: code, policy, a live task or creator time
     /// prevents execution. This is not a durable rejection or an ACK.
     Deferred,
@@ -372,7 +372,7 @@ impl AppWorkflows {
         if let Some(existing) = &existing {
             if let Some(receipt) = existing.receipt(job)? {
                 tx.commit().await?;
-                return Ok(JobAcceptance::Settled(receipt));
+                return Ok(JobAcceptance::Settled(Box::new(receipt)));
             }
         }
         let lease = &captured?;
@@ -399,7 +399,7 @@ impl AppWorkflows {
             let receipt = finish(&tx, job, JobOutcome::Rejected {}, now).await?;
             lease.check(self)?;
             tx.commit().await?;
-            return Ok(JobAcceptance::Settled(receipt));
+            return Ok(JobAcceptance::Settled(Box::new(receipt)));
         }
         let Some(run) = reclaim(&mut tx, &self.app, run.ok_or_else(invalid)?, now).await? else {
             lease.check(self)?;
@@ -422,7 +422,7 @@ impl AppWorkflows {
             let receipt = finish(&tx, job, outcome, now).await?;
             lease.check(self)?;
             tx.commit().await?;
-            return Ok(JobAcceptance::Settled(receipt));
+            return Ok(JobAcceptance::Settled(Box::new(receipt)));
         }
         let worker = WorkerIdentity::new(delivery.worker_id.as_str().into())?;
         let lease_ms = remaining_millis(lease)?;

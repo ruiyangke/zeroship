@@ -314,7 +314,7 @@ impl<T: JobTransport> DeliverySlot<T> {
         let accepted = app.accept_job(&lease).await?;
         let task = match accepted {
             JobAcceptance::Deferred => return Ok(DeliveryOutcome::Deferred),
-            JobAcceptance::Settled(receipt) => return self.acknowledge(receipt, &lease).await,
+            JobAcceptance::Settled(receipt) => return self.acknowledge(*receipt, &lease).await,
             JobAcceptance::Execute(task) => *task,
         };
         let authority = match authority.and_then(|authority| {
