@@ -244,6 +244,18 @@ impl crate::StepOutputReader for StepOutputs {
         }
         Ok(bytes)
     }
+
+    async fn read_output(
+        &self,
+        api: &crate::service::AppWorkflows,
+        run_id: &str,
+    ) -> Result<Vec<u8>, WorkflowServiceError> {
+        let bytes = api.read_output(run_id, self.objects.open()).await?;
+        if bytes.len() > self.limit {
+            return Err(WorkflowServiceError::PayloadTooLarge);
+        }
+        Ok(bytes)
+    }
 }
 
 fn matches(body: &[u8], reference: &WorkflowOutputRef) -> bool {

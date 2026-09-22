@@ -411,6 +411,17 @@ impl StepOutputReader for ObjectStepOutputs {
             .into_bytes(self.limit)
             .await
     }
+
+    async fn read_output(
+        &self,
+        api: &AppWorkflows,
+        run_id: &str,
+    ) -> Result<Vec<u8>, WorkflowServiceError> {
+        api.read_output(run_id, ObjectOpener(&self.objects))
+            .await?
+            .into_bytes(self.limit)
+            .await
+    }
 }
 
 struct AuthorizedSource {
