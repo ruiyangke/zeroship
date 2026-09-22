@@ -267,9 +267,20 @@ Concretely, and naming the functions rather than the files:
    about it.
 
 3. **Does the dev host read a configured database id, or does the configuration read the host's?**
-   `zeroship.jsonc` declares an id per label and an app may declare several databases, while the
-   dev tier serves one app. Whether the dev binding becomes a reader of that map or the map gains
-   a dev-tier entry decides whether `.zeroship/private/dev-database-binding.json` survives at all.
+   SETTLED: the dev host reads the configuration, and the mint is not needed at all. `id` is a
+   REQUIRED key on every declared database - `DATABASE_REQUIRED_KEYS` is `["id", "migrations",
+   "out"]` in both `crates/zeroship-cli/src/project_config/generated.rs` and
+   `packages/vite-plugin/src/project-config/generated.ts`, which come from one generator, so a
+   config that parses has declared one. The reader already exists:
+   `ProjectConfig::database_id` (`crates/zeroship-cli/src/project_config/mod.rs`) resolves
+   `databases.<label>.id` and names the declared labels when it cannot.
+
+   So `load_material` (`crates/zeroship-cli/src/dev_binding.rs`) minting a `DatabaseId` is
+   generating a fact the file it is reading beside already states, and that mint is the root of
+   the naming disagreement above: it is the third identity for one database, after the app id the
+   apply composes with and the declared id everything else reads. `.zeroship/private/dev-database-
+   binding.json` survives only for the BINDING id, which nothing declares and which no other
+   reader needs to predict.
 
 4. **Is `zs-` still earning its place?** Once a path is data, the prefix is not distinguishing
    anything a directory does not already distinguish. Worth deciding with the rest rather than
