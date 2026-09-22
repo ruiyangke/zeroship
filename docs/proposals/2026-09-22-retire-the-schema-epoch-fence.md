@@ -1,0 +1,139 @@
+# Retire the schema epoch fence
+
+**Status.** DECIDED by the operator, not built. The platform stops promising that code built
+against an older schema shape is refused before it runs. Creators own migration/deploy sequencing,
+by expand-and-contract, the way every system with migrations does. The binding role and its two
+membership edges stay exactly as they are: that is the tenant boundary and it is not what this
+retires.
+
+---
+
+## What is being retired
+
+The epoch is a version number for a database's schema SHAPE, carried as the last component of a
+binding role name (`zs_bind_<binding>_e<E>`). An apply that commits a schema delta rotates it:
+retire `E-1`, mint `E+1`, advance the head. An isolate holding a retired epoch fails
+`SET LOCAL ROLE` and is refused before any statement runs.
+
+That refusal is the promise. It is the promise being withdrawn.
+
+## Why
+
+**Old code meeting a new schema is universal, and the answer is the creator's.** Every system with
+migrations has this. The industry answer is expand-and-contract: add the column, deploy code that
+tolerates both shapes, backfill, then drop. It is a sequencing discipline, and sequencing a
+creator's own migrations against their own deploys is theirs.
+
+**The platform hands over the gun.** `DropTable` and `DropColumn` are first-class operations in
+`crates/zeroship-migrate-ir/src/ir.rs`. The migration service executes them on request. So the
+fence protects code from a destructive change THE PLATFORM ITSELF PERFORMED because the creator
+asked for it. It is not guarding against an outside hazard.
+
+**It is not a property of the product, only of one deployment mode.** The fence works because the
+platform owns role creation on the cluster and rotates names on an apply. On a database the
+platform did not provision, nothing rotates and there is no fence. A guarantee that evaporates when
+the creator brings their own database was never a guarantee; it was an artifact of who happened to
+hold `CREATEROLE`.
+
+**It is half a guarantee where it does work.** It catches the schema moving forward under code that
+is behind. It cannot catch code moving forward against a schema that is behind - the proposal that
+introduced it says so plainly - and that direction surfaces as `42703 undefined_column` at query
+time. So `42703` is the fallback either way; the fence only decides which half gets a tidier error.
+
+**It amplifies across co-tenants.** `schema_name` is `db_<database_id>` and the epoch sits on the
+database, not the app. Many bindings point at one database. So one creator's migration advances the
+epoch for EVERY app bound to that database, and with the reload comparison in place every
+co-tenant rebuilds its isolate because someone else changed a shape. The apps being reloaded did
+nothing and, in the common case, are unaffected by the change.
+
+## What survives, and why it is a different thing
+
+The tenant boundary is the binding role's MEMBERSHIP, not the epoch in its name:
+
+```
+GRANT <capability> TO <binding> WITH SET FALSE      -- what the binding may reach
+GRANT <binding> TO <worker>     WITH INHERIT FALSE  -- the worker cannot inherit it ambiently
+```
+
+(`crates/zeroship-migrate-server/src/datastore/cluster.rs`, `grant_binding_statements`.)
+
+That is "app A cannot read app B's data". It is cross-tenant, the creator cannot enforce it for
+themselves, and PostgreSQL enforces it regardless of what a creator does to their own tables.
+Revocation stays a dropped membership and stays instant. None of this depends on the epoch.
+
+A binding keeps exactly one role. The name needs to be unique per binding, and nothing needs to
+decode it - which also settles Open 1 of `docs/proposals/2026-09-22-role-names-as-data.md` in the
+"unique, not decodable" direction for the binding roles at least.
+
+## What comes out
+
+| what | where |
+|---|---|
+| the rotation itself | `crates/zeroship-migrate-server/src/rotation.rs`, whole module |
+| T1/T4/E wiring in the apply | `crates/zeroship-migrate-server/src/apply.rs` |
+| the cluster's epoch head and its table | `crates/zeroship-migrate-server/src/datastore/cluster.rs` |
+| the epoch projection | `crates/zeroship-control/src/{databases,internal,registry}.rs` |
+| `databases.schema_epoch` and its CHECK | `db/migrations-ts/20260919000200_database_entities.ts` |
+| the epoch in the role name | `crates/zeroship-core/src/database_role.rs`, `binding_role_name` |
+| `AppVersionInfo::binding_epochs` | `crates/zeroship-core/src/types.rs` |
+| the reload comparison and re-supply | `crates/zeroship-worker/src/{sync,cache,handler}.rs` |
+| `SCHEMA_EPOCH_STALE` and its classification | `crates/zeroship-data-orm/src/{error.rs,backend/postgres/pg_error.rs}` |
+| the epoch arm of the role reaper | `crates/zeroship-migrate-server/src/datastore/cluster.rs`, `classify_role_name` |
+
+Most of this landed today. That is not a reason to keep it.
+
+## What creators get instead
+
+Documentation, not machinery. `docs/reference/db.md` should say what every migration guide says:
+a deploy and a migration are two events, a running build is not replaced atomically by either, and
+the way to change a shape without breaking a live build is to expand, migrate, then contract. The
+platform applies what it is given and does not adjudicate whether the sequence was safe.
+
+`42703 undefined_column` remains the observable failure when a creator gets it wrong, and it names
+the missing column, which is a better diagnostic than a role that does not exist.
+
+## What this does NOT license
+
+- **Do not weaken the membership edges.** `WITH SET FALSE` and `WITH INHERIT FALSE` are the tenant
+  boundary. Nothing here touches them, and an argument that starts "since we dropped the epoch"
+  and ends at either of those has changed subject.
+- **Do not drop the binding role.** One role per binding stays. It is the object membership hangs
+  off and the thing a session narrows to.
+- **Do not read this as "the platform makes no promises about data".** Isolation between tenants is
+  promised and enforced. What is withdrawn is a promise about a creator's own code meeting a
+  creator's own schema change.
+
+## Open
+
+1. **Does the reaper still need the epoch arm?** `classify_role_name` attributes a stray role by
+   parsing and re-composing its name. With no epoch in the name the binding arm simplifies rather
+   than disappears, but it interacts with Open 1 of the role-names-as-data proposal and the two
+   should be settled together.
+
+2. **Does anything else read `schema_epoch` that is not the fence?** The CDC relay is granted
+   `SELECT (id, status, schema_epoch)` on `zeroship.databases`
+   (`crates/zeroship-data-cdc-server/src/source.rs` builds the same shape in its fixture). Whether
+   the relay uses the value or merely reads the column must be settled before the column is
+   dropped.
+
+3. **Is the dev-tier divergence row now shorter?** `docs/reference/sqlite-divergences.md` owes an
+   epoch row because the dev tier has no carrier for one. If production has no epoch either, the
+   divergence is gone rather than owed.
+
+## Acceptance
+
+(a) **A migration that changes a shape does not rotate anything.** Apply a schema delta, assert the
+binding role that existed before still exists and no new one was minted. Control: the apply did
+commit a delta, asserted from the engine journal, so the test is not passing over a no-op.
+
+(b) **A co-tenant is not reloaded by a neighbour's migration.** Two apps on one shared database; A
+applies; assert B's isolate is not replaced. This is the amplification going away and it should be
+measured, not assumed.
+
+(c) **Revocation still fences immediately.** Revoke a binding, assert the next session is refused
+`42501` and the role still exists in `pg_roles`. This must pass unchanged - it is the boundary that
+survives, and its passing is what distinguishes this change from weakening isolation.
+
+(d) **Stale code meets `42703`, and the message names the column.** A build expecting a dropped
+column gets `undefined_column` naming it, rather than a role-does-not-exist error. This is the
+documented contract now, so it needs a test rather than a paragraph.
