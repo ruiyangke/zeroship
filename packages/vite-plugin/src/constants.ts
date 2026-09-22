@@ -15,7 +15,6 @@ export const DEV_RUNTIME_FRESH_REQUIRED = "fresh-required";
 export const ENV_DEV = "ZEROSHIP_DEV";
 export const ENV_VITE_ORIGIN = "ZEROSHIP_VITE_ORIGIN";
 export const ENV_ENTRY = "ZEROSHIP_ENTRY";
-export const ENV_RUNTIME_DESCRIPTOR = "ZEROSHIP_RUNTIME_DESCRIPTOR";
 
 /** Cookie secret shared with the spawned runtime's native verifier. */
 export const ENV_DEV_AUTH_SECRET = "ZEROSHIP_DEV_AUTH_SECRET";

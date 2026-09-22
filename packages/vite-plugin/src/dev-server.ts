@@ -22,7 +22,6 @@ import {
   ENV_DEV,
   ENV_VITE_ORIGIN,
   ENV_ENTRY,
-  ENV_RUNTIME_DESCRIPTOR,
   ENV_DEV_AUTH_SECRET,
   ENV_DIE_WITH_PARENT,
   DEFAULT_DEV_PORT,
@@ -678,7 +677,7 @@ export function devServerPlugin(
         // Initial regen on boot: migrations may have changed while the dev server
         // was down (`hotUpdate` only fires on a *subsequent* change, so without
         // this a fresh `pnpm dev` leaves env.db.ts stale). `spawnRuntime` awaits
-        // `bootRegenDone` so the runtime is injected WITH the fresh descriptor.
+        // `bootRegenDone`, so the archive it publishes carries the fresh fold.
         // `regenTypesDev` never throws: a malformed migration is logged and
         // survived, a PLATFORM fault exits the process here (`fatal: true`)
         // rather than serving a stale descriptor for the rest of the session.
@@ -1062,8 +1061,9 @@ export function devServerPlugin(
         const spawnRuntime = async () => {
           if (tornDown) return;
 
-          // Wait for the boot-time gen-types regen so the child is spawned WITH a
-          // fresh runtime descriptor (the pre-in-process CLI path was synchronous).
+          // Wait for the boot-time gen-types regen, then publish. The archive
+          // published just below is what carries each database's folded schema
+          // to the runtime, so the fold has to land before it is built.
           await bootRegenDone;
           const publisher = devPublisher;
           await publisher?.refresh().catch(error => {
@@ -1115,13 +1115,6 @@ export function devServerPlugin(
                 }
               : {}),
           };
-          if (runtimeDescriptorJson === undefined) {
-            // A schema-less project must not inherit a descriptor that happened
-            // to be present in the Vite parent's environment.
-            delete childEnv[ENV_RUNTIME_DESCRIPTOR];
-          } else {
-            childEnv[ENV_RUNTIME_DESCRIPTOR] = runtimeDescriptorJson;
-          }
 
           try {
             // Reset the captured tail so a terminal verdict quotes THIS
@@ -1198,8 +1191,8 @@ export function devServerPlugin(
             child.exitCode !== null ||
             child.signalCode !== null
           ) {
-            // An initial or crash-restart spawn reads runtimeDescriptorJson at
-            // spawn time, so it already receives the latest value. A corrected
+            // An initial or crash-restart spawn republishes the archive before
+            // it spawns, so it already carries the latest fold. A corrected
             // descriptor also starts a fresh failure budget: otherwise a child
             // that exhausted the old descriptor's budget can start cleanly
             // while the proxy remains permanently marked fatal.

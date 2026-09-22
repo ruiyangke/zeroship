@@ -28,10 +28,20 @@ struct Host {
 }
 impl Host {
     fn start(root: &Path, app: Option<&AppId>, native_dev: bool) -> Self {
-        Self::launch(root, app, native_dev, None)
+        Self::launch(root, app, native_dev, None, None)
     }
 
-    fn launch(root: &Path, app: Option<&AppId>, native_dev: bool, config: Option<&Path>) -> Self {
+    /// `descriptor` puts a runtime descriptor in the child's environment, the
+    /// way an ambient value reaches a host that inherits its environment. Every
+    /// other launch removes the name below so the enclosing shell cannot steer
+    /// the host under test.
+    fn launch(
+        root: &Path,
+        app: Option<&AppId>,
+        native_dev: bool,
+        config: Option<&Path>,
+        descriptor: Option<&str>,
+    ) -> Self {
         let port = TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -64,6 +74,9 @@ impl Host {
             "ZEROSHIP_RUNTIME_DESCRIPTOR",
         ] {
             command.env_remove(key);
+        }
+        if let Some(descriptor) = descriptor {
+            command.env("ZEROSHIP_RUNTIME_DESCRIPTOR", descriptor);
         }
         if native_dev {
             command
@@ -179,6 +192,39 @@ fn cli_resumes_a_workflow_with_a_configured_app_identity() {
 #[test]
 fn native_dev_entry_keeps_workflow_replay_on_the_retained_archive() {
     resume_after_process_death(None, true);
+}
+
+/// The COLLECTIONS document one database's schema is generated as, which
+/// `@zeroship/vite-plugin` folds to `schema.runtime.json`. It is not the
+/// document the runtime's descriptor slot takes.
+const GENERATED_COLLECTIONS_DOCUMENT: &str =
+    r#"{"version":2,"collections":{"todos":{"fields":{"id":{"type":"string","required":true}}}}}"#;
+
+/// The host composes its runtime descriptor from the deployment it loaded, so
+/// a descriptor standing in its environment reaches no isolate.
+///
+/// The slot takes the DATABASES document - `{version, databases: [...]}`, whose
+/// one producer is `RuntimeDatabases::document` - and the runtime validates it
+/// before creator modules evaluate. A collections document fails that
+/// validation, so a host that forwarded what it inherited would build no
+/// context and serve nothing. This deployment declares no database, so the
+/// composed answer is no document at all.
+#[test]
+fn native_dev_entry_serves_over_an_inherited_collections_descriptor() {
+    let root = tempfile::tempdir().unwrap();
+    compile(root.path(), "original", "1h");
+    write_dev_entry(root.path(), "live-original");
+    let mut host = Host::launch(
+        root.path(),
+        None,
+        true,
+        None,
+        Some(GENERATED_COLLECTIONS_DOCUMENT),
+    );
+    assert_eq!(
+        host.request("/version").unwrap(),
+        json!({"version": "live-original"})
+    );
 }
 
 fn write_dev_entry(root: &Path, version: &str) {
@@ -457,7 +503,7 @@ fn republished_bundle_releases_both_deployment_holders() {
         "[manager]\ndriver_interval_ms = 50\nhold_grace_ms = 5001\n",
     )
     .unwrap();
-    let mut host = Host::launch(root.path(), None, false, Some(&config));
+    let mut host = Host::launch(root.path(), None, false, Some(&config), None);
     let started = host.request("/start").unwrap();
     let run = started["id"].as_str().unwrap().to_owned();
     let status = format!("/status?id={run}");
@@ -469,7 +515,7 @@ fn republished_bundle_releases_both_deployment_holders() {
 
     // Publishing a new bundle activates it and supersedes the original.
     compile(root.path(), "replacement", "2s");
-    let mut host = Host::launch(root.path(), None, false, Some(&config));
+    let mut host = Host::launch(root.path(), None, false, Some(&config), None);
     assert_eq!(
         host.request("/version").unwrap(),
         json!({"version": "replacement:lazy"})
@@ -521,7 +567,7 @@ fn republished_bundle_releases_both_deployment_holders() {
     // A third bundle supersedes the replacement, which no run ever used. Both
     // holder classes give it back, and the collector's fence then commits.
     compile(root.path(), "final", "2s");
-    let host = Host::launch(root.path(), None, false, Some(&config));
+    let host = Host::launch(root.path(), None, false, Some(&config), None);
     let deadline = Instant::now() + Duration::from_secs(90);
     // The ledger records the release; the manager discharges its journal duty
     // when it applies the settled reply, which is a later transaction.

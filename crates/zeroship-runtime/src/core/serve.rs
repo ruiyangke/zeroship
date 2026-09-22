@@ -1852,10 +1852,11 @@ fn run_single_worker(
     // process vars. Shared (read-only) across all connections this worker
     // accepts; an `Rc` clone is one refcount bump per connection.
     let app_env = Rc::new(app_env_from_prefixed_vars(&env_vars));
-    // Vite dev hands the generated descriptor to `zeroship serve` through
-    // process env. Feed it into the same RuntimeState slot used by deployed
-    // bundles so validation and native plugin binding happen before creator
-    // modules evaluate. Schema-less apps omit the variable entirely.
+    // `zeroship serve` composes the databases document from the deployment it
+    // loaded and installs it under this name in the variables it passes here.
+    // Feed it into the same RuntimeState slot used by deployed bundles so
+    // validation and native plugin binding happen before creator modules
+    // evaluate. A deployment declaring no database omits the name entirely.
     let runtime_descriptor = env_vars.get("ZEROSHIP_RUNTIME_DESCRIPTOR").cloned();
 
     // Resolve the two dev-auth conditions ONCE per worker, here where the
