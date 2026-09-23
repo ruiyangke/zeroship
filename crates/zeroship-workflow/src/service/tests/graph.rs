@@ -470,14 +470,16 @@ pub(super) async fn seed_run(
     app::insert_root_run(
         tx,
         app_id,
-        &id,
-        name,
-        &deploy.id,
-        &StartOptions {
+        &app::NewRun {
+            id: &id,
+            name,
+            deploy: &deploy.id,
+            options: &StartOptions {
             key: key.map(str::to_owned),
             ..Default::default()
         },
-        None,
+            input_source: None,
+        },
         now,
     )
     .await

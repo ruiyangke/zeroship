@@ -512,11 +512,13 @@ async fn outcome_contract(store: Rc<OrmStore>) {
     app::insert_root_run(
         &mut tx,
         &local,
-        absent.as_str(),
-        "Example",
-        &deployment.id,
-        &StartOptions::default(),
-        None,
+        &app::NewRun {
+            id: absent.as_str(),
+            name: "Example",
+            deploy: &deployment.id,
+            options: &StartOptions::default(),
+            input_source: None,
+        },
         now,
     )
     .await

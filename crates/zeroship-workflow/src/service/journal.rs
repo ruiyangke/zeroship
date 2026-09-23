@@ -1,5 +1,5 @@
 use super::{
-    app::{current_run, decode, encode, insert_root_run, keyed_run, live_runs},
+    app::{current_run, decode, encode, insert_root_run, keyed_run, live_runs, NewRun},
     continuations, models,
     store::{Row, Transaction},
     AppPolicy,
@@ -660,7 +660,14 @@ async fn child(
     validation::start(&start)?;
     // The parent's live task staged what it passed the child, so the parent's
     // row is what proves this run may take the object.
-    insert_root_run(tx, app, &id, name, &deploy_id, &start, Some(parent), now).await?;
+    let run = NewRun {
+        id: &id,
+        name,
+        deploy: &deploy_id,
+        options: &start,
+        input_source: Some(parent),
+    };
+    insert_root_run(tx, app, &run, now).await?;
     tx.database()
         .collection(models::runs::Entity::COLLECTION)?
         .update(

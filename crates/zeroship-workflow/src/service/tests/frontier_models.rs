@@ -252,11 +252,13 @@ async fn seed_run(tx: &mut Transaction, app_id: &AppId, id: &str, name: &str) {
     app::insert_root_run(
         tx,
         app_id,
-        id,
-        name,
-        &deploy.id,
-        &StartOptions::default(),
-        None,
+        &app::NewRun {
+            id,
+            name,
+            deploy: &deploy.id,
+            options: &StartOptions::default(),
+            input_source: None,
+        },
         now,
     )
     .await

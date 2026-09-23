@@ -408,8 +408,9 @@ async fn app_contract(store: Rc<OrmStore>) {
     let b = service.fixture_app(b);
     let request = RequestId::mint();
     let objects = objects::Objects::new();
+    let input = json!({"hello": "world"});
     let options = StartOptions {
-        input_ref: objects.start_input(&a, json!({"hello": "world"})).await,
+        input_ref: objects.start_input(&a, input.clone()).await,
         key: Some("invoice".into()),
         on_conflict: ConflictPolicy::Join,
     };
@@ -425,12 +426,20 @@ async fn app_contract(store: Rc<OrmStore>) {
             .unwrap()
             .id
     );
+    // A run starts from an object of its OWN app. The same descriptor names
+    // nothing in `b`, so the start that would have reached across is refused
+    // before it admits anything, and `b` has to stage the bytes for itself.
+    assert!(matches!(
+        b.start(&request, "Example", options.clone()).await,
+        Err(WorkflowServiceError::NotFound(_))
+    ));
+    let foreign = StartOptions {
+        input_ref: objects.start_input(&b, input).await,
+        ..options.clone()
+    };
     assert_ne!(
         first.id,
-        b.start(&request, "Example", options.clone())
-            .await
-            .unwrap()
-            .id
+        b.start(&request, "Example", foreign).await.unwrap().id
     );
     assert!(matches!(
         b.status(&first.id).await,
