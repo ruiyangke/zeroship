@@ -649,10 +649,10 @@ impl CreatorFactory for Factory {
             foreign
                 .register_app(&binding)
                 .await?
-                .into_backend(&foreign, outputs.clone())?
+                .into_backend(&foreign, outputs.clone(), Arc::new(objects.clone()))?
         } else {
             app.clone()
-                .into_backend(&service, outputs.clone())?
+                .into_backend(&service, outputs.clone(), Arc::new(objects.clone()))?
         };
         let runtime = CreatorRuntime {
             app: app.with_ingress(ingress),

@@ -204,7 +204,23 @@ impl PreparedExecution {
                     let forced = output.is_some();
                     (output, output_ref, true, forced)
                 }
-                StepOutcome::ContinueAsNew { input, input_ref } => (input, input_ref, true, false),
+                // A continuation seed and a child's input are both a run's
+                // input, and a generation row keeps no inline slot for one, so
+                // every value a body hands either of them is staged, whatever
+                // it weighs. Handing nothing stages nothing: an absent
+                // descriptor is the whole record of it, and minting an object
+                // for `null` would spend an app's payload budget on the absence
+                // of an input.
+                StepOutcome::ContinueAsNew { input, input_ref } => {
+                    let forced = input.is_some();
+                    (input, input_ref, true, forced)
+                }
+                StepOutcome::Child {
+                    input, input_ref, ..
+                } => {
+                    let forced = input.is_some();
+                    (input, input_ref, true, forced)
+                }
                 _ => {
                     result.outcomes.push(outcome);
                     continue;
@@ -230,11 +246,11 @@ impl PreparedExecution {
                 break;
             }
             // A forced value never trips the refusal above. That refusal's
-            // second clause wants either an explicit `inline` mode, which a run
-            // output cannot carry because an output configuration is refused
-            // unless it names a `run` step, or an outcome that cannot reference
-            // at all, which a run output is not. Its first clause, the platform
-            // payload ceiling, still applies.
+            // second clause wants either an explicit `inline` mode, which a
+            // forced value cannot carry because an output configuration is
+            // refused unless it names a `run` step, or an outcome that cannot
+            // reference at all, which none of the forced outcomes is. Its first
+            // clause, the platform payload ceiling, still applies.
             if can_reference
                 && (forced || mode.requires_reference() || bytes.len() > limits.max_inline_bytes)
             {
@@ -325,8 +341,9 @@ struct LimitStep {
 ///
 /// Only a `run` step has a journal row a failure can be written to:
 /// `fold_outcomes` records a named `RunFailed` as `kind: "run"`, so naming a
-/// `sideEffect` ordinal would replay as a kind mismatch. A run output and a
-/// continuation seed belong to the run, not to any step.
+/// `sideEffect` or `child` ordinal would replay as a kind mismatch. A run
+/// output, a continuation seed and a child's input belong to a run, not to any
+/// step that can carry the refusal.
 fn limit_step(outcome: &StepOutcome) -> Option<LimitStep> {
     match outcome {
         StepOutcome::StepCompleted {

@@ -817,12 +817,15 @@ impl JobLease for ProbeLease {
 async fn receipts(store: Rc<OrmStore>) {
     let (service, app, other, _deployments) = registered_service(store).await;
     let scope = service.fixture_app(app.clone());
+    let objects = objects::Objects::new();
     let run = scope
         .start(
             &RequestId::mint(),
             "Example",
             StartOptions {
-                input: json!({"private":"creator-input"}),
+                input_ref: objects
+                    .start_input(&scope, json!({"private":"creator-input"}))
+                    .await,
                 ..Default::default()
             },
         )
@@ -926,7 +929,11 @@ async fn retained_history(
 ) {
     let service = &scope.service;
     let tx = service.begin().await.unwrap();
+    // Ordered so each table is dropped before the one it points at. A run owns
+    // the object it starts from through an edge on its generation, so that edge
+    // goes first or the generation cannot be removed at all.
     for table in [
+        "payload_refs",
         "tasks",
         "steps",
         "continuation_members",

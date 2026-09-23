@@ -9,7 +9,7 @@ use zeroship_core::workflow_jobs::{
 
 async fn start(backend: &dyn WorkflowBackend) -> Result<String, WorkflowServiceError> {
     backend
-        .start("Example".into(), StartOptions::default())
+        .start("Example".into(), serde_json::Value::Null, StartOptions::default())
         .await
         .map(|run| run.id)
 }

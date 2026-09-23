@@ -150,6 +150,10 @@ const POSTGRES_VERSIONS: &[SchemaVersion] = &[
         version: 5,
         sql: include_str!("../schema/versions/0005.postgres.sql"),
     },
+    SchemaVersion {
+        version: 6,
+        sql: include_str!("../schema/versions/0006.postgres.sql"),
+    },
 ];
 
 /// The complete `SQLite` series, the peer of [`POSTGRES_VERSIONS`].
@@ -173,6 +177,10 @@ const SQLITE_VERSIONS: &[SchemaVersion] = &[
     SchemaVersion {
         version: 5,
         sql: include_str!("../schema/versions/0005.sqlite.sql"),
+    },
+    SchemaVersion {
+        version: 6,
+        sql: include_str!("../schema/versions/0006.sqlite.sql"),
     },
 ];
 

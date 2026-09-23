@@ -88,7 +88,6 @@ pub struct GenerationOutcome {
 #[derive(FromRow)]
 #[orm(entity = generations)]
 pub struct GenerationInput {
-    pub input: String,
     pub input_ref: Option<String>,
     pub started_at: i64,
 }

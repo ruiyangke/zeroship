@@ -359,7 +359,7 @@ const DEPTH_CEILING: i64 = 1;
 fn child_call() -> crate::WorkflowExecution {
     execution(json!([{
         "kind":"Child", "ordinal":0, "name":"join", "childWorkflowName":"Child",
-        "options":{}, "input":{},
+        "options":{},
     }]))
 }
 
@@ -470,12 +470,16 @@ pub(super) async fn seed_run(
     app::insert_root_run(
         tx,
         app_id,
-        &id,
-        name,
-        &deploy.id,
-        &StartOptions {
+        &app::NewRun {
+            id: &id,
+            name,
+            deploy: &deploy.id,
+            options: &StartOptions {
             key: key.map(str::to_owned),
             ..Default::default()
+        },
+            input_source: None,
+            max_input_bytes: AppPolicy::default().max_input_bytes,
         },
         now,
     )
@@ -492,7 +496,7 @@ pub(super) async fn advance_generation(tx: &mut Transaction, app_id: &AppId, run
     let now = tx.now().await.unwrap();
     tx.database().collection(models::generations::Entity::COLLECTION).unwrap()
         .insert(value!({"id":storage_id(), "app_id":app_id.as_str(), "run_id":run,
-            "generation":1, "deploy_id":deploy.id, "input":"null", "state":"queued", "started_at":now}))
+            "generation":1, "deploy_id":deploy.id, "state":"queued", "started_at":now}))
         .await.unwrap();
     crate::service::continuations::advance(tx, app_id, &source, run, 1)
         .await

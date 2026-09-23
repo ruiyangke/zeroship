@@ -95,10 +95,10 @@ async fn a_backend_reads_and_writes_the_journal_it_was_built_over() {
     let objects = Objects::new();
     let client = home
         .fixture_app(app.clone())
-        .into_backend(&away, StepOutputs::shared(&objects, 1024))
+        .into_backend(&away, StepOutputs::shared(&objects, 1024), objects.stager())
         .unwrap();
     let run = client
-        .start("Example".into(), StartOptions::default())
+        .start("Example".into(), serde_json::Value::Null, StartOptions::default())
         .await
         .unwrap();
     assert_eq!(
@@ -140,7 +140,7 @@ async fn into_backend_refuses_a_journal_from_another_policy_registry() {
         .await
         .unwrap();
     home.fixture_app(app.clone())
-        .into_backend(&shared, StepOutputs::shared(&objects, 1024))
+        .into_backend(&shared, StepOutputs::shared(&objects, 1024), objects.stager())
         .expect("a journal over this handle's own registry binds");
 
     let foreign = WorkflowService::open(away_store, Arc::new(HostPolicies::default()))
@@ -148,7 +148,7 @@ async fn into_backend_refuses_a_journal_from_another_policy_registry() {
         .unwrap();
     match home
         .fixture_app(app)
-        .into_backend(&foreign, StepOutputs::shared(&objects, 1024))
+        .into_backend(&foreign, StepOutputs::shared(&objects, 1024), objects.stager())
     {
         Err(WorkflowServiceError::PermissionDenied) => {}
         other => panic!(

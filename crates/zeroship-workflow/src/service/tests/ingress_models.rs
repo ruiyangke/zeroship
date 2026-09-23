@@ -40,10 +40,14 @@ async fn revocation_contract(store: Rc<OrmStore>) {
         app::insert_root_run(
             &mut tx,
             app_id,
-            run_id,
-            "Example",
-            &deploy.id,
-            &StartOptions::default(),
+            &app::NewRun {
+                id: run_id,
+                name: "Example",
+                deploy: &deploy.id,
+                options: &StartOptions::default(),
+                input_source: None,
+                max_input_bytes: AppPolicy::default().max_input_bytes,
+            },
             now,
         )
         .await

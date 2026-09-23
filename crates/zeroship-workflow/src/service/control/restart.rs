@@ -28,7 +28,6 @@ const MAX_DESCENDANT_INSPECTIONS: usize = 16_384;
 #[orm(entity = models::generations)]
 struct SourceGeneration {
     deploy_id: String,
-    input: String,
     input_ref: Option<String>,
 }
 
@@ -464,7 +463,7 @@ impl RestartPlan<'_> {
             .collection(models::generations::Entity::COLLECTION)?
             .insert(value!({
                 "id":super::super::types::storage_id(), "app_id":app.as_str(), "run_id":run_id, "generation":generation,
-                "deploy_id":deploy.clone(), "input":previous.input, "input_ref":previous.input_ref,
+                "deploy_id":deploy.clone(), "input_ref":previous.input_ref,
                 "state":"queued", "started_at":now,
             }))
             .await?;

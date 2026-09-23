@@ -405,7 +405,68 @@ async fn output_contract(store: Rc<OrmStore>) {
         Err(WorkflowServiceError::NotFound(_))
     ));
 
+    // A run's input is an object at every size. A seed and a child's input are
+    // both a run's input, and the generation row has no inline slot for one, so
+    // preparation stages them however small they are -- well under
+    // `max_inline_bytes`, where a step output would stay in the journal. The
+    // step beside them is the control: the same batch, the same small value,
+    // and it is still carried inline, so this is the arm and not the budget.
     let task = claim(&scope, &tasks).await;
+    let small = json!({"n":1});
+    assert!(serde_json::to_vec(&small).unwrap().len() < LIMITS.max_inline_bytes);
+    let outcomes = prepare(
+        &task,
+        json!([
+            step(small.clone()),
+            {"kind":"Child","ordinal":1,"name":"child","childWorkflowName":"Example","input":small},
+        ]),
+    )
+    .stage(&tasks)
+    .await
+    .unwrap()
+    .outcomes;
+    assert!(
+        matches!(
+            &outcomes[0],
+            StepOutcome::StepCompleted { output: Some(_), output_ref: None, .. }
+        ),
+        "{outcomes:?}"
+    );
+    assert!(
+        matches!(
+            &outcomes[1],
+            StepOutcome::Child { input: None, input_ref: Some(_), .. }
+        ),
+        "{outcomes:?}"
+    );
+    let seeded = prepare(&task, json!([{"kind":"ContinueAsNew","input":small}]))
+        .stage(&tasks)
+        .await
+        .unwrap()
+        .outcomes;
+    assert!(
+        matches!(
+            &seeded[0],
+            StepOutcome::ContinueAsNew { input: None, input_ref: Some(_) }
+        ),
+        "{seeded:?}"
+    );
+    // A body that handed nothing stages nothing: an absent descriptor is the
+    // whole record of it, and an object minted for `null` would spend the app's
+    // payload budget on the absence of an input.
+    let bare = prepare(&task, json!([{"kind":"ContinueAsNew"}]))
+        .stage(&tasks)
+        .await
+        .unwrap()
+        .outcomes;
+    assert!(
+        matches!(
+            &bare[0],
+            StepOutcome::ContinueAsNew { input: None, input_ref: None }
+        ),
+        "{bare:?}"
+    );
+
     let execution = prepare(&task, json!([{"kind":"ContinueAsNew","input":value}]))
         .stage(&tasks)
         .await
