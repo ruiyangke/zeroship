@@ -385,10 +385,10 @@ remains unfinished.
 and prepares task-scoped uploads for large or explicitly referenced results.
 It retains upload request identities across retries, checks returned descriptors
 and returns journal-ready outcomes only after uploads are confirmed. Host limits
-come from `TaskPayloadLimits`, whose payload read budget and the app policy's
-bound of the same name both answer to the platform ceiling in
-`zeroship_core::workflow_policy`, so neither side can admit what the other
-cannot carry.
+come from `TaskPayloadLimits`, and the service enforces its app policy
+independently. Their payload bounds of the same name answer to one platform
+ceiling in `zeroship_core::workflow_policy`, so a payload the service admits at
+staging is within the budget the host reads it back through.
 An exceeded payload limit becomes a terminal failure while retaining the valid
 preceding outcomes. Object references still require service ownership validation
 when the task completes.

@@ -13,8 +13,9 @@
 //! WHAT IT MEASURES
 //! - `exchange`: client-observed latency of one `Transport::post`, end to end.
 //!   Reported for a connection-per-exchange peer and for a keep-alive peer, and
-//!   for a small body and a body near the client's request bound, because the
-//!   two protocol points that would cross carry very different payloads.
+//!   for a claim-shaped body and for the completion batch a whole dispatch
+//!   folds at once, because the two protocol points that would cross carry
+//!   very different payloads.
 //! - `mint` and `verify`: the credential halves alone, so a reader can tell how
 //!   much of an exchange is cryptography the worker pays per call and how much
 //!   is transport.

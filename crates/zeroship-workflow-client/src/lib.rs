@@ -42,10 +42,11 @@ pub struct Options {
 
 impl Default for Options {
     /// The byte bounds derive from the platform ceilings for the quantities
-    /// this transport carries: a request carries what `max_input_bytes`
-    /// governs, and a response carries what `max_journal_bytes` governs. A
-    /// host that takes these defaults can therefore carry anything admission
-    /// admits, without a second literal to keep in step.
+    /// this transport would carry: a request carries what `max_input_bytes`
+    /// governs, and a response carries what `max_journal_bytes` governs.
+    /// Deriving them is what stops this client refusing, on its own account,
+    /// something admission admitted. What a peer will accept is that peer's
+    /// own bound, declared where the peer configures its body limit.
     fn default() -> Self {
         Self {
             timeout: Duration::from_secs(5),
