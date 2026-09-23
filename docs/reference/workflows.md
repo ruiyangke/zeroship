@@ -818,7 +818,9 @@ That covers a run started through `start()`, a child started by `step.call` or
 `step.startMany`, a successor seeded by `step.continueAsNew`, and every firing
 of a schedule alike. A single blob may not exceed 64 MiB; an output over that
 cap fails the `step.run` that produced it with `LimitExceededError`, which a
-`catch` around that step can handle, and an input over it fails the start.
+`catch` around that step can handle, and an input over it fails the start. A
+schedule is the exception: its input rides inline on the deploy manifest, so it
+answers to the 1 MiB bound at deploy time and the deploy is what fails.
 
 ## Compensation
 
