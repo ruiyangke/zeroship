@@ -15,13 +15,13 @@ use zeroship_workflow::{
     engine::WorkflowOutputRef,
     operations::{RunState, StartOptions},
     service::{
-        AppPolicy, AppWorkflows, DeployRegistration, HostPolicies, PolicyBinding,
+        AppPolicy, AppWorkflows, DeployRegistration, HostPolicies, PayloadSlot, PolicyBinding,
         PolicySnapshot, RequestId, WorkerIdentity, WorkflowService,
     },
     WorkflowExecution,
 };
 use zeroship_workflow_runner::{
-    ready::ReadyApps, ObjectStepOutputs, PayloadObjects, WorkerPayloads,
+    ready::ReadyApps, ObjectStepOutputs, PayloadObjects, RunPayloads, WorkerPayloads,
 };
 use zeroship_workflow_v8::WorkflowBinding;
 
@@ -445,6 +445,25 @@ async fn ready_binding_reaches_only_the_published_backend_of_its_runtime_identit
     assert_eq!(
         fixture.app.status(run).await.unwrap().state,
         RunState::Queued
+    );
+    // The creator handed the seam a VALUE and the host staged it: the run names
+    // an object it owns, and the generation row carries no copy of the value.
+    // This is the only path on which the backend itself stages, so nothing else
+    // covers it.
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &fixture
+                .app
+                .payloads(&fixture.objects)
+                .read(run, 0, PayloadSlot::Input)
+                .await
+                .unwrap()
+                .into_bytes(1024)
+                .await
+                .unwrap()
+        )
+        .unwrap(),
+        json!({"secret":"app-a"}),
     );
     assert!(fixture.other.status(run).await.is_err());
     // Retiring the other app's generation leaves this one published.

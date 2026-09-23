@@ -905,6 +905,7 @@ async fn rollback(store: Rc<OrmStore>, fault: ReceiptFault) {
         "outbox",
         "job_publications",
         "occurrences",
+        "payload_refs",
     ] {
         assert_eq!(
             count(&service, &app, table).await,
@@ -912,22 +913,31 @@ async fn rollback(store: Rc<OrmStore>, fault: ReceiptFault) {
             "{table} escaped the failed transaction"
         );
     }
+    // The object itself DOES survive. Staging commits before the activation
+    // opens the transaction that admits the run, so a failed attempt leaves an
+    // ownerless upload that nothing points at and its staging deadline retires.
+    assert_eq!(count(&service, &app, "payloads").await, 1);
     fault.set(false).await;
     assert_eq!(
         scope.cron_job(&grant.retry(), &objects).await.unwrap().outcome,
         JobOutcome::Completed {}
     );
-    for table in [
-        "schedules",
-        "runs",
-        "generations",
-        "outbox",
-        "job_publications",
-        "occurrences",
+    for (table, rows) in [
+        ("schedules", 1),
+        ("runs", 1),
+        ("generations", 1),
+        // The run's start and the retention of the object it starts from. An
+        // activation stages that object before it opens this transaction, and
+        // the attachment that gives the run durable ownership of it is what
+        // announces the bytes as retained.
+        ("outbox", 2),
+        ("job_publications", 1),
+        ("occurrences", 1),
+        ("payload_refs", 1),
     ] {
         assert_eq!(
             count(&service, &app, table).await,
-            1,
+            rows,
             "{table} missing from accepted transaction"
         );
     }
