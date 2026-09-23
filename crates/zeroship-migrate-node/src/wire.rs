@@ -203,20 +203,23 @@ pub struct JsRequest {
 //    into them under a napi-free test.
 // ===========================================================================
 
-/// Which side of the boundary opens the database connection an `applyIr` runs over.
+/// Which side of the boundary opens the database connection a verb runs over.
 ///
 /// This is a TRANSPORT choice, not a vendor one, and the two travel as separate
 /// fields on purpose. `kind` says who opens the connection; `dialect` beside it says
 /// which vendor's backend is built over it. A verb named after a vendor conflates
-/// them, and the addon has exactly one apply verb because of that.
+/// them, and `applyIr`, `statusIr` and `rollback` are each exactly one verb because
+/// of that.
 ///
-/// The optional fields belong to one kind each, and the other kind refuses them
-/// rather than ignoring them - see `ApplyTarget::resolve` in [`crate::verbs`], which
-/// is where every pairing is decided.
+/// One shape for all three, because the transport question is one question. The
+/// credential fields are the half that is NOT common: each verb admits the ones it
+/// writes a journal row under and refuses the rest rather than ignoring them - see
+/// `DriverTarget::resolve` and the `HostCredentials` implementations in
+/// [`crate::verbs`], which is where every pairing is decided.
 #[cfg(feature = "napi")]
 #[napi(object)]
 #[derive(Debug, Clone)]
-pub struct ApplyDriverDto {
+pub struct DriverDto {
     /// `"host"` - the host-driver callback argument owns the connection.
     /// `"inProcess"` - the addon opens the connections itself on its engine worker
     /// thread, and takes no callback.
@@ -225,10 +228,13 @@ pub struct ApplyDriverDto {
     pub app_path: Option<String>,
     /// `"inProcess"` only: the journal database file attached beside it.
     pub journal_path: Option<String>,
-    /// `"host"` only: the migrator role to `SET ROLE` under (least-privilege apply).
+    /// `"host"` only, and only for the verbs that run DDL: the migrator role to
+    /// `SET ROLE` under (a least-privilege apply or rollback). `statusIr` takes none.
     pub migrator_role: Option<String>,
-    /// `"host"` only: the audit `applied_by` label recorded in the journal. The
-    /// in-process deploy loop journals its own label and accepts none here.
+    /// `applyIr`'s `"host"` driver only: the audit `applied_by` label recorded in
+    /// the journal. The in-process deploy loop journals its own label and accepts
+    /// none here; `rollback` carries its label on the request instead, because both
+    /// of its drivers record it; `statusIr` records nothing.
     pub applied_by: Option<String>,
 }
 
@@ -251,7 +257,7 @@ pub struct ApplyRequest {
     /// against `driver`, which selects who opens the connection to it.
     pub dialect: String,
     /// Who opens the connection this apply runs over.
-    pub driver: ApplyDriverDto,
+    pub driver: DriverDto,
     /// The project's `{ table: owner_app }` ownership registry. Empty on a
     /// fresh single-app project.
     pub registry: std::collections::HashMap<String, String>,
@@ -303,12 +309,19 @@ pub struct StatusIrRequest {
     pub owner_app: String,
     /// The confined project schema.
     pub project_schema: String,
-    /// `"postgres" | "mysql" | "sqlite"` selects the journal backend and must
-    /// match the host-driven or in-process status entrypoint.
+    /// `"postgres" | "mysql" | "sqlite"` selects the journal backend. It is checked
+    /// against `driver`, which selects who opens the connection to it.
     pub dialect: String,
+    /// Who opens the connection this status reconciles over.
+    pub driver: DriverDto,
     /// The project's table-ownership registry.
     pub registry: std::collections::HashMap<String, String>,
-    /// Ordered authored migration envelopes to reconcile.
+    /// The complete ordered authored set to reconcile, oldest first.
+    ///
+    /// ONE field with one meaning, unlike `applyIr`'s: both status drivers hand the
+    /// whole sequence to the same reconciliation, so neither a prefix nor a last
+    /// envelope is distinguished, and an empty set is the honest question "what does
+    /// the journal hold that nothing authored describes".
     pub envelopes: Vec<JsonValue>,
     /// Required ordered policy charters, identical to the `applyIr` lowering input.
     pub charter_layers: Vec<String>,
@@ -396,11 +409,12 @@ pub struct RollbackTargetDto {
     pub steps: Option<u32>,
 }
 
-/// The typed request for the `rollback` and `rollbackSqlite` verbs.
+/// The typed request for the `rollback` verb.
 ///
 /// It carries the complete ordered envelope sequence rather than a prior/current
 /// split: a rollback reconstructs the reverse SQL for migrations that are ALREADY
-/// applied, so there is no "current" envelope to distinguish.
+/// applied, so there is no "current" envelope to distinguish. Both drivers read that
+/// sequence the same way, which is why - unlike `applyIr`'s - it needs no split.
 #[cfg(feature = "napi")]
 #[napi(object)]
 #[derive(Debug, Clone)]
@@ -410,13 +424,14 @@ pub struct RollbackRequest {
     pub owner_app: String,
     /// The confined project schema the lower pins ops to.
     pub project_schema: String,
-    /// The migrator role to `SET ROLE` under for the reverse DDL. Optional, and
-    /// refused outright by `rollbackSqlite`: SQLite has no roles, so accepting one
-    /// there would silently promise least-privilege that is not being applied.
-    pub migrator_role: Option<String>,
-    /// `"postgres" | "mysql"` for the host-driven verb, `"sqlite"` for the
-    /// in-process one.
+    /// `"postgres" | "mysql" | "sqlite"` selects the vendor backend. It is checked
+    /// against `driver`, which selects who opens the connection to it.
     pub dialect: String,
+    /// Who opens the connection this rollback runs over. The migrator role to
+    /// `SET ROLE` under for the reverse DDL rides on its `"host"` kind, and the
+    /// `"inProcess"` kind refuses one: it opens the only connection there is, so
+    /// accepting a role would promise a least-privilege that is not being applied.
+    pub driver: DriverDto,
     /// The project's `{ table: owner_app }` ownership registry.
     pub registry: std::collections::HashMap<String, String>,
     /// The ordered authored migration envelopes, as real JavaScript values.
@@ -437,6 +452,10 @@ pub struct RollbackRequest {
     /// irreversible migration discards data, so it takes both flags.
     pub backup_acknowledged: bool,
     /// The audit label recorded with the `rolled_back` events.
+    ///
+    /// On the REQUEST rather than on the driver, unlike `applyIr`'s: both rollback
+    /// drivers journal under it, because both reach the journal through the same
+    /// `rollback_with_locked_backend`, which takes the label as an argument.
     pub applied_by: String,
 }
 

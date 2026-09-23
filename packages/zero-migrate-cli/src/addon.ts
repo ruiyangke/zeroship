@@ -4,10 +4,10 @@
 // The addon is the V8-free Rust core (host-driven PG/MySQL over the `SqlSession`
 // seam + bundled rusqlite, no compio, no io_uring, cross-platform). It exposes:
 //  - sync, DB-free: `irVersion()`, `loadVerify(...)`
-//  - async, fire-and-resolve: `applyIr(...)`, `apply(...)`, `status(...)`,
-//    `history(...)`. `applyIr` takes the driver as DATA (`req.driver`) and so serves
-//    both the `hostDriver` TSFN and the addon's own in-process connections; the rest
-//    are host-driven only.
+//  - async, fire-and-resolve: `applyIr(...)`, `statusIr(...)`, `rollback(...)`,
+//    `status(...)`, `history(...)`. `applyIr`, `statusIr` and `rollback` take the
+//    driver as DATA (`req.driver`) and so serve both the `hostDriver` TSFN and the
+//    addon's own in-process connections; the rest are host-driven only.
 //
 // The host-driver callback contract is `hostDriver([request, done]) => void` —
 // napi delivers `(request, done)` as a SINGLE array arg. See `driver-pg.ts`.
@@ -26,7 +26,7 @@ import type {
   JsRequest as GenJsRequest,
   JsReply as GenJsReply,
   JsError as GenJsError,
-  ApplyDriverDto,
+  DriverDto,
   ApplyRequest,
   StatusRequest,
   StatusIrRequest,
@@ -48,7 +48,7 @@ import type {
 } from "zeroship-migrate-node";
 
 export type {
-  ApplyDriverDto,
+  DriverDto,
   ApplyRequest,
   StatusRequest,
   StatusIrRequest,
@@ -127,27 +127,17 @@ export interface MigrateAddon {
   /** `status` over the host driver. Resolves to a typed `StatusReply`. */
   status(hostDriver: AddonHostDriver, req: StatusRequest): Promise<StatusReply>;
 
-  /** Plan-aware status over authored IR envelopes. The addon lowers complete
-   *  plans in Rust, retaining DML and backfill step identities. */
-  statusIr(hostDriver: AddonHostDriver, req: StatusIrRequest): Promise<StatusReply>;
+  /** The ONE status: plan-aware reconciliation over authored IR envelopes. The
+   *  addon lowers complete plans in Rust, retaining DML and backfill step
+   *  identities, and reconciles them over the driver `req.driver` names — this
+   *  `hostDriver` callback, or the addon's own bundled rusqlite connections, in
+   *  which case pass `null` here. */
+  statusIr(hostDriver: AddonHostDriver | null, req: StatusIrRequest): Promise<StatusReply>;
 
-  /** Read-only plan-aware status through the bundled in-process SQLite backend. */
-  statusIrSqlite(
-    appPath: string,
-    journalPath: string,
-    req: StatusIrRequest,
-  ): Promise<StatusReply>;
-
-  /** Unwind applied migrations over the host driver, reconstructing each `down`
-   *  from its authored envelope. Resolves to a typed `RollbackReply`. */
-  rollback(hostDriver: AddonHostDriver, req: RollbackRequest): Promise<RollbackReply>;
-
-  /** Rollback through the addon's bundled in-process rusqlite backend. */
-  rollbackSqlite(
-    appPath: string,
-    journalPath: string,
-    req: RollbackRequest,
-  ): Promise<RollbackReply>;
+  /** The ONE rollback: unwind applied migrations over the driver `req.driver`
+   *  names, reconstructing each `down` from its authored envelope. Pass `null` for
+   *  an in-process driver. Resolves to a typed `RollbackReply`. */
+  rollback(hostDriver: AddonHostDriver | null, req: RollbackRequest): Promise<RollbackReply>;
 
   /** Complete or abort one outstanding PostgreSQL online rename. */
   resolvePending(

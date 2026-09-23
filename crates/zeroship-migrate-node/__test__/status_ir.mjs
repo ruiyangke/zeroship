@@ -116,6 +116,7 @@ const status = await addon.statusIr(hostDriver, {
   ownerApp: 'app_status_js',
   projectSchema: 'proj_status_js',
   dialect: 'postgres',
+  driver: { kind: 'host' },
   registry: {},
   envelopes: [],
   charterLayers: [NO_INJECT_CHARTER_TOML],
@@ -148,6 +149,7 @@ const orderedStatus = await addon.statusIr(hostDriver, {
   ownerApp: 'app_status_ordered',
   projectSchema: 'app_status_ordered',
   dialect: 'postgres',
+  driver: { kind: 'host' },
   registry: {},
   charterLayers: [NO_INJECT_CHARTER_TOML],
   envelopes: [
@@ -224,6 +226,7 @@ const busy = await addon.statusIr(contendedDriver, {
   ownerApp: 'app_status_busy',
   projectSchema: 'app_status_busy',
   dialect: 'postgres',
+  driver: { kind: 'host' },
   registry: {},
   envelopes: [],
   charterLayers: [NO_INJECT_CHARTER_TOML],

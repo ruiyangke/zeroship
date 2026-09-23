@@ -1,15 +1,18 @@
-// SQLite apply driven through the shipped CLI binary, end to end.
+// SQLite apply and rollback driven through the shipped CLI binary, end to end.
 //
 // The suite's other SQLite references parse DSN strings (`driverFor`,
-// `hasInlinePassword`) and never reach a database; this arm drives a real
-// apply so support for the combination does not rest on prose.
+// `hasInlinePassword`) and never reach a database; these arms drive a real
+// apply and a real unwind so support for the combination does not rest on prose.
 //
 // It also fills the coverage gap directly. The Rust side proves the
 // SQLite backend (`crates/zeroship-migrate-node/tests/rollback_sqlite.rs` and the
 // in-crate suites), and the host suite proves the CLI against PostgreSQL and
-// MySQL; this arm runs the CLI against SQLite.
+// MySQL; these arms run the CLI against SQLite. The rollback arm is the only place
+// the facade's SQLite branch of `rollback()` is driven end to end - every other
+// `rollback()` arm in this suite opens a network session - so it is what keeps the
+// request that branch assembles honest.
 //
-// The second arm covers the one thing zero-migrate does to a SQLite database that
+// The WAL arm covers the one thing zero-migrate does to a SQLite database that
 // OUTLIVES the apply, and so is the one an operator has to be told about in advance.
 //
 // GATE: none. SQLite is an in-process file, so unlike every other arm here this one
@@ -157,6 +160,71 @@ test("the CLI applies to a SQLite file and the rows are really there", () => {
   }
 });
 
+test("the CLI rolls back a SQLite file and the reversed row is really gone", () => {
+  const work = mkdtempSync(join(HERE, "sqlite-cli-rollback-"));
+  const dbPath = join(work, "app.db");
+  try {
+    const migrations = join(work, "migrations");
+    writeFileSync(join(work, "policy.toml"), CHARTER);
+    writeFileSync(join(work, "registry.json"), JSON.stringify({ notes: OWNER_APP }));
+    mkdirSync(migrations);
+    writeMigrations(migrations);
+
+    const shared = [
+      "--dir",
+      migrations,
+      "--database-url",
+      `sqlite:${dbPath}`,
+      "--policy",
+      join(work, "policy.toml"),
+      "--registry",
+      join(work, "registry.json"),
+      "--schema",
+      "main",
+      "--owner-app",
+      OWNER_APP,
+    ];
+
+    const applied = spawnCli(["apply", ...shared], work);
+    assert.equal(
+      applied.status,
+      0,
+      `apply must succeed; stdout=${applied.stdout} stderr=${applied.stderr}`,
+    );
+
+    const rolledBack = spawnCli(["rollback", ...shared, "--steps", "1", "--approve"], work);
+    assert.equal(
+      rolledBack.status,
+      0,
+      `rollback must succeed; stdout=${rolledBack.stdout} stderr=${rolledBack.stderr}`,
+    );
+    assert.match(
+      rolledBack.stdout,
+      /rollback: 1 rolled back/,
+      `one step was asked for; stdout=${rolledBack.stdout}`,
+    );
+
+    // The FILE again, not the reply. The authored `inverse()` ran, and only it: the
+    // table the first migration created is still there, because one step was asked
+    // for and the engine unwound one.
+    const db = new DatabaseSync(dbPath);
+    try {
+      const tables = db
+        .prepare("SELECT name FROM sqlite_master WHERE type = ?")
+        .all("table")
+        .map((row: Record<string, unknown>) => row.name as string);
+      assert.ok(tables.includes("notes"), `the table survives one step; saw ${tables.join(",")}`);
+
+      const rows = db.prepare("SELECT id FROM notes").all() as Array<Record<string, unknown>>;
+      assert.equal(rows.length, 0, "the seeded row was removed by the authored inverse");
+    } finally {
+      db.close();
+    }
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
 // A WAL application database comes back from an apply in DELETE journal mode, and
 // stays there.
 //
@@ -270,7 +338,8 @@ test("a WAL application database is left in DELETE journal mode, persistently", 
 // of applying, and it is not. `plan` is advertised as a live dry run that does
 // not call the apply or resolution APIs, does not execute the rendered migration
 // SQL, and uses a read-only status path. All of that is true of the
-// SQL. None of it is true of the FILE: `statusIrSqlite` opens through the same
+// SQL. None of it is true of the FILE: `statusIr` under an in-process driver opens
+// through the same
 // `SqliteBackend::open`, so `plan` gets the same hardened profile as apply and pins
 // `journal_mode = DELETE` on the application database before it reads anything. The
 // `readOnly` flag reaches only the journal-bootstrap decision, not the connection.
