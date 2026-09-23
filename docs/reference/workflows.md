@@ -816,11 +816,15 @@ no threshold. Whatever starts a run and whatever it returns are staged as blobs,
 so each costs an object against the app's payload budget however small it is.
 That covers a run started through `start()`, a child started by `step.call` or
 `step.startMany`, a successor seeded by `step.continueAsNew`, and every firing
-of a schedule alike. A single blob may not exceed 64 MiB; an output over that
-cap fails the `step.run` that produced it with `LimitExceededError`, which a
-`catch` around that step can handle, and an input over it fails the start. A
-schedule is the exception: its input rides inline on the deploy manifest, so it
-answers to the 1 MiB bound at deploy time and the deploy is what fails.
+of a schedule alike.
+
+Two different caps then apply, because the two are read differently. A blob read
+back on demand may reach 64 MiB, so an output over that fails the `step.run`
+that produced it with `LimitExceededError`, which a `catch` around that step can
+handle. A run's input is not read on demand: it is read in full before the body
+runs and handed over as `trigger.input`, so it is capped at 1 MiB and a start
+over that is refused. Being stored as a blob does not raise that cap, and a
+schedule answers to it at deploy time, where the deploy is what fails.
 
 ## Compensation
 
