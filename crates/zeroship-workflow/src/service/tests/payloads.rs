@@ -1023,3 +1023,111 @@ async fn input_bound(store: Rc<OrmStore>) {
         Err(WorkflowServiceError::PayloadTooLarge)
     ));
 }
+
+#[compio::test]
+async fn sqlite_a_child_input_answers_to_the_input_bound() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("zs-workflow.sqlite");
+    schema::initialize_sqlite(&path).unwrap();
+    child_input_bound(Rc::new(sqlite_store(&path).await)).await;
+}
+
+#[compio::test]
+async fn postgres_a_child_input_answers_to_the_input_bound() {
+    let fixture = PostgresFixture::start().await;
+    child_input_bound(Rc::new(fixture.store.clone())).await;
+}
+
+/// A child's input answers to the same bound a start's does.
+///
+/// This is the path that widened furthest. A child's input rode inline inside
+/// the completion batch, which `apply` bounds whole with `max_input_bytes`; as
+/// an object it is admitted by the runner against the payload ceiling instead,
+/// which is far larger. The service closes that on a descriptor a worker staged
+/// under its own live task, so this exercises the bound `journal.rs` passes and
+/// not only the check that reads it.
+///
+/// Both objects stage, because the payload ceiling admits either -- that is the
+/// point, the runner would mint either one. The control differs from the
+/// refusal in the object the child names and nothing else, and it runs on a
+/// fresh task because a refused batch is released rather than reused.
+async fn child_input_bound(store: Rc<OrmStore>) {
+    let (service, app, _, _deployments) = registered_service(store).await;
+    let scope = service.fixture_app(app.clone());
+    let objects = Objects::new();
+    let worker = WorkerIdentity::new("child-input-bound".into()).unwrap();
+    let bound = AppPolicy::default().max_input_bytes;
+    let at = vec![b'a'; bound];
+    let over = vec![b'b'; bound + 1];
+    assert_eq!(reference(&over).size, bound as i64 + 1);
+    let run = scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+
+    let task = service.poll(&worker).await.unwrap().unwrap();
+    service
+        .stage_payload(
+            &worker,
+            &task.id,
+            &task.token,
+            &RequestId::mint(),
+            reference(&over),
+            objects.upload(&over),
+        )
+        .await
+        .expect("the payload ceiling admits it, which is what the service must close");
+    let refused = service
+        .complete(
+            &worker,
+            &task.id,
+            &task.token,
+            execution(json!([
+                {"kind":"Child","ordinal":0,"name":"big","childWorkflowName":"Child",
+                 "inputRef":reference(&over), "options":{}},
+            ])),
+        )
+        .await;
+    assert!(
+        matches!(&refused, Err(WorkflowServiceError::PayloadTooLarge)),
+        "a child input past the bound must be refused: {refused:?}"
+    );
+    service.release(&worker, &task.id, &task.token).await.unwrap();
+
+    // The refused batch started nothing. Without this the assertion above would
+    // also pass over a service that refused the reply and kept the child.
+    let tx = service.begin().await.unwrap();
+    let runs = journal_rows(&tx, "runs", json!({"app_id":app.as_str()})).await;
+    tx.commit().await.unwrap();
+    assert_eq!(runs.len(), 1, "only the parent may exist: {runs:?}");
+
+    // The same batch, one byte narrower.
+    let task = service.poll(&worker).await.unwrap().unwrap();
+    assert_eq!(task.invocation.run_id, run.id);
+    service
+        .stage_payload(
+            &worker,
+            &task.id,
+            &task.token,
+            &RequestId::mint(),
+            reference(&at),
+            objects.upload(&at),
+        )
+        .await
+        .unwrap();
+    service
+        .complete(
+            &worker,
+            &task.id,
+            &task.token,
+            execution(json!([
+                {"kind":"Child","ordinal":0,"name":"ok","childWorkflowName":"Child",
+                 "inputRef":reference(&at), "options":{}},
+            ])),
+        )
+        .await
+        .expect("a child input exactly at the bound is accepted");
+    let child = service.poll(&worker).await.unwrap().unwrap();
+    assert_eq!(child.invocation.workflow_name, "Child");
+    assert_eq!(child.invocation.trigger.input_ref, Some(reference(&at)));
+}
