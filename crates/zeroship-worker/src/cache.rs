@@ -6,6 +6,7 @@ use std::sync::Arc;
 use zeroship_bundle::compiled::CompiledManifest;
 use zeroship_bundle::Manifest;
 use zeroship_core::app_id::AppId;
+use zeroship_core::database_role::DatabaseCapability;
 use zeroship_core::net_policy::{EgressRule, Verdict};
 use zeroship_core::types::{AppNetPolicy, AppRuntimeLimits};
 use zeroship_runtime::plugin::NativePlugin;
@@ -654,6 +655,16 @@ pub struct LoadedMeta {
     pub env_version: i64,
     /// Worker-facing raw-TCP policy snapshot the isolate was built with.
     pub net_policy: AppNetPolicy,
+    /// The live binding set control reported when this isolate was built: the
+    /// capability the app held on each database it bound.
+    ///
+    /// The isolate captured the bindings its sessions narrow with while it
+    /// built, so a database bound after that is one it has no handle for, and
+    /// one unbound under it is one it keeps composing a withdrawn edge's role
+    /// for. Recording what it was built against is what lets
+    /// `sync::needs_reload` see either - nothing else about the app changes
+    /// when its binding set does.
+    pub live_bindings: std::collections::BTreeMap<zeroship_core::DatabaseId, DatabaseCapability>,
 }
 
 thread_local! {

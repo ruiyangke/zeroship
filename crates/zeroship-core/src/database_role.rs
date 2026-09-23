@@ -125,6 +125,39 @@ impl DatabaseCapability {
     }
 }
 
+/// The wire form is [`DatabaseCapability::as_wire`], never a second spelling a
+/// derive produced.
+///
+/// A `#[derive(Serialize)]` with a rename rule would stand a SECOND codec beside
+/// the one `zeroship.database_bindings.capability` and the cluster reconciler
+/// already share, and the two would be free to drift: a rename rule edited here
+/// would move the worker version feed off the text control stores while every
+/// `as_wire` caller stayed put. Delegating leaves one spelling and one parse, so
+/// a version-feed entry and a binding row cannot disagree about which text names
+/// which capability.
+impl serde::Serialize for DatabaseCapability {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_wire())
+    }
+}
+
+/// The parse is [`DatabaseCapability::from_wire`], and a text it refuses is
+/// refused here.
+///
+/// No fallback arm and no default: both capabilities are values this field
+/// carries, so whichever a default picked would be the correct reading for some
+/// live binding and a silent misreading for the other - and the direction that
+/// goes wrong quietly is the read-write one, where nothing says anything until
+/// `PostgreSQL` produces a bare `42501` at the first write.
+impl<'de> serde::Deserialize<'de> for DatabaseCapability {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = <std::borrow::Cow<'_, str> as serde::Deserialize>::deserialize(deserializer)?;
+        // The offending text is NOT quoted back: this decodes a control
+        // response, and the length of a field in one is not bounded here.
+        Self::from_wire(&text).ok_or_else(|| serde::de::Error::custom("not a database capability"))
+    }
+}
+
 /// Compose the per-app `PostgreSQL` role name.
 ///
 /// The input is the physical schema name. It can differ from the platform
@@ -459,5 +492,42 @@ mod tests {
         // role by a suffix that drifted.
         assert_eq!(DatabaseCapability::ReadWrite.role_suffix(), "rw");
         assert_eq!(DatabaseCapability::ReadOnly.role_suffix(), "ro");
+    }
+
+    /// `serde` writes and reads the SAME text the stored-column codec does.
+    ///
+    /// The assertion is against `as_wire` rather than against a literal: a
+    /// literal here would be a third spelling, and the property is that there
+    /// are not two. Both capabilities, because one arm alone would pass over an
+    /// impl that emitted a constant.
+    #[test]
+    fn serde_writes_and_reads_the_stored_capability_spelling() {
+        let mut checked = 0;
+        for capability in [DatabaseCapability::ReadWrite, DatabaseCapability::ReadOnly] {
+            let json = serde_json::to_string(&capability).expect("a capability serializes");
+            assert_eq!(json, format!("\"{}\"", capability.as_wire()));
+            assert_eq!(
+                serde_json::from_str::<DatabaseCapability>(&json).expect("it reads back"),
+                capability
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 2, "the arm must not pass over an empty list");
+    }
+
+    /// A text `from_wire` refuses is refused by the decoder too, rather than
+    /// defaulted to a capability.
+    ///
+    /// Its control is the accepted spelling beside it: without one, a decoder
+    /// that had begun refusing everything would pass this.
+    #[test]
+    fn a_capability_spelling_the_codec_refuses_does_not_decode() {
+        assert!(serde_json::from_str::<DatabaseCapability>("\"readwrite\"").is_ok());
+        for text in ["\"read_write\"", "\"rw\"", "\"\"", "\"owner\"", "7"] {
+            assert!(
+                serde_json::from_str::<DatabaseCapability>(text).is_err(),
+                "{text} is not a capability and must not decode as one"
+            );
+        }
     }
 }
