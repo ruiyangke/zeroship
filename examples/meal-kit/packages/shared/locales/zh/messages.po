@@ -402,10 +402,6 @@ msgid "We couldn't prepare your download. Please contact us."
 msgstr "暂时无法准备下载文件，请联系我们。"
 
 #. js-lingui-explicit-id
-msgid "Your download isn't ready yet. Please try again."
-msgstr "下载文件尚未准备好，请稍后重试。"
-
-#. js-lingui-explicit-id
 msgid "Please wait a moment, then try refreshing your total."
 msgstr "请稍等片刻，再刷新订单金额。"
 
