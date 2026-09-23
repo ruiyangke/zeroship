@@ -57,21 +57,39 @@ also settles the operator's objection to a dialect-specific one reaching that fa
 The order contract, the uniqueness guard and the extension set then have ONE definition. Today they
 have two, and the two differ.
 
-## The hazard this must not reintroduce
+## The duplicated-DSL hazard is real but LOUD, which lowers the cost of this change
 
 `recorder.ts` bundles with the DSL marked external for a stated reason:
 
 > its `@zeroship/migrate` DSL import must resolve to the SAME module instance the recorder drains
 > from - a duplicated DSL module would drain an empty op list
 
-A consolidated path that ends up with two instances of `@zeroship/migrate` records NOTHING and
-reports success: `applied=0`, no error, no throw. That is a wrong answer wearing a success's
-clothes, and it is invisible to any check that only asks whether the apply threw.
+That describes the shape correctly but not the current failure. MEASURED in
+`packages/zero-migrate/src/ops.ts`: the recording buffer is a module-level `let active`, the host
+calls `__begin` on the instance IT imported, and every authoring call goes through `recorder()`,
+which refuses a null buffer with a structured error:
 
-One guard already exists and must stay pointed at the consolidated path: `migrate-dev.ts` treats
-`applied=0 skipped=0` as a FAILURE and exits non-zero, on the stated grounds that nothing applied
-and nothing skipped on a fresh database means the schema is unchanged. That guard is the reason
-this hazard is survivable, so it is a precondition of the change rather than a detail of it.
+```
+OP_OUTSIDE_RECORDER: migration operations may only be authored synchronously
+inside schema(), data(), or inverse()
+```
+
+So with two instances the migration's first `table()` call reaches an instance whose buffer was
+never begun, and it THROWS with a code and a suggested fix. It does not record nothing and pass.
+`__drain` does return an empty list when its buffer is null, but that is the host's own instance,
+which it began a moment earlier.
+
+Two consequences for this change. First, consolidating the loaders is safer than the comment
+implies: the invariant is enforced at the authoring call, not merely assumed by whoever remembers
+to pass `external`. Second, the guard worth naming is that structured refusal rather than the
+aggregate one downstream - though `migrate-dev.ts` treating `applied=0 skipped=0` as a failing
+exit remains the backstop for a genuinely empty set, and should stay pointed at the consolidated
+path.
+
+What stays unguarded is the legitimately empty migration: a `schema()` whose body records nothing
+drains empty and raises no error, because `enforceRecordedPhase` only refuses ops recorded in the
+WRONG phase and finds nothing to object to in an empty list. That is the case the downstream
+`applied=0` check exists for.
 
 ## Open
 
@@ -102,9 +120,12 @@ orders, which is the divergence being removed.
 rejected wherever they enter. Control: a set differing only in that one prefix is accepted, so the
 arm is not passing by refusing everything.
 
-(c) **A duplicated DSL instance is caught, not reported as success.** Force the consolidated path
-to resolve two `@zeroship/migrate` instances and assert the run FAILS. Fails if it reports
-`applied=0` and exits zero, which is the silent mode this whole section exists to prevent.
+(c) **A duplicated DSL instance is refused by CODE, not by convention.** Force the consolidated
+path to resolve two `@zeroship/migrate` instances and assert the run fails with
+`OP_OUTSIDE_RECORDER` specifically, not merely with some error. Pinning the code is the point: any
+error would pass a weaker assertion, including one thrown for an unrelated reason, and the claim
+being protected is that the authoring call itself refuses. Control: the same set through a single
+instance records its ops, so the arm is not passing by failing everything.
 
 (d) **The dev tier still applies and serves.** After the change, a migrate followed by a dev boot
 applies the example's migrations and answers a query against the file it wrote. Fails if the apply
