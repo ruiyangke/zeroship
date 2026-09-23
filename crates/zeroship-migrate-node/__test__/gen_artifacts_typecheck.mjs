@@ -1,8 +1,13 @@
 // Regression gate for the schema-artifact code generator through the REAL N-API
 // boundary. The generated env.db.ts is compiled against the real zero-migrate
 // authoring package; a stale/non-existent helper therefore makes this test fail.
+//
+// TWO calls, because the corpus of spellings splits along the charter. The
+// AUTHORED half declares its own keys and so can only render with nothing
+// injected; the CONFINED half turns on the lifecycle options, whose generators
+// exist only in the production injection shape. Both sources are typechecked.
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,7 +17,26 @@ const REPO_ROOT = resolve(HERE, '../../..');
 const AUTHORING_ROOT = join(REPO_ROOT, 'packages/zero-migrate');
 const require = createRequire(import.meta.url);
 const addon = require('../index.js');
+
+// Two charters, because one cannot carry both halves of this gate.
+//
+// The AUTHORED spellings below declare their own keys - a UUID primary key, an
+// auto-increment one, a TypeID one, two composite ones. An injecting charter
+// forbids every one of them (`author_primary_key = "forbid"`) and owns the
+// column name `id`, so the spelling corpus can only be rendered under a charter
+// that injects nothing.
 const NO_INJECT_CHARTER_TOML = 'policy_version = 1\n';
+
+// The PRODUCTION schema-emit ceiling, composed exactly as
+// `packages/vite-plugin/src/gen-types/confined-ceiling.ts` composes it: the
+// document header plus the authored `[[inject]]` fragment. Read from the
+// fragment itself rather than copied, so this gate cannot describe a platform
+// shape the platform no longer has - the same bytes
+// `crates/zeroship-migrate-node/tests/gen_artifacts_reserved_identifiers.rs`
+// takes through `include_str!`.
+const CONFINED_EMIT_CEILING_TOML =
+  'policy_version = 1\n\n' +
+  readFileSync(join(REPO_ROOT, 'policies/confined-system-shape.inject.toml'), 'utf8');
 
 function assert(cond, msg) {
   if (!cond) {
@@ -139,11 +163,14 @@ const envelope = {
           columns: [{ kind: 'column', name: 'slug' }],
         },
       ],
-      runtimeOptions: {
-        softDelete: true,
-        versioning: true,
-        strictness: 'lenient',
-      },
+      // `strictness` is the only runtime option a no-inject charter can satisfy.
+      // `softDelete` and `versioning` each REQUIRE exactly one assignment
+      // generator, and generators are charter data - an injected column's
+      // `assign = { by = "now", on = "delete" }`, never a column this envelope
+      // could declare. Declaring them here would declare an option nothing in
+      // this call can satisfy; they are exercised under the production ceiling
+      // in the confined half below.
+      runtimeOptions: { softDelete: false, versioning: false, strictness: 'lenient' },
     },
   ],
 };
@@ -186,11 +213,70 @@ assert(
 );
 assert(!/\btable\s*\(/.test(source), 'generated artifact does not execute a table lifecycle operation');
 
+// The lifecycle half: the SAME renderer under the production schema-emit
+// ceiling. A collection that turns `softDelete`/`versioning` on is refused
+// unless exactly one injected assignment generates each - a delete-event `now`
+// and a write-event `increment`. Those live in the charter, so this is the only
+// charter under which the option spellings can be rendered at all, and the
+// collection below therefore declares columns and nothing else.
+const confinedEnvelope = {
+  ir_version: addon.irVersion(),
+  name: 'confined_lifecycle_typecheck',
+  ops: [
+    {
+      op: 'createTable',
+      name: 'articles',
+      columns: [{ name: 'title', type: 'text', nullable: false }],
+      primaryKey: null,
+      constraints: [],
+      indexes: [],
+      runtimeOptions: { softDelete: true, versioning: true, strictness: 'strict' },
+    },
+  ],
+};
+
+const confinedReply = addon.genArtifacts({
+  envelopes: [confinedEnvelope],
+  dialect: 'postgres',
+  charterLayers: [CONFINED_EMIT_CEILING_TOML],
+});
+assert(confinedReply.ok, `genArtifacts under the confined ceiling succeeds: ${confinedReply.error ?? 'unknown error'}`);
+const confinedSource = confinedReply.envDbTs;
+assert(typeof confinedSource === 'string', 'the confined call returns envDbTs source');
+
+assert(
+  /options:\s*\{\s*softDelete:\s*true\s*,\s*versioning:\s*true\s*\}/.test(confinedSource),
+  'renders both lifecycle options once their generators are injected',
+);
+assert(
+  /deleted_at:\s*t\.timestamp\(\)/.test(confinedSource),
+  'renders the injected delete-event column the softDelete generator assigns',
+);
+assert(
+  /version:\s*t\.int\(\)\s*\.required\(\)\s*\.default\(1\)/.test(confinedSource),
+  'renders the injected write-event column the versioning generator increments',
+);
+// The generators reach the OTHER artifact of the same call as typed per-field
+// facts, which is what the runtime reads; `env.db.ts` carries only the options.
+const confinedRuntime = JSON.parse(confinedReply.runtimeJson);
+const articleFields = confinedRuntime.collections.articles.fields;
+assert(
+  articleFields.deleted_at.assign?.by === 'now' && articleFields.deleted_at.assign?.on === 'delete',
+  'preserves the delete-event generator on the descriptor field',
+);
+assert(articleFields.deleted_at.softDelete === true, 'marks the soft-delete field on the descriptor');
+assert(
+  articleFields.version.assign?.by === 'increment(1)' && articleFields.version.assign?.on === 'write',
+  'preserves the write-event increment generator on the descriptor field',
+);
+assert(articleFields.version.concurrency === true, 'marks the concurrency field on the descriptor');
+
 // Root the harness inside the real package tree, matching the package doc gates,
 // so `import ... from "@zeroship/migrate"` resolves its built public declarations.
 const dir = mkdtempSync(join(AUTHORING_ROOT, 'node_modules', '.codegen-gate-'));
 try {
   writeFileSync(join(dir, 'env.db.ts'), source, 'utf8');
+  writeFileSync(join(dir, 'env.db.confined.ts'), confinedSource, 'utf8');
   const tsconfig = {
     extends: resolve(AUTHORING_ROOT, 'tsconfig.json'),
     compilerOptions: {
@@ -198,7 +284,7 @@ try {
       rootDir: dir,
       types: [],
     },
-    include: ['env.db.ts'],
+    include: ['env.db.ts', 'env.db.confined.ts'],
   };
   const configPath = join(dir, 'tsconfig.json');
   writeFileSync(configPath, JSON.stringify(tsconfig), 'utf8');
@@ -215,7 +301,12 @@ try {
     });
   } catch (error) {
     const diagnostics = `${error.stdout ?? ''}${error.stderr ?? ''}`;
-    assert(false, `generated env.db.ts must typecheck against zero-migrate\n${diagnostics}\n--- generated source ---\n${source}`);
+    assert(
+      false,
+      `generated env.db.ts must typecheck against zero-migrate\n${diagnostics}` +
+        `\n--- generated source ---\n${source}` +
+        `\n--- generated source (confined ceiling) ---\n${confinedSource}`,
+    );
   }
 } finally {
   rmSync(dir, { recursive: true, force: true });
