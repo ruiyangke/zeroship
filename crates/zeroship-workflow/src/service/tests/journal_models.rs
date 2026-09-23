@@ -60,6 +60,20 @@ async fn read_contract(store: Rc<OrmStore>) {
         (&first_app, other_run.as_str()),
     ];
     let count = i32::try_from(RowLimit::default().get()).unwrap() + 1;
+    // A run's input is an object, and admitting the run takes an edge on that
+    // object, so the bytes reach the store before the transaction that admits
+    // it opens. Only generation 0 is admitted through the funnel; generation 1
+    // is written into the row below the way restart records it, taking no edge
+    // and needing no object.
+    let objects = objects::Objects::new();
+    for (scope, (app_id, _)) in scopes.iter().enumerate() {
+        objects
+            .start_input(
+                &service.fixture_app((*app_id).clone()),
+                json!({"scope":scope, "generation":0}),
+            )
+            .await;
+    }
     let mut tx = service.begin().await.unwrap();
     for app_id in [&first_app, &second_app] {
         app::lock_app(&mut tx, app_id).await.unwrap();

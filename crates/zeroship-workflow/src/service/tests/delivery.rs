@@ -929,7 +929,11 @@ async fn retained_history(
 ) {
     let service = &scope.service;
     let tx = service.begin().await.unwrap();
+    // Ordered so each table is dropped before the one it points at. A run owns
+    // the object it starts from through an edge on its generation, so that edge
+    // goes first or the generation cannot be removed at all.
     for table in [
+        "payload_refs",
         "tasks",
         "steps",
         "continuation_members",
