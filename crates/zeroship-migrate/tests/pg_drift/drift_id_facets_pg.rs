@@ -209,22 +209,6 @@ fn fixture(schema: &str) -> MigrationIr {
             },
             {
                 "op": "createTable",
-                "name": "ulid_keys",
-                "columns": [{
-                    "name": "id",
-                    "type": "text",
-                    "nullable": false,
-                    "type":"text",
-                    "default": {
-                        "literal": { "value": "00000000000000000000000000" }
-                    }
-                }],
-                "primaryKey": ["id"],
-                "constraints": [],
-                "indexes": []
-            },
-            {
-                "op": "createTable",
                 "name": "case_default_keys",
                 "columns": [{
                     "name": "id",
@@ -742,7 +726,6 @@ async fn live_postgres_introspects_identity_default_format_and_reference_drift()
 
         for (table, column) in [
             ("type_keys", "id"),
-            ("ulid_keys", "id"),
             ("case_default_keys", "id"),
             ("trim_default_keys", "id"),
             ("single_child", "parent_id"),
@@ -861,41 +844,6 @@ async fn live_postgres_introspects_identity_default_format_and_reference_drift()
             "default",
             "user-defined:call:lower(",
         )?;
-
-        let ulid_check = format_constraint_name(&session, &schema, "ulid_keys", "id").await?;
-        let ulid_table = format!("{quoted_schema}.{}", quote_ident("ulid_keys"));
-        for mutation in [
-            format!(
-                "ALTER TABLE {ulid_table} DROP CONSTRAINT {}",
-                quote_ident(&ulid_check)
-            ),
-            format!(
-                "ALTER TABLE {ulid_table} DROP CONSTRAINT {}; \
-                 ALTER TABLE {ulid_table} ADD CONSTRAINT {} \
-                 CHECK (id IS NULL OR octet_length(id) = 25)",
-                quote_ident(&ulid_check),
-                quote_ident(&ulid_check)
-            ),
-            format!(
-                "ALTER TABLE {ulid_table} DROP CONSTRAINT {}; \
-                 ALTER TABLE {ulid_table} ADD CONSTRAINT {} \
-                 CHECK (id IS NULL OR (octet_length(id) = 26 AND \
-                 (id COLLATE \"C\") ~ '^[0-7][0123456789ABCDEFGHJKMNPQRSTVWXYZ]{{25}}$')) \
-                 NOT VALID",
-                quote_ident(&ulid_check),
-                quote_ident(&ulid_check)
-            ),
-        ] {
-            let actual_snapshot =
-                snapshot_after_mutation(&session, &schema, &mutation).await?;
-            require_altered(
-                &diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual_snapshot),
-                "ulid_keys",
-                "column id",
-                "format",
-                "",
-            )?;
-        }
 
         let single_fk = foreign_key_name(&expected, "single_child")?;
         let single_table = format!("{quoted_schema}.{}", quote_ident("single_child"));

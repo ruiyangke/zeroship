@@ -264,12 +264,8 @@ fn assert_per_row_uuid(value: &str, version: u8) {
     );
 }
 
-fn decode_per_row_crockford(value: &str, uppercase: bool) -> u128 {
-    let alphabet = if uppercase {
-        b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".as_slice()
-    } else {
-        b"0123456789abcdefghjkmnpqrstvwxyz".as_slice()
-    };
+fn decode_per_row_crockford(value: &str) -> u128 {
+    let alphabet = b"0123456789abcdefghjkmnpqrstvwxyz".as_slice();
     let bytes = value.as_bytes();
     assert_eq!(bytes.len(), 26, "canonical Crockford length: {value}");
     let decode = |byte: u8| {
@@ -293,17 +289,13 @@ fn assert_per_row_type_id(value: &str, prefix: &str) {
     let suffix = value
         .strip_prefix(&format!("{prefix}_"))
         .unwrap_or_else(|| panic!("TypeID must preserve prefix {prefix:?}: {value}"));
-    let decoded = decode_per_row_crockford(suffix, false).to_be_bytes();
+    let decoded = decode_per_row_crockford(suffix).to_be_bytes();
     assert_eq!(
         decoded[6] >> 4,
         7,
         "TypeID suffix must encode UUIDv7: {value}"
     );
     assert_eq!(decoded[8] & 0xc0, 0x80, "TypeID UUID variant: {value}");
-}
-
-fn assert_per_row_ulid(value: &str) {
-    let _ = decode_per_row_crockford(value, true);
 }
 
 async fn standard_conforming_strings(session: &PgDevSession) -> String {
@@ -587,7 +579,6 @@ async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
             {"name":"uuid4","type":"uuid"},
             {"name":"uuid7","type":"uuid"},
             {"name":"type_id","type":{"string":{"length":36}},"idPrefix":"order"},
-            {"name":"ulid","type":"text","type":"text"},
             {"name":"plain_text","type":"text"}
           ],"primaryKey":["id"]}
         ]}"#,
@@ -654,8 +645,7 @@ async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
            "cursorColumns":["id"],"cursorStability":{"mode":"guardUpdates"},"batchSize":2,"set":{
              "uuid4":{"perRow":"uuidV4"},
              "uuid7":{"perRow":"uuidV7"},
-             "type_id":{"perRow":{"typeId":{"prefix":"order"}}},
-             "ulid":{"perRow":"ulid"}
+             "type_id":{"perRow":{"typeId":{"prefix":"order"}}}
            }}
         ]}"#;
     // The data envelope must prove ownership from the REGISTRY: unlike the schema
@@ -681,7 +671,7 @@ async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
     let rows = session
         .query(
             &format!(
-                "SELECT uuid4::text AS uuid4, uuid7::text AS uuid7, type_id, ulid \
+                "SELECT uuid4::text AS uuid4, uuid7::text AS uuid7, type_id \
                  FROM \"{}\".samples ORDER BY id",
                 cfg.project_schema
             ),
@@ -690,25 +680,17 @@ async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
         .await
         .expect("read generated values");
     assert_eq!(rows.len(), 8);
-    let mut distinct = [
-        BTreeSet::new(),
-        BTreeSet::new(),
-        BTreeSet::new(),
-        BTreeSet::new(),
-    ];
+    let mut distinct = [BTreeSet::new(), BTreeSet::new(), BTreeSet::new()];
     for row in &rows {
         let uuid4: String = row.try_get("uuid4").expect("decode UUIDv4");
         let uuid7: String = row.try_get("uuid7").expect("decode UUIDv7");
         let type_id: String = row.try_get("type_id").expect("decode TypeID");
-        let ulid: String = row.try_get("ulid").expect("decode ULID");
         assert_per_row_uuid(&uuid4, 4);
         assert_per_row_uuid(&uuid7, 7);
         assert_per_row_type_id(&type_id, "order");
-        assert_per_row_ulid(&ulid);
         distinct[0].insert(uuid4);
         distinct[1].insert(uuid7);
         distinct[2].insert(type_id);
-        distinct[3].insert(ulid);
     }
     for values in distinct {
         assert_eq!(

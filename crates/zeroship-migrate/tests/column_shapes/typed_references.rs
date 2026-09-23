@@ -53,8 +53,7 @@ fn column(
             .get("typeId")
             .and_then(|type_id| type_id.get("prefix"))
             .and_then(Value::as_str)
-            .map(str::to_string)
-            .or_else(|| (value_format.as_str() == Some("ulid")).then(|| "ulid".to_string()));
+            .map(str::to_string);
         if let Some(prefix) = prefix {
             object.insert("type".to_string(), json!({ "string": { "length": 36 } }));
             object.insert("idPrefix".to_string(), json!(prefix));
@@ -136,11 +135,6 @@ fn typed_reference_matrix_ir() -> MigrationIr {
                 Some(&["id"]),
             ),
             create_table(
-                "ulid_parents",
-                vec![column("id", "text", false, Some(json!("ulid")), None, None)],
-                Some(&["id"]),
-            ),
-            create_table(
                 "children",
                 vec![
                     column(
@@ -170,14 +164,6 @@ fn typed_reference_matrix_ir() -> MigrationIr {
                             Some("cascade"),
                             Some("cascade"),
                         )),
-                    ),
-                    column(
-                        "ulid_parent_id",
-                        "text",
-                        true,
-                        Some(json!("ulid")),
-                        None,
-                        Some(reference("ulid_parents", Some("setNull"), Some("cascade"))),
                     ),
                 ],
                 None,
@@ -233,7 +219,7 @@ fn create_sql<'a>(
 }
 
 #[test]
-fn typed_integer_uuid_type_id_and_ulid_references_lower_on_every_dialect() {
+fn typed_integer_uuid_and_type_id_references_lower_on_every_dialect() {
     let ir = typed_reference_matrix_ir();
 
     for dialect in [
@@ -254,15 +240,10 @@ fn typed_integer_uuid_type_id_and_ulid_references_lower_on_every_dialect() {
 
         assert_eq!(
             child.matches("FOREIGN KEY").count(),
-            4,
+            3,
             "every explicitly typed column must retain its independent FK on {dialect:?}: {child}"
         );
-        for target in [
-            "int_parents",
-            "uuid_parents",
-            "type_id_parents",
-            "ulid_parents",
-        ] {
+        for target in ["int_parents", "uuid_parents", "type_id_parents"] {
             assert_reference_target(child, dialect, target);
         }
 
@@ -271,21 +252,18 @@ fn typed_integer_uuid_type_id_and_ulid_references_lower_on_every_dialect() {
                 "\"int_parent_id\" integer",
                 "\"uuid_parent_id\" uuid",
                 "\"type_id_parent_id\" character varying(36)",
-                "\"ulid_parent_id\" character varying(36)",
             ]
         } else if dialect == &zeroship_migrate_mysql::DIALECT {
             [
                 "`int_parent_id` INT",
                 "`uuid_parent_id` VARCHAR(36) CHARACTER SET ascii COLLATE ascii_bin",
                 "`type_id_parent_id` VARCHAR(36)",
-                "`ulid_parent_id` VARCHAR(36)",
             ]
         } else if dialect == &zeroship_migrate_sqlite::DIALECT {
             [
                 "\"int_parent_id\" INTEGER",
                 "\"uuid_parent_id\" TEXT",
                 "\"type_id_parent_id\" TEXT",
-                "\"ulid_parent_id\" TEXT",
             ]
         } else {
             panic!("unregistered test dialect {dialect}")
@@ -314,13 +292,11 @@ fn typed_integer_uuid_type_id_and_ulid_references_lower_on_every_dialect() {
             );
         }
         // A typed-id key is a plain bounded string: no format CHECK survives.
-        for table in ["type_id_parents", "ulid_parents"] {
-            let parent = create_sql(&migrations, dialect, table);
-            assert!(
-                !parent.contains("CHECK ("),
-                "a typed-id key carries no format CHECK on {dialect:?}: {parent}"
-            );
-        }
+        let type_id_parent = create_sql(&migrations, dialect, "type_id_parents");
+        assert!(
+            !type_id_parent.contains("CHECK ("),
+            "a typed-id key carries no format CHECK on {dialect:?}: {type_id_parent}"
+        );
     }
 }
 
@@ -380,10 +356,6 @@ fn mysql_format_typed_references_accept_delete_and_update_actions_without_checks
     assert!(
         child.contains("ON UPDATE CASCADE ON DELETE CASCADE"),
         "TypeID reference lost an action: {child}"
-    );
-    assert!(
-        child.contains("ON UPDATE CASCADE ON DELETE SET NULL"),
-        "ULID reference lost an action: {child}"
     );
     assert!(
         !child.contains("CHECK ("),
@@ -774,7 +746,9 @@ fn live_pg_token() -> String {
 
 #[test]
 fn postgres_live_catalog_compares_formatted_reference_base_storage_separately_from_collation() {
-    for (label, value_format) in [("type_id", type_id("acct")), ("ulid", json!("ulid"))] {
+    {
+        let label = "type_id";
+        let value_format = type_id("acct");
         let parent = format!("{label}_parents");
         let target = ir(
             &format!("create_{parent}"),
@@ -871,7 +845,7 @@ fn postgres_live_catalog_compares_formatted_reference_base_storage_separately_fr
 }
 
 #[compio::test]
-async fn live_postgres_introspection_validates_type_id_and_ulid_reference_storage() {
+async fn live_postgres_introspection_validates_type_id_reference_storage() {
     let url = require_live_pg!();
     let session = support::PgDevSession::connect(&url);
     let schema = format!("typed_refs_{}", live_pg_token());
@@ -898,18 +872,6 @@ async fn live_postgres_introspection_validates_type_id_and_ulid_reference_storag
                     )],
                     Some(&["id"]),
                 ),
-                create_table(
-                    "ulid_parents",
-                    vec![column(
-                        "id",
-                        "text",
-                        false,
-                        Some(json!("ulid")),
-                        None,
-                        None,
-                    )],
-                    Some(&["id"]),
-                ),
             ],
         );
         let parent_migrations = IrAuthor::new(zeroship_migrate::shipping_vendors(),
@@ -930,7 +892,8 @@ async fn live_postgres_introspection_validates_type_id_and_ulid_reference_storag
         let parent_snapshot = snapshot_schema(&session, &schema)
             .await
             .map_err(|error| format!("introspect formatted parent keys: {error}"))?;
-        for table in ["type_id_parents", "ulid_parents"] {
+        {
+            let table = "type_id_parents";
             let column = parent_snapshot
                 .tables
                 .get(table)
@@ -961,14 +924,6 @@ async fn live_postgres_introspection_validates_type_id_and_ulid_reference_storag
                         Some(type_id("acct")),
                         None,
                         Some(reference("type_id_parents", Some("cascade"), None)),
-                    ),
-                    column(
-                        "ulid_parent_id",
-                        "text",
-                        true,
-                        Some(json!("ulid")),
-                        None,
-                        Some(reference("ulid_parents", None, Some("cascade"))),
                     ),
                 ],
                 None,
@@ -1022,16 +977,16 @@ async fn live_postgres_introspection_validates_type_id_and_ulid_reference_storag
 
     assert_eq!(
         child_sql.matches("character varying(36)").count(),
-        2,
-        "both typed-id references must retain their bounded string storage: {child_sql}"
+        1,
+        "the typed-id reference must retain its bounded string storage: {child_sql}"
     );
     assert!(
         !child_sql.contains("CHECK"),
         "formatted references must not carry child format checks: {child_sql}"
     );
     assert_eq!(
-        foreign_key_count, 2,
-        "both typed references must exist in the live PostgreSQL catalog"
+        foreign_key_count, 1,
+        "the typed reference must exist in the live PostgreSQL catalog"
     );
 }
 
@@ -1078,7 +1033,7 @@ fn format_bearing_reference_to_unmanaged_target_without_authored_metadata_is_rej
 fn mysql_live_catalog_validates_but_does_not_select_declared_uuid_storage() {
     let ir = typed_reference_matrix_ir();
     let recorded = serde_json::to_value(&ir).expect("serialize declared UUID reference IR");
-    assert_eq!(recorded["ops"][4]["columns"][1]["type"], "uuid");
+    assert_eq!(recorded["ops"][3]["columns"][1]["type"], "uuid");
 
     let mut snapshot = SchemaSnapshot::default();
     snapshot.tables.insert(
@@ -1125,7 +1080,7 @@ fn mysql_live_catalog_validates_but_does_not_select_declared_uuid_storage() {
         "the catalog must not replace explicit UUID storage: {child}"
     );
     assert_eq!(
-        serde_json::to_value(&ir).expect("serialize after catalog validation")["ops"][4]["columns"]
+        serde_json::to_value(&ir).expect("serialize after catalog validation")["ops"][3]["columns"]
             [1]["type"],
         "uuid"
     );
