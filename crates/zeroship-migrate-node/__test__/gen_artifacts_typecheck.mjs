@@ -21,7 +21,7 @@ function assert(cond, msg) {
 }
 
 // One final schema that exercises every spelling which previously regressed:
-// UUID v4/v7 defaults, integer auto-increment IDs, TypeID/ULID formats, exact
+// UUID v4/v7 defaults, integer auto-increment IDs, typed-ID prefixes, exact
 // bigint literals, typed single-column references, and composite PK/FK arrays.
 const envelope = {
   ir_version: addon.irVersion(),
@@ -80,15 +80,9 @@ const envelope = {
       columns: [
         {
           name: 'id',
-          type: 'text',
+          type: { string: { length: 36 } },
           nullable: false,
-          valueFormat: { typeId: { prefix: 'usr' } },
-        },
-        {
-          name: 'session_id',
-          type: 'text',
-          nullable: false,
-          valueFormat: 'ulid',
+          idPrefix: 'member',
         },
         {
           name: 'account_id',
@@ -176,8 +170,7 @@ assert(
 assert(/t\.uuid\(\)\s*\.primaryKey\(\)\s*\.default\(uuidV4\(\)\)/.test(source), 'renders the UUID-v4 primary-key composition');
 assert(/\.default\(uuidV7\(\)\)/.test(source), 'renders UUID-v7 defaults with uuidV7()');
 assert(/t\.bigInt\(\)\s*\.primaryKey\(\)\s*\.autoIncrement\(\)/.test(source), 'renders the integer-ID composition');
-assert(/ids\.typeId\(\{\s*prefix:\s*"usr"\s*\}\)\s*\.primaryKey\(\)/.test(source), 'renders the TypeID primary-key composition');
-assert(source.includes('ids.ulid()'), 'renders ULID columns with ids.ulid()');
+assert(/t\.typedId\("member"\)\s*\.primaryKey\(\)/.test(source), 'renders the TypeID primary-key composition');
 assert(source.includes('int64("9007199254740993")'), 'renders exact bigint literals with int64()');
 assert(source.includes('.default("line one\\nline two")'), 'escapes control characters in string defaults');
 assert(

@@ -1,4 +1,4 @@
-import { table, t, ids, now } from "@zeroship/migrate";
+import { table, t, now } from "@zeroship/migrate";
 
 // Departments are the organizational anchor. Public identity is a TypeID
 // (prefix "dept"), so every reference downstream is format-checked. Uniqueness
@@ -10,7 +10,7 @@ export default {
   schema() {
     table("departments").create({
       columns: {
-        id: t.typedId("dept" ).primaryKey(),
+        id: t.typedId("dept").primaryKey(),
         code: t.char({ length: 8 }).required(),
         name: t.string({ length: 255 }).required(),
         is_active: t.boolean().required().default(true),

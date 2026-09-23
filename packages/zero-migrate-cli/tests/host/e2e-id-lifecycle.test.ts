@@ -31,7 +31,7 @@ import {
   type DriverConfig,
   type MigrationModule,
 } from "zero-migrate-cli";
-import { ids, table, t } from "@zeroship/migrate";
+import { table, t } from "@zeroship/migrate";
 import { noInjectPolicy } from "./policy.js";
 
 
