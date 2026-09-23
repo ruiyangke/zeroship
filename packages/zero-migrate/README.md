@@ -16,14 +16,14 @@ npm install @zeroship/migrate
 ## Write a migration
 
 ```ts
-import { ids, now, table, t } from "@zeroship/migrate";
+import { now, table, t } from "@zeroship/migrate";
 
 export default {
   name: "create_orders",
   schema() {
     table("orders").create({
       columns: {
-        id: ids.typeId({ prefix: "ord" }).primaryKey(),
+        id: t.typedId("ord").primaryKey(),
         total: t.numeric({ precision: 12, scale: 2 }).required(),
         status: t.text().required().default("pending"),
         created_at: t.timestamp().required().default(now()),

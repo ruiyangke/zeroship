@@ -1,4 +1,4 @@
-import { table, t, ids, now } from "@zeroship/migrate";
+import { table, t, now } from "@zeroship/migrate";
 
 // Employees carry a TypeID public key (prefix "emp"). The department reference
 // is a format-matched TypeID FK; the grade reference is an int64 FK; manager_id
@@ -10,9 +10,9 @@ export default {
   schema() {
     table("employees").create({
       columns: {
-        id: t.typedId("emp" ).primaryKey(),
-        dept_id: ids
-          .typeId({ prefix: "dept" })
+        id: t.typedId("emp").primaryKey(),
+        dept_id: t
+          .typedId("dept")
           .required()
           .references("departments", "id", { onDelete: "restrict" }),
         grade_id: t
@@ -30,8 +30,8 @@ export default {
         base_salary: t.numeric({ precision: 12, scale: 2 }).required(),
         employment_type: t.string({ length: 32 }).required(),
         status: t.string({ length: 32 }).required().default("active"),
-        manager_id: ids
-          .typeId({ prefix: "emp" })
+        manager_id: t
+          .typedId("emp")
           .references("employees", "id", { onDelete: "setNull" }),
         created_at: t.timestamp().required().default(now()),
       },

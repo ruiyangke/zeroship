@@ -969,7 +969,7 @@ fn render_env_db_ts(
          //\n\
          // This passive schema map reconstructs the current `@zeroship/migrate` authoring\n\
          // API from the folded migration IR. It records no lifecycle operation.\n\
-         import { byteValue, decimal, ids, int64, nextval, now, t, uuidV4, uuidV7, type CreateTableArgs, type Expr } from \"@zeroship/migrate\";\n\n",
+         import { byteValue, decimal, int64, nextval, now, t, uuidV4, uuidV7, type CreateTableArgs, type Expr } from \"@zeroship/migrate\";\n\n",
     );
     body.push_str("const schema = {\n");
     for (table_name, table) in tables {

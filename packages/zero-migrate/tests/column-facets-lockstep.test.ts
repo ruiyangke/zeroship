@@ -1,5 +1,5 @@
 // Artifact-identity parity for the column-level facets (column facets +
-// generated/identity): typed `.references()`, `t.typedId(prefix)`, `ids.ulid()`,
+// generated/identity): typed `.references()`, `t.typedId(prefix)`,
 // `t.vector({ dimensions, metric })`, standalone
 // `t.text().mask({ kind, classification })`, `.generated(...)`, and `.identity(...)`.
 //
@@ -11,7 +11,7 @@
 // re-author the SAME migration through BOTH the
 // `ops.ts` SOURCE (`pub*`) and the COMPILED artifact (`eng*`), then assert the
 // two recorded op lists are byte-identical — proving the shipped engine artifact
-// records the EXACT camelCase wire form (`valueFormat` / `references` / `vectorMetric` /
+// records the EXACT camelCase wire form (`idPrefix` / `references` / `vectorMetric` /
 // `mask:{kind,classification}` / `generated:{expr,stored}` / `identity:{always}`)
 // the source authors, with no compile-time drift.
 
@@ -106,9 +106,9 @@ function authorWith({ begin, drain, t, table }: Rec): any[] {
       title: t.text(),
     },
   });
-  // addColumn carries valueFormat + vectorMetric + mask:
+  // addColumn carries idPrefix + vectorMetric + mask:
   table("documents").column("summary_vec").add({ type: t.vector({ dimensions: 768, metric: "innerProduct" }) });
-  table("documents").column("external_id").add({ type: t.typedId("ext" ) });
+  table("documents").column("external_id").add({ type: t.typedId("ext") });
   table("documents").column("phone").add({ type: t.text().mask({ kind: "last4" }) });
   table("documents").column("added_total").add({
     type: t.int().generated((col: any) => col("qty").mul(col("unit_cents"))),

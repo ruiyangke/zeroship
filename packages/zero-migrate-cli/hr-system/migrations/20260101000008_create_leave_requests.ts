@@ -1,4 +1,4 @@
-import { table, t, ids, uuidV4, now } from "@zeroship/migrate";
+import { table, t, uuidV4, now } from "@zeroship/migrate";
 
 // Leave requests use a database-generated UUIDv4 key (portable across all three
 // dialects; UUIDv7 DB-generation is PostgreSQL-18-only), a format-matched
@@ -11,8 +11,8 @@ export default {
     table("leave_requests").create({
       columns: {
         id: t.uuid().required().default(uuidV4()),
-        employee_id: ids
-          .typeId({ prefix: "emp" })
+        employee_id: t
+          .typedId("emp")
           .required()
           .references("employees", "id", { onDelete: "cascade" }),
         leave_type: t.string({ length: 32 }).required(),

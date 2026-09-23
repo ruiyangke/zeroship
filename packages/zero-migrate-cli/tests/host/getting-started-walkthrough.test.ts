@@ -72,7 +72,7 @@ scope = "all"
 }
 
 /** The schema half of the doc's step-2 migration. */
-const CREATE_USERS = `import { ids, now, table, t } from "@zeroship/migrate";
+const CREATE_USERS = `import { now, table, t } from "@zeroship/migrate";
 
 export const name = "create_users";
 
@@ -80,7 +80,7 @@ export default {
   schema() {
     table("users").create({
       columns: {
-        id: t.typedId("user" ).primaryKey(),
+        id: t.typedId("user").primaryKey(),
         email: t.string({ length: 254 }).required(),
         display_name: t.string({ length: 255 }),
         state: t.string({ length: 32 }).required().default("invited"),
