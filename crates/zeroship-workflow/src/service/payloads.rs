@@ -775,9 +775,9 @@ pub(crate) struct RunGeneration<'a> {
 /// so the two spellings of nothing stay the same run.
 ///
 /// This is where a start value stops being a value. `max_payload_bytes` is what
-/// bounds it from here, because that is the budget the staged object is admitted
-/// and read back under; the journal bound it used to answer to measured an
-/// inline column the generation row no longer has.
+/// bounds it, because that is the budget the staged object is admitted and read
+/// back under. `max_input_bytes` measures an inline journal column, and a
+/// generation row carries none for an input.
 ///
 /// # Errors
 /// Reports an unserializable value and every refusal staging reports.

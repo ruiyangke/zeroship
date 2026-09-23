@@ -267,14 +267,14 @@ impl AppWorkflows {
                 // where object I/O belongs. Staging it at registration instead
                 // would make a deployment manifest a producer of payload
                 // references and leave a schedule pointing at an object whose
-                // lifetime a retired deploy no longer answers for.
+                // lifetime a retired deploy cannot answer for.
                 //
                 // Every firing stages its own object, because staging
                 // deduplicates on a request identity and each firing mints one.
-                // That is the cost every run now pays for its input, and this
-                // one is owned by the run it starts and reclaimed with it. An
-                // attempt that stages and then fails to commit leaves an
-                // ownerless object its staging deadline retires.
+                // That is the cost every run pays for its input, and this one is
+                // owned by the run it starts and reclaimed with it. An attempt
+                // that stages and then fails to commit leaves an ownerless
+                // object its staging deadline retires.
                 let input_ref = super::payloads::stage_start_input(
                     inputs,
                     self,
