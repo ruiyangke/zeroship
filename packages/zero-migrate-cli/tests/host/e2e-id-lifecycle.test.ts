@@ -10,8 +10,9 @@
 // `applyIr` under an in-process driver. The SQLite lifecycle matrix is caught
 // in-process by the Rust crate
 // instead (`crates/zeroship-migrate/tests/column_shapes/uuid_generation.rs`,
-// `type_id_value_format.rs`,
-// `synchronize_identity_sqlite.rs`). What a SQLite arm here could NOT reach either
+// `typed_references.rs` - whose
+// `typed_integer_uuid_and_type_id_references_lower_on_every_dialect` covers the
+// typed-id half across dialects - and `synchronize_identity_sqlite.rs`). What a SQLite arm here could NOT reach either
 // way is `status`, which refuses a `sqlite` driver outright
 // (`status()` in `packages/zero-migrate-cli/src/index.ts`); only
 // `statusEnvelopes({ readOnly: true })` accepts one.
