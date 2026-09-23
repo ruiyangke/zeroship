@@ -30,13 +30,18 @@ pub struct TaskPayloadLimits {
 }
 impl Default for TaskPayloadLimits {
     /// Only `max_payload_bytes` derives from a platform ceiling, because it is
-    /// the only one of these three that describes the same quantity as a policy
-    /// bound: it is the budget a staged payload is read back through, and
+    /// the only one of these three measuring the same bytes as a policy bound:
+    /// it is the budget a staged payload is read back through, and
     /// `AppPolicy::max_payload_bytes` is the budget the same payload was
-    /// admitted under. `max_inline_bytes` chooses between storing a value
-    /// inline and storing it by reference, and `max_result_bytes` bounds the
-    /// runtime's whole result text; neither has a policy bound measuring the
-    /// same thing, so neither derives from one.
+    /// admitted under, so one constant serves both.
+    ///
+    /// `max_result_bytes` bounds the runtime's whole result text and no policy
+    /// bound measures it. `max_inline_bytes` decides whether a value is carried
+    /// inline or replaced by a reference, and an inline value then rides inside
+    /// the checkpoint `AppPolicy::max_input_bytes` bounds - a part of that
+    /// quantity rather than the same one, by an amount only the checkpoint's
+    /// own framing settles. A single constant cannot serve both ends of a
+    /// containment, so this one stays the host's.
     fn default() -> Self {
         Self {
             max_inline_bytes: 1024 * 1024,
@@ -67,6 +72,10 @@ impl TaskPayloadLimits {
     /// the configured budget and has observed no policy; admission knows the
     /// policy and cannot re-read what this host was configured with. Either
     /// check alone leaves one direction open.
+    ///
+    /// For a host that takes [`Self::default`] the budget is at the ceiling by
+    /// derivation, so this belongs to a host whose budget arrives from
+    /// configuration and could be anything.
     ///
     /// Distinct from [`Self::validate`], which compares a budget against
     /// itself and runs on every execution, including the deliberately narrow
