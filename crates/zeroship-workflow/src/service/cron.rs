@@ -7,7 +7,7 @@
 
 use super::{
     activation,
-    app::{decode, encode, insert_root_run, live_runs, lock_app_state},
+    app::{decode, encode, insert_root_run, live_runs, lock_app_state, NewRun},
     delivery::{self, CapturedLease, JobReceipt},
     deployment_retention::admission_generation,
     deployments::unavailable,
@@ -337,20 +337,18 @@ impl AppWorkflows {
                 }
                 let run_id = (!skip).then(|| cron.run_id.as_str().to_owned());
                 if !skip {
-                    insert_root_run(
-                        &mut tx,
-                        self.app_id(),
-                        cron.run_id.as_str(),
-                        &registration.workflow_name,
-                        &deployment.id,
-                        &StartOptions {
-                            input_ref: input_ref.clone(),
-                            ..Default::default()
-                        },
-                        None,
-                        now,
-                    )
-                    .await?;
+                    let options = StartOptions {
+                        input_ref: input_ref.clone(),
+                        ..Default::default()
+                    };
+                    let run = NewRun {
+                        id: cron.run_id.as_str(),
+                        name: &registration.workflow_name,
+                        deploy: &deployment.id,
+                        options: &options,
+                        input_source: None,
+                    };
+                    insert_root_run(&mut tx, self.app_id(), &run, now).await?;
                     let changed = tx
                         .database()
                         .entity::<runs::Entity>()?

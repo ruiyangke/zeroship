@@ -116,11 +116,13 @@ async fn contract(store: Rc<OrmStore>, fault: Fault) {
         app::insert_root_run(
             &mut tx,
             app_id,
-            run_id,
-            "Example",
-            &deploy.id,
-            &StartOptions::default(),
-            None,
+            &app::NewRun {
+                id: run_id,
+                name: "Example",
+                deploy: &deploy.id,
+                options: &StartOptions::default(),
+                input_source: None,
+            },
             now,
         )
         .await

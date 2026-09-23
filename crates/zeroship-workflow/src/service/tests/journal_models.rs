@@ -84,14 +84,16 @@ async fn read_contract(store: Rc<OrmStore>) {
         app::insert_root_run(
             &mut tx,
             app_id,
-            run_id,
-            "Example",
-            &deploy.id,
-            &StartOptions {
+            &app::NewRun {
+                id: run_id,
+                name: "Example",
+                deploy: &deploy.id,
+                options: &StartOptions {
                 input_ref: Some(output_reference(&seed(scope, 0))),
                 ..Default::default()
             },
-            None,
+                input_source: None,
+            },
             now,
         )
         .await
@@ -363,11 +365,13 @@ async fn replayed_error_contract(store: Rc<OrmStore>) {
     app::insert_root_run(
         &mut tx,
         &app_id,
-        &run_id,
-        "Example",
-        &deploy.id,
-        &StartOptions::default(),
-        None,
+        &app::NewRun {
+            id: &run_id,
+            name: "Example",
+            deploy: &deploy.id,
+            options: &StartOptions::default(),
+            input_source: None,
+        },
         now,
     )
     .await

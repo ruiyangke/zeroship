@@ -91,11 +91,13 @@ async fn seed_unassigned_backlog(service: &WorkflowService, source: &AppId) {
         crate::service::app::insert_root_run(
             &mut tx,
             &app,
-            &typed_id::new_workflow_run_id(),
-            "Example",
-            &deploy_id,
-            &StartOptions::default(),
-            None,
+            &crate::service::app::NewRun {
+                id: &typed_id::new_workflow_run_id(),
+                name: "Example",
+                deploy: &deploy_id,
+                options: &StartOptions::default(),
+                input_source: None,
+            },
             0,
         )
         .await

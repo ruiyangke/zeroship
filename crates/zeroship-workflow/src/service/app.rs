@@ -398,7 +398,14 @@ impl AppWorkflows {
                 ));
             }
             let id = typed_id::new_workflow_run_id();
-            insert_root_run(&mut tx, &self.app, &id, name, &deploy.id, &options, None, now).await?;
+            let run = NewRun {
+                id: &id,
+                name,
+                deploy: &deploy.id,
+                options: &options,
+                input_source: None,
+            };
+            insert_root_run(&mut tx, &self.app, &run, now).await?;
             StartedRun {
                 id,
                 state: RunState::Queued,
@@ -773,21 +780,10 @@ pub(crate) struct NewRun<'a> {
 pub(crate) async fn insert_root_run(
     tx: &mut Transaction,
     app: &AppId,
-    id: &str,
-    name: &str,
-    deploy: &str,
-    options: &StartOptions,
-    input_source: Option<&Row>,
+    run: &NewRun<'_>,
     now: i64,
 ) -> Result<(), WorkflowServiceError> {
-    let run = NewRun {
-        id,
-        name,
-        deploy,
-        options,
-        input_source,
-    };
-    insert_run(tx, app, &run, now, None).await
+    insert_run(tx, app, run, now, None).await
 }
 
 pub(crate) async fn insert_continued_run(
@@ -827,7 +823,7 @@ async fn insert_run(
         .collection(models::generations::Entity::COLLECTION)?
         .insert(value!({
             "id":super::types::storage_id(), "app_id":app.as_str(), "run_id":id, "generation":0, "deploy_id":deploy,
-            "input_ref":options.input_ref.as_ref().map(|reference|encode(reference)).transpose()?,
+            "input_ref":options.input_ref.as_ref().map(encode).transpose()?,
             "state":"queued", "started_at":now,
         }))
         .await?;
