@@ -7,8 +7,10 @@ use zeroship_core::types::{
     AccountState, AppNetPolicy, AppRuntimeLimits, AppUsage, AppVersionInfo, ControlEvent,
     NetEgressEntry, RouteEntry, SpendState,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use zeroship_core::app_id::AppId;
+use zeroship_core::database_role::DatabaseCapability;
+use zeroship_core::DatabaseId;
 
 #[test]
 fn control_event_deploy_json() {
@@ -479,6 +481,8 @@ fn worker_round_trips_through_json() {
 
 #[test]
 fn app_version_info_serializes_with_manifest() {
+    let main = DatabaseId::mint();
+    let analytics = DatabaseId::mint();
     let info = AppVersionInfo {
         deploy_hash: Some(SHA_A.to_string()),
         plan_id: "pro".into(),
@@ -507,6 +511,10 @@ fn app_version_info_serializes_with_manifest() {
             max_sockets: 4,
             egress_ceiling_bytes: 1024 * 1024,
         },
+        live_bindings: BTreeMap::from([
+            (main.clone(), DatabaseCapability::ReadWrite),
+            (analytics.clone(), DatabaseCapability::ReadOnly),
+        ]),
     };
     let json = serde_json::to_string(&info).unwrap();
     assert!(json.contains("\"manifest\""), "manifest is on the wire: {json}");
@@ -531,6 +539,17 @@ fn app_version_info_serializes_with_manifest() {
     assert_eq!(decoded.net_policy.egress[0].verdict, Verdict::Accept);
     assert_eq!(decoded.net_policy.egress[1].destination, "93.184.216.0/24");
     assert_eq!(decoded.net_policy.egress[1].verdict, Verdict::Reject);
+    // Each database keeps its OWN capability across the wire. A feed that
+    // carried one value for the app - or only a count of them - would arrive
+    // here unable to say which database moved, and a worker comparing it could
+    // not see a capability narrowed under a set whose size never changed.
+    assert_eq!(
+        decoded.live_bindings,
+        BTreeMap::from([
+            (main, DatabaseCapability::ReadWrite),
+            (analytics, DatabaseCapability::ReadOnly),
+        ])
+    );
 }
 
 #[test]
@@ -542,30 +561,90 @@ fn app_version_info_omits_missing_manifest() {
         env_version: 0,
         manifest: None,
         net_policy: AppNetPolicy::default(),
+        live_bindings: BTreeMap::new(),
     };
     let json = serde_json::to_string(&info).unwrap();
     assert!(
         !json.contains("\"manifest\""),
         "manifest absent when None: {json}"
     );
+    // The binding set is NOT skipped when empty. "This app binds no database"
+    // is a statement the feed makes - it is what a worker compares its isolate
+    // against to find that a binding was withdrawn - and an omitted field would
+    // make the producer's silence indistinguishable from it.
+    assert!(
+        json.contains("\"live_bindings\":{}"),
+        "an app with no live binding says so on the wire: {json}"
+    );
     let decoded: AppVersionInfo = serde_json::from_str(&json).unwrap();
     assert!(decoded.manifest.is_none());
+    assert!(decoded.live_bindings.is_empty());
 }
 
 #[test]
-fn app_version_info_fills_its_defaulted_fields() {
+fn app_version_info_fills_its_defaulted_fields_but_refuses_an_absent_binding_set() {
     // `manifest` and `net_policy` are `#[serde(default)]`: an app that has not
     // deployed carries no manifest, and no egress rule is deny-by-default.
     let json = r#"{
         "deploy_hash": null,
         "plan_id": "free",
         "runtime": {},
-        "env_version": 3
+        "env_version": 3,
+        "live_bindings": {}
     }"#;
     let info: AppVersionInfo = serde_json::from_str(json).unwrap();
     assert!(info.manifest.is_none());
     assert_eq!(info.env_version, 3);
     assert_eq!(info.net_policy, AppNetPolicy::default());
+    assert!(info.live_bindings.is_empty());
+
+    // `live_bindings` is NOT defaulted, and this is the rejection control for
+    // the acceptance above: the empty set is a value this field carries, so a
+    // default would read a producer that stopped emitting the field as an app
+    // that binds nothing, and every worker's binding comparison would go quiet
+    // with nothing failing. The one variable between the two payloads is the
+    // presence of the field.
+    let without = r#"{
+        "deploy_hash": null,
+        "plan_id": "free",
+        "runtime": {},
+        "env_version": 3
+    }"#;
+    let error = serde_json::from_str::<AppVersionInfo>(without)
+        .expect_err("a version feed entry with no binding set is refused");
+    assert!(
+        error.to_string().contains("live_bindings"),
+        "the refusal must name the missing field: {error}"
+    );
+}
+
+#[test]
+fn app_version_info_keys_its_binding_set_by_database_id() {
+    let database = DatabaseId::mint();
+    let json = format!(
+        r#"{{"deploy_hash":null,"plan_id":"free","runtime":{{}},"env_version":0,
+             "live_bindings":{{"{}":"readonly"}}}}"#,
+        database.as_str()
+    );
+    let info: AppVersionInfo = serde_json::from_str(&json).expect("a database-keyed set decodes");
+    assert_eq!(
+        info.live_bindings.get(&database),
+        Some(&DatabaseCapability::ReadOnly)
+    );
+
+    // The rejection control: a key outside the typed-id grammar names no
+    // database this worker can resolve a binding for, and is refused rather
+    // than carried as text.
+    let foreign = json.replace(database.as_str(), "not-a-database-id");
+    serde_json::from_str::<AppVersionInfo>(&foreign)
+        .expect_err("a binding keyed by something that is not a database id is refused");
+
+    // And so is a capability the one codec does not read: a feed entry the
+    // cluster reconciler could not compose a role from must not decode as
+    // whichever capability a default picked.
+    let unreadable = json.replace("readonly", "read_only");
+    serde_json::from_str::<AppVersionInfo>(&unreadable)
+        .expect_err("a capability spelling nothing writes is refused");
 }
 
 // -- AssetEntry variants (Tier 4b: pre-compressed encoding variants) -----

@@ -221,7 +221,9 @@ pub fn validate_poll_interval_secs(secs: u64) -> Result<u64, String> {
 /// - the deploy hash changed (new code),
 /// - the runtime limits changed (CPU / wall / heap),
 /// - the env version changed (var/secret rotation),
-/// - the raw-TCP net policy changed (grant/revoke/cap edit).
+/// - the raw-TCP net policy changed (grant/revoke/cap edit),
+/// - the live binding set changed (a database bound, unbound, or its
+///   capability edited).
 ///
 /// The env arm is SEC-7: a pure env bump (dashboard secret rotation, no
 /// redeploy) must reload the isolate. The runtime materializes the `env`
@@ -239,6 +241,18 @@ pub fn validate_poll_interval_secs(secs: u64) -> Result<u64, String> {
 /// `info.env_version`, so comparing against it would mask the rotation).
 /// `loaded == None` (isolate cached but nothing recorded) is treated as
 /// "unknown state" → reload, never "assume current".
+///
+/// The binding arm is the database half of the same argument. An isolate
+/// captures the bindings its sessions narrow with while it builds, by value,
+/// so nothing that moves the host's binding store afterwards reaches it: an
+/// app that has just been bound to a database has no `env.db` handle for it
+/// until an isolate is built holding one, and an app whose binding was
+/// withdrawn keeps composing the role that withdrawal retired. Neither is
+/// visible in the deploy hash, the limits, the env version or the net policy,
+/// so without this comparison both wait for the worker PROCESS to restart. A
+/// binding's lifetime is therefore the isolate's, and this is where the isolate
+/// ends: [`resupply_bindings`] installs the set the replacement is built from
+/// before it is built.
 pub fn needs_reload(
     loaded: Option<&cache::LoadedMeta>,
     local_limits: Option<RuntimeLimits>,
@@ -251,7 +265,12 @@ pub fn needs_reload(
     let limits_changed = local_limits != Some(cache::runtime_limits_from_app(&info.runtime));
     let env_changed = loaded.map(|m| m.env_version) != Some(info.env_version);
     let net_policy_changed = loaded.map(|m| &m.net_policy) != Some(&info.net_policy);
-    hash_changed || limits_changed || env_changed || net_policy_changed
+    // The WHOLE set, compared for equality. A count over it collapses the three
+    // changes that matter into one number: a database gained, a database
+    // withdrawn, and a capability narrowed or widened under a set whose size
+    // never moved.
+    let live_bindings_changed = loaded.map(|m| &m.live_bindings) != Some(&info.live_bindings);
+    hash_changed || limits_changed || env_changed || net_policy_changed || live_bindings_changed
 }
 
 async fn reconcile_once(
@@ -364,6 +383,27 @@ async fn reconcile_once(
                                 continue;
                             };
 
+                            // BEFORE the isolate is built, never after: an
+                            // isolate captures the bindings its sessions narrow
+                            // with while it builds, so a re-resolution that
+                            // followed `load_app` would leave the replacement
+                            // holding the set its predecessor was built from -
+                            // the state this reload exists to leave. A
+                            // resolution that fails leaves the previous isolate
+                            // standing and this app for the next cycle, for the
+                            // same reason the bundle and env failures above do:
+                            // an isolate built on a binding set control would
+                            // not serve is worse than the one already running.
+                            if let Err(error) = resupply_bindings(config, local_id, info).await {
+                                tracing::warn!(
+                                    app_id = local_id.as_str(),
+                                    %error,
+                                    "worker-sync: binding re-resolution failed; keeping the \
+                                     previous isolate"
+                                );
+                                continue;
+                            }
+
                             match cache::load_app(
                                 local_id.clone(),
                                 executable.modules,
@@ -386,6 +426,7 @@ async fn reconcile_once(
                                             deploy_hash: info.deploy_hash.clone(),
                                             env_version: info.env_version,
                                             net_policy: info.net_policy.clone(),
+                                            live_bindings: info.live_bindings.clone(),
                                         },
                                     );
                                     tracing::info!(
@@ -519,7 +560,10 @@ pub async fn fetch_app_env_supplying(
     // `mint_db_for_binding` takes a `DbBinding` by value and `build_env_object`
     // runs once - so a store that moved would not move an isolate already
     // running. The guard keeps a second isolate for an already-resolved app
-    // from re-reading what the first installed.
+    // from re-reading what the first installed; what the guard therefore
+    // CANNOT do is follow a binding set that changed under a resolved app, and
+    // that is [`resupply_bindings`]'s job, at the one moment it is safe - the
+    // replacement of the isolate itself.
     if let Some(bindings) = bindings {
         let app = app_id.as_str();
         if !bindings.is_bound(app).map_err(|error| error.to_string())? {
@@ -539,6 +583,45 @@ pub async fn fetch_app_env_supplying(
     }
     let url = control_app_url(url_base, endpoints::CONTROL_APP_ENV, app_id.as_str());
     http_get(&url, control_authorization(service_auth)?.as_deref()).await
+}
+
+/// Make this host's binding store agree with the set Control now reports, for
+/// an app whose isolate is about to be built or rebuilt.
+///
+/// The counterpart to the `is_bound` guard in [`fetch_app_env_supplying`].
+/// That guard is what keeps a binding change from reaching an isolate already
+/// running: the binding follows the isolate, so nothing re-reads it under one.
+/// This is the point where the isolate is REPLACED, which is the only moment at
+/// which installing a different set is safe, and the guard would otherwise
+/// leave the replacement inheriting the set its predecessor was built on.
+///
+/// `AppVersionInfo::live_bindings` decides whether a read happens at all: it is
+/// the binding topology Control reports for this app, so a store that already
+/// agrees with it has nothing to resolve, and an app Control reports no live
+/// binding for is unbound here rather than read for. The read itself serves the
+/// binding ids, which no worker composes.
+pub(crate) async fn resupply_bindings(
+    config: &WorkerConfig,
+    app_id: &AppId,
+    info: &AppVersionInfo,
+) -> Result<(), String> {
+    let Some(bindings) = crate::cache::app_bindings() else {
+        return Ok(());
+    };
+    let app = app_id.as_str();
+    if bindings.live_bindings_for(app) == info.live_bindings {
+        return Ok(());
+    }
+    let resolved = if info.live_bindings.is_empty() {
+        Vec::new()
+    } else {
+        let url = control_app_url(&config.control_url, endpoints::CONTROL_APP_BINDINGS, app);
+        let body = http_get(&url, control_authorization(&config.service_auth)?.as_deref()).await?;
+        parse_resolved_bindings(&body)?
+    };
+    bindings
+        .replace_app(app, resolved)
+        .map_err(|error| error.to_string())
 }
 
 /// Install the binding set Control served for one app.
