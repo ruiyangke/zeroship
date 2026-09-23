@@ -1,6 +1,11 @@
 # One schema builder: merge the `@zeroship/db` and `@zeroship/migrate` `t.*` surfaces into a shared leaf package
 
-**Status:** PROPOSED — 2026-09-16 · **Origin:** `docs/reviews/2026-09-16-orm-api-review.md` BUG-1 (ORM API review)
+**Status:** BUILT in `da2aaa371`, which extracted the `@zeroship/schema` leaf and renamed `date` to
+`timestamp`. Verified: the leaf is `packages/schema/src/index.ts`, and both `packages/db` and
+`packages/zero-migrate` declare it as a dependency, so the two `t.*` surfaces share one source.
+The step list below was not re-audited item by item, so read an individual step as unverified
+rather than as done. Open question 1 is a follow-up design and was never part of this merge.
+· **Origin:** `docs/reviews/2026-09-16-orm-api-review.md` BUG-1 (ORM API review)
 
 Design review the same day settled the vocabulary table, the semantic forks
 (temporal, protection, identity, numbers, validation, arrays, structured
