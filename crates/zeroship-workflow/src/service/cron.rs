@@ -253,6 +253,14 @@ impl AppWorkflows {
                     return Err(invalid());
                 }
                 let registration = cron.declaration(&deployment)?;
+                // A schedule's input rides inline on the manifest, which is
+                // what `ScheduleRegistration::validate` bounded when the
+                // deployment was accepted. Policy can narrow between then and
+                // now, so the same value answers to the same bound again here,
+                // under the policy this occurrence is admitted on.
+                if encode(&registration.input)?.len() > authority.policy().max_input_bytes {
+                    return Err(WorkflowServiceError::PayloadTooLarge);
+                }
                 // The schedule declares its input inline, and the run it starts
                 // names an object, so the value becomes one here: at
                 // ACTIVATION, holding no lock and no transaction, which is

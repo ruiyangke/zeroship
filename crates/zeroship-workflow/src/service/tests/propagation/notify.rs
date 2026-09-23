@@ -175,7 +175,7 @@ pub(super) async fn superseded(store: Rc<OrmStore>) {
             &task.token,
             execution(json!([{
                 "kind":"Child", "ordinal":0, "name":"child", "childWorkflowName":"Child",
-                "options":{}, "input":{}
+                "options":{}
             }])),
         )
         .await

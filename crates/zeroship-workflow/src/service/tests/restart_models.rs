@@ -130,7 +130,7 @@ async fn contract(store: Rc<OrmStore>, fault: Fault) {
             .unwrap();
         tx.database().collection(models::generations::Entity::COLLECTION).unwrap()
             .insert(value!({"id":storage_id(), "app_id":app_id.as_str(), "run_id":*run_id, "generation":1,
-                "deploy_id":deploy.id, "input":"null", "state":"completed", "started_at":now, "terminal_at":now}))
+                "deploy_id":deploy.id, "state":"completed", "started_at":now, "terminal_at":now}))
             .await.unwrap();
         crate::service::continuations::restart(&tx, app_id, &source, run_id, 1)
             .await

@@ -91,7 +91,7 @@ async fn parent(
             &task.token,
             execution(json!([{
                 "kind":"Child", "ordinal":0, "name":"child", "childWorkflowName":"Child",
-                "options":{"key":key, "cascade":true}, "input":{}
+                "options":{"key":key, "cascade":true}
             }])),
         )
         .await
@@ -148,7 +148,7 @@ async fn continue_run(
             worker,
             &task.id,
             &task.token,
-            execution(json!([{"kind":"ContinueAsNew", "input":"next"}])),
+            execution(json!([{"kind":"ContinueAsNew"}])),
         )
         .await
         .unwrap();
@@ -434,7 +434,7 @@ async fn rollback(store: Rc<OrmStore>) {
             &app_id,
             &run,
             &policy,
-            execution(json!([{"kind":"ContinueAsNew", "input":"uncommitted"}])),
+            execution(json!([{"kind":"ContinueAsNew"}])),
             now,
         ))
         .await
@@ -464,7 +464,7 @@ async fn rollback(store: Rc<OrmStore>) {
             &worker,
             &task.id,
             &task.token,
-            execution(json!([{"kind":"ContinueAsNew", "input":"committed"}])),
+            execution(json!([{"kind":"ContinueAsNew"}])),
         )
         .await
         .unwrap();
@@ -506,7 +506,7 @@ async fn compensable_carry(store: Rc<OrmStore>) {
             &task.token,
             execution(json!([
                 {"kind":"StepCompleted", "ordinal":0, "name":"reserve", "compensable":true, "output":0},
-                {"kind":"ContinueAsNew", "input":"next"},
+                {"kind":"ContinueAsNew"},
             ])),
         )
         .await
@@ -555,7 +555,7 @@ async fn compensable_carry(store: Rc<OrmStore>) {
             &task.token,
             execution(json!([
                 {"kind":"StepCompleted", "ordinal":0, "name":"reserve", "compensable":false, "output":0},
-                {"kind":"ContinueAsNew", "input":"next"},
+                {"kind":"ContinueAsNew"},
             ])),
         )
         .await

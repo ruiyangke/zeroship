@@ -102,7 +102,7 @@ async fn completed_family(service: &WorkflowService, objects: &Objects, app_id: 
             &task.token,
             execution(json!([{
                 "kind":"Child", "ordinal":0, "name":"child", "childWorkflowName":"Child",
-                "input":{}, "options":{}
+                "options":{}
             }])),
         )
         .await
@@ -114,7 +114,7 @@ async fn completed_family(service: &WorkflowService, objects: &Objects, app_id: 
             &worker(),
             &accepted.id,
             &accepted.token,
-            execution(json!([{"kind":"ContinueAsNew", "input":{}}])),
+            execution(json!([{"kind":"ContinueAsNew"}])),
         )
         .await
         .unwrap();
