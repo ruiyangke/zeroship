@@ -1,10 +1,20 @@
 # Retire the schema epoch fence
 
-**Status.** DECIDED by the operator, not built. The platform stops promising that code built
-against an older schema shape is refused before it runs. Creators own migration/deploy sequencing,
-by expand-and-contract, the way every system with migrations does. The binding role and its two
+**Status.** BUILT on `main`, in `2bf158f04`. The platform stops promising that code built against
+an older schema shape is refused before it runs. Creators own migration/deploy sequencing, by
+expand-and-contract, the way every system with migrations does. The binding role and its two
 membership edges stay exactly as they are: that is the tenant boundary and it is not what this
 retires.
+
+The three membership arms that distinguish this from weakening isolation pass by name -
+`a_worker_login_reaches_a_shared_database_only_through_a_live_binding_role`,
+`only_a_noninheriting_membership_keeps_a_binding_out_of_ambient_login_privileges` and
+`set_role_separates_a_missing_role_from_a_role_the_session_may_not_assume`, in
+`crates/zeroship-data-orm/tests/postgres_tenant_fence.rs`.
+
+Removing the rotation also removed the trigger for re-resolving an app's binding SET, which was
+never part of what this retires. That was restored separately, keyed on the live binding set
+rather than on any schema shape, in `7064b2448`.
 
 ---
 

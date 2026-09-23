@@ -15,7 +15,7 @@ tier needs. The cost is that one parser stops being able to attribute a stray ro
 zs_db_<database_id>_mig      database_migrator_role_name
 zs_db_<database_id>_rw       database_capability_role_name(ReadWrite)
 zs_db_<database_id>_ro       database_capability_role_name(ReadOnly)
-zs_bind_<binding_id>_e<E>    binding_role_name
+zs_bind_<binding_id>         binding_role_name
 ```
 
 `crates/zeroship-core/src/database_derivation.rs` wraps them in typed-id signatures, and the
@@ -57,23 +57,16 @@ Control serves `role_name` on `GET /internal/apps/{app_id}/bindings` in place of
 and epoch the worker composes from. `DbBinding::to_database` takes the name rather than deriving
 it. `apply.rs` reads the three database roles from the row it already fetches.
 
-The epoch stays a column. It is already one on `zeroship.databases`, and
-`AppVersionInfo::binding_epochs` already carries it to the worker for the reload comparison, so
-nothing needs the name to be parseable to learn it.
+A binding role name carries one fact: which binding it is. There is no version component to encode,
+so nothing needs the name to be parseable in order to learn anything from it.
 
-## Three things move rather than disappear
+## Two things move rather than disappear
 
 **Truncation moves from compose time to write time.** `refuse_truncation`
 (`crates/zeroship-core/src/database_role.rs`) refuses a name over the identifier limit, and today
 every reader can hit it. As data the check happens once, where the role is minted, and an operator
 sees it at provisioning rather than a creator meeting it at a first query. The guard does not
 weaken; its site improves.
-
-**Rotation becomes an explicit write.** Advancing the epoch currently changes the name implicitly,
-because the name contains the epoch. With the name stored, `rotation::rotate_if_owed`
-(`crates/zeroship-migrate-server/src/rotation.rs`) updates `role_name` in the same transaction
-that mints `E+1` and advances the head. That transaction already exists and is already atomic, so
-this is a column in a statement that is already there.
 
 **The reaper loses its shape test, and this is the real cost.** `classify_role_name`
 (`crates/zeroship-migrate-server/src/datastore/cluster.rs`) attributes a role found on the cluster
@@ -103,10 +96,6 @@ With names as data, a creator-supplied role is a value in a column. The platform
 narrows to it; it mints nothing and needs no `CREATEROLE`. That is the whole of the mechanism
 change. What it does NOT do is carry the rest of the tier:
 
-- **No epoch fence.** The fence works because the platform rotates role names on an apply. Nothing
-  rotates a creator's role, so an isolate built against an older shape is not refused - it meets
-  `42703 undefined_column` at query time, the direction the fence already cannot catch. On a
-  single-tenant database this is the creator's own code against the creator's own schema.
 - **Masking becomes advisory.** Column-level masking is enforced by capability-role grants. A
   creator-supplied role has whatever grants the creator gave it.
 - **Revocation is credential rotation**, not a dropped membership, and so is not instant.
@@ -129,23 +118,20 @@ channel the binding id arrives on now, and PostgreSQL still decides what it open
 1. **Must a role name be DECODABLE, or only UNIQUE?** This is the gating question, and posing it
    this way decides the design rather than following it.
 
-   The epoch is read as a NUMBER, from a column, everywhere that matters - the fence compares
-   nothing, it relies on the retired role having stopped existing; `needs_reload` compares
-   `AppVersionInfo::binding_epochs`; the two-live-epochs cap is arithmetic on the head row. Exactly
-   one site reads an epoch back OUT of a name: `classify_role_name`
-   (`crates/zeroship-migrate-server/src/datastore/cluster.rs`), which parses `zs_bind_<id>_e<N>`
-   and then re-composes it to confirm the parse.
+   NARROWED, and by a change that has landed rather than by an argument here. With the schema
+   epoch retired (`docs/proposals/2026-09-22-retire-the-schema-epoch-fence.md`, built in
+   `2bf158f04`), a binding role name has no version component, so no reader parses one to learn a
+   number. Exactly one site still reads anything back OUT of a name: `classify_role_name`
+   (`crates/zeroship-migrate-server/src/datastore/cluster.rs`), which parses the binding id and
+   then re-composes the name to confirm the parse.
 
-   So the fence needs a name that is UNIQUE per rotation. The reaper needs one that is DECODABLE.
-   Nothing else needs either.
+   So the reaper is now the ONLY constraint, and the question is no longer a trade between two
+   readers. It is: can the reaper attribute a stray role without decoding its name? Its whole job
+   is the orphan whose row is gone, so reading the table cannot answer it. The candidates are a
+   marker written onto the role at mint time - a comment, a membership in a platform-owned group -
+   or accepting that an unattributable role is reported rather than reaped.
 
-   If only uniqueness is required, the convention is free, stored names cost nothing, and the
-   reaper needs a different way to attribute a role whose row is gone - by absence from the table,
-   or by a marker the mint writes onto the role itself. If decodability is required, the convention
-   stays load-bearing and a stored name is a second copy of something the name must still carry,
-   which is the defect this proposal exists to remove.
-
-   Until this is answered the columns should not land, because the answer decides whether
+   Until that is answered the columns should not land, because the answer decides whether
    `classify_role_name` survives as a fallback or is retired - and, per Open 4, whether the suffix
    spellings are a convention at all.
 
@@ -186,9 +172,11 @@ row and the cluster: the stored name is the role that exists. Control differing 
 second binding on the same database stores a different name. Fails if the writer and the minter
 disagree.
 
-(b) **A rotation moves the stored name and the role together.** Apply a schema delta, then assert
-the row's `role_name` names a role that exists and the previous one does not. Fails if the column
-update and the mint fall out of the same transaction.
+(b) **A revoke and a re-grant move the stored name and the role together.** Revoke a binding and
+grant a fresh one for the same app and database, then assert the row's `role_name` names a role
+that exists and the reaped one does not. Fails if the column update and the mint fall out of the
+same transaction. This is the only path that replaces a binding role, so it is where a stored name
+and the catalog can disagree.
 
 (c) **A supplied name is narrowed to without minting.** Provision a database whose role the test
 creates out of band, store its name, and assert a session narrows to it and reaches the schema -
