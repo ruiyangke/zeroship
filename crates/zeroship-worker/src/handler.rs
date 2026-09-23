@@ -733,6 +733,17 @@ async fn load_on_demand(
         .ok_or_else(|| format!("app {} has no manifest yet", app_id.as_str()))?;
     let executable = crate::executable::load_executable(manifest, &config.blob_store).await?;
 
+    // Make the binding store agree with the set control reports before anything
+    // builds an isolate from it. A cold start on this thread is not a cold
+    // PROCESS: the store is process-wide and outlives every isolate in it, so
+    // an app another thread resolved before a bind or an unbind is still in the
+    // store at the set that change left behind - and the resolution inside
+    // `fetch_app_env` below is guarded on the app being UNRESOLVED, so it would
+    // not fire for exactly that app.
+    crate::sync::resupply_bindings(config, app_id, &app_version)
+        .await
+        .map_err(|e| format!("binding resolution failed: {e}"))?;
+
     // Fetch env BEFORE committing the V8 isolate. If env fetch fails
     // we never partially-load.
     let env_json = crate::sync::fetch_app_env(&config.control_url, &config.service_auth, app_id)
@@ -776,6 +787,7 @@ async fn load_on_demand(
             deploy_hash: app_version.deploy_hash.clone(),
             env_version: app_version.env_version,
             net_policy: app_version.net_policy,
+            live_bindings: app_version.live_bindings,
         },
     );
     tracing::info!(

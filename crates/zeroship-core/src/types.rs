@@ -1,9 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 use zeroship_bundle::Manifest;
 
-use crate::{AppId, UserId};
+use crate::database_role::DatabaseCapability;
+use crate::{AppId, DatabaseId, UserId};
 
 /// A registered application record.
 ///
@@ -150,6 +151,36 @@ pub struct AppVersionInfo {
     /// operator-internal runtimes.
     #[serde(default)]
     pub net_policy: AppNetPolicy,
+    /// The app's LIVE BINDING SET: the capability it holds on every database it
+    /// holds a live binding to, keyed by the database.
+    ///
+    /// A worker isolate captures the binding its sessions narrow with when it
+    /// builds, so a database bound after it was built is one the isolate has no
+    /// handle for, and one unbound under it is one the isolate keeps composing
+    /// a withdrawn edge's role for. This is the fact
+    /// `zeroship_worker::sync::needs_reload` compares to decide that the
+    /// isolate has to be replaced, exactly as it compares
+    /// [`AppVersionInfo::env_version`] for a rotated secret; the replacement is
+    /// built after `resupply_bindings` has installed the set Control now
+    /// serves.
+    ///
+    /// Nothing about any schema's SHAPE is here, deliberately. This says which
+    /// databases the app binds and at what capability - facts the control plane
+    /// owns and changes by a bind, an unbind or a capability edit. What a
+    /// creator's own migration does to the columns inside one of those
+    /// databases moves nothing here and is not the platform's to fence.
+    ///
+    /// The whole SET and not a count, because equality over it detects the three
+    /// changes a number cannot tell apart: a database the app has started
+    /// binding, one whose binding was withdrawn, and one whose capability was
+    /// narrowed or widened while the set's size stayed put.
+    ///
+    /// No serde default, deliberately. An absent field would decode as "this
+    /// app binds nothing", which is a value this map also carries for the
+    /// common app with no database, so a producer that stopped emitting it
+    /// would silently disable the comparison on every worker. Required, it
+    /// fails the version-feed parse by name instead.
+    pub live_bindings: BTreeMap<DatabaseId, DatabaseCapability>,
 }
 
 /// Per-app spend-enforcement state, derived by the control-plane spend engine

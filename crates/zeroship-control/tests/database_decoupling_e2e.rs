@@ -365,6 +365,27 @@ impl World {
             })
             .collect()
     }
+
+    /// The live binding set `app`'s VERSION FEED entry carries.
+    ///
+    /// The other half of the same fact: `/internal/apps/{app_id}/bindings`
+    /// serves the edges a worker installs, and this feed is what tells the
+    /// worker to go and install them. The two are read by different statements
+    /// over the same predicate, so this is the place a disagreement between
+    /// them shows.
+    async fn version_bindings(
+        &self,
+        app: &AppId,
+    ) -> std::collections::BTreeMap<DatabaseId, DatabaseCapability> {
+        self.registry
+            .get_versions()
+            .await
+            .expect("the worker version feed")
+            .get(app)
+            .expect("an app control serves has a version feed entry")
+            .live_bindings
+            .clone()
+    }
 }
 
 async fn seed_user(pg: &Client, label: &str) -> UserId {
@@ -1461,6 +1482,24 @@ async fn the_whole_decoupled_path_runs_in_one_exercise() {
             "control must serve the capability the bind declared"
         );
     }
+    // The VERSION FEED reports the same set, and it is the feed that tells a
+    // resident worker to go and re-read the edges above: an isolate captures
+    // the bindings its sessions narrow with while it builds, so a feed that
+    // disagreed with this endpoint would either never ask for the re-read or
+    // ask on every poll for a set it already holds. Both apps, because a feed
+    // that answered with one app's set for every app would satisfy either
+    // alone.
+    for (app, bindings) in [(&app_a, &a_bindings), (&app_b, &b_bindings)] {
+        assert_eq!(
+            world.version_bindings(app).await,
+            bindings
+                .iter()
+                .map(|resolved| (resolved.database.clone(), resolved.capability))
+                .collect::<std::collections::BTreeMap<_, _>>(),
+            "the version feed and the binding endpoint must not disagree about \
+             which databases this app binds"
+        );
+    }
 
     let a_document = document(vec![
         (SHARED_LABEL, &shared_id, true, shared_descriptor()),
@@ -1632,6 +1671,21 @@ async fn the_whole_decoupled_path_runs_in_one_exercise() {
     assert!(
         world.live_bindings(&app_b).await.is_empty(),
         "control serves an unbound app no binding, so its next isolate has no env.db"
+    );
+    // AND THE VERSION FEED SAYS SO. The empty set is a statement rather than an
+    // absence, and it is the only thing a worker holding app B's isolate ever
+    // sees of this unbind: nothing else about the app moved, so without it the
+    // isolate keeps composing the role the unbind retired until the worker
+    // process restarts. Its control is app A, still bound, whose feed entry
+    // must NOT have emptied.
+    assert!(
+        world.version_bindings(&app_b).await.is_empty(),
+        "an unbound app's version feed entry carries the empty set"
+    );
+    assert_eq!(
+        world.version_bindings(&app_a).await.len(),
+        2,
+        "the control: unbinding app B leaves app A's feed entry alone"
     );
     // AND THE CLUSTER HAS NOT MOVED. The unbind is a declaration, not an
     // effect: until a pass reaps the role, a session that already resolved the
