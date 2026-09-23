@@ -26,12 +26,16 @@ async fn output_contract(store: Rc<OrmStore>) {
     let objects = objects::Objects::new();
     let backend = app
         .clone()
-        .into_backend(&service, objects::StepOutputs::shared(&objects, 1024))
+        .into_backend(
+            &service,
+            objects::StepOutputs::shared(&objects, 1024),
+            objects.stager(),
+        )
         .unwrap();
     assert_eq!(backend.app_id(), app.app_id());
     let worker = WorkerIdentity::new("output-reader".into()).unwrap();
     let run = backend
-        .start("Example".into(), StartOptions::default())
+        .start("Example".into(), serde_json::Value::Null, StartOptions::default())
         .await
         .unwrap();
     let task = service.poll(&worker).await.unwrap().unwrap();

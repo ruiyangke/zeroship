@@ -18,6 +18,7 @@ use super::{
 };
 use crate::service::policy::admit;
 use crate::{
+    backend::InputStager,
     operations::{RunState, StartOptions},
     validation, WorkflowServiceError,
 };
@@ -198,6 +199,7 @@ impl AppWorkflows {
     pub async fn cron_job(
         &self,
         lease: &impl JobLease,
+        inputs: &dyn InputStager,
     ) -> Result<JobReceipt, WorkflowServiceError> {
         let job = &lease.delivery().job;
         delivery::check_scope(self.app_id(), job)?;
@@ -251,6 +253,28 @@ impl AppWorkflows {
                     return Err(invalid());
                 }
                 let registration = cron.declaration(&deployment)?;
+                // The schedule declares its input inline, and the run it starts
+                // names an object, so the value becomes one here: at
+                // ACTIVATION, holding no lock and no transaction, which is
+                // where object I/O belongs. Staging it at registration instead
+                // would make a deployment manifest a producer of payload
+                // references and leave a schedule pointing at an object whose
+                // lifetime a retired deploy no longer answers for.
+                //
+                // Every firing stages its own object, because staging
+                // deduplicates on a request identity and each firing mints one.
+                // That is the cost every run now pays for its input, and this
+                // one is owned by the run it starts and reclaimed with it. An
+                // attempt that stages and then fails to commit leaves an
+                // ownerless object its staging deadline retires.
+                let input_ref = super::payloads::stage_start_input(
+                    inputs,
+                    self,
+                    &RequestId::mint(),
+                    &registration.input,
+                )
+                .await?;
+                authority.check(self)?;
 
                 let mut tx = self.service.begin().await?;
                 let lock = lock_app_state(&mut tx, self.app_id()).await?;
@@ -275,9 +299,6 @@ impl AppWorkflows {
                 }
                 let policy = authority.policy();
                 admit(policy)?;
-                if encode(&registration.input)?.len() > policy.max_input_bytes {
-                    return Err(WorkflowServiceError::PayloadTooLarge);
-                }
                 let skip = registration.overlap == ScheduleOverlap::SkipIfRunning
                     && tx
                         .database()
@@ -315,9 +336,10 @@ impl AppWorkflows {
                         &registration.workflow_name,
                         &deployment.id,
                         &StartOptions {
-                            input: registration.input.clone(),
+                            input_ref: input_ref.clone(),
                             ..Default::default()
                         },
+                        None,
                         now,
                     )
                     .await?;

@@ -212,6 +212,7 @@ impl<P: WorkflowResourceProvider> WorkflowCreatorFactory<P> {
                         resources.objects.clone(),
                         self.payloads.max_payload_bytes,
                     )?),
+                    Arc::new(resources.objects.clone()),
                 )?;
                 let loader = Rc::new(WorkerWorkflowRuntimeLoader::new(contexts, backend.clone()));
                 let executor = Rc::new(V8TaskExecutor::new(loader, tasks, self.payloads)?);

@@ -44,6 +44,7 @@ async fn revocation_contract(store: Rc<OrmStore>) {
             "Example",
             &deploy.id,
             &StartOptions::default(),
+            None,
             now,
         )
         .await

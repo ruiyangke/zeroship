@@ -32,10 +32,15 @@ async fn postgres_backend_queue_keeps_original_deadline_after_refresh() {
 async fn queued_backend(store: Rc<OrmStore>) {
     let (service, app, _, _deployments) = registered_service(store).await;
     let binding = service.policies.current_binding(&app).unwrap();
+    let objects = crate::service::tests::objects::Objects::new();
     let backend = service
         .bind_app(&binding)
         .unwrap()
-        .into_backend(&service, crate::service::tests::objects::StepOutputs::shared(&crate::service::tests::objects::Objects::new(), 1024))
+        .into_backend(
+            &service,
+            crate::service::tests::objects::StepOutputs::shared(&objects, 1024),
+            objects.stager(),
+        )
         .unwrap();
     let before = ingress_state(&service, &app).await;
     let mut blocker = service.begin().await.unwrap();
@@ -51,7 +56,7 @@ async fn queued_backend(store: Rc<OrmStore>) {
         )
         .unwrap();
     let mut pending = backend
-        .start("Example".into(), StartOptions::default())
+        .start("Example".into(), serde_json::Value::Null, StartOptions::default())
         .boxed_local();
     // Polling enqueues without yielding to the local dispatch task. Refresh then
     // precedes dequeue, while the app lock keeps the eventual mutation blocked.
@@ -79,7 +84,7 @@ async fn queued_backend(store: Rc<OrmStore>) {
     blocker.commit().await.unwrap();
     assert_eq!(ingress_state(&service, &app).await, before);
     backend
-        .start("Example".into(), StartOptions::default())
+        .start("Example".into(), serde_json::Value::Null, StartOptions::default())
         .await
         .unwrap();
 }

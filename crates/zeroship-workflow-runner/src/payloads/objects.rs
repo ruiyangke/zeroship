@@ -19,7 +19,7 @@ use zeroship_workflow::{
         PayloadDeleter, PayloadOpener, PayloadSlot, PayloadTarget, PayloadWriter, PolicyAuthority,
         RequestId, StagedPayload, StepOutput, TaskToken, WorkerIdentity, WorkflowService,
     },
-    StepOutputReader, WorkflowServiceError,
+    InputStager, StepOutputReader, WorkflowServiceError,
 };
 
 /// The payload store, namespaced under credentials private to the workflow
@@ -129,6 +129,44 @@ impl std::fmt::Debug for PayloadRead {
         f.debug_struct("PayloadRead")
             .field("reference", &self.reference)
             .finish_non_exhaustive()
+    }
+}
+
+/// The object a run started through the creator seam or the cron sweep begins
+/// from.
+///
+/// A generation row keeps no inline slot for a run's input, so the value a
+/// caller handed the platform becomes an object before the run that names it
+/// exists. The row lands ownerless: the generation takes the edge that owns it
+/// in the same transaction that admits the run, and a start that never commits
+/// leaves an object collection reclaims.
+#[async_trait(?Send)]
+impl InputStager for PayloadObjects {
+    async fn stage_input(
+        &self,
+        api: &AppWorkflows,
+        request: &RequestId,
+        input: &serde_json::Value,
+    ) -> Result<WorkflowOutputRef, WorkflowServiceError> {
+        let bytes = serde_json::to_vec(input).map_err(|_| {
+            WorkflowServiceError::InvalidRequest("invalid workflow run input".into())
+        })?;
+        let reference = WorkflowOutputRef {
+            hash: zeroship_workflow::service::hash(&bytes),
+            size: i64::try_from(bytes.len()).map_err(|_| WorkflowServiceError::PayloadTooLarge)?,
+            content_type: Some("application/json".into()),
+        };
+        validate_reference(&reference)?;
+        api.stage_input(
+            request,
+            reference.clone(),
+            ObjectWriter {
+                objects: self,
+                body: Box::new(OnceChunk::new(bytes.into())),
+            },
+        )
+        .await?;
+        Ok(reference)
     }
 }
 

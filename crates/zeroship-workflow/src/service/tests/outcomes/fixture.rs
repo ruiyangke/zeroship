@@ -1,4 +1,5 @@
 use super::*;
+use crate::service::tests::objects::Objects;
 
 pub(super) struct Lease {
     pub(super) delivery: Delivery,
@@ -71,7 +72,7 @@ impl Case {
         let scope = &fixture.app;
         match &self.lease.delivery.job.operation {
             JobOperation::Activate { .. } => scope.activate_job(&self.lease).await,
-            JobOperation::Cron { .. } => scope.cron_job(&self.lease).await,
+            JobOperation::Cron { .. } => scope.cron_job(&self.lease, &fixture.objects).await,
             JobOperation::Reconcile {} => {
                 scope
                     .reconcile_job(
@@ -93,6 +94,8 @@ impl Case {
 pub(super) struct Fixture {
     pub(super) service: WorkflowService,
     pub(super) app: AppWorkflows,
+    /// Where a schedule activation puts the run input it stages.
+    pub(super) objects: Objects,
     pub(super) publisher: Publisher,
     pub(super) cases: Vec<Case>,
     _platform: Deployments,
@@ -121,7 +124,8 @@ impl Fixture {
             forbidden: vec![JobOutcome::Waiting {}, JobOutcome::Rejected {}],
             wrong_linkage: vec![],
         }];
-        cases.extend(cron_cases(&scoped, &deployment_id).await);
+        let objects = Objects::new();
+        cases.extend(cron_cases(&scoped, &deployment_id, &objects).await);
         let lease = Lease::job(scoped.pending_jobs(None, 1).await.unwrap().remove(0));
         let JobAcceptance::Execute(task) = scoped.accept_job(&lease).await.unwrap() else {
             panic!("accepted cron must publish executable work")
@@ -157,6 +161,7 @@ impl Fixture {
         Self {
             service,
             app: scoped,
+            objects,
             publisher,
             cases,
             _platform: platform,
@@ -183,7 +188,11 @@ fn scheduled() -> DeployRegistration {
     }
 }
 
-async fn cron_cases(scope: &AppWorkflows, deployment_id: &DeploymentId) -> Vec<Case> {
+async fn cron_cases(
+    scope: &AppWorkflows,
+    deployment_id: &DeploymentId,
+    objects: &Objects,
+) -> Vec<Case> {
     let mut cases = Vec::new();
     let schedule_id = ScheduleId::mint();
     for (instant, expected) in [
@@ -202,7 +211,7 @@ async fn cron_cases(scope: &AppWorkflows, deployment_id: &DeploymentId) -> Vec<C
                 scheduled_at: instant.try_into().unwrap(),
             },
         );
-        let receipt = scope.cron_job(&lease).await.unwrap();
+        let receipt = scope.cron_job(&lease, objects).await.unwrap();
         assert_eq!(receipt.outcome, expected);
         let opposite = match expected {
             JobOutcome::Completed {} => JobOutcome::Rejected {},

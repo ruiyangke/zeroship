@@ -24,10 +24,16 @@ fn result(scope: usize, generation: i64) -> Vec<u8> {
     serde_json::to_vec(&json!({"scope":scope, "generation":generation})).unwrap()
 }
 
-/// A run's result lives in an object, so the generation row carries only its
-/// descriptor. This is the column text the service decodes it from.
+/// A run's result and its input both live in objects, so the generation row
+/// carries only their descriptors. This is the column text the service decodes
+/// one from.
 fn stored_reference(scope: usize, generation: i64) -> String {
     serde_json::to_string(&output_reference(&result(scope, generation))).unwrap()
+}
+
+/// What a run of this scope and generation was started from, as bytes.
+fn seed(scope: usize, generation: i64) -> Vec<u8> {
+    serde_json::to_vec(&json!({"scope":scope, "generation":generation})).unwrap()
 }
 
 #[compio::test]
@@ -68,9 +74,10 @@ async fn read_contract(store: Rc<OrmStore>) {
             "Example",
             &deploy.id,
             &StartOptions {
-                input: json!({"scope":scope, "generation":0}),
+                input_ref: Some(output_reference(&seed(scope, 0))),
                 ..Default::default()
             },
+            None,
             now,
         )
         .await
@@ -102,7 +109,7 @@ async fn read_contract(store: Rc<OrmStore>) {
         generations
             .insert(value!({
                 "id":storage_id(), "app_id":app_id.as_str(), "run_id":*run_id, "generation":1, "deploy_id":deploy.id,
-                "input":json!({"scope":scope, "generation":1}).to_string(),
+                "input_ref":serde_json::to_string(&output_reference(&seed(scope, 1))).unwrap(),
                 "state":"completed", "started_at":now, "terminal_at":now,
                 "output_ref":stored_reference(scope, 1),
             }))
@@ -234,9 +241,10 @@ async fn read_contract(store: Rc<OrmStore>) {
             let invocation = frontier::invocation(&mut tx, app_id, &run).await.unwrap();
             assert_eq!(invocation.app_id, app_id.as_str());
             assert_eq!(invocation.run_id, *run_id);
+            assert!(invocation.trigger.input.is_none());
             assert_eq!(
-                invocation.trigger.input,
-                Some(json!({"scope":scope, "generation":generation}))
+                invocation.trigger.input_ref,
+                Some(output_reference(&seed(scope, generation)))
             );
             tx.commit().await.unwrap();
         }
@@ -276,9 +284,10 @@ async fn read_contract(store: Rc<OrmStore>) {
         let run = app::lock_run(&mut tx, app_id, run_id).await.unwrap();
         assert_eq!(run.integer("generation").unwrap(), 2);
         let invocation = frontier::invocation(&mut tx, app_id, &run).await.unwrap();
+        assert!(invocation.trigger.input.is_none());
         assert_eq!(
-            invocation.trigger.input,
-            Some(json!({"scope":scope, "generation":1}))
+            invocation.trigger.input_ref,
+            Some(output_reference(&seed(scope, 1)))
         );
         assert!(invocation.journal.is_empty());
         tx.commit().await.unwrap();
@@ -344,6 +353,7 @@ async fn replayed_error_contract(store: Rc<OrmStore>) {
         "Example",
         &deploy.id,
         &StartOptions::default(),
+        None,
         now,
     )
     .await

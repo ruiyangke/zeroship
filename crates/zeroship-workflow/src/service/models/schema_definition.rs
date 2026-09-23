@@ -123,7 +123,6 @@ zeroship_data_orm::orm::schema! {
             run_id: Text,
             generation: BigInt,
             deploy_id: Text,
-            input: Text,
             input_ref: Nullable<Text>,
             output_ref: Nullable<Text>,
             error: Nullable<Text>,

@@ -235,6 +235,7 @@ async fn assert_unaccepted(service: &WorkflowService, scope: &AppWorkflows, gran
 }
 
 async fn replay(store: Rc<OrmStore>) {
+    let objects = objects::Objects::new();
     let (service, app, _, platform) = registered_service(store.clone()).await;
     let deployment = publish(
         &platform,
@@ -246,7 +247,7 @@ async fn replay(store: Rc<OrmStore>) {
     let scope = service.fixture_app(app.clone());
     activate(&scope, &deployment, 1).await;
     let grant = Grant::cron(&app, &deployment, &ScheduleId::mint(), 1, 1000);
-    let receipt = scope.cron_job(&grant).await.unwrap();
+    let receipt = scope.cron_job(&grant, &objects).await.unwrap();
     assert_eq!(receipt.outcome, JobOutcome::Completed {});
     let tx = service.begin().await.unwrap();
     let runs = journal_rows(&tx, "runs", json!({"app_id":app.as_str()})).await;
@@ -291,18 +292,19 @@ async fn replay(store: Rc<OrmStore>) {
     assert_eq!(
         reopened
             .fixture_app(app.clone())
-            .cron_job(&expired)
+            .cron_job(&expired, &objects)
             .await
             .unwrap(),
         receipt
     );
-    assert_eq!(scope.cron_job(&grant.retry()).await.unwrap(), receipt);
+    assert_eq!(scope.cron_job(&grant.retry(), &objects).await.unwrap(), receipt);
     assert_eq!(scope.pending_jobs(None, 10).await.unwrap(), jobs);
     assert_eq!(count(&service, &app, "runs").await, 1);
     assert_eq!(count(&service, &app, "occurrences").await, 1);
 }
 
 async fn historical(store: Rc<OrmStore>) {
+    let objects = objects::Objects::new();
     let (service, app, _, platform) = registered_service(store).await;
     let old = publish(&platform, &app, json!("original"), ScheduleOverlap::Allow).await;
     let newer = publish(
@@ -319,9 +321,9 @@ async fn historical(store: Rc<OrmStore>) {
     let schedule = ScheduleId::mint();
     let current = Grant::cron(&app, &newer, &schedule, 2, 1000);
     let prior = Grant::cron(&app, &old, &schedule, 1, 1000);
-    scope.cron_job(&current).await.unwrap();
+    scope.cron_job(&current, &objects).await.unwrap();
     activate(&scope, &removed, 3).await;
-    scope.cron_job(&prior).await.unwrap();
+    scope.cron_job(&prior, &objects).await.unwrap();
     let tx = service.begin().await.unwrap();
     let selected = journal_rows(&tx, "deploys", json!({"app_id":app.as_str(), "active":1})).await;
     assert_eq!(selected[0].text("id").unwrap(), removed.id);
@@ -349,6 +351,7 @@ async fn historical(store: Rc<OrmStore>) {
 }
 
 async fn identities(store: Rc<OrmStore>) {
+    let objects = objects::Objects::new();
     let (service, app, other, platform) = registered_service(store).await;
     let mut registration = scheduled(json!(null), ScheduleOverlap::Allow);
     let mut second = registration.schedules[0].clone();
@@ -363,10 +366,10 @@ async fn identities(store: Rc<OrmStore>) {
     let schedule = ScheduleId::mint();
     let grant = Grant::cron(&app, &deployment, &schedule, 1, 1000);
     assert!(matches!(
-        service.fixture_app(other).cron_job(&grant).await,
+        service.fixture_app(other).cron_job(&grant, &objects).await,
         Err(WorkflowServiceError::PermissionDenied)
     ));
-    scope.cron_job(&grant).await.unwrap();
+    scope.cron_job(&grant, &objects).await.unwrap();
     for field in [
         "run", "request", "schedule", "name", "revision", "instant", "job", "deploy",
     ] {
@@ -396,7 +399,7 @@ async fn identities(store: Rc<OrmStore>) {
         }
         assert!(
             matches!(
-                scope.cron_job(&bad).await,
+                scope.cron_job(&bad, &objects).await,
                 Err(WorkflowServiceError::Conflict(_))
             ),
             "changed {field} accepted"
@@ -408,12 +411,12 @@ async fn identities(store: Rc<OrmStore>) {
     };
     *schedule_name = "other".into();
     assert!(matches!(
-        scope.cron_job(&rebound).await,
+        scope.cron_job(&rebound, &objects).await,
         Err(WorkflowServiceError::Conflict(_))
     ));
     let renamed = Grant::cron(&app, &deployment, &ScheduleId::mint(), 1, 2000);
     assert!(matches!(
-        scope.cron_job(&renamed).await,
+        scope.cron_job(&renamed, &objects).await,
         Err(WorkflowServiceError::Conflict(_))
     ));
     assert_eq!(count(&service, &app, "runs").await, 1);
@@ -456,26 +459,27 @@ async fn finish_run(service: &WorkflowService, app: &AppId, continuation: bool) 
 }
 
 async fn overlap(store: Rc<OrmStore>) {
+    let objects = objects::Objects::new();
     let (service, app, _, platform) = registered_service(store).await;
     let deployment = publish(&platform, &app, json!(null), ScheduleOverlap::SkipIfRunning).await;
     let scope = service.fixture_app(app.clone());
     activate(&scope, &deployment, 1).await;
     let schedule = ScheduleId::mint();
     let first = Grant::cron(&app, &deployment, &schedule, 1, 1000);
-    scope.cron_job(&first).await.unwrap();
+    scope.cron_job(&first, &objects).await.unwrap();
     finish_run(&service, &app, true).await;
     let skipped = Grant::cron(&app, &deployment, &schedule, 1, 2000);
-    let skipped_receipt = scope.cron_job(&skipped).await.unwrap();
+    let skipped_receipt = scope.cron_job(&skipped, &objects).await.unwrap();
     assert_eq!(skipped_receipt.outcome, JobOutcome::Rejected {});
     assert_eq!(count(&service, &app, "runs").await, 2);
     finish_run(&service, &app, false).await;
     assert_eq!(
-        scope.cron_job(&skipped.retry()).await.unwrap(),
+        scope.cron_job(&skipped.retry(), &objects).await.unwrap(),
         skipped_receipt
     );
     let next = Grant::cron(&app, &deployment, &schedule, 1, 3000);
     assert_eq!(
-        scope.cron_job(&next).await.unwrap().outcome,
+        scope.cron_job(&next, &objects).await.unwrap().outcome,
         JobOutcome::Completed {}
     );
     let tx = service.begin().await.unwrap();
@@ -490,6 +494,7 @@ async fn overlap(store: Rc<OrmStore>) {
 }
 
 async fn capacity(store: Rc<OrmStore>) {
+    let objects = objects::Objects::new();
     let (service, app, _, platform) = registered_service(store).await;
     let deployment = publish(
         &platform,
@@ -515,12 +520,12 @@ async fn capacity(store: Rc<OrmStore>) {
         .unwrap();
     let schedule = ScheduleId::mint();
     scope
-        .cron_job(&Grant::cron(&app, &deployment, &schedule, 1, 1000))
+        .cron_job(&Grant::cron(&app, &deployment, &schedule, 1, 1000), &objects)
         .await
         .unwrap();
     let retry = Grant::cron(&app, &deployment, &schedule, 1, 2000);
     assert!(matches!(
-        scope.cron_job(&retry).await,
+        scope.cron_job(&retry, &objects).await,
         Err(WorkflowServiceError::ResourceExhausted(_))
     ));
     assert_unaccepted(&service, &scope, &retry).await;
@@ -539,7 +544,7 @@ async fn capacity(store: Rc<OrmStore>) {
         .await
         .unwrap();
     assert!(matches!(
-        scope.cron_job(&retry).await,
+        scope.cron_job(&retry, &objects).await,
         Err(WorkflowServiceError::PermissionDenied)
     ));
     assert_unaccepted(&service, &scope, &retry).await;
@@ -557,7 +562,7 @@ async fn capacity(store: Rc<OrmStore>) {
         .await
         .unwrap();
     assert!(matches!(
-        scope.cron_job(&retry).await,
+        scope.cron_job(&retry, &objects).await,
         Err(WorkflowServiceError::PayloadTooLarge)
     ));
     assert_unaccepted(&service, &scope, &retry).await;
@@ -566,12 +571,13 @@ async fn capacity(store: Rc<OrmStore>) {
         .await
         .unwrap();
     assert_eq!(
-        scope.cron_job(&retry.retry()).await.unwrap().outcome,
+        scope.cron_job(&retry.retry(), &objects).await.unwrap().outcome,
         JobOutcome::Completed {}
     );
 }
 
 async fn reacquire(store: Rc<OrmStore>) {
+    let objects = objects::Objects::new();
     let (service, app, _, platform) = registered_service(store).await;
     let deployment = publish(&platform, &app, json!("retained"), ScheduleOverlap::Allow).await;
     let replacement = platform.deploy(&app).await;
@@ -593,7 +599,7 @@ async fn reacquire(store: Rc<OrmStore>) {
     assert_eq!(before[0].text("state").unwrap(), "released");
     tx.commit().await.unwrap();
     let grant = Grant::cron(&app, &deployment, &ScheduleId::mint(), 1, 1000);
-    scope.cron_job(&grant).await.unwrap();
+    scope.cron_job(&grant, &objects).await.unwrap();
     platform.assert_held(&app, &deployment.id).await;
     let tx = service.begin().await.unwrap();
     let after = journal_rows(
@@ -612,12 +618,13 @@ async fn reacquire(store: Rc<OrmStore>) {
 }
 
 async fn prerequisites(store: Rc<OrmStore>) {
+    let objects = objects::Objects::new();
     let (service, app, _, platform) = registered_service(store).await;
     let deployment = publish(&platform, &app, json!(null), ScheduleOverlap::Allow).await;
     let scope = service.fixture_app(app.clone());
     let grant = Grant::cron(&app, &deployment, &ScheduleId::mint(), 1, 1000);
     assert!(matches!(
-        scope.cron_job(&grant).await,
+        scope.cron_job(&grant, &objects).await,
         Err(WorkflowServiceError::Unavailable(_))
     ));
     assert_unaccepted(&service, &scope, &grant).await;
@@ -633,7 +640,7 @@ async fn prerequisites(store: Rc<OrmStore>) {
         .await
         .unwrap();
     assert!(matches!(
-        scope.cron_job(&grant).await,
+        scope.cron_job(&grant, &objects).await,
         Err(WorkflowServiceError::Unavailable(_))
     ));
     assert_unaccepted(&service, &scope, &grant).await;
@@ -643,7 +650,7 @@ async fn prerequisites(store: Rc<OrmStore>) {
         .await
         .unwrap();
     assert!(matches!(
-        scope.cron_job(&grant).await,
+        scope.cron_job(&grant, &objects).await,
         Err(WorkflowServiceError::Unavailable(_))
     ));
     assert_unaccepted(&service, &scope, &grant).await;
@@ -657,10 +664,11 @@ async fn prerequisites(store: Rc<OrmStore>) {
         .put_manifest(&app, &deployment.hash, &bytes)
         .await
         .unwrap();
-    scope.cron_job(&grant.retry()).await.unwrap();
+    scope.cron_job(&grant.retry(), &objects).await.unwrap();
 }
 
 async fn authority(store: Rc<OrmStore>) {
+    let objects = objects::Objects::new();
     let (service, app, _, platform) = registered_service(store).await;
     let deployment = publish(&platform, &app, json!(null), ScheduleOverlap::Allow).await;
     let scope = service.fixture_app(app.clone());
@@ -669,7 +677,7 @@ async fn authority(store: Rc<OrmStore>) {
     let mut expired = grant.clone();
     expired.expires = Instant::now();
     assert!(matches!(
-        scope.cron_job(&expired).await,
+        scope.cron_job(&expired, &objects).await,
         Err(WorkflowServiceError::Timeout)
     ));
     let mut held = service.begin().await.unwrap();
@@ -677,15 +685,16 @@ async fn authority(store: Rc<OrmStore>) {
     let mut short = grant.clone();
     short.expires = Instant::now() + Duration::from_millis(100);
     assert!(matches!(
-        scope.cron_job(&short).await,
+        scope.cron_job(&short, &objects).await,
         Err(WorkflowServiceError::Timeout)
     ));
     held.commit().await.unwrap();
     assert_unaccepted(&service, &scope, &grant).await;
-    scope.cron_job(&grant.retry()).await.unwrap();
+    scope.cron_job(&grant.retry(), &objects).await.unwrap();
 }
 
 async fn policy_lock(store: Rc<OrmStore>) {
+    let objects = objects::Objects::new();
     let (service, app, _, platform) = registered_service(store).await;
     let deployment = publish(&platform, &app, json!(null), ScheduleOverlap::Allow).await;
     let scope = service.fixture_app(app.clone());
@@ -693,7 +702,7 @@ async fn policy_lock(store: Rc<OrmStore>) {
     let grant = Grant::cron(&app, &deployment, &ScheduleId::mint(), 1, 1000);
     let mut held = service.begin().await.unwrap();
     super::super::app::lock_app(&mut held, &app).await.unwrap();
-    let mut work = Box::pin(scope.cron_job(&grant));
+    let mut work = Box::pin(scope.cron_job(&grant, &objects));
     assert!(futures::poll!(work.as_mut()).is_pending());
     service
         .policies
@@ -705,10 +714,11 @@ async fn policy_lock(store: Rc<OrmStore>) {
         Err(WorkflowServiceError::Unavailable(_))
     ));
     assert_unaccepted(&service, &scope, &grant).await;
-    scope.cron_job(&grant.retry()).await.unwrap();
+    scope.cron_job(&grant.retry(), &objects).await.unwrap();
 }
 
 async fn linkage(store: Rc<OrmStore>) {
+    let objects = objects::Objects::new();
     let (service, app, _, platform) = registered_service(store).await;
     let deployment = publish(&platform, &app, json!(null), ScheduleOverlap::Allow).await;
     let scope = service.fixture_app(app.clone());
@@ -716,8 +726,8 @@ async fn linkage(store: Rc<OrmStore>) {
     let schedule = ScheduleId::mint();
     let first = Grant::cron(&app, &deployment, &schedule, 1, 1000);
     let second = Grant::cron(&app, &deployment, &schedule, 1, 2000);
-    let receipt = scope.cron_job(&first).await.unwrap();
-    scope.cron_job(&second).await.unwrap();
+    let receipt = scope.cron_job(&first, &objects).await.unwrap();
+    scope.cron_job(&second, &objects).await.unwrap();
     let tx = service.begin().await.unwrap();
     let original = journal_rows(
         &tx,
@@ -751,7 +761,7 @@ async fn linkage(store: Rc<OrmStore>) {
         tx.commit().await.unwrap();
         assert!(
             matches!(
-                scope.cron_job(&first.retry()).await,
+                scope.cron_job(&first.retry(), &objects).await,
                 Err(WorkflowServiceError::Internal(_))
             ),
             "changed occurrence {field} replayed"
@@ -766,7 +776,7 @@ async fn linkage(store: Rc<OrmStore>) {
         .await;
         tx.commit().await.unwrap();
     }
-    assert_eq!(scope.cron_job(&first.retry()).await.unwrap(), receipt);
+    assert_eq!(scope.cron_job(&first.retry(), &objects).await.unwrap(), receipt);
     let tx = service.begin().await.unwrap();
     tx.database()
         .collection(super::super::models::occurrences::Entity::COLLECTION)
@@ -776,7 +786,7 @@ async fn linkage(store: Rc<OrmStore>) {
         .unwrap();
     tx.commit().await.unwrap();
     assert!(matches!(
-        scope.cron_job(&first.retry()).await,
+        scope.cron_job(&first.retry(), &objects).await,
         Err(WorkflowServiceError::Internal(_))
     ));
     assert_eq!(count(&service, &app, "runs").await, 2);
@@ -843,6 +853,7 @@ async fn postgres_cron_receipt_failure_rolls_back_run_publication_and_occurrence
 }
 
 async fn rollback(store: Rc<OrmStore>, fault: ReceiptFault) {
+    let objects = objects::Objects::new();
     let (service, app, _, platform) = registered_service(store).await;
     let deployment = publish(
         &platform,
@@ -855,7 +866,7 @@ async fn rollback(store: Rc<OrmStore>, fault: ReceiptFault) {
     activate(&scope, &deployment, 1).await;
     let grant = Grant::cron(&app, &deployment, &ScheduleId::mint(), 1, 1000);
     fault.set(true).await;
-    assert!(scope.cron_job(&grant).await.is_err());
+    assert!(scope.cron_job(&grant, &objects).await.is_err());
     assert_unaccepted(&service, &scope, &grant).await;
     for table in [
         "schedules",
@@ -873,7 +884,7 @@ async fn rollback(store: Rc<OrmStore>, fault: ReceiptFault) {
     }
     fault.set(false).await;
     assert_eq!(
-        scope.cron_job(&grant.retry()).await.unwrap().outcome,
+        scope.cron_job(&grant.retry(), &objects).await.unwrap().outcome,
         JobOutcome::Completed {}
     );
     for table in [
@@ -965,6 +976,7 @@ async fn expired_hold(store: Rc<OrmStore>) {
 }
 
 async fn held_authority(store: Rc<OrmStore>, expire: bool) {
+    let objects = objects::Objects::new();
     let (service, app, _, platform) = registered_service(store).await;
     let deployment = publish(&platform, &app, json!("original"), ScheduleOverlap::Allow).await;
     let replacement = platform.deploy(&app).await;
@@ -988,7 +1000,7 @@ async fn held_authority(store: Rc<OrmStore>, expire: bool) {
     if expire {
         grant.expires = Instant::now() + Duration::from_secs(2);
     }
-    let (result, ()) = futures::join!(scope.cron_job(&grant), async {
+    let (result, ()) = futures::join!(scope.cron_job(&grant, &objects), async {
         compio::time::timeout(Duration::from_secs(5), entered.recv_async())
             .await
             .expect("retention acquisition must reach its gated response")
@@ -1016,7 +1028,7 @@ async fn held_authority(store: Rc<OrmStore>, expire: bool) {
     assert_eq!(
         service
             .fixture_app(app)
-            .cron_job(&grant.retry())
+            .cron_job(&grant.retry(), &objects)
             .await
             .unwrap()
             .outcome,

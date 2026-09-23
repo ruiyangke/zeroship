@@ -513,7 +513,7 @@ pub(crate) async fn append(
             super::payloads::promote(
                 tx,
                 app,
-                run,
+                Some(run),
                 super::payloads::RunGeneration {
                     id: &id,
                     generation,
@@ -653,12 +653,14 @@ async fn child(
     }
     let id = typed_id::new_workflow_run_id();
     let start = StartOptions {
-        input: step.child_input.clone().unwrap_or(Value::Null),
+        input_ref: step.child_input_ref.clone(),
         key: options.key,
         on_conflict: ConflictPolicy::Join,
     };
     validation::start(&start)?;
-    insert_root_run(tx, app, &id, name, &deploy_id, &start, now).await?;
+    // The parent's live task staged what it passed the child, so the parent's
+    // row is what proves this run may take the object.
+    insert_root_run(tx, app, &id, name, &deploy_id, &start, Some(parent), now).await?;
     tx.database()
         .collection(models::runs::Entity::COLLECTION)?
         .update(

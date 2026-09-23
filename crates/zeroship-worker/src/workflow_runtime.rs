@@ -193,12 +193,20 @@ mod tests {
     use serde_json::{json, Value};
 
     /// The creator seam's step-output reader, over a store beneath `directory`.
+    fn payload_objects(directory: &std::path::Path) -> PayloadObjects {
+        PayloadObjects::open(zeroship_storage::StorageStore::from_backend(Arc::new(
+            zeroship_storage::LocalFs::new(directory.join("objects")),
+        )))
+        .unwrap()
+    }
+
     fn step_outputs(directory: &std::path::Path) -> zeroship_workflow::SharedStepOutputs {
-        let objects = PayloadObjects::open(zeroship_storage::StorageStore::from_backend(
-            Arc::new(zeroship_storage::LocalFs::new(directory.join("objects"))),
-        ))
-        .unwrap();
-        Arc::new(ObjectStepOutputs::new(objects, 1024).unwrap())
+        Arc::new(ObjectStepOutputs::new(payload_objects(directory), 1024).unwrap())
+    }
+
+    /// The store a backend stages the values its callers start runs from into.
+    fn input_stager(directory: &std::path::Path) -> zeroship_workflow::SharedInputStager {
+        Arc::new(payload_objects(directory))
     }
     use std::{cell::RefCell, collections::BTreeMap, time::Duration};
     use zeroship_bundle::{
@@ -286,7 +294,7 @@ mod tests {
                 .register_app(&binding)
                 .await
                 .unwrap()
-                .into_backend(&service, step_outputs(directory.path()))
+                .into_backend(&service, step_outputs(directory.path()), input_stager(directory.path()))
                 .unwrap();
             let context = WorkflowAppContext {
                 schema: SchemaName::new(&tenant).unwrap(),
@@ -487,7 +495,11 @@ mod tests {
             .service
             .bind_app(&foreign)
             .unwrap()
-            .into_backend(&fixture.service, step_outputs(fixture._directory.path()))
+            .into_backend(
+                &fixture.service,
+                step_outputs(fixture._directory.path()),
+                input_stager(fixture._directory.path()),
+            )
             .unwrap();
         assert!(matches!(
             WorkerWorkflowRuntimeLoader::new(fixture.contexts.clone(), foreign_backend)
@@ -623,7 +635,11 @@ mod tests {
             .register_app(&replacement)
             .await
             .unwrap()
-            .into_backend(&fixture.service, step_outputs(fixture._directory.path()))
+            .into_backend(
+                &fixture.service,
+                step_outputs(fixture._directory.path()),
+                input_stager(fixture._directory.path()),
+            )
             .unwrap();
         fixture.contexts.0.borrow_mut().env = EnvSnapshot::vars_only(json!({"COLOR":"green"}));
 
