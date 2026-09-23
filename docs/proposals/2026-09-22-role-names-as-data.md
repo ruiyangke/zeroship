@@ -1,9 +1,24 @@
 # Role names are data, not a convention
 
-**Status.** PROPOSED, nothing built. The change is to stop deriving cluster role names from
-entity ids at every reader, and to store each name on the row whose object it is. The payoff is
-that a role the platform did not mint becomes expressible, which is what a bring-your-own-database
-tier needs. The cost is that one parser stops being able to attribute a stray role by its shape.
+**Status.** WITHDRAWN by operator decision: a role name must be DECODABLE, and uniqueness alone is
+not enough. The change this document proposes - storing each name on the row whose object it is -
+is not made. Role names stay DERIVED from entity ids, `crates/zeroship-core/src/database_role.rs`
+stays the single codec, and `classify_role_name` keeps attributing a stray role by parsing and
+re-composing its shape.
+
+The decision follows from Open 1 rather than overriding it. If a name must decode, the naming
+convention is load-bearing, and a stored copy is a second spelling of something the name has to
+carry anyway - which is the exact defect this document exists to remove. So the premise fails, and
+the document is kept as the record of why rather than as a plan.
+
+**What this costs, stated plainly.** The motivation was a database the platform did not provision:
+a creator-supplied role is a value, and a value cannot be derived. A decodable-name rule means a
+creator's existing role name would have to match the platform's shape to be attributable, which is
+not a constraint a creator's cluster will satisfy. So bring-your-own-database needs a different
+mechanism than this one, and the sections below on what it does and does not carry remain accurate
+about the problem while no longer describing the intended solution. The reaper's own question -
+can a stray role be attributed without decoding its name - is answered here in the negative, which
+is what fixes the convention in place.
 
 ---
 
@@ -131,9 +146,10 @@ channel the binding id arrives on now, and PostgreSQL still decides what it open
    marker written onto the role at mint time - a comment, a membership in a platform-owned group -
    or accepting that an unattributable role is reported rather than reaped.
 
-   Until that is answered the columns should not land, because the answer decides whether
-   `classify_role_name` survives as a fallback or is retired - and, per Open 4, whether the suffix
-   spellings are a convention at all.
+   SETTLED by operator decision: DECODABLE is required, uniqueness alone is not enough. So the
+   reaper keeps its shape test, `classify_role_name` stays, the suffix spellings stay a convention
+   (which also answers Open 4's second half), and the columns do not land. An orphan stays
+   attributable by parsing, which is the property the decision protects.
 
 2. **Is a BYOD database a creation-time choice?** Open 1 of
    `docs/proposals/2026-08-28-app-database-decoupling.md` rejected a dedicated-cluster tier for a
