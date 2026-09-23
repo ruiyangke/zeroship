@@ -170,8 +170,8 @@ pub async fn exec_mutation(route: &TxRoute, bq: CompiledQuery) -> Result<Vec<Val
 ///
 /// This is the coarse-grained reactive-query bridge: every
 /// successful INSERT/UPDATE/DELETE produces one or more events on
-/// `(app_id, collection)` that wake any matching subscribers in the
-/// same isolate.
+/// `(route, collection)` - the tenant, the database and the collection - that
+/// wake any matching subscribers in the same isolate.
 ///
 /// On error the broker is untouched. The caller supplies the operation kind;
 /// returned rows supply the logical identity and changed columns.
@@ -224,14 +224,14 @@ pub(crate) fn emit_mutation_count(
     op: zeroship_data_orm::cdc::ChangeOp,
     affected: u64,
 ) {
-    let app_id = route.app_id();
+    let key = route.key();
     if affected != 0
         && !backend_publishes_committed_changes(route.backend())
-        && !crate::cdc::broker::is_app_suppressed(app_id)
-        && crate::cdc::broker::has_subscribers(app_id, collection)
+        && !crate::cdc::broker::is_route_suppressed(&key)
+        && crate::cdc::broker::has_subscribers(&key, collection)
     {
         queue_or_emit(
-            &route.key(),
+            &key,
             route.in_tx(),
             collection,
             op,
@@ -275,8 +275,8 @@ fn emit_for_rows(
         // The backend's commit publisher owns delivery for this write.
         return;
     }
-    if crate::cdc::broker::is_app_suppressed(route.app_id())
-        || !crate::cdc::broker::has_subscribers(route.app_id(), collection)
+    if crate::cdc::broker::is_route_suppressed(route)
+        || !crate::cdc::broker::has_subscribers(route, collection)
     {
         return;
     }
@@ -333,18 +333,11 @@ fn queue_or_emit(
     // immediately; queueing it would park the event on a settle path that
     // belongs to a different unit of work.
     if !in_tx {
-        crate::cdc::broker::emit_local(
-            route.app_id(),
-            collection,
-            op,
-            pk,
-            changed_columns,
-            new_tuple,
-        );
+        crate::cdc::broker::emit_local(route, collection, op, pk, changed_columns, new_tuple);
         return;
     }
     let ev = zeroship_data_orm::cdc::ChangeEvent {
-        app_id: route.app_id().to_string(),
+        route: route.clone(),
         collection: collection.to_string(),
         op,
         pk,
@@ -372,7 +365,7 @@ pub fn drain_pending_emits_on_commit(route: &crate::binding::DbRoute) {
         crate::tx_lanes::with_mut(|l| l.drain_pending_emits_for(route));
     for ev in queued {
         crate::cdc::broker::emit_local(
-            &ev.app_id,
+            &ev.route,
             &ev.collection,
             ev.op,
             ev.pk,
@@ -465,7 +458,7 @@ mod tests {
     /// Reset only the state owned by one test app.
     fn reset_world(app_id: &str) {
         crate::cdc::broker::drop_app(app_id);
-        crate::cdc::broker::unsuppress_app(app_id);
+        crate::cdc::broker::unsuppress_route(&crate::tests::fixtures::harness_route(app_id));
         reset_counter();
         reset_sqlite_route();
     }
@@ -475,26 +468,27 @@ mod tests {
     fn reset_world_leaves_other_apps_untouched() {
         let mine = "app_reset_scope_mine";
         let theirs = "app_reset_scope_theirs";
+        let their_route = crate::tests::fixtures::harness_route(theirs);
 
         reset_world(mine);
 
         // Stand in for a test running concurrently on another thread.
-        let their_sub = crate::cdc::broker::subscribe(theirs, "messages");
-        crate::cdc::broker::suppress_app(theirs);
+        let their_sub = crate::cdc::broker::subscribe(&their_route, "messages");
+        crate::cdc::broker::suppress_route(&their_route);
 
         // Our cleanup fires while they are mid-test.
         reset_world(mine);
 
         assert!(
-            crate::cdc::broker::is_app_suppressed(theirs),
+            crate::cdc::broker::is_route_suppressed(&their_route),
             "reset_world cleared another app's suppression",
         );
         assert!(
-            crate::cdc::broker::has_subscribers(theirs, "messages"),
+            crate::cdc::broker::has_subscribers(&their_route, "messages"),
             "reset_world dropped another app's broker subscription",
         );
 
-        crate::cdc::broker::unsuppress_app(theirs);
+        crate::cdc::broker::unsuppress_route(&their_route);
         drop(their_sub);
         reset_world(theirs);
         reset_world(mine);
@@ -594,8 +588,8 @@ mod tests {
         reset_world("app_suppressed");
         // Register a subscriber so the only thing keeping us out of
         // the build is the suppression flag.
-        let sub = crate::cdc::broker::subscribe("app_suppressed", "messages");
-        crate::cdc::broker::suppress_app("app_suppressed");
+        let sub = crate::cdc::broker::subscribe(&crate::tests::fixtures::harness_route("app_suppressed"), "messages");
+        crate::cdc::broker::suppress_route(&crate::tests::fixtures::harness_route("app_suppressed"));
 
         let rows = vec![synthetic_row()];
         emit_for_rows(
@@ -644,7 +638,7 @@ mod tests {
         // would have published to the empty broker bucket. Verify the
         // broker really has no bucket for this key.
         assert!(
-            !crate::cdc::broker::has_subscribers("app_no_subs", "ghosts"),
+            !crate::cdc::broker::has_subscribers(&crate::tests::fixtures::harness_route("app_no_subs"), "ghosts"),
             "sanity: precondition for the gate",
         );
         reset_world("app_no_subs");
@@ -685,10 +679,7 @@ mod tests {
             )
         });
 
-        let sub = crate::cdc::broker::subscribe(
-            "app_active_queue_or_emit_no_tx_emits_immediately",
-            "messages",
-        );
+        let sub = crate::cdc::broker::subscribe(&crate::tests::fixtures::harness_route("app_active_queue_or_emit_no_tx_emits_immediately"), "messages");
 
         let mut tuple = HashMap::new();
         tuple.insert("id".to_string(), "9".to_string());
@@ -720,13 +711,10 @@ mod tests {
     #[test]
     fn drain_pending_emits_on_commit_fires_every_queued_event() {
         reset_world("app_active_drain_pending_emits_on_commit_fires_every_queued_event");
-        let sub = crate::cdc::broker::subscribe(
-            "app_active_drain_pending_emits_on_commit_fires_every_queued_event",
-            "messages",
-        );
+        let sub = crate::cdc::broker::subscribe(&crate::tests::fixtures::harness_route("app_active_drain_pending_emits_on_commit_fires_every_queued_event"), "messages");
 
         let mk_event = |pk: i64| zeroship_data_orm::cdc::ChangeEvent {
-            app_id: "app_active_drain_pending_emits_on_commit_fires_every_queued_event".to_string(),
+            route: crate::tests::fixtures::harness_route("app_active_drain_pending_emits_on_commit_fires_every_queued_event"),
             collection: "messages".to_string(),
             op: ChangeOp::Insert,
             pk: Some(pk.to_string()),
@@ -777,13 +765,10 @@ mod tests {
     #[test]
     fn clear_pending_emits_drops_without_firing() {
         reset_world("app_active_clear_pending_emits_drops_without_firing");
-        let sub = crate::cdc::broker::subscribe(
-            "app_active_clear_pending_emits_drops_without_firing",
-            "messages",
-        );
+        let sub = crate::cdc::broker::subscribe(&crate::tests::fixtures::harness_route("app_active_clear_pending_emits_drops_without_firing"), "messages");
 
         let ev = zeroship_data_orm::cdc::ChangeEvent {
-            app_id: "app_active_clear_pending_emits_drops_without_firing".to_string(),
+            route: crate::tests::fixtures::harness_route("app_active_clear_pending_emits_drops_without_firing"),
             collection: "messages".to_string(),
             op: ChangeOp::Insert,
             pk: Some("99".to_string()),
@@ -817,10 +802,7 @@ mod tests {
     #[test]
     fn exec_mutation_with_emit_builds_when_active_subscriber() {
         reset_world("app_active_exec_mutation_with_emit_builds_when_active_subscriber");
-        let sub = crate::cdc::broker::subscribe(
-            "app_active_exec_mutation_with_emit_builds_when_active_subscriber",
-            "messages",
-        );
+        let sub = crate::cdc::broker::subscribe(&crate::tests::fixtures::harness_route("app_active_exec_mutation_with_emit_builds_when_active_subscriber"), "messages");
 
         let rows = vec![synthetic_row()];
         emit_for_rows(
@@ -841,10 +823,7 @@ mod tests {
         // subscriber's queue holds the change.
         match sub.pop() {
             Some(crate::cdc::broker::SubscriptionMessage::Change(ev)) => {
-                assert_eq!(
-                    ev.app_id,
-                    "app_active_exec_mutation_with_emit_builds_when_active_subscriber"
-                );
+                assert_eq!(ev.route, crate::tests::fixtures::harness_route("app_active_exec_mutation_with_emit_builds_when_active_subscriber"));
                 assert_eq!(ev.collection, "messages");
                 assert_eq!(ev.op, ChangeOp::Insert);
                 assert_eq!(ev.pk.as_deref(), Some("7"));
@@ -879,10 +858,7 @@ mod tests {
                 .expect("open sqlite backend"),
             );
             let handle = BackendHandle::new(Rc::clone(&backend));
-            let sub = crate::cdc::broker::subscribe(
-                "app_active_exec_mutation_with_emit_skips_local_emit_when_sqlite_cdc_publishes",
-                "messages",
-            );
+            let sub = crate::cdc::broker::subscribe(&crate::tests::fixtures::harness_route("app_active_exec_mutation_with_emit_skips_local_emit_when_sqlite_cdc_publishes"), "messages");
 
             let rows = vec![synthetic_row()];
             emit_for_rows(
@@ -912,10 +888,7 @@ mod tests {
     #[test]
     fn exec_mutation_with_emit_uses_logical_typed_id_for_pk() {
         reset_world("app_active_exec_mutation_with_emit_uses_logical_typed_id_for_pk");
-        let sub = crate::cdc::broker::subscribe(
-            "app_active_exec_mutation_with_emit_uses_logical_typed_id_for_pk",
-            "messages",
-        );
+        let sub = crate::cdc::broker::subscribe(&crate::tests::fixtures::harness_route("app_active_exec_mutation_with_emit_uses_logical_typed_id_for_pk"), "messages");
 
         let rows = vec![synthetic_typed_id_row()];
         emit_for_rows(

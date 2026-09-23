@@ -376,7 +376,7 @@ async fn next_change(sub: &Subscription) -> std::sync::Arc<crate::cdc::ChangeEve
 async fn bulk_cdc(fixture: CollectionFixture) {
     let db = fixture.database.clone();
     let entries = db.collection("entries").unwrap();
-    let sub = broker::subscribe(db.binding.app_id(), "entries");
+    let sub = broker::subscribe(&db.binding.route(), "entries");
     for label in ["first", "second"] {
         entries
             .insert(value!({"label":label, "status":"new"}))

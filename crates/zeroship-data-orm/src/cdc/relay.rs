@@ -1,6 +1,7 @@
 //! Worker-side CDC transport. This module never opens a replication connection.
 
 use super::{broker, ChangeEvent, ChangeOp};
+use crate::binding::DbRoute;
 use crate::error::DbError;
 use compio_ws::tungstenite::{protocol::WebSocketConfig, Message};
 use futures::FutureExt;
@@ -85,23 +86,28 @@ impl RelayConfig {
 
     /// Start delivery and wait until the relay has established capture.
     ///
+    /// One connection carries one `(app, database)` stream: the subscribe
+    /// request names both, and the relay resolves the named database's schema
+    /// from Control's binding rows.
+    ///
     /// # Errors
-    /// Refuses unavailable authentication, invalid requests, or failed startup.
-    pub async fn spawn(&self, app_id: &str) -> Result<RelayHandle, DbError> {
+    /// Refuses unavailable authentication, invalid requests, a route that
+    /// names no database, or failed startup.
+    pub async fn spawn(&self, route: &DbRoute) -> Result<RelayHandle, DbError> {
         let (startup, ready) = flume::bounded(1);
         let (shutdown, stop) = flume::bounded(1);
         let exit = Arc::new(SharedExit::default());
         let handle = RelayHandle {
-            app_id: app_id.into(),
+            route: route.clone(),
             shutdown,
             exit: exit.clone(),
         };
         let config = self.clone();
-        let app = app_id.to_owned();
+        let route = route.clone();
         compio::runtime::spawn(async move {
             let task = async {
-                let _suppression = broker::SuppressGuard::activate(&app);
-                let stream = config.supervise(&app, &startup).fuse();
+                let _suppression = broker::SuppressGuard::activate(&route);
+                let stream = config.supervise(&route, &startup).fuse();
                 let stop = stop.recv_async().fuse();
                 futures::pin_mut!(stream, stop);
                 futures::select! { result = stream => result, _ = stop => Ok(()) }
@@ -129,19 +135,20 @@ impl RelayConfig {
 
     async fn supervise(
         &self,
-        app: &str,
+        route: &DbRoute,
         startup: &flume::Sender<Result<(), DbError>>,
     ) -> Result<(), DbError> {
         let mut ever_ready = false;
         let mut delay = Duration::from_millis(250);
         loop {
-            let result = self.consume(app, startup, &mut ever_ready).await;
+            let result = self.consume(route, startup, &mut ever_ready).await;
             if !ever_ready {
                 return result;
             }
-            broker::resume_app_with_resync(app);
+            broker::resume_route_with_resync(route);
             tracing::warn!(
-                app_id = app,
+                app_id = route.app_id(),
+                database = route.database_text(),
                 "CDC relay disconnected; reconnecting with a fresh snapshot"
             );
             compio::time::sleep(delay).await;
@@ -151,10 +158,18 @@ impl RelayConfig {
 
     async fn consume(
         &self,
-        app: &str,
+        route: &DbRoute,
         startup: &flume::Sender<Result<(), DbError>>,
         ever_ready: &mut bool,
     ) -> Result<(), DbError> {
+        // A platform store narrows to nothing and has no database to name on
+        // the wire; it also never reaches this backend. Refuse here rather
+        // than send a request the relay would have to interpret.
+        let database = route
+            .database()
+            .ok_or_else(|| failure("CDC relay requires a route that names a database"))?
+            .as_str()
+            .to_owned();
         let config = WebSocketConfig::default()
             .max_message_size(Some(MAX_MESSAGE_BYTES))
             .max_frame_size(Some(MAX_MESSAGE_BYTES));
@@ -173,7 +188,8 @@ impl RelayConfig {
             .authorization_for(&audience)
             .ok_or_else(|| failure("CDC relay worker identity is unavailable"))?;
         let request = Subscribe {
-            app_id: app.into(),
+            app_id: route.app_id().into(),
+            database_id: database,
             authorization,
         }
         .encode()
@@ -195,7 +211,7 @@ impl RelayConfig {
                 Event::Ready if !ready => {
                     ready = true;
                     if *ever_ready {
-                        broker::resume_app_with_resync(app);
+                        broker::resume_route_with_resync(route);
                     } else {
                         *ever_ready = true;
                         let _ = startup.try_send(Ok(()));
@@ -212,7 +228,7 @@ impl RelayConfig {
                         Operation::Delete => ChangeOp::Delete,
                     };
                     broker::publish(&ChangeEvent {
-                        app_id: app.into(),
+                        route: route.clone(),
                         collection,
                         op,
                         pk: None,
@@ -221,7 +237,7 @@ impl RelayConfig {
                         old_tuple: None,
                     });
                 }
-                Event::Resync if ready => broker::resume_app_with_resync(app),
+                Event::Resync if ready => broker::resume_route_with_resync(route),
                 _ => return Err(failure("CDC relay event arrived outside a ready stream")),
             }
         }
@@ -289,7 +305,7 @@ impl SharedExit {
 /// receiver competes for the single exit result.
 #[derive(Clone)]
 pub struct RelayHandle {
-    app_id: String,
+    route: DbRoute,
     shutdown: flume::Sender<()>,
     exit: Arc<SharedExit>,
 }
@@ -297,7 +313,7 @@ pub struct RelayHandle {
 impl std::fmt::Debug for RelayHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RelayHandle")
-            .field("app_id", &self.app_id)
+            .field("route", &self.route)
             .finish_non_exhaustive()
     }
 }

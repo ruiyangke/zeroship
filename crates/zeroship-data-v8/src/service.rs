@@ -95,7 +95,9 @@ mod tests {
         .unwrap();
         let before = zeroship_data_orm::connection::backend_open_count();
         let app = "app_teardown_without_driver";
-        let lease = zeroship_data_orm::cdc::lifecycle::acquire(app);
+        let lease = zeroship_data_orm::cdc::lifecycle::acquire(
+            &zeroship_data_orm::binding::DbRoute::new(app, Some(zeroship_core::DatabaseId::mint())),
+        );
         service.lifecycle().deprovision_app(app).await.unwrap();
         drop(lease);
         assert_eq!(zeroship_data_orm::connection::backend_open_count(), before);

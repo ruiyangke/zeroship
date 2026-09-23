@@ -19,6 +19,7 @@
 
 #![allow(unsafe_code)]
 
+use zeroship_data_orm::binding::DbRoute;
 use zeroship_data_orm::cdc::broker;
 use zeroship_data_v8::v8_classes::subscription::mint_subscription;
 use zeroship_runtime::init_v8;
@@ -44,7 +45,8 @@ fn dropping_subscription_closes_broker_handle_on_gc() {
     // is gone too.
     {
         v8::scope!(let inner, scope);
-        let _wrapper = mint_subscription(inner, "test_app", "messages").expect("mint_subscription");
+        let route = DbRoute::new("test_app", Some(zeroship_core::DatabaseId::mint()));
+        let _wrapper = mint_subscription(inner, &route, "messages").expect("mint_subscription");
         // Sanity: broker registered an entry.
         assert_eq!(
             broker::app_subscription_count("test_app"),
@@ -90,7 +92,8 @@ fn explicit_close_releases_broker_handle_synchronously() {
     let context = v8::Context::new(handle_scope, Default::default());
     let scope = &mut v8::ContextScope::new(handle_scope, context);
 
-    let wrapper = mint_subscription(scope, "test_app2", "messages2").expect("mint_subscription");
+    let route = DbRoute::new("test_app2", Some(zeroship_core::DatabaseId::mint()));
+    let wrapper = mint_subscription(scope, &route, "messages2").expect("mint_subscription");
     assert_eq!(
         broker::app_subscription_count("test_app2"),
         1,

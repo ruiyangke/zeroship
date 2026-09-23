@@ -1,6 +1,6 @@
 //! TLS transport and process ownership for the relay.
 
-use crate::{auth, hub::Hub, source};
+use crate::{auth, hub::Hub, hub::StreamKey, source};
 use compio::net::TcpListener;
 use compio_postgres::Pool;
 use compio_tls::TlsAcceptor;
@@ -192,19 +192,21 @@ where
     )
     .await??;
     drop(bytes);
-    let (lease, start) = state.hub.subscribe(
-        &request.app_id,
-        state.max_apps,
-        state.max_clients,
-        state.queue,
-    )?;
+    // The stream is the app AND the database it named. Capacity is counted in
+    // streams, so an app reaching two databases occupies two of them - which is
+    // what it costs the relay.
+    let key = StreamKey::new(&request.app_id, &request.database_id);
+    let (lease, start) =
+        state
+            .hub
+            .subscribe(&key, state.max_apps, state.max_clients, state.queue)?;
     if let Some(start) = start {
         let state = state.clone();
-        let app = request.app_id.clone();
+        let key = key.clone();
         compio::runtime::spawn(async move {
             source::run(
                 state.hub.clone(),
-                app,
+                key,
                 start,
                 state.pool.clone(),
                 state.url.clone(),

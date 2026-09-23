@@ -235,6 +235,7 @@ async fn relay_process_authenticates_workers_and_streams_commits_without_worker_
         .send(Message::Binary(
             Subscribe {
                 app_id: app.clone(),
+                database_id: database.clone(),
                 authorization: token.clone(),
             }
             .encode()
@@ -249,6 +250,7 @@ async fn relay_process_authenticates_workers_and_streams_commits_without_worker_
         .send(Message::Binary(
             Subscribe {
                 app_id: app.clone(),
+                database_id: database.clone(),
                 authorization: token,
             }
             .encode()
@@ -266,6 +268,7 @@ async fn relay_process_authenticates_workers_and_streams_commits_without_worker_
         .send(Message::Binary(
             Subscribe {
                 app_id: app.clone(),
+                database_id: database.clone(),
                 authorization: assertion(&first_id, &second_key),
             }
             .encode()
@@ -283,6 +286,7 @@ async fn relay_process_authenticates_workers_and_streams_commits_without_worker_
         .send(Message::Binary(
             Subscribe {
                 app_id: app.clone(),
+                database_id: database.clone(),
                 authorization: assertion(&second_id, &second_key),
             }
             .encode()
@@ -311,8 +315,9 @@ async fn relay_process_authenticates_workers_and_streams_commits_without_worker_
     let client = zeroship_data_orm::cdc::relay::RelayConfig::new(endpoint.clone(), auth)
         .unwrap()
         .with_tls_connector(connector.clone());
-    let native = zeroship_data_orm::cdc::broker::subscribe(&app, "orders");
-    let native_handle = client.spawn(&app).await.unwrap();
+    let route = binding.route();
+    let native = zeroship_data_orm::cdc::broker::subscribe(&route, "orders");
+    let native_handle = client.spawn(&route).await.unwrap();
     let slots: i64 = db
         .query(
             "SELECT count(*) FROM pg_replication_slots WHERE slot_name = $1",

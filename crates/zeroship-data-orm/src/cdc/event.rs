@@ -2,15 +2,22 @@
 
 use std::collections::HashMap;
 
+use crate::binding::DbRoute;
+
 /// One committed row change flowing through the data-plane broker.
 ///
 /// Mutation callbacks and database change streams produce the same shape so
 /// downstream delivery does not depend on the originating backend.
 #[derive(Debug, Clone)]
 pub struct ChangeEvent {
-    /// App that produced the event. Used by the routing table to isolate
-    /// tenants.
-    pub app_id: String,
+    /// Tenant AND database the change was committed on. The routing table keys
+    /// on this together with [`Self::collection`].
+    ///
+    /// **The database half is load-bearing and its omission is silent.** One
+    /// app may reach two databases and both may declare a collection of the
+    /// same name, so an event carrying only the tenant would match a
+    /// subscription on the other database and nothing would raise.
+    pub route: DbRoute,
     /// Collection (table inside the app database).
     pub collection: String,
     /// Operation kind: `"insert"`, `"update"`, or `"delete"`.

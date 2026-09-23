@@ -4,7 +4,7 @@
 //! isolate transaction callbacks; the actor publishes committed change events
 //! through the supplied change sink. Migrations own the physical schema.
 
-use crate::binding::DbBinding;
+use crate::binding::{DbBinding, DbRoute};
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
@@ -26,7 +26,7 @@ struct NullChangeSink;
 
 #[cfg(test)]
 impl ChangeSink for NullChangeSink {
-    fn disposition(&self, _app_id: &str) -> crate::cdc::DeliveryDisposition {
+    fn disposition(&self, _route: &DbRoute) -> crate::cdc::DeliveryDisposition {
         crate::cdc::DeliveryDisposition::Deliver
     }
     fn publish(&self, _event: &zeroship_data_orm::cdc::ChangeEvent) {}
@@ -367,9 +367,9 @@ impl SqliteBackend {
         if alias == MAIN_DATABASE {
             return Ok(());
         }
-        // The preupdate hook reports the alias and nothing else, so the tenant
+        // The preupdate hook reports the alias and nothing else, so the route
         // a change is published under has to be recorded where both are known.
-        record_alias_tenant(alias, binding.app_id());
+        record_alias_route(alias, binding.route());
         self.attach_alias_file(alias).await
     }
 
@@ -1184,14 +1184,20 @@ impl crate::backend::Backend for SqliteBackend {
     }
 }
 
-/// Every app bound to one `ATTACH` alias on this process's dev tier.
+/// Every route bound to one `ATTACH` alias on this process's dev tier.
 ///
-/// **The alias is a DATABASE and the broker routes on an APP, so this is the
-/// translation between them.** SQLite's preupdate hook reports the alias and
-/// nothing else; production learns the same mapping from Control's binding
-/// topology, which the relay reads. A dev process has no control plane, so the
-/// mapping is what `attach_binding` saw: every binding whose statements have
-/// addressed this alias.
+/// **The alias is a DATABASE and the broker routes on a TENANT AND a DATABASE,
+/// so this is the translation between them.** SQLite's preupdate hook reports
+/// the alias and nothing else; production learns the same mapping from
+/// Control's binding topology, which the relay reads. A dev process has no
+/// control plane, so the mapping is what `attach_binding` saw: every binding
+/// whose statements have addressed this alias.
+///
+/// The recorded value is the whole route rather than the app id, because the
+/// alias recovers the database only for a binding that composed the alias FROM
+/// that database - and `main` is a legal alias for a binding on any of them.
+/// Carrying the route keeps the published event's key the one the writer's own
+/// binding declared.
 ///
 /// Process-wide rather than per backend because the publisher task and the
 /// session actor run on different threads from the one that attached.
@@ -1199,29 +1205,26 @@ impl crate::backend::Backend for SqliteBackend {
 /// An alias nobody bound publishes nothing. Stamping the alias as a tenant
 /// instead would deliver to a subscription nobody holds, which reads as a lost
 /// event rather than as an unbound database.
-static ALIAS_TENANTS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, BTreeSet<String>>>> =
+static ALIAS_ROUTES: std::sync::OnceLock<std::sync::Mutex<HashMap<String, BTreeSet<DbRoute>>>> =
     std::sync::OnceLock::new();
 
-fn alias_tenants() -> &'static std::sync::Mutex<HashMap<String, BTreeSet<String>>> {
-    ALIAS_TENANTS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+fn alias_routes() -> &'static std::sync::Mutex<HashMap<String, BTreeSet<DbRoute>>> {
+    ALIAS_ROUTES.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
-/// Record that `app_id` addresses `alias`.
-pub(crate) fn record_alias_tenant(alias: &str, app_id: &str) {
-    if let Ok(mut tenants) = alias_tenants().lock() {
-        tenants
-            .entry(alias.to_owned())
-            .or_default()
-            .insert(app_id.to_owned());
+/// Record that `route` addresses `alias`.
+pub(crate) fn record_alias_route(alias: &str, route: DbRoute) {
+    if let Ok(mut routes) = alias_routes().lock() {
+        routes.entry(alias.to_owned()).or_default().insert(route);
     }
 }
 
-/// The apps a change on `alias` is published to, in a stable order.
-pub(crate) fn tenants_for_alias(alias: &str) -> Vec<String> {
-    alias_tenants()
+/// The routes a change on `alias` is published to, in a stable order.
+pub(crate) fn routes_for_alias(alias: &str) -> Vec<DbRoute> {
+    alias_routes()
         .lock()
-        .map(|tenants| {
-            tenants
+        .map(|routes| {
+            routes
                 .get(alias)
                 .map(|set| set.iter().cloned().collect())
                 .unwrap_or_default()

@@ -1,6 +1,6 @@
 //! PostgreSQL capture belongs exclusively to the relay process.
 
-use crate::hub::{Hub, Start};
+use crate::hub::{Hub, Start, StreamKey};
 use crate::transaction::{Action, TransactionBuffer};
 use compio_postgres::replication::{self, pgoutput, ReplicationMessage, StartReplicationOptions};
 use compio_postgres::{MakeRustlsConnect, Pool};
@@ -20,43 +20,40 @@ pub(crate) struct Limits {
 
 pub(crate) use zeroship_core::replication_names::SLOT_PREFIX;
 
-/// The physical schema of the one database this app is bound to.
+/// The physical schema of the database this subscriber NAMED, once the app is
+/// confirmed to hold a live binding to it.
 ///
 /// **Read from Control's rows, never composed here.** The database id is a
 /// control-plane fact and `db_<dbs>` is derived from it, so a relay that
-/// composed a schema from the app id would name something no reconciler
-/// created. This is the same read Control's binding endpoint performs, taken
-/// against the pool this process already reads `zeroship.worker_instances`
-/// from when it verifies a worker.
+/// composed a schema from the request alone would name something no reconciler
+/// created - and would stream a schema the app may hold no binding to. This is
+/// the same read Control's binding endpoint performs, taken against the pool
+/// this process already reads `zeroship.worker_instances` from when it verifies
+/// a worker.
 ///
-/// **The subscribe request names only the app, so a second live binding is
-/// REFUSED rather than ordered and taken.** Carrying a database on that wire is
-/// a wire-contract change - every producer, consumer, fixture and doc in one
-/// patch. Picking silently would stream one database to a subscriber expecting
-/// another, and the day that becomes possible is the day nobody is looking at
-/// this function.
+/// **The app is the authorization subject and the database is the target.** The
+/// request's database narrows the row set; the binding predicate decides
+/// whether the pair is admissible at all. An app bound to two databases is
+/// ordinary here and picks neither by accident: a subscriber that named neither
+/// would not have parsed as a request.
 ///
 /// The predicate is [`zeroship_core::live_binding::LIVE_BINDINGS_FROM_WHERE`],
 /// the one Control serves bindings from and the one the migration service
 /// admits an apply against.
-async fn bound_database_schema(pool: &Pool, app: &str) -> Result<String, Error> {
+async fn bound_database_schema(pool: &Pool, app: &str, database: &str) -> Result<String, Error> {
+    let database = zeroship_core::DatabaseId::parse(database)?;
     let rows = pool
         .query(
             &format!(
-                "SELECT b.database_id {} ORDER BY b.id LIMIT 2",
+                "SELECT b.database_id {} AND b.database_id = $2 LIMIT 1",
                 zeroship_core::live_binding::LIVE_BINDINGS_FROM_WHERE
             ),
-            &[&app],
+            &[&app, &database.as_str().to_owned()],
         )
         .await?;
-    if rows.len() > 1 {
-        return Err("app holds more than one live database binding; the subscribe request must \
-                    name which database"
-            .into());
+    if rows.is_empty() {
+        return Err("app holds no live binding to the database the subscribe request named".into());
     }
-    let row = rows.first().ok_or("app has no live database binding")?;
-    let database: String = row.try_get(0)?;
-    let database = zeroship_core::DatabaseId::parse(&database)?;
     Ok(zeroship_core::database_derivation::schema_name(&database))
 }
 
@@ -68,39 +65,39 @@ pub(crate) fn slot_name(app: &str) -> Result<String, Error> {
 /// Every exit drops the replication socket before attempting slot cleanup.
 pub(crate) async fn run(
     hub: Rc<Hub>,
-    app: String,
+    key: StreamKey,
     start: Start,
     pool: Pool,
     url: String,
     limits: Limits,
 ) {
-    let slot = match slot_name(&app) {
+    let slot = match slot_name(&key.app) {
         Ok(slot) => slot,
         Err(_) => {
-            hub.end(&app, start.generation);
+            hub.end(&key, start.generation);
             return;
         }
     };
     let result = {
-        let capture = capture(&hub, &app, start.generation, &pool, &url, &slot, limits).fuse();
+        let capture = capture(&hub, &key, start.generation, &pool, &url, &slot, limits).fuse();
         let stop = start.shutdown.recv_async().fuse();
         futures::pin_mut!(capture, stop);
         futures::select! { result = capture => result, _ = stop => Ok(()) }
     };
     if result.is_err() {
-        tracing::warn!(app_id = %app, "CDC capture stopped; subscribers must reconnect and resnapshot");
+        tracing::warn!(app_id = %key.app, database_id = %key.database, "CDC capture stopped; subscribers must reconnect and resnapshot");
     }
     // Only our prefix and this app's exact name are ever deleted. An active
     // slot is never terminated; a failed cleanup is retried at relay startup.
     if pool.query("SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1 AND NOT active AND database = current_database()", &[&slot]).await.is_err() {
-        tracing::warn!(app_id = %app, "CDC slot cleanup failed");
+        tracing::warn!(app_id = %key.app, "CDC slot cleanup failed");
     }
-    hub.end(&app, start.generation);
+    hub.end(&key, start.generation);
 }
 
 async fn capture(
     hub: &Hub,
-    app: &str,
+    key: &StreamKey,
     generation: u64,
     pool: &Pool,
     url: &str,
@@ -130,8 +127,8 @@ async fn capture(
     // spans every database on the datastore, so its membership is NOT a filter:
     // reading namespaces out of it would admit every co-tenant's relations to
     // this subscriber. What separates them is this comparison, against the
-    // schema of the ONE database this app is bound to.
-    let schema = bound_database_schema(pool, app).await?;
+    // schema of the database this subscriber NAMED and holds a live binding to.
+    let schema = bound_database_schema(pool, &key.app, &key.database).await?;
     // A source restart begins a new snapshot contract. Discard any inactive
     // previous slot rather than claiming that an in-memory queue is durable.
     pool.query("SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1 AND NOT active AND database = current_database()", &[&slot]).await?;
@@ -153,7 +150,7 @@ async fn capture(
         .await?;
     let mut transactions = TransactionBuffer::new(max_bytes, max_changes);
     let mut relations: HashMap<u32, String> = HashMap::new();
-    hub.ready(app, generation);
+    hub.ready(key, generation);
     while let Some(message) = stream.next().await? {
         match message {
             ReplicationMessage::XLogData { body, .. } => {
@@ -213,7 +210,7 @@ async fn capture(
                     Action::Pending => {}
                     Action::Commit(batch) => {
                         if batch.needs_resync {
-                            hub.publish(app, generation, Event::Resync);
+                            hub.publish(key, generation, Event::Resync);
                         } else {
                             for message in batch.changes {
                                 let (rel_id, operation) = match message {
@@ -221,14 +218,14 @@ async fn capture(
                                     M::Update { rel_id, .. } => (rel_id, Operation::Update),
                                     M::Delete { rel_id, .. } => (rel_id, Operation::Delete),
                                     M::Truncate { .. } => {
-                                        hub.publish(app, generation, Event::Resync);
+                                        hub.publish(key, generation, Event::Resync);
                                         continue;
                                     }
                                     _ => return Err("unexpected buffered message".into()),
                                 };
                                 match relations.get(&rel_id) {
                                     Some(collection) => hub.publish(
-                                        app,
+                                        key,
                                         generation,
                                         Event::Change {
                                             collection: collection.clone(),
@@ -295,7 +292,20 @@ mod tests {
     /// schema. Without them capture refuses, which is the production behaviour
     /// for an app whose binding is not live.
     async fn declare_binding(pool: &Pool, app: &str) {
-        let database = test_database(app).as_str().to_owned();
+        let database = test_database(app);
+        declare_binding_to(pool, app, &database, "active").await;
+    }
+
+    /// One `(app, database)` edge in Control's rows, at the given binding
+    /// status. The database itself is always `active`, so a non-`active`
+    /// status here varies exactly one conjunct of the liveness predicate.
+    async fn declare_binding_to(
+        pool: &Pool,
+        app: &str,
+        database: &zeroship_core::DatabaseId,
+        status: &str,
+    ) {
+        let database = database.as_str().to_owned();
         pool.batch_execute(
             "CREATE SCHEMA IF NOT EXISTS zeroship;
              CREATE TABLE IF NOT EXISTS zeroship.databases (
@@ -318,15 +328,103 @@ mod tests {
         .expect("declare the database");
         pool.execute(
             "INSERT INTO zeroship.database_bindings (id, app_id, database_id, status) \
-             VALUES ($1, $2, $3, 'active') ON CONFLICT (id) DO NOTHING",
+             VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING",
             &[
                 &zeroship_core::BindingId::mint().as_str().to_owned(),
                 &app.to_owned(),
                 &database,
+                &status.to_owned(),
             ],
         )
         .await
         .expect("declare the binding");
+    }
+
+    /// **An app that holds several live bindings resolves the named one.**
+    ///
+    /// The subscribe request carries the database, so holding more than one
+    /// live binding is an ordinary state here rather than an ambiguity: the
+    /// request selects, and nothing has to pick. A resolver that answered from
+    /// the app alone could only refuse this row set or guess at it, and the
+    /// guess is the silent half.
+    ///
+    /// Three controls, each differing from the admitted case in one variable:
+    /// the app's OTHER live database resolves its own distinct schema (so the
+    /// request's database really selects); a database that exists and is
+    /// `active` but which this app holds no binding row for is refused; and a
+    /// database this app IS bound to whose binding is `pending` is refused,
+    /// which is the liveness conjunct rather than the ownership one.
+    #[compio::test]
+    async fn a_named_database_resolves_among_an_app_s_several_live_bindings() {
+        let postgres = crate::postgres_fixture::Postgres::start();
+        let pool = Pool::connect(&postgres.url(), 2)
+            .await
+            .expect("required PostgreSQL");
+        let app = zeroship_core::typed_id::generate(zeroship_core::typed_id::APP_PREFIX);
+        let neighbour = zeroship_core::typed_id::generate(zeroship_core::typed_id::APP_PREFIX);
+
+        let mine = zeroship_core::DatabaseId::mint();
+        let theirs = zeroship_core::DatabaseId::mint();
+        let unbound = zeroship_core::DatabaseId::mint();
+        let not_yet = zeroship_core::DatabaseId::mint();
+        declare_binding_to(&pool, &app, &mine, "active").await;
+        declare_binding_to(&pool, &app, &theirs, "active").await;
+        declare_binding_to(&pool, &app, &not_yet, "pending").await;
+        // `unbound` is a real, active database - the neighbour's - so the
+        // refusal below is about THIS app's binding topology and not about a
+        // row that is simply absent.
+        declare_binding_to(&pool, &neighbour, &unbound, "active").await;
+
+        // PRECONDITION: the app really holds TWO live bindings, compared to
+        // each other. Two separately-minted ids that happened to be equal
+        // would make the whole arm vacuous.
+        assert_ne!(mine, theirs, "the app's two databases must be different");
+        let live: i64 = pool
+            .query(
+                &format!(
+                    "SELECT count(*) {}",
+                    zeroship_core::live_binding::LIVE_BINDINGS_FROM_WHERE
+                ),
+                &[&app],
+            )
+            .await
+            .expect("count the app's live bindings")[0]
+            .try_get(0)
+            .expect("the count decodes");
+        assert_eq!(
+            live, 2,
+            "the arm is about an app that holds MORE THAN ONE live binding"
+        );
+
+        let my_schema = bound_database_schema(&pool, &app, mine.as_str())
+            .await
+            .expect("a named live binding resolves rather than being refused");
+        let their_schema = bound_database_schema(&pool, &app, theirs.as_str())
+            .await
+            .expect("the app's other live binding resolves too");
+        assert_eq!(
+            my_schema,
+            zeroship_core::database_derivation::schema_name(&mine)
+        );
+        assert_ne!(
+            my_schema, their_schema,
+            "the request's database selects which schema is streamed"
+        );
+
+        assert!(
+            bound_database_schema(&pool, &app, unbound.as_str())
+                .await
+                .is_err(),
+            "a database this app holds no binding to must be refused"
+        );
+        assert!(
+            bound_database_schema(&pool, &app, not_yet.as_str())
+                .await
+                .is_err(),
+            "a binding that is not yet live must be refused"
+        );
+
+        pool.close().await;
     }
 
     #[compio::test]
@@ -360,12 +458,13 @@ mod tests {
             .expect("logical WAL and publication required");
         declare_binding(&pool, &app).await;
         let hub = Rc::new(Hub::default());
-        let (first, start) = hub.subscribe(&app, 1, 4, 32).unwrap();
-        let (second, duplicate) = hub.subscribe(&app, 1, 4, 32).unwrap();
+        let stream = StreamKey::new(&app, test_database(&app).as_str());
+        let (first, start) = hub.subscribe(&stream, 1, 4, 32).unwrap();
+        let (second, duplicate) = hub.subscribe(&stream, 1, 4, 32).unwrap();
         assert!(duplicate.is_none());
         let task = compio::runtime::spawn(run(
             hub.clone(),
-            app.clone(),
+            stream.clone(),
             start.unwrap(),
             pool.clone(),
             url,

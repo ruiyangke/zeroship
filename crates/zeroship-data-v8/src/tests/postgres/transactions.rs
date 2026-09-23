@@ -1723,7 +1723,7 @@ const _procedures = { nestedPartialFailure };
 /// about a row that was rolled back and does not exist.
 ///
 /// The live subscription is load-bearing, not scaffolding: `emit_for_rows`
-/// returns early unless `broker::has_subscribers(app, collection)`
+/// returns early unless `broker::has_subscribers(route, collection)`
 /// (`exec.rs`), so without it nothing is ever queued and this test
 /// would pass vacuously against the very defect it exists to catch.
 #[test]
@@ -1735,7 +1735,8 @@ fn savepoint_rollback_must_not_publish_its_change_event_at_outer_commit() {
 
     // Same thread as `block_on`'s runtime (`RT.with`), so this shares the
     // thread-local broker the dispatch path publishes into.
-    let sub = zeroship_data_orm::cdc::broker::subscribe(app, "notes");
+    let sub =
+        zeroship_data_orm::cdc::broker::subscribe(&crate::tests::fixtures::harness_route(app), "notes");
 
     let src = build_src(
         r#"

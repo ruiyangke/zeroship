@@ -17,10 +17,13 @@ fn c1_broker_event_delivered_for_insert_via_emit() {
         zeroship_data_orm::cdc::broker::drain_current_thread_subscriptions();
         let app = crate::tests::fixtures::test_app_id!();
         let app = app.as_str();
-        let sub = zeroship_data_orm::cdc::broker::subscribe(app, "messages");
+        let sub = zeroship_data_orm::cdc::broker::subscribe(
+            &crate::tests::fixtures::harness_route(app),
+            "messages",
+        );
 
         zeroship_data_orm::cdc::broker::emit_local(
-            app,
+            &crate::tests::fixtures::harness_route(app),
             "messages",
             zeroship_data_orm::cdc::ChangeOp::Insert,
             Some("usr_02HXINTEGRATIONSUBPK".to_string()),
@@ -45,7 +48,7 @@ fn c1_broker_event_delivered_for_insert_via_emit() {
 /// Helper: build a minimal ChangeEvent for the queue-mechanics tests.
 fn gapb_ev(app: &str, collection: &str, pk: i64) -> zeroship_data_orm::cdc::ChangeEvent {
     zeroship_data_orm::cdc::ChangeEvent {
-        app_id: app.to_string(),
+        route: crate::tests::fixtures::harness_route(app),
         collection: collection.to_string(),
         op: zeroship_data_orm::cdc::ChangeOp::Insert,
         pk: Some(pk.to_string()),
@@ -63,7 +66,10 @@ fn gap_b_commit_drains_pending_emits_to_broker() {
         zeroship_data_orm::cdc::broker::drain_current_thread_subscriptions();
         let app = crate::tests::fixtures::test_app_id!();
         let app = app.as_str();
-        let sub = zeroship_data_orm::cdc::broker::subscribe(app, "users");
+        let sub = zeroship_data_orm::cdc::broker::subscribe(
+            &crate::tests::fixtures::harness_route(app),
+            "users",
+        );
 
         host.push_pending_emit(app, gapb_ev(app, "users", 1));
         host.push_pending_emit(app, gapb_ev(app, "users", 2));
@@ -92,7 +98,10 @@ fn gap_b_rollback_clears_pending_emits_silently() {
         zeroship_data_orm::cdc::broker::drain_current_thread_subscriptions();
         let app = crate::tests::fixtures::test_app_id!();
         let app = app.as_str();
-        let sub = zeroship_data_orm::cdc::broker::subscribe(app, "users");
+        let sub = zeroship_data_orm::cdc::broker::subscribe(
+            &crate::tests::fixtures::harness_route(app),
+            "users",
+        );
 
         host.push_pending_emit(app, gapb_ev(app, "users", 42));
         host.push_pending_emit(app, gapb_ev(app, "users", 43));
@@ -153,7 +162,10 @@ fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
             .unwrap();
 
             zeroship_data_orm::cdc::broker::drain_current_thread_subscriptions();
-            let sub = zeroship_data_orm::cdc::broker::subscribe(app, "users");
+            let sub = zeroship_data_orm::cdc::broker::subscribe(
+            &crate::tests::fixtures::harness_route(app),
+            "users",
+        );
 
             // Open the production transaction protocol.
             host.begin_transaction(app, &url).await;
