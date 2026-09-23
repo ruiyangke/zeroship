@@ -18,7 +18,7 @@
 // `applyIr` under an in-process driver, and `existence-guard-fold-projection.test.ts`
 // in this directory
 // drives live SQLite arms through it. The SQLite arm for this exact shape is caught
-// in `crates/zeroship-migrate/tests/existence_guard_sqlite.rs`
+// in `crates/zeroship-migrate/tests/sqlite_engine/existence_guard_sqlite.rs`
 // (`create_index_unguarded_name_owned_by_another_table_fails_closed`).
 //
 // Does NOT cover a collision the same migration UNIT creates before the statement

@@ -18,7 +18,7 @@
 // `applyIr` under an in-process driver, and `existence-guard-fold-projection.test.ts`
 // in this directory
 // drives live SQLite arms through exactly that. The SQLite arm for THIS question is
-// caught in `crates/zeroship-migrate/tests/existence_guard_sqlite.rs`
+// caught in `crates/zeroship-migrate/tests/sqlite_engine/existence_guard_sqlite.rs`
 // (`create_index_ifnotexists_name_owned_by_another_table_fails_closed`), against a
 // real SQLite catalog in process.
 //

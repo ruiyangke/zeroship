@@ -1,5 +1,5 @@
 // Join the TypeScript authoring surface to the hand-written SQL expectations in
-// `crates/zeroship-migrate/tests/sql_preview.rs`.
+// `crates/zeroship-migrate/tests/ir_contract/sql_preview.rs`.
 //
 // WHY THIS EXISTS
 // `buildEnvelope` (packages/zero-migrate/src/internal/recorder.ts) is the only

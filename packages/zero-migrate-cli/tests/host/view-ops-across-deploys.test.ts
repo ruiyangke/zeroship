@@ -9,9 +9,9 @@
 //
 // The DROP row was FAILS on MySQL. Its catalog snapshot left the `views` map empty, the
 // Node apply lowering seeds its pending-schema fold from exactly that snapshot
-// (`crates/zeroship-migrate-node/src/lower.rs:578`, folded at `:607`), and the fold's
-// `DropView` arm treats an absent view as an error rather than a no-op
-// (`crates/zeroship-migrate/src/render/fold.rs:2348`). The deploy failed with
+// (`crates/zeroship-migrate-node/src/lower.rs`, `lower_ordered_envelopes_to_plans_inner`), and
+// the fold's `Op::DropView` arm treats an absent view as an error rather than a no-op
+// (`crates/zeroship-migrate-core/src/render/fold.rs`, `fold_ops`). The deploy failed with
 // `fold: view <name> does not exist`. MySQL now populates the map from
 // `information_schema.VIEWS`.
 //
