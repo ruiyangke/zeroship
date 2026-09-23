@@ -40,21 +40,24 @@ costs: `IMMEDIATE` "takes a write lock on every database the connection has open
 `crates/zeroship-migrate-sqlite/src/backend/mod.rs` receives them; it composes neither. Every
 composition is in a caller, and every caller composes its own.
 
-**Two callers now compose different names for one file.** `devSqlitePaths` names
-`zs-<app_id>.sqlite`. `attach_alias_file` names `zs-<alias>.sqlite`, where the alias is the
-binding's schema, and a creator binding's schema is `db_<database_id>` with the database id read
-from `.zeroship/private/dev-database-binding.json`, which `load_material` in
-`crates/zeroship-cli/src/dev_binding.rs` mints when the file is absent:
+**The two callers now agree on the IDENTITY, and that half is built.** `devSqlitePaths` and
+`attach_alias_file` both compose from the database id that `zeroship.jsonc` declares under the
+app's `primary` label: the dev host resolves it with `resolve_dev_database`
+(`crates/zeroship-cli/src/main.rs`) and hands it to `dev_binding::load`, which no longer mints one.
+Measured end to end on `examples/db-todos`: the apply reports its target as
+`.zeroship/zs-db_dbs_03evr3oqx1200cfkwyailh8l8.sqlite` and the dev server reports reading that same
+file, and a write through `env.db` then reads back.
 
-```rust
-database_id: DatabaseId::mint().into_string(),
-```
-
-So the dev apply writes one file and the dev runtime's `env.db` opens another. The header of
-`dev-apply.ts` names exactly this as the failure worth guarding against: "`applyIrSqlite` would
+`dev-apply.ts`'s header states the property and the failure it guards: "ONE IDENTITY, and it is the
+declared one: the apply and the runtime compose the same name because they read the same `dbs_` id
+out of the same file. Getting it wrong is the failure worth guarding against: the apply would
 report `applied: [...]` against a file nobody opens, and the app would still be broken with a
-success line in the log." Two derivations over two different identities cannot be kept in
-agreement by being careful, which is the whole of decision 3 below.
+success line in the log."
+
+**What is NOT built is the rest of decision 3.** The identity crosses the boundary as data; the
+COMPOSITION does not. `zs-` and `db_` are still spelled once in Rust and once in TypeScript, so the
+two sides agree today because both read the same id, not because only one of them builds a path.
+That is the residual this proposal still argues for, and it is narrower than it was.
 
 **Not SQLite, and partitioned out rather than filtered out.**
 `crates/zeroship-metering/src/outbox.rs` composes
