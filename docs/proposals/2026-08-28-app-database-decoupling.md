@@ -1102,6 +1102,17 @@ journal's frontier as the control that each delta actually committed.
   `crates/zeroship-data-cdc-server/src/source.rs` derives its slot name from
   `replication_names::publication_name(app)` and is app-keyed throughout; that keying moves to the
   datastore.
+
+  **This is now REACHABLE rather than theoretical, and the routing key is what reached it.** The
+  hub keys streams on `(app, database)`, so a capture is spawned per stream, while
+  `replication_names::relay_slot_name` still composes `<prefix><app_token>` with no database
+  component. An app holding concurrent relay subscriptions on two databases OF ONE DATASTORE
+  therefore has two captures request the same slot: the second gets `42710`, its capture returns
+  an error, and its subscribers disconnect and retry. Before the routing key the relay refused an
+  app with a second live binding outright, so this could not arise. The failure is LOUD and the
+  first stream is undamaged - both drop paths are scoped `AND NOT active` - but it is a real gap
+  that belongs to this bullet rather than to the one below it, and no test covers it, because
+  writing one means changing slot naming.
 - **The broker's routing key gains the database.** `crates/zeroship-data-orm/src/cdc/broker.rs`
   routes on `(app_id, collection)`, and the hub in `crates/zeroship-data-cdc-server/src/hub.rs`
   keys subscribers under an app. With one app reaching two databases that key is ambiguous: two
