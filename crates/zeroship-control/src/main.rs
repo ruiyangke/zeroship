@@ -557,11 +557,6 @@ fn main() -> std::io::Result<()> {
         std::path::PathBuf::from(&deploy_tmp_dir_str)
     };
 
-    // Control authenticates the worker admin log fan-out with the
-    // worker key. The same key gates the worker's dispatch bearer AND keys the
-    // per-request ZeroShip-User HMAC, so it carries the >=32-byte strength floor
-    // (empty and present-but-weak values are rejected).
-    //
     // Every strength guard below goes through `validate_secret_material`, which
     // runs the validator on the RESOLVED material whenever this run has any.
     //

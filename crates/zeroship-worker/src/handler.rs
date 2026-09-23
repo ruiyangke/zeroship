@@ -84,11 +84,11 @@ pub(crate) async fn check_worker_auth(
 /// public key.
 ///
 /// A second, independent credential from the one [`check_worker_auth`] checks -
-/// independent now in the only sense that counts, which is the key. Until this
-/// change both were the shared `worker_key`, so a worker able to verify an
-/// envelope was equally able to mint one, and every claim about the envelope
-/// surviving a transport bypass was circular. The worker now holds only the
-/// public half: it can check the gateway's signature and cannot produce one.
+/// independent in the only sense that counts, which is the key. The worker
+/// holds only the gateway's public half: it can check the gateway's signature
+/// and cannot produce one. Were one shared secret to key both, a worker able to
+/// verify an envelope would be equally able to mint one, and every claim about
+/// the envelope surviving a transport bypass would be circular.
 ///
 /// # Absence refuses
 ///
@@ -314,11 +314,12 @@ pub async fn dispatch(
     //     exists: `env.auth.requireUser()` runs INSIDE creator code and only
     //     when the creator remembers to call it, so it cannot be the fence.
     //
-    // `user_json` here is the HMAC-verified `ZeroShip-User` payload resolved at
-    // the top of this function, or `None` when the request carried no verified
-    // identity at all. The scope half duplicates a check the gateway already
-    // makes; that is defence in depth, not redundancy - see `policy.rs`, which
-    // states the threat the duplication answers.
+    // `user_json` here is the `ZeroShip-User` payload resolved at the top of
+    // this function, its signature checked under the gateway's public key, or
+    // `None` when the request carried no verified identity at all. The scope
+    // half duplicates a check the gateway already makes; that is defence in
+    // depth, not redundancy - see `policy.rs`, which states the threat the
+    // duplication answers.
     if let Some(declared) = cache::get_declared_policy(&app_id) {
         if let Err(refusal) = crate::policy::enforce(&declared, &metadata.url, user_json.as_deref())
         {

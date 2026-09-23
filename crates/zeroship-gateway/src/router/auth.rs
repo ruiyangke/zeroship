@@ -137,8 +137,8 @@ async fn family_revocation_decision(
 
 /// Resolve the per-request auth gate and protected-route scope requirements.
 /// A raw OP Bearer token is evaluated before the signed session cookie; either
-/// credential can produce the HMAC-signed `ZeroShip-User` header forwarded to
-/// the worker. Recognized but invalid user-session Bearers may continue without
+/// credential can produce the ed25519-signed `ZeroShip-User` header forwarded
+/// to the worker. Recognized but invalid user-session Bearers may continue without
 /// identity on anonymous routes, while protected routes fail closed. Other
 /// Bearer schemes are rejected on every route.
 ///
@@ -227,10 +227,11 @@ use zeroship_bundle::compiled::scopes_satisfied;
 
 /// Recover the `scopes` vector from a freshly-built `ZeroShip-User`
 /// header, the scope source of truth set by whichever arm authenticated.
-/// Verifies the MAC under the worker key and JSON-parses the
-/// `scopes` array — the same path the worker uses. A verify/parse failure
-/// yields `[]`, which fails the scope gate closed (a route demanding a
-/// scope rejects an unreadable principal rather than waving it through).
+/// Verifies the envelope signature through `decode_user_header` and
+/// JSON-parses the `scopes` array — the same check the worker runs on the
+/// same bytes. A verify/parse failure yields `[]`, which fails the scope gate
+/// closed (a route demanding a scope rejects an unreadable principal rather
+/// than waving it through).
 fn decode_header_scopes(state: &Arc<GateState>, header: &str) -> Vec<String> {
     let Some(value) = decode_user_header(state, header) else {
         return Vec::new();
@@ -1889,7 +1890,7 @@ mod tests {
             .expect("the test gateway signs")
             .own_verifier()
             .verify(&header)
-        .expect("ZeroShip-User MAC verifies");
+        .expect("ZeroShip-User signature verifies");
         let user: serde_json::Value = serde_json::from_str(&json).expect("user json");
         assert!(
             user["scopes"]
@@ -2112,7 +2113,7 @@ mod tests {
             .expect("the test gateway signs")
             .own_verifier()
             .verify(&header)
-        .expect("MAC verifies");
+        .expect("ZeroShip-User signature verifies");
         let user: serde_json::Value = serde_json::from_str(&json).expect("user json");
         assert_eq!(user["id"], expected_pws);
         assert!(
@@ -2377,7 +2378,7 @@ mod tests {
             .expect("the test gateway signs")
             .own_verifier()
             .verify(&header)
-        .expect("MAC verifies");
+        .expect("ZeroShip-User signature verifies");
         let user: serde_json::Value = serde_json::from_str(&json).expect("user json");
         // The OP-issued per-app pws_ survives resolve_auth unchanged; the
         // global UUID never reaches the worker header.
@@ -2857,7 +2858,7 @@ mod tests {
             .expect("the test gateway signs")
             .own_verifier()
             .verify(header)
-        .expect("ZeroShip-User MAC verifies");
+        .expect("ZeroShip-User signature verifies");
         let v: serde_json::Value = serde_json::from_str(&json).expect("user json");
         v["id"].as_str().expect("id is a string").to_string()
     }
@@ -2985,7 +2986,7 @@ mod tests {
             .expect("the test gateway signs")
             .own_verifier()
             .verify(&header)
-        .expect("MAC verifies");
+        .expect("ZeroShip-User signature verifies");
         let user: serde_json::Value = serde_json::from_str(&json).expect("user json");
         assert_eq!(user["email"], "relay-alias@zeroship.ai", "relay alias from claim");
         assert_eq!(

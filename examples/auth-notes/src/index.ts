@@ -3,8 +3,9 @@
 // auth-notes — the env.auth coverage example (G3 / ISS-54).
 //
 // Proves the gateway→worker identity chain reaches `env.auth` at the worker
-// tier. The platform HMAC-signs the authenticated identity into the
-// `ZeroShip-User` header; the worker verifies + parses it and exposes it via
+// tier. The gateway signs the authenticated identity into the
+// `ZeroShip-User` header with its ed25519 private key; the worker verifies
+// that signature under the gateway's public half, parses it and exposes it via
 // the kernel `env.auth.getUser()` / `requireUser()` primitives, which the
 // `@zeroship/auth` server helper wraps.
 //

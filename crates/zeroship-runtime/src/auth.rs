@@ -1,10 +1,12 @@
 //! Auth primitives — `zeroship.auth.getUser()` and `zeroship.auth.requireUser()`.
 //!
 //! The gateway extracts the authenticated user from the `__Host-zeroship_app_session` cookie
-//! and forwards it as the `ZeroShip-User` header (base64-encoded JSON, HMAC-
-//! signed with the shared worker key). The worker decodes + verifies the
-//! header before dispatching to V8 and stores the user JSON in the runtime's
-//! per-request state, keyed by `request_id`.
+//! and forwards it as the `ZeroShip-User` header: base64-encoded JSON inside an
+//! envelope the gateway signs with its ed25519 private key
+//! (`crates/zeroship-core/src/user_envelope.rs`). The worker verifies that
+//! signature under the gateway's published public half before dispatching to
+//! V8, and stores the user JSON in the runtime's per-request state, keyed by
+//! `request_id`.
 //!
 //! ## Why per-request, not thread-local
 //!
@@ -51,8 +53,9 @@ impl NativePlugin for AuthPlugin {
 }
 
 /// Store the user JSON for a specific request. Called by the worker
-/// dispatch handler after HMAC-verifying the `ZeroShip-User` header,
-/// right before V8 enters for the initial dispatch.
+/// dispatch handler after verifying the `ZeroShip-User` envelope's signature
+/// under the gateway's public key, right before V8 enters for the initial
+/// dispatch.
 pub fn set_request_user(state: &SharedState, request_id: u64, user_json: Option<String>) {
     let mut s = state.borrow_mut();
     match user_json {

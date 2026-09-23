@@ -4,8 +4,9 @@ The `env.auth` coverage example (G3 / ISS-54). A minimal **server-only**
 zeroship app (no client bundle — ISS-59) that proves the gateway→worker
 identity chain reaches the `env.auth` kernel primitive at the worker tier.
 
-The platform HMAC-signs the authenticated identity into the `ZeroShip-User`
-header; the worker verifies + parses it and exposes it via the kernel
+The gateway signs the authenticated identity into the `ZeroShip-User`
+header with its ed25519 private key; the worker verifies that signature under
+the gateway's published public half, parses it and exposes it via the kernel
 `env.auth.getUser()` / `requireUser()` primitives, which the `@zeroship/auth`
 server helper (`auth.getUser()` / `auth.requireUser()`) wraps.
 
@@ -46,5 +47,5 @@ pnpm build      # → dist/app.zship  (4 server functions, 1 worker module)
 
 This app is built to be deployed to a clean ephemeral stack and exercised on
 both the anonymous and the authenticated paths over the worker `/dispatch`
-edge, with a request-bound, HMAC-signed `ZeroShip-User` header (empty dev
-`worker_key`) flowing a test identity into `env.auth`.
+edge, with a request-bound, gateway-signed `ZeroShip-User` header flowing a
+test identity into `env.auth`.
