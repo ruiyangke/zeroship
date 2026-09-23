@@ -226,8 +226,6 @@ pub struct DriverDto {
     pub kind: String,
     /// `"inProcess"` only: the application database file.
     pub app_path: Option<String>,
-    /// `"inProcess"` only: the journal database file attached beside it.
-    pub journal_path: Option<String>,
     /// `"host"` only, and only for the verbs that run DDL: the migrator role to
     /// `SET ROLE` under (a least-privilege apply or rollback). `statusIr` takes none.
     pub migrator_role: Option<String>,

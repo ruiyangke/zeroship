@@ -46,18 +46,12 @@ const VIEW: &str = "active_users";
 struct Paths {
     _dir: TempDir,
     app: PathBuf,
-    journal: PathBuf,
 }
 
 fn paths() -> Paths {
     let dir = tempfile::tempdir().expect("tempdir");
     let app = dir.path().join("zs-app.sqlite");
-    let journal = dir.path().join("zs-app.migrations.sqlite");
-    Paths {
-        _dir: dir,
-        app,
-        journal,
-    }
+    Paths { _dir: dir, app }
 }
 
 fn exec_cfg() -> ExecutorConfig {
@@ -214,7 +208,7 @@ async fn apply_doc(
 #[compio::test]
 async fn rolling_back_a_replace_restores_the_previous_body() {
     let p = paths();
-    let be = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
+    let be = SqliteBackend::open(&p.app).expect("open hardened sqlite backend");
     let mut history: Vec<Op> = Vec::new();
 
     let mut migrations = apply_doc(
@@ -293,7 +287,7 @@ async fn rolling_back_a_replace_restores_the_previous_body() {
 #[compio::test]
 async fn a_replace_is_refused_as_irreversible_rather_than_dropping_the_view() {
     let p = paths();
-    let be = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
+    let be = SqliteBackend::open(&p.app).expect("open hardened sqlite backend");
     let mut history: Vec<Op> = Vec::new();
 
     let mut migrations = apply_doc(

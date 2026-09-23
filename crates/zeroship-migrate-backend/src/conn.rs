@@ -67,7 +67,7 @@ pub struct ConfinementConfig {
     /// would otherwise ADOPT a creator table of the same name as the journal.
     /// MySQL keeps the unprefixed `<meta>.schema_migrations`. SQLite does not
     /// read this field at all: its journal lives in a separately attached
-    /// `_mig` database file.
+    /// journal, which lives in the database file it describes.
     pub meta_schema: String,
     /// Mandatory per-statement timeout. Bounds how long a statement may
     /// **run**; a runaway DDL/DML is cancelled after this. This is the

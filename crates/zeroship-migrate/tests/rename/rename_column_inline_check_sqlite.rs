@@ -120,18 +120,12 @@ fn rename_ir_named(name: &str, from: &str, to: &str) -> MigrationIr {
 struct Paths {
     _dir: TempDir,
     app: PathBuf,
-    journal: PathBuf,
 }
 
 fn paths(tag: &str) -> Paths {
     let dir = tempfile::tempdir().expect("tempdir");
     let app = dir.path().join(format!("zs-{tag}.sqlite"));
-    let journal = dir.path().join(format!("zs-{tag}.migrations.sqlite"));
-    Paths {
-        _dir: dir,
-        app,
-        journal,
-    }
+    Paths { _dir: dir, app }
 }
 
 fn exec_cfg() -> ExecutorConfig {
@@ -177,7 +171,7 @@ fn insert_sql(state: &str) -> String {
 async fn a_sqlite_rename_rebuild_emits_a_check_body_over_the_new_column_name() {
     let effective = support::confined_charter();
     let p = paths("inline_check");
-    let backend = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
+    let backend = SqliteBackend::open(&p.app).expect("open hardened sqlite backend");
     let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let author = IrAuthor::new(
         zeroship_migrate::shipping_vendors(),
@@ -338,7 +332,7 @@ async fn a_sqlite_rename_rebuild_emits_a_check_body_over_the_new_column_name() {
 async fn a_catalog_sourced_rename_still_replays_the_stored_body() {
     let effective = support::confined_charter();
     let p = paths("inline_check_catalog");
-    let backend = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
+    let backend = SqliteBackend::open(&p.app).expect("open hardened sqlite backend");
     let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let author = IrAuthor::new(
         zeroship_migrate::shipping_vendors(),
@@ -461,7 +455,7 @@ async fn a_catalog_sourced_rename_still_replays_the_stored_body() {
 async fn a_second_rename_starts_from_a_folded_body_the_first_rename_already_moved() {
     let effective = support::confined_charter();
     let p = paths("inline_check_twice");
-    let backend = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
+    let backend = SqliteBackend::open(&p.app).expect("open hardened sqlite backend");
     let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let author = IrAuthor::new(
         zeroship_migrate::shipping_vendors(),

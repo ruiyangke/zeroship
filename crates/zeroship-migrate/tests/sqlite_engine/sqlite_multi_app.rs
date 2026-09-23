@@ -40,22 +40,16 @@ const PROJECT: &str = "prj_demo";
 struct Paths {
     _dir: TempDir,
     app: PathBuf,
-    journal: PathBuf,
 }
 
 fn paths(id: &str) -> Paths {
     let dir = tempfile::tempdir().expect("tempdir");
     let app = dir.path().join(format!("zs-{id}.sqlite"));
-    let journal = dir.path().join(format!("zs-{id}.migrations.sqlite"));
-    Paths {
-        _dir: dir,
-        app,
-        journal,
-    }
+    Paths { _dir: dir, app }
 }
 
 fn backend(p: &Paths) -> SqliteBackend {
-    SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend")
+    SqliteBackend::open(&p.app).expect("open hardened sqlite backend")
 }
 
 /// A `SQLite` author deploying AS `owner_app`.

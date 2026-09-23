@@ -54,25 +54,19 @@ use zeroship_migrate_sqlite::SqliteBackend;
 struct Paths {
     _dir: TempDir,
     app: PathBuf,
-    journal: PathBuf,
 }
 
 fn paths(app_id: &str) -> Paths {
     let dir = tempfile::tempdir().expect("tempdir");
     let app = dir.path().join(format!("zs-{app_id}.sqlite"));
-    let journal = dir.path().join(format!("zs-{app_id}.migrations.sqlite"));
-    Paths {
-        _dir: dir,
-        app,
-        journal,
-    }
+    Paths { _dir: dir, app }
 }
 
 /// Open the engine's OWN hardened backend and bootstrap its journal. The whole
 /// point of this file is the open sequence, so nothing here constructs a
 /// connection by hand.
 async fn backend(p: &Paths) -> SqliteBackend {
-    let be = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
+    let be = SqliteBackend::open(&p.app).expect("open hardened sqlite backend");
     be.ensure_journal_sqlite().await.expect("bootstrap journal");
     be
 }

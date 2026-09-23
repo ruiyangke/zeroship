@@ -459,12 +459,18 @@ async fn sqlite_row_order(pin: Pin) -> Result<Vec<String>, String> {
     let dir: TempDir =
         tempfile::tempdir().map_err(|error| format!("create a temp dir: {error}"))?;
     let app: PathBuf = dir.path().join("probe.sqlite");
-    let journal: PathBuf = dir.path().join("probe.migrations.sqlite");
-    let backend = SqliteBackend::open(&app, &journal)
-        .map_err(|error| format!("open the probe database: {error}"))?;
+    let backend =
+        SqliteBackend::open(&app).map_err(|error| format!("open the probe database: {error}"))?;
     let policy = support::operator_charter(SQLITE_PROJECT);
     let cfg = ExecutorConfig::new(SQLITE_PROJECT, SQLITE_PROJECT, policy.clone());
-    apply_fixture(pin, &backend, &cfg, &policy, &zeroship_migrate_sqlite::DIALECT).await?;
+    apply_fixture(
+        pin,
+        &backend,
+        &cfg,
+        &policy,
+        &zeroship_migrate_sqlite::DIALECT,
+    )
+    .await?;
 
     backend
         .actor()

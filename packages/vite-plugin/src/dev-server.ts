@@ -59,7 +59,7 @@ import {
   genTypesFromMigrations,
   isMigrationSourceError,
 } from "./gen-types/index.js";
-import { devSqlitePaths, DEV_APP_ID } from "./gen-types/dev-apply.js";
+import { devSqliteAppPath, DEV_APP_ID } from "./gen-types/dev-apply.js";
 import {
   collectionNamesFrom,
   readGeneratedRuntimeDescriptorAt,
@@ -437,7 +437,7 @@ function reportDevSchemaState(
   }
   if (expected.length === 0) return;
 
-  const { appPath } = devSqlitePaths(root, migrations.id, databaseUrl);
+  const appPath = devSqliteAppPath(root, migrations.id, databaseUrl);
 
   let present: Set<string>;
   try {

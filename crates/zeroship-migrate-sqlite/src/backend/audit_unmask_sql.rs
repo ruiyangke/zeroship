@@ -35,7 +35,7 @@
 //! zeroship app schema carries this platform table" - in a zeroship host, and
 //! leaves this vendor crate holding only the SQL.
 //!
-//! # `main`, not `_mig` - and why the schema is a PARAMETER
+//! # `main` and unfenced - and why the schema is a PARAMETER
 //!
 //! This host opens the tenant's `zs-<app_id>.sqlite` as `main`, so it passes
 //! `"main"`. The worker opens a DIFFERENT file as `main` (the session database)
@@ -49,7 +49,7 @@
 //! generator the apply host does. A fixture with its own hardcoded copy of this
 //! DDL would stay green while production drifted away from it.
 //!
-//! What must NOT happen either way is the table landing in `_mig`. The journal
+//! What must NOT happen either way is the table landing behind the journal's fence. The journal
 //! file is attached only by the migration actor; the worker never attaches it
 //! and could not reach a table put there, so the writer would be unable to see
 //! its own audit log.
@@ -59,7 +59,7 @@
 //! It runs under [`Mode::CreatorUp`], not `EngineJournal`. The table is an
 //! ordinary table in the tenant's own file, reached by ordinary parameterised
 //! SQL from the worker - exactly the privilege a creator migration's own
-//! `CREATE TABLE` has. `EngineJournal` is for `_mig` and would be a strictly
+//! `CREATE TABLE` has. `EngineJournal` is for the journal and would be a strictly
 //! larger grant for no reason.
 
 use super::actor::{MigrationActor, SqliteActorError};

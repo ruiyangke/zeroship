@@ -71,18 +71,12 @@ const WIDE: i64 = 9_007_199_254_740_993;
 struct Paths {
     _dir: TempDir,
     app: PathBuf,
-    journal: PathBuf,
 }
 
 fn paths() -> Paths {
     let dir = tempfile::tempdir().expect("tempdir");
     let app = dir.path().join("app.sqlite");
-    let journal = dir.path().join("app.migrations.sqlite");
-    Paths {
-        _dir: dir,
-        app,
-        journal,
-    }
+    Paths { _dir: dir, app }
 }
 
 async fn exec(backend: &SqliteBackend, sql: &str) -> Result<(), String> {
@@ -251,7 +245,7 @@ async fn seed(backend: &SqliteBackend) {
 #[compio::test]
 async fn a_big_int_column_survives_a_rebuild_as_an_integer() {
     let paths = paths();
-    let backend = SqliteBackend::open(&paths.app, &paths.journal).expect("open the SQLite backend");
+    let backend = SqliteBackend::open(&paths.app).expect("open the SQLite backend");
 
     let history = apply(&backend, CREATE, &LiveSchema::default()).await;
     seed(&backend).await;

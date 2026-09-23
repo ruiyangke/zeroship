@@ -146,7 +146,6 @@ test("SQLite refuses an exclusion constraint by name", async () => {
       deploy("main", {
         kind: "sqlite",
         appPath: join(work, "app.db"),
-        journalPath: join(work, "mig.db"),
       }),
       REFUSAL,
       "SQLite must refuse rather than drop the constraint",

@@ -5,7 +5,7 @@
 // and rows through the real pg/mysql2 drivers. PostgreSQL and MySQL are gated
 // independently by their URL environment variables. SQLite deliberately is not
 // duplicated here - a placement choice, not a missing seam: the Node host
-// `DriverConfig` DOES carry `{ kind: "sqlite"; appPath; journalPath }`
+// `DriverConfig` DOES carry `{ kind: "sqlite"; appPath }`
 // (`packages/zero-migrate-cli/src/index.ts`) and `apply()` routes it to
 // `applyIr` under an in-process driver. The SQLite lifecycle matrix is caught
 // in-process by the Rust crate

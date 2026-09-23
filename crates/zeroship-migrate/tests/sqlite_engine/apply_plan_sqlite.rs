@@ -30,22 +30,16 @@ const APP: &str = "app_demo";
 struct Paths {
     _dir: TempDir,
     app: PathBuf,
-    journal: PathBuf,
 }
 
 fn paths(app_id: &str) -> Paths {
     let dir = tempfile::tempdir().expect("tempdir");
     let app = dir.path().join(format!("zs-{app_id}.sqlite"));
-    let journal = dir.path().join(format!("zs-{app_id}.migrations.sqlite"));
-    Paths {
-        _dir: dir,
-        app,
-        journal,
-    }
+    Paths { _dir: dir, app }
 }
 
 fn backend(p: &Paths) -> SqliteBackend {
-    SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend")
+    SqliteBackend::open(&p.app).expect("open hardened sqlite backend")
 }
 
 fn sqlite_author() -> DeclarativeAuthor {
@@ -255,10 +249,10 @@ async fn sqlite_online_rename_executes_via_rebuild_one_through_apply_plan() {
 // apply_plan bootstraps the journal up front.
 //
 // A standalone plan whose FIRST step is `OnlineRename(TableRebuild)`, applied
-// against a FRESH SQLite file with NO `_mig` journal, must not read the journal
+// against a FRESH SQLite file with NO journal bootstrapped, must not read the journal
 // before it exists: `journal_sql::applied`'s SELECT on a non-existent
 // `_mig.schema_migrations` (the rebuild arm's net-applied-skip lookup) would fail
-// with "no such table". The up-front `ensure_journal` must bootstrap `_mig` before
+// with "no such table". The up-front `ensure_journal` must bootstrap it before
 // any read.
 //
 // The v1 schema is built (with its full system columns) on one backend, then the
@@ -287,9 +281,8 @@ async fn rebuild_first_plan_against_fresh_journal_bootstraps_it() {
 
     // 1) Build the v1 `people` table (with its full descriptor-generated system
     //    columns) on a FIRST backend; this also bootstraps that backend's journal.
-    let journal_a = dir.path().join("zs-app.migrations-a.sqlite");
     {
-        let be_a = SqliteBackend::open(&app, &journal_a).expect("open backend A");
+        let be_a = SqliteBackend::open(&app).expect("open backend A");
         apply_first_deploy(&be_a, &v1).await;
         be_a.actor()
             .set_mode(Mode::EngineJournal)
@@ -331,11 +324,10 @@ async fn rebuild_first_plan_against_fresh_journal_bootstraps_it() {
     let rebuild_version = rebuild.migration.version.as_str().to_string();
 
     // 3) Open a SECOND backend over the SAME app file but a FRESH journal file:
-    //    the schema is fully present, the `_mig` journal is empty/unbootstrapped.
-    let journal_b = dir.path().join("zs-app.migrations-b.sqlite");
-    let be = SqliteBackend::open(&app, &journal_b).expect("open backend B (fresh journal)");
+    //    the schema is fully present, the journal is empty/unbootstrapped.
+    let be = SqliteBackend::open(&app).expect("open backend B (fresh journal)");
 
-    // The FIRST (and only) step is the TableRebuild; the `_mig` journal does not
+    // The FIRST (and only) step is the TableRebuild; the journal does not
     // exist yet — the rebuild arm's net-applied-skip lookup reads it first.
     let steps = vec![PlanStep::OnlineRename(RenameStep::TableRebuild(rebuild))];
     let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());

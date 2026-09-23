@@ -8,8 +8,9 @@
 //! schema with creator-declared tables and its `CREATE TABLE IF NOT EXISTS`
 //! bootstrap would otherwise ADOPT a creator table of the same name. MySQL and
 //! SQLite keep the unprefixed names: MySQL's journal has its own meta schema and
-//! SQLite's lives in a separately attached `_mig` database, so neither can
-//! collide with a creator table.
+//! SQLite's shares the creator's database and carries the same `__zeroship_` fence
+//! PostgreSQL's does, for the same reason. MySQL's has its own meta schema, so it
+//! cannot collide with a creator table.
 //!
 //! This module names the journal's shared CONCEPTS and nothing else: the wire
 //! enums ([`Phase`], [`EventKind`], [`JournaledKind`], [`PendingState`],

@@ -75,7 +75,7 @@ export interface NetworkSecurityOptions {
 export type DriverConfig =
   | { kind: "postgres"; url: string; security?: NetworkSecurityOptions }
   | { kind: "mysql"; url: string; security?: NetworkSecurityOptions }
-  | { kind: "sqlite"; appPath: string; journalPath: string };
+  | { kind: "sqlite"; appPath: string };
 
 type NetworkDriverConfig = Exclude<DriverConfig, { kind: "sqlite" }>;
 
@@ -202,16 +202,12 @@ export async function apply(opts: HostApplyOptions): Promise<ApplyOutcome> {
   const envelopes = [...priorEnvelopes, envelope];
 
   if (opts.driver.kind === "sqlite") {
-    // No session: the addon opens the application and journal files itself.
+    // No session: the addon opens the application file itself.
     return await addon.applyIr(null, {
       ownerApp: opts.ownerApp,
       projectSchema: opts.projectSchema,
       dialect: dialectOf(opts.driver),
-      driver: {
-        kind: "inProcess",
-        appPath: opts.driver.appPath,
-        journalPath: opts.driver.journalPath,
-      },
+      driver: { kind: "inProcess", appPath: opts.driver.appPath },
       registry: opts.registry ?? {},
       envelopes,
       charterLayers: [...opts.policy],
@@ -326,15 +322,11 @@ export async function rollback(opts: HostRollbackOptions): Promise<RollbackOutco
   };
 
   if (opts.driver.kind === "sqlite") {
-    // No session: the addon opens the application and journal files itself.
+    // No session: the addon opens the application file itself.
     return await addon.rollback(null, {
       ...shared,
       dialect: dialectOf(opts.driver),
-      driver: {
-        kind: "inProcess",
-        appPath: opts.driver.appPath,
-        journalPath: opts.driver.journalPath,
-      },
+      driver: { kind: "inProcess", appPath: opts.driver.appPath },
     });
   }
 
@@ -610,14 +602,10 @@ export async function statusEnvelopes(
     readOnly: opts.readOnly ?? false,
   };
   if (opts.driver.kind === "sqlite") {
-    // No session: the addon opens the application and journal files itself.
+    // No session: the addon opens the application file itself.
     return await addon.statusIr(null, {
       ...shared,
-      driver: {
-        kind: "inProcess",
-        appPath: opts.driver.appPath,
-        journalPath: opts.driver.journalPath,
-      },
+      driver: { kind: "inProcess", appPath: opts.driver.appPath },
     });
   }
   const { hostDriver, close } = await openSession(opts.driver);

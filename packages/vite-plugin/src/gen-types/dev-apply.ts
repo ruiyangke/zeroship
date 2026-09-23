@@ -7,8 +7,9 @@
  * the worker, one collection at a time in registration order, is backwards and
  * is the root of the "SCHEMA-INIT" class of dev-only bugs.
  *
- * PATHS - these are the exact files the worker opens, verified rather than
- * assumed:
+ * PATHS - this is the exact file the worker opens, verified rather than
+ * assumed. There is one file per database and the migration journal is inside
+ * it, so there is nothing beside it to keep in step:
  *
  *   DATABASE_URL           `sqlite:.zeroship/dev.sqlite`   (dev-db.ts)
  *   SqliteBackend::open    a FILE arg gives session = that file,
@@ -114,7 +115,8 @@ export function devDatabaseAlias(databaseId: string): string {
 }
 
 /**
- * The database file + migration journal for one declared database.
+ * The one file that holds a declared database: its collections and the migration
+ * journal describing them.
  *
  * `databaseId` is REQUIRED and has no default. The runtime opens the file the
  * BINDING names, and the binding names the database the project declared; a
@@ -122,29 +124,22 @@ export function devDatabaseAlias(databaseId: string): string {
  * already states, which is how the apply and the runtime came to fill two
  * different files.
  */
-export function devSqlitePaths(
+export function devSqliteAppPath(
   root: string,
   databaseId: string,
   databaseUrl?: string,
-): {
-  appPath: string;
-  journalPath: string;
-} {
+): string {
   const dir = devSqliteDir(root, databaseUrl);
-  const alias = devDatabaseAlias(databaseId);
-  return {
-    appPath: join(dir, `zs-${alias}.sqlite`),
-    journalPath: join(dir, `zs-${alias}.migrations.sqlite`),
-  };
+  return join(dir, `zs-${devDatabaseAlias(databaseId)}.sqlite`);
 }
 
 /**
  * Record `migrationsDir` and apply every pending envelope to the dev SQLite
  * app file, in authored order, through the addon's in-process verb.
  *
- * Idempotent: the engine's `_mig` journal skips migrations it has already
- * applied, so this is safe to run on every dev boot and on migration
- * hot-update.
+ * Idempotent: the engine's journal - which lives in the same file - skips
+ * migrations it has already applied, so this is safe to run on every dev boot
+ * and on migration hot-update.
  *
  * Returns the engine's reply so the caller can log what actually happened
  * rather than "done" — `applied` being empty on a fresh database is a signal,
@@ -170,11 +165,7 @@ export async function applyMigrationsToDevSqlite(opts: {
   databaseUrl?: string;
 }): Promise<ApplyReply> {
   const appId = opts.appId ?? DEV_APP_ID;
-  const { appPath, journalPath } = devSqlitePaths(
-    opts.root,
-    opts.databaseId,
-    opts.databaseUrl,
-  );
+  const appPath = devSqliteAppPath(opts.root, opts.databaseId, opts.databaseUrl);
 
   // The apply runs BEFORE the runtime spawns, and `.zeroship/` is normally
   // created by the runtime — so on a cold checkout (or after `rm -rf
@@ -196,10 +187,10 @@ export async function applyMigrationsToDevSqlite(opts: {
     // what gen-types emitted ("public").
     projectSchema: "public",
     dialect: "sqlite",
-    // The addon opens both files itself, so there is no host driver and no
+    // The addon opens the file itself, so there is no host driver and no
     // network session. The dialect above is a separate fact and stays separate:
     // this names the transport, not the vendor.
-    driver: { kind: "inProcess", appPath, journalPath },
+    driver: { kind: "inProcess", appPath },
     registry,
     charterLayers: [CONFINED_APPLY_CHARTER_TOML],
     // The operator owns the local dev file; there is no approval workflow to

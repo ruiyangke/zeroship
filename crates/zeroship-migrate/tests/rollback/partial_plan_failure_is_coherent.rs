@@ -19,7 +19,9 @@ use std::collections::BTreeMap;
 
 use zeroship_migrate::apply::backend::MigrationBackend;
 use zeroship_migrate::apply::executor::LockMode;
-use zeroship_migrate::{Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine};
+use zeroship_migrate::{
+    Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine,
+};
 use zeroship_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_ir";
@@ -33,11 +35,8 @@ const TWO_STEP_PLAN: &str = r#"{"ir_version":1,"name":"partial","ops":[
 #[compio::test]
 async fn a_plan_that_fails_halfway_leaves_the_journal_agreeing_with_the_database() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let backend = SqliteBackend::open(
-        &dir.path().join("p.sqlite"),
-        &dir.path().join("p.migrations.sqlite"),
-    )
-    .expect("open the hardened sqlite backend");
+    let backend = SqliteBackend::open(&dir.path().join("p.sqlite"))
+        .expect("open the hardened sqlite backend");
     let cfg = ExecutorConfig::new(PROJECT, PROJECT, support::no_inject(PROJECT));
 
     // OUT OF BAND, so the plan lowers and the failure lands mid-apply.

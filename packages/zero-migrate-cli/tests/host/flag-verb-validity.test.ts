@@ -2,7 +2,7 @@
 // NOT show is refused there.
 //
 // The CLI already refuses a misplaced `--dialect`, `--explain`, `--strict`,
-// `--json`, `--registry`, `--policy`, `--journal`, and the rollback target flags,
+// `--json`, `--registry`, `--policy`, and the rollback target flags,
 // each with a message naming the commands the flag belongs to. The reason is
 // written into `cli.ts` beside the `--json` guard:
 //
@@ -62,7 +62,6 @@ const HELP = helpText();
 const FLAGS: Readonly<Record<string, string | null>> = {
   "--registry": "REGISTRY",
   "--policy": "POLICY",
-  "--journal": "JOURNAL",
   "--dialect": "postgres",
   "--json": null,
   "--strict": null,

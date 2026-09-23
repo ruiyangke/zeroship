@@ -13,7 +13,7 @@
 //
 // Does NOT cover SQLite here. That is a placement choice, not a seam that is
 // missing: the Node host `DriverConfig` DOES carry
-// `{ kind: "sqlite"; appPath; journalPath }`
+// `{ kind: "sqlite"; appPath }`
 // (`packages/zero-migrate-cli/src/index.ts`), `apply()` routes it to
 // `applyIr` under an in-process driver, and `existence-guard-fold-projection.test.ts`
 // in this directory

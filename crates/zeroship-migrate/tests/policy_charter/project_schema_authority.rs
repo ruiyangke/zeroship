@@ -177,11 +177,7 @@ async fn apply_and_reapply<B: MigrationBackend>(backend: &B, dialect: &DialectId
 async fn sqlite_file_applies_and_reapplies_without_cross_schema_grants() {
     let directory = tempfile::tempdir().unwrap();
     let application = directory.path().join("application.sqlite");
-    let backend = zeroship_migrate_sqlite::SqliteBackend::open(
-        &application,
-        &directory.path().join("journal.sqlite"),
-    )
-    .unwrap();
+    let backend = zeroship_migrate_sqlite::SqliteBackend::open(&application).unwrap();
     apply_and_reapply(&backend, &zeroship_migrate_sqlite::DIALECT).await;
     let connection = rusqlite::Connection::open(&application).unwrap();
     let indexes: String = connection

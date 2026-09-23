@@ -6,12 +6,14 @@
 //! ([`MigrationActor`](crate::backend::actor::MigrationActor))
 //! and enforces second-line confinement through a two-mode `prepare`-time authorizer
 //! ([`authorizer`](crate::backend::authorizer)) - the runtime analog of Postgres's least-privilege
-//! `migrator` role. The journal lives in an attached `_mig` database, immutable by
+//! `migrator` role. The journal lives in the database it describes, fenced behind
+//! [`JOURNAL_PREFIX`](crate::backend::authorizer::JOURNAL_PREFIX) and immutable by
 //! authorizer construction + DEFENSIVE + append-only triggers, with the
 //! native `event_seq` AUTOINCREMENT PK as the total order. One migration's DDL and
-//! its journal row commit atomically on the single connection, with the creator
-//! `up` confined from `_mig` and the journal write done under engine mode, the
-//! mode flip landing between separate prepares.
+//! its journal row commit atomically because they are one ordinary transaction
+//! against one file, with the creator `up` confined from the fenced objects and the
+//! journal write done under engine mode, the mode flip landing between separate
+//! prepares.
 //!
 //! See the module-level docs of [`authorizer`](crate::backend::authorizer) and
 //! [`actor`](crate::backend::actor) for the mechanism.
@@ -20,9 +22,9 @@
 //!
 //! - `zero-migrate/tests/policy_charter/sqlite_confinement.rs` covers the
 //!   authorizer line. A creator `up` may
-//!   not drop the `_mig` table (`confine_d_drop_mig_table_denied`) or its triggers
+//!   not drop the journal table (`confine_d_drop_mig_table_denied`) or its triggers
 //!   (`confine_e_drop_mig_trigger_denied`), may not insert a journal row directly
-//!   (`confine_f_direct_journal_insert_denied`), may not reach `_mig` through a
+//!   (`confine_f_direct_journal_insert_denied`), may not reach the journal through a
 //!   trigger it defines (`confine_g_creator_trigger_writing_mig_denied`), and may
 //!   not even read the journal (`confine_i_creator_read_of_mig_journal_denied`).
 //! - `zero-migrate/tests/sqlite_engine/sqlite_apply.rs` covers the journal's own
@@ -38,7 +40,8 @@
 //! of it: `is_autocommit_detects_open_transaction` (`sqlite_apply.rs`) drives the
 //! actor through `set_mode(EngineJournal)` and proves the transaction state it
 //! produces is detectable, and `confine_g_creator_trigger_writing_mig_denied`
-//! proves creator-defined SQL cannot reach `_mig` by deferring itself to a trigger.
+//! proves creator-defined SQL cannot reach the journal by deferring itself to a
+//! trigger.
 //! What no test asserts is that engine mode is unreachable to creator SQL BETWEEN
 //! the two prepares - the window is argued from the mode being flipped by the
 //! backend rather than shown closed by a test that tries to open it. A hole, and
@@ -102,7 +105,6 @@ use crate::DIALECT as SQLITE_DIALECT;
 #[derive(Debug)]
 pub struct SqliteBackend {
     actor: MigrationActor,
-    journal_path: PathBuf,
     /// OS-backed whole-plan lock shared by every process opening this app file.
     project_lock: File,
     project_lock_path: PathBuf,
@@ -112,15 +114,15 @@ pub struct SqliteBackend {
 impl SqliteBackend {
     /// Open the hardened migration backend for one tenant.
     ///
-    /// `app_path` is the tenant's `zs-<app_id>.sqlite`; `journal_path` is the
-    /// tenant's separate journal file (`<app>.migrations.sqlite`). Both are
-    /// engine-constructed from the authenticated `app_id`, never creator input
-    /// The connection is hardened before any creator SQL can run.
+    /// `app_path` is the tenant's database file, and the only one: the journal
+    /// that describes it lives inside it. The path is engine-constructed from the
+    /// authenticated identity, never creator input. The connection is hardened
+    /// before any creator SQL can run.
     ///
     /// # Errors
     /// [`SqliteActorError`] on a failed open / hardening / sub-floor SQLite.
-    pub fn open(app_path: &Path, journal_path: &Path) -> Result<Self, SqliteActorError> {
-        let actor = MigrationActor::open(app_path, journal_path)?;
+    pub fn open(app_path: &Path) -> Result<Self, SqliteActorError> {
+        let actor = MigrationActor::open(app_path)?;
         let project_lock_path = project_lock_path(app_path)?;
         let project_lock = OpenOptions::new()
             .create(true)
@@ -136,7 +138,6 @@ impl SqliteBackend {
             })?;
         Ok(Self {
             actor,
-            journal_path: journal_path.to_path_buf(),
             project_lock,
             project_lock_path,
             project_lock_held: Mutex::new(false),
@@ -149,7 +150,7 @@ impl SqliteBackend {
         &self.actor
     }
 
-    /// Bootstrap the `_mig` journal (idempotent) under engine mode.
+    /// Bootstrap the journal (idempotent) under engine mode.
     pub async fn ensure_journal_sqlite(&self) -> Result<(), SqliteActorError> {
         journal_sql::ensure_journal(&self.actor).await
     }
@@ -301,7 +302,7 @@ impl SqliteBackend {
     /// Serialize the LIVE `main` schema as a deterministic CREATE-statement script
     /// for the `dump` command (engine-agnostic `dump` parity with the PG
     /// `pg_dump --schema-only` leg). Tables/views before indexes/triggers, each
-    /// name-ordered; the `_mig` journal + `sqlite_*` internals never leak.
+    /// name-ordered; the journal's fenced objects and `sqlite_*` internals never leak.
     /// The bin appends the SAME applied-versions trailer the PG `dump` writes.
     ///
     /// # Errors
@@ -314,7 +315,7 @@ impl SqliteBackend {
     /// SQLite peer of piping `schema.sql` into `psql`: the operator-/engine-generated
     /// dump body is replayed verbatim under engine mode (the operator-restore posture -
     /// this is an operator restore of a dump, not an untrusted creator `up`). Runs as
-    /// one `execute_batch` (the dump body is multi-statement). The `_mig` journal is a
+    /// one `execute_batch` (the dump body is multi-statement). The journal is a
     /// SEPARATE attached DB and the dump never references it, so this only recreates
     /// `main` objects.
     ///
@@ -332,7 +333,7 @@ impl SqliteBackend {
     }
 
     /// Net-applied migrations as `(version, checksum, name)` for the dump trailer -
-    /// read straight from the `_mig` journal so the dumped checksum/name
+    /// read straight from the journal so the dumped checksum/name
     /// are the JOURNAL's, never re-derived from `--dir`. Per version, the LATEST
     /// event must be `applied` (net-applied); its `name`/`checksum` are taken from
     /// that latest completed event. Ordered by version (the trailer order).
@@ -347,7 +348,7 @@ impl SqliteBackend {
             "WITH ranked AS ( \
                  SELECT version, name, checksum, event_kind, \
                         ROW_NUMBER() OVER (PARTITION BY version ORDER BY event_seq DESC) AS rn \
-                   FROM \"_mig\".schema_migrations \
+                   FROM main.\"__zeroship_schema_migrations\" \
              ) \
              SELECT version, name, checksum FROM ranked \
               WHERE rn = 1 AND event_kind = '{applied}' \
@@ -367,24 +368,37 @@ impl SqliteBackend {
 
     /// `load` first-entry guard - run BEFORE any `main` mutation. Refuses
     /// (errors, nothing touched) if `main` already carries user objects (any
-    /// `sqlite_master` row that is not an internal `sqlite_*` object) OR if the
-    /// journal already records net-applied migrations. `load` bootstraps a FRESH DB;
-    /// `restore_schema_sqlite` mutates `main`, so this MUST be checked before it
-    /// (the in-`record_loaded_versions` journal check fires only AFTER the restore).
+    /// `sqlite_master` row that is neither an internal `sqlite_*` object nor one of
+    /// the engine's own fenced ones) OR if the journal already records net-applied
+    /// migrations. `load` bootstraps a FRESH DB; `restore_schema_sqlite` mutates
+    /// `main`, so this MUST be checked before it (the in-`record_loaded_versions`
+    /// journal check fires only AFTER the restore).
     ///
     /// # Errors
     /// [`SqliteActorError`] if `main` is non-empty / the journal is already managed /
     /// on a probe failure.
     pub async fn ensure_fresh_load_target_sqlite(&self) -> Result<(), SqliteActorError> {
         // (a) `main` user objects. Internal `sqlite_*` objects (autoindex, the
-        // `sqlite_sequence`/`sqlite_stat*` bookkeeping) are NOT user data.
+        // `sqlite_sequence`/`sqlite_stat*` bookkeeping) are NOT user data, and
+        // neither is the engine's own journal, which shares this file: without the
+        // fence here, every database the engine has ever bootstrapped would be
+        // refused as "already has user objects" with zero migrations applied.
+        //
+        // `substr(name, 1, n) <> prefix` and not `NOT LIKE 'prefix%'`: `_` is a
+        // LIKE wildcard, so the prefix's own underscores would match any character
+        // and the fence would be wider than its name says. (The `sqlite_` clause
+        // below has always carried that looseness; it is left as it was rather than
+        // silently retightened in a change about the journal.)
         self.actor.set_mode(authorizer::Mode::EngineJournal).await?;
+        let fence = authorizer::JOURNAL_PREFIX;
         let rows = self
             .actor
-            .query(
+            .query(&format!(
                 "SELECT count(*) FROM main.sqlite_master \
-                 WHERE name NOT LIKE 'sqlite_%'",
-            )
+                 WHERE name NOT LIKE 'sqlite_%' \
+                   AND substr(name, 1, {}) <> '{fence}'",
+                fence.len()
+            ))
             .await?;
         let user_objects: i64 = rows
             .first()
@@ -764,44 +778,34 @@ impl MigrationBackend for SqliteBackend {
 
     // -- journal row I/O ----------------------------------------------------
 
+    /// Whether this database already carries the journal.
+    ///
+    /// Asked of the live connection rather than of the filesystem: the journal is
+    /// a set of tables in the database the actor already has open, so its presence
+    /// is a catalog fact. The probe runs under engine mode because the fenced name
+    /// it reads is one `CreatorUp` denies.
     async fn journal_exists(&self, _cfg: &ExecutorConfig) -> Result<bool, JournalError> {
-        let exists = self.journal_path.try_exists().map_err(|error| {
-            JournalError::Backend(format!(
-                "inspect sqlite journal path {}: {error}",
-                self.journal_path.display()
-            ))
-        })?;
-        if !exists {
-            return Ok(false);
-        }
-
-        let conn = rusqlite::Connection::open_with_flags(
-            &self.journal_path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .map_err(|error| {
-            JournalError::Backend(format!(
-                "open sqlite journal {} read-only: {error}",
-                self.journal_path.display()
-            ))
-        })?;
-        let exists = conn
-            .query_row(
-                "SELECT EXISTS (
-                     SELECT 1
-                       FROM sqlite_master
-                      WHERE type = 'table' AND name = 'schema_migrations'
+        self.actor
+            .set_mode(authorizer::Mode::EngineJournal)
+            .await
+            .map_err(journal_err)?;
+        let rows = self
+            .actor
+            .query(
+                "SELECT EXISTS ( \
+                     SELECT 1 \
+                       FROM main.sqlite_master \
+                      WHERE type = 'table' \
+                        AND name = '__zeroship_schema_migrations' \
                  )",
-                [],
-                |row| row.get::<_, bool>(0),
             )
-            .map_err(|error| {
-                JournalError::Backend(format!(
-                    "inspect sqlite journal {} schema: {error}",
-                    self.journal_path.display()
-                ))
-            })?;
-        Ok(exists)
+            .await
+            .map_err(journal_err)?;
+        Ok(rows
+            .first()
+            .and_then(|row| row.first())
+            .and_then(|cell| cell.as_deref())
+            .is_some_and(|value| value == "1"))
     }
 
     async fn ensure_journal(&self, _cfg: &ExecutorConfig) -> Result<(), JournalError> {
@@ -1121,14 +1125,19 @@ impl MigrationBackend for SqliteBackend {
         // script, both backends, DDL+DML" headline: a batched backfill is now
         // PORTABLE on BOTH backends. Each batch is its own committed
         // `BEGIN IMMEDIATE ... COMMIT` on the single hardened connection, resumable
-        // from the committed progress cursor in `_mig`.
+        // from the committed progress cursor in the fenced progress table.
         //
         if let Some(entry) = journal_sql::applied(&self.actor)
             .await
             .map_err(journal_err)
             .map_err(ApplyError::Journal)?
             .into_iter()
-            .filter(|entry| matches!(entry.phase, zeroship_migrate_backend::journal::Phase::Completed))
+            .filter(|entry| {
+                matches!(
+                    entry.phase,
+                    zeroship_migrate_backend::journal::Phase::Completed
+                )
+            })
             .find(|entry| entry.version == version.as_str())
         {
             if entry.checksum != checksum.as_str() {
@@ -1307,9 +1316,8 @@ mod lock_tests {
     async fn project_lock_excludes_a_second_backend_for_the_same_app() {
         let dir = tempfile::tempdir().expect("tempdir");
         let app = dir.path().join("app.sqlite");
-        let journal = dir.path().join("journal.sqlite");
-        let first = SqliteBackend::open(&app, &journal).expect("first backend");
-        let second = SqliteBackend::open(&app, &journal).expect("second backend");
+        let first = SqliteBackend::open(&app).expect("first backend");
+        let second = SqliteBackend::open(&app).expect("second backend");
         assert_eq!(first.timeout_setting_names(), None);
         assert!(first.preserves_authored_logical_columns());
         assert!(first.projects_sdk_field_defs());
@@ -1340,10 +1348,8 @@ mod lock_tests {
     async fn project_lock_respects_the_configured_timeout() {
         let dir = tempfile::tempdir().expect("tempdir");
         let app = dir.path().join("app.sqlite");
-        let first =
-            SqliteBackend::open(&app, &dir.path().join("journal-a.sqlite")).expect("first backend");
-        let second = SqliteBackend::open(&app, &dir.path().join("journal-b.sqlite"))
-            .expect("second backend");
+        let first = SqliteBackend::open(&app).expect("first backend");
+        let second = SqliteBackend::open(&app).expect("second backend");
         let mut cfg =
             ExecutorConfig::new("project", "main", crate::test_fixtures::no_inject("main"));
         cfg.confinement.project_lock_timeout = Duration::from_millis(25);
@@ -1370,10 +1376,8 @@ mod lock_tests {
     async fn the_project_lock_wait_is_not_bounded_by_the_ddl_budget() {
         let dir = tempfile::tempdir().expect("tempdir");
         let app = dir.path().join("app.sqlite");
-        let first =
-            SqliteBackend::open(&app, &dir.path().join("journal-a.sqlite")).expect("first backend");
-        let second = SqliteBackend::open(&app, &dir.path().join("journal-b.sqlite"))
-            .expect("second backend");
+        let first = SqliteBackend::open(&app).expect("first backend");
+        let second = SqliteBackend::open(&app).expect("second backend");
         let mut cfg =
             ExecutorConfig::new("project", "main", crate::test_fixtures::no_inject("main"));
         // A DDL budget far SHORTER than the project-lock budget. If the two are
@@ -1406,12 +1410,10 @@ mod lock_tests {
     async fn project_lock_cannot_be_bypassed_with_a_hard_link() {
         let dir = tempfile::tempdir().expect("tempdir");
         let app = dir.path().join("app.sqlite");
-        let first =
-            SqliteBackend::open(&app, &dir.path().join("journal-a.sqlite")).expect("first backend");
+        let first = SqliteBackend::open(&app).expect("first backend");
         let alias = dir.path().join("app-alias.sqlite");
         std::fs::hard_link(&app, &alias).expect("hard link app database");
-        let second = SqliteBackend::open(&alias, &dir.path().join("journal-b.sqlite"))
-            .expect("hard-link backend");
+        let second = SqliteBackend::open(&alias).expect("hard-link backend");
         let cfg = ExecutorConfig::new("project", "main", crate::test_fixtures::no_inject("main"));
 
         first.acquire_project_lock(&cfg).await.expect("first lock");

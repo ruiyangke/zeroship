@@ -96,18 +96,12 @@ const SQLITE_UNREACHABLE_CARRIER_FIELDS: &[&str] = &[
 struct Paths {
     _dir: TempDir,
     app: PathBuf,
-    journal: PathBuf,
 }
 
 fn paths(tag: &str) -> Paths {
     let dir = tempfile::tempdir().expect("tempdir");
     let app = dir.path().join(format!("zm-{tag}.sqlite"));
-    let journal = dir.path().join(format!("zm-{tag}.migrations.sqlite"));
-    Paths {
-        _dir: dir,
-        app,
-        journal,
-    }
+    Paths { _dir: dir, app }
 }
 
 /// The executor's policy is scoped to the PROJECT SCHEMA, while the authoring policy
@@ -273,7 +267,7 @@ struct Measured {
 /// introspect and fold the same op stream offline.
 async fn measure(tag: &str) -> Measured {
     let paths = paths(tag);
-    let backend = SqliteBackend::open(&paths.app, &paths.journal).expect("open sqlite backend");
+    let backend = SqliteBackend::open(&paths.app).expect("open sqlite backend");
 
     let mut ops: Vec<Op> = Vec::new();
     ops.extend(apply_doc(&backend, CREATE_IR, &BTreeMap::new(), LiveSchema::default()).await);

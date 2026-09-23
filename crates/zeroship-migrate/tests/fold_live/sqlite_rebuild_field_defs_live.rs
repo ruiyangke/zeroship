@@ -91,18 +91,12 @@ const APP: &str = "app_rebuild_field_defs";
 struct Paths {
     _dir: TempDir,
     app: PathBuf,
-    journal: PathBuf,
 }
 
 fn paths() -> Paths {
     let dir = tempfile::tempdir().expect("tempdir");
     let app = dir.path().join("app.sqlite");
-    let journal = dir.path().join("app.migrations.sqlite");
-    Paths {
-        _dir: dir,
-        app,
-        journal,
-    }
+    Paths { _dir: dir, app }
 }
 
 fn registry(tables: &[&str]) -> BTreeMap<String, String> {
@@ -291,7 +285,7 @@ async fn seed(backend: &SqliteBackend) {
 #[compio::test]
 async fn every_row_and_every_column_survives_a_deployed_rebuild() {
     let paths = paths();
-    let backend = SqliteBackend::open(&paths.app, &paths.journal).expect("open the SQLite backend");
+    let backend = SqliteBackend::open(&paths.app).expect("open the SQLite backend");
 
     deploy(&backend, &TABLES, &[CREATE])
         .await
@@ -373,7 +367,7 @@ async fn every_row_and_every_column_survives_a_deployed_rebuild() {
 #[compio::test]
 async fn the_rebuilt_table_carries_exactly_the_constraints_the_server_had() {
     let paths = paths();
-    let backend = SqliteBackend::open(&paths.app, &paths.journal).expect("open the SQLite backend");
+    let backend = SqliteBackend::open(&paths.app).expect("open the SQLite backend");
 
     deploy(&backend, &TABLES, &[CREATE])
         .await
@@ -537,7 +531,7 @@ async fn apply(backend: &SqliteBackend, source: &str, live: &LiveSchema) -> Vec<
 #[compio::test]
 async fn a_fold_seeded_rebuild_renders_its_create_table_from_the_map() {
     let paths = paths();
-    let backend = SqliteBackend::open(&paths.app, &paths.journal).expect("open the SQLite backend");
+    let backend = SqliteBackend::open(&paths.app).expect("open the SQLite backend");
 
     let history = apply(&backend, CREATE, &LiveSchema::default()).await;
     seed(&backend).await;
@@ -662,7 +656,7 @@ async fn a_fold_seeded_rebuild_renders_its_create_table_from_the_map() {
 #[allow(non_snake_case)]
 async fn the_deploy_path_depends_on_the_maps_PRESENCE_not_its_content() {
     let paths = paths();
-    let backend = SqliteBackend::open(&paths.app, &paths.journal).expect("open the SQLite backend");
+    let backend = SqliteBackend::open(&paths.app).expect("open the SQLite backend");
     let history = apply(&backend, CREATE, &LiveSchema::default()).await;
     let policy = support::no_inject(PROJECT);
     let author = IrAuthor::new(
@@ -825,8 +819,7 @@ async fn no_field_def_divergence_reaches_a_sqlite_rebuild() {
     let mut wrong_reason = Vec::new();
     for (label, expected, source) in DIVERGENCE_STREAMS {
         let paths = paths();
-        let backend =
-            SqliteBackend::open(&paths.app, &paths.journal).expect("open the SQLite backend");
+        let backend = SqliteBackend::open(&paths.app).expect("open the SQLite backend");
         let tables = ["users", "accounts", "orders", "par", "p1"];
         match deploy(&backend, &tables, &[source]).await {
             Err(error) if error.contains(expected) => {}
@@ -854,7 +847,7 @@ async fn no_field_def_divergence_reaches_a_sqlite_rebuild() {
     // THE CONTROL. Same helper, same charter, same rename - and this one must deploy, or
     // the assertion above is satisfied by a harness that cannot deploy anything.
     let paths = paths();
-    let backend = SqliteBackend::open(&paths.app, &paths.journal).expect("open the SQLite backend");
+    let backend = SqliteBackend::open(&paths.app).expect("open the SQLite backend");
     deploy(&backend, &TABLES, &[CREATE, RENAME]).await.expect(
         "the control stream must DEPLOY, or `no divergence reaches the rebuild` is a \
              statement about a broken harness rather than about the engine",

@@ -513,7 +513,6 @@ test("SQLite: both view operations across two deploys", async () => {
   const driver: DriverConfig = {
     kind: "sqlite",
     appPath: join(dir, "app.db"),
-    journalPath: join(dir, "app.migrations.db"),
   };
 
   try {
@@ -534,7 +533,6 @@ test("SQLite: both view operations across two deploys", async () => {
     const driver2: DriverConfig = {
       kind: "sqlite",
       appPath: join(dir2, "app.db"),
-      journalPath: join(dir2, "app.migrations.db"),
     };
     try {
       await applyOne(created2, SQLITE_PROJECT, driver2, []);
@@ -623,7 +621,6 @@ test("SQLite: apply refuses an absent view at the database, with or without a pr
     const driver: DriverConfig = {
       kind: "sqlite",
       appPath: join(dir, "app.db"),
-      journalPath: join(dir, "app.migrations.db"),
     };
     try {
       for (const prior of priors) {

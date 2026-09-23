@@ -183,7 +183,7 @@ test("SQLite rejects a non-portable authored identifier before mutation", async 
             migration: migrationNaming(payload),
             ownerApp: OWNER_APP,
             projectSchema: "main",
-            driver: { kind: "sqlite", appPath: dbPath, journalPath: join(work, "mig.db") },
+            driver: { kind: "sqlite", appPath: dbPath },
             registry: {},
             policy: [charter("main")],
             approved: true,

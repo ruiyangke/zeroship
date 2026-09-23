@@ -158,7 +158,6 @@ test("SQLite refuses a nextval default, naming the default rather than a sequenc
       deploy(DEFAULT_ONLY, "main", {
         kind: "sqlite",
         appPath: join(work, "app.db"),
-        journalPath: join(work, "mig.db"),
       }),
       DEFAULT_REFUSAL,
       "SQLite must refuse the default itself",
@@ -210,7 +209,6 @@ test("the two matrix rows refuse with different text, so neither stands in for t
   const driver = (name: string): DriverConfig => ({
     kind: "sqlite",
     appPath: join(work, `${name}.db`),
-    journalPath: join(work, `${name}-mig.db`),
   });
   try {
     await assert.rejects(

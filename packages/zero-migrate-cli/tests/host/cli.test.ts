@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import type { Client } from "pg";
 import type { StatusReply } from "../../src/addon.js";
@@ -632,45 +633,41 @@ test("CLI help documents the v2 surface, config, and dialect rule", () => {
   assert.match(liveDialect.stderr, /--dialect is only valid with the lint command/);
 });
 
-test("CLI derives SQLite app and journal paths and honors --journal", () => {
+test("CLI derives a SQLite app path from every URL shape, and nothing beside it", () => {
+  // Every shape yields exactly `{ kind, appPath }`: `deepEqual` is what makes the
+  // "nothing beside it" half real, since an extra path field would fail here.
   assert.deepEqual(driverFor("sqlite:/tmp/app.db"), {
     kind: "sqlite",
     appPath: "/tmp/app.db",
-    journalPath: "/tmp/app.migrations.db",
   });
   assert.deepEqual(driverFor("sqlite:///tmp/app.sqlite"), {
     kind: "sqlite",
     appPath: "/tmp/app.sqlite",
-    journalPath: "/tmp/app.migrations.sqlite",
   });
+  // Extensionless, which is where a derived sibling name had its own rule.
   assert.deepEqual(driverFor("sqlite:./data/app"), {
     kind: "sqlite",
     appPath: "./data/app",
-    journalPath: "./data/app.migrations",
   });
-  assert.deepEqual(driverFor("./data/app.db", "/tmp/custom-journal.sqlite"), {
+  // A bare path with a recognised extension, no scheme.
+  assert.deepEqual(driverFor("./data/app.db"), {
     kind: "sqlite",
     appPath: "./data/app.db",
-    journalPath: "/tmp/custom-journal.sqlite",
   });
   assert.throws(
-    () => driverFor("postgres://localhost/app", "/tmp/journal.db"),
-    /--journal is only valid for a SQLite database URL/,
-  );
-  assert.throws(
-    () => driverFor("sqlite:/tmp/app.db", ""),
-    /--journal needs a non-empty file path/,
+    () => driverFor("sqlite:"),
+    /SQLite database URL needs an application database path/,
   );
 });
 
 test("driverFor attaches host-enforced transport security to network drivers", () => {
   const security = { hostAllowlist: ["db.internal"], queryTimeoutMs: 5000 };
-  assert.deepEqual(driverFor("postgres://db.internal/app", undefined, security), {
+  assert.deepEqual(driverFor("postgres://db.internal/app", security), {
     kind: "postgres",
     url: "postgres://db.internal/app",
     security,
   });
-  assert.deepEqual(driverFor("mysql://db.internal/app", undefined, security), {
+  assert.deepEqual(driverFor("mysql://db.internal/app", security), {
     kind: "mysql",
     url: "mysql://db.internal/app",
     security,
@@ -729,16 +726,14 @@ test("resolveNetworkSecurity reads and pins the --tls-ca bundle contents", () =>
   }
 });
 
-test("live plan leaves a fresh SQLite journal absent", () => {
+test("live plan bootstraps no journal into the database it opens", () => {
   const dir = temporaryDirectory(".cli-plan-sqlite-read-only-");
   try {
     writeSimpleMigration(dir);
     const policyPath = join(dir, "policy.toml");
     writeFileSync(policyPath, noInjectPolicy("public"));
     const appPath = join(dir, "fresh.db");
-    const journalPath = join(dir, "fresh.migrations.db");
     assert.equal(existsSync(appPath), false, "application database starts absent");
-    assert.equal(existsSync(journalPath), false, "migration journal starts absent");
 
     const result = runCliWithEnv(
       { ZERO_MIGRATE_ADDON_PATH: ADDON_PATH },
@@ -761,11 +756,26 @@ test("live plan leaves a fresh SQLite journal absent", () => {
     assert.equal(report.pending[0].name, "create_widgets");
     assert.match(report.pending[0].sql, /CREATE TABLE/i);
     assert.match(report.pending[0].sql, /widgets/i);
-    assert.equal(
-      existsSync(journalPath),
-      false,
-      "read-only plan must not create the derived SQLite journal",
-    );
+    // Opening a SQLite path creates the file, so a read-only verb leaves an empty
+    // database behind. What it must not leave is a JOURNAL, which now lives inside
+    // that same file - so the question is asked of the catalog rather than of the
+    // filesystem.
+    const db = new DatabaseSync(appPath, { readOnly: true });
+    try {
+      const journalTables = db
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' " +
+            "AND substr(name, 1, 18) = '__zeroship_schema_'",
+        )
+        .all();
+      assert.deepEqual(
+        journalTables,
+        [],
+        "a read-only plan must not bootstrap the journal it would apply through",
+      );
+    } finally {
+      db.close();
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

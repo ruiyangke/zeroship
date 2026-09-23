@@ -459,8 +459,16 @@ fn value_to_string(v: ValueRef<'_>) -> Option<String> {
     }
 }
 
-/// SQLite owns its catalog relations. Every table in an attached creator
-/// schema participates in CDC regardless of its name.
+/// SQLite owns its catalog relations. Every other table in an attached creator
+/// schema participates in CDC regardless of its name - including the
+/// `__zeroship_` ones the platform writes there (materialized-view shadows, the
+/// unmask audit ledger), which subscribers are meant to see.
+///
+/// The migration journal shares that database too and is NOT an exception here,
+/// because it never reaches this hook: the hook is installed per CONNECTION by
+/// `cdc::install`, from `open_lane_connection`, and the migration engine owns a
+/// connection of its own with no hooks on it. A name fence here would therefore
+/// filter nothing that arrives and would silence the platform tables that do.
 fn is_filtered_relation(table: &str) -> bool {
     table.starts_with("sqlite_")
 }

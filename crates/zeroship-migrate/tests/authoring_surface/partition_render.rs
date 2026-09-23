@@ -280,8 +280,7 @@ async fn sqlite_event_rows(backend: &SqliteBackend) -> Vec<(i64, String)> {
 fn sqlite_partition_backend(label: &str) -> (tempfile::TempDir, SqliteBackend) {
     let dir = tempfile::tempdir().expect("sqlite tempdir");
     let app = dir.path().join(format!("{label}.sqlite"));
-    let journal = dir.path().join(format!("{label}.migrations.sqlite"));
-    let backend = SqliteBackend::open(&app, &journal).expect("open sqlite backend");
+    let backend = SqliteBackend::open(&app).expect("open sqlite backend");
     (dir, backend)
 }
 
@@ -407,8 +406,7 @@ async fn collapse_affirmed_events_apply_as_plain_table_on_sqlite() {
 
     let dir = tempfile::tempdir().expect("sqlite tempdir");
     let app = dir.path().join("collapse.sqlite");
-    let journal = dir.path().join("collapse.migrations.sqlite");
-    let backend = SqliteBackend::open(&app, &journal).expect("open sqlite backend");
+    let backend = SqliteBackend::open(&app).expect("open sqlite backend");
     apply_sqlite_partition_steps(&backend, &steps, Approval::None)
         .await
         .expect("apply collapsed parent table on SQLite");

@@ -47,8 +47,7 @@ struct Db {
 fn open_db() -> Db {
     let dir = tempfile::tempdir().expect("tempdir");
     let app: PathBuf = dir.path().join("pc.sqlite");
-    let journal: PathBuf = dir.path().join("pc.migrations.sqlite");
-    let backend = SqliteBackend::open(&app, &journal).expect("open the hardened sqlite backend");
+    let backend = SqliteBackend::open(&app).expect("open the hardened sqlite backend");
     Db { _dir: dir, backend }
 }
 

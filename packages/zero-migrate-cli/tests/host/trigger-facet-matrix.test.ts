@@ -108,7 +108,7 @@ function withSqliteFile<T>(prefix: string, run: (driver: DriverConfig, dbPath: s
   const work = mkdtempSync(join(HERE, `${prefix}-`));
   const dbPath = join(work, "app.db");
   return run(
-    { kind: "sqlite", appPath: dbPath, journalPath: join(work, "mig.db") },
+    { kind: "sqlite", appPath: dbPath },
     dbPath,
   ).finally(() => rmSync(work, { recursive: true, force: true }));
 }

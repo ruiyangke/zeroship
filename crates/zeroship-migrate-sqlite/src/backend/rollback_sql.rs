@@ -7,7 +7,7 @@
 //!
 //! ```text
 //! BEGIN IMMEDIATE (EngineJournal - the engine owns txn boundaries)
-//! CreatorUp: run the creator `down` (confined from `_mig`)
+//! CreatorUp: run the creator `down` (confined from the journal)
 //! EngineJournal: INSERT schema_migrations (event_kind='rolled_back')
 //! COMMIT (down + rolled_back event commit atomically)
 //! ```
@@ -34,9 +34,9 @@
 //! # Confinement (invariants unchanged)
 //!
 //! The creator `down` runs under `CreatorUp` - a malicious `down` attempting a
-//! `_mig` write / ATTACH / PRAGMA is still denied by the authorizer at prepare
+//! journal write / ATTACH / PRAGMA is still denied by the authorizer at prepare
 //! time. The `rolled_back` journal write runs under `EngineJournal` (the only
-//! mode that permits a `_mig` write). The mode flip lands between separate
+//! mode that permits a journal write). The mode flip lands between separate
 //! prepares, never inside one batch.
 
 use std::time::Instant;
@@ -158,8 +158,8 @@ async fn run_rollback_txn(
     actor.exec("BEGIN IMMEDIATE").await.map_err(rb_err)?;
 
     let result = async {
-        // 2. CreatorUp - the creator `down` is confined from `_mig`. A malicious
-        // `down` attempting a `_mig` write / ATTACH / PRAGMA is denied at prepare.
+        // 2. CreatorUp - the creator `down` is confined from the journal. A malicious
+        // `down` attempting a journal write / ATTACH / PRAGMA is denied at prepare.
         actor.set_mode(Mode::CreatorUp).await?;
         actor.exec(down).await?;
 
@@ -188,7 +188,7 @@ async fn append_rolled_back(
     let by = journal_sql::sql_lit(applied_by);
     actor
         .exec(&format!(
-            "INSERT INTO \"_mig\".schema_migrations \
+            "INSERT INTO main.\"__zeroship_schema_migrations\" \
              (event_kind, version, name, checksum, \"by\", exec_ms) \
              VALUES ('{rolled_back}', {version}, {name}, {checksum}, {by}, {exec_ms})",
             rolled_back = zeroship_migrate_backend::journal::EventKind::RolledBack.as_str()

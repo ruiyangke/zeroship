@@ -154,18 +154,12 @@ fn rename_ir_named(name: &str, from: &str, to: &str) -> MigrationIr {
 struct Paths {
     _dir: TempDir,
     app: PathBuf,
-    journal: PathBuf,
 }
 
 fn paths(tag: &str) -> Paths {
     let dir = tempfile::tempdir().expect("tempdir");
     let app = dir.path().join(format!("zs-{tag}.sqlite"));
-    let journal = dir.path().join(format!("zs-{tag}.migrations.sqlite"));
-    Paths {
-        _dir: dir,
-        app,
-        journal,
-    }
+    Paths { _dir: dir, app }
 }
 
 /// `support::confined_charter` with the catalog-read scope widened to the project
@@ -292,7 +286,7 @@ async fn deploy_create(backend: &SqliteBackend, engine: &MigrationEngine) -> Vec
 async fn a_sqlite_rename_rebuild_emits_a_foreign_key_over_the_new_local_column() {
     let effective = charter();
     let p = paths("fk_definition");
-    let backend = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
+    let backend = SqliteBackend::open(&p.app).expect("open hardened sqlite backend");
     let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let author = IrAuthor::new(
         zeroship_migrate::shipping_vendors(),
@@ -463,7 +457,7 @@ async fn a_sqlite_rename_rebuild_emits_a_foreign_key_over_the_new_local_column()
 #[compio::test]
 async fn sqlite_refuses_a_stale_child_key_and_silently_accepts_a_stale_parent_key() {
     let p = paths("fk_definition_semantics");
-    let backend = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
+    let backend = SqliteBackend::open(&p.app).expect("open hardened sqlite backend");
     backend
         .actor()
         .set_mode(Mode::EngineJournal)
@@ -566,7 +560,7 @@ async fn sqlite_refuses_a_stale_child_key_and_silently_accepts_a_stale_parent_ke
 async fn the_stored_shape_decision_is_unchanged_by_the_constraint_rewrite() {
     let effective = charter();
     let p = paths("fk_definition_decision");
-    let backend = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
+    let backend = SqliteBackend::open(&p.app).expect("open hardened sqlite backend");
     let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let author = IrAuthor::new(
         zeroship_migrate::shipping_vendors(),
@@ -623,7 +617,7 @@ async fn the_stored_shape_decision_is_unchanged_by_the_constraint_rewrite() {
 async fn a_catalog_sourced_rename_still_replays_the_stored_body() {
     let effective = charter();
     let p = paths("fk_definition_catalog");
-    let backend = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
+    let backend = SqliteBackend::open(&p.app).expect("open hardened sqlite backend");
     let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let author = IrAuthor::new(
         zeroship_migrate::shipping_vendors(),
@@ -775,7 +769,7 @@ async fn a_catalog_sourced_rename_still_replays_the_stored_body() {
 async fn a_second_rename_starts_from_a_folded_definition_the_first_rename_already_moved() {
     let effective = charter();
     let p = paths("fk_definition_twice");
-    let backend = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
+    let backend = SqliteBackend::open(&p.app).expect("open hardened sqlite backend");
     let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let author = IrAuthor::new(
         zeroship_migrate::shipping_vendors(),

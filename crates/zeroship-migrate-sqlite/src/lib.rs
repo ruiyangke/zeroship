@@ -6,9 +6,10 @@
 //!   guard, all registered through [`VENDOR`]; and
 //! * the EXECUTION half - [`backend`], the `MigrationBackend` implementation: the
 //!   dedicated hardened CDC-free `rusqlite` actor, the two-mode prepare-time
-//!   authorizer that is SQLite's second line of confinement, the `_mig` attached
-//!   journal, the `sqlite_master` + `PRAGMA` drift snapshot, the twelve-step table
-//!   rebuild, the batched backfill, and the OS-backed project lock.
+//!   authorizer that is SQLite's second line of confinement, the fenced journal
+//!   inside the database it describes, the `sqlite_master` + `PRAGMA` drift
+//!   snapshot, the twelve-step table rebuild, the batched backfill, and the
+//!   OS-backed project lock.
 //!
 //! It depends on `zeroship-migrate-backend` and `zeroship-migrate-ir` - never on the engine.
 //! That is the whole point of the split: the engine names this crate for its

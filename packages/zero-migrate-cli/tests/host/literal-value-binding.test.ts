@@ -253,7 +253,7 @@ test("SQLite binds literal values and stores a NUL byte exactly", async () => {
           migration,
           ownerApp: OWNER_APP,
           projectSchema: "main",
-          driver: { kind: "sqlite", appPath: dbPath, journalPath: join(work, "mig.db") },
+          driver: { kind: "sqlite", appPath: dbPath },
           registry: { items: OWNER_APP },
           policy: [charter("main")],
           approved: true,

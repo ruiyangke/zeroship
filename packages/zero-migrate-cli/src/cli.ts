@@ -25,7 +25,7 @@
 
 import { readdir, mkdir, writeFile, access, readFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
-import { basename, extname, join, resolve, isAbsolute } from "node:path";
+import { basename, join, resolve, isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   apply,
@@ -181,8 +181,6 @@ interface Args {
   positional?: string;
   dir: string;
   databaseUrl?: string;
-  /** Optional SQLite migration-journal file override. */
-  journalPath?: string;
   /** `--tls-ca <file>`: path to a PEM CA bundle to PIN for the network driver. */
   tlsCaPath?: string;
   /** `--host-allowlist <csv>`: comma-separated hosts the driver may connect to. */
@@ -302,9 +300,6 @@ function parseArgs(argv: string[]): Args {
         args.databaseUrl = takeVal();
         args.databaseUrlFromFlag = true;
         args.explicitConfig.databaseUrl = args.databaseUrl;
-        break;
-      case "journal":
-        args.journalPath = takeVal();
         break;
       case "tls-ca":
         args.tlsCaPath = takeVal();
@@ -517,13 +512,6 @@ function parseArgs(argv: string[]): Args {
     );
   }
   if (
-    args.journalPath !== undefined &&
-    args.command !== "apply" &&
-    args.command !== "rollback"
-  ) {
-    throw new CliError("flag --journal is only valid with apply or rollback");
-  }
-  if (
     (args.rollbackTo !== undefined ||
       args.rollbackSteps !== undefined ||
       args.rollbackAll ||
@@ -564,8 +552,8 @@ function resolveParsedArgs(args: Args): Args {
   // applied it cleanly because schema is inert there; PostgreSQL bootstrapped a
   // journal schema literally named `_migrations` and only then failed on a
   // zero-length delimited identifier; MySQL got `Incorrect database name ''` from
-  // the server. Every other required setting -- the URL, `--registry`, `--policy`,
-  // `--journal` -- already refuses a zero-length value by name.
+  // the server. Every other required setting -- the URL, `--registry`, `--policy`
+  // -- already refuses a zero-length value by name.
   if (resolved.projectSchema.length === 0) {
     throw new CliError(
       "project schema must be non-empty (set --schema, ZERO_MIGRATE_SCHEMA, or the config `schema` field)",
@@ -733,13 +721,6 @@ async function loadLintPolicyFiles(paths: readonly string[]): Promise<string[]> 
   return paths.length === 0 ? [NO_INJECT_POLICY] : await loadPolicyFiles(paths);
 }
 
-/** Derive the separate SQLite migration-journal filename next to the app DB. */
-function sqliteJournalPath(appPath: string): string {
-  const extension = extname(appPath);
-  if (extension.length === 0) return `${appPath}.migrations`;
-  return `${appPath.slice(0, -extension.length)}.migrations${extension}`;
-}
-
 function nonEmptyEnv(value: string | undefined): string | undefined {
   return value === undefined || value.trim().length === 0 ? undefined : value;
 }
@@ -789,7 +770,6 @@ export function resolveNetworkSecurity(
 /** Select the supported Node driver from a database URL scheme. */
 export function driverFor(
   databaseUrl: string,
-  journalOverride?: string,
   security?: NetworkSecurityOptions,
 ): DriverConfig {
   const trimmed = databaseUrl.trimStart();
@@ -797,15 +777,9 @@ export function driverFor(
   const hasUriScheme = /^[a-z][a-z0-9+.-]*:/i.test(trimmed);
   const isWindowsDrivePath = /^[a-z]:[\\/]/i.test(trimmed);
   if (lower.startsWith("postgres://") || lower.startsWith("postgresql://")) {
-    if (journalOverride !== undefined) {
-      throw new CliError("flag --journal is only valid for a SQLite database URL");
-    }
     return { kind: "postgres", url: databaseUrl, security };
   }
   if (lower.startsWith("mysql://")) {
-    if (journalOverride !== undefined) {
-      throw new CliError("flag --journal is only valid for a SQLite database URL");
-    }
     return { kind: "mysql", url: databaseUrl, security };
   }
   const isBareSqlitePath =
@@ -818,17 +792,7 @@ export function driverFor(
     if (appPath.length === 0) {
       throw new CliError("SQLite database URL needs an application database path");
     }
-    if (journalOverride !== undefined && journalOverride.length === 0) {
-      throw new CliError("flag --journal needs a non-empty file path");
-    }
-    return {
-      kind: "sqlite",
-      appPath,
-      journalPath: journalOverride ?? sqliteJournalPath(appPath),
-    };
-  }
-  if (journalOverride !== undefined) {
-    throw new CliError("flag --journal is only valid for a SQLite database URL");
+    return { kind: "sqlite", appPath };
   }
   throw new CliError(
     "could not infer a driver from the database URL (expected a postgres:// or mysql:// scheme, or sqlite:<path>)",
@@ -1313,7 +1277,7 @@ async function runLivePlan(args: Args): Promise<number> {
   if (!args.databaseUrl) {
     throw new CliError("missing database URL (pass --database-url or set DATABASE_URL)");
   }
-  const driver = driverFor(args.databaseUrl, undefined, args.security);
+  const driver = driverFor(args.databaseUrl, args.security);
   const charterLayers = await loadPolicyFiles(args.policyPaths);
   const registry = await loadRegistry(args.registryPath);
   const files = await discover(args.dir);
@@ -1430,7 +1394,7 @@ async function runApply(args: Args): Promise<number> {
       "missing database URL (pass --database-url or set DATABASE_URL)",
     );
   }
-  const driver = driverFor(args.databaseUrl, args.journalPath, args.security);
+  const driver = driverFor(args.databaseUrl, args.security);
   const charterLayers = await loadPolicyFiles(args.policyPaths);
   const registry = await loadRegistry(args.registryPath);
   const files = await discover(args.dir);
@@ -1515,7 +1479,7 @@ async function runRollback(args: Args): Promise<number> {
       "rollback runs the reverse SQL of applied migrations, so it needs --approve",
     );
   }
-  const driver = driverFor(args.databaseUrl, args.journalPath, args.security);
+  const driver = driverFor(args.databaseUrl, args.security);
   const charterLayers = await loadPolicyFiles(args.policyPaths);
   const registry = await loadRegistry(args.registryPath);
   const files = await discover(args.dir);
@@ -1692,7 +1656,7 @@ async function runStatus(args: Args): Promise<number> {
       "missing database URL (pass --database-url or set DATABASE_URL)",
     );
   }
-  const driver = driverFor(args.databaseUrl, undefined, args.security);
+  const driver = driverFor(args.databaseUrl, args.security);
   const charterLayers = await loadPolicyFiles(args.policyPaths);
   const registry = await loadRegistry(args.registryPath);
   const files = await discover(args.dir);
@@ -1802,7 +1766,7 @@ async function runResolve(args: Args): Promise<number> {
   if (!args.databaseUrl) {
     throw new CliError("missing database URL (pass --database-url or set DATABASE_URL)");
   }
-  const driver = driverFor(args.databaseUrl, undefined, args.security);
+  const driver = driverFor(args.databaseUrl, args.security);
   if (driver.kind !== "postgres") {
     throw new CliError("resolve supports only PostgreSQL online renames");
   }
@@ -1858,7 +1822,7 @@ async function runHistory(args: Args): Promise<number> {
   if (!args.databaseUrl) {
     throw new CliError("missing database URL (pass --database-url or set DATABASE_URL)");
   }
-  const driver = driverFor(args.databaseUrl, undefined, args.security);
+  const driver = driverFor(args.databaseUrl, args.security);
   if (driver.kind !== "postgres") {
     throw new CliError("history supports only PostgreSQL");
   }
@@ -1984,7 +1948,7 @@ async function runBaseline(args: Args): Promise<number> {
   if (!args.databaseUrl) {
     throw new CliError("missing database URL (pass --database-url or set DATABASE_URL)");
   }
-  const driver = driverFor(args.databaseUrl, undefined, args.security);
+  const driver = driverFor(args.databaseUrl, args.security);
   if (driver.kind !== "postgres") {
     throw new CliError("baseline supports only PostgreSQL");
   }
@@ -2032,8 +1996,8 @@ Usage:
   zero-migrate new <name> [--dir <dir>]
   zero-migrate lint [--dir <dir>] [--dialect <name>] [--explain] [--registry <file>] [--policy <file> ...] [--json]
   zero-migrate plan [--dir <dir>] [--database-url <url>] [--policy <file> ...] [--registry <file>] [--json]
-  zero-migrate apply [--dir <dir>] [--database-url <url>] [--policy <file> ...] [--journal <path>] [--registry <file>] [--approve]
-  zero-migrate rollback (--to <version> | --steps <n> | --all) --approve [--dir <dir>] [--database-url <url>] [--policy <file> ...] [--journal <path>] [--registry <file>] [--force --backup-acknowledged] [--json]
+  zero-migrate apply [--dir <dir>] [--database-url <url>] [--policy <file> ...] [--registry <file>] [--approve]
+  zero-migrate rollback (--to <version> | --steps <n> | --all) --approve [--dir <dir>] [--database-url <url>] [--policy <file> ...] [--registry <file>] [--force --backup-acknowledged] [--json]
   zero-migrate status [--dir <dir>] [--database-url <url>] [--policy <file> ...] [--registry <file>] [--strict] [--json]
   zero-migrate resolve <migration> (--commit | --rollback) --approve [--database-url <url>] [--policy <file> ...] [--registry <file>]
   zero-migrate history [--database-url <url>] [--policy <file> ...] [--json]
@@ -2043,7 +2007,6 @@ Usage:
 Flags:
   --dir <dir>           Migration directory (default ./migrations)
   --database-url <url>  postgres:// or mysql:// DSN, or sqlite:<path>
-  --journal <path>      SQLite journal override (default: <app>.migrations.<ext>)
   --tls-ca <file>       Pin this PEM CA bundle for the postgres/mysql TLS connection
                         (env ZERO_MIGRATE_TLS_CA); verifies the server certificate
   --host-allowlist <csv> Reject connecting to any host not in this comma list

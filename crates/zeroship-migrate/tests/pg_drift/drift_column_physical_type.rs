@@ -605,8 +605,7 @@ async fn an_untouched_postgres_table_reports_clean() {
 async fn an_untouched_sqlite_table_reports_clean() {
     let dir: TempDir = tempfile::tempdir().expect("tempdir");
     let app: PathBuf = dir.path().join("zs-physdrift.sqlite");
-    let journal: PathBuf = dir.path().join("zs-physdrift.migrations.sqlite");
-    let backend = SqliteBackend::open(&app, &journal).expect("open hardened sqlite backend");
+    let backend = SqliteBackend::open(&app).expect("open hardened sqlite backend");
 
     let ir = portable_corpus(
         "drift_column_physical_type_sqlite",

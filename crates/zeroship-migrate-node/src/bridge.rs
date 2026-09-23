@@ -603,7 +603,6 @@ pub fn apply_ir(
         &DriverParts {
             kind: &driver.kind,
             app_path: driver.app_path.as_deref(),
-            journal_path: driver.journal_path.as_deref(),
             migrator_role: driver.migrator_role.as_deref(),
             applied_by: driver.applied_by.as_deref(),
             host_driver_supplied: host_driver.is_some(),
@@ -712,10 +711,7 @@ pub fn apply_ir(
                 }
             })
         }
-        DriverTarget::InProcessSqlite {
-            app_path,
-            journal_path,
-        } => {
+        DriverTarget::InProcessSqlite { app_path } => {
             let envelopes = envelopes
                 .into_iter()
                 .enumerate()
@@ -730,7 +726,7 @@ pub fn apply_ir(
             let registry: BTreeMap<String, String> = registry.into_iter().collect();
 
             run_in_process_verb(env, move || async move {
-                let backend = SqliteBackend::open(Path::new(&app_path), Path::new(&journal_path))
+                let backend = SqliteBackend::open(Path::new(&app_path))
                     .map_err(|error| format!("failed to open SQLite migration backend: {error}"))?;
                 let exec_cfg = ExecutorConfig::new(
                     project_schema.clone(),
@@ -899,7 +895,6 @@ pub fn rollback(
         &DriverParts {
             kind: &req.driver.kind,
             app_path: req.driver.app_path.as_deref(),
-            journal_path: req.driver.journal_path.as_deref(),
             migrator_role: req.driver.migrator_role.as_deref(),
             applied_by: req.driver.applied_by.as_deref(),
             host_driver_supplied: host_driver.is_some(),
@@ -974,33 +969,32 @@ pub fn rollback(
                 }
             })
         }
-        DriverTarget::InProcessSqlite {
-            app_path,
-            journal_path,
-        } => run_in_process_verb(env, move || async move {
-            let backend = SqliteBackend::open(Path::new(&app_path), Path::new(&journal_path))
-                .map_err(|error| format!("failed to open SQLite migration backend: {error}"))?;
-            let cfg = ExecutorConfig::new(
-                owner_app_project(&project_schema),
-                project_schema.clone(),
-                effective,
-            );
-            rollback_with_locked_backend(
-                &backend,
-                &cfg,
-                &decoded.envelope_json,
-                &owner_app,
-                &project_schema,
-                &dialect,
-                &decoded.registry_json,
-                &charter_layers,
-                decoded.target,
-                decoded.options,
-                decoded.approval,
-                &applied_by,
-            )
-            .await
-        }),
+        DriverTarget::InProcessSqlite { app_path } => {
+            run_in_process_verb(env, move || async move {
+                let backend = SqliteBackend::open(Path::new(&app_path))
+                    .map_err(|error| format!("failed to open SQLite migration backend: {error}"))?;
+                let cfg = ExecutorConfig::new(
+                    owner_app_project(&project_schema),
+                    project_schema.clone(),
+                    effective,
+                );
+                rollback_with_locked_backend(
+                    &backend,
+                    &cfg,
+                    &decoded.envelope_json,
+                    &owner_app,
+                    &project_schema,
+                    &dialect,
+                    &decoded.registry_json,
+                    &charter_layers,
+                    decoded.target,
+                    decoded.options,
+                    decoded.approval,
+                    &applied_by,
+                )
+                .await
+            })
+        }
     }
 }
 
@@ -1108,7 +1102,6 @@ pub fn status_ir(
         &DriverParts {
             kind: &driver.kind,
             app_path: driver.app_path.as_deref(),
-            journal_path: driver.journal_path.as_deref(),
             migrator_role: driver.migrator_role.as_deref(),
             applied_by: driver.applied_by.as_deref(),
             host_driver_supplied: host_driver.is_some(),
@@ -1179,30 +1172,29 @@ pub fn status_ir(
                 }
             })
         }
-        DriverTarget::InProcessSqlite {
-            app_path,
-            journal_path,
-        } => run_in_process_verb(env, move || async move {
-            let backend = SqliteBackend::open(Path::new(&app_path), Path::new(&journal_path))
-                .map_err(|error| format!("failed to open SQLite migration backend: {error}"))?;
-            let cfg = ExecutorConfig::new(
-                owner_app_project(&project_schema),
-                project_schema.clone(),
-                effective,
-            );
-            status_ir_with_locked_backend(
-                &backend,
-                &cfg,
-                &envelope_json,
-                &owner_app,
-                &project_schema,
-                &dialect,
-                &registry_json,
-                &charter_layers,
-                read_only,
-            )
-            .await
-        }),
+        DriverTarget::InProcessSqlite { app_path } => {
+            run_in_process_verb(env, move || async move {
+                let backend = SqliteBackend::open(Path::new(&app_path))
+                    .map_err(|error| format!("failed to open SQLite migration backend: {error}"))?;
+                let cfg = ExecutorConfig::new(
+                    owner_app_project(&project_schema),
+                    project_schema.clone(),
+                    effective,
+                );
+                status_ir_with_locked_backend(
+                    &backend,
+                    &cfg,
+                    &envelope_json,
+                    &owner_app,
+                    &project_schema,
+                    &dialect,
+                    &registry_json,
+                    &charter_layers,
+                    read_only,
+                )
+                .await
+            })
+        }
     }
 }
 

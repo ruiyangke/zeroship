@@ -72,11 +72,7 @@ async fn an_engine_rendered_down_restores_the_schema_its_up_changed() {
         ),
     ] {
         let dir = tempfile::tempdir().expect("tempdir");
-        let be = SqliteBackend::open(
-            &dir.path().join("r.sqlite"),
-            &dir.path().join("r.migrations.sqlite"),
-        )
-        .expect("open");
+        let be = SqliteBackend::open(&dir.path().join("r.sqlite")).expect("open");
         let cfg = ExecutorConfig::new(PROJECT, PROJECT, support::no_inject(PROJECT));
         let eng = MigrationEngine::new(zeroship_migrate::shipping_vendors());
         let mut live = LiveSchema::default();

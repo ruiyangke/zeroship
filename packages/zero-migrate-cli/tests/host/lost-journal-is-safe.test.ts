@@ -1,16 +1,17 @@
 // Losing the journal fails closed on every target. It never re-runs data migrations.
 //
-// The journal lives beside the application's own objects: a separate FILE on SQLite
-// (`sqlite-journal-is-a-separate-file.test.ts` pins that), a sibling SCHEMA on
-// PostgreSQL and MySQL. Every one of those can be lost independently of the data --
-// copy `app.db` without `app.migrations.db`, restore one schema and not its
-// `_migrations` twin, or simply drop the latter believing it to be scratch. The
-// engine's record of what already ran is then gone while the schema and the data
-// are still there.
+// The journal lives beside the application's own objects: fenced TABLES inside the
+// database itself on SQLite (`sqlite-journal-lives-in-the-app-file.test.ts` pins
+// that), a sibling SCHEMA on PostgreSQL and MySQL. Every one can be lost
+// independently of the data -- restore one schema and not its `_migrations` twin,
+// or drop the journal's tables believing them to be scratch. The engine's record of
+// what already ran is then gone while the schema and the data are still there.
 //
 // ALL THREE DIALECTS ARE COVERED because the danger is identical and the mechanism
-// is not: one is a filesystem mistake and two are catalog mistakes, so a change
-// that fixed or broke one would not obviously touch the others.
+// is not: each loss is a catalog mistake in its own catalog, so a change that fixed
+// or broke one would not obviously touch the others. On SQLite one shape of the
+// mistake is gone rather than guarded -- a copy of the database file carries its
+// journal, because the journal is in it.
 //
 // The dangerous outcome would be silent re-application. Every migration looks
 // pending, so a data migration -- a backfill, an UPDATE, an INSERT -- would run a
@@ -188,22 +189,57 @@ function proveAnIncrementIsVisible(appPath: string): void {
   assert.equal(valueOfN(appPath), before, "the instrument check must leave no trace");
 }
 
-test("an app database restored without its journal refuses, and re-runs nothing", () => {
+/** The journal's own tables inside `appPath`, by the fence they carry. */
+function journalTables(appPath: string): string[] {
+  const db = new DatabaseSync(appPath, { readOnly: true });
+  try {
+    return (
+      db
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' " +
+            "AND substr(name, 1, 18) = '__zeroship_schema_' ORDER BY name",
+        )
+        .all() as { name: string }[]
+    ).map((row) => row.name);
+  } finally {
+    db.close();
+  }
+}
+
+/** Drop every journal table, the way an operator clearing "scratch" would. */
+function dropJournalTables(appPath: string): void {
+  const names = journalTables(appPath);
+  const db = new DatabaseSync(appPath);
+  try {
+    for (const name of names) db.exec(`DROP TABLE "${name}"`);
+  } finally {
+    db.close();
+  }
+}
+
+test("an app database whose journal was dropped refuses, and re-runs nothing", () => {
   const work = project();
   try {
     const appPath = join(work, "app.db");
-    const journalPath = join(work, "app.migrations.db");
 
     const first = apply(work, appPath);
     assert.equal(first.code, 0, `the first apply must succeed; ${first.text}`);
     assert.equal(valueOfN(appPath), 20, "10 inserted, then 10 added by the update migration");
-    assert.ok(existsSync(journalPath), "the journal sidecar must exist to be removed");
+    assert.ok(
+      journalTables(appPath).length > 0,
+      "the journal must be present inside the app file before it can be removed",
+    );
 
     proveAnIncrementIsVisible(appPath);
 
-    // The operator mistake this design invites: the application database is
-    // restored, copied or shipped without its sidecar.
-    rmSync(journalPath, { force: true });
+    // The operator mistake: the journal's own tables are dropped out of the
+    // database, leaving the schema and the data behind.
+    dropJournalTables(appPath);
+    assert.deepEqual(
+      journalTables(appPath),
+      [],
+      "the journal must actually be gone, or this measures a journal that is still there",
+    );
 
     const second = apply(work, appPath);
     assert.equal(

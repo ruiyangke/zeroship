@@ -207,11 +207,10 @@ test("applyIr with an in-process driver deploys the whole ordered sequence to a 
   const work = scratch("apply-driver-");
   try {
     const appPath = join(work, "app.db");
-    const journalPath = join(work, "app.journal.db");
 
     const reply = await addon.applyIr(
       null,
-      baseRequest({ driver: { kind: "inProcess", appPath, journalPath } }),
+      baseRequest({ driver: { kind: "inProcess", appPath } }),
     );
 
     // Both envelopes, not just the last one. The host-driven arm applies only the
@@ -239,11 +238,10 @@ test("statusIr with an in-process driver reconciles the whole sequence against a
   const work = scratch("status-driver-");
   try {
     const appPath = join(work, "app.db");
-    const journalPath = join(work, "app.journal.db");
 
     const fresh = await addon.statusIr(
       null,
-      statusRequest({ driver: { kind: "inProcess", appPath, journalPath } }),
+      statusRequest({ driver: { kind: "inProcess", appPath } }),
     );
     // The whole sequence is pending, and none of it is applied. Both drivers read
     // `envelopes` this way: unlike `applyIr`, no entry in it is the "current" one,
@@ -253,12 +251,12 @@ test("statusIr with an in-process driver reconciles the whole sequence against a
 
     await addon.applyIr(
       null,
-      baseRequest({ driver: { kind: "inProcess", appPath, journalPath } }),
+      baseRequest({ driver: { kind: "inProcess", appPath } }),
     );
 
     const after = await addon.statusIr(
       null,
-      statusRequest({ driver: { kind: "inProcess", appPath, journalPath } }),
+      statusRequest({ driver: { kind: "inProcess", appPath } }),
     );
     assert.equal(after.applied.length, 2, "the deploy is visible through the same verb");
     assert.equal(after.pending.length, 0, "with nothing left pending");
@@ -272,16 +270,15 @@ test("rollback with an in-process driver unwinds through the driver-neutral verb
   const work = scratch("rollback-driver-");
   try {
     const appPath = join(work, "app.db");
-    const journalPath = join(work, "app.journal.db");
 
     await addon.applyIr(
       null,
-      baseRequest({ driver: { kind: "inProcess", appPath, journalPath } }),
+      baseRequest({ driver: { kind: "inProcess", appPath } }),
     );
 
     const reply = await addon.rollback(
       null,
-      rollbackRequest({ driver: { kind: "inProcess", appPath, journalPath } }),
+      rollbackRequest({ driver: { kind: "inProcess", appPath } }),
     );
     assert.equal(reply.rolledBack.length, 1, "one step was asked for and one was unwound");
     assert.equal(reply.skippedIrreversible.length, 0, "the seeded data declares its inverse");
@@ -314,7 +311,6 @@ test("the in-process driver refuses a dialect it does not serve, on every verb",
     const driver = {
       kind: "inProcess",
       appPath: join(work, "app.db"),
-      journalPath: join(work, "app.journal.db"),
     };
     const unserved = /serves only the sqlite dialect/;
 
@@ -342,8 +338,7 @@ test("the driver kind and the host-driver argument must agree, on every verb", (
   const work = scratch("driver-mismatch-");
   try {
     const appPath = join(work, "app.db");
-    const journalPath = join(work, "app.journal.db");
-    const inProcess = { kind: "inProcess", appPath, journalPath };
+    const inProcess = { kind: "inProcess", appPath };
 
     assert.throws(
       () => addon.applyIr(unreachableHostDriver(), baseRequest({ driver: inProcess })),
@@ -380,7 +375,7 @@ test("the driver kind and the host-driver argument must agree, on every verb", (
     );
 
     assert.throws(
-      () => addon.applyIr(null, baseRequest({ driver: { kind: "sqlite", appPath, journalPath } })),
+      () => addon.applyIr(null, baseRequest({ driver: { kind: "sqlite", appPath } })),
       /unknown driver kind/,
       "a vendor name is not a driver kind",
     );
@@ -388,7 +383,7 @@ test("the driver kind and the host-driver argument must agree, on every verb", (
       () =>
         addon.statusIr(
           null,
-          statusRequest({ driver: { kind: "sqlite", appPath, journalPath } }),
+          statusRequest({ driver: { kind: "sqlite", appPath } }),
         ),
       /unknown driver kind/,
       "on status either",
@@ -397,7 +392,7 @@ test("the driver kind and the host-driver argument must agree, on every verb", (
       () =>
         addon.rollback(
           null,
-          rollbackRequest({ driver: { kind: "sqlite", appPath, journalPath } }),
+          rollbackRequest({ driver: { kind: "sqlite", appPath } }),
         ),
       /unknown driver kind/,
       "nor on rollback",
@@ -411,8 +406,7 @@ test("each verb's driver refuses the credentials that verb does not journal unde
   const work = scratch("driver-credentials-");
   try {
     const appPath = join(work, "app.db");
-    const journalPath = join(work, "app.journal.db");
-    const inProcess = { kind: "inProcess", appPath, journalPath };
+    const inProcess = { kind: "inProcess", appPath };
 
     // A status reconciles and records no row for a label to name. Its driver carries
     // neither credential, and setting one is refused rather than dropped: a caller

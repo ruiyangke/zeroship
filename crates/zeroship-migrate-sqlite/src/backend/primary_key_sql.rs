@@ -172,6 +172,12 @@ async fn verify_inbound_foreign_keys(
         .await?;
     for row in tables {
         let child = cell(&row, 0, "sqlite_master.name")?;
+        // The journal shares this database and declares no foreign keys, so
+        // probing it would spend a PRAGMA per journal table on every
+        // ALTER PRIMARY KEY and could only ever answer "no inbound key".
+        if super::authorizer::is_journal_object(&child) {
+            continue;
+        }
         let foreign_keys = actor
             .query(&format!("PRAGMA main.foreign_key_list({})", lit(&child)))
             .await?;

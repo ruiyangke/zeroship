@@ -43,22 +43,16 @@ const APP: &str = "app_rename";
 struct Paths {
     _dir: TempDir,
     app: PathBuf,
-    journal: PathBuf,
 }
 
 fn paths(tag: &str) -> Paths {
     let dir = tempfile::tempdir().expect("tempdir");
     let app = dir.path().join(format!("zs-{tag}.sqlite"));
-    let journal = dir.path().join(format!("zs-{tag}.migrations.sqlite"));
-    Paths {
-        _dir: dir,
-        app,
-        journal,
-    }
+    Paths { _dir: dir, app }
 }
 
 fn backend(p: &Paths) -> SqliteBackend {
-    SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend")
+    SqliteBackend::open(&p.app).expect("open hardened sqlite backend")
 }
 
 fn exec_cfg() -> ExecutorConfig {

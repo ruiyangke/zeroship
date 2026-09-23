@@ -1,7 +1,7 @@
 //! The `MigrationEngine` drives `SQLite` end-to-end through a
 //! `SqliteBackend`, against REAL temp-file `SQLite` (the faithful path: the actual
 //! `DeclarativeAuthor` builds the plan, and the engine's generic `apply_declarative`
-//! orchestrates the plain set + the 12-step rebuild under confinement + the `_mig`
+//! orchestrates the plain set + the 12-step rebuild under confinement + the fenced
 //! journal). The engine is generic over `MigrationBackend`, and a rebuild is
 //! driven through `SqliteBackend::rebuild_one` under the destructive/approval
 //! gate — NOT a direct executor-internal seam.
@@ -41,22 +41,16 @@ const APP: &str = "app_demo";
 struct Paths {
     _dir: TempDir,
     app: PathBuf,
-    journal: PathBuf,
 }
 
 fn paths(app_id: &str) -> Paths {
     let dir = tempfile::tempdir().expect("tempdir");
     let app = dir.path().join(format!("zs-{app_id}.sqlite"));
-    let journal = dir.path().join(format!("zs-{app_id}.migrations.sqlite"));
-    Paths {
-        _dir: dir,
-        app,
-        journal,
-    }
+    Paths { _dir: dir, app }
 }
 
 fn backend(p: &Paths) -> SqliteBackend {
-    SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend")
+    SqliteBackend::open(&p.app).expect("open hardened sqlite backend")
 }
 
 fn sqlite_author() -> DeclarativeAuthor {
@@ -70,7 +64,7 @@ fn sqlite_author() -> DeclarativeAuthor {
 
 fn exec_cfg() -> ExecutorConfig {
     // SQLite ignores the schema strings (lock is a single-actor no-op, the journal
-    // lives in the `_mig` attached file); the engine still needs a config to thread.
+    // lives in the fenced journal tables); the engine still needs a config to thread.
     ExecutorConfig::new(PROJECT, PROJECT, support::no_inject(PROJECT))
 }
 
@@ -129,7 +123,7 @@ async fn column_type(be: &SqliteBackend, table: &str, column: &str) -> String {
         .unwrap_or_default()
 }
 
-/// True iff `version` is journaled `completed` in the `_mig` net-state.
+/// True iff `version` is journaled `completed` in the journal's net-state.
 async fn is_completed(be: &SqliteBackend, version: &str) -> bool {
     be.applied_sqlite()
         .await
@@ -280,7 +274,7 @@ async fn engine_applies_sqlite_rebuild_end_to_end() {
         "the rebuilt column has the new TEXT type"
     );
 
-    // The rebuild is journaled `completed` (a real `_mig` versioned journal row).
+    // The rebuild is journaled `completed` (a real versioned journal row).
     assert!(
         is_completed(&be, &rebuild_version).await,
         "the engine-driven rebuild is journaled completed"
@@ -1199,7 +1193,7 @@ async fn sqlite_baseline_adopts_a_journal_less_file_then_additive_deploy_works()
     let cfg = exec_cfg();
 
     // Simulate a file a prior `run_sqlite_pipeline` populated: a real table on
-    // `main`, but an EMPTY `_mig` journal. Create the table directly (engine
+    // `main`, but an EMPTY journal. Create the table directly (engine
     // mode lets the test write `main`); do NOT journal it.
     be.ensure_journal_sqlite().await.expect("ensure journal");
     be.actor()

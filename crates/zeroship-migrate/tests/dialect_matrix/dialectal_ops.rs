@@ -114,22 +114,16 @@ fn lower_selects_postgres_leg_and_emits_nothing_for_absent_sqlite_mysql_legs() {
 struct Paths {
     _dir: TempDir,
     app: PathBuf,
-    journal: PathBuf,
 }
 
 fn paths(tag: &str) -> Paths {
     let dir = tempfile::tempdir().expect("tempdir");
     let app = dir.path().join(format!("zs-{tag}.sqlite"));
-    let journal = dir.path().join(format!("zs-{tag}.migrations.sqlite"));
-    Paths {
-        _dir: dir,
-        app,
-        journal,
-    }
+    Paths { _dir: dir, app }
 }
 
 fn backend(p: &Paths) -> SqliteBackend {
-    SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend")
+    SqliteBackend::open(&p.app).expect("open hardened sqlite backend")
 }
 
 fn registry(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
