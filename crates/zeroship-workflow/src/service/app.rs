@@ -414,14 +414,15 @@ impl AppWorkflows {
             .ok_or_else(|| not_found("workflow run"))?;
         let status = RunStatus {
             state: parse_state(&run.state)?,
-            output: if let Some(reference) = outcome.output_ref {
-                let reference: crate::engine::WorkflowOutputRef = decode(&reference)?;
-                Some(
-                    json!({"kind":"ref","ref":format!("wfblob:sha256:{}",reference.hash),"hash":reference.hash,"size":reference.size,"contentType":reference.content_type}),
-                )
-            } else {
-                outcome.output.map(|value| decode(&value)).transpose()?
-            },
+            // A run's result is the object its descriptor names, so the reply
+            // locates it and the bytes come from a payload read. A run that
+            // returned nothing has no descriptor and reports no output.
+            output: outcome
+                .output_ref
+                .as_deref()
+                .map(decode::<crate::engine::WorkflowOutputRef>)
+                .transpose()?
+                .map(|reference| json!({"kind":"ref","ref":format!("wfblob:sha256:{}",reference.hash),"hash":reference.hash,"size":reference.size,"contentType":reference.content_type})),
             error: outcome.error.map(|value| decode(&value)).transpose()?,
             continued_as_new_run_id: outcome.continued_as_new_run_id,
         };

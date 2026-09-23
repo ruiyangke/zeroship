@@ -172,6 +172,23 @@ impl Host {
         }
     }
 }
+
+/// The value a completed run returned, resolved through the descriptor its
+/// status reports.
+///
+/// A run result is a payload object, so `status` locates it and the bytes come
+/// from `readOutput`. Both halves are asserted here: the descriptor the host
+/// hands out is the one whose object holds these bytes, so a status read that
+/// followed the wrong run reports a size the object does not have.
+fn returned_value(host: &mut Host, run: &str) -> Value {
+    let completed = host.until(&format!("/status?id={run}"), |value| {
+        value["state"] == "completed"
+    });
+    assert_eq!(completed["output"]["kind"], "ref", "{completed}");
+    let read = host.request(&format!("/result?id={run}")).unwrap();
+    assert_eq!(completed["output"]["size"], read["size"], "{completed}");
+    read["value"].clone()
+}
 impl Drop for Host {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -244,6 +261,10 @@ export function createDevEntryLoader() {{
       }}
       const run = env.workflows.Example.get(url.searchParams.get("id"));
       if (url.pathname === "/signal") return Response.json(await run.signal({{ type: "resume" }}));
+      if (url.pathname === "/result") {{
+        const bytes = await run.readOutput();
+        return Response.json({{ size: bytes.length, value: JSON.parse(new TextDecoder().decode(bytes)) }});
+      }}
       return Response.json(await run.status());
     }}
   }});
@@ -325,8 +346,7 @@ fn resume_after_process_death(configured_app: Option<&AppId>, native_dev: bool) 
     assert!(database.exists());
     assert!(!root.path().join(".zeroship/app-id").exists());
     host.request(&format!("/signal?id={run}")).unwrap();
-    let completed = host.until(&status, |value| value["state"] == "completed");
-    assert_eq!(completed["output"], "original:original:lazy");
+    assert_eq!(returned_value(&mut host, run), "original:original:lazy");
 }
 
 /// The running host writes the same file; retry only its brief lock contention.
@@ -509,8 +529,7 @@ fn republished_bundle_releases_both_deployment_holders() {
     let status = format!("/status?id={run}");
     host.until(&status, |value| value["state"] == "waiting");
     host.request(&format!("/signal?id={run}")).unwrap();
-    let completed = host.until(&status, |value| value["state"] == "completed");
-    assert_eq!(completed["output"], "original:original:lazy");
+    assert_eq!(returned_value(&mut host, &run), "original:original:lazy");
     drop(host);
 
     // Publishing a new bundle activates it and supersedes the original.

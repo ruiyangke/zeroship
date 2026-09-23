@@ -150,7 +150,7 @@ async fn stall(
 ) -> Result<RunState, WorkflowServiceError> {
     let update = RunUpdate::Stalled { error };
     let state = parse_state(update.state())?;
-    finish(tx, app, run, state, None, update.error(), now).await
+    finish(tx, app, run, state, update.error(), now).await
 }
 
 /// Bring a run whose rollback stopped reporting to rest at the failure it was
@@ -202,7 +202,7 @@ async fn abandon(
         failures,
         Some(Abandonment { steps, reason }),
     );
-    finish(tx, app, run, RunState::Failed, None, Some(error), now).await
+    finish(tx, app, run, RunState::Failed, Some(error), now).await
 }
 
 /// Reconcile control intent and durable waits before assigning an executor.
@@ -337,10 +337,16 @@ pub(crate) async fn apply(
         return settle(tx, app, run, update, now).await;
     }
     if let RunUpdate::Completed { output, output_ref } = update {
+        // The generation row has no inline slot for a run's result: what a run
+        // returned is the payload object its descriptor names, or nothing. An
+        // executor reporting a value it never staged is reporting a result this
+        // journal cannot keep, so the frontier refuses it instead of dropping
+        // it. The runner stages every value a run returns, which is why no
+        // executor reaches this.
+        if output.is_some() {
+            return journal::invalid("workflow run output must be a staged reference");
+        }
         if let Some(reference) = &output_ref {
-            if output.is_some() {
-                return journal::invalid("workflow output cannot be both inline and referenced");
-            }
             super::payloads::promote(
                 tx,
                 app,
@@ -366,7 +372,7 @@ pub(crate) async fn apply(
         {
             return journal::invalid("workflow cannot complete with unresolved operations");
         }
-        return finish(tx, app, run, RunState::Completed, output, None, now).await;
+        return finish(tx, app, run, RunState::Completed, None, now).await;
     }
     if let RunUpdate::ContinuedAsNew {
         seed_input,
@@ -418,7 +424,6 @@ pub(crate) async fn apply(
         let key = run.optional_text("key")?;
         let continued = Terminal {
             state: RunState::ContinuedAsNew,
-            output: None,
             error: None,
             successor: Some(id.clone()),
         };
@@ -568,7 +573,7 @@ async fn settle(
             value!({"state":"compensating", "compensation_target":target.as_str(), "control":"none", "due_at":now, "task_id":null})).await?;
         Ok(RunState::Compensating)
     } else {
-        finish(tx, app, run, target, None, update.error(), now).await
+        finish(tx, app, run, target, update.error(), now).await
     }
 }
 
@@ -696,7 +701,7 @@ async fn compensate(
         RunState::Failed
     };
     let error = compensated_error(original, &steps, failures, None);
-    finish(tx, app, run, state, None, Some(error), now).await
+    finish(tx, app, run, state, Some(error), now).await
 }
 
 /// The failure that started this generation's rollback, as `settle` recorded it.
@@ -791,13 +796,11 @@ pub(crate) async fn finish(
     app: &AppId,
     run: &Row,
     state: RunState,
-    output: Option<Value>,
     error: Option<Value>,
     now: i64,
 ) -> Result<RunState, WorkflowServiceError> {
     let terminal = Terminal {
         state,
-        output,
         error,
         successor: None,
     };
@@ -807,14 +810,13 @@ pub(crate) async fn finish(
 /// Result recorded on a run's current generation when it becomes terminal.
 struct Terminal {
     state: RunState,
-    output: Option<Value>,
     error: Option<Value>,
     /// The run this close handed its work to, when it produced one.
     ///
     /// Platform data with a column of its own, so it cannot be confused with
-    /// the creator JSON `output` carries. Every close writes this field, so a
-    /// close that begins producing a successor sets it here and needs no second
-    /// mechanism to record one.
+    /// the creator result `output_ref` names. Every close writes this field, so
+    /// a close that begins producing a successor sets it here and needs no
+    /// second mechanism to record one.
     successor: Option<String>,
 }
 
@@ -828,7 +830,6 @@ async fn finish_run(
 ) -> Result<RunState, WorkflowServiceError> {
     let Terminal {
         state,
-        output,
         error,
         successor,
     } = terminal;
@@ -842,7 +843,7 @@ async fn finish_run(
         .collection(models::generations::Entity::COLLECTION)?
         .update(
             value!({"app_id":app.as_str(), "run_id":id.clone(), "generation":generation}),
-            value!({"state":state.as_str(), "output":output.map(|value|encode(&value)).transpose()?,
+            value!({"state":state.as_str(),
             "error":error.map(|value|encode(&value)).transpose()?, "terminal_at":now,
             "continued_as_new_run_id":successor}),
         )

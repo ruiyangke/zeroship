@@ -167,7 +167,7 @@ pub(super) async fn restarted_source(store: Rc<OrmStore>) {
             &worker,
             &child.id,
             &child.token,
-            execution(json!([{"kind":"RunCompleted","output":"done"}])),
+            execution(json!([{"kind":"RunCompleted"}])),
         )
         .await
         .unwrap();
@@ -236,7 +236,7 @@ pub(super) async fn restarted_source(store: Rc<OrmStore>) {
             &worker,
             &running.id,
             &running.token,
-            execution(json!([{"kind":"RunCompleted","output":"restarted"}])),
+            execution(json!([{"kind":"RunCompleted"}])),
         )
         .await
         .unwrap();

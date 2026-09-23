@@ -233,7 +233,7 @@ async fn wake_contract(store: Rc<OrmStore>) {
     }
     let run = app::lock_run(&mut tx, &local, &child).await.unwrap();
     let now = tx.now().await.unwrap();
-    frontier::finish(&mut tx, &local, &run, RunState::Completed, None, None, now)
+    frontier::finish(&mut tx, &local, &run, RunState::Completed, None, now)
         .await
         .unwrap();
     let parents = [

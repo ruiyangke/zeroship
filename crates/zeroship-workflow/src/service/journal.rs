@@ -250,24 +250,13 @@ pub(super) fn validate_child_result(
                 .as_deref()
                 .map(decode)
                 .transpose()?;
-            let output = if reference.is_some() {
-                None
-            } else {
-                Some(
-                    result
-                        .outcome
-                        .output
-                        .as_deref()
-                        .map(decode::<Value>)
-                        .transpose()?
-                        .unwrap_or(Value::Null),
-                )
-            };
-            // A stored checkpoint round-trips an inline JSON null as an absent
-            // output, so both spellings name the same consumed result.
+            // A completed child's result is the object its descriptor names, and
+            // a child that returned nothing names no object, so the consuming
+            // checkpoint carries no inline value either way. A stored checkpoint
+            // round-trips an inline JSON null as an absent output, so both
+            // spellings of nothing are the same consumed result.
             if step.state != "completed"
-                || step.output.as_ref().filter(|value| !value.is_null())
-                    != output.as_ref().filter(|value| !value.is_null())
+                || step.output.as_ref().is_some_and(|value| !value.is_null())
                 || step.output_ref != reference
                 || step.error.is_some()
             {
@@ -944,13 +933,10 @@ pub(crate) async fn resolve(
                         .await?,
                     );
                 } else {
-                    output = Some(
-                        outcome
-                            .output
-                            .map(|value| decode(&value))
-                            .transpose()?
-                            .unwrap_or(Value::Null),
-                    );
+                    // No descriptor means the child returned nothing. The step
+                    // still resolves: a JSON null is what the parent's body
+                    // receives, and it is what marks this checkpoint completed.
+                    output = Some(Value::Null);
                 }
             } else if state.is_terminal() {
                 error=Some(outcome.error.map(|value|decode(&value)).transpose()?.unwrap_or(json!({"type":"ChildCancelledError","message":"child workflow was cancelled"})));

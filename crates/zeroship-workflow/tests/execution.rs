@@ -52,6 +52,43 @@ fn invalid_batches_do_not_become_empty_successful_completions() {
     assert!(fold(json!({"outcomes": [{"kind": "RunCompleted", "output": true}]})).is_ok());
 }
 
+/// A run that returned nothing must fold to an ABSENT output, not to an inline
+/// JSON null.
+///
+/// The decoder normalizes a bare `RunCompleted` by writing `output: null` into
+/// the outcome, so the two spellings a runtime can send arrive here identical.
+/// Everything downstream reads that as the absence of a result: the runner
+/// stages an object for a value a run returned and none for a run that returned
+/// nothing, and `frontier::apply` refuses an inline run output outright. A
+/// `Some(Value::Null)` here would make a run that returned nothing
+/// indistinguishable from one whose result the executor failed to stage.
+#[test]
+fn a_run_that_returned_nothing_folds_to_an_absent_output() {
+    for value in [
+        json!({"outcomes": [{"kind": "RunCompleted"}]}),
+        json!({"outcomes": [{"kind": "RunCompleted", "output": null}]}),
+    ] {
+        let (_, run_update) = fold(value.clone()).unwrap();
+        assert!(
+            matches!(
+                run_update,
+                RunUpdate::Completed {
+                    output: None,
+                    output_ref: None
+                }
+            ),
+            "{value}: {run_update:?}"
+        );
+    }
+    // The control: the same fold over a run that DID return a value carries it,
+    // so the absence above is the batch and not a fold that drops every output.
+    let (_, carried) = fold(json!({"outcomes": [{"kind": "RunCompleted", "output": true}]})).unwrap();
+    assert!(
+        matches!(carried, RunUpdate::Completed { output: Some(Value::Bool(true)), .. }),
+        "{carried:?}"
+    );
+}
+
 /// The pair a completion actually runs through: the shared runtime decoder, then
 /// the shared fold `frontier::apply` applies to an authorized claim's run.
 fn fold(value: Value) -> Result<(Vec<StepCheckpoint>, RunUpdate), WorkflowServiceError> {

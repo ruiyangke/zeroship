@@ -5,7 +5,6 @@
 
 use super::*;
 use crate::{
-    engine::WorkflowOutputRef,
     operations::{RestartOptions, RestartTarget, RunState},
     service::{tests::objects::Objects, TaskAssignment, WorkerIdentity},
 };
@@ -47,12 +46,6 @@ const ORIGINAL: &[u8] = br#"{"value":"original"}"#;
 const REPLACEMENT: &[u8] = br#"{"value":"replacement"}"#;
 const ABANDONED: &[u8] = br#"{"value":"abandoned"}"#;
 
-#[derive(Clone, Copy)]
-enum OutputKind {
-    Inline,
-    Reference,
-}
-
 struct Family {
     parent: String,
     child: String,
@@ -65,58 +58,36 @@ fn worker() -> WorkerIdentity {
     WorkerIdentity::new("continuation-provenance-worker".into()).unwrap()
 }
 
-fn output_reference(data: &[u8]) -> WorkflowOutputRef {
-    WorkflowOutputRef {
-        hash: crate::service::hash(data),
-        size: i64::try_from(data.len()).unwrap(),
-        content_type: Some("application/json".into()),
-    }
-}
-
 async fn complete_child(
     service: &WorkflowService,
     objects: &Objects,
     task: &TaskAssignment,
-    kind: OutputKind,
     data: &'static [u8],
 ) {
-    let outcome = match kind {
-        OutputKind::Inline => json!({
-            "kind":"RunCompleted", "output":serde_json::from_slice::<serde_json::Value>(data).unwrap()
-        }),
-        OutputKind::Reference => {
-            let reference = output_reference(data);
-            service
-                .stage_payload(
-                    &worker(),
-                    &task.id,
-                    &task.token,
-                    &RequestId::mint(),
-                    reference.clone(),
-                    objects.upload(data),
-                )
-                .await
-                .unwrap();
-            json!({"kind":"RunCompleted", "outputRef":reference})
-        }
-    };
+    let reference = output_reference(data);
+    service
+        .stage_payload(
+            &worker(),
+            &task.id,
+            &task.token,
+            &RequestId::mint(),
+            reference.clone(),
+            objects.upload(data),
+        )
+        .await
+        .unwrap();
     service
         .complete(
             &worker(),
             &task.id,
             &task.token,
-            execution(json!([outcome])),
+            execution(json!([{"kind":"RunCompleted", "outputRef":reference}])),
         )
         .await
         .unwrap();
 }
 
-async fn completed_family(
-    service: &WorkflowService,
-    objects: &Objects,
-    app_id: &AppId,
-    kind: OutputKind,
-) -> Family {
+async fn completed_family(service: &WorkflowService, objects: &Objects, app_id: &AppId) -> Family {
     let scope = service.fixture_app(app_id.clone());
     let parent = scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
@@ -150,7 +121,7 @@ async fn completed_family(
     let child = service.poll(&worker()).await.unwrap().unwrap();
     assert_eq!(child.invocation.workflow_name, "Child");
     assert_ne!(child.invocation.run_id, accepted.invocation.run_id);
-    complete_child(service, objects, &child, kind, ORIGINAL).await;
+    complete_child(service, objects, &child, ORIGINAL).await;
     assert_eq!(deliver_propagations(&scope).await.len(), 1);
     let resumed = service.poll(&worker()).await.unwrap().unwrap();
     assert_eq!(resumed.invocation.run_id, parent.id);
@@ -158,7 +129,7 @@ async fn completed_family(
         resumed.invocation.journal[0].child_run_id.as_deref(),
         Some(child.invocation.run_id.as_str())
     );
-    assert_output(service, objects, &resumed, kind, ORIGINAL).await;
+    assert_output(service, objects, &resumed, ORIGINAL).await;
     service
         .complete(
             &worker(),
@@ -203,34 +174,25 @@ async fn assert_output(
     service: &WorkflowService,
     objects: &Objects,
     task: &TaskAssignment,
-    kind: OutputKind,
     data: &[u8],
 ) {
     let step = &task.invocation.journal[0];
     assert_eq!(step.state, "completed");
-    match kind {
-        OutputKind::Inline => {
-            assert_eq!(step.output, Some(serde_json::from_slice(data).unwrap()));
-            assert!(step.output_ref.is_none());
-        }
-        OutputKind::Reference => {
-            assert!(step.output.is_none());
-            assert_eq!(step.output_ref, Some(output_reference(data)));
-            assert_eq!(
-                service
-                    .read_task_payload(
-                        &worker(),
-                        &task.id,
-                        &task.token,
-                        &output_reference(data),
-                        objects.open(),
-                    )
-                    .await
-                    .unwrap(),
-                data
-            );
-        }
-    }
+    assert!(step.output.is_none());
+    assert_eq!(step.output_ref, Some(output_reference(data)));
+    assert_eq!(
+        service
+            .read_task_payload(
+                &worker(),
+                &task.id,
+                &task.token,
+                &output_reference(data),
+                objects.open(),
+            )
+            .await
+            .unwrap(),
+        data
+    );
 }
 
 fn prefix() -> RestartOptions {
@@ -244,70 +206,66 @@ fn prefix() -> RestartOptions {
 }
 
 async fn retained_provenance(store: Rc<OrmStore>) {
-    for kind in [OutputKind::Inline, OutputKind::Reference] {
-        let objects = Objects::new();
-        let (service, app_id, _, _deployments) = registered_service(store.clone()).await;
-        let family = completed_family(&service, &objects, &app_id, kind).await;
-        assert_ne!(family.accepted, family.result);
-        let scope = service.fixture_app(app_id.clone());
-        scope
-            .restart(&RequestId::mint(), &family.child, RestartOptions::default())
-            .await
-            .unwrap();
-        let child = service.poll(&worker()).await.unwrap().unwrap();
-        assert_eq!(child.invocation.run_id, family.child);
-        assert_eq!(child.generation, 1);
-        complete_child(&service, &objects, &child, kind, REPLACEMENT).await;
-        assert_eq!(
-            scope.status(&family.child).await.unwrap().state,
-            RunState::Completed
-        );
-        scope
-            .restart(&RequestId::mint(), &family.parent, prefix())
-            .await
-            .unwrap();
-        let parent = service.poll(&worker()).await.unwrap().unwrap();
-        assert_eq!(parent.invocation.run_id, family.parent);
-        assert_eq!(parent.generation, 1);
-        assert_eq!(parent.invocation.journal.len(), 1);
-        assert_eq!(
-            parent.invocation.journal[0].child_run_id.as_deref(),
-            Some(family.child.as_str())
-        );
-        assert_output(&service, &objects, &parent, kind, ORIGINAL).await;
-        for generation in [0, 1] {
-            let step = child_step(&service, &app_id, &family.parent, generation).await;
-            assert_eq!(step.text("child_member_id").unwrap(), family.accepted);
-            assert_eq!(step.text("child_result_member_id").unwrap(), family.result);
-            assert_eq!(step.text("record").unwrap(), family.record);
-        }
-        if matches!(kind, OutputKind::Reference) {
-            let tx = service.begin().await.unwrap();
-            let references = journal_rows(
-                &tx,
-                "payload_refs",
-                json!({
-                    "app_id":app_id.as_str(),"run_id":family.parent,"slot":"step","ordinal":0
-                }),
-            )
-            .await;
-            assert_eq!(references.len(), 2);
-            assert_eq!(
-                references[0].text("payload_id").unwrap(),
-                references[1].text("payload_id").unwrap()
-            );
-            tx.commit().await.unwrap();
-        }
-        service
-            .complete(
-                &worker(),
-                &parent.id,
-                &parent.token,
-                execution(json!([{"kind":"RunCompleted"}])),
-            )
-            .await
-            .unwrap();
+    let objects = Objects::new();
+    let (service, app_id, _, _deployments) = registered_service(store).await;
+    let family = completed_family(&service, &objects, &app_id).await;
+    assert_ne!(family.accepted, family.result);
+    let scope = service.fixture_app(app_id.clone());
+    scope
+        .restart(&RequestId::mint(), &family.child, RestartOptions::default())
+        .await
+        .unwrap();
+    let child = service.poll(&worker()).await.unwrap().unwrap();
+    assert_eq!(child.invocation.run_id, family.child);
+    assert_eq!(child.generation, 1);
+    complete_child(&service, &objects, &child, REPLACEMENT).await;
+    assert_eq!(
+        scope.status(&family.child).await.unwrap().state,
+        RunState::Completed
+    );
+    scope
+        .restart(&RequestId::mint(), &family.parent, prefix())
+        .await
+        .unwrap();
+    let parent = service.poll(&worker()).await.unwrap().unwrap();
+    assert_eq!(parent.invocation.run_id, family.parent);
+    assert_eq!(parent.generation, 1);
+    assert_eq!(parent.invocation.journal.len(), 1);
+    assert_eq!(
+        parent.invocation.journal[0].child_run_id.as_deref(),
+        Some(family.child.as_str())
+    );
+    assert_output(&service, &objects, &parent, ORIGINAL).await;
+    for generation in [0, 1] {
+        let step = child_step(&service, &app_id, &family.parent, generation).await;
+        assert_eq!(step.text("child_member_id").unwrap(), family.accepted);
+        assert_eq!(step.text("child_result_member_id").unwrap(), family.result);
+        assert_eq!(step.text("record").unwrap(), family.record);
     }
+    let tx = service.begin().await.unwrap();
+    let references = journal_rows(
+        &tx,
+        "payload_refs",
+        json!({
+            "app_id":app_id.as_str(),"run_id":family.parent,"slot":"step","ordinal":0
+        }),
+    )
+    .await;
+    assert_eq!(references.len(), 2);
+    assert_eq!(
+        references[0].text("payload_id").unwrap(),
+        references[1].text("payload_id").unwrap()
+    );
+    tx.commit().await.unwrap();
+    service
+        .complete(
+            &worker(),
+            &parent.id,
+            &parent.token,
+            execution(json!([{"kind":"RunCompleted"}])),
+        )
+        .await
+        .unwrap();
 }
 
 /// Delivered collection after a consumed child output was restarted and copied
@@ -316,7 +274,7 @@ async fn collected_provenance(store: Rc<OrmStore>) {
     use crate::service::tests::payloads::collection::fixture::{options, Grant};
     let objects = Objects::new();
     let (service, app_id, _, _deployments) = registered_service(store).await;
-    let family = completed_family(&service, &objects, &app_id, OutputKind::Reference).await;
+    let family = completed_family(&service, &objects, &app_id).await;
     let scope = service.fixture_app(app_id.clone());
     scope
         .restart(&RequestId::mint(), &family.child, RestartOptions::default())
@@ -324,7 +282,7 @@ async fn collected_provenance(store: Rc<OrmStore>) {
         .unwrap();
     let child = service.poll(&worker()).await.unwrap().unwrap();
     assert_eq!(child.invocation.run_id, family.child);
-    complete_child(&service, &objects, &child, OutputKind::Reference, REPLACEMENT).await;
+    complete_child(&service, &objects, &child, REPLACEMENT).await;
     scope
         .restart(&RequestId::mint(), &family.parent, prefix())
         .await
@@ -394,7 +352,7 @@ async fn collected_provenance(store: Rc<OrmStore>) {
             assert!(stored, "collection must keep referenced child output");
         }
     }
-    assert_output(&service, &objects, &parent, OutputKind::Reference, ORIGINAL).await;
+    assert_output(&service, &objects, &parent, ORIGINAL).await;
     service
         .complete(
             &worker(),
@@ -441,70 +399,68 @@ async fn snapshot(service: &WorkflowService, app_id: &AppId) -> Snapshot {
 }
 
 async fn substituted_provenance(store: Rc<OrmStore>) {
-    for kind in [OutputKind::Inline, OutputKind::Reference] {
-        let objects = Objects::new();
-        let (service, app_id, _, _deployments) = registered_service(store.clone()).await;
-        let family = completed_family(&service, &objects, &app_id, kind).await;
-        let scope = service.fixture_app(app_id.clone());
-        scope
-            .restart(&RequestId::mint(), &family.child, RestartOptions::default())
-            .await
-            .unwrap();
-        let tx = service.begin().await.unwrap();
-        let generations = journal_rows(
-            &tx,
-            "generations",
-            json!({
-                "app_id":app_id.as_str(),"run_id":family.child,"generation":1
-            }),
-        )
-        .await;
-        assert_eq!(generations.len(), 1);
-        let replacement = generations[0].text("id").unwrap();
-        assert_ne!(replacement, family.result);
-        tx.commit().await.unwrap();
-        for completed in [false, true] {
-            if completed {
-                let child = service.poll(&worker()).await.unwrap().unwrap();
-                assert_eq!(child.invocation.run_id, family.child);
-                complete_child(&service, &objects, &child, kind, ORIGINAL).await;
-            }
-            assert_rejected_substitution(
-                &service,
-                &app_id,
-                &family,
-                "child_result_member_id",
-                &replacement,
-                &family.result,
-            )
-            .await;
+    let objects = Objects::new();
+    let (service, app_id, _, _deployments) = registered_service(store).await;
+    let family = completed_family(&service, &objects, &app_id).await;
+    let scope = service.fixture_app(app_id.clone());
+    scope
+        .restart(&RequestId::mint(), &family.child, RestartOptions::default())
+        .await
+        .unwrap();
+    let tx = service.begin().await.unwrap();
+    let generations = journal_rows(
+        &tx,
+        "generations",
+        json!({
+            "app_id":app_id.as_str(),"run_id":family.child,"generation":1
+        }),
+    )
+    .await;
+    assert_eq!(generations.len(), 1);
+    let replacement = generations[0].text("id").unwrap();
+    assert_ne!(replacement, family.result);
+    tx.commit().await.unwrap();
+    for completed in [false, true] {
+        if completed {
+            let child = service.poll(&worker()).await.unwrap().unwrap();
+            assert_eq!(child.invocation.run_id, family.child);
+            complete_child(&service, &objects, &child, ORIGINAL).await;
         }
         assert_rejected_substitution(
             &service,
             &app_id,
             &family,
-            "child_member_id",
+            "child_result_member_id",
+            &replacement,
             &family.result,
-            &family.accepted,
         )
         .await;
-        scope
-            .restart(&RequestId::mint(), &family.parent, prefix())
-            .await
-            .unwrap();
-        let parent = service.poll(&worker()).await.unwrap().unwrap();
-        assert_eq!(parent.invocation.run_id, family.parent);
-        assert_output(&service, &objects, &parent, kind, ORIGINAL).await;
-        service
-            .complete(
-                &worker(),
-                &parent.id,
-                &parent.token,
-                execution(json!([{"kind":"RunCompleted"}])),
-            )
-            .await
-            .unwrap();
     }
+    assert_rejected_substitution(
+        &service,
+        &app_id,
+        &family,
+        "child_member_id",
+        &family.result,
+        &family.accepted,
+    )
+    .await;
+    scope
+        .restart(&RequestId::mint(), &family.parent, prefix())
+        .await
+        .unwrap();
+    let parent = service.poll(&worker()).await.unwrap().unwrap();
+    assert_eq!(parent.invocation.run_id, family.parent);
+    assert_output(&service, &objects, &parent, ORIGINAL).await;
+    service
+        .complete(
+            &worker(),
+            &parent.id,
+            &parent.token,
+            execution(json!([{"kind":"RunCompleted"}])),
+        )
+        .await
+        .unwrap();
 }
 
 async fn assert_rejected_substitution(

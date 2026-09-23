@@ -12,9 +12,17 @@ import { Workflow, type WorkflowStep, type WorkflowTrigger } from "@zeroship/wor
 // `workflows` mention). The cast below is the shape `env.workflows` exposes;
 // keeping it in one place makes the missing declaration obvious
 // rather than scattering `as any` through the handlers.
+interface ProbeStatusOutputRef {
+  readonly kind: "ref";
+  readonly ref: string;
+  readonly hash: string;
+  readonly size: number;
+  readonly contentType?: string;
+}
 interface ProbeRun {
   readonly id: string;
-  status(): Promise<{ state: string; output?: unknown; error?: unknown }>;
+  status(): Promise<{ state: string; output?: ProbeStatusOutputRef; error?: unknown }>;
+  readOutput(): Promise<Uint8Array>;
   signal(opts: { type: string; payload?: unknown }): Promise<void>;
   cancel(opts?: { mode?: "abort" | "compensate" }): Promise<void>;
 }
@@ -223,9 +231,15 @@ export const status = query(
     const run = workflows[input.workflow].get(input.runId);
     const s = await run.status();
     const err = s.error as Record<string, unknown> | null | undefined;
+    // A run's result is a blob whatever it weighs, so `status` locates it and
+    // `readOutput` is what turns it back into the value the workflow returned.
+    // The probe answers with the value, which is what its tests compare.
+    const output = s.output
+      ? JSON.parse(new TextDecoder().decode(await run.readOutput())) as unknown
+      : null;
     return {
       state: s.state,
-      output: s.output ?? null,
+      output,
       // Projected, not passed through: the deployed envelope carries a `stack`
       // whose frames name a per-process module id and minified line numbers, so
       // comparing it verbatim would diff on noise. `type` and `message` are the

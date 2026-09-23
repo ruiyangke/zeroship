@@ -707,11 +707,23 @@ fn execution(value: serde_json::Value) -> crate::WorkflowExecution {
     crate::WorkflowExecution::from_runtime_value(json!({"outcomes":value})).unwrap()
 }
 
+/// The descriptor a staged result is named by, derived from the bytes a run
+/// returned. A run's output is a payload object, so this is the only identity a
+/// completion can report it under.
+pub(super) fn output_reference(data: &[u8]) -> crate::engine::WorkflowOutputRef {
+    crate::engine::WorkflowOutputRef {
+        hash: super::hash(data),
+        size: i64::try_from(data.len()).unwrap(),
+        content_type: Some("application/json".into()),
+    }
+}
+
 async fn task_contract(store: Rc<OrmStore>) {
     use super::{TaskToken, WorkerIdentity};
     use crate::operations::RunState;
     let (service, app, _, _deployments) = registered_service(store.clone()).await;
     let scope = service.fixture_app(app.clone());
+    let objects = objects::Objects::new();
     let worker = WorkerIdentity::new("worker-a".into()).unwrap();
     let other = WorkerIdentity::new("worker-b".into()).unwrap();
     let request = RequestId::mint();
@@ -778,7 +790,7 @@ async fn task_contract(store: Rc<OrmStore>) {
                 &worker,
                 &task.id,
                 &task.token,
-                execution(json!([{"kind":"RunCompleted","output":false}]))
+                execution(json!([{"kind":"RunCompleted"}]))
             )
             .await,
         Err(WorkflowServiceError::Conflict(_))
@@ -796,14 +808,39 @@ async fn task_contract(store: Rc<OrmStore>) {
     )
     .unwrap();
     chrono::DateTime::parse_from_rfc3339(envelope["createdAt"].as_str().unwrap()).unwrap();
-    let done = execution(json!([{"kind":"RunCompleted","output":{"paid":true}}]));
+    const PAID: &[u8] = br#"{"paid":true}"#;
+    let paid = output_reference(PAID);
     service
-        .complete(&other, &next.id, &next.token, done.clone())
+        .stage_payload(
+            &other,
+            &next.id,
+            &next.token,
+            &RequestId::mint(),
+            paid.clone(),
+            objects.upload(PAID),
+        )
+        .await
+        .unwrap();
+    service
+        .complete(
+            &other,
+            &next.id,
+            &next.token,
+            execution(json!([{"kind":"RunCompleted","outputRef":paid}])),
+        )
         .await
         .unwrap();
     assert_eq!(
         scope.status(&run.id).await.unwrap().output,
-        Some(json!({"paid":true}))
+        Some(json!({
+            "kind":"ref", "ref":format!("wfblob:sha256:{}", paid.hash),
+            "hash":paid.hash, "size":paid.size, "contentType":paid.content_type,
+        }))
+    );
+    assert_eq!(
+        scope.read_output(&run.id, objects.open()).await.unwrap(),
+        PAID,
+        "the descriptor the status reports must open the creator's own bytes"
     );
     assert_eq!(
         run,
@@ -847,6 +884,9 @@ async fn task_contract(store: Rc<OrmStore>) {
     let replacement = recovered.poll(&other).await.unwrap().unwrap();
     assert_eq!(replacement.invocation.run_id, new.id);
     assert!(replacement.epoch > abandoned.epoch);
+    // The reclaimed run closes on nothing of its own: what this replays is the
+    // receipt, not a result.
+    let done = execution(json!([{"kind":"RunCompleted"}]));
     assert!(matches!(
         recovered
             .complete(&worker, &abandoned.id, &abandoned.token, done.clone())
@@ -884,6 +924,7 @@ async fn behavior_contract(store: Rc<OrmStore>) {
     use crate::operations::{RestartOptions, RestartTarget, RunOperation, RunState};
     let (service, app, _, deployments) = registered_service(store.clone()).await;
     let scope = service.fixture_app(app.clone());
+    let objects = objects::Objects::new();
     let worker = WorkerIdentity::new("worker".into()).unwrap();
     let start = scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
@@ -973,7 +1014,7 @@ async fn behavior_contract(store: Rc<OrmStore>) {
         .unwrap();
     let receipt=service.complete(&worker,&task.id,&task.token,execution(json!([
         {"kind":"StepCompleted","ordinal":2,"name":"reserve","compensable":true,"output":"reservation"},
-        {"kind":"RunCompleted","output":"must be cancelled"}
+        {"kind":"RunCompleted"}
     ]))).await.unwrap();
     assert_eq!(receipt.state, RunState::Compensating);
     assert!(matches!(
@@ -1031,7 +1072,7 @@ async fn behavior_contract(store: Rc<OrmStore>) {
             execution(json!([
                 {"kind":"StepCompleted","ordinal":0,"name":"keep","output":42},
                 {"kind":"StepCompleted","ordinal":1,"name":"redo","output":0},
-                {"kind":"RunCompleted","output":"original"}
+                {"kind":"RunCompleted"}
             ])),
         )
         .await
@@ -1061,7 +1102,7 @@ async fn behavior_contract(store: Rc<OrmStore>) {
             &task.token,
             execution(json!([
                 {"kind":"StepCompleted","ordinal":1,"name":"redo","output":1},
-                {"kind":"RunCompleted","output":"restarted"}
+                {"kind":"RunCompleted"}
             ])),
         )
         .await
@@ -1131,12 +1172,25 @@ async fn behavior_contract(store: Rc<OrmStore>) {
     let continued_child = service.poll(&worker).await.unwrap().unwrap();
     assert_eq!(continued_child.invocation.workflow_name, "Child");
     assert_eq!(continued_child.invocation.deploy_id, new_deploy.id);
+    const CHILD_RESULT: &[u8] = br#""child result""#;
+    let child_result = output_reference(CHILD_RESULT);
+    service
+        .stage_payload(
+            &worker,
+            &continued_child.id,
+            &continued_child.token,
+            &RequestId::mint(),
+            child_result.clone(),
+            objects.upload(CHILD_RESULT),
+        )
+        .await
+        .unwrap();
     service
         .complete(
             &worker,
             &continued_child.id,
             &continued_child.token,
-            execution(json!([{"kind":"RunCompleted","output":"child result"}])),
+            execution(json!([{"kind":"RunCompleted","outputRef":child_result}])),
         )
         .await
         .unwrap();
@@ -1144,8 +1198,17 @@ async fn behavior_contract(store: Rc<OrmStore>) {
     let resumed = service.poll(&worker).await.unwrap().unwrap();
     assert_eq!(resumed.invocation.run_id, parent.id);
     assert_eq!(
-        resumed.invocation.journal[0].output,
-        Some(json!("child result"))
+        resumed.invocation.journal[0].output_ref.as_ref(),
+        Some(&child_result),
+        "the parent's join names the object its continued child returned"
+    );
+    assert!(resumed.invocation.journal[0].output.is_none());
+    assert_eq!(
+        scope
+            .read_output(&continued_child.invocation.run_id, objects.open())
+            .await
+            .unwrap(),
+        CHILD_RESULT
     );
     service
         .complete(
@@ -1168,7 +1231,7 @@ async fn behavior_contract(store: Rc<OrmStore>) {
             &worker,
             &successor.id,
             &successor.token,
-            execution(json!([{"kind":"RunCompleted","output":"finished"}])),
+            execution(json!([{"kind":"RunCompleted"}])),
         )
         .await
         .unwrap();
@@ -1535,7 +1598,7 @@ async fn delayed_lease_write(table: &str, operation: &str, heartbeat: bool) {
             &worker,
             &replacement.id,
             &replacement.token,
-            execution(json!([{"kind":"RunCompleted","output":"recovered"}])),
+            execution(json!([{"kind":"RunCompleted"}])),
         )
         .await
         .unwrap();

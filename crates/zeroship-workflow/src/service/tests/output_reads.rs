@@ -101,7 +101,7 @@ async fn output_contract(store: Rc<OrmStore>) {
             &task.token,
             execution(json!([
                 {"kind":"StepCompleted", "ordinal":0, "name":"value", "output":null},
-                {"kind":"RunCompleted", "output":"done"}
+                {"kind":"RunCompleted"}
             ])),
         )
         .await
