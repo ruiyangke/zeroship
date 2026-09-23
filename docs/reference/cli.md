@@ -199,13 +199,15 @@ Applies a database's committed migrations to the deployed database that app is
 bound to.
 
 ```
-zeroship migrate [<path-to-migrations.ir.json>] [--app=<label>] [--database=<label>]
+zeroship migrate [<path-to-migrations-dir>] [--app=<label>] [--database=<label>]
                  [--app-name=<name>]
                  [--control=URL] [--token=<token>] [--config=PATH] [--env=NAME] [--yes]
 ```
 
-- **The path** is optional. With no positional it is
-  `<out>/migrations.ir.json` for the selected database, from `zeroship.jsonc`.
+- **The path** is optional, and it names the DIRECTORY holding your
+  `migrations/*.ts`. With no positional it is the `migrations` of the selected
+  database, from `zeroship.jsonc`. A path to a file is refused: there is no
+  pre-built migration file to pass, and nothing writes one.
 - **`--database`** names one of the app's own database labels; with none
   passed it is the app's primary. Any of the app's databases may be migrated -
   `primary` decides which handle is `env.db`, not which schema a migration set
@@ -220,11 +222,20 @@ zeroship migrate [<path-to-migrations.ir.json>] [--app=<label>] [--database=<lab
 - **`--yes`** is required to migrate an environment marked `"protected": true`
   (an `environments.<name>` member).
 
-The file posted is the build's recorded migration set (its intermediate
-representation, or IR); the CLI does not parse or rewrite it, which is why the
-database rides in the URL rather than in the body. `migrate` prints what it
-resolved, how many operations it applied and skipped — the `applied`/`skipped`
-counts are operations, not migration files — and the migration id.
+`migrate` reads your `migrations/*.ts` and records them into the request it
+posts. That recording is the same one the build runs, so it needs Node and your
+app's installed dependencies - the ones that already build your `.zship`. Run
+`migrate` from a checkout with `node_modules` present, not from a machine that
+only holds the built bundle.
+
+Nothing is written to your project. The recorded set exists only in the request,
+which is why the database rides in the URL rather than in the body. `migrate`
+prints the migrations directory it resolved, the database it resolved, how many
+operations it applied and skipped — the `applied`/`skipped` counts are
+operations, not migration files — and the migration id.
+
+A migration that fails to record stops the command before anything is applied,
+and the message names the file and what the DSL refused.
 
 An apply naming a database this app holds no live binding to is refused with
 `database_not_bound`, naming the database and the call that grants one. Bind it

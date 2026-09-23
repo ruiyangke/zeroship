@@ -52,10 +52,10 @@ pub struct ApplyMigrationsRequest {
     /// sha256 of the `schema.runtime.json` the SAME build emitted from these
     /// documents, lowercase hex.
     ///
-    /// `genTypesFromMigrations` calls `genArtifacts` ONCE and writes both
-    /// `schema.runtime.json` and `migrations.ir.json` from that single reply,
-    /// so the hash names the descriptor that corresponds to exactly this
-    /// document set.
+    /// The fold calls `genArtifacts` ONCE, and both the written
+    /// `schema.runtime.json` and the recorded documents in this request come out
+    /// of that single reply, so the hash names the descriptor that corresponds
+    /// to exactly this document set.
     ///
     /// NOTHING ON THE DEPLOY PATH COMPARES IT, and that is the design rather
     /// than an omission. `admit_bindings`

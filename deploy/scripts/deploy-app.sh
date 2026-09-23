@@ -183,27 +183,30 @@ echo "ok  deploy accepted"
 # unmigrated app fails with `role "app_..._role" does not exist` and the end
 # user sees an opaque `internal error`. That is a live-site failure a green
 # deploy here used to hide, which is why this step is not optional when the
-# artifact exists.
+# app authors migrations.
 #
-# Presence of the file IS the condition: the build writes it only for an app
-# with committed migrations, so an app without `env.db` has nothing here and
-# skips. Do not turn this into a flag - a step you have to remember is the
-# thing that failed.
-IR_JSON=""
-[ -n "$APP_DIR" ] && IR_JSON="$APP_DIR/generated/zeroship/migrations.ir.json"
-if [ -n "$IR_JSON" ] && [ -f "$IR_JSON" ]; then
+# Presence of the migrations directory IS the condition: an app without
+# `env.db` authors none and skips. Do not turn this into a flag - a step you
+# have to remember is the thing that failed.
+#
+# `zeroship migrate` RECORDS those `.ts` itself, which needs Node and the app's
+# installed dependencies. That is the same requirement the `.zship` this script
+# just uploaded was built under, so a `--dir` that can build can also migrate.
+MIGRATIONS_DIR=""
+[ -n "$APP_DIR" ] && MIGRATIONS_DIR="$APP_DIR/migrations"
+if [ -n "$MIGRATIONS_DIR" ] && [ -d "$MIGRATIONS_DIR" ]; then
   say "applying migrations for app $APP_ID"
-  "$CLI" migrate "$IR_JSON" --app="$APP_ID" --control="$MIGRATE" \
+  "$CLI" migrate "$MIGRATIONS_DIR" --app="$APP_ID" --control="$MIGRATE" \
     || fail "zeroship migrate failed - the app is deployed but its schema is not applied, so every env.db call will fail"
   echo "ok  migrations applied"
 elif [ -n "$APP_DIR" ]; then
-  echo "ok  no $IR_JSON - this app has no committed migrations, nothing to apply"
+  echo "ok  no $MIGRATIONS_DIR - this app has no committed migrations, nothing to apply"
 else
-  # --zship without --dir: there is no app directory to find the artifact in.
+  # --zship without --dir: there is no app directory to find the migrations in.
   # Say so rather than printing nothing, or a db-backed app deployed this way
   # goes out unmigrated and silent.
   echo "note: --zship was used without --dir, so migrations were NOT applied."
-  echo "      If this app uses env.db, run:  $CLI migrate <path-to-migrations.ir.json> --app=$APP_ID --control=$MIGRATE"
+  echo "      If this app uses env.db, run:  $CLI migrate <path-to-migrations-dir> --app=$APP_ID --control=$MIGRATE"
 fi
 
 # ------------------------------------------------------------------- verify

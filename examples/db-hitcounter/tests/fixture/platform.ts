@@ -316,13 +316,15 @@ export class Platform {
       method: "POST", headers: { authorization: `Bearer ${bearer}` }, signal: AbortSignal.timeout(30_000),
     });
     assert(database.ok, `Create database: ${database.status}: ${await database.text()}`);
-    const ir = join(app, "generated/zeroship/migrations.ir.json");
+    // The DIRECTORY: `zeroship migrate` records the `.ts` itself and posts the
+    // result, so there is no recorded-migration file to hand it.
+    const migrations = join(app, "migrations");
     const applied = await processes.run("app-migrate", binary("zeroship"), [
-      "migrate", ir, `--app=${id}`, `--control=${migrationServer.url}`, `--token=${bearer}`,
+      "migrate", migrations, `--app=${id}`, `--control=${migrationServer.url}`, `--token=${bearer}`,
     ], work);
     assert.match(applied, /Applied [1-9][0-9]* migration op/);
     const reapplied = await processes.run("app-migrate-again", binary("zeroship"), [
-      "migrate", ir, `--app=${id}`, `--control=${migrationServer.url}`, `--token=${bearer}`,
+      "migrate", migrations, `--app=${id}`, `--control=${migrationServer.url}`, `--token=${bearer}`,
     ], work);
     assert.match(reapplied, /Applied 0 migration op/);
     assert.equal(await this.sql(`SELECT count(*) FROM pg_roles WHERE rolname='${role}'`), "1", "Migration must provision the app role");

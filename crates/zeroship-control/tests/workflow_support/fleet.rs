@@ -548,7 +548,7 @@ impl Fleet {
                 .expect("install the creator workflow journal");
         }
         let request = serde_json::from_slice(
-            &fs::read(schema_work.join("generated/migrations.ir.json")).unwrap(),
+            &fs::read(schema_work.join("generated/apply-request.json")).unwrap(),
         )
         .unwrap();
         let policy = zeroship_migrate_server::policy::ManagedPolicyConfig::default_confined(

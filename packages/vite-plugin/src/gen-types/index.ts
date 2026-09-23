@@ -25,7 +25,6 @@
  * absent, so drift is always caught.
  */
 
-import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 
@@ -43,20 +42,6 @@ import {
 
 /** The two committed artifact filenames gen-types emits. */
 export const RUNTIME_DESCRIPTOR_FILE = "schema.runtime.json";
-/**
- * The recorded migration set, as the migration service's apply-request body.
- *
- * Emitted ONLY by the generated (migrations-authored) source - a manual
- * `schema.ts` app has no migrations to record. `zeroship migrate` posts this
- * file verbatim; keeping the whole envelope (`{ kind, documents }`) rather than
- * a bare array means the CLI never has to know the wire shape, so a change to
- * `ApplyMigrationsRequest` moves this emitter and nothing else.
- *
- * It is emitted here, beside the other two, rather than into `dist/`, because
- * all three are the SAME fold of the SAME `migrations/*.ts`. Splitting them
- * across two output dirs is how they drift.
- */
-export const MIGRATIONS_IR_FILE = "migrations.ir.json";
 /** The generated `env.db` typings module. A real `.ts` (NOT a `.d.ts`): the
  *  generated variant carries `const schema = <builder calls> as const`, which is
  *  illegal in a `.d.ts` ambient context. */
@@ -168,8 +153,10 @@ export interface GenTypesResult {
   /**
    * The artifact filenames relative to the out dir, in emit order.
    *
-   * Always the two schema artifacts; plus `migrations.ir.json` when the source
-   * was migrations (the manual `schema.ts` source has none to record).
+   * The two schema artifacts, whichever source produced them. The recorded
+   * migration set is NOT among them: it is built in memory by
+   * {@link recordApplyRequest} when `zeroship migrate` asks for it, and is
+   * never written to disk.
    */
   files: readonly string[];
 }
@@ -236,16 +223,32 @@ export async function genTypesFromSchemaFile(
   return emit(outDir, envDbTs, runtimeJson, opts.check ?? false);
 }
 
+/** One recorded migration, named the way the migration service journals it. */
+export interface RecordedDocument {
+  /** `<stem>.ir.json`, from the migration's own filename. */
+  filename: string;
+  /** The recorded IR envelope (`{ ir_version, name, ops }`). */
+  body: Awaited<ReturnType<typeof recordMigration>>;
+}
+
+/** One fold of one migrations directory: the documents and the descriptor the
+ *  SAME `genArtifacts` call rendered from them. */
+export interface FoldedMigrations {
+  documents: RecordedDocument[];
+  /** The v2 RuntimeSchemaDescriptor, as the bytes that reach the packer. */
+  runtimeJson: string;
+}
+
 /**
- * GENERATED source. Record every `.ts` migration under `migrationsDir` →
- * envelopes → `genArtifacts`, then write (or `--check`) BOTH the inline
- * `env.db.ts` literal + `schema.runtime.json`. No subprocess.
+ * Record every `.ts` migration under `migrationsDir` and render the runtime
+ * descriptor from them, in ONE `genArtifacts` call.
+ *
+ * The single call is the ordering anchor. Both consumers — the artifact emitter
+ * below and {@link recordApplyRequest}, which builds the migration service's
+ * apply body — read the documents and the descriptor out of this one reply, so
+ * a descriptor hash taken here always names exactly this document set.
  */
-export async function genTypesFromMigrations(
-  migrationsDir: string,
-  outDir: string,
-  opts: GenTypesOptions,
-): Promise<GenTypesResult> {
+export async function foldMigrations(migrationsDir: string): Promise<FoldedMigrations> {
   // Recording EVALUATES the creator's `.ts`, so everything that throws here is
   // their source: an unresolvable import, a syntax error, a DSL guard. Tagged
   // so the dev server can keep serving through it — see `MigrationSourceError`.
@@ -254,10 +257,7 @@ export async function genTypesFromMigrations(
   // apply request identifies each document by `<stem>.ir.json`, and the stem is
   // what the migration service journals a version under. Dropping it here would
   // mean re-deriving it later from something that is not the filename.
-  let documents: Array<{
-    filename: string;
-    body: Awaited<ReturnType<typeof recordMigration>>;
-  }>;
+  let documents: RecordedDocument[];
   try {
     const discovered = await discoverMigrations(migrationsDir);
     documents = [];
@@ -285,34 +285,25 @@ export async function genTypesFromMigrations(
     // contract silently rather than loudly.
     dialect: "postgres",
   });
-  const runtimeJson = unwrap(reply, "generated migration source");
+  return { documents, runtimeJson: unwrap(reply, "generated migration source") };
+}
+
+/**
+ * GENERATED source. Fold every `.ts` migration under `migrationsDir`, then write
+ * (or `--check`) BOTH the inline `env.db.ts` literal + `schema.runtime.json`.
+ * No subprocess.
+ */
+export async function genTypesFromMigrations(
+  migrationsDir: string,
+  outDir: string,
+  opts: GenTypesOptions,
+): Promise<GenTypesResult> {
+  const { runtimeJson } = await foldMigrations(migrationsDir);
   // The typed surface is rendered HERE, off the runtime descriptor - the engine's
   // own `envDbTs` re-authors the fold in the migration DSL, which a deployed app
   // neither depends on nor gets `env.db` typing from.
   const envDbTs = renderGeneratedEnvDb(parseRuntimeDescriptor(runtimeJson), opts);
-  // THE ORDERING ANCHOR. `genArtifacts` ran ONCE above and both artifacts come
-  // out of that single reply, so this hash names the descriptor that belongs to
-  // exactly these documents. `migrated` records it on the ledger row for the
-  // apply request; the control plane refuses a deploy whose
-  // `manifest.runtime_descriptor.hash` is not the hash on the newest applied
-  // row.
-  //
-  // IT MUST BE THE HASH OF THE BYTES THAT REACH THE PACKER, not of some
-  // re-serialisation of the same value. `emit` writes `runtimeJson` verbatim
-  // with `fs.writeFile(..., "utf8")`, and `zship.ts` hashes the file it reads
-  // back (`sha256Hex(descriptorBytes)`), so hashing the string here as utf8
-  // yields the same digest. A pretty-print, a re-`JSON.stringify`, or a
-  // trailing newline added on either side would produce two hashes that can
-  // never agree, and the failure would look like the guard misfiring.
-  const descriptorSha256 = createHash("sha256").update(runtimeJson, "utf8").digest("hex");
-  // Two-space JSON, trailing newline: this file is committed and reviewed, and
-  // a one-line 200 KB blob is not.
-  const migrationsIr = `${JSON.stringify(
-    { kind: "ir", descriptor_sha256: descriptorSha256, documents },
-    null,
-    2,
-  )}\n`;
-  return emit(outDir, envDbTs, runtimeJson, opts.check ?? false, migrationsIr);
+  return emit(outDir, envDbTs, runtimeJson, opts.check ?? false);
 }
 
 /** Unwrap a `genArtifacts` reply, turning the soft `{ ok:false, error }` arm into
@@ -392,25 +383,14 @@ async function emit(
   envDbTs: string,
   runtimeJson: string,
   check: boolean,
-  // Absent on the MANUAL source, which has no migrations to record. It is
-  // optional rather than an empty string so a manual app does not emit an
-  // apply body with zero documents - the migration service rejects that
-  // outright ("at least one .ir.json document is required"), and shipping a
-  // file that can only ever 422 is worse than shipping none.
-  migrationsIr?: string,
 ): Promise<GenTypesResult> {
   const envPath = resolve(outDir, ENV_DB_FILE);
   const jsonPath = resolve(outDir, RUNTIME_DESCRIPTOR_FILE);
-  const irPath = resolve(outDir, MIGRATIONS_IR_FILE);
   const files = [ENV_DB_FILE, RUNTIME_DESCRIPTOR_FILE];
-  if (migrationsIr !== undefined) files.push(MIGRATIONS_IR_FILE);
 
   if (check) {
     await assertNoDrift(envPath, envDbTs, ENV_DB_FILE);
     await assertNoDrift(jsonPath, runtimeJson, RUNTIME_DESCRIPTOR_FILE);
-    if (migrationsIr !== undefined) {
-      await assertNoDrift(irPath, migrationsIr, MIGRATIONS_IR_FILE);
-    }
     return { status: "checked", files };
   }
 
@@ -418,7 +398,6 @@ async function emit(
     [envPath, ENV_DB_FILE],
     [jsonPath, RUNTIME_DESCRIPTOR_FILE],
   ];
-  if (migrationsIr !== undefined) targets.push([irPath, MIGRATIONS_IR_FILE]);
   for (const [path, file] of targets) {
     await assertGeneratedArtifactMayBeReplaced(path, file);
   }
@@ -426,9 +405,6 @@ async function emit(
   await fs.mkdir(outDir, { recursive: true });
   await fs.writeFile(envPath, envDbTs, "utf8");
   await fs.writeFile(jsonPath, runtimeJson, "utf8");
-  if (migrationsIr !== undefined) {
-    await fs.writeFile(irPath, migrationsIr, "utf8");
-  }
   return { status: "written", files };
 }
 
@@ -464,8 +440,7 @@ function isGeneratedArtifact(file: string, existing: string): boolean {
     return existing.startsWith(MANUAL_ENV_DB_BANNER) ||
       existing.startsWith(GENERATED_ENV_DB_BANNER);
   }
-  if (file === RUNTIME_DESCRIPTOR_FILE) return isRuntimeDescriptorArtifact(existing);
-  return file === MIGRATIONS_IR_FILE && isMigrationsIrArtifact(existing);
+  return file === RUNTIME_DESCRIPTOR_FILE && isRuntimeDescriptorArtifact(existing);
 }
 
 /**
@@ -484,11 +459,6 @@ function isGeneratedArtifact(file: string, existing: string): boolean {
 function isRuntimeDescriptorArtifact(text: string): boolean {
   const parsed = parseObject(text);
   return typeof parsed?.version === "number" && isRecord(parsed.collections);
-}
-
-function isMigrationsIrArtifact(text: string): boolean {
-  const parsed = parseObject(text);
-  return parsed?.kind === "ir" && Array.isArray(parsed.documents);
 }
 
 function parseObject(text: string): Record<string, unknown> | null {

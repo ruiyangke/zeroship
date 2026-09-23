@@ -81,8 +81,8 @@ pnpm build      # → dist/app.zship
 RPC functions, folds migrations into the generated `env.db` types (in-process —
 no external binary), bundles the server module + static client, and writes
 `dist/app.zship`. A production build runs the gen-types generated-artifact check
-and fails if `generated/zeroship/{env.db.ts,schema.runtime.json,migrations.ir.json}`
-drift from the migrations — regenerate with `vite build --mode development`.
+and fails if `generated/zeroship/{env.db.ts,schema.runtime.json}` drift from the
+migrations — regenerate with `vite build --mode development`.
 
 ## Deploy
 
@@ -105,10 +105,12 @@ after that first deploy.
 
 **Both steps, in that order, every time the migrations change.** The `.zship`
 carries the app's *code* and the generated schema *typing*; it does not carry
-the migrations, and deploying does not run them. `zeroship migrate` posts
-`generated/zeroship/migrations.ir.json` (written by the build) to the platform's
+the migrations, and deploying does not run them. `zeroship migrate` reads this
+app's `migrations/*.ts`, records them, and posts the result to the platform's
 migration service, which creates the app's database schema, its tables, and the
-per-app database role the runtime uses for every `env.db` call.
+per-app database role the runtime uses for every `env.db` call. Run it from this
+directory with `node_modules` installed — the recording is the same one the
+build does.
 
 Skip it on an app that uses `env.db` and the app deploys clean, serves its
 static assets, and then fails on the FIRST database call — the role it needs

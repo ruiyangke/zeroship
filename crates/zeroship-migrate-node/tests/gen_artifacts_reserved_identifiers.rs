@@ -12,10 +12,15 @@
 //!
 //! # This drives the REAL path, and the control says so
 //!
-//! Everything here is committed production input, not a fixture:
+//! The inputs are the production ones:
 //!
-//! - the envelopes are `examples/db-todos/generated/zeroship/migrations.ir.json`,
-//!   exactly the `documents[].body` array the vite plugin hands to `genArtifacts`;
+//! - the envelopes are the recorded `examples/db-todos` migration set, exactly
+//!   the `documents[].body` array the vite plugin hands to `genArtifacts`. That
+//!   set lives only on the wire - `zeroship migrate` records it in memory and
+//!   posts it - so this suite carries the recorded bytes as a fixture, and
+//!   [`the_real_committed_schema_generates_byte_identical_artifacts`] is what
+//!   keeps them honest: they must still render the committed
+//!   `schema.runtime.json` the build regenerates from those same `.ts`;
 //! - the charter is `policy_version = 1` + `policies/confined-system-shape.inject.toml`,
 //!   which is byte-for-byte what `CONFINED_SCHEMA_EMIT_CEILING_TOML` composes in
 //!   `packages/vite-plugin/src/gen-types/confined-ceiling.ts` (TypeScript reads the same
@@ -46,9 +51,10 @@ use zeroship_migrate_node::wire::GenArtifactsReply;
 const CONFINED_SYSTEM_SHAPE_INJECT_TOML: &str =
     include_str!("../../../policies/confined-system-shape.inject.toml");
 
-/// The real committed IR envelope document for `examples/db-todos`.
+/// The recorded migration set for `examples/db-todos`, as `zeroship migrate`
+/// puts it on the wire. Pinned against the committed descriptor below.
 const REAL_MIGRATIONS_IR: &str =
-    include_str!("../../../examples/db-todos/generated/zeroship/migrations.ir.json");
+    include_str!("../../../tests/fixtures/migrations-ir/db-todos.ir.json");
 
 /// The real committed artifact the unmutated input must reproduce.
 const REAL_RUNTIME_JSON: &str =
@@ -63,10 +69,10 @@ fn schema_emit_ceiling() -> String {
 /// `genTypesFromMigrations`.
 fn real_envelopes() -> Vec<Value> {
     let document: Value =
-        serde_json::from_str(REAL_MIGRATIONS_IR).expect("the committed migrations.ir.json parses");
+        serde_json::from_str(REAL_MIGRATIONS_IR).expect("the recorded migration set parses");
     document["documents"]
         .as_array()
-        .expect("migrations.ir.json carries a `documents` array")
+        .expect("the recorded migration set carries a `documents` array")
         .iter()
         .map(|entry| entry["body"].clone())
         .collect()
