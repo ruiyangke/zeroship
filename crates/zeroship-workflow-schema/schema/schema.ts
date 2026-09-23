@@ -309,8 +309,17 @@ export function workflowSchema(namespace) {
     fk("occurrence_job", ["app_id", "job_id"], "job_receipts", ["app_id", "id"]),
     fk("occurrence_run", ["app_id", "run_id"], "runs", ["app_id", "id"]),
   ], [{ name: "occurrence_job_identity", columns: ["app_id", "job_id"] }]);
+  // run_id, generation and task_id are STAGING-LOCATION metadata, not durable
+  // ownership; `payload_refs` on (app_id, run_id, generation, slot, ordinal) is
+  // that. Bytes have to be stageable BEFORE any run exists -- a continuation
+  // seed, a child run's input, a root run a request handler or the cron sweep
+  // starts -- so all three are nullable and `app_id` alone scopes the tenant.
+  // Both composite keys stay: MATCH SIMPLE, which is what both dialects apply,
+  // satisfies a key carrying a NULL without a lookup, so an owned row is still
+  // checked against its generation and task and an ownerless one skips it.
   create("payloads", {
-    ...generation(), id: text(), task_id: t.text(), request_id: text(), hash: text(), size: integer(),
+    ...identity(), run_id: t.text(), generation: t.bigInt(),
+    id: text(), task_id: t.text(), request_id: text(), hash: text(), size: integer(),
     content_type: t.text(), state: text(), created_at: integer(), expires_at: integer(),
   }, ["app_id", "id"], [
     generationFk("payloads"),
