@@ -17,6 +17,7 @@ use zeroship_migrate::ops::status::{AppliedPlanStatus, MigrationStatus, PlanStat
 use zeroship_migrate::{shipping_backends, DialectId, LiveSchema, MigrationEngine};
 use zeroship_migrate_mysql::DIALECT as MYSQL;
 use zeroship_migrate_postgres::DIALECT as POSTGRES;
+use zeroship_migrate_sqlite::DIALECT as SQLITE;
 
 use crate::wire::{
     ApplyPendingContractDto, ApplyReply, BaselineReply, BaselineStepDto, BlockedPlanDto,
@@ -34,7 +35,7 @@ use crate::wire::{
 /// the dialect table. The variants stay because `bridge.rs` selects a concrete
 /// backend type per arm and that dispatch must remain exhaustive until the
 /// backend crates exist to be dispatched to.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApplyDialect {
     Postgres,
     Mysql,
@@ -77,6 +78,176 @@ impl ApplyDialect {
             descriptor.id
         ))
     }
+}
+
+/// The `driver.kind` spelling for an apply the JS caller drives.
+pub const HOST_DRIVER_KIND: &str = "host";
+/// The `driver.kind` spelling for an apply the addon drives itself.
+pub const IN_PROCESS_DRIVER_KIND: &str = "inProcess";
+
+/// Who owns the database connection an apply runs over, resolved against the
+/// dialect it targets.
+///
+/// The driver and the dialect are INDEPENDENT axes. The driver says which side
+/// opens the connection; the dialect says which vendor's backend is built over it.
+/// Splitting the verb per vendor instead would read as a dialect distinction and be
+/// none: SQLite is simply the dialect with no JavaScript driver, which is why it is
+/// the dialect the addon opens itself. [`ApplyTarget::resolve`] is the single place
+/// the pairing is checked, so an unserved combination refuses with the pair named
+/// instead of being reinterpreted as whichever axis the caller got right.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApplyTarget {
+    /// The JS host-driver callback owns the connection; the dialect selects the
+    /// `MigrationBackend` built over that seam.
+    Host {
+        /// The vendor backend the seam is driven as.
+        dialect: ApplyDialect,
+        /// The role to `SET ROLE` under for a least-privilege apply.
+        migrator_role: Option<String>,
+        /// The audit label journalled against every applied step.
+        applied_by: String,
+    },
+    /// The addon opens the hardened application and journal connections on its own
+    /// engine worker thread. Bundled rusqlite is the only backend it can.
+    InProcessSqlite {
+        /// The application database file.
+        app_path: String,
+        /// The journal database file, attached beside it.
+        journal_path: String,
+    },
+}
+
+/// The `driver` fields [`ApplyTarget::resolve`] reads, borrowed from the request,
+/// plus whether the caller actually passed a host-driver callback.
+///
+/// The callback is a POSITIONAL argument rather than a request field, so nothing in
+/// the request alone can tell a host apply missing its driver from an in-process one
+/// carrying a spurious driver. Carrying its presence here is what lets one decoder
+/// refuse both.
+#[derive(Debug, Clone, Copy)]
+pub struct ApplyDriverParts<'a> {
+    /// `"host"` or `"inProcess"`.
+    pub kind: &'a str,
+    /// The in-process application database file.
+    pub app_path: Option<&'a str>,
+    /// The in-process journal database file.
+    pub journal_path: Option<&'a str>,
+    /// The host apply's least-privilege role.
+    pub migrator_role: Option<&'a str>,
+    /// The host apply's audit label.
+    pub applied_by: Option<&'a str>,
+    /// Whether a host-driver callback was passed alongside the request.
+    pub host_driver_supplied: bool,
+}
+
+impl ApplyTarget {
+    /// Resolve the requested driver and dialect into the one apply this addon can
+    /// actually run, or say why the pair has no apply.
+    ///
+    /// # Errors
+    /// Returns the refusal message for an unknown driver kind, a driver whose
+    /// callback argument contradicts it, a field belonging to the other driver, and
+    /// a driver/dialect pairing the addon does not serve.
+    pub fn resolve(
+        dialect: &str,
+        parts: &ApplyDriverParts<'_>,
+    ) -> std::result::Result<Self, String> {
+        match parts.kind {
+            HOST_DRIVER_KIND => {
+                if !parts.host_driver_supplied {
+                    return Err(format!(
+                        "the {HOST_DRIVER_KIND:?} apply driver requires a host-driver callback \
+                         argument"
+                    ));
+                }
+                if parts.app_path.is_some() || parts.journal_path.is_some() {
+                    return Err(format!(
+                        "the {HOST_DRIVER_KIND:?} apply driver opens no files; appPath and \
+                         journalPath belong to the {IN_PROCESS_DRIVER_KIND:?} driver"
+                    ));
+                }
+                let applied_by = parts.applied_by.ok_or_else(|| {
+                    format!(
+                        "the {HOST_DRIVER_KIND:?} apply driver requires an appliedBy audit label"
+                    )
+                })?;
+                Ok(Self::Host {
+                    dialect: ApplyDialect::parse(dialect)?,
+                    migrator_role: parts.migrator_role.map(str::to_string),
+                    applied_by: applied_by.to_string(),
+                })
+            }
+            IN_PROCESS_DRIVER_KIND => {
+                if parts.host_driver_supplied {
+                    return Err(format!(
+                        "the {IN_PROCESS_DRIVER_KIND:?} apply driver opens its own connections and \
+                         takes no host-driver callback argument"
+                    ));
+                }
+                if parts.migrator_role.is_some() || parts.applied_by.is_some() {
+                    return Err(format!(
+                        "migratorRole and appliedBy belong to the {HOST_DRIVER_KIND:?} apply \
+                         driver; the {IN_PROCESS_DRIVER_KIND:?} driver runs the engine's own \
+                         deploy loop, which journals its own label"
+                    ));
+                }
+                let (Some(app_path), Some(journal_path)) = (parts.app_path, parts.journal_path)
+                else {
+                    return Err(format!(
+                        "the {IN_PROCESS_DRIVER_KIND:?} apply driver requires appPath and \
+                         journalPath"
+                    ));
+                };
+                // Compared against the one in-process backend rather than looked up
+                // in the dialect table: the served set here has exactly one member,
+                // so naming it IS the complete diagnostic. A registered dialect the
+                // addon cannot open in-process (postgres) and an unregistered name
+                // (duckdb) both learn the same whole answer from this message, which
+                // is why they do not need the two-tier refusal
+                // [`ApplyDialect::parse`] owes its caller.
+                if dialect != SQLITE.as_str() {
+                    return Err(format!(
+                        "the {IN_PROCESS_DRIVER_KIND:?} apply driver serves only the {SQLITE} \
+                         dialect, not {dialect:?}"
+                    ));
+                }
+                Ok(Self::InProcessSqlite {
+                    app_path: app_path.to_string(),
+                    journal_path: journal_path.to_string(),
+                })
+            }
+            unknown => Err(format!(
+                "unknown apply driver kind {unknown:?} (expected {HOST_DRIVER_KIND:?} or \
+                 {IN_PROCESS_DRIVER_KIND:?})"
+            )),
+        }
+    }
+}
+
+/// Split the ordered authored sequence a request carries into the prefix that must
+/// already be journalled and the one migration a host-driven apply deploys.
+///
+/// The two drivers read the same sequence differently, and this is where that is
+/// stated. The in-process driver hands the whole sequence to the engine's deploy
+/// loop, which applies every envelope the journal does not already carry. The host
+/// driver applies ONLY the last, using the prefix to reconstruct declared logical
+/// column contracts and refusing unless those plans are proven fully applied. So an
+/// empty sequence is a legal no-op deploy for the first and has no migration at all
+/// for the second.
+///
+/// # Errors
+/// Returns a refusal when the sequence is empty.
+pub fn split_host_envelopes<T>(envelopes: &[T]) -> std::result::Result<(&[T], &T), String> {
+    envelopes.split_last().map_or_else(
+        || {
+            Err(
+                "a host-driven apply needs at least one migration envelope; the last entry is \
+                 the migration being applied"
+                    .to_string(),
+            )
+        },
+        |(current, priors)| Ok((priors, current)),
+    )
 }
 
 /// Borrow the ordered charter documents a request carries as the `&str` slice the
@@ -1795,6 +1966,205 @@ mod status_projection_tests {
         let unregistered = ApplyDialect::parse("duckdb").expect_err("duckdb is not registered");
         assert!(unregistered.contains("unknown dialect"), "{unregistered}");
         assert!(!unregistered.contains("rusqlite"), "{unregistered}");
+    }
+
+    /// The parts a caller gets right when it gets nothing wrong: a host-driven
+    /// apply with its callback present. Each arm below perturbs ONE field of it, so
+    /// a refusal is attributable to that field rather than to the fixture.
+    fn host_parts() -> ApplyDriverParts<'static> {
+        ApplyDriverParts {
+            kind: HOST_DRIVER_KIND,
+            app_path: None,
+            journal_path: None,
+            migrator_role: None,
+            applied_by: Some("host"),
+            host_driver_supplied: true,
+        }
+    }
+
+    /// The same, for the in-process driver.
+    fn in_process_parts() -> ApplyDriverParts<'static> {
+        ApplyDriverParts {
+            kind: IN_PROCESS_DRIVER_KIND,
+            app_path: Some("/tmp/app.db"),
+            journal_path: Some("/tmp/app.journal.db"),
+            migrator_role: None,
+            applied_by: None,
+            host_driver_supplied: false,
+        }
+    }
+
+    /// The driver and the dialect are separate axes, and BOTH pairings the addon
+    /// serves resolve. Without this the refusal arms below would pass over a
+    /// decoder that refused everything.
+    #[test]
+    fn the_served_driver_and_dialect_pairings_resolve() {
+        assert_eq!(
+            ApplyTarget::resolve("postgres", &host_parts()),
+            Ok(ApplyTarget::Host {
+                dialect: ApplyDialect::Postgres,
+                migrator_role: None,
+                applied_by: "host".to_string(),
+            })
+        );
+        assert_eq!(
+            ApplyTarget::resolve(
+                "mysql",
+                &ApplyDriverParts {
+                    migrator_role: Some("migrator"),
+                    ..host_parts()
+                }
+            ),
+            Ok(ApplyTarget::Host {
+                dialect: ApplyDialect::Mysql,
+                migrator_role: Some("migrator".to_string()),
+                applied_by: "host".to_string(),
+            })
+        );
+        assert_eq!(
+            ApplyTarget::resolve("sqlite", &in_process_parts()),
+            Ok(ApplyTarget::InProcessSqlite {
+                app_path: "/tmp/app.db".to_string(),
+                journal_path: "/tmp/app.journal.db".to_string(),
+            })
+        );
+    }
+
+    /// A dialect never selects the transport, and a transport never selects the
+    /// dialect. Each unserved pairing is refused NAMING the pair, so a caller is
+    /// not told to fix the axis it already had right.
+    #[test]
+    fn an_unserved_driver_and_dialect_pairing_is_refused() {
+        // The transport the addon has no in-process backend for.
+        let host_only = ApplyTarget::resolve("postgres", &in_process_parts())
+            .expect_err("postgres has no in-process backend here");
+        assert!(host_only.contains("serves only the sqlite dialect"), "{host_only}");
+        assert!(host_only.contains("postgres"), "{host_only}");
+
+        // And the reverse: the dialect with no JavaScript driver, asked for over one.
+        let in_process_only =
+            ApplyTarget::resolve("sqlite", &host_parts()).expect_err("sqlite has no host driver");
+        assert!(in_process_only.contains("rusqlite"), "{in_process_only}");
+
+        // A vendor name is not a driver kind. The two axes are spelled from
+        // overlapping vocabularies, so this confusion gets its own diagnostic
+        // rather than the dialect arm's.
+        let vendor_kind = ApplyTarget::resolve(
+            "sqlite",
+            &ApplyDriverParts {
+                kind: "sqlite",
+                ..in_process_parts()
+            },
+        )
+        .expect_err("a dialect is not a driver kind");
+        assert!(vendor_kind.contains("unknown apply driver kind"), "{vendor_kind}");
+    }
+
+    /// The callback is positional, so nothing in the request alone can catch a
+    /// caller that selected one driver and passed the other's argument. Both
+    /// directions refuse.
+    #[test]
+    fn the_driver_kind_and_the_callback_argument_must_agree() {
+        let no_callback = ApplyTarget::resolve(
+            "postgres",
+            &ApplyDriverParts {
+                host_driver_supplied: false,
+                ..host_parts()
+            },
+        )
+        .expect_err("a host apply with no callback has nothing to drive");
+        assert!(
+            no_callback.contains("requires a host-driver callback"),
+            "{no_callback}"
+        );
+
+        let spurious_callback = ApplyTarget::resolve(
+            "sqlite",
+            &ApplyDriverParts {
+                host_driver_supplied: true,
+                ..in_process_parts()
+            },
+        )
+        .expect_err("an in-process apply drives no callback");
+        assert!(
+            spurious_callback.contains("takes no host-driver callback"),
+            "{spurious_callback}"
+        );
+    }
+
+    /// A field belonging to the other driver is REFUSED, never ignored. Silently
+    /// dropping `appliedBy` would journal a label the caller believes it set.
+    #[test]
+    fn each_driver_refuses_the_other_drivers_fields() {
+        let host_with_files = ApplyTarget::resolve(
+            "postgres",
+            &ApplyDriverParts {
+                app_path: Some("/tmp/app.db"),
+                ..host_parts()
+            },
+        )
+        .expect_err("the host driver opens no files");
+        assert!(host_with_files.contains("appPath"), "{host_with_files}");
+
+        let in_process_with_label = ApplyTarget::resolve(
+            "sqlite",
+            &ApplyDriverParts {
+                applied_by: Some("host"),
+                ..in_process_parts()
+            },
+        )
+        .expect_err("the in-process deploy loop journals its own label");
+        assert!(
+            in_process_with_label.contains("appliedBy"),
+            "{in_process_with_label}"
+        );
+
+        let host_without_label = ApplyTarget::resolve(
+            "postgres",
+            &ApplyDriverParts {
+                applied_by: None,
+                ..host_parts()
+            },
+        )
+        .expect_err("the host apply journals the label it is given");
+        assert!(
+            host_without_label.contains("appliedBy"),
+            "{host_without_label}"
+        );
+
+        let in_process_missing_files = ApplyTarget::resolve(
+            "sqlite",
+            &ApplyDriverParts {
+                journal_path: None,
+                ..in_process_parts()
+            },
+        )
+        .expect_err("the in-process driver opens two files, not one");
+        assert!(
+            in_process_missing_files.contains("journalPath"),
+            "{in_process_missing_files}"
+        );
+    }
+
+    /// One ordered sequence serves both drivers, and this is the split that makes
+    /// that true: the host driver applies the LAST envelope and treats everything
+    /// before it as a prefix that must already be journalled.
+    #[test]
+    fn the_host_split_keeps_the_last_envelope_as_the_one_being_applied() {
+        let sequence = ["first", "second", "third"];
+        assert_eq!(
+            split_host_envelopes(&sequence),
+            Ok((&sequence[..2], &sequence[2]))
+        );
+
+        let lone = ["only"];
+        assert_eq!(split_host_envelopes(&lone), Ok((&lone[..0], &lone[0])));
+
+        // Legal for the in-process deploy loop (a project with no migrations yet),
+        // and meaningless here: there is no migration to apply.
+        let empty: [&str; 0] = [];
+        let refusal = split_host_envelopes(&empty).expect_err("an empty sequence applies nothing");
+        assert!(refusal.contains("at least one migration envelope"), "{refusal}");
     }
 
     #[test]

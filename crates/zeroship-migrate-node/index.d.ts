@@ -41,49 +41,59 @@ export interface AdvisoryDto {
 }
 
 /**
- * `applyIr` - the HOST-AUTHORING apply entry: take a pure-JS IR envelope
- * ENVELOPE (`{ ir_version, name, ops }`) as a typed [`ApplyRequest`], run the
+ * Which side of the boundary opens the database connection an `applyIr` runs over.
+ *
+ * This is a TRANSPORT choice, not a vendor one, and the two travel as separate
+ * fields on purpose. `kind` says who opens the connection; `dialect` beside it says
+ * which vendor's backend is built over it. A verb named after a vendor conflates
+ * them, and the addon has exactly one apply verb because of that.
+ *
+ * The optional fields belong to one kind each, and the other kind refuses them
+ * rather than ignoring them - see `ApplyTarget::resolve` in [`crate::verbs`], which
+ * is where every pairing is decided.
+ */
+export interface ApplyDriverDto {
+  /**
+   * `"host"` - the host-driver callback argument owns the connection.
+   * `"inProcess"` - the addon opens the connections itself on its engine worker
+   * thread, and takes no callback.
+   */
+  kind: string
+  /** `"inProcess"` only: the application database file. */
+  appPath?: string
+  /** `"inProcess"` only: the journal database file attached beside it. */
+  journalPath?: string
+  /** `"host"` only: the migrator role to `SET ROLE` under (least-privilege apply). */
+  migratorRole?: string
+  /**
+   * `"host"` only: the audit `applied_by` label recorded in the journal. The
+   * in-process deploy loop journals its own label and accepts none here.
+   */
+  appliedBy?: string
+}
+
+/**
+ * `applyIr` - the apply entry: take the ordered pure-JS IR envelope sequence
+ * (`{ ir_version, name, ops }` each) as a typed [`ApplyRequest`], run the
  * fail-closed LOAD GATE + LOWER **in Rust** (stamping `owner_app` + folding the
  * authoritative `Checksum::of_ir` - the checksum is NEVER computed in JS), then
- * drive the complete ordered plan over the host driver. The envelope must NOT carry
- * `owner_app`; it is stamped from `req.owner_app` (provenance).
+ * deploy. An envelope must NOT carry `owner_app`; it is stamped from
+ * `req.owner_app` (provenance).
  *
- * This is the entry the `zero-migrate-cli` facade's `apply` calls: the pure-JS
- * recorder produces the envelope, this addon owns the checksum.
- * Resolves to a typed [`ApplyReply`].
- */
-export declare function applyIr(hostDriver: (args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void, req: ApplyRequest): Promise<ApplyReply>
-
-/**
- * `applyIrSqlite` - deploy an ordered migration-IR sequence through the bundled
- * in-process SQLite backend. There is no host-driver callback: the hardened app
- * and journal connections are opened on the engine worker thread, and the same
- * high-level library deploy loop used by Rust callers owns lowering, idempotent
- * journal skips, apply, and live-schema threading.
- */
-export declare function applyIrSqlite(appPath: string, journalPath: string, req: ApplyIrSqliteRequest): Promise<ApplyReply>
-
-/**
- * The typed request for the in-process SQLite `applyIrSqlite` verb.
+ * `req.driver` selects WHO OPENS THE CONNECTION and `req.dialect` selects WHICH
+ * VENDOR, and they are checked against each other in one place
+ * ([`ApplyTarget::resolve`]). A `"host"` driver hands the plan to the
+ * `host_driver` callback over the `SqlSession` seam; an `"inProcess"` driver opens
+ * the hardened bundled-rusqlite connections on the engine worker thread and takes
+ * no callback. SQLite is not a different kind of apply - it is the dialect with no
+ * JavaScript driver, which is why the transport rather than the vendor is what the
+ * request names.
  *
- * Unlike [`ApplyRequest`], this carries the complete ordered envelope sequence:
- * SQLite opens its bundled-rusqlite backend in the addon and deploys every
- * pending envelope in one engine call, without a host-driver callback.
+ * This is the entry the `zero-migrate-cli` facade's `apply` and the vite plugin's
+ * dev apply both call: the pure-JS recorder produces the envelopes, this addon owns
+ * the checksum. Resolves to a typed [`ApplyReply`].
  */
-export interface ApplyIrSqliteRequest {
-  /** The deploying app id (`app_...`) stamped onto every lowered migration. */
-  ownerApp: string
-  /** The logical project/schema name used by lowering and executor confinement. */
-  projectSchema: string
-  /** The project's `{ table: owner_app }` ownership registry. */
-  registry: Record<string, string>
-  /** Ordered policy charter documents (TOML), starting with the root bound. */
-  charterLayers: Array<string>
-  /** Whether destructive changes are pre-approved. */
-  approved: boolean
-  /** Ordered authored migration IR envelopes as real JavaScript values. */
-  envelopes: Array<JsonValue>
-}
+export declare function applyIr(hostDriver: ((args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void) | null, req: ApplyRequest): Promise<ApplyReply>
 
 /** One outstanding online-rename contract returned after apply. */
 export interface ApplyPendingContractDto {
@@ -120,8 +130,8 @@ export interface ApplyReply {
 /**
  * The typed request for the host-authoring `applyIr` verb.
  *
- * The `envelope` (`{ ir_version, name, ops }`) crosses as a REAL JS value
- * ([`JsonValue`]) - the recorder builds a JS object, no JSON string round-trip. The
+ * Each envelope (`{ ir_version, name, ops }`) crosses as a REAL JS value
+ * ([`JsonValue`]) - the recorder builds a JS object, no JSON string round-trip. An
  * envelope MUST NOT carry `owner_app` (it is stamped from `owner_app` here -
  * provenance).
  */
@@ -133,24 +143,29 @@ export interface ApplyRequest {
   ownerApp: string
   /** The confined project schema the lower pins ops to. */
   projectSchema: string
-  /** The migrator role to `SET ROLE` under (least-privilege apply). Optional. */
-  migratorRole?: string
-  /** `"postgres" | "mysql"` - selects the dialect backend (`SQLite` is in-process). */
+  /**
+   * `"postgres" | "mysql" | "sqlite"` - selects the vendor backend. It is checked
+   * against `driver`, which selects who opens the connection to it.
+   */
   dialect: string
+  /** Who opens the connection this apply runs over. */
+  driver: ApplyDriverDto
   /**
    * The project's `{ table: owner_app }` ownership registry. Empty on a
    * fresh single-app project.
    */
   registry: Record<string, string>
-  /** The pure-JS IR envelope `{ ir_version, name, ops }` as a JS value. */
-  envelope: JsonValue
   /**
-   * Ordered authored envelopes that precede `envelope` in the project migration
-   * set. Apply uses them only to reconstruct declared logical column contracts,
-   * and accepts that metadata only after the corresponding plans are proven
-   * fully applied in the journal.
+   * The ordered authored migration set, oldest first, as real JavaScript values.
+   *
+   * The two drivers read it differently, and the difference is the reason it is
+   * ONE field. The in-process driver deploys the whole sequence, applying every
+   * envelope the journal does not already carry. The host driver applies only the
+   * LAST, and uses the prefix solely to reconstruct declared logical column
+   * contracts - accepting that metadata only once those plans are proven fully
+   * applied in the journal, and refusing an empty sequence outright.
    */
-  priorEnvelopes?: Array<JsonValue>
+  envelopes: Array<JsonValue>
   /**
    * The **policy input**: an ordered list of policy charter documents (TOML).
    * The first document is the root bound; each subsequent document narrows it.
@@ -158,8 +173,6 @@ export interface ApplyRequest {
   charterLayers: Array<string>
   /** Whether destructive changes are pre-approved. */
   approved: boolean
-  /** The audit `applied_by` label recorded in the journal. */
-  appliedBy: string
 }
 
 /**

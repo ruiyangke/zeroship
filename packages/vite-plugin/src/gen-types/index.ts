@@ -115,12 +115,12 @@ const MIGRATION_SOURCE_FAULT = "migration-source";
  * made a malformed source throw would fail that upstream contract test instead
  * of silently reaching us.
  *
- * The ASYNC verb, `applyIrSqlite`, does NOT behave that way. It rejects at the
+ * The ASYNC verb, `applyIr`, does NOT behave that way. It rejects at the
  * napi boundary, and `Error::from_reason` hardcodes `Status::GenericFailure`,
  * so a CREATOR's invalid migration arrives from the engine indistinguishable
  * from an engine panic and carrying no tag of ours.
  *
- * That costs nothing TODAY because the only caller of `applyIrSqlite` is
+ * That costs nothing TODAY because the only caller of `applyIr` from here is
  * `cli/migrate-dev.ts`, which has no try/catch, so both classes propagate
  * equally loudly. It stops being free the moment the apply is chained into the
  * dev server. Under this allow-list, a creator's own bad migration would

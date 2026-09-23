@@ -601,10 +601,11 @@ test("PostgreSQL: the same authored pair drops the view, the parity the MySQL ar
 
 /** SQLite apply never builds a pending-schema projection, so an applied prior does not
  *  change which code decides the op - unlike MySQL and PostgreSQL, where a prior is
- *  exactly what turns the projection on (`verbs.rs:303` branches on
- *  `prior_envelope_json.is_empty()`).
+ *  exactly what turns the projection on (`apply_ir_with_locked_backend` in
+ *  `verbs.rs` branches on `prior_envelope_json.is_empty()`).
  *
- *  `apply()` with a sqlite driver calls `applyIrSqlite`, whose `deploy_envelopes` loop
+ *  `apply()` with a sqlite driver calls `applyIr` under an in-process driver, whose
+ *  `deploy_envelopes` loop
  *  re-snapshots the live catalog after every envelope, so there is no projection to
  *  refuse at. The refusal comes from the database instead, and its TEXT is the evidence:
  *  `no such view` is SQLite speaking, where the other two dialects say
@@ -658,7 +659,8 @@ test("SQLite: apply refuses an absent view at the database, with or without a pr
 /** The PostgreSQL half of the same question the SQLite arm above answers, and it lands
  *  the other way: here an applied prior DOES decide which layer refuses.
  *
- *  `verbs.rs:303` branches on `prior_envelope_json.is_empty()` - an empty history lowers
+ *  `apply_ir_with_locked_backend` in `verbs.rs` branches on
+ *  `prior_envelope_json.is_empty()` - an empty history lowers
  *  through `lower_envelope_to_plan_with_live`, which builds no pending-schema projection,
  *  and any prior lowers through `lower_ordered_envelopes_to_plans_for_apply`, which does.
  *  MySQL was measured following that branch; this arm stops PostgreSQL from being

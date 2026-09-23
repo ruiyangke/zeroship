@@ -14,8 +14,9 @@
 //      `ir_version` sourced from the addon's `irVersion()` (single source of truth);
 //      NO `owner_app`, NO checksum;
 //   2. the addon's `applyIr` LOWERS the envelope in Rust (stamps `owner_app`, folds
-//      the authoritative `Checksum::of_ir`), then drives `executor::apply` over the
-//      chosen host driver (`driver-pg.ts` / `driver-mysql2.ts`).
+//      the authoritative `Checksum::of_ir`), then deploys it over the driver the
+//      request NAMES — the chosen host driver (`driver-pg.ts` / `driver-mysql2.ts`)
+//      over the `SqlSession` seam, or the addon's own bundled rusqlite connections.
 //
 // NO shadow dry-run verb in v1: the host-side shadow harness is deferred, and no
 // backend implements the `ShadowDryRun` capability, so a shadow dry-run would
@@ -166,10 +167,16 @@ function assertExplicitPolicy(
 }
 
 /**
- * Author the envelope (pure JS) then drive the addon's apply path. PostgreSQL
- * and MySQL use the host-driver `applyIr` seam; SQLite sends the complete ordered
- * envelope sequence to bundled rusqlite through `applyIrSqlite`. Resolves to the
- * typed `ApplyReply`. Network sessions are always closed (success or throw).
+ * Author the envelopes (pure JS) then drive the addon's one apply verb. Which side
+ * opens the connection is DATA in the request — `driver: { kind: "inProcess" }` for
+ * bundled rusqlite, `{ kind: "host" }` for the `SqlSession` seam — and the vendor
+ * rides beside it in `dialect`, so nothing here names a dialect to pick a verb.
+ *
+ * The one branch below is about the TRANSPORT and nothing else: an in-process
+ * driver opens its own file and needs no network session, so there is none to open
+ * or close. Network sessions are always closed (success or throw).
+ *
+ * Resolves to the typed `ApplyReply`.
  */
 export async function apply(opts: HostApplyOptions): Promise<ApplyOutcome> {
   assertExplicitPolicy(opts.policy, "apply");
@@ -188,32 +195,47 @@ export async function apply(opts: HostApplyOptions): Promise<ApplyOutcome> {
   );
   const envelope = authorEnvelope(addon, opts.migration, opts.nameFallback);
 
+  // The ordered authored set, oldest first. Both drivers take the same sequence;
+  // the in-process deploy loop applies every envelope the journal does not carry,
+  // and the host-driven apply applies the last and requires the prefix to be
+  // journalled already.
+  const envelopes = [...priorEnvelopes, envelope];
+
   if (opts.driver.kind === "sqlite") {
-    return await addon.applyIrSqlite(opts.driver.appPath, opts.driver.journalPath, {
+    // No session: the addon opens the application and journal files itself.
+    return await addon.applyIr(null, {
       ownerApp: opts.ownerApp,
       projectSchema: opts.projectSchema,
+      dialect: dialectOf(opts.driver),
+      driver: {
+        kind: "inProcess",
+        appPath: opts.driver.appPath,
+        journalPath: opts.driver.journalPath,
+      },
       registry: opts.registry ?? {},
+      envelopes,
       charterLayers: [...opts.policy],
       approved: opts.approved ?? false,
-      envelopes: [...priorEnvelopes, envelope],
     });
   }
 
   const { hostDriver, close } = await openSession(opts.driver);
   try {
     // The verb boundary is TYPED: pass an `ApplyRequest`, get an
-    // `ApplyReply` — no JSON stringify/parse. The `envelope` crosses as a JS value.
+    // `ApplyReply` — no JSON stringify/parse. The envelopes cross as JS values.
     return await addon.applyIr(hostDriver, {
       ownerApp: opts.ownerApp,
       projectSchema: opts.projectSchema,
-      migratorRole: opts.migratorRole,
       dialect: dialectOf(opts.driver),
+      driver: {
+        kind: "host",
+        migratorRole: opts.migratorRole,
+        appliedBy: opts.appliedBy ?? "host",
+      },
       registry: opts.registry ?? {},
-      priorEnvelopes,
-      envelope,
+      envelopes,
       charterLayers: [...opts.policy],
       approved: opts.approved ?? false,
-      appliedBy: opts.appliedBy ?? "host",
     });
   } finally {
     await close();

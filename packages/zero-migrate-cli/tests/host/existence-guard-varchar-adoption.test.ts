@@ -40,8 +40,9 @@
 // affinity, so no length ever reaches the compare and the defect this file pins
 // cannot arise there. NOTHING STRUCTURAL BLOCKS A SQLITE ARM: the Node host
 // `DriverConfig` DOES carry `{ kind: "sqlite"; appPath; journalPath }`
-// (`packages/zero-migrate-cli/src/index.ts:73`), `apply()` routes it to
-// `applyIrSqlite`, and `existence-guard-fold-projection.test.ts` in this same
+// (`packages/zero-migrate-cli/src/index.ts`), `apply()` routes it to
+// `applyIr` under an in-process driver, and `existence-guard-fold-projection.test.ts`
+// in this same
 // directory drives live SQLite arms through it.
 //
 // Does NOT cover `character(N)` (already recovered by the snapshot, by the

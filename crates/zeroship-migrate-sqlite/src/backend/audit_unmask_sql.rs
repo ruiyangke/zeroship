@@ -28,7 +28,8 @@
 //! # This crate provides the capability; the HOST decides to use it
 //!
 //! Nothing here runs on its own. [`ensure_audit_unmask_table`] is called by the
-//! dev-tier apply host (`zeroship-migrate-node`'s `applyIrSqlite`), the same way
+//! dev-tier apply host (`zeroship-migrate-node`'s `applyIr` under an in-process
+//! driver), the same way
 //! [`crate::backend::journal_sql::ensure_journal`] is called by the engine rather
 //! than firing from inside the backend. That keeps the policy decision - "a
 //! zeroship app schema carries this platform table" - in a zeroship host, and

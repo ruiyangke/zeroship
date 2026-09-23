@@ -56,7 +56,8 @@
 //
 // SQLite is covered by the last three arms below. It reaches the projection from a
 // DIFFERENT direction than PostgreSQL and MySQL: `apply()` routes a `sqlite` driver
-// to `applyIrSqlite`, which drives the engine's own `deploy_envelopes` and never
+// to `applyIr` under an in-process driver, which drives the engine's own
+// `deploy_envelopes` and never
 // projects, while `plan`/`status` route to `statusIrSqlite`, which lowers through
 // `lower_ordered_envelopes_to_plans` and does. Those arms therefore assert plan and
 // apply AGREE, which is the property a split path can silently lose.
@@ -592,7 +593,8 @@ test("MySQL: a guarded createTable over an existing live table is refused by the
 
 // -- SQLite: plan and apply reach the guard down two different code paths --------
 //
-// `apply()` with a `sqlite` driver calls `applyIrSqlite`, which hands the envelope
+// `apply()` with a `sqlite` driver calls `applyIr` under an in-process driver, which
+// hands the envelope
 // sequence to the engine's `deploy_envelopes`. That loop re-snapshots the live
 // catalog after every envelope, so it never builds a pending-schema projection and
 // the guard is decided only by the backend's own `existence_probe::decide`.
