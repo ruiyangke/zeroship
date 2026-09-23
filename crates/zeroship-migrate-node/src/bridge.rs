@@ -9,7 +9,8 @@
 //! a typed [`LoadVerifyReply`] on the napi call thread (no JSON string).
 //!
 //! ## Async, host-driven entrypoints (fire-and-resolve)
-//! `applyIr`, `apply`, `status`, `history` - each goes through the ONE generic
+//! `applyIr`, `statusIr`, `rollback`, `status`, `history`, `resolvePending` and
+//! `baselineIr` - each goes through the ONE generic
 //! private `run_verb` helper: it builds a [`TsfnDispatch`] from the JS host-driver
 //! callback, opens
 //! a `create_deferred` promise, spawns the engine on its OWN std::thread
@@ -18,10 +19,11 @@
 //! a TYPED reply (`ApplyReply`/`StatusReply`/`HistoryReply`) when `block_on`
 //! completes - NO `Promise<string>`, NO per-verb copy-pasted plumbing.
 //!
-//! `applyIr` is host-driven only when its request asks to be: `req.driver` selects
-//! the transport, and an `"inProcess"` driver takes `run_in_process_verb` instead -
-//! same deferred topology, no TSFN, bundled rusqlite opened on the worker thread.
-//! The vendor rides beside it in `req.dialect`, so no verb is named after a dialect.
+//! `applyIr`, `statusIr` and `rollback` are host-driven only when their request asks
+//! to be: `req.driver` selects the transport, and an `"inProcess"` driver takes
+//! `run_in_process_verb` instead - same deferred topology, no TSFN, bundled rusqlite
+//! opened on the worker thread. The vendor rides beside it in `req.dialect`, so no
+//! verb is named after a dialect.
 //!
 //! The JS thread is **never** `join()`ed on the worker - that would deadlock
 //! libuv/Bun (the host-driver TSFN callback can't run while the JS thread is parked
@@ -86,7 +88,7 @@ use crate::verbs::{
     effective_policy_from_wire_layers, legacy_status_with_locked_backend, owner_app_project,
     parse_rollback_target, preview_dialect, resolve_pending_with_locked_backend,
     rollback_with_locked_backend, split_host_envelopes, status_ir_with_locked_backend,
-    ApplyDialect, ApplyDriverParts, ApplyTarget,
+    ApplyDialect, DriverParts, DriverTarget, NoCredentials, RoleAndLabel, RoleOnly,
 };
 use crate::wire::{
     AdvisoryDto, ApplyReply, ApplyRequest, BaselineIrRequest, BuildInfo, GenArtifactsReply,
@@ -596,9 +598,9 @@ pub fn apply_ir(
         approved,
     } = req;
 
-    let target = ApplyTarget::resolve(
+    let target = DriverTarget::<RoleAndLabel>::resolve(
         &dialect,
-        &ApplyDriverParts {
+        &DriverParts {
             kind: &driver.kind,
             app_path: driver.app_path.as_deref(),
             journal_path: driver.journal_path.as_deref(),
@@ -630,10 +632,13 @@ pub fn apply_ir(
         effective_policy_from_wire_layers(&charter_layers).map_err(Error::from_reason)?;
 
     match target {
-        ApplyTarget::Host {
+        DriverTarget::Host {
             dialect: backend,
-            migrator_role,
-            applied_by,
+            credentials:
+                RoleAndLabel {
+                    migrator_role,
+                    applied_by,
+                },
         } => {
             // The host seam takes JSON: the lower gate reads strings, so each
             // envelope is re-serialized here rather than handed over as a value.
@@ -707,7 +712,7 @@ pub fn apply_ir(
                 }
             })
         }
-        ApplyTarget::InProcessSqlite {
+        DriverTarget::InProcessSqlite {
             app_path,
             journal_path,
         } => {
@@ -863,28 +868,47 @@ fn decode_rollback(req: &RollbackRequest) -> Result<DecodedRollback> {
     })
 }
 
-/// `rollback` - unwind applied migrations over the host driver.
+/// `rollback` - the rollback entry: unwind applied migrations over the driver
+/// `req.driver` names.
 ///
 /// The authored envelopes are lowered through the same guarded Rust path `applyIr`
 /// uses, so the reverse SQL comes from the migration files rather than from
-/// anything the journal stored. Resolves to a typed [`RollbackReply`].
+/// anything the journal stored. `req.driver` selects WHO OPENS THE CONNECTION and
+/// `req.dialect` selects WHICH VENDOR, checked against each other in the one place
+/// every verb checks them ([`DriverTarget::resolve`]).
+///
+/// Unlike `applyIr`, both drivers read the request identically: the same complete
+/// ordered sequence reaches the same `rollback_with_locked_backend` under the same
+/// `ExecutorConfig`, and only the backend built over the connection differs. The
+/// `"host"` driver alone carries a `migratorRole`, because the in-process driver
+/// opens the only identity there is. Resolves to a typed [`RollbackReply`].
 ///
 /// [`RollbackReply`]: crate::wire::RollbackReply
 #[napi(ts_return_type = "Promise<RollbackReply>", catch_unwind)]
 pub fn rollback(
     env: Env,
     #[napi(
-        ts_arg_type = "(args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void"
+        ts_arg_type = "((args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void) | null"
     )]
-    host_driver: HostDriverFn,
+    host_driver: Option<HostDriverFn>,
     req: RollbackRequest,
 ) -> Result<Object<'static>> {
     let decoded = decode_rollback(&req)?;
-    let target_backend = ApplyDialect::parse(&req.dialect).map_err(Error::from_reason)?;
+    let target = DriverTarget::<RoleOnly>::resolve(
+        &req.dialect,
+        &DriverParts {
+            kind: &req.driver.kind,
+            app_path: req.driver.app_path.as_deref(),
+            journal_path: req.driver.journal_path.as_deref(),
+            migrator_role: req.driver.migrator_role.as_deref(),
+            applied_by: req.driver.applied_by.as_deref(),
+            host_driver_supplied: host_driver.is_some(),
+        },
+    )
+    .map_err(Error::from_reason)?;
     let RollbackRequest {
         owner_app,
         project_schema,
-        migrator_role,
         dialect,
         charter_layers,
         applied_by,
@@ -893,119 +917,91 @@ pub fn rollback(
     let effective =
         effective_policy_from_wire_layers(&charter_layers).map_err(Error::from_reason)?;
 
-    run_verb(env, host_driver, move |session| async move {
-        let mut cfg = ExecutorConfig::new(
-            owner_app_project(&project_schema),
-            project_schema.clone(),
-            effective,
-        );
-        if let Some(role) = migrator_role {
-            cfg = cfg.with_migrator_role(role);
+    match target {
+        DriverTarget::Host {
+            dialect: target_backend,
+            credentials: RoleOnly { migrator_role },
+        } => {
+            let host_driver = host_driver
+                .ok_or_else(|| Error::from_reason("the host rollback driver lost its callback"))?;
+            run_verb(env, host_driver, move |session| async move {
+                let mut cfg = ExecutorConfig::new(
+                    owner_app_project(&project_schema),
+                    project_schema.clone(),
+                    effective,
+                );
+                if let Some(role) = migrator_role {
+                    cfg = cfg.with_migrator_role(role);
+                }
+                match target_backend {
+                    ApplyDialect::Postgres => {
+                        let backend =
+                            zeroship_migrate_postgres::PostgresBackend::new_generic(&session);
+                        rollback_with_locked_backend(
+                            &backend,
+                            &cfg,
+                            &decoded.envelope_json,
+                            &owner_app,
+                            &project_schema,
+                            &dialect,
+                            &decoded.registry_json,
+                            &charter_layers,
+                            decoded.target,
+                            decoded.options,
+                            decoded.approval,
+                            &applied_by,
+                        )
+                        .await
+                    }
+                    ApplyDialect::Mysql => {
+                        let backend = zeroship_migrate_mysql::MysqlBackend::new_generic(&session);
+                        rollback_with_locked_backend(
+                            &backend,
+                            &cfg,
+                            &decoded.envelope_json,
+                            &owner_app,
+                            &project_schema,
+                            &dialect,
+                            &decoded.registry_json,
+                            &charter_layers,
+                            decoded.target,
+                            decoded.options,
+                            decoded.approval,
+                            &applied_by,
+                        )
+                        .await
+                    }
+                }
+            })
         }
-        match target_backend {
-            ApplyDialect::Postgres => {
-                let backend = zeroship_migrate_postgres::PostgresBackend::new_generic(&session);
-                rollback_with_locked_backend(
-                    &backend,
-                    &cfg,
-                    &decoded.envelope_json,
-                    &owner_app,
-                    &project_schema,
-                    &dialect,
-                    &decoded.registry_json,
-                    &charter_layers,
-                    decoded.target,
-                    decoded.options,
-                    decoded.approval,
-                    &applied_by,
-                )
-                .await
-            }
-            ApplyDialect::Mysql => {
-                let backend = zeroship_migrate_mysql::MysqlBackend::new_generic(&session);
-                rollback_with_locked_backend(
-                    &backend,
-                    &cfg,
-                    &decoded.envelope_json,
-                    &owner_app,
-                    &project_schema,
-                    &dialect,
-                    &decoded.registry_json,
-                    &charter_layers,
-                    decoded.target,
-                    decoded.options,
-                    decoded.approval,
-                    &applied_by,
-                )
-                .await
-            }
-        }
-    })
-}
-
-/// `rollbackSqlite` - unwind applied migrations through the bundled in-process
-/// SQLite backend. There is no host-driver callback.
-#[napi(
-    js_name = "rollbackSqlite",
-    ts_return_type = "Promise<RollbackReply>",
-    catch_unwind
-)]
-pub fn rollback_sqlite(
-    env: Env,
-    app_path: String,
-    journal_path: String,
-    req: RollbackRequest,
-) -> Result<Object<'static>> {
-    let decoded = decode_rollback(&req)?;
-    let RollbackRequest {
-        owner_app,
-        project_schema,
-        migrator_role,
-        dialect,
-        charter_layers,
-        applied_by,
-        ..
-    } = req;
-    if dialect != "sqlite" {
-        return Err(Error::from_reason(format!(
-            "rollbackSqlite requires dialect \"sqlite\" (got {dialect:?})"
-        )));
+        DriverTarget::InProcessSqlite {
+            app_path,
+            journal_path,
+        } => run_in_process_verb(env, move || async move {
+            let backend = SqliteBackend::open(Path::new(&app_path), Path::new(&journal_path))
+                .map_err(|error| format!("failed to open SQLite migration backend: {error}"))?;
+            let cfg = ExecutorConfig::new(
+                owner_app_project(&project_schema),
+                project_schema.clone(),
+                effective,
+            );
+            rollback_with_locked_backend(
+                &backend,
+                &cfg,
+                &decoded.envelope_json,
+                &owner_app,
+                &project_schema,
+                &dialect,
+                &decoded.registry_json,
+                &charter_layers,
+                decoded.target,
+                decoded.options,
+                decoded.approval,
+                &applied_by,
+            )
+            .await
+        }),
     }
-    // SQLite has no roles to assume. Accepting one here would let a caller believe
-    // the reverse DDL runs least-privilege when it runs as the only identity there is.
-    if migrator_role.is_some() {
-        return Err(Error::from_reason(
-            "rollbackSqlite takes no migratorRole: SQLite has no roles, so the reverse DDL \
-             cannot be run under a narrower identity than the connection's own",
-        ));
-    }
-    let effective =
-        effective_policy_from_wire_layers(&charter_layers).map_err(Error::from_reason)?;
-
-    run_in_process_verb(env, move || async move {
-        let backend = SqliteBackend::open(Path::new(&app_path), Path::new(&journal_path))
-            .map_err(|error| format!("failed to open SQLite migration backend: {error}"))?;
-        let cfg = ExecutorConfig::new(
-            owner_app_project(&project_schema),
-            project_schema.clone(),
-            effective,
-        );
-        rollback_with_locked_backend(
-            &backend,
-            &cfg,
-            &decoded.envelope_json,
-            &owner_app,
-            &project_schema,
-            &dialect,
-            &decoded.registry_json,
-            &charter_layers,
-            decoded.target,
-            decoded.options,
-            decoded.approval,
-            &applied_by,
-        )
-        .await
-    })
 }
 
 /// Complete or abort one outstanding PostgreSQL online column rename.
@@ -1073,7 +1069,16 @@ pub fn resolve_pending(
 
 /// `statusIr`: lower the supplied pure-JS envelopes through the same guarded
 /// Rust path as [`apply_ir`], retain every executable plan step, and reconcile
-/// their stable journal identities through the selected dialect backend.
+/// their stable journal identities through the driver `req.driver` names.
+///
+/// `req.driver` selects WHO OPENS THE CONNECTION and `req.dialect` selects WHICH
+/// VENDOR, checked against each other in the one place every verb checks them
+/// ([`DriverTarget::resolve`]). Both drivers then reconcile identically: the same
+/// complete ordered sequence, the same `ExecutorConfig`, the same
+/// `status_ir_with_locked_backend`, and no journal credential on either - a status
+/// records no row for an audit label to name. The journal is bootstrapped by
+/// default; a request with `readOnly: true` takes the non-creating
+/// journal-existence path instead, on either driver.
 ///
 /// This is the status entrypoint for mixed and data-only plans. The legacy
 /// [`status`] verb remains available for callers that already hold a flat set of
@@ -1082,20 +1087,35 @@ pub fn resolve_pending(
 pub fn status_ir(
     env: Env,
     #[napi(
-        ts_arg_type = "(args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void"
+        ts_arg_type = "((args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void) | null"
     )]
-    host_driver: HostDriverFn,
+    host_driver: Option<HostDriverFn>,
     req: StatusIrRequest,
 ) -> Result<Object<'static>> {
     let StatusIrRequest {
         owner_app,
         project_schema,
         dialect,
+        driver,
         registry,
         envelopes,
         charter_layers,
         read_only,
     } = req;
+
+    let target = DriverTarget::<NoCredentials>::resolve(
+        &dialect,
+        &DriverParts {
+            kind: &driver.kind,
+            app_path: driver.app_path.as_deref(),
+            journal_path: driver.journal_path.as_deref(),
+            migrator_role: driver.migrator_role.as_deref(),
+            applied_by: driver.applied_by.as_deref(),
+            host_driver_supplied: host_driver.is_some(),
+        },
+    )
+    .map_err(Error::from_reason)?;
+
     let read_only = read_only.unwrap_or(false);
     let registry_json = serde_json::to_string(&registry)
         .map_err(|e| Error::from_reason(format!("registry is not serializable: {e}")))?;
@@ -1108,115 +1128,82 @@ pub fn status_ir(
                 .map_err(|e| Error::from_reason(format!("envelope is not serializable: {e}")))
         })
         .collect::<Result<Vec<_>>>()?;
-    let target = ApplyDialect::parse(&dialect).map_err(Error::from_reason)?;
     let effective =
         effective_policy_from_wire_layers(&charter_layers).map_err(Error::from_reason)?;
 
-    run_verb(env, host_driver, move |session| async move {
-        let cfg = ExecutorConfig::new(
-            owner_app_project(&project_schema),
-            project_schema.clone(),
-            effective,
-        );
-        match target {
-            ApplyDialect::Postgres => {
-                let backend = zeroship_migrate_postgres::PostgresBackend::new_generic(&session);
-                status_ir_with_locked_backend(
-                    &backend,
-                    &cfg,
-                    &envelope_json,
-                    &owner_app,
-                    &project_schema,
-                    &dialect,
-                    &registry_json,
-                    &charter_layers,
-                    read_only,
-                )
-                .await
-            }
-            ApplyDialect::Mysql => {
-                let backend = zeroship_migrate_mysql::MysqlBackend::new_generic(&session);
-                status_ir_with_locked_backend(
-                    &backend,
-                    &cfg,
-                    &envelope_json,
-                    &owner_app,
-                    &project_schema,
-                    &dialect,
-                    &registry_json,
-                    &charter_layers,
-                    read_only,
-                )
-                .await
-            }
-        }
-    })
-}
-
-/// `statusIrSqlite`: reconcile authored plans through the bundled in-process
-/// SQLite backend. The journal is bootstrapped by default, matching [`status_ir`];
-/// a request with `readOnly: true` uses the non-creating journal-existence path.
-#[napi(
-    js_name = "statusIrSqlite",
-    ts_return_type = "Promise<StatusReply>",
-    catch_unwind
-)]
-pub fn status_ir_sqlite(
-    env: Env,
-    app_path: String,
-    journal_path: String,
-    req: StatusIrRequest,
-) -> Result<Object<'static>> {
-    let StatusIrRequest {
-        owner_app,
-        project_schema,
-        dialect,
-        registry,
-        envelopes,
-        charter_layers,
-        read_only,
-    } = req;
-    if dialect != "sqlite" {
-        return Err(Error::from_reason(format!(
-            "statusIrSqlite requires dialect \"sqlite\" (got {dialect:?})"
-        )));
-    }
-    let read_only = read_only.unwrap_or(false);
-    let registry_json = serde_json::to_string(&registry)
-        .map_err(|error| Error::from_reason(format!("registry is not serializable: {error}")))?;
-    let envelope_json = envelopes
-        .into_iter()
-        .map(|mut envelope| {
-            crate::wire::restore_exact_integers(&mut envelope);
-            serde_json::to_string(&envelope).map_err(|error| {
-                Error::from_reason(format!("envelope is not serializable: {error}"))
+    match target {
+        DriverTarget::Host {
+            dialect: target_backend,
+            credentials: NoCredentials,
+        } => {
+            let host_driver = host_driver
+                .ok_or_else(|| Error::from_reason("the host status driver lost its callback"))?;
+            run_verb(env, host_driver, move |session| async move {
+                let cfg = ExecutorConfig::new(
+                    owner_app_project(&project_schema),
+                    project_schema.clone(),
+                    effective,
+                );
+                match target_backend {
+                    ApplyDialect::Postgres => {
+                        let backend =
+                            zeroship_migrate_postgres::PostgresBackend::new_generic(&session);
+                        status_ir_with_locked_backend(
+                            &backend,
+                            &cfg,
+                            &envelope_json,
+                            &owner_app,
+                            &project_schema,
+                            &dialect,
+                            &registry_json,
+                            &charter_layers,
+                            read_only,
+                        )
+                        .await
+                    }
+                    ApplyDialect::Mysql => {
+                        let backend = zeroship_migrate_mysql::MysqlBackend::new_generic(&session);
+                        status_ir_with_locked_backend(
+                            &backend,
+                            &cfg,
+                            &envelope_json,
+                            &owner_app,
+                            &project_schema,
+                            &dialect,
+                            &registry_json,
+                            &charter_layers,
+                            read_only,
+                        )
+                        .await
+                    }
+                }
             })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let effective =
-        effective_policy_from_wire_layers(&charter_layers).map_err(Error::from_reason)?;
-
-    run_in_process_verb(env, move || async move {
-        let backend = SqliteBackend::open(Path::new(&app_path), Path::new(&journal_path))
-            .map_err(|error| format!("failed to open SQLite migration backend: {error}"))?;
-        let cfg = ExecutorConfig::new(
-            owner_app_project(&project_schema),
-            project_schema.clone(),
-            effective,
-        );
-        status_ir_with_locked_backend(
-            &backend,
-            &cfg,
-            &envelope_json,
-            &owner_app,
-            &project_schema,
-            &dialect,
-            &registry_json,
-            &charter_layers,
-            read_only,
-        )
-        .await
-    })
+        }
+        DriverTarget::InProcessSqlite {
+            app_path,
+            journal_path,
+        } => run_in_process_verb(env, move || async move {
+            let backend = SqliteBackend::open(Path::new(&app_path), Path::new(&journal_path))
+                .map_err(|error| format!("failed to open SQLite migration backend: {error}"))?;
+            let cfg = ExecutorConfig::new(
+                owner_app_project(&project_schema),
+                project_schema.clone(),
+                effective,
+            );
+            status_ir_with_locked_backend(
+                &backend,
+                &cfg,
+                &envelope_json,
+                &owner_app,
+                &project_schema,
+                &dialect,
+                &registry_json,
+                &charter_layers,
+                read_only,
+            )
+            .await
+        }),
+    }
 }
 
 /// `status` - the generic `ops::status::status` over the host driver.

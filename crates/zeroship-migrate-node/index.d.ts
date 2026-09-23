@@ -41,38 +41,6 @@ export interface AdvisoryDto {
 }
 
 /**
- * Which side of the boundary opens the database connection an `applyIr` runs over.
- *
- * This is a TRANSPORT choice, not a vendor one, and the two travel as separate
- * fields on purpose. `kind` says who opens the connection; `dialect` beside it says
- * which vendor's backend is built over it. A verb named after a vendor conflates
- * them, and the addon has exactly one apply verb because of that.
- *
- * The optional fields belong to one kind each, and the other kind refuses them
- * rather than ignoring them - see `ApplyTarget::resolve` in [`crate::verbs`], which
- * is where every pairing is decided.
- */
-export interface ApplyDriverDto {
-  /**
-   * `"host"` - the host-driver callback argument owns the connection.
-   * `"inProcess"` - the addon opens the connections itself on its engine worker
-   * thread, and takes no callback.
-   */
-  kind: string
-  /** `"inProcess"` only: the application database file. */
-  appPath?: string
-  /** `"inProcess"` only: the journal database file attached beside it. */
-  journalPath?: string
-  /** `"host"` only: the migrator role to `SET ROLE` under (least-privilege apply). */
-  migratorRole?: string
-  /**
-   * `"host"` only: the audit `applied_by` label recorded in the journal. The
-   * in-process deploy loop journals its own label and accepts none here.
-   */
-  appliedBy?: string
-}
-
-/**
  * `applyIr` - the apply entry: take the ordered pure-JS IR envelope sequence
  * (`{ ir_version, name, ops }` each) as a typed [`ApplyRequest`], run the
  * fail-closed LOAD GATE + LOWER **in Rust** (stamping `owner_app` + folding the
@@ -149,7 +117,7 @@ export interface ApplyRequest {
    */
   dialect: string
   /** Who opens the connection this apply runs over. */
-  driver: ApplyDriverDto
+  driver: DriverDto
   /**
    * The project's `{ table: owner_app }` ownership registry. Empty on a
    * fresh single-app project.
@@ -363,6 +331,46 @@ export interface CollectionDescriptorDto {
   indexes?: Array<IndexDescriptorDto>
   /** Per-collection runtime options (`softDelete`/`versioning`/`strictness`). */
   runtimeOptions?: RuntimeOptionsDto
+}
+
+/**
+ * Which side of the boundary opens the database connection a verb runs over.
+ *
+ * This is a TRANSPORT choice, not a vendor one, and the two travel as separate
+ * fields on purpose. `kind` says who opens the connection; `dialect` beside it says
+ * which vendor's backend is built over it. A verb named after a vendor conflates
+ * them, and `applyIr`, `statusIr` and `rollback` are each exactly one verb because
+ * of that.
+ *
+ * One shape for all three, because the transport question is one question. The
+ * credential fields are the half that is NOT common: each verb admits the ones it
+ * writes a journal row under and refuses the rest rather than ignoring them - see
+ * `DriverTarget::resolve` and the `HostCredentials` implementations in
+ * [`crate::verbs`], which is where every pairing is decided.
+ */
+export interface DriverDto {
+  /**
+   * `"host"` - the host-driver callback argument owns the connection.
+   * `"inProcess"` - the addon opens the connections itself on its engine worker
+   * thread, and takes no callback.
+   */
+  kind: string
+  /** `"inProcess"` only: the application database file. */
+  appPath?: string
+  /** `"inProcess"` only: the journal database file attached beside it. */
+  journalPath?: string
+  /**
+   * `"host"` only, and only for the verbs that run DDL: the migrator role to
+   * `SET ROLE` under (a least-privilege apply or rollback). `statusIr` takes none.
+   */
+  migratorRole?: string
+  /**
+   * `applyIr`'s `"host"` driver only: the audit `applied_by` label recorded in
+   * the journal. The in-process deploy loop journals its own label and accepts
+   * none here; `rollback` carries its label on the request instead, because both
+   * of its drivers record it; `statusIr` records nothing.
+   */
+  appliedBy?: string
 }
 
 /**
@@ -944,15 +952,24 @@ export interface ResolvePendingRequest {
 }
 
 /**
- * `rollback` - unwind applied migrations over the host driver.
+ * `rollback` - the rollback entry: unwind applied migrations over the driver
+ * `req.driver` names.
  *
  * The authored envelopes are lowered through the same guarded Rust path `applyIr`
  * uses, so the reverse SQL comes from the migration files rather than from
- * anything the journal stored. Resolves to a typed [`RollbackReply`].
+ * anything the journal stored. `req.driver` selects WHO OPENS THE CONNECTION and
+ * `req.dialect` selects WHICH VENDOR, checked against each other in the one place
+ * every verb checks them ([`DriverTarget::resolve`]).
+ *
+ * Unlike `applyIr`, both drivers read the request identically: the same complete
+ * ordered sequence reaches the same `rollback_with_locked_backend` under the same
+ * `ExecutorConfig`, and only the backend built over the connection differs. The
+ * `"host"` driver alone carries a `migratorRole`, because the in-process driver
+ * opens the only identity there is. Resolves to a typed [`RollbackReply`].
  *
  * [`RollbackReply`]: crate::wire::RollbackReply
  */
-export declare function rollback(hostDriver: (args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void, req: RollbackRequest): Promise<RollbackReply>
+export declare function rollback(hostDriver: ((args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void) | null, req: RollbackRequest): Promise<RollbackReply>
 
 /**
  * The typed reply for `rollback` (the projected [`RollbackOutcome`]).
@@ -985,11 +1002,12 @@ export interface RollbackReply {
 }
 
 /**
- * The typed request for the `rollback` and `rollbackSqlite` verbs.
+ * The typed request for the `rollback` verb.
  *
  * It carries the complete ordered envelope sequence rather than a prior/current
  * split: a rollback reconstructs the reverse SQL for migrations that are ALREADY
- * applied, so there is no "current" envelope to distinguish.
+ * applied, so there is no "current" envelope to distinguish. Both drivers read that
+ * sequence the same way, which is why - unlike `applyIr`'s - it needs no split.
  */
 export interface RollbackRequest {
   /**
@@ -1000,16 +1018,17 @@ export interface RollbackRequest {
   /** The confined project schema the lower pins ops to. */
   projectSchema: string
   /**
-   * The migrator role to `SET ROLE` under for the reverse DDL. Optional, and
-   * refused outright by `rollbackSqlite`: SQLite has no roles, so accepting one
-   * there would silently promise least-privilege that is not being applied.
-   */
-  migratorRole?: string
-  /**
-   * `"postgres" | "mysql"` for the host-driven verb, `"sqlite"` for the
-   * in-process one.
+   * `"postgres" | "mysql" | "sqlite"` selects the vendor backend. It is checked
+   * against `driver`, which selects who opens the connection to it.
    */
   dialect: string
+  /**
+   * Who opens the connection this rollback runs over. The migrator role to
+   * `SET ROLE` under for the reverse DDL rides on its `"host"` kind, and the
+   * `"inProcess"` kind refuses one: it opens the only connection there is, so
+   * accepting a role would promise a least-privilege that is not being applied.
+   */
+  driver: DriverDto
   /** The project's `{ table: owner_app }` ownership registry. */
   registry: Record<string, string>
   /** The ordered authored migration envelopes, as real JavaScript values. */
@@ -1037,15 +1056,15 @@ export interface RollbackRequest {
    * irreversible migration discards data, so it takes both flags.
    */
   backupAcknowledged: boolean
-  /** The audit label recorded with the `rolled_back` events. */
+  /**
+   * The audit label recorded with the `rolled_back` events.
+   *
+   * On the REQUEST rather than on the driver, unlike `applyIr`'s: both rollback
+   * drivers journal under it, because both reach the journal through the same
+   * `rollback_with_locked_backend`, which takes the label as an argument.
+   */
   appliedBy: string
 }
-
-/**
- * `rollbackSqlite` - unwind applied migrations through the bundled in-process
- * SQLite backend. There is no host-driver callback.
- */
-export declare function rollbackSqlite(appPath: string, journalPath: string, req: RollbackRequest): Promise<RollbackReply>
 
 /**
  * How far a rollback should unwind, as a nested object rather than three flat
@@ -1114,13 +1133,22 @@ export declare function status(hostDriver: (args: [request: JsRequest, done: (er
 /**
  * `statusIr`: lower the supplied pure-JS envelopes through the same guarded
  * Rust path as [`apply_ir`], retain every executable plan step, and reconcile
- * their stable journal identities through the selected dialect backend.
+ * their stable journal identities through the driver `req.driver` names.
+ *
+ * `req.driver` selects WHO OPENS THE CONNECTION and `req.dialect` selects WHICH
+ * VENDOR, checked against each other in the one place every verb checks them
+ * ([`DriverTarget::resolve`]). Both drivers then reconcile identically: the same
+ * complete ordered sequence, the same `ExecutorConfig`, the same
+ * `status_ir_with_locked_backend`, and no journal credential on either - a status
+ * records no row for an audit label to name. The journal is bootstrapped by
+ * default; a request with `readOnly: true` takes the non-creating
+ * journal-existence path instead, on either driver.
  *
  * This is the status entrypoint for mixed and data-only plans. The legacy
  * [`status`] verb remains available for callers that already hold a flat set of
  * pre-lowered `Migration` values.
  */
-export declare function statusIr(hostDriver: (args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void, req: StatusIrRequest): Promise<StatusReply>
+export declare function statusIr(hostDriver: ((args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void) | null, req: StatusIrRequest): Promise<StatusReply>
 
 /**
  * The typed request for the plan-aware `statusIr` verb.
@@ -1135,13 +1163,22 @@ export interface StatusIrRequest {
   /** The confined project schema. */
   projectSchema: string
   /**
-   * `"postgres" | "mysql" | "sqlite"` selects the journal backend and must
-   * match the host-driven or in-process status entrypoint.
+   * `"postgres" | "mysql" | "sqlite"` selects the journal backend. It is checked
+   * against `driver`, which selects who opens the connection to it.
    */
   dialect: string
+  /** Who opens the connection this status reconciles over. */
+  driver: DriverDto
   /** The project's table-ownership registry. */
   registry: Record<string, string>
-  /** Ordered authored migration envelopes to reconcile. */
+  /**
+   * The complete ordered authored set to reconcile, oldest first.
+   *
+   * ONE field with one meaning, unlike `applyIr`'s: both status drivers hand the
+   * whole sequence to the same reconciliation, so neither a prefix nor a last
+   * envelope is distinguished, and an empty set is the honest question "what does
+   * the journal hold that nothing authored describes".
+   */
   envelopes: Array<JsonValue>
   /** Required ordered policy charters, identical to the `applyIr` lowering input. */
   charterLayers: Array<string>
@@ -1151,13 +1188,6 @@ export interface StatusIrRequest {
    */
   readOnly?: boolean
 }
-
-/**
- * `statusIrSqlite`: reconcile authored plans through the bundled in-process
- * SQLite backend. The journal is bootstrapped by default, matching [`status_ir`];
- * a request with `readOnly: true` uses the non-creating journal-existence path.
- */
-export declare function statusIrSqlite(appPath: string, journalPath: string, req: StatusIrRequest): Promise<StatusReply>
 
 /**
  * The typed reply for `status` (the projected `MigrationStatus`).

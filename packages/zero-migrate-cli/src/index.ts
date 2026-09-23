@@ -283,14 +283,20 @@ export interface HostRollbackOptions {
 export type RollbackOutcome = RollbackReply;
 
 /**
- * Author every envelope (pure JS) then drive the addon's rollback path.
- * PostgreSQL and MySQL go over the host-driver `rollback` seam; SQLite goes to
- * bundled rusqlite through `rollbackSqlite`. Network sessions are always closed.
+ * Author every envelope (pure JS) then drive the addon's one rollback verb. Which
+ * side opens the connection is DATA in the request — `driver: { kind: "inProcess" }`
+ * for bundled rusqlite, `{ kind: "host" }` for the `SqlSession` seam — and the
+ * vendor rides beside it in `dialect`, so nothing here names a dialect to pick a
+ * verb.
+ *
+ * The one branch below is about the TRANSPORT and nothing else: an in-process driver
+ * opens its own files and needs no network session, so there is none to open or
+ * close. Network sessions are always closed.
  *
  * Unlike `apply`, this takes the WHOLE authored set rather than one migration and
  * its priors: the versions being unwound are already applied, so there is no
  * current envelope to distinguish, and the engine needs every candidate's `down`
- * in one set to refuse coherently.
+ * in one set to refuse coherently. Both drivers read that set identically.
  */
 export async function rollback(opts: HostRollbackOptions): Promise<RollbackOutcome> {
   assertExplicitPolicy(opts.policy, "rollback");
@@ -320,9 +326,15 @@ export async function rollback(opts: HostRollbackOptions): Promise<RollbackOutco
   };
 
   if (opts.driver.kind === "sqlite") {
-    return await addon.rollbackSqlite(opts.driver.appPath, opts.driver.journalPath, {
+    // No session: the addon opens the application and journal files itself.
+    return await addon.rollback(null, {
       ...shared,
-      dialect: "sqlite",
+      dialect: dialectOf(opts.driver),
+      driver: {
+        kind: "inProcess",
+        appPath: opts.driver.appPath,
+        journalPath: opts.driver.journalPath,
+      },
     });
   }
 
@@ -330,8 +342,8 @@ export async function rollback(opts: HostRollbackOptions): Promise<RollbackOutco
   try {
     return await addon.rollback(hostDriver, {
       ...shared,
-      migratorRole: opts.migratorRole,
       dialect: dialectOf(opts.driver),
+      driver: { kind: "host", migratorRole: opts.migratorRole },
     });
   } finally {
     await close();
@@ -588,7 +600,7 @@ export async function statusEnvelopes(
   }
   assertExplicitPolicy(opts.policy, "status");
   const addon = loadAddon();
-  const request = {
+  const shared = {
     ownerApp: opts.ownerApp,
     projectSchema: opts.projectSchema,
     dialect: dialectOf(opts.driver),
@@ -598,15 +610,19 @@ export async function statusEnvelopes(
     readOnly: opts.readOnly ?? false,
   };
   if (opts.driver.kind === "sqlite") {
-    return await addon.statusIrSqlite(
-      opts.driver.appPath,
-      opts.driver.journalPath,
-      request,
-    );
+    // No session: the addon opens the application and journal files itself.
+    return await addon.statusIr(null, {
+      ...shared,
+      driver: {
+        kind: "inProcess",
+        appPath: opts.driver.appPath,
+        journalPath: opts.driver.journalPath,
+      },
+    });
   }
   const { hostDriver, close } = await openSession(opts.driver);
   try {
-    return await addon.statusIr(hostDriver, request);
+    return await addon.statusIr(hostDriver, { ...shared, driver: { kind: "host" } });
   } finally {
     await close();
   }
