@@ -1871,7 +1871,7 @@ app's requests and cannot protect a shared cluster from an app under its limit. 
     `SET` survives that arm, because PostgreSQL unwinds it on rollback as well, so a second lease
     settles with COMMIT: the transaction scoping is only visible there.
 
-8. **Write the mandatory regression tests.** PARTLY BUILT, in
+8. **Write the mandatory regression tests.** BUILT, in
     `crates/zeroship-data-orm/tests/postgres_binding_fence.rs`, which drives the ORM against a
     live cluster the reconciler converged.
 
@@ -1918,7 +1918,18 @@ app's requests and cannot protect a shared cluster from an app under its limit. 
     variable and sits beside it in the same exercise: the same app, the same shape, one database it
     holds no binding to, refused `DatabaseNotBound`.
 
-    BUILDABLE: (e) two databases each declaring `users`, which needs the CDC routing key.
+    BUILT: (e) `one_app_s_two_databases_do_not_cross_deliver_a_shared_collection_name`
+    (`crates/zeroship-data-orm/tests/postgres_binding_fence.rs`). One app, two reconciler-converged
+    databases both declaring the same collection, and a change on one must not reach a subscription
+    on the other. The routing key is `(app_id, database_id, collection)` - the broker keys on
+    `DbRoute`, the relay hub on a `StreamKey` carrying both names, and the subscribe wire names the
+    database so the relay resolves the one it was asked for rather than refusing an app that holds
+    two. Because the omission this guards is SILENT, every precondition is compared rather than
+    merely found non-empty: the two database ids and schemas against each other, a read through the
+    ORM under EACH binding, and the two subscriptions' collection names against each other; and the
+    positive delivery is asserted beside the absence, so no arm can pass over a publish that never
+    happened. Its binding mutation is the broker key reverted to the app alone, which reddens this
+    arm and leaves the other broker arms green.
 
 9. **Make the project config plural without losing cross-target protection.** DECIDED AND BUILT.
     `schema/project-v1.json` declares `app` as a single string, and the environments block requires
