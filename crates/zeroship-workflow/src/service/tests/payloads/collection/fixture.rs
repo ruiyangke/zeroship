@@ -100,9 +100,10 @@ impl Fixture {
     pub async fn expire(&self, id: &str) {
         self.set_expiry(id, 0).await;
     }
-    /// Leave a payload with no staging-lease owner, the shape a run that holds
-    /// no task anywhere in its flow produces. The composite foreign key then
-    /// carries a NULL, which both dialects satisfy without a lookup.
+    /// Strip every staging-location column, the shape `stage_app_payload`
+    /// writes for bytes that belong to an app and to no run. Both composite
+    /// foreign keys then carry a NULL, which both dialects satisfy without a
+    /// lookup, so expiry is the whole eligibility test that remains.
     pub async fn disown(&self, id: &str) {
         use crate::service::models::payloads;
         let tx = self.store.begin().await.unwrap();
@@ -112,7 +113,13 @@ impl Fixture {
                 .unwrap()
                 .update_many(
                     payloads::id.eq(id).unwrap(),
-                    payloads::task_id.set(None::<&str>).unwrap()
+                    payloads::task_id
+                        .set(None::<&str>)
+                        .unwrap()
+                        .and(payloads::run_id.set(None::<&str>).unwrap())
+                        .unwrap()
+                        .and(payloads::generation.set(None::<i64>).unwrap())
+                        .unwrap()
                 )
                 .await
                 .unwrap(),
@@ -245,6 +252,8 @@ pub(super) struct Payload {
     pub id: String,
     pub state: String,
     pub expires_at: i64,
+    pub run_id: Option<String>,
+    pub generation: Option<i64>,
     pub task_id: Option<String>,
 }
 #[derive(FromRow, Insertable)]
@@ -252,8 +261,8 @@ pub(super) struct Payload {
 struct PayloadRow {
     id: String,
     app_id: String,
-    run_id: String,
-    generation: i64,
+    run_id: Option<String>,
+    generation: Option<i64>,
     task_id: Option<String>,
     request_id: String,
     hash: String,
