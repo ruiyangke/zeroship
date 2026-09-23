@@ -1,8 +1,12 @@
 # Moving the workflow journal out of creator databases
 
-**Status.** PROPOSED. Nothing here is built. The journal is installed into the creator's own
-schema today and written by the worker over the creator's own connection; this moves storage
-and the durable fold into the workflow service, leaving execution where it is.
+**Status.** PROPOSED, with Plan step 1 in place:
+`db/migrations-ts/20260919000000_workflow_journal.ts` installs the journal into
+`workflow_manager`, and `journal_is_installed_and_unread` in
+`crates/zeroship-workflow-server/tests/platform_schema.rs` holds it there unread. The journal is
+installed into the creator's own schema today and written by the worker over the creator's own
+connection; this moves storage and the durable fold into the workflow service, leaving execution
+where it is.
 
 This is a sibling of `docs/proposals/2026-08-28-app-database-decoupling.md` and should land
 BEFORE it. See Sequencing: that design breaks journal appends if the journal is still where it
@@ -596,14 +600,18 @@ stall the defect fixes that motivate the move.
    storage: it takes a `WorkflowOutputRef` that a worker already staged through `stage_payload`,
    resolves the owning row with `owned_reference`, and attaches it through `payload_refs`. The
    only promotion of an inline value anywhere is `PreparedExecution::from_runtime_json` in
-   `crates/zeroship-workflow-runner/src/outputs.rs`, which runs in the worker and
-   references a value only when the creator asked for it or it exceeds
-   `TaskPayloadLimits::max_inline_bytes`; it covers `RunCompleted`, `ContinueAsNew` and a
-   `step.run` completion, and nothing else.
+   `crates/zeroship-workflow-runner/src/outputs.rs`, which runs in the worker and covers
+   `RunCompleted`, `ContinueAsNew` and a `step.run` completion, and nothing else. A
+   `RunCompleted` value is referenced whatever it weighs, and a run that returns nothing
+   references nothing; `ContinueAsNew` and a `step.run` completion are referenced only when the
+   creator asked for it or the value exceeds `TaskPayloadLimits::max_inline_bytes`.
 
-   `generations.input` is written in one place, `insert_run`, and four production callers reach
-   it (`crates/zeroship-workflow/src/service/app.rs`). `AppWorkflows::start` is outside any fold.
-   The other three are inside one: `journal.rs` starts a child run from
+   `generations.input` is written by `insert_run`, which four production callers reach
+   (`crates/zeroship-workflow/src/service/app.rs`), and by `RestartPlan::apply` in
+   `crates/zeroship-workflow/src/service/control/restart.rs`, which inserts a generation of its
+   own carrying the previous one's input and input reference. `AppWorkflows::start` is outside
+   any fold.
+   The other three `insert_run` callers are inside one: `journal.rs` starts a child run from
    `StepCheckpoint.child_input`, `cron.rs` starts a scheduled run from the `ScheduleRegistration`
    carried on the deploy registration that `__zeroship_workflow_deploys.manifest` stores, and
    `frontier.rs` starts the successor of a continuation. Promoting there means object I/O under
@@ -611,9 +619,14 @@ stall the defect fixes that motivate the move.
    schedule's input has a reference form to arrive in. Making those two referenceable is a
    change to `StepOutcome` and to the deploy manifest, not a mechanism added beside them.
 
-   `generations.output` has one writer, `finish_run` in `crates/zeroship-workflow/src/service/frontier.rs`,
-   and it carries three things: nothing, a creator run output, and `{"continuedAsNew":id}`, which
-   is platform data rather than payload and needs a home that is not a payload reference.
+   A run's result on the generation is `output_ref` alone, a payload reference the
+   `RunUpdate::Completed` arm of `apply` in `crates/zeroship-workflow/src/service/frontier.rs`
+   writes after promoting it, refusing an inline value outright. The successor a `continuedAsNew`
+   close hands a run's work to is a typed platform-minted column that `finish_run` in the same
+   file writes beside the terminal `RunState::ContinuedAsNew` in
+   `crates/zeroship-core/src/workflow_coordination/lifecycle.rs`, and it reaches a caller as
+   `RunStatus.continued_as_new_run_id` in `crates/zeroship-workflow/src/operations.rs`. So
+   platform data on a generation needs no home inside a payload.
 
    **An empty list is not a payload-free journal.** The assertion matches a column's type or its
    name, so creator payload held in a text column under another name passes it.
@@ -689,17 +702,22 @@ stall the defect fixes that motivate the move.
    field, so the described union names output values with `kind: "workflow-step-output-ref"` that
    the status path emits as `kind: "ref"`.
 
-   **Staging is task-scoped, and that is the constraint on emptying `generations.input`.**
-   `stage_payload` requires a worker identity, a task id and a task token, and its only non-test
-   caller is `HostPayloads::stage` in `crates/zeroship-workflow-runner/src/payloads/objects.rs`,
-   reached from a worker that is executing a task. `promote` in
+   **Staging has a task-less path, and reaching it is the constraint on emptying
+   `generations.input`.** `stage_payload` requires a worker identity, a task id and a task token,
+   and its only non-test caller is `HostPayloads::stage` in
+   `crates/zeroship-workflow-runner/src/payloads/objects.rs`, reached from a worker that is
+   executing a task. `stage_app_payload` beside it takes an `AppId` and proves only that the
+   caller may act for the app: its `StagingScope::Unowned` arm names no location, so the row's
+   `run_id`, `generation` and `task_id` are NULL and an edge in `payload_refs` is what owns the
+   bytes once a run attaches them. `promote` in
    `crates/zeroship-workflow/src/service/payloads.rs` creates no object; it takes a reference a
    worker already staged. So the continuation stages today, and a child's input leaves a worker
    holding a task and could stage on the same path, while `AppWorkflows::start` called from a
    request handler has no task at all and `AppWorkflows::cron_job` in
    `crates/zeroship-workflow/src/service/cron.rs` starts its scheduled run under a `JobLease`
-   rather than a task token. Emptying the run-input column therefore needs either a task-less
-   staging path or a decision that some inputs stay inline. That is open.
+   rather than a task token. Neither of those reaches `stage_app_payload`: both hand their input
+   inline to `insert_root_run`. Emptying the run-input column is therefore a matter of routing
+   them through it, not of adding a mechanism.
 
    The `insert_run` callers also differ in how far a reference form is from them.
    `AppWorkflows::start` is additive: `StartOptions` in `crates/zeroship-workflow/src/operations.rs`
