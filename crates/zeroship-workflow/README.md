@@ -391,6 +391,6 @@ preceding outcomes. Object references still require service ownership validation
 when the task completes.
 The schema check uses the built `@zeroship/migrate` and `zero-migrate-cli`
 packages and their native migration addon; regenerate with
-`node crates/zeroship-workflow/schema/generate.mjs` from the repository root.
+`node crates/zeroship-workflow-schema/schema/generate.mjs` from the repository root.
 
 Run `cargo test -p zeroship-workflow` for the engine and shared service tests.

@@ -10,7 +10,7 @@
 //! # Macro author rules
 //!
 //! Every new emit path goes here first. Adding a re-export is part
-//! of the macro's PR. See `crates/runtime-macros/STABILITY.md` for
+//! of the macro's PR. See `crates/zeroship-runtime-macros/STABILITY.md` for
 //! the formal contract.
 //!
 //! Internal callers of the same types (e.g. `request.rs` uses
@@ -202,7 +202,7 @@ pub mod __private {
 ///
 /// The trait, its method signature, and the sealing pattern are all
 /// part of `runtime-macros`'s STABILITY contract. See
-/// `crates/runtime-macros/STABILITY.md`.
+/// `crates/zeroship-runtime-macros/STABILITY.md`.
 pub trait V8ClassInstance: __private::Sealed {
     /// Brand-check: returns `true` iff `value` is an instance of this
     /// class (or a subclass via `#[v8_inherit]`) in the current isolate.

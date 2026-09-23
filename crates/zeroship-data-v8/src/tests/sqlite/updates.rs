@@ -599,7 +599,7 @@ const _procedures = { seed, failBulk, failBulkInsideTransaction };
         // second.
         //
         // PATH: `transaction()` returns `Promise<Result<R>>` and wraps the
-        // callback's value with `ok(...)` (`crates/zeroship-data-v8/js/install-schema.ts`, in
+        // callback's value with `ok(...)` (`crates/zeroship-data-v8/js/runtime/install-schema.ts`, in
         // the transaction facade), so the payload is `{data: {...}, error:
         // null}` and the failure sits at `["data"]["failure"]`. Reading
         // `["failure"]` yielded `Null`, which compares unequal to ANY expected

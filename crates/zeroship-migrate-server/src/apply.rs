@@ -1127,7 +1127,7 @@ const APP_ROLE_TEMPLATE: &str = "__zeroship_app_role_template";
 /// The ONE login role every worker process connects as.
 ///
 /// Precreated by the platform migrations
-/// (`db/migrations-ts/20260818000200_worker_database_authority.ts`); this
+/// (`db/migrations-ts/20260702000100_schema_roles_extensions.ts`); this
 /// service only grants it membership in each app's runtime role.
 ///
 /// Public so end-to-end tests can reach the audit table through the production

@@ -365,8 +365,8 @@ pub(crate) mod infrastructure_error_test_support {
 /// a credential no request path consults is worse than handing them nothing,
 /// because it reads as an authentication mechanism. The response stopped
 /// carrying it first, and the field, the column and the mint that produced it
-/// are now gone too - `db/migrations-ts/20260905000200_drop_app_api_key.ts`
-/// records why the platform does not own such a key at all.
+/// are now gone too: the platform owns no such key at all, so there is nothing
+/// for a schema or a handler to reinstate.
 ///
 /// So this function has no field to withhold, which is what makes the "exactly"
 /// above enforceable in both directions: the body is the whole record.

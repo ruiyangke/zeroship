@@ -22,10 +22,10 @@
 //! pending and loud, never half-erased.
 //!
 //! Every users edge is declared by
-//! `db/migrations-ts/20260907000000_user_erasure_edges.ts` as CASCADE (identity)
-//! or SET NULL (attribution), so PostgreSQL clears them under the constraint
-//! owner's privileges rather than the reaper's. Nothing here walks a list of
-//! foreign keys.
+//! `db/migrations-ts/20260702000600_constraints_indexes_fks.ts` as CASCADE
+//! (identity) or SET NULL (attribution), so PostgreSQL clears them under the
+//! constraint owner's privileges rather than the reaper's. Nothing here walks a
+//! list of foreign keys.
 //!
 //! ## The re-check is the fence, not the request-time preflight
 //!

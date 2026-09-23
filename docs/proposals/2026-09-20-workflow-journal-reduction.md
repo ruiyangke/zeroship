@@ -107,10 +107,8 @@ guard type, or by continuing to trust a convention is a decision the relocation 
 silence makes it by default at the moment the boundary moves.
 
 The same decision was made the other way inside this repository, and the cost is recorded rather
-than estimated. The example is NOT on main: it is
-`crates/zeroship-migrate-server/src/datastore/control.rs` on the
-`feat/app-database-decoupling` branch, added in `9067e6367`, so the path above does not resolve
-in a checkout of main and a reader has to look there for it. Its cluster reconciler
+than estimated. The example is
+`crates/zeroship-migrate-server/src/datastore/control.rs`, whose cluster reconciler
 puts a compare-and-set on `activate_database` and `observe_binding` - two writes whose realistic
 concurrent-writer count is one, since a cluster reconciler is a single loop. On the likelihood
 axis both would have taken a convention. `observe_binding`'s predicate names the generation
@@ -1073,12 +1071,12 @@ therefore reducible. **One side of a duplicated pair can be a boundary artifact
 while the other is load-bearing for a different reason, and the only way to
 tell is to read what enforces it.**
 
-## What the move does to the grant model, which is the thing another branch is blocked on
+## What the move does to the grant model, which is the thing app-database decoupling is blocked on
 
-`feat/app-database-decoupling` is blocked on this relocation for one reason: the
-journal's appends depend on a blanket grant in the app's schema. That is worth
-stating precisely, because the move changes the KIND of grant the journal lives
-under, not just its address.
+`docs/proposals/2026-08-28-app-database-decoupling.md` is blocked on this relocation
+for one reason: the journal's appends depend on a blanket grant in the app's
+schema. That is worth stating precisely, because the move changes the KIND of
+grant the journal lives under, not just its address.
 
 ### The app schema's model: a snapshot nothing verifies
 

@@ -1,6 +1,6 @@
 # Decoupling app identity from database identity
 
-**Status.** PARTLY BUILT, on `feat/app-database-decoupling`. What exists is the identity, the
+**Status.** PARTLY BUILT, on `main`. What exists is the identity, the
 entities, the control-plane surface that declares them, the cluster reconciler that makes a
 cluster match, the data path that narrows to what the reconciler granted, the creator config and
 manifest made plural, `env.databases` reaching every bound database and typed under its label,

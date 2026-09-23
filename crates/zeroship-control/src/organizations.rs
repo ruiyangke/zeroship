@@ -2736,9 +2736,10 @@ pub async fn delete_project(
 /// `ON DELETE CASCADE`, so a row delete instead destroys the input the
 /// unbilled-usage predicate reads - the same predicate `dissolve` and the
 /// erasure preflight refuse on. A hard delete is therefore impossible or
-/// destructive depending only on whether the reconciler has run, and
-/// `db/migrations-ts/20260831000000_archive_apps.ts` revoked the DELETE
-/// privilege for that reason. The row is retained and marked; nothing cascades.
+/// destructive depending only on whether the reconciler has run, and the
+/// control plane's grant on `zeroship.apps`
+/// (`db/migrations-ts/20260702000900_grants.ts`) withholds DELETE for that
+/// reason. The row is retained and marked; nothing cascades.
 ///
 /// # What ends, and what is kept
 ///

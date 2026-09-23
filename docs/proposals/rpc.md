@@ -773,7 +773,7 @@ list returns parsed Todo[]  ←  superjson decode
 | --- | --- |
 | `packages/vite-plugin/src/transform.ts` | Per-file rewrite, function-level + file-level directive handling |
 | `packages/vite-plugin/src/reference-graph.ts` | Module-graph walk for transitive marking |
-| `packages/vite-plugin/src/synthetic-entry.ts` | Generates the bundle entry |
+| `packages/vite-plugin/src/rpc-registry.ts` | Generates the bundle entry (`buildServerEntrySource`) |
 | `packages/vite-plugin/src/manifest.ts` | Emits `manifest.resources` at `closeBundle` |
 | `crates/zeroship-runtime/src/rpc/dispatch.rs` | NEW: fastcall dispatch entries |
 | `crates/zeroship-runtime/src/rpc/error.rs` | NEW: native `RpcError` `#[v8_class]` (§6) |

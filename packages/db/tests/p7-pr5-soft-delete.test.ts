@@ -13,9 +13,12 @@
  *    flag into the native `find` opts. The runtime then suppresses
  *    the `AND deleted_at IS NULL` auto-filter.
  *
- * The runtime-side soft-delete is verified by the Rust integration
- * tests in `crates/zeroship-data-orm/src/tests/sqlite/assignments.rs`; this file
- * confirms the SDK boundary is wired correctly.
+ * The runtime-side soft-delete is verified in Rust: `should_filter_soft_deleted`
+ * in `crates/zeroship-data-orm/src/crud/assignment_pass.rs` decides the
+ * auto-filter, and `bulk_mutations_return_counts_without_returning_records_sqlite_runtime`
+ * in `crates/zeroship-data-v8/src/tests/sqlite/updates.rs` runs delete and
+ * restore over a `softDelete` collection. This file confirms the SDK boundary is
+ * wired correctly.
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";

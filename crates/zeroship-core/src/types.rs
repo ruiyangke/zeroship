@@ -11,7 +11,7 @@ use crate::{AppId, BindingId, DatabaseId, UserId};
 /// It carries NO app-level API key, and there is no field withheld from its
 /// serialized form - the record a caller receives is the whole record, which is
 /// why it round-trips through `serde_json`. The reasoning for having no such key
-/// at all is in `db/migrations-ts/20260905000200_drop_app_api_key.ts`.
+/// at all is on `zeroship_control::api::create_app_response_body`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppRecord {
     pub id: AppId,

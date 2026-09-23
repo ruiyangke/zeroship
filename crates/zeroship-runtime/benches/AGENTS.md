@@ -42,7 +42,7 @@ Bench fixtures + runners for measuring the runtime against itself
 | `node-whatwg-cluster` | `node node_whatwg_server_cluster.js` | 4005 | Cluster variant of the WHATWG wrap |
 
 `zeroship-bench-server` is the bench fixture binary built from
-`crates/runtime/src/server.rs` — it embeds `scenarios.js` via
+`crates/zeroship-runtime/src/core/server.rs` — it embeds `scenarios.js` via
 `include_str!` so the V8 isolate runs the same dispatch path as a
 deployed app.
 
