@@ -1049,16 +1049,6 @@
             "valueColumn": "input_ref"
           }
         },
-        "output": {
-          "type": "string",
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "output"
-          }
-        },
         "output_ref": {
           "type": "string",
           "readable": true,

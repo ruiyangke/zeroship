@@ -93,7 +93,7 @@ pub(super) async fn pages(store: Rc<OrmStore>) {
     app::lock_app(&mut tx, &app).await.unwrap();
     let run = app::lock_run(&mut tx, &app, &child).await.unwrap();
     let now = tx.now().await.unwrap();
-    crate::service::frontier::finish(&mut tx, &app, &run, RunState::Completed, None, None, now)
+    crate::service::frontier::finish(&mut tx, &app, &run, RunState::Completed, None, now)
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -159,6 +159,7 @@ fn wait(id: String, run: &str, ordinal: i64, child: &str) -> graph::Wait {
 pub(super) async fn superseded(store: Rc<OrmStore>) {
     let (service, app, _, _deployments) = registered_service(store).await;
     let scope = service.fixture_app(app.clone());
+    let objects = objects::Objects::new();
     let worker = WorkerIdentity::new("superseded-notify".into()).unwrap();
     let parent = scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
@@ -185,7 +186,7 @@ pub(super) async fn superseded(store: Rc<OrmStore>) {
             &worker,
             &child.id,
             &child.token,
-            execution(json!([{"kind":"RunCompleted","output":"first"}])),
+            execution(json!([{"kind":"RunCompleted"}])),
         )
         .await
         .unwrap();
@@ -218,17 +219,41 @@ pub(super) async fn superseded(store: Rc<OrmStore>) {
     let rerun = service.poll(&worker).await.unwrap().unwrap();
     assert_eq!(rerun.invocation.run_id, child.invocation.run_id);
     assert_eq!(rerun.generation, 1);
+    const SECOND: &[u8] = br#""second""#;
+    let second = output_reference(SECOND);
+    service
+        .stage_payload(
+            &worker,
+            &rerun.id,
+            &rerun.token,
+            &RequestId::mint(),
+            second.clone(),
+            objects.upload(SECOND),
+        )
+        .await
+        .unwrap();
     service
         .complete(
             &worker,
             &rerun.id,
             &rerun.token,
-            execution(json!([{"kind":"RunCompleted","output":"second"}])),
+            execution(json!([{"kind":"RunCompleted","outputRef":second}])),
         )
         .await
         .unwrap();
     assert_eq!(deliver_propagations(&scope).await.len(), 1);
     let resumed = service.poll(&worker).await.unwrap().unwrap();
     assert_eq!(resumed.invocation.run_id, parent);
-    assert_eq!(resumed.invocation.journal[0].output, Some(json!("second")));
+    assert_eq!(
+        resumed.invocation.journal[0].output_ref.as_ref(),
+        Some(&second),
+        "the parent joins the generation that outlived the superseded page"
+    );
+    assert_eq!(
+        scope
+            .read_output(&child.invocation.run_id, objects.open())
+            .await
+            .unwrap(),
+        SECOND
+    );
 }

@@ -403,8 +403,15 @@ export default {
     const status = path.match(/^\/__host\/status\/([A-Za-z]+)\/([A-Za-z0-9_]+)$/);
     if (status) {
       try {
-        const state = await env.workflows[status[1]].get(status[2]).status();
-        return Response.json({ state: state.state, output: state.output ?? null });
+        const run = env.workflows[status[1]].get(status[2]);
+        const state = await run.status();
+        // A run's result is a blob whatever it weighs, so `status` locates it
+        // and `readOutput` is what turns it back into the returned value. A run
+        // that returned nothing reports no output and reads nothing.
+        const output = state.output
+          ? JSON.parse(new TextDecoder().decode(await run.readOutput()))
+          : null;
+        return Response.json({ state: state.state, output });
       } catch (error) {
         return Response.json({ code: error.code, message: error.message }, { status: 503 });
       }

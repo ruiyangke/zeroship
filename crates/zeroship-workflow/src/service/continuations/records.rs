@@ -35,7 +35,6 @@ pub(super) struct Generation {
     pub run_id: String,
     pub generation: i64,
     pub state: String,
-    pub output: Option<String>,
     pub output_ref: Option<String>,
     pub error: Option<String>,
     pub continued_as_new_run_id: Option<String>,
@@ -86,7 +85,6 @@ impl Generation {
 
     pub fn outcome(self) -> models::GenerationOutcome {
         models::GenerationOutcome {
-            output: self.output,
             output_ref: self.output_ref,
             error: self.error,
             continued_as_new_run_id: self.continued_as_new_run_id,
@@ -114,7 +112,6 @@ impl Membership {
             generation: generation.generation,
             state: generation.state.clone(),
             outcome: models::GenerationOutcome {
-                output: generation.output.clone(),
                 output_ref: generation.output_ref.clone(),
                 error: generation.error.clone(),
                 continued_as_new_run_id: generation.continued_as_new_run_id.clone(),

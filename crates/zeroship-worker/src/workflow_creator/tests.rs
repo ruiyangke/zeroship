@@ -12,7 +12,7 @@ use zeroship_workflow::{
     operations::{RunState, StartOptions},
     service::{
         delivery::{DeliveredTask, JobAcceptance},
-        AppPolicy, RequestId,
+        AppPolicy, PayloadSlot, RequestId,
     },
 };
 use zeroship_workflow_runner::{ExecutionGuard, RunPayloads};
@@ -21,6 +21,34 @@ use zeroship_workflow_runner::{ExecutionGuard, RunPayloads};
 mod deployment_fixture;
 mod fixture;
 use fixture::{execute, install, Fixture};
+
+/// What a run returned, read back from the payload object it was staged into.
+///
+/// A run's result reaches the journal as a descriptor, so `status` names the
+/// object and the bytes come from the store the factory supplied. Both halves
+/// are asserted here: the descriptor status hands out is the one whose object
+/// holds these bytes.
+async fn returned_value(runtime: &CreatorRuntime, run: &str) -> serde_json::Value {
+    let described = runtime
+        .app
+        .status(run)
+        .await
+        .unwrap()
+        .output
+        .expect("a run that returned a value names the payload holding it");
+    assert_eq!(described["kind"], "ref", "{described}");
+    let bytes = runtime
+        .app
+        .payloads(&runtime.objects)
+        .read(run, 0, PayloadSlot::Output)
+        .await
+        .unwrap()
+        .into_bytes(4096)
+        .await
+        .unwrap();
+    assert_eq!(described["size"], json!(bytes.len()), "{described}");
+    serde_json::from_slice(&bytes).unwrap()
+}
 
 #[compio::test]
 async fn unknown_assignment_and_wrong_policy_are_refused_before_creator_io() {
@@ -234,7 +262,7 @@ async fn factory_executes_delivered_v8_frontiers_with_its_creator_artifact_and_p
         );
         let status = runtime.app.status(&started.id).await.unwrap();
         if status.state == RunState::Completed {
-            assert_eq!(status.output, Some(json!(input)));
+            assert_eq!(returned_value(&runtime, &started.id).await, json!(input));
             finished = true;
             break;
         }
@@ -312,8 +340,5 @@ async fn dynamic_context_cannot_move_an_installed_creator_to_another_schema() {
         .complete_job(&task, &lease, execution)
         .await
         .unwrap();
-    assert_eq!(
-        runtime.app.status(&started.id).await.unwrap().output,
-        Some(json!("bound"))
-    );
+    assert_eq!(returned_value(&runtime, &started.id).await, json!("bound"));
 }
