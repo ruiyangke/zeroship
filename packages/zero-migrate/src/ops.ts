@@ -1305,7 +1305,7 @@ function isBytesValue(value: unknown): value is BytesValue {
 }
 
 function isPerRowGenerator(generator: unknown): generator is PerRowGenerator {
-  if (generator === "uuidV4" || generator === "uuidV7" || generator === "ulid") {
+  if (generator === "uuidV4" || generator === "uuidV7") {
     return true;
   }
   if (!isPlainObject(generator)) return false;
