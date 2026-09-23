@@ -43,7 +43,7 @@ import { buildDevBundle } from "./dev-bundle.js";
 import { DevPublisher } from "./dev-publisher.js";
 import {
   defaultProjectConfig,
-  selectDatabase,
+  selectBuildTarget,
   type ProjectConfigHolder,
   type ResolvedProjectConfig,
   type TargetDatabase,
@@ -99,8 +99,8 @@ export interface DevServerOptions {
  * `label` and `primary` ride along because the emitted `env.db.ts` keys
  * `EnvDatabases` on the label and only the primary declares `Env.db`. `id` is
  * the declared `dbs_` id, which names the SQLite file both the apply and the
- * runtime open. A `TargetDatabase` from `selectDatabase` satisfies this shape,
- * so the dev server passes the same record it already resolved.
+ * runtime open. A `TargetDatabase` from `selectBuildTarget` satisfies this
+ * shape, so the dev server passes the same record it already resolved.
  */
 type MigrationPaths = {
   migrations: string;
@@ -597,6 +597,13 @@ export function devServerPlugin(
   // The database the dev tier serves: the app's primary, the one `env.db`
   // reaches. `undefined` for an app that declares none.
   let primaryDatabase: TargetDatabase | undefined;
+  // The identity the spawned runtime runs under. The dev tier is one process
+  // per app, and everything the runtime namespaces - the app schema, the
+  // workflow deployment and activation rows - is keyed on this id, so two dev
+  // apps sharing one database are ONE app to those tables unless they are told
+  // apart here. `DEV_APP_ID` is the answer for a workspace that declares no
+  // `apps.<label>.app`, which is a fresh project with nothing to tell apart.
+  let devAppId: string = DEV_APP_ID;
   // The boot-time gen-types regen (async, in-process). `spawnRuntime` awaits it
   // so the runtime is spawned WITH a fresh descriptor (the pre-in-process CLI
   // path was synchronous; awaiting here preserves that ordering).
@@ -672,7 +679,14 @@ export function devServerPlugin(
       //    root by default; a migrations dir holding `.ts` sources not imported
       //    by app code may not be covered). The `hotUpdate` branch below
       //    regenerates `env.db.ts` on a change.
-      primaryDatabase = selectDatabase(projectConfig, { app: options.app });
+      //
+      //    The SAME selection answers both "which database" and "which app
+      //    identity": one app's primary database and one app's declared id are
+      //    two members of one entry, and reading them through two selections
+      //    would let them come from two different apps.
+      const target = selectBuildTarget(projectConfig, options.app);
+      devAppId = target.appId ?? DEV_APP_ID;
+      primaryDatabase = target.databases.find((database) => database.primary);
       migrationsAbs =
         primaryDatabase == null ? null : resolve(root, primaryDatabase.migrations);
       if (primaryDatabase != null && migrationsAbs != null && existsSync(migrationsAbs)) {
@@ -1101,7 +1115,13 @@ export function devServerPlugin(
           const childEnv: NodeJS.ProcessEnv = {
             ...dotenvVars,
             ...process.env,
-            APP_ID: DEV_APP_ID,
+            // The runtime's identity, and the ONLY lever over it: `--app=`
+            // below names a LABEL the child dereferences to a database, and
+            // `resolve_dev_app_id` (crates/zeroship-cli/src/main.rs) reads this
+            // variable alone, falling back to the shared local id only when it
+            // is absent. This entry sits after the `process.env` spread, so it
+            // is the value the child sees either way.
+            APP_ID: devAppId,
             DATABASE_URL: databaseUrl,
             [ENV_DEV]: "1",
             // Reaping of last resort. `killChild` below covers every teardown
