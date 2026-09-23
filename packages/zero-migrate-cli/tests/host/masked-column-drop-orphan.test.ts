@@ -3,7 +3,7 @@
 // The declared column holds the masked value. The raw sibling holds the real value,
 // and the declared column carries the `zero-migrate:mask` sentinel.
 //
-// The mirror op did not. `Op::DropColumn` in crates/zeroship-migrate/src/render/lower.rs
+// The mirror op did not. `Op::DropColumn` in crates/zeroship-migrate-core/src/render/lower.rs
 // emitted a single unit for the named column and nothing for the sibling, so
 // dropping a masked column left an orphan behind: a column with a mask sentinel on
 // it, belonging to a field that no longer exists.

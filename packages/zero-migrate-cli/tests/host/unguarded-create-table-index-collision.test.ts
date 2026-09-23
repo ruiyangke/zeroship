@@ -5,7 +5,7 @@
 // `Op::CreateIndex`, which lowering stamps with an ownership-only probe when the
 // dialect scopes index names schema-wide. A `createTable` carrying `indexes: [...]`
 // does not go through that op. Its inline indexes are emitted inside
-// `lower_create_table` (`crates/zeroship-migrate/src/render/declarative.rs`), whose
+// `lower_create_table` (`crates/zeroship-migrate-core/src/render/declarative.rs`), whose
 // per-index probe is stamped only `if let Some(dir) = guard` - so an UNGUARDED
 // create attaches no probe at all, while the emitter still writes
 // `CREATE INDEX IF NOT EXISTS`. The name is skipped by the server and the migration
@@ -20,7 +20,7 @@
 // its table, which is what `Capability::SchemaWideIndexNames` names; MySQL scopes
 // index names per table, writes no `IF NOT EXISTS`, and evaluates no probe, so there
 // is nothing here to cover. SQLite shares the schema-wide scoping and is covered for
-// the `createIndex` shape in `crates/zeroship-migrate/tests/existence_guard_sqlite.rs`;
+// the `createIndex` shape in `crates/zeroship-migrate/tests/sqlite_engine/existence_guard_sqlite.rs`;
 // the createTable shape on SQLite is NOT covered by this file and NOT covered there
 // either - a gap, not a handoff.
 //

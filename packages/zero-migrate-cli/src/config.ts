@@ -157,7 +157,7 @@ function assertRegularFile(path: string, required: boolean): boolean {
  * recommend.
  *
  * Ported from the zeroship platform one-shot this CLI replaced: its DSN reader
- * (`crates/core/src/config/secrets.rs`, `enforce_owner_only`) rejected any file
+ * (`crates/zeroship-core/src/config/secrets.rs`, `enforce_owner_only`) rejected any file
  * with a bit set in 0o077, and dropping that on the way across would have been a
  * silent security regression. The mode and the fix are both named, for the same
  * reason that reader named them: a refusal an operator cannot act on gets worked
