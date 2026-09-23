@@ -666,6 +666,7 @@ async fn child(
         deploy: &deploy_id,
         options: &start,
         input_source: Some(parent),
+        max_input_bytes: policy.max_input_bytes,
     };
     insert_root_run(tx, app, &run, now).await?;
     tx.database()

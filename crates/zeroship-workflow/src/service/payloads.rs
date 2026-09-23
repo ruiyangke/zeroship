@@ -1,5 +1,5 @@
 use super::{
-    app::{deadline, emit, lock_app, lock_run, not_found, validate_run},
+    app::{deadline, emit, encode, lock_app, lock_run, not_found, validate_run},
     models,
     policy::PolicyAuthority,
     store::{Row, Transaction},
@@ -774,10 +774,12 @@ pub(crate) struct RunGeneration<'a> {
 /// an app's payload budget on it. Either way the body is handed a JSON null,
 /// so the two spellings of nothing stay the same run.
 ///
-/// This is where a start value stops being a value. `max_payload_bytes` is what
-/// bounds it, because that is the budget the staged object is admitted and read
-/// back under. `max_input_bytes` measures an inline journal column, and a
-/// generation row carries none for an input.
+/// This is where a start value stops being a value, and `max_input_bytes` is
+/// what bounds it. The executor reads a run's input in full and hands the body
+/// the value, so the bytes are resident alongside the isolate however they were
+/// stored; that is the quantity this bound measures, and staging does not move
+/// it onto the payload ceiling. Refusing here spends no payload budget on a
+/// start no run will reach.
 ///
 /// # Errors
 /// Reports an unserializable value and every refusal staging reports.
@@ -786,9 +788,13 @@ pub(crate) async fn stage_start_input(
     api: &AppWorkflows,
     request: &RequestId,
     input: &serde_json::Value,
+    max_input_bytes: usize,
 ) -> Result<Option<WorkflowOutputRef>, WorkflowServiceError> {
     if input.is_null() {
         return Ok(None);
+    }
+    if encode(input)?.len() > max_input_bytes {
+        return Err(WorkflowServiceError::PayloadTooLarge);
     }
     stager.stage_input(api, request, input).await.map(Some)
 }

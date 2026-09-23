@@ -316,6 +316,9 @@ impl Objects {
             api,
             &crate::service::RequestId::mint(),
             &input,
+            // The app's own bound, so a fixture stages what the service would
+            // admit rather than a ceiling invented here.
+            api.service.policy_for(&api.app).unwrap().max_input_bytes,
         )
         .await
         .unwrap()

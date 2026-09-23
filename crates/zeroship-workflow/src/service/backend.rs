@@ -213,9 +213,15 @@ impl WorkflowBackend for AppBackend {
                 // Staging comes first because it is object I/O, and the
                 // transaction it precedes holds the app lock.
                 let request = RequestId::mint();
-                options.input_ref =
-                    super::payloads::stage_start_input(inputs.as_ref(), &api, &request, &input)
-                        .await?;
+                let bound = api.service.policy_for(&api.app)?.max_input_bytes;
+                options.input_ref = super::payloads::stage_start_input(
+                    inputs.as_ref(),
+                    &api,
+                    &request,
+                    &input,
+                    bound,
+                )
+                .await?;
                 api.start(&request, &workflow_name, options).await
             }
             .boxed_local()

@@ -450,6 +450,7 @@ pub(crate) async fn apply(
             // The closing generation's task staged the seed, so its row is what
             // proves the successor may take the object.
             input_source: Some(run),
+            max_input_bytes: policy.max_input_bytes,
         };
         insert_continued_run(tx, app, &successor, now, &source).await?;
         link_continuation(tx, app, run, &id).await?;

@@ -518,6 +518,7 @@ async fn outcome_contract(store: Rc<OrmStore>) {
             deploy: &deployment.id,
             options: &StartOptions::default(),
             input_source: None,
+            max_input_bytes: AppPolicy::default().max_input_bytes,
         },
         now,
     )
