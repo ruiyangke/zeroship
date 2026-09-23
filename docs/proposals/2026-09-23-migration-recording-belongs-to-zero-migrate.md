@@ -49,10 +49,28 @@ failure mode the dev tier exists to avoid.
 
 ## The change
 
-`zero-migrate` exports a directory-level entry - discover, order, load, record, apply - and the
-plugin calls it with the migrations dir and a driver. `recorder.ts` is deleted rather than kept
-beside it, and with it the plugin's direct use of the addon: the plugin stops naming a verb, which
-also settles the operator's objection to a dialect-specific one reaching that far up the stack.
+Narrower than it looks, because `zero-migrate` needs no new CAPABILITY. Measured: its CLI already
+drives SQLite - `DriverConfig` carries `{ kind: "sqlite", appPath, journalPath }`, and the driver
+resolver accepts `sqlite:<path>` or a bare `.sqlite` / `.db` path with `--journal` as an override -
+and it already accepts all three zeroship-specific inputs the dev path supplies: `--owner-app`,
+`--registry` (the table-ownership registry) and `--policy` (ordered charter layers). A creator can
+apply the dev database by hand today with nothing but that CLI.
+
+What is missing is an EXPORT, not a feature. The library should expose the directory-level entry
+its own CLI already uses internally - discover, order, load, record, apply - and
+`zeroship-dev-migrate` should shrink to the three things only it can do:
+
+- read `zeroship.jsonc` to select the database, its label, whether it is the app's primary, and its
+  migrations and out dirs;
+- run gen-types, because `env.db.ts` and `schema.runtime.json` are zeroship concepts the engine has
+  never heard of, and because the apply's ownership registry is keyed on the descriptor's
+  collections, so one command has to produce both or they disagree;
+- derive the arguments - registry, policy, owner app, SQLite path - from that config, rather than
+  making a creator hand-type four values the file already declares.
+
+`recorder.ts` is deleted rather than kept beside it, and with it the plugin's direct use of the
+addon: the plugin stops naming a verb, which also settles the operator's objection to a
+dialect-specific one reaching that far up the stack.
 
 The order contract, the uniqueness guard and the extension set then have ONE definition. Today they
 have two, and the two differ.
