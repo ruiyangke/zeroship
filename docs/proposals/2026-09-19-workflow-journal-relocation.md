@@ -358,10 +358,12 @@ protocol. This extends a working client rather than inventing one.
 7. **Drop `zeroship-data-orm` from the crate the worker links.** The last step of moving the
    `service/` tree, not a deletion available earlier.
 
-**Measure the latency question before step 1, not after step 4.** Open 1 decides whether this is
-viable under load, and it is answerable now: transitions already batch, so a dispatch's outcome
-count can be measured against a round trip on today's code. That is the cheapest de-risking
-available and it gates the whole design rather than one step.
+**Latency is not the gate; payload is, and its bound is settled.** Open 1 holds the answer and
+names `crates/zeroship-workflow-client/tests/round_trip_cost.rs` as the instrument: re-run it
+rather than trusting a paragraph. The bounds a crossing payload meets answer to the ceiling
+constants in `crates/zeroship-core/src/workflow_policy.rs`, so step 4 plans against a bound
+instead of choosing one. Read Open 4 alongside it, because every reading behind Open 1 was taken
+over loopback.
 
 **The fence is a separate track, not a gate.** Under this design only the service reaches the
 journal, so the `app_id` filter sits inside a trusted process and is defensible without
@@ -403,26 +405,44 @@ stall the defect fixes that motivate the move.
    `crates/zeroship-core/src/workflow_coordination.rs` carries no journal. Two confusably named
    types in two crates: read any claim about "the assignment" against which one it means.
 
-   Two shipped bounds already disagree about the crossing this move would create:
-   `AppPolicy::max_journal_bytes` against the client's `max_response_bytes`, and
-   `AppPolicy::max_input_bytes` against `max_request_bytes` - and the worker takes the client
-   defaults, `client_options` in `crates/zeroship-worker/src/workflow_host.rs` returning
-   `ClientOptions::default()` with no configuration surface to change them. The pairs are not
-   like for like. The policy bounds count stored `StepCheckpoint` JSON, one per item and one
-   accumulated per run generation; the client bounds count a single HTTP message. And `replay`
-   in `crates/zeroship-workflow/src/service/journal.rs` narrows `StepCheckpoint` to
-   `JournalStep` and drops retrying rows, so the journal bound is an upper bound on wire bytes
-   rather than a measure of them.
+   **The bounds describing this crossing answer to one authority.** Neither the policy bound nor
+   the transport bound is authoritative over the other. The ceiling constants in
+   `crates/zeroship-core/src/workflow_policy.rs` name each shared quantity once, and both sides
+   stand in the same relation to it: `AppPolicy::validate` refuses `max_journal_bytes` above the
+   journal ceiling and the client's `max_response_bytes` default derives from it;
+   `max_input_bytes` and `max_request_bytes` stand the same way to the input ceiling. So
+   `client_options` in `crates/zeroship-worker/src/workflow_host.rs`, returning
+   `ClientOptions::default()`, needs no configuration surface of its own to keep the two in
+   step: it will not refuse, on its own account, something admission admitted. What a peer
+   accepts stays that peer's own bound, which is the next paragraph.
 
-   The decision Plan step 4 cannot avoid: when the dispatch reply carries the journal and the
-   settle request carries the execution, which side is the authority - does the transport bound
-   rise to admit what the policy already admits, or does the policy bound fall to what the
-   transport will carry? Deciding how the journal crosses is the real design work behind this
-   move. See Open 2, which is the same question seen from the payload side.
+   **The request path is three numbers, not two.** The client's `Options::max_request_bytes`
+   default, the server's `DEFAULT_MAX_REQUEST_BYTES` in
+   `crates/zeroship-workflow-server/src/api.rs`, and the `workflow.max_request_bytes` setting
+   that defaults to that constant. Only the first describes the input quantity. The other two
+   are the global body cap `configure_with_limit` installs on the `ServiceConfig` state, which
+   covers every endpoint on that server and buffers rather than streams, so raising it to admit
+   a journal would widen the per-request buffer on `healthz`, `verify_assignment`, `manage` and
+   `renew` alike. It stays its own bound. An endpoint that comes to carry a journal takes a
+   named per-resource bound derived from the ceiling instead, the shape
+   `crates/zeroship-migrate-server/src/api.rs` and
+   `crates/zeroship-control/src/deployment_hold_api.rs` already use. No endpoint carries one
+   today, so none has one.
 
-2. **MEASURED - referencing does not cover the creator-facing reads, and which bound governs
-   them is undecided.** The measurement settles what the paths are and leaves open which side
-   is the authority, so this item stays open on the decision rather than on the measurement.
+   The paired quantities are not like for like, which is why the ceiling bounds each of them
+   rather than equating two measurements. The policy bounds count stored `StepCheckpoint` JSON,
+   one per item and one accumulated per run generation; the client bounds count a single HTTP
+   message. And `replay` in `crates/zeroship-workflow/src/service/journal.rs` narrows
+   `StepCheckpoint` to `JournalStep` and drops retrying rows, so the journal bound is an upper
+   bound on wire bytes rather than a measure of them.
+
+   Plan step 4 therefore inherits a bound it can plan against rather than a decision it has to
+   make. See Open 2, which is the same question seen from the payload side and closed with this
+   one.
+
+2. **DECIDED - referencing does not cover the creator-facing reads, and a ceiling both sides
+   derive from governs them.** The measurement settled what the paths are; the decision settles
+   which bound governs, and it is the same decision as Open 1's.
 
    **Referencing covers the journal, not the read.** `WorkflowOutputRef` in
    `crates/zeroship-workflow/src/engine.rs` keeps the stored row a reference rather than an
@@ -431,35 +451,46 @@ stall the defect fixes that motivate the move.
    answer `Vec<u8>`, so a named step's output and a run's final output arrive whole in the
    caller's process however they are stored.
 
-   **What bounds those reads is a host budget, not the policy.** `ObjectStepOutputs` in
-   `crates/zeroship-workflow-runner/src/payloads/objects.rs` resolves both "inside the host
-   memory budget", holds a read limit it refuses to have empty, and applies it to each read
-   through `into_bytes`, which rejects an oversized reference rather than streaming it. The
-   worker takes that limit from `TaskPayloadLimits::max_payload_bytes` in
-   `crates/zeroship-workflow-runner/src/outputs.rs`, declared there as a host budget under which
-   "Service policy remains authoritative", and `crates/zeroship-cli/src/workflow/host.rs`
-   composes the dev tier's reader the same way. The policy bound it defers to,
-   `AppPolicy::max_payload_bytes` in `crates/zeroship-core/src/workflow_policy.rs`, is enforced
-   on the way in, by `stage_payload` in `crates/zeroship-workflow/src/service/payloads.rs`, and
-   nowhere on the way out. So the payload path has the shape Open 1 records for the journal: a
-   policy bound and a host bound set independently, with nothing reconciling them, and a host
-   budget below the policy admits a payload that cannot be read back.
+   **The host budget bounding those reads derives from the ceiling the policy is refused
+   above.** `ObjectStepOutputs` in `crates/zeroship-workflow-runner/src/payloads/objects.rs`
+   resolves both "inside the host memory budget", holds a read limit it refuses to have empty,
+   and applies it to each read through `into_bytes`, which rejects an oversized reference rather
+   than streaming it. The worker takes that limit from `TaskPayloadLimits::max_payload_bytes` in
+   `crates/zeroship-workflow-runner/src/outputs.rs`, whose default derives from the payload
+   ceiling, and `crates/zeroship-cli/src/workflow/host.rs` composes the dev tier's reader the
+   same way. `AppPolicy::max_payload_bytes` in `crates/zeroship-core/src/workflow_policy.rs` is
+   refused above that same ceiling, so what `stage_payload` in
+   `crates/zeroship-workflow/src/service/payloads.rs` admits on the way in is within the budget
+   the read has on the way out.
 
-   **The conflict is prospective rather than live.** Nothing of this crosses that transport
-   today. `zeroship-workflow-client` does not depend on `zeroship-workflow`, and the
+   **Two refusals, because one invariant has two halves observable at different times.** Startup
+   knows the configured host budgets and has observed no policy; admission knows the policy and
+   cannot re-read what the host was configured with. So `AppPolicy::validate` refuses a policy
+   above the ceiling wherever authority is admitted, and a host refuses a configured budget
+   below it before it serves: `TaskPayloadLimits::validate_configured`, called from
+   `LocalConfig::validate` in `crates/zeroship-cli/src/workflow.rs`, which is where `[payloads]`
+   is configured. Either refusal alone catches one direction and leaves the other open.
+
+   **The conflict this closes is prospective rather than live.** Nothing of this crosses that
+   transport today. `zeroship-workflow-client` does not depend on `zeroship-workflow`, and the
    `Assignment` it exchanges in `crates/zeroship-core/src/workflow_coordination.rs` carries an
-   app, a worker, a revision and an expiry. The pairs Open 1 names are also not like for like,
-   and neither is this one: the policy bounds count stored `StepCheckpoint` JSON while the
-   client bounds count a single HTTP message, and `replay` in
-   `crates/zeroship-workflow/src/service/journal.rs` narrows `StepCheckpoint` to `JournalStep`
-   and drops retrying rows, so a policy bound is an upper bound on wire bytes rather than a
-   measure of them.
+   app, a worker, a revision and an expiry. That is also why a ceiling is the authority rather
+   than either measurement: the pairs Open 1 names are not like for like, and neither is this
+   one. The policy bounds count stored `StepCheckpoint` JSON while the client bounds count a
+   single HTTP message, and `replay` in `crates/zeroship-workflow/src/service/journal.rs`
+   narrows `StepCheckpoint` to `JournalStep` and drops retrying rows, so a policy bound is an
+   upper bound on wire bytes rather than a measure of them.
 
-   **What stays undecided.** Which side is the authority once these reads cross: does the
-   transport bound rise to admit what the policy already admits, or does the policy bound fall
-   to what the transport will carry? That is the decision Plan step 4 cannot avoid, stated from
-   the payload side rather than the journal side. It is one decision, not two, so this item and
-   Open 1 close together or not at all.
+   **What this does not cover.** A ceiling serves a pair that measures the same bytes.
+   `TaskPayloadLimits::max_inline_bytes` and `AppPolicy::max_input_bytes` do not: an inline
+   value rides inside the checkpoint the policy bound measures, so the host bound is a part of
+   the policy bound rather than the same quantity, separated by the checkpoint's own framing
+   and, in `apply` in `crates/zeroship-workflow/src/service/frontier.rs`, by however many
+   outcomes one batch carries. They are equal today, so a value at the host's inline threshold
+   is refused by `journal.rs` rather than referenced by the host. Deciding what separation they
+   need is its own item, not this one.
+
+   It was one decision, not two, and it closes this item and Open 1 together.
 
 3. **Does `workflow_manager` become its own database?** NEEDS-DECISION, deferrable. It is a
    schema in the control database today with its own migrator, login and search path. Moving
