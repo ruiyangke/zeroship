@@ -5,6 +5,7 @@ use crate::service::{delivery::JobAcceptance, ControlIntent};
 pub(super) async fn mid_propagation(store: Rc<OrmStore>) {
     let (service, app, _, _deployments) = registered_service(store).await;
     let scope = service.fixture_app(app.clone());
+    let objects = objects::Objects::new();
     let worker = WorkerIdentity::new("fenced-children".into()).unwrap();
     let parent = scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
@@ -130,12 +131,32 @@ pub(super) async fn mid_propagation(store: Rc<OrmStore>) {
     );
     let row = run_row(&service, &app, &running.invocation.run_id).await;
     assert_eq!(row.text("control").unwrap(), "cancel");
+    // The late result is staged first, so the run reports a result that exists
+    // and the discarded value is the one a promotion would have recorded. A
+    // completion carrying nothing would leave the status empty on its own.
+    const LATE: &[u8] = br#""late""#;
+    let late = output_reference(LATE);
+    let staged = service
+        .stage_payload(
+            &worker,
+            &running.id,
+            &running.token,
+            &RequestId::mint(),
+            late.clone(),
+            objects.upload(LATE),
+        )
+        .await
+        .unwrap();
+    assert!(
+        objects.exists(&app, &staged.id),
+        "the late result has to exist for its discard to mean anything"
+    );
     let receipt = service
         .complete(
             &worker,
             &running.id,
             &running.token,
-            execution(json!([{"kind":"RunCompleted","output":"late"}])),
+            execution(json!([{"kind":"RunCompleted","outputRef":late}])),
         )
         .await
         .unwrap();
@@ -148,6 +169,12 @@ pub(super) async fn mid_propagation(store: Rc<OrmStore>) {
             .output,
         None
     );
+    assert!(matches!(
+        scope
+            .read_output(&running.invocation.run_id, objects.open())
+            .await,
+        Err(WorkflowServiceError::NotFound(_))
+    ));
 }
 
 pub(super) async fn restart(store: Rc<OrmStore>) {

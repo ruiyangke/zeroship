@@ -125,7 +125,6 @@ zeroship_data_orm::orm::schema! {
             deploy_id: Text,
             input: Text,
             input_ref: Nullable<Text>,
-            output: Nullable<Text>,
             output_ref: Nullable<Text>,
             error: Nullable<Text>,
             state: Text,

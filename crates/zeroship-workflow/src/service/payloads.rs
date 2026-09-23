@@ -659,13 +659,13 @@ impl AppWorkflows {
     }
 
     /// Read the run's final output object from the generation the run is
-    /// currently on. A run whose output stayed in the journal owns no object
-    /// here and is reported as missing: `status` already carries that value
-    /// whole, so there is nothing for this to open.
+    /// currently on. A run that returned nothing owns no object here and is
+    /// reported as missing, which is the same absence `status` reports by
+    /// carrying no descriptor.
     ///
     /// # Errors
-    /// Rejects an unknown run, an output that was never stored as an object,
-    /// unavailable policy and failed object reads.
+    /// Rejects an unknown run, a run that staged no output object, unavailable
+    /// policy and failed object reads.
     pub async fn read_output<O: PayloadOpener>(
         &self,
         run_id: &str,

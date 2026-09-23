@@ -213,7 +213,7 @@ async fn binding_reads_outputs_and_denies_foreign_run_handles() {
             &task.token,
             WorkflowExecution::from_runtime_value(json!({"outcomes":[
                 {"kind":"StepCompleted","ordinal":0,"name":"value","output":{"secret":"app-a"}},
-                {"kind":"RunCompleted","output":"done"}
+                {"kind":"RunCompleted"}
             ]}))
             .unwrap(),
         )
@@ -245,9 +245,10 @@ async fn binding_reads_outputs_and_denies_foreign_run_handles() {
 
 /// A creator holding only a run id reads that run's final output. The three
 /// fetches below share one handler source and one call, and differ in exactly
-/// one variable each: who is asking, and where the run's output was stored.
+/// one variable each: who is asking, and whether the run returned anything for
+/// its payload to hold.
 #[compio::test]
-async fn binding_reads_blob_backed_run_output_and_denies_foreign_run_handles() {
+async fn binding_reads_a_staged_run_output_and_denies_foreign_run_handles() {
     let fixture = Fixture::new().await;
     let worker = WorkerIdentity::new("output-binding".into()).unwrap();
     let bytes = br#"{"secret":"app-a"}"#;
@@ -256,7 +257,7 @@ async fn binding_reads_blob_backed_run_output_and_denies_foreign_run_handles() {
         size: i64::try_from(bytes.len()).unwrap(),
         content_type: Some("application/json".into()),
     };
-    let blob = fixture
+    let staged = fixture
         .app
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
@@ -290,13 +291,19 @@ async fn binding_reads_blob_backed_run_output_and_denies_foreign_run_handles() {
         .unwrap();
     // The premise this capability exists for: status hands out a descriptor,
     // so the bytes are unreachable without a read of their own.
-    let described = fixture.app.status(&blob.id).await.unwrap().output.unwrap();
+    let described = fixture
+        .app
+        .status(&staged.id)
+        .await
+        .unwrap()
+        .output
+        .unwrap();
     assert_eq!(described["kind"], "ref", "{described}");
     assert_eq!(described["hash"], reference.hash);
 
-    // The control: same app, same call, an output small enough to have stayed
-    // in the journal, so no object was ever written for it.
-    let inline = fixture
+    // The control: same app, same call, a run that returned nothing, so no
+    // object was ever written for it and status names none.
+    let empty = fixture
         .app
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
@@ -309,16 +316,16 @@ async fn binding_reads_blob_backed_run_output_and_denies_foreign_run_handles() {
             &task.id,
             &task.token,
             WorkflowExecution::from_runtime_value(json!({"outcomes":[
-                {"kind":"RunCompleted","output":{"secret":"app-a"}}
+                {"kind":"RunCompleted"}
             ]}))
             .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(
-        fixture.app.status(&inline.id).await.unwrap().output.unwrap(),
-        json!({"secret":"app-a"}),
-        "the control's output must reach status whole, not as a descriptor"
+        fixture.app.status(&empty.id).await.unwrap().output,
+        None,
+        "a run that returned nothing must name no payload"
     );
 
     let source = |run: &str| {
@@ -338,26 +345,27 @@ async fn binding_reads_blob_backed_run_output_and_denies_foreign_run_handles() {
     let owner = fetch(fixture.runtime(
         &fixture.app,
         Some(fixture.app.app_id().clone()),
-        &source(&blob.id),
+        &source(&staged.id),
     ))
     .await;
     assert_eq!(owner, json!({"output":{"secret":"app-a"}}));
     let stranger = fetch(fixture.runtime(
         &fixture.other,
         Some(fixture.other.app_id().clone()),
-        &source(&blob.id),
+        &source(&staged.id),
     ))
     .await;
     assert_eq!(stranger, json!({"code":"workflow_not_found"}));
-    // An inline output owns no object, so there is nothing here to open. The
-    // creator reads that value off `status`, which carried it whole above.
-    let inline_read = fetch(fixture.runtime(
+    // A run that returned nothing owns no object, so the app that owns the run
+    // finds nothing to open on it either. Without this arm the owner's read
+    // above could be reporting bytes the call never had to find.
+    let empty_read = fetch(fixture.runtime(
         &fixture.app,
         Some(fixture.app.app_id().clone()),
-        &source(&inline.id),
+        &source(&empty.id),
     ))
     .await;
-    assert_eq!(inline_read, json!({"code":"workflow_not_found"}));
+    assert_eq!(empty_read, json!({"code":"workflow_not_found"}));
 }
 
 #[compio::test]

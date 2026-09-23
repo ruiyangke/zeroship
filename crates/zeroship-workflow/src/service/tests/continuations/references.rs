@@ -32,15 +32,20 @@ async fn purge(
 async fn pinned_members(store: Rc<OrmStore>) {
     let (service, app_id, _, _deployments) = registered_service(store).await;
     let scope = service.fixture_app(app_id.clone());
+    let objects = Objects::new();
     let worker = WorkerIdentity::new("continuation-references".into()).unwrap();
     let owner = parent(&service, &scope, &worker, None).await;
     let (child, accepted) = accepted(&scope, &owner).await;
     let successor = continue_run(&service, &scope, &worker, &child).await;
-    finish_run(&service, &worker, &successor, "done").await;
+    let result = finish_run(&service, &objects, &worker, &successor, br#""done""#).await;
     assert_eq!(deliver_propagations(&scope).await.len(), 1);
     let task = service.poll(&worker).await.unwrap().unwrap();
     assert_eq!(task.invocation.run_id, owner);
-    assert_eq!(task.invocation.journal[0].output, Some(json!("done")));
+    assert_eq!(
+        task.invocation.journal[0].output_ref.as_ref(),
+        Some(&result)
+    );
+    assert!(task.invocation.journal[0].output.is_none());
     service
         .complete(
             &worker,

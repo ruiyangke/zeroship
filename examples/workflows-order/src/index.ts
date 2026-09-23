@@ -163,8 +163,7 @@ async function fetch(request: Request, rawEnv: unknown): Promise<Response> {
   const statusMatch = url.pathname.match(/^\/orders\/([^/]+)$/);
   if (request.method === "GET" && statusMatch) {
     const runId = decodeURIComponent(statusMatch[1]!);
-    const status = await env.workflows.OrderWorkflow.get(runId).status();
-    return json({ runId, ...status });
+    return json({ runId, ...(await report(env.workflows.OrderWorkflow.get(runId))) });
   }
 
   const approveMatch = url.pathname.match(/^\/orders\/([^/]+)\/approve$/);
@@ -180,11 +179,30 @@ async function fetch(request: Request, rawEnv: unknown): Promise<Response> {
       },
       idempotencyKey: payload.approvalCode,
     });
-    const status = await run.status();
-    return json({ runId, ...status });
+    return json({ runId, ...(await report(run)) });
   }
 
   return json({ error: "not found" }, 404);
+}
+
+/**
+ * What a caller gets back for a run: its state, its error, and the value it
+ * returned. A run's result is a blob whatever it weighs, so `status` locates it
+ * and `readOutput` is what turns it back into the value.
+ */
+async function report(run: WorkflowRun<OrderOutput>): Promise<{
+  state: string;
+  output: OrderOutput | null;
+  error: unknown;
+}> {
+  const status = await run.status();
+  return {
+    state: status.state,
+    output: status.output
+      ? (JSON.parse(new TextDecoder().decode(await run.readOutput())) as OrderOutput)
+      : null,
+    error: status.error ?? null,
+  };
 }
 
 async function loadOrder(input: OrderInput, correlationId: string): Promise<LoadedOrder> {

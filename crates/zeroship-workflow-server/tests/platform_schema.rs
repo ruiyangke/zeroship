@@ -196,10 +196,12 @@ async fn journal_is_installed_and_unread(fixture: &platform::Platform) {
 /// which is where `db/migrations-ts/20260919000000_workflow_journal.ts` puts it.
 ///
 /// The set is closed, so a new json, jsonb or bytea column anywhere in
-/// `workflow_manager`, or a new column named for a payload, fails here. The two
-/// it names are the journal's inline generation payload;
-/// `docs/proposals/2026-09-19-workflow-journal-relocation.md` settles that they
-/// leave, and emptying this list is what that change looks like from here.
+/// `workflow_manager`, or a new column named for a payload, fails here. The
+/// predicate still names `output`, which is how a reintroduced inline run result
+/// fails here rather than passing unnoticed. The one column it does name is the
+/// journal's inline generation input;
+/// `docs/proposals/2026-09-19-workflow-journal-relocation.md` settles that it
+/// leaves, and emptying this list is what that change looks like from here.
 ///
 /// WHAT THIS DOES NOT SEE. The predicate matches a column's TYPE or its NAME, so
 /// creator payload carried in a text column under another name passes it. The
@@ -208,8 +210,8 @@ async fn journal_is_installed_and_unread(fixture: &platform::Platform) {
 /// `crates/zeroship-workflow/src/engine.rs`, whose `output`, `error` and
 /// `child_input` are creator values; `finish_run`
 /// (`crates/zeroship-workflow/src/service/frontier.rs`) writes a creator error
-/// into `__zeroship_workflow_generations.error` beside the two columns named
-/// below; the `payload` columns of `__zeroship_workflow_signals` and
+/// into `__zeroship_workflow_generations.error` beside the column named below;
+/// the `payload` columns of `__zeroship_workflow_signals` and
 /// `__zeroship_workflow_broadcasts` take `options.payload` from the caller; and
 /// `__zeroship_workflow_deploys.manifest` carries every `ScheduleRegistration`
 /// input the deployment declared. An empty list here is not the same claim as a
@@ -231,10 +233,7 @@ async fn journal_payload_columns_are_a_closed_set(fixture: &platform::Platform) 
             .iter()
             .map(|row| (row.get::<_, String>(0), row.get::<_, String>(1)))
             .collect::<Vec<_>>(),
-        vec![
-            (format!("{JOURNAL_PREFIX}generations"), "input".to_owned()),
-            (format!("{JOURNAL_PREFIX}generations"), "output".to_owned()),
-        ],
+        vec![(format!("{JOURNAL_PREFIX}generations"), "input".to_owned())],
     );
 }
 

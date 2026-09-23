@@ -163,7 +163,7 @@ pub(super) async fn retirement(store: Rc<OrmStore>) {
             &fixture.worker,
             &fixture.task.id,
             &fixture.task.token,
-            execution(json!([{"kind":"RunCompleted", "output":"done"}])),
+            execution(json!([{"kind":"RunCompleted"}])),
         )
         .await
         .unwrap();

@@ -40,6 +40,10 @@ export default {
     }
     const run = env.workflows.Example.get(url.searchParams.get("id"));
     if (url.pathname === "/signal") return Response.json(await run.signal({ type: "resume" }));
+    if (url.pathname === "/result") {
+      const bytes = await run.readOutput();
+      return Response.json({ size: bytes.length, value: JSON.parse(new TextDecoder().decode(bytes)) });
+    }
     return Response.json(await run.status());
   }
 };

@@ -106,7 +106,7 @@ pub(super) async fn lifecycle(store: Rc<OrmStore>) {
             &worker,
             &task.id,
             &task.token,
-            execution(json!([{"kind":"RunCompleted","output":"done"}])),
+            execution(json!([{"kind":"RunCompleted"}])),
         )
         .await
         .unwrap();

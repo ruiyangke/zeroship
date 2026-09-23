@@ -250,4 +250,8 @@ ALTER TABLE "__zeroship_workflow_schema"."__zeroship_workflow_tasks" ADD COLUMN 
 
 
 ALTER TABLE "__zeroship_workflow_schema"."__zeroship_workflow_generations" ADD COLUMN "continued_as_new_run_id" text;
-INSERT INTO "__zeroship_workflow_schema".__zeroship_workflow_schema_version (id, version, fingerprint) VALUES ('workflow', 4, '609de2e638de3a79af5ead686c0bb57401ee861ff1afe7d13bee3bb8586071a6');
+
+
+
+ALTER TABLE "__zeroship_workflow_schema"."__zeroship_workflow_generations" DROP COLUMN "output";
+INSERT INTO "__zeroship_workflow_schema".__zeroship_workflow_schema_version (id, version, fingerprint) VALUES ('workflow', 5, '84324f44d429587ee41ec677f26ce50a116b958038062dc05221c6e9eba8f53b');

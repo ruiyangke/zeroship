@@ -115,7 +115,7 @@ async fn inline_step_bodies(store: Rc<zeroship_workflow::service::store::OrmStor
             &task.token,
             execution(json!([
                 {"kind":"StepCompleted", "ordinal":0, "name":"value", "output":{"value":1}},
-                {"kind":"RunCompleted", "output":"done"}
+                {"kind":"RunCompleted"}
             ])),
         )
         .await
@@ -214,8 +214,10 @@ async fn run_output_bodies(store: Rc<zeroship_workflow::service::store::OrmStore
         reader.read_output(&stranger, &blob.id).await,
         Err(WorkflowServiceError::NotFound(_))
     ));
-    // One variable differs from the first read: where the output was stored.
-    let inline = scope
+    // One variable differs from the first read: whether the run produced a
+    // result at all. A run that returned nothing stages no object, so a caller
+    // holding its id has nothing to open.
+    let empty = scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .unwrap();
@@ -225,17 +227,17 @@ async fn run_output_bodies(store: Rc<zeroship_workflow::service::store::OrmStore
             &worker,
             &task.id,
             &task.token,
-            execution(json!([{"kind":"RunCompleted", "output":{"value":"final"}}])),
+            execution(json!([{"kind":"RunCompleted"}])),
         )
         .await
         .unwrap();
     assert_eq!(
-        scope.status(&inline.id).await.unwrap().output.unwrap(),
-        json!({"value":"final"}),
-        "the control's output must stay in the journal for this to be a control"
+        scope.status(&empty.id).await.unwrap().output,
+        None,
+        "the control run must report no output for this to be a control"
     );
     assert!(matches!(
-        reader.read_output(&scope, &inline.id).await,
+        reader.read_output(&scope, &empty.id).await,
         Err(WorkflowServiceError::NotFound(_))
     ));
 }
