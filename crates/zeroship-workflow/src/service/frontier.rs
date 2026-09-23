@@ -86,7 +86,10 @@ pub(crate) async fn invocation(
         }
         .into(),
         trigger: WorkflowTrigger {
-            input: Some(decode(&input.input)?),
+            // What a run starts from is the payload object its descriptor
+            // names, or nothing. The invocation locates it; the executor reads
+            // the bytes and hands the body the value.
+            input: None,
             input_ref: input.input_ref.map(|value| decode(&value)).transpose()?,
             started_at: DateTime::from_timestamp_millis(input.started_at).ok_or_else(|| {
                 WorkflowServiceError::Internal("invalid workflow start time".into())
@@ -350,7 +353,7 @@ pub(crate) async fn apply(
             super::payloads::promote(
                 tx,
                 app,
-                run,
+                Some(run),
                 super::payloads::RunGeneration {
                     id: &run.text("id")?,
                     generation: run.integer("generation")?,
@@ -379,8 +382,14 @@ pub(crate) async fn apply(
         seed_input_ref,
     } = update
     {
-        if seed_input_ref.is_some() && seed_input.is_some() {
-            return journal::invalid("workflow input cannot be both inline and referenced");
+        // The generation row has no inline slot for a run's input: what a
+        // successor starts from is the payload object its descriptor names, or
+        // nothing. An executor reporting a seed it never staged is reporting a
+        // run this journal cannot admit, so the frontier refuses it instead of
+        // dropping it. The runner stages every value a body seeds a
+        // continuation with, which is why no executor reaches this.
+        if seed_input.is_some() {
+            return journal::invalid("workflow continuation input must be a staged reference");
         }
         let steps = journal::load(tx, app, &run.text("id")?, run.integer("generation")?).await?;
         if steps
@@ -429,7 +438,7 @@ pub(crate) async fn apply(
         };
         finish_run(tx, app, run, continued, now, false).await?;
         let options = StartOptions {
-            input: seed_input.unwrap_or(Value::Null),
+            input_ref: seed_input_ref,
             key,
             ..Default::default()
         };
@@ -438,30 +447,12 @@ pub(crate) async fn apply(
             name: &name,
             deploy: &deploy.id,
             options: &options,
+            // The closing generation's task staged the seed, so its row is what
+            // proves the successor may take the object.
+            input_source: Some(run),
+            max_input_bytes: policy.max_input_bytes,
         };
         insert_continued_run(tx, app, &successor, now, &source).await?;
-        if let Some(reference) = seed_input_ref {
-            super::payloads::promote(
-                tx,
-                app,
-                run,
-                super::payloads::RunGeneration {
-                    id: &id,
-                    generation: 0,
-                },
-                super::PayloadSlot::Input,
-                &reference,
-                now,
-            )
-            .await?;
-            tx.database()
-                .collection(models::generations::Entity::COLLECTION)?
-                .update(
-                    value!({"app_id":app.as_str(), "run_id":id.clone(), "generation":0}),
-                    value!({"input_ref":encode(&reference)?}),
-                )
-                .await?;
-        }
         link_continuation(tx, app, run, &id).await?;
         return Ok(RunState::ContinuedAsNew);
     }

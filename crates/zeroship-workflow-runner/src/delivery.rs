@@ -256,7 +256,9 @@ impl<T: JobTransport> DeliverySlot<T> {
             return self.acknowledge(receipt, &lease).await;
         }
         if matches!(lease.delivery().job.operation, JobOperation::Cron { .. }) {
-            let receipt = bounded(self.options.execution_timeout, app.cron_job(&lease)).await?;
+            let receipt =
+                bounded(self.options.execution_timeout, app.cron_job(&lease, &self.objects))
+                    .await?;
             return self.acknowledge(receipt, &lease).await;
         }
         if matches!(

@@ -470,7 +470,7 @@ async fn retired_app_handles(store: Rc<OrmStore>) {
     let objects = Objects::new();
     let backend = scope
         .clone()
-        .into_backend(&service, StepOutputs::shared(&objects, 1024))
+        .into_backend(&service, StepOutputs::shared(&objects, 1024), objects.stager())
         .unwrap();
     let unrelated = service.fixture_app(other);
     scope
@@ -487,7 +487,7 @@ async fn retired_app_handles(store: Rc<OrmStore>) {
         .await
         .unwrap();
     backend
-        .start("Example".into(), StartOptions::default())
+        .start("Example".into(), serde_json::Value::Null, StartOptions::default())
         .await
         .unwrap();
 
@@ -517,7 +517,7 @@ async fn retired_app_handles(store: Rc<OrmStore>) {
     ));
     assert!(matches!(
         backend
-            .start("Example".into(), StartOptions::default())
+            .start("Example".into(), serde_json::Value::Null, StartOptions::default())
             .await,
         Err(WorkflowServiceError::Unavailable(_))
     ));

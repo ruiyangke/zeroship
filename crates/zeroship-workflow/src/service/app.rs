@@ -300,6 +300,16 @@ impl AppWorkflows {
         result
     }
 
+    /// Admit a run of `name` from the input object `options` names.
+    ///
+    /// `request_id` is the start's idempotency key. It is also the key the
+    /// input object was staged under, so a retried start that reaches a stored
+    /// receipt and one that reaches this again both name the same object.
+    ///
+    /// # Errors
+    /// Rejects an invalid name or key, withdrawn admission, a fenced ingress
+    /// epoch, an absent workflow, a conflicting business key and an exhausted
+    /// live-run budget.
     pub async fn start(
         &self,
         request_id: &RequestId,
@@ -339,9 +349,6 @@ impl AppWorkflows {
         admit(policy)?;
         captured.check()?;
         require_open_epoch(&tx, &self.app, captured).await?;
-        if encode(&options.input)?.len() > policy.max_input_bytes {
-            return Err(WorkflowServiceError::PayloadTooLarge);
-        }
         let deploy = active_deploy(&mut tx, &self.app).await?;
         if !deploy.workflows.contains(name) {
             return Err(not_found("workflow"));
@@ -391,7 +398,15 @@ impl AppWorkflows {
                 ));
             }
             let id = typed_id::new_workflow_run_id();
-            insert_root_run(&mut tx, &self.app, &id, name, &deploy.id, &options, now).await?;
+            let run = NewRun {
+                id: &id,
+                name,
+                deploy: &deploy.id,
+                options: &options,
+                input_source: None,
+                max_input_bytes: policy.max_input_bytes,
+            };
+            insert_root_run(&mut tx, &self.app, &run, now).await?;
             StartedRun {
                 id,
                 state: RunState::Queued,
@@ -756,24 +771,30 @@ pub(crate) struct NewRun<'a> {
     pub name: &'a str,
     pub deploy: &'a str,
     pub options: &'a StartOptions,
+    /// The run whose authority staged `options.input_ref`, when one did: the
+    /// parent that passed a child its input, or the generation that seeded its
+    /// successor. A run started from outside any execution names none, and its
+    /// input is an object this app staged for itself and nobody owns yet.
+    pub input_source: Option<&'a Row>,
+    /// The ceiling on the object this run starts from.
+    ///
+    /// A run's input is materialized in full before its body runs: the executor
+    /// reads the object and hands the body the value, so the bytes are resident
+    /// alongside the isolate for the whole execution. That is what
+    /// `AppPolicy::max_input_bytes` measures, and it measures the same quantity
+    /// whether the value reached the journal inline or as an object, so moving
+    /// a run's input into the payload store does not move it onto the payload
+    /// budget's ceiling.
+    pub max_input_bytes: usize,
 }
 
 pub(crate) async fn insert_root_run(
     tx: &mut Transaction,
     app: &AppId,
-    id: &str,
-    name: &str,
-    deploy: &str,
-    options: &StartOptions,
+    run: &NewRun<'_>,
     now: i64,
 ) -> Result<(), WorkflowServiceError> {
-    let run = NewRun {
-        id,
-        name,
-        deploy,
-        options,
-    };
-    insert_run(tx, app, &run, now, None).await
+    insert_run(tx, app, run, now, None).await
 }
 
 pub(crate) async fn insert_continued_run(
@@ -798,7 +819,18 @@ async fn insert_run(
         name,
         deploy,
         options,
+        input_source,
+        max_input_bytes,
     } = *run;
+    // Every run's input passes here, whoever staged it. The runner admits an
+    // object against the payload ceiling, the budget for a blob read back on
+    // demand; a run's input is read in full before the body runs, so this is
+    // where it answers to the bound written for that.
+    if let Some(reference) = &options.input_ref {
+        if usize::try_from(reference.size).is_ok_and(|size| size > max_input_bytes) {
+            return Err(WorkflowServiceError::PayloadTooLarge);
+        }
+    }
     tx.database()
         .collection(models::runs::Entity::COLLECTION)?
         .insert(value!({
@@ -812,9 +844,28 @@ async fn insert_run(
         .collection(models::generations::Entity::COLLECTION)?
         .insert(value!({
             "id":super::types::storage_id(), "app_id":app.as_str(), "run_id":id, "generation":0, "deploy_id":deploy,
-            "input":encode(&options.input)?, "state":"queued", "started_at":now,
+            "input_ref":options.input_ref.as_ref().map(encode).transpose()?,
+            "state":"queued", "started_at":now,
         }))
         .await?;
+    // The generation row names the object; this edge is what owns it. Every
+    // admitted run takes that edge in the same write as the row that names it,
+    // so a run can never reach a committed generation whose input nothing holds.
+    if let Some(reference) = &options.input_ref {
+        super::payloads::promote(
+            tx,
+            app,
+            input_source,
+            super::payloads::RunGeneration {
+                id,
+                generation: 0,
+            },
+            super::PayloadSlot::Input,
+            reference,
+            now,
+        )
+        .await?;
+    }
     match source {
         Some(source) => {
             super::continuations::advance(tx, app, source, id, 0).await?;

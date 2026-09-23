@@ -194,6 +194,7 @@ pub async fn open<C: Composition>(
                 objects.clone(),
                 config.payloads.max_payload_bytes,
             )?),
+            Arc::new(objects.clone()),
         )?
         .with_commit_hint(Arc::new(move || {
             let _ = hint.try_send(());

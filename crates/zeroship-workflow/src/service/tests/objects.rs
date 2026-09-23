@@ -87,6 +87,18 @@ impl Objects {
         self.get(app, id).is_some()
     }
 
+    /// Every object this app holds, by the payload id it is keyed under.
+    pub fn stored_for(&self, app: &AppId) -> Vec<(String, Vec<u8>)> {
+        self.0
+            .lock()
+            .unwrap()
+            .stored
+            .iter()
+            .filter(|((owner, _), _)| owner == app.as_str())
+            .map(|((_, id), body)| (id.clone(), body.clone()))
+            .collect()
+    }
+
     /// Every payload a deletion was attempted for, in order.
     pub fn deletes(&self) -> Vec<String> {
         self.0.lock().unwrap().deletes.clone()
@@ -255,6 +267,61 @@ impl crate::StepOutputReader for StepOutputs {
             return Err(WorkflowServiceError::PayloadTooLarge);
         }
         Ok(bytes)
+    }
+}
+
+/// The host's start-input staging over this store, standing in for the object
+/// writer the workflow host supplies in production.
+#[async_trait::async_trait(?Send)]
+impl crate::InputStager for Objects {
+    async fn stage_input(
+        &self,
+        api: &crate::service::AppWorkflows,
+        request: &crate::service::RequestId,
+        input: &serde_json::Value,
+    ) -> Result<WorkflowOutputRef, WorkflowServiceError> {
+        let bytes = serde_json::to_vec(input).map_err(|_| {
+            WorkflowServiceError::InvalidRequest("invalid workflow run input".into())
+        })?;
+        let reference = WorkflowOutputRef {
+            hash: format!("{:x}", Sha256::digest(&bytes)),
+            size: i64::try_from(bytes.len()).map_err(|_| WorkflowServiceError::PayloadTooLarge)?,
+            content_type: Some("application/json".into()),
+        };
+        api.stage_input(request, reference.clone(), self.upload(&bytes))
+            .await?;
+        Ok(reference)
+    }
+}
+
+impl Objects {
+    /// This store as the seam a backend stages start inputs through.
+    pub fn stager(&self) -> crate::SharedInputStager {
+        Arc::new(self.clone())
+    }
+
+    /// The object `input` becomes, ready to be named by a start.
+    ///
+    /// A host stages a caller's start value before the journal ever sees it, so
+    /// a contract that starts a run from a value stages it the same way. The
+    /// object is ownerless until the generation that names it takes its edge,
+    /// so this runs outside any transaction the contract holds.
+    pub async fn start_input(
+        &self,
+        api: &crate::service::AppWorkflows,
+        input: serde_json::Value,
+    ) -> Option<WorkflowOutputRef> {
+        crate::service::payloads::stage_start_input(
+            self,
+            api,
+            &crate::service::RequestId::mint(),
+            &input,
+            // The app's own bound, so a fixture stages what the service would
+            // admit rather than a ceiling invented here.
+            api.service.policy_for(&api.app).unwrap().max_input_bytes,
+        )
+        .await
+        .unwrap()
     }
 }
 

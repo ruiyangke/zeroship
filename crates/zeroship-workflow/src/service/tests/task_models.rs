@@ -42,13 +42,18 @@ async fn postgres_replay_input_keeps_claim_credentials_in_the_host() {
 async fn claim_credentials(store: Rc<OrmStore>) {
     let (service, app, _foreign, _deployments) = registered_service(store.clone()).await;
     let worker = WorkerIdentity::new("replay-credential-worker".into()).unwrap();
-    let started = service
-        .fixture_app(app.clone())
+    let objects = objects::Objects::new();
+    let scope = service.fixture_app(app.clone());
+    let input = objects
+        .start_input(&scope, serde_json::from_str(REPLAY_INPUT).unwrap())
+        .await
+        .expect("a run started from a value names the object it became");
+    let started = scope
         .start(
             &RequestId::mint(),
             "Example",
             StartOptions {
-                input: serde_json::from_str(REPLAY_INPUT).unwrap(),
+                input_ref: Some(input.clone()),
                 ..Default::default()
             },
         )
@@ -57,7 +62,7 @@ async fn claim_credentials(store: Rc<OrmStore>) {
 
     let first = service.poll(&worker).await.unwrap().unwrap();
     let mut secrets = claim_material(&store, &first, &worker).await;
-    replay_input_excludes("first claim", &first, &app, &started.id, &secrets);
+    replay_input_excludes("first claim", &first, &app, &started.id, &input, &secrets);
 
     // A released lease stays on file, so the builder can now reach a claim for
     // this run. The redispatch it produces still carries none of it.
@@ -68,7 +73,7 @@ async fn claim_credentials(store: Rc<OrmStore>) {
     let second = service.poll(&worker).await.unwrap().unwrap();
     assert_ne!(second.id, first.id, "the redispatch must be a fresh claim");
     secrets.extend(claim_material(&store, &second, &worker).await);
-    replay_input_excludes("redispatch", &second, &app, &started.id, &secrets);
+    replay_input_excludes("redispatch", &second, &app, &started.id, &input, &secrets);
 }
 
 async fn claim_material(
@@ -103,16 +108,22 @@ fn replay_input_excludes(
     task: &TaskAssignment,
     app: &AppId,
     run_id: &str,
+    input: &crate::engine::WorkflowOutputRef,
     secrets: &[(&'static str, String)],
 ) {
     let encoded = serde_json::to_value(&task.invocation).unwrap();
     // Replay input a claim failed to build would satisfy every exclusion below.
     assert_eq!(encoded["appId"], json!(app.as_str()));
     assert_eq!(encoded["runId"], json!(run_id));
+    // What a run starts from is an object, so the claim carries its descriptor
+    // and never the value. The descriptor is this control: an invocation the
+    // builder never filled would name no object, and the exclusions further
+    // down would pass over it.
     assert_eq!(
-        encoded["trigger"]["input"],
-        serde_json::from_str::<serde_json::Value>(REPLAY_INPUT).unwrap()
+        encoded["trigger"]["inputRef"],
+        serde_json::to_value(input).unwrap()
     );
+    assert!(encoded["trigger"]["input"].is_null());
 
     let fields: BTreeSet<&str> = encoded
         .as_object()
@@ -143,6 +154,7 @@ fn replay_input_excludes(
         .collect();
     assert!(
         trigger.contains("input")
+            && trigger.contains("inputRef")
             && trigger.contains("startedAt")
             && trigger.is_subset(&BTreeSet::from([
                 "input",

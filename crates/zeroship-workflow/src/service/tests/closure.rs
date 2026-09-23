@@ -843,7 +843,7 @@ async fn sqlite_fenced_acceptance_establishes_a_newer_epoch_and_retries_once() {
     let objects = Objects::new();
     let backend = scope
         .clone()
-        .into_backend(&fixture.service, StepOutputs::shared(&objects, 1024))
+        .into_backend(&fixture.service, StepOutputs::shared(&objects, 1024), objects.stager())
         .unwrap();
     backend
         .signal(started.id.clone(), approved())

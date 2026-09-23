@@ -65,18 +65,18 @@ async fn native_client_crosses_runtime_threads_without_losing_app_scope() {
     let objects = Objects::new();
     let client = service
         .fixture_app(app.clone())
-        .into_backend(&service, StepOutputs::shared(&objects, 1024))
+        .into_backend(&service, StepOutputs::shared(&objects, 1024), objects.stager())
         .unwrap();
     let other_client = service
         .fixture_app(other)
-        .into_backend(&service, StepOutputs::shared(&objects, 1024))
+        .into_backend(&service, StepOutputs::shared(&objects, 1024), objects.stager())
         .unwrap();
     let (reply, result) = oneshot::channel();
     let thread = std::thread::spawn(move || {
         let runtime = compio::runtime::Runtime::new().unwrap();
         runtime.block_on(async move {
             let run = client
-                .start("Example".into(), StartOptions::default())
+                .start("Example".into(), serde_json::Value::Null, StartOptions::default())
                 .await
                 .unwrap();
             assert_eq!(
@@ -117,14 +117,14 @@ async fn mutating_backend_calls_hint_the_host_and_reads_do_not() {
     let objects = Objects::new();
     let client = service
         .fixture_app(app)
-        .into_backend(&service, StepOutputs::shared(&objects, 1024))
+        .into_backend(&service, StepOutputs::shared(&objects, 1024), objects.stager())
         .unwrap()
         .with_commit_hint(Arc::new(move || {
             observed.fetch_add(1, Ordering::SeqCst);
         }));
     let cloned = client.clone();
     let run = client
-        .start("Example".into(), StartOptions::default())
+        .start("Example".into(), serde_json::Value::Null, StartOptions::default())
         .await
         .unwrap();
     assert_eq!(hints.load(Ordering::SeqCst), 1);
@@ -143,16 +143,16 @@ async fn mutating_backend_calls_hint_the_host_and_reads_do_not() {
         .is_err());
     assert_eq!(hints.load(Ordering::SeqCst), 2);
     cloned
-        .start("Example".into(), StartOptions::default())
+        .start("Example".into(), serde_json::Value::Null, StartOptions::default())
         .await
         .unwrap();
     assert_eq!(hints.load(Ordering::SeqCst), 3, "clones share the hint");
     let plain = service
         .fixture_app(client.app_id().clone())
-        .into_backend(&service, StepOutputs::shared(&objects, 1024))
+        .into_backend(&service, StepOutputs::shared(&objects, 1024), objects.stager())
         .unwrap();
     plain
-        .start("Example".into(), StartOptions::default())
+        .start("Example".into(), serde_json::Value::Null, StartOptions::default())
         .await
         .unwrap();
     assert_eq!(hints.load(Ordering::SeqCst), 3);
@@ -166,7 +166,7 @@ async fn cancelled_queued_requests_do_not_mutate_and_overload_is_bounded() {
     let objects = Objects::new();
     let client = service
         .fixture_app(app)
-        .into_backend(&service, StepOutputs::shared(&objects, 1024))
+        .into_backend(&service, StepOutputs::shared(&objects, 1024), objects.stager())
         .unwrap();
     let mut waiting = Vec::new();
     // Do not yield to the engine until the request queue rejects admission.
@@ -176,7 +176,7 @@ async fn cancelled_queued_requests_do_not_mutate_and_overload_is_bounded() {
             "request queue must apply backpressure"
         );
         let mut start = client
-            .start("Example".into(), StartOptions::default())
+            .start("Example".into(), serde_json::Value::Null, StartOptions::default())
             .boxed_local();
         match futures::poll!(&mut start) {
             Poll::Pending => waiting.push(start),
@@ -189,7 +189,7 @@ async fn cancelled_queued_requests_do_not_mutate_and_overload_is_bounded() {
     let run = compio::time::timeout(Duration::from_secs(10), async {
         loop {
             match client
-                .start("Example".into(), StartOptions::default())
+                .start("Example".into(), serde_json::Value::Null, StartOptions::default())
                 .await
             {
                 Err(WorkflowServiceError::ResourceExhausted(_)) => {
@@ -214,7 +214,7 @@ async fn cancelling_a_database_wait_rolls_back_before_the_next_request() {
     let objects = Objects::new();
     let client = service
         .fixture_app(app.clone())
-        .into_backend(&service, StepOutputs::shared(&objects, 1024))
+        .into_backend(&service, StepOutputs::shared(&objects, 1024), objects.stager())
         .unwrap();
     let blocker = connect(&fixture.admin_url).await;
     blocker.batch_execute("BEGIN").await.unwrap();
@@ -226,7 +226,7 @@ async fn cancelling_a_database_wait_rolls_back_before_the_next_request() {
         .await
         .unwrap();
     let mut starting = client
-        .start("Example".into(), StartOptions::default())
+        .start("Example".into(), serde_json::Value::Null, StartOptions::default())
         .boxed_local();
     assert!(futures::poll!(&mut starting).is_pending());
     let observer = connect(&fixture.admin_url).await;
@@ -241,7 +241,7 @@ async fn cancelling_a_database_wait_rolls_back_before_the_next_request() {
     blocker.batch_execute("COMMIT").await.unwrap();
     let run = compio::time::timeout(
         Duration::from_secs(10),
-        client.start("Example".into(), StartOptions::default()),
+        client.start("Example".into(), serde_json::Value::Null, StartOptions::default()),
     )
     .await
     .unwrap()

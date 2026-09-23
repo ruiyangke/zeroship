@@ -14,7 +14,7 @@ pub(super) async fn cascade(fixture: &Fixture) -> (JobSpec, String) {
             &parent.token,
             WorkflowExecution::from_runtime_value(json!({"outcomes":[{
                 "kind":"Child", "ordinal":0, "name":"child", "childWorkflowName":"Example",
-                "options":{"cascade":true}, "input":{}
+                "options":{"cascade":true}
             }]}))
             .unwrap(),
         )

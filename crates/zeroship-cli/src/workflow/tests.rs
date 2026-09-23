@@ -321,6 +321,7 @@ async fn start_run(backend: &AppBackend, key: &str) -> String {
         backend
             .start(
                 "Example".into(),
+                serde_json::Value::Null,
                 StartOptions {
                     key: Some(key.into()),
                     ..StartOptions::default()

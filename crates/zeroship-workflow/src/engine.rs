@@ -64,7 +64,11 @@ pub struct StepCheckpoint {
     pub topic: Option<String>,
     pub child_run_id: Option<String>,
     pub child_workflow_name: Option<String>,
-    pub child_input: Option<Value>,
+    /// The payload object the accepted child starts from. A child's input is a
+    /// run's input, so it is an object like any other and the checkpoint keeps
+    /// no inline slot for one.
+    #[serde(default, rename = "childInputRef")]
+    pub child_input_ref: Option<WorkflowOutputRef>,
     pub child_options: Option<ChildWorkflowOptions>,
     #[serde(default, rename = "compensationState")]
     pub compensation_state: Option<String>,
@@ -101,7 +105,7 @@ impl StepCheckpoint {
             topic: None,
             child_run_id: None,
             child_workflow_name: None,
-            child_input: None,
+            child_input_ref: None,
             child_options: None,
             compensation_state: None,
             compensation_max_attempts: 1,
@@ -324,8 +328,13 @@ pub enum StepOutcome {
         name_occurrence: i32,
         #[serde(rename = "childWorkflowName", alias = "workflowName")]
         child_workflow_name: String,
+        /// What the body passed the child, as the executor reported it. The
+        /// host stages it and replaces it with `input_ref`, so the checkpoint
+        /// this outcome becomes carries only the descriptor.
         #[serde(default)]
-        input: Value,
+        input: Option<Value>,
+        #[serde(default, rename = "inputRef")]
+        input_ref: Option<WorkflowOutputRef>,
         #[serde(default)]
         options: ChildWorkflowOptions,
     },
@@ -514,7 +523,7 @@ pub fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, R
                     topic: None,
                     child_run_id: None,
                     child_workflow_name: None,
-                    child_input: None,
+                    child_input_ref: None,
                     child_options: None,
                     compensation_state: (*compensable && step_kind == "run")
                         .then(|| "pending".to_string()),
@@ -546,7 +555,7 @@ pub fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, R
                     topic: None,
                     child_run_id: None,
                     child_workflow_name: None,
-                    child_input: None,
+                    child_input_ref: None,
                     child_options: None,
                     compensation_state: None,
                     compensation_max_attempts: 1,
@@ -593,7 +602,7 @@ pub fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, R
                             topic: None,
                             child_run_id: None,
                             child_workflow_name: None,
-                            child_input: None,
+                            child_input_ref: None,
                             child_options: None,
                             compensation_state: None,
                             compensation_max_attempts: 1,
@@ -638,7 +647,7 @@ pub fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, R
                     topic: None,
                     child_run_id: None,
                     child_workflow_name: None,
-                    child_input: None,
+                    child_input_ref: None,
                     child_options: None,
                     compensation_state: None,
                     compensation_max_attempts: 1,
@@ -679,7 +688,7 @@ pub fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, R
                     topic: topic.clone(),
                     child_run_id: None,
                     child_workflow_name: None,
-                    child_input: None,
+                    child_input_ref: None,
                     child_options: None,
                     compensation_state: None,
                     compensation_max_attempts: 1,
@@ -698,8 +707,18 @@ pub fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, R
                 name_occurrence,
                 child_workflow_name,
                 input,
+                input_ref,
                 options,
             } => {
+                // A child's input is a run's input, and a generation row keeps
+                // no inline slot for one. An executor reporting a value it
+                // never staged is reporting a child this journal cannot admit,
+                // so the fold refuses it instead of dropping it. The runner
+                // stages every value a body passes a child, which is why no
+                // executor reaches this.
+                if input.is_some() {
+                    return Err("workflow child input must be a staged reference".to_string());
+                }
                 checkpoints.push(StepCheckpoint {
                     ordinal: *ordinal,
                     name: name.clone(),
@@ -716,7 +735,7 @@ pub fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, R
                     topic: None,
                     child_run_id: None,
                     child_workflow_name: Some(child_workflow_name.clone()),
-                    child_input: Some(input.clone()),
+                    child_input_ref: input_ref.clone(),
                     child_options: Some(options.clone()),
                     compensation_state: None,
                     compensation_max_attempts: 1,

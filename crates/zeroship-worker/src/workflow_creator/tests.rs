@@ -224,13 +224,23 @@ async fn factory_executes_delivered_v8_frontiers_with_its_creator_artifact_and_p
         }
     ").await;
     let input = "creator-owned-payload".repeat(8);
+    let request = RequestId::mint();
     let started = runtime
         .app
         .start(
-            &RequestId::mint(),
+            &request,
             "Example",
             StartOptions {
-                input: json!({"value":input}),
+                input_ref: Some(
+                    zeroship_workflow::InputStager::stage_input(
+                        &runtime.objects,
+                        &runtime.app,
+                        &request,
+                        &json!({"value":input}),
+                    )
+                    .await
+                    .unwrap(),
+                ),
                 ..StartOptions::default()
             },
         )

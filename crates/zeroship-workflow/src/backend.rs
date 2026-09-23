@@ -5,18 +5,26 @@
 
 use std::sync::Arc;
 
+use crate::engine::WorkflowOutputRef;
 use crate::errors::WorkflowServiceError;
 use crate::operations::{
     DeliveredSignal, RestartOptions, RestartedRun, RunOperation, RunStatus, SignalOptions,
     StartOptions, StartedRun, TransitionedRun,
 };
 use async_trait::async_trait;
+use serde_json::Value;
 
 #[async_trait(?Send)]
 pub trait WorkflowBackend: Send + Sync + std::fmt::Debug {
+    /// Start a run of `workflow_name` from the value `input` carries.
+    ///
+    /// The value is the caller's. A generation row keeps no inline slot for a
+    /// run's input, so the host stages it and the run names the object; that is
+    /// why the caller supplies a value here and never a descriptor.
     async fn start(
         &self,
         workflow_name: String,
+        input: Value,
         options: StartOptions,
     ) -> Result<StartedRun, WorkflowServiceError>;
 
@@ -78,5 +86,35 @@ pub trait StepOutputReader: Send + Sync + std::fmt::Debug {
 }
 
 pub type SharedStepOutputs = Arc<dyn StepOutputReader>;
+
+/// Turns a value the platform accepted into the payload object a run starts
+/// from.
+///
+/// A generation row keeps no inline slot for a run's input, so every host that
+/// takes a start value stages it before any run can name it. This crate records
+/// which payload a run owns and proves that ownership; it moves no payload
+/// bytes and holds no object store, so the host that owns the store supplies
+/// this, and `api` arrives already carrying the policy generation the call is
+/// bound to.
+#[async_trait(?Send)]
+pub trait InputStager: Send + Sync + std::fmt::Debug {
+    /// Stage `input` for `api`'s app and name the object it became.
+    ///
+    /// `request` is the idempotency key of the operation the input belongs to:
+    /// staging deduplicates on it, so an operation retried after an uncommitted
+    /// attempt restages to the object that attempt already wrote.
+    ///
+    /// # Errors
+    /// Reports withdrawn admission, an input over the app's payload bound, an
+    /// exhausted payload quota and store failures.
+    async fn stage_input(
+        &self,
+        api: &crate::service::AppWorkflows,
+        request: &crate::service::RequestId,
+        input: &Value,
+    ) -> Result<WorkflowOutputRef, WorkflowServiceError>;
+}
+
+pub type SharedInputStager = Arc<dyn InputStager>;
 
 pub type SharedWorkflowBackend = Arc<dyn WorkflowBackend>;

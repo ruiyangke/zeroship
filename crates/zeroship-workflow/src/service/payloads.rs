@@ -1,5 +1,5 @@
 use super::{
-    app::{deadline, emit, lock_app, lock_run, not_found, validate_run},
+    app::{deadline, emit, encode, lock_app, lock_run, not_found, validate_run},
     models,
     policy::PolicyAuthority,
     store::{Row, Transaction},
@@ -481,7 +481,8 @@ impl WorkflowService {
         let mut tx = self.begin().await?;
         let claim = authorized_task(&mut tx, worker, task_id, token).await?;
         claim.validate_live()?;
-        let row = owned_reference(&mut tx, &claim.app, &claim.run, reference, claim.now).await?;
+        let row =
+            owned_reference(&mut tx, &claim.app, Some(&claim.run), reference, claim.now).await?;
         let read = open_payload(opener, &claim.app, &row, authority).await?;
         claim.validate_at(tx.now().await?)?;
         tx.commit().await?;
@@ -644,6 +645,28 @@ impl AppWorkflows {
         Ok(read)
     }
 
+    /// Stage bytes this app is about to start a run from.
+    ///
+    /// The row lands with its run, generation and task columns NULL: nothing
+    /// owns these bytes until the generation that names them takes an edge on
+    /// them, and until then their staging deadline is the whole of what keeps
+    /// them. A start that never commits leaves an object collection reclaims.
+    ///
+    /// # Errors
+    /// Reports an app this service may not act for, withdrawn admission, an
+    /// object over the app's payload bound, an exhausted payload quota and a
+    /// write the caller could not complete.
+    pub async fn stage_input<W: PayloadWriter>(
+        &self,
+        request: &RequestId,
+        reference: WorkflowOutputRef,
+        writer: W,
+    ) -> Result<StagedPayload, WorkflowServiceError> {
+        self.service
+            .stage_app_payload(&self.app, request, reference, writer)
+            .await
+    }
+
     /// Read a retained payload through this app's original policy authority.
     ///
     /// # Errors
@@ -744,10 +767,48 @@ pub(crate) struct RunGeneration<'a> {
     pub generation: i64,
 }
 
+/// The object a caller's start value becomes, or none when it supplied nothing.
+///
+/// A run started from `null` stages nothing: an absent descriptor is the whole
+/// record of it, and minting an object for the absence of an input would spend
+/// an app's payload budget on it. Either way the body is handed a JSON null,
+/// so the two spellings of nothing stay the same run.
+///
+/// This is where a start value stops being a value, and `max_input_bytes` is
+/// what bounds it. The executor reads a run's input in full and hands the body
+/// the value, so the bytes are resident alongside the isolate however they were
+/// stored; that is the quantity this bound measures, and staging does not move
+/// it onto the payload ceiling. Refusing here spends no payload budget on a
+/// start no run will reach.
+///
+/// # Errors
+/// Reports an unserializable value and every refusal staging reports.
+pub(crate) async fn stage_start_input(
+    stager: &dyn crate::backend::InputStager,
+    api: &AppWorkflows,
+    request: &RequestId,
+    input: &serde_json::Value,
+    max_input_bytes: usize,
+) -> Result<Option<WorkflowOutputRef>, WorkflowServiceError> {
+    if input.is_null() {
+        return Ok(None);
+    }
+    if encode(input)?.len() > max_input_bytes {
+        return Err(WorkflowServiceError::PayloadTooLarge);
+    }
+    stager.stage_input(api, request, input).await.map(Some)
+}
+
+/// Give `target` durable ownership of the object `reference` names.
+///
+/// `source` is the run whose authority staged those bytes, when a run did.
+/// Nothing staged for a run at all -- the input of a root run a request handler
+/// or the cron sweep is about to start -- names none, and the object is the
+/// ownerless one this app staged for itself.
 pub(crate) async fn promote(
     tx: &mut Transaction,
     app: &AppId,
-    source: &Row,
+    source: Option<&Row>,
     target: RunGeneration<'_>,
     slot: PayloadSlot,
     reference: &WorkflowOutputRef,
@@ -822,28 +883,21 @@ pub(crate) async fn inherit_child_output(
 async fn owned_reference(
     tx: &mut Transaction,
     app: &AppId,
-    run: &Row,
+    run: Option<&Row>,
     reference: &WorkflowOutputRef,
     now: i64,
 ) -> Result<models::PayloadRecord, WorkflowServiceError> {
     let db = tx.database();
     let object = db.entity::<models::payloads::Entity>()?.alias("p")?;
     let edge = db.entity::<models::payload_refs::Entity>()?.alias("r")?;
-    let id = run.text("id")?;
-    let generation = run.integer("generation")?;
-    let mut ownership = object
-        .column(models::payloads::state)
-        .eq("referenced")?
-        .and(edge.column(models::payload_refs::run_id).eq(id.as_str())?);
-    if let Some(task) = run.optional_text("task_id")? {
-        ownership = ownership.or(object
-            .column(models::payloads::state)
-            .eq("staged")?
-            .and(object.column(models::payloads::run_id).eq(Some(id.as_str()))?)
-            .and(object.column(models::payloads::generation).eq(Some(generation))?)
-            .and(object.column(models::payloads::task_id).eq(Some(task.as_str()))?)
-            .and(object.column(models::payloads::expires_at).gt(now)?));
-    }
+    let source = match run {
+        Some(run) => Some((
+            run.text("id")?,
+            run.integer("generation")?,
+            run.optional_text("task_id")?,
+        )),
+        None => None,
+    };
     // Staged, and staged for nobody: the row was written before any run
     // existed, so it names no run to compare against and expiry is the whole
     // remaining eligibility test. Every staged row carries a NOT NULL
@@ -856,29 +910,61 @@ async fn owned_reference(
     // can do is let two runs OF THE SAME APP that converge on byte-identical
     // content share one object -- deduplication, not disclosure, because the
     // bytes were already this app's and the caller already held their digest.
-    ownership = ownership.or(object
+    //
+    // A promotion naming no source run has this arm and nothing else: no run's
+    // edges or task can speak for an object staged before the run existed.
+    let mut ownership = object
         .column(models::payloads::state)
         .eq("staged")?
         .and(object.column(models::payloads::run_id).is_null())
-        .and(object.column(models::payloads::expires_at).gt(now)?));
+        .and(object.column(models::payloads::expires_at).gt(now)?);
+    if let Some((id, generation, task)) = &source {
+        ownership = ownership.or(object
+            .column(models::payloads::state)
+            .eq("referenced")?
+            .and(edge.column(models::payload_refs::run_id).eq(id.as_str())?));
+        if let Some(task) = task {
+            // What this run's live task staged. `referenced` sits beside
+            // `staged` because one batch can name the same object twice -- two
+            // children started from identical inputs share one upload -- and
+            // the first promotion puts that object's only edge on the run it
+            // handed the bytes to, where no edge of this run's reaches it. The
+            // staging columns outlive the state change, so the task that wrote
+            // the object still identifies it, and the expiry test is the one
+            // thing that stops applying once something owns the row.
+            let live = object
+                .column(models::payloads::state)
+                .eq("staged")?
+                .and(object.column(models::payloads::expires_at).gt(now)?)
+                .or(object.column(models::payloads::state).eq("referenced")?);
+            ownership = ownership.or(live
+                .and(object.column(models::payloads::run_id).eq(Some(id.as_str()))?)
+                .and(object.column(models::payloads::generation).eq(Some(*generation))?)
+                .and(object.column(models::payloads::task_id).eq(Some(task.as_str()))?));
+        }
+    }
+    // Only the source run's own edges. With no source run there is no edge any
+    // arm above reads, and an ownerless staged row has no edge at all, so the
+    // join contributes nothing either way.
+    let mut joined = object
+        .column(models::payloads::app_id)
+        .eq(edge.column(models::payload_refs::app_id))?
+        .and(
+            object
+                .column(models::payloads::id)
+                .eq(edge.column(models::payload_refs::payload_id))?,
+        );
+    if let Some((id, generation, _)) = &source {
+        joined = joined
+            .and(edge.column(models::payload_refs::run_id).eq(id.as_str())?)
+            .and(
+                edge.column(models::payload_refs::generation)
+                    .eq(*generation)?,
+            );
+    }
     let rows = db
         .from(&object)
-        .left_join(
-            &edge,
-            object
-                .column(models::payloads::app_id)
-                .eq(edge.column(models::payload_refs::app_id))?
-                .and(
-                    object
-                        .column(models::payloads::id)
-                        .eq(edge.column(models::payload_refs::payload_id))?,
-                )
-                .and(edge.column(models::payload_refs::run_id).eq(id.as_str())?)
-                .and(
-                    edge.column(models::payload_refs::generation)
-                        .eq(generation)?,
-                ),
-        )?
+        .left_join(&edge, joined)?
         .filter(
             object
                 .column(models::payloads::app_id)

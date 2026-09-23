@@ -1,5 +1,5 @@
 use super::{
-    app::{current_run, decode, encode, insert_root_run, keyed_run, live_runs},
+    app::{current_run, decode, encode, insert_root_run, keyed_run, live_runs, NewRun},
     continuations, models,
     store::{Row, Transaction},
     AppPolicy,
@@ -513,7 +513,7 @@ pub(crate) async fn append(
             super::payloads::promote(
                 tx,
                 app,
-                run,
+                Some(run),
                 super::payloads::RunGeneration {
                     id: &id,
                     generation,
@@ -653,12 +653,22 @@ async fn child(
     }
     let id = typed_id::new_workflow_run_id();
     let start = StartOptions {
-        input: step.child_input.clone().unwrap_or(Value::Null),
+        input_ref: step.child_input_ref.clone(),
         key: options.key,
         on_conflict: ConflictPolicy::Join,
     };
     validation::start(&start)?;
-    insert_root_run(tx, app, &id, name, &deploy_id, &start, now).await?;
+    // The parent's live task staged what it passed the child, so the parent's
+    // row is what proves this run may take the object.
+    let run = NewRun {
+        id: &id,
+        name,
+        deploy: &deploy_id,
+        options: &start,
+        input_source: Some(parent),
+        max_input_bytes: policy.max_input_bytes,
+    };
+    insert_root_run(tx, app, &run, now).await?;
     tx.database()
         .collection(models::runs::Entity::COLLECTION)?
         .update(

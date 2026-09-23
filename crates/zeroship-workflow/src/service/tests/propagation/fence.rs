@@ -21,7 +21,7 @@ pub(super) async fn mid_propagation(store: Rc<OrmStore>) {
             &task.token,
             execution(json!([0, 1, 2].map(|ordinal| json!({
                 "kind":"Child", "ordinal":ordinal, "name":format!("child-{ordinal}"),
-                "childWorkflowName":"Child", "options":{"cascade":true}, "input":{}
+                "childWorkflowName":"Child", "options":{"cascade":true}
             })))),
         )
         .await
@@ -60,7 +60,7 @@ pub(super) async fn mid_propagation(store: Rc<OrmStore>) {
             &worker,
             &continuing.id,
             &continuing.token,
-            execution(json!([{"kind":"ContinueAsNew","input":"escape"}])),
+            execution(json!([{"kind":"ContinueAsNew"}])),
         )
         .await
         .unwrap();

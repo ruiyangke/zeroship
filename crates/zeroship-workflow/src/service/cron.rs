@@ -7,7 +7,7 @@
 
 use super::{
     activation,
-    app::{decode, encode, insert_root_run, live_runs, lock_app_state},
+    app::{decode, encode, insert_root_run, live_runs, lock_app_state, NewRun},
     delivery::{self, CapturedLease, JobReceipt},
     deployment_retention::admission_generation,
     deployments::unavailable,
@@ -18,6 +18,7 @@ use super::{
 };
 use crate::service::policy::admit;
 use crate::{
+    backend::InputStager,
     operations::{RunState, StartOptions},
     validation, WorkflowServiceError,
 };
@@ -198,6 +199,7 @@ impl AppWorkflows {
     pub async fn cron_job(
         &self,
         lease: &impl JobLease,
+        inputs: &dyn InputStager,
     ) -> Result<JobReceipt, WorkflowServiceError> {
         let job = &lease.delivery().job;
         delivery::check_scope(self.app_id(), job)?;
@@ -251,6 +253,35 @@ impl AppWorkflows {
                     return Err(invalid());
                 }
                 let registration = cron.declaration(&deployment)?;
+                // A schedule's input rides inline on the manifest, which is what
+                // `ScheduleRegistration::validate` bounded when the deployment
+                // was accepted. Policy can narrow between then and now, so
+                // staging below answers to the bound again, under the policy
+                // this occurrence is admitted on.
+                //
+                // The schedule declares its input inline, and the run it starts
+                // names an object, so the value becomes one here: at
+                // ACTIVATION, holding no lock and no transaction, which is
+                // where object I/O belongs. Staging it at registration instead
+                // would make a deployment manifest a producer of payload
+                // references and leave a schedule pointing at an object whose
+                // lifetime a retired deploy cannot answer for.
+                //
+                // Every firing stages its own object, because staging
+                // deduplicates on a request identity and each firing mints one.
+                // That is the cost every run pays for its input, and this one is
+                // owned by the run it starts and reclaimed with it. An attempt
+                // that stages and then fails to commit leaves an ownerless
+                // object its staging deadline retires.
+                let input_ref = super::payloads::stage_start_input(
+                    inputs,
+                    self,
+                    &RequestId::mint(),
+                    &registration.input,
+                    authority.policy().max_input_bytes,
+                )
+                .await?;
+                authority.check(self)?;
 
                 let mut tx = self.service.begin().await?;
                 let lock = lock_app_state(&mut tx, self.app_id()).await?;
@@ -275,9 +306,6 @@ impl AppWorkflows {
                 }
                 let policy = authority.policy();
                 admit(policy)?;
-                if encode(&registration.input)?.len() > policy.max_input_bytes {
-                    return Err(WorkflowServiceError::PayloadTooLarge);
-                }
                 let skip = registration.overlap == ScheduleOverlap::SkipIfRunning
                     && tx
                         .database()
@@ -308,19 +336,19 @@ impl AppWorkflows {
                 }
                 let run_id = (!skip).then(|| cron.run_id.as_str().to_owned());
                 if !skip {
-                    insert_root_run(
-                        &mut tx,
-                        self.app_id(),
-                        cron.run_id.as_str(),
-                        &registration.workflow_name,
-                        &deployment.id,
-                        &StartOptions {
-                            input: registration.input.clone(),
-                            ..Default::default()
-                        },
-                        now,
-                    )
-                    .await?;
+                    let options = StartOptions {
+                        input_ref: input_ref.clone(),
+                        ..Default::default()
+                    };
+                    let run = NewRun {
+                        id: cron.run_id.as_str(),
+                        name: &registration.workflow_name,
+                        deploy: &deployment.id,
+                        options: &options,
+                        input_source: None,
+                        max_input_bytes: authority.policy().max_input_bytes,
+                    };
+                    insert_root_run(&mut tx, self.app_id(), &run, now).await?;
                     let changed = tx
                         .database()
                         .entity::<runs::Entity>()?

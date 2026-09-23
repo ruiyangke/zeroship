@@ -107,11 +107,12 @@ impl WorkflowBackend for ReadyBackend {
     async fn start(
         &self,
         workflow_name: String,
+        input: serde_json::Value,
         options: StartOptions,
     ) -> Result<StartedRun, WorkflowServiceError> {
         self.apps
             .current(&self.app)?
-            .start(workflow_name, options)
+            .start(workflow_name, input, options)
             .await
     }
 

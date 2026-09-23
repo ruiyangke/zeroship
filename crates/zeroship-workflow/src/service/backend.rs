@@ -2,7 +2,7 @@
 
 use super::{policy::PolicyAuthority, AppWorkflows, PolicyBinding, RequestId, WorkflowService};
 use crate::{
-    backend::{SharedStepOutputs, WorkflowBackend},
+    backend::{SharedInputStager, SharedStepOutputs, WorkflowBackend},
     operations::{
         DeliveredSignal, RestartOptions, RestartedRun, RunOperation, RunStatus, SignalOptions,
         StartOptions, StartedRun, TransitionedRun,
@@ -11,6 +11,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use futures::{channel::oneshot, future::LocalBoxFuture, FutureExt, StreamExt};
+use serde_json::Value;
 use std::sync::Arc;
 use zeroship_core::app_id::AppId;
 
@@ -32,6 +33,7 @@ pub struct AppBackend {
     binding: PolicyBinding,
     requests: flume::Sender<Request>,
     outputs: SharedStepOutputs,
+    inputs: SharedInputStager,
     commit_hint: Option<CommitHint>,
 }
 impl std::fmt::Debug for AppBackend {
@@ -42,13 +44,14 @@ impl std::fmt::Debug for AppBackend {
     }
 }
 impl AppBackend {
-    fn new(api: AppWorkflows, outputs: SharedStepOutputs) -> Self {
+    fn new(api: AppWorkflows, outputs: SharedStepOutputs, inputs: SharedInputStager) -> Self {
         let (requests, receiver) = flume::bounded::<Request>(MAX_QUEUED_REQUESTS);
         let backend = Self {
             app: api.app_id().clone(),
             binding: api.binding.clone(),
             requests,
             outputs,
+            inputs,
             commit_hint: None,
         };
         compio::runtime::spawn(async move {
@@ -168,9 +171,10 @@ impl AppWorkflows {
     /// makes, not one the handle carries: every call through the returned
     /// backend goes to `journal`'s store, while the app identity, its policy
     /// binding, its ingress, deployments and signal authority stay as this
-    /// handle holds them, and `outputs` resolves a step's stored output to
-    /// bytes against the object store its host owns. Naming the service this
-    /// handle was
+    /// handle holds them, `outputs` resolves a step's stored output to bytes
+    /// against the object store its host owns, and `inputs` writes the object a
+    /// started run's value becomes into that same store. Naming the service
+    /// this handle was
     /// bound to keeps the creator seam on the same database as the app's
     /// execution; naming another service's puts it on that one. A
     /// [`WorkflowService`] exists only over a journal it verified as it
@@ -183,12 +187,13 @@ impl AppWorkflows {
         mut self,
         journal: &WorkflowService,
         outputs: SharedStepOutputs,
+        inputs: SharedInputStager,
     ) -> Result<AppBackend, WorkflowServiceError> {
         if !self.binding.belongs_to(&journal.policies) {
             return Err(WorkflowServiceError::PermissionDenied);
         }
         self.service.store = journal.store.clone();
-        Ok(AppBackend::new(self, outputs))
+        Ok(AppBackend::new(self, outputs, inputs))
     }
 }
 #[async_trait(?Send)]
@@ -196,11 +201,30 @@ impl WorkflowBackend for AppBackend {
     async fn start(
         &self,
         workflow_name: String,
-        options: StartOptions,
+        input: Value,
+        mut options: StartOptions,
     ) -> Result<StartedRun, WorkflowServiceError> {
+        let inputs = self.inputs.clone();
         self.mutate(move |api| {
-            async move { api.start(&RequestId::mint(), &workflow_name, options).await }
-                .boxed_local()
+            async move {
+                // One identity for the whole start: the object the value became
+                // and the run that names it are both keyed by it, so a retried
+                // start restages the same object and replays the same receipt.
+                // Staging comes first because it is object I/O, and the
+                // transaction it precedes holds the app lock.
+                let request = RequestId::mint();
+                let bound = api.service.policy_for(&api.app)?.max_input_bytes;
+                options.input_ref = super::payloads::stage_start_input(
+                    inputs.as_ref(),
+                    &api,
+                    &request,
+                    &input,
+                    bound,
+                )
+                .await?;
+                api.start(&request, &workflow_name, options).await
+            }
+            .boxed_local()
         })
         .await
     }

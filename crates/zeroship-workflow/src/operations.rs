@@ -1,5 +1,6 @@
 //! App-scoped workflow operations shared by native callers and transport adapters.
 
+use crate::engine::WorkflowOutputRef;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 pub use zeroship_core::workflow_coordination::{
@@ -28,8 +29,15 @@ impl ConflictPolicy {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StartOptions {
-    #[serde(default)]
-    pub input: Value,
+    /// The payload object the run starts from, or none when it starts from
+    /// nothing.
+    ///
+    /// A generation row keeps no inline slot for a run's input, so whatever
+    /// accepted the caller's value staged it first and names the object here.
+    /// The value itself never reaches this type, which is why a run's input
+    /// costs the same however large it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_ref: Option<WorkflowOutputRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
     #[serde(default, skip_serializing_if = "ConflictPolicy::is_join")]
