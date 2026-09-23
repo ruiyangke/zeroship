@@ -1,10 +1,14 @@
 packages:
   - "examples/*"
-  # meal-kit is NOT a workspace member. Its nested apps/ and packages/ are
-  # untracked work in progress, and `examples/*` would otherwise pull it in,
-  # along with the workspace deps that make it part of every install and of
-  # the lockfile.
-  - "!examples/meal-kit"
+  # The one example that is several packages. `examples/*` takes its root; its
+  # two apps and its shared package are members in their own right because they
+  # declare `workspace:*` on the SDK they demonstrate and `catalog:` on the
+  # versions it pins, and neither protocol resolves outside the workspace that
+  # holds them. Membership is also what supplies the `lucide-react` peer
+  # extension below, which its shared package needs to type-check against
+  # React 19.
+  - "examples/meal-kit/apps/*"
+  - "examples/meal-kit/packages/*"
   # Browser integration suite spanning examples.
   - "tests/e2e-browser"
   # The migration engine's TypeScript half: the authoring DSL, the CLI and its
