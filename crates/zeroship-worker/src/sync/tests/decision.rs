@@ -1,7 +1,8 @@
 use super::*;
 use std::collections::BTreeMap;
 use zeroship_core::database_role::DatabaseCapability;
-use zeroship_core::DatabaseId;
+use zeroship_core::types::LiveBinding;
+use zeroship_core::{BindingId, DatabaseId};
 
 fn version_info(
     deploy_hash: Option<&str>,
@@ -28,20 +29,28 @@ fn loaded_meta(deploy_hash: Option<&str>, env_version: i64) -> cache::LoadedMeta
     }
 }
 
-/// One app's live binding set, spelled as the pairs a case cares about.
+/// One app's live binding set, spelled as the triples a case cares about.
 fn bindings(
-    entries: &[(&DatabaseId, DatabaseCapability)],
-) -> BTreeMap<DatabaseId, DatabaseCapability> {
+    entries: &[(&DatabaseId, &BindingId, DatabaseCapability)],
+) -> BTreeMap<DatabaseId, LiveBinding> {
     entries
         .iter()
-        .map(|(database, capability)| ((*database).clone(), *capability))
+        .map(|(database, binding, capability)| {
+            (
+                (*database).clone(),
+                LiveBinding {
+                    binding: (*binding).clone(),
+                    capability: *capability,
+                },
+            )
+        })
         .collect()
 }
 
 /// The scalar a count over the set would summarise it as. Named so a case can
 /// SHOW that the number it refutes did not move, rather than assert in prose
 /// that it would not have.
-fn size(set: &BTreeMap<DatabaseId, DatabaseCapability>) -> usize {
+fn size(set: &BTreeMap<DatabaseId, LiveBinding>) -> usize {
     set.len()
 }
 
@@ -55,14 +64,16 @@ fn size(set: &BTreeMap<DatabaseId, DatabaseCapability>) -> usize {
 #[test]
 fn needs_reload_true_when_a_database_is_bound_under_a_running_isolate() {
     let main = DatabaseId::mint();
+    let main_edge = BindingId::mint();
     let analytics = DatabaseId::mint();
+    let analytics_edge = BindingId::mint();
     let mut info = version_info(Some("h1"), 7, AppRuntimeLimits::default());
     info.live_bindings = bindings(&[
-        (&main, DatabaseCapability::ReadWrite),
-        (&analytics, DatabaseCapability::ReadOnly),
+        (&main, &main_edge, DatabaseCapability::ReadWrite),
+        (&analytics, &analytics_edge, DatabaseCapability::ReadOnly),
     ]);
     let mut loaded = loaded_meta(Some("h1"), 7);
-    loaded.live_bindings = bindings(&[(&main, DatabaseCapability::ReadWrite)]);
+    loaded.live_bindings = bindings(&[(&main, &main_edge, DatabaseCapability::ReadWrite)]);
     assert!(
         needs_reload(Some(&loaded), Some(matching_limits(&info.runtime)), &info),
         "a database the app has started binding needs an isolate built with a \
@@ -87,13 +98,15 @@ fn needs_reload_true_when_a_database_is_bound_under_a_running_isolate() {
 #[test]
 fn needs_reload_true_when_a_binding_is_withdrawn_under_a_running_isolate() {
     let main = DatabaseId::mint();
+    let main_edge = BindingId::mint();
     let analytics = DatabaseId::mint();
+    let analytics_edge = BindingId::mint();
     let mut info = version_info(Some("h1"), 7, AppRuntimeLimits::default());
-    info.live_bindings = bindings(&[(&main, DatabaseCapability::ReadWrite)]);
+    info.live_bindings = bindings(&[(&main, &main_edge, DatabaseCapability::ReadWrite)]);
     let mut loaded = loaded_meta(Some("h1"), 7);
     loaded.live_bindings = bindings(&[
-        (&main, DatabaseCapability::ReadWrite),
-        (&analytics, DatabaseCapability::ReadOnly),
+        (&main, &main_edge, DatabaseCapability::ReadWrite),
+        (&analytics, &analytics_edge, DatabaseCapability::ReadOnly),
     ]);
     assert!(
         needs_reload(Some(&loaded), Some(matching_limits(&info.runtime)), &info),
@@ -104,7 +117,7 @@ fn needs_reload_true_when_a_binding_is_withdrawn_under_a_running_isolate() {
     // And the LAST binding withdrawn, which leaves the empty set: the app has
     // no `env.db` at all, and the empty set is a statement rather than an
     // absence.
-    loaded.live_bindings = bindings(&[(&main, DatabaseCapability::ReadWrite)]);
+    loaded.live_bindings = bindings(&[(&main, &main_edge, DatabaseCapability::ReadWrite)]);
     info.live_bindings = BTreeMap::new();
     assert!(
         needs_reload(Some(&loaded), Some(matching_limits(&info.runtime)), &info),
@@ -129,10 +142,11 @@ fn needs_reload_true_when_a_binding_is_withdrawn_under_a_running_isolate() {
 #[test]
 fn needs_reload_true_when_a_capability_changes_under_an_unchanged_set_size() {
     let main = DatabaseId::mint();
+    let main_edge = BindingId::mint();
     let mut info = version_info(Some("h1"), 7, AppRuntimeLimits::default());
-    info.live_bindings = bindings(&[(&main, DatabaseCapability::ReadOnly)]);
+    info.live_bindings = bindings(&[(&main, &main_edge, DatabaseCapability::ReadOnly)]);
     let mut loaded = loaded_meta(Some("h1"), 7);
-    loaded.live_bindings = bindings(&[(&main, DatabaseCapability::ReadWrite)]);
+    loaded.live_bindings = bindings(&[(&main, &main_edge, DatabaseCapability::ReadWrite)]);
 
     assert_eq!(
         size(&loaded.live_bindings),
@@ -151,7 +165,66 @@ fn needs_reload_true_when_a_capability_changes_under_an_unchanged_set_size() {
     );
 
     // The rejection control, one variable changed back.
-    loaded.live_bindings = bindings(&[(&main, DatabaseCapability::ReadOnly)]);
+    loaded.live_bindings = bindings(&[(&main, &main_edge, DatabaseCapability::ReadOnly)]);
+    assert!(!needs_reload(
+        Some(&loaded),
+        Some(matching_limits(&info.runtime)),
+        &info
+    ));
+}
+
+/// A database UNBOUND and REBOUND at the same capability must reload, even
+/// though nothing about the set except the edge moved.
+///
+/// This is what a set carrying the capability alone cannot see. An unbind
+/// DELETES the binding row and the role `zs_bind_<binding>` derived from it is
+/// reaped; a rebind MINTS a fresh id and a fresh role. Both halves inside one
+/// poll interval leave the same database at the same capability, so a set of
+/// capabilities is byte-identical across the move while the isolate keeps
+/// composing a role that no longer exists - `SET LOCAL ROLE` refuses it and the
+/// app is stuck refusing until its process restarts.
+///
+/// The case SHOWS that rather than asserting it: the size, the databases and
+/// the capability projection are all equal across the two sets, and the reload
+/// is asked for anyway.
+///
+/// Its rejection control is the SAME edge on both sides, which must not reload -
+/// without it this would pass over a `needs_reload` that had started answering
+/// true for every set.
+#[test]
+fn needs_reload_true_when_a_database_is_rebound_onto_a_fresh_edge() {
+    let main = DatabaseId::mint();
+    let retired = BindingId::mint();
+    let regranted = BindingId::mint();
+    assert_ne!(
+        retired, regranted,
+        "the premise: an unbind and a rebind are two edges, because bind mints \
+         a fresh id and unbind deletes the row"
+    );
+    let mut info = version_info(Some("h1"), 7, AppRuntimeLimits::default());
+    info.live_bindings = bindings(&[(&main, &regranted, DatabaseCapability::ReadWrite)]);
+    let mut loaded = loaded_meta(Some("h1"), 7);
+    loaded.live_bindings = bindings(&[(&main, &retired, DatabaseCapability::ReadWrite)]);
+
+    assert_eq!(
+        size(&loaded.live_bindings),
+        size(&info.live_bindings),
+        "the premise of this case: the number of live bindings did not move"
+    );
+    assert_eq!(
+        capabilities(&loaded.live_bindings),
+        capabilities(&info.live_bindings),
+        "and neither did which databases are bound, nor at what capability - \
+         which is everything a comparison ignoring the edge could see"
+    );
+    assert!(
+        needs_reload(Some(&loaded), Some(matching_limits(&info.runtime)), &info),
+        "the edge moved, so the isolate composes `zs_bind_<retired>` - a role \
+         the unbind reaped, which PostgreSQL refuses at SET LOCAL ROLE"
+    );
+
+    // The rejection control, one variable changed back.
+    loaded.live_bindings = bindings(&[(&main, &regranted, DatabaseCapability::ReadWrite)]);
     assert!(!needs_reload(
         Some(&loaded),
         Some(matching_limits(&info.runtime)),

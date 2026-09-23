@@ -246,13 +246,14 @@ pub fn validate_poll_interval_secs(secs: u64) -> Result<u64, String> {
 /// captures the bindings its sessions narrow with while it builds, by value,
 /// so nothing that moves the host's binding store afterwards reaches it: an
 /// app that has just been bound to a database has no `env.db` handle for it
-/// until an isolate is built holding one, and an app whose binding was
-/// withdrawn keeps composing the role that withdrawal retired. Neither is
+/// until an isolate is built holding one, an app whose binding was withdrawn
+/// keeps composing the role that withdrawal retired, and an app REBOUND onto a
+/// fresh edge keeps composing the role the old edge named. None of them is
 /// visible in the deploy hash, the limits, the env version or the net policy,
-/// so without this comparison both wait for the worker PROCESS to restart. A
-/// binding's lifetime is therefore the isolate's, and this is where the isolate
-/// ends: [`resupply_bindings`] installs the set the replacement is built from
-/// before it is built.
+/// so without this comparison all of them wait for the worker PROCESS to
+/// restart. A binding's lifetime is therefore the isolate's, and this is where
+/// the isolate ends: [`resupply_bindings`] installs the set the replacement is
+/// built from before it is built.
 pub fn needs_reload(
     loaded: Option<&cache::LoadedMeta>,
     local_limits: Option<RuntimeLimits>,
@@ -265,10 +266,13 @@ pub fn needs_reload(
     let limits_changed = local_limits != Some(cache::runtime_limits_from_app(&info.runtime));
     let env_changed = loaded.map(|m| m.env_version) != Some(info.env_version);
     let net_policy_changed = loaded.map(|m| &m.net_policy) != Some(&info.net_policy);
-    // The WHOLE set, compared for equality. A count over it collapses the three
-    // changes that matter into one number: a database gained, a database
-    // withdrawn, and a capability narrowed or widened under a set whose size
-    // never moved.
+    // The WHOLE set, compared for equality, and each entry carries its EDGE.
+    // A count over the set collapses the changes that matter into one number -
+    // a database gained, a database withdrawn, a capability narrowed or widened
+    // under a set whose size never moved - and dropping the edge would lose one
+    // more that no scalar about the set moves at all: a database unbound and
+    // rebound at the same capability, which retires one role name and mints
+    // another.
     let live_bindings_changed = loaded.map(|m| &m.live_bindings) != Some(&info.live_bindings);
     hash_changed || limits_changed || env_changed || net_policy_changed || live_bindings_changed
 }

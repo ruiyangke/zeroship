@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use zeroship_bundle::Manifest;
 
 use crate::database_role::DatabaseCapability;
-use crate::{AppId, DatabaseId, UserId};
+use crate::{AppId, BindingId, DatabaseId, UserId};
 
 /// A registered application record.
 ///
@@ -120,6 +120,55 @@ pub const FREE_TIER_NET_POLICY_LIMITS: AppNetPolicyLimits = AppNetPolicyLimits {
     max_grants: 10,
 };
 
+/// One entry of an app's LIVE BINDING SET: the EDGE the app holds on a
+/// database, and the capability that edge grants.
+///
+/// The database is the key this is stored under, so it is not repeated here.
+///
+/// # Why the edge and not the capability alone
+///
+/// Both halves move independently and both have to reach a resident isolate.
+/// The capability is what a session narrows TO; the edge is what it narrows
+/// WITH - `zeroship_core::database_derivation::binding_role_name` derives
+/// `zs_bind_<binding>` from it, so an edge retired and re-granted is a
+/// different role name for the same database at the same capability.
+/// `zeroship_control::databases::bind_database` mints a fresh [`BindingId`] and
+/// `unbind_database` DELETES the row, so an unbind and a rebind that both
+/// commit and converge inside one poll interval is exactly that: with the
+/// capability alone the feed entry would be byte-identical across the move, the
+/// worker's comparison would see nothing, and the isolate would keep composing
+/// a role the unbind reaped - `SET LOCAL ROLE` refuses it, so the app is stuck
+/// refusing until its process restarts. Carrying the edge makes the entry move
+/// when the edge does.
+///
+/// # What must never be added here
+///
+/// No schema shape, under any name - no migration id, no descriptor hash, no
+/// version, no epoch. This says WHICH BINDINGS AN APP HOLDS, which is a control
+/// plane fact changed by a bind, an unbind or a capability edit. What a
+/// creator's own migration does to the columns inside one of those databases
+/// moves nothing here and is not the platform's to fence;
+/// `docs/proposals/2026-09-22-retire-the-schema-epoch-fence.md` carries the
+/// reasoning for that boundary.
+///
+/// # Serde
+///
+/// Derived, and that derive stands no second codec: both fields delegate to
+/// hand-written impls - [`BindingId`]'s, which PARSES on the way in, and
+/// [`DatabaseCapability`]'s, which is the one spelling
+/// `zeroship.database_bindings.capability` stores. Neither field is
+/// `#[serde(default)]`: neither is derivable from the other, so a producer that
+/// stopped emitting one would be read as a binding whose edge or capability
+/// happened to be whatever the default picked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveBinding {
+    /// The edge joining this app to the database, which its session role is
+    /// derived from. No worker composes one: this is read back and installed.
+    pub binding: BindingId,
+    /// The privilege set that edge grants.
+    pub capability: DatabaseCapability,
+}
+
 /// Worker-facing metadata for an app version/config snapshot.
 ///
 /// `PartialEq`/`Eq` are intentionally NOT derived: `manifest`'s recursive
@@ -151,8 +200,8 @@ pub struct AppVersionInfo {
     /// operator-internal runtimes.
     #[serde(default)]
     pub net_policy: AppNetPolicy,
-    /// The app's LIVE BINDING SET: the capability it holds on every database it
-    /// holds a live binding to, keyed by the database.
+    /// The app's LIVE BINDING SET: the [`LiveBinding`] it holds on every
+    /// database it holds a live binding to, keyed by the database.
     ///
     /// A worker isolate captures the binding its sessions narrow with when it
     /// builds, so a database bound after it was built is one the isolate has no
@@ -164,23 +213,22 @@ pub struct AppVersionInfo {
     /// built after `resupply_bindings` has installed the set Control now
     /// serves.
     ///
-    /// Nothing about any schema's SHAPE is here, deliberately. This says which
-    /// databases the app binds and at what capability - facts the control plane
-    /// owns and changes by a bind, an unbind or a capability edit. What a
-    /// creator's own migration does to the columns inside one of those
-    /// databases moves nothing here and is not the platform's to fence.
+    /// Nothing about any schema's SHAPE is here, deliberately, and
+    /// [`LiveBinding`] carries what that rules out and why.
     ///
-    /// The whole SET and not a count, because equality over it detects the three
+    /// The whole SET and not a count, because equality over it detects the four
     /// changes a number cannot tell apart: a database the app has started
-    /// binding, one whose binding was withdrawn, and one whose capability was
-    /// narrowed or widened while the set's size stayed put.
+    /// binding, one whose binding was withdrawn, one whose capability was
+    /// narrowed or widened while the set's size stayed put, and one unbound and
+    /// rebound onto a fresh edge at the same capability, where every scalar
+    /// about the set holds still.
     ///
     /// No serde default, deliberately. An absent field would decode as "this
     /// app binds nothing", which is a value this map also carries for the
     /// common app with no database, so a producer that stopped emitting it
     /// would silently disable the comparison on every worker. Required, it
     /// fails the version-feed parse by name instead.
-    pub live_bindings: BTreeMap<DatabaseId, DatabaseCapability>,
+    pub live_bindings: BTreeMap<DatabaseId, LiveBinding>,
 }
 
 /// Per-app spend-enforcement state, derived by the control-plane spend engine

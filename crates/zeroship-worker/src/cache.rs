@@ -6,9 +6,8 @@ use std::sync::Arc;
 use zeroship_bundle::compiled::CompiledManifest;
 use zeroship_bundle::Manifest;
 use zeroship_core::app_id::AppId;
-use zeroship_core::database_role::DatabaseCapability;
 use zeroship_core::net_policy::{EgressRule, Verdict};
-use zeroship_core::types::{AppNetPolicy, AppRuntimeLimits};
+use zeroship_core::types::{AppNetPolicy, AppRuntimeLimits, LiveBinding};
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::{Runtime, RuntimeLimits};
 use zeroship_runtime::{EnvSnapshot, ModuleEntry, NetPolicy};
@@ -656,15 +655,16 @@ pub struct LoadedMeta {
     /// Worker-facing raw-TCP policy snapshot the isolate was built with.
     pub net_policy: AppNetPolicy,
     /// The live binding set control reported when this isolate was built: the
-    /// capability the app held on each database it bound.
+    /// edge and capability the app held on each database it bound.
     ///
     /// The isolate captured the bindings its sessions narrow with while it
-    /// built, so a database bound after that is one it has no handle for, and
-    /// one unbound under it is one it keeps composing a withdrawn edge's role
-    /// for. Recording what it was built against is what lets
-    /// `sync::needs_reload` see either - nothing else about the app changes
-    /// when its binding set does.
-    pub live_bindings: std::collections::BTreeMap<zeroship_core::DatabaseId, DatabaseCapability>,
+    /// built, so a database bound after that is one it has no handle for, one
+    /// unbound under it is one it keeps composing a withdrawn edge's role for,
+    /// and one rebound under it is one whose role name moved while the database
+    /// and the capability stayed put. Recording what it was built against is
+    /// what lets `sync::needs_reload` see any of them - nothing else about the
+    /// app changes when its binding set does.
+    pub live_bindings: std::collections::BTreeMap<zeroship_core::DatabaseId, LiveBinding>,
 }
 
 thread_local! {

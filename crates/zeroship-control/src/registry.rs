@@ -7,7 +7,7 @@ use compio_postgres::{Client, NoTls};
 use zeroship_core::app_derivation;
 use zeroship_core::app_id::AppId;
 use zeroship_core::database_role::DatabaseCapability;
-use zeroship_core::DatabaseId;
+use zeroship_core::{BindingId, DatabaseId};
 
 use crate::publication::{
     catalog, Acceptance, AcceptanceResult, Catalog, CatalogError, CatalogOptions, CommandBinding,
@@ -15,8 +15,9 @@ use crate::publication::{
 };
 use zeroship_core::types::{
     AppNetPolicy, AppNetPolicyLimits, AppRecord, AppRuntimeLimits, AppVersionInfo,
-    GatewayFamilyRevocation, GatewayPrincipalLifecycle, GatewaySnapshot, NetEgressEntry,
-    RouteEntry, RouteMap, VersionMap, FREE_TIER_NET_POLICY_LIMITS, FREE_TIER_RUNTIME_LIMITS,
+    GatewayFamilyRevocation, GatewayPrincipalLifecycle, GatewaySnapshot, LiveBinding,
+    NetEgressEntry, RouteEntry, RouteMap, VersionMap, FREE_TIER_NET_POLICY_LIMITS,
+    FREE_TIER_RUNTIME_LIMITS,
 };
 use zeroship_core::UserId;
 
@@ -808,6 +809,13 @@ impl Registry {
         // or a capability edit reaches a resident app only by this feed: the
         // worker compares it and replaces the isolate.
         //
+        // `b.id` is projected because the EDGE is half of what changes. A
+        // rebind of the same database at the same capability mints a fresh
+        // binding id (`databases::bind_database`) after the unbind deleted the
+        // old row (`databases::unbind_database`), and the session role is
+        // derived from that id - so without it the two halves would produce a
+        // byte-identical entry across a move of the role name.
+        //
         // `LIVE_BINDINGS_FROM_WHERE_EVERY_APP` is the shared liveness
         // predicate, over every app in one statement rather than one statement
         // per app on every poll. Which bindings are live is the same question
@@ -816,19 +824,21 @@ impl Registry {
         let binding_rows = conn
             .query(
                 &format!(
-                    "SELECT b.app_id, b.database_id, b.capability {}",
+                    "SELECT b.app_id, b.id AS binding_id, b.database_id, b.capability {}",
                     zeroship_core::live_binding::LIVE_BINDINGS_FROM_WHERE_EVERY_APP
                 ),
                 &[],
             )
             .await?;
         // A ROW THIS LOOP CANNOT DESCRIBE LEAVES THE APP'S SET, AND THE WORKER
-        // READS THAT AS A BINDING THE APP NO LONGER HOLDS. The three refusals
+        // READS THAT AS A BINDING THE APP NO LONGER HOLDS. The four refusals
         // below are each held off by a corpus constraint, and the skip is only
         // safe while they are:
         //
         // - `app_id` is foreign-keyed to `zeroship.apps.id`, which carries
         //   `apps_id_shape` - the grammar `AppId::parse` accepts;
+        // - `id` is under `database_bindings_id_shape`, the grammar
+        //   `BindingId::parse` accepts;
         // - `database_id` is foreign-keyed to `zeroship.databases.id`, which
         //   carries `databases_id_shape`;
         // - `capability` is under `database_bindings_capability_check`, which
@@ -847,8 +857,7 @@ impl Registry {
         // every poll with nothing converging. The refusal is logged at ERROR
         // for that reason: it names a row whose repair is the only thing that
         // settles it.
-        let mut live_bindings: HashMap<AppId, BTreeMap<DatabaseId, DatabaseCapability>> =
-            HashMap::new();
+        let mut live_bindings: HashMap<AppId, BTreeMap<DatabaseId, LiveBinding>> = HashMap::new();
         for row in &binding_rows {
             let app_id_raw: String = row.get("app_id");
             let Ok(app_id) = AppId::parse(&app_id_raw) else {
@@ -856,6 +865,16 @@ impl Registry {
                     app_id = %app_id_raw,
                     "registry: database_bindings row has a malformed app id; its app's \
                      version feed entry omits this binding"
+                );
+                continue;
+            };
+            let binding_raw: String = row.get("binding_id");
+            let Ok(binding) = BindingId::parse(&binding_raw) else {
+                tracing::error!(
+                    app_id = %app_id.as_str(),
+                    binding_id = %binding_raw,
+                    "registry: database_bindings row has a malformed binding id; this \
+                     app's version feed entry omits this binding"
                 );
                 continue;
             };
@@ -882,10 +901,13 @@ impl Registry {
                 );
                 continue;
             };
-            live_bindings
-                .entry(app_id)
-                .or_default()
-                .insert(database, capability);
+            live_bindings.entry(app_id).or_default().insert(
+                database,
+                LiveBinding {
+                    binding,
+                    capability,
+                },
+            );
         }
         let mut rules: HashMap<AppId, Vec<NetEgressEntry>> = HashMap::new();
         for row in &rule_rows {

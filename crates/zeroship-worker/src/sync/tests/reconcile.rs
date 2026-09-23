@@ -4,6 +4,7 @@ use crate::control_fixture::{route, ControlPlane};
 use crate::worker_fixture::dispatch_frame;
 use sha2::{Digest, Sha256};
 use zeroship_core::database_role::DatabaseCapability;
+use zeroship_core::types::LiveBinding;
 use zeroship_core::{BindingId, DatabaseId};
 use zeroship_data_orm::resolved_bindings::ResolvedBinding;
 
@@ -47,10 +48,18 @@ fn binding_body(resolved: &[ResolvedBinding]) -> String {
 /// feed reports for an app whose store holds exactly these edges.
 fn live_bindings(
     resolved: &[ResolvedBinding],
-) -> std::collections::BTreeMap<DatabaseId, DatabaseCapability> {
+) -> std::collections::BTreeMap<DatabaseId, LiveBinding> {
     resolved
         .iter()
-        .map(|edge| (edge.database.clone(), edge.capability))
+        .map(|edge| {
+            (
+                edge.database.clone(),
+                LiveBinding {
+                    binding: edge.binding.clone(),
+                    capability: edge.capability,
+                },
+            )
+        })
         .collect()
 }
 
@@ -220,6 +229,123 @@ async fn an_app_whose_binding_is_withdrawn_reloads_onto_the_set_control_serves()
         .is_bound(case.worker.app_id.as_str())
         .expect("read the store"));
     assert_eq!(case.body().await, b"var-old|sec-old|var-old");
+}
+
+/// An app whose binding is WITHDRAWN and RE-GRANTED for the same database at
+/// the same capability, both inside one poll interval, reloads onto the fresh
+/// edge.
+///
+/// The unbind DELETES the binding row (`databases::unbind_database`) and the
+/// rebind MINTS a fresh id (`databases::bind_database`), so the role
+/// `zs_bind_<binding>` the isolate composes is reaped and a differently named
+/// one takes its place. Every other fact about the app holds still - same
+/// deploy, same env, same limits, same policy, same database, same capability,
+/// same number of bindings - so the live binding set is the only place this
+/// can be seen, and it can only be seen there because each entry carries its
+/// EDGE. Without the edge the feed entry is byte-identical across the move and
+/// the isolate keeps composing a role `SET LOCAL ROLE` now refuses, leaving the
+/// app refusing until its process restarts.
+///
+/// The case SHOWS it rather than asserting it: the database-to-capability
+/// projection - everything a comparison ignoring the edge could see - is equal
+/// on both sides, and the reload is asked for anyway. Its rejection
+/// control is the reconcile after it, against a control plane expecting NO
+/// request: with the sets agreeing, nothing re-resolves.
+#[compio::test]
+async fn an_app_rebound_to_the_same_database_reloads_onto_the_fresh_edge() {
+    let mut case = deployed_with_database().await;
+    let retired = case.resolved_binding();
+    let regranted = ResolvedBinding {
+        database: retired.database.clone(),
+        binding: BindingId::mint(),
+        capability: retired.capability,
+    };
+    assert_ne!(
+        regranted.binding, retired.binding,
+        "the premise: an unbind and a rebind are two edges"
+    );
+    let before = case.installed_bindings();
+    assert_eq!(
+        before.len(),
+        1,
+        "the premise: the store starts non-empty, so this is not passing over \
+         an app that binds nothing"
+    );
+    let retired_binding = binding_store()
+        .binding_for(case.worker.app_id.as_str(), "d", &retired.database)
+        .expect("the app's isolate was built on an edge that composes a role");
+    let retired_role = retired_binding
+        .session_role()
+        .expect("a resolved edge names a role")
+        .to_owned();
+
+    let served = vec![regranted.clone()];
+    let bindings_route = route(endpoints::CONTROL_APP_BINDINGS, &case.worker.app_id);
+    let control = ControlPlane::serving(1, vec![(bindings_route.clone(), binding_body(&served))]);
+    case.control_url = control.base_url.clone();
+    case.version.live_bindings = live_bindings(&served);
+    assert_eq!(
+        capabilities(&before),
+        capabilities(&case.version.live_bindings),
+        "the premise of this case: the database and its capability did not \
+         move, which is everything a comparison ignoring the edge could see"
+    );
+
+    case.reconcile().await;
+
+    assert_eq!(
+        control.served(),
+        vec![bindings_route],
+        "the reload re-resolved the binding set at the route control declares"
+    );
+    assert_eq!(
+        case.installed_bindings(),
+        case.version.live_bindings,
+        "the store holds the set control serves, so the isolate built above \
+         narrows with the re-granted edge"
+    );
+    assert_eq!(
+        case.resolved_edges()
+            .get(&regranted.database)
+            .map(|edge| edge.binding.clone()),
+        Some(regranted.binding.clone()),
+        "and it is the EDGE that moved: same database, new binding id"
+    );
+    let regranted_binding = binding_store()
+        .binding_for(case.worker.app_id.as_str(), "d", &regranted.database)
+        .expect("the re-granted edge composes a role");
+    assert_ne!(
+        regranted_binding
+            .session_role()
+            .expect("a resolved edge names a role"),
+        retired_role,
+        "which is the point: the role the isolate narrows to is derived from \
+         the edge, so the rebind moved the role name the unbind reaped"
+    );
+    assert_eq!(
+        cache::get_loaded_meta(&case.worker.app_id)
+            .expect("the reload recorded what it built against")
+            .live_bindings,
+        case.version.live_bindings,
+        "and the isolate records it, so the next cycle does not reload again"
+    );
+    // The app is still serving: the reload replaced the isolate rather than
+    // dropping it.
+    assert_eq!(case.body().await, b"var-old|sec-old|var-old");
+
+    // THE REJECTION CONTROL, one variable changed: the sets now agree, and a
+    // control plane expecting NO request records one if it is made. Without it
+    // this case would pass over a reconcile that had started reloading every
+    // app on every tick.
+    let control = ControlPlane::serving(0, Vec::new());
+    case.control_url = control.base_url.clone();
+    case.reconcile().await;
+    assert_eq!(
+        control.served(),
+        Vec::<String>::new(),
+        "an app whose version feed entry did not move resolves nothing"
+    );
+    assert_eq!(case.installed_bindings(), case.version.live_bindings);
 }
 
 /// A reload whose binding set cannot be re-resolved keeps the previous isolate.
