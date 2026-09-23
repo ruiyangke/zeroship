@@ -201,8 +201,8 @@ zeroship_data_orm::orm::schema! {
             #[orm(primary_key)]
             id: Text,
             app_id: Text,
-            run_id: Text,
-            generation: BigInt,
+            run_id: Nullable<Text>,
+            generation: Nullable<BigInt>,
             task_id: Nullable<Text>,
             request_id: Text,
             hash: Text,
