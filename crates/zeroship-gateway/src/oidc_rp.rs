@@ -1062,13 +1062,14 @@ pub fn parse_stash_cookie(cookie_header: &str) -> Option<String> {
 //
 // Post-callback the gateway resolves the per-request `ZeroShip-User`
 // header from the app-session row (not from the ID token directly).
-// The payload shape and HMAC envelope are the canonical wire format;
-// the worker MAC-verifies and deserializes `WorkerUser` from it.
+// The payload shape and the signed envelope around it are the canonical
+// wire format; the worker verifies that signature under the gateway's
+// published public key and deserializes `WorkerUser` from it.
 
 /// Public user shape forwarded to the worker as the JSON body of the
 /// `ZeroShip-User` header. JWT internals (`sub` rename, `app`/`exp`
 /// stripping) live elsewhere; this struct is what the worker actually
-/// deserializes after MAC verification.
+/// deserializes once the envelope signature verifies.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerUser<'a> {
     pub id: &'a str,
@@ -1101,20 +1102,14 @@ pub struct WorkerUser<'a> {
 /// were ever bypassed. The request id and timestamp binding limit replay if
 /// a header leaks through logs or a proxy.
 ///
-/// # That guarantee is now true, and was not
+/// # Why that guarantee holds
 ///
-/// The paragraph above shipped for as long as this function has existed, and
-/// under the previous envelope it was FALSE BY CONSTRUCTION: the signature was
-/// an HMAC keyed by `worker_key`, the very secret that bearer-authenticated the
-/// dispatch endpoint. A caller who had bypassed - or simply held - that bearer
-/// held the minting key too, so "even if the bearer were bypassed" described a
-/// defence that did not exist. Worse, an empty `worker_key` disabled the bearer
-/// check while the worker went on verifying envelopes under the same empty key.
-///
-/// The identity envelope is asymmetric as of this change
-/// ([`zeroship_core::user_envelope`]). The gateway holds the only private key
-/// that can produce one; the worker holds the public half and can check but not
-/// mint. The claim is a property of the key model now rather than a hope about
+/// The identity envelope is asymmetric ([`zeroship_core::user_envelope`]). The
+/// gateway holds the only private key that can produce one; the worker holds
+/// the public half and can check but not mint. A symmetric envelope keyed by
+/// the same secret that bearer-authenticates the dispatch hop would make the
+/// paragraph above circular - whoever held the bearer would hold the minting
+/// key - so the claim is a property of the key model rather than a hope about
 /// the transport.
 ///
 /// Returns `None` when this gateway loaded no service key material and so

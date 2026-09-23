@@ -254,11 +254,11 @@ resource server with no RP of its own — the bespoke `ConsoleOidcRp` +
 Gateway -> 302 to auth /oauth2/authorize (no session cookie)
 crates/auth -> login / OAuth / consent, then native OP code issuance
 Gateway -> /__zeroship/auth/callback: code exchange, sets `__Host-zeroship_app_session`
-Gateway -> validates the session and forwards `ZeroShip-User` (HMAC-signed)
+Gateway -> validates the session and forwards `ZeroShip-User` (ed25519-signed)
 Worker/runtime -> reads the forwarded user context
 ```
 
-See `docs/reference/auth.md` for the full flow.
+See `docs/architecture/auth-flows.md` for the full flow.
 
 ## Notes
 

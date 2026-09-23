@@ -2,8 +2,9 @@
  * `@zeroship/auth` (the `.` export) — the SERVER helper.
  *
  * A thin, ergonomic wrapper around the platform-injected `env.auth.*`
- * namespace. The gateway HMAC-signs the authenticated identity into a
- * `ZeroShip-User` header, the worker verifies + parses it, and the runtime
+ * namespace. The gateway signs the authenticated identity into a
+ * `ZeroShip-User` header with its ed25519 private key, the worker verifies
+ * that signature under the gateway's public half and parses it, and the runtime
  * exposes the user via the kernel `env.auth.getUser()` / `requireUser()`
  * primitives. This package is the creator-facing surface on top.
  *

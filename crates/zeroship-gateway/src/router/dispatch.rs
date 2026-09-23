@@ -1121,7 +1121,7 @@ fn inflight_wait_ms(policy: &zeroship_bundle::compiled::EffectivePolicy) -> u64 
 /// A `user` procedure with no readable principal is REFUSED. Only
 /// a gateway-side invariant break reaches that arm — `resolve_auth` 401s
 /// an unauthenticated caller long before dispatch, and the header is
-/// minted and MAC'd by this same process moments earlier — but falling
+/// minted and signed by this same process moments earlier — but falling
 /// back to the shared anonymous namespace there would be exactly the
 /// cross-user leak the partition exists to prevent.
 fn resolve_dedupe_principal(
@@ -1581,8 +1581,8 @@ async fn handle_subscription_dispatch(
 
 /// Platform-reserved header names that must never be forwarded verbatim
 /// into the worker dispatch envelope. These are either set by the gateway
-/// itself on the trusted side-channel (`ZeroShip-User` HMAC), are
-/// gateway/control-internal routing/identity hints, or are an attractive
+/// itself on the trusted side-channel (the signed `ZeroShip-User` envelope),
+/// are gateway/control-internal routing/identity hints, or are an attractive
 /// nuisance for app JS that (incorrectly) reads identity from raw
 /// `request.headers` instead of `env.auth`. A forged inbound copy of any
 /// of these is dropped at the trust boundary.
@@ -1697,7 +1697,7 @@ async fn handle_dispatch(
     // `Authorization` / `x-zs-*` cannot ride into the worker's
     // dispatch envelope and be trusted by app JS reading raw
     // `request.headers`. Authoritative identity travels the separate
-    // HMAC `ZeroShip-User` channel (`user_header_value`), never here.
+    // signed `ZeroShip-User` channel (`user_header_value`), never here.
     let headers = collect_forwarded_headers(req.headers());
 
     // The gateway's own peer credential for this hop, minted per request under
@@ -5616,7 +5616,7 @@ mod tests {
     /// Defence-in-depth arm, driven directly because it is UNREACHABLE
     /// end-to-end: on an `auth: "user"` procedure `resolve_auth` 401s a
     /// caller with no identity long before dispatch, and the
-    /// `ZeroShip-User` header is minted and MAC'd by this same process. If
+    /// `ZeroShip-User` header is minted and signed by this same process. If
     /// that invariant ever breaks, the request must be refused — silently
     /// falling back to `Principal::Anon` would put an authenticated
     /// procedure's responses in the namespace every anonymous caller

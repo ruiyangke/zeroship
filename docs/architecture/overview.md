@@ -49,7 +49,7 @@ App runtime
 5. `Runtime::call_fetch_handler(...)` runs user code and returns `FetchOutcome`.
 ```
 
-Auth today is cookie/JWT-based at the gateway. When a session is valid, the gateway forwards an HMAC-signed `ZeroShip-User` header to the worker, as defined in the auth flow contract ([auth.md](../reference/auth.md)).
+Auth today is cookie/JWT-based at the gateway. When a session is valid, the gateway signs a `ZeroShip-User` identity envelope with its ed25519 private key and forwards it to the worker, which verifies it under the gateway's published public half ([auth-flows.md](auth-flows.md)).
 
 ## Deploy path
 

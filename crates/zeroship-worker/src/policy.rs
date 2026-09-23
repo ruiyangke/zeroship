@@ -7,10 +7,10 @@
 //! handler is entered. The next reader will call that redundant. It is not,
 //! for two independent reasons:
 //!
-//! 1. **The gateway is not the only way in.** `WorkerUser`'s own doc states
-//!    the threat: signing the `ZeroShip-User` header "prevents a caller with
-//!    direct network access to the worker from forging a user identity, even
-//!    if the worker's endpoint bearer-auth were ever bypassed." That sentence
+//! 1. **The gateway is not the only way in.** `encode_user_header`'s own doc
+//!    states the threat: signing the `ZeroShip-User` header "prevents a caller
+//!    with direct network access to the worker from forging a user identity,
+//!    even if the worker's endpoint bearer-auth were ever bypassed." That sentence
 //!    only means something if the worker itself rules on identity. Until this
 //!    module existed the format was designed for an enforcer that was never
 //!    built, and `crates/zeroship-gateway/src/router/dispatch.rs` recorded the
@@ -118,9 +118,9 @@ impl Refusal {
 
 /// Rule the deploy's declared policy on one dispatch.
 ///
-/// `user_json` is the payload `handler::dispatch` already HMAC-verified, and
-/// `None` means no identity was presented. `url` is the worker-visible URL the
-/// gateway forwarded (absolute, query included).
+/// `user_json` is the payload `handler::dispatch` already verified under the
+/// gateway's public key, and `None` means no identity was presented. `url` is
+/// the worker-visible URL the gateway forwarded (absolute, query included).
 ///
 /// A path that matches NO declared resource is admitted, and that is a
 /// deliberate boundary rather than an oversight: the worker is not a router
