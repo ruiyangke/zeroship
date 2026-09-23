@@ -12,7 +12,6 @@ import Module from "node:module";
 import {
   genTypesFromMigrations,
   ENV_DB_FILE,
-  MIGRATIONS_IR_FILE,
   RUNTIME_DESCRIPTOR_FILE,
 } from "../../src/gen-types/index.js";
 import { databaseForOutDir, readProjectConfig } from "../../src/project-config/index.js";
@@ -162,11 +161,17 @@ describe("generated schema source (record -> genArtifacts)", () => {
     try {
       const res = await genTypesFromMigrations(join(fx.root, "migrations"), outDir, MAIN);
       assert.equal(res.status, "written");
-      assert.deepEqual([...res.files], [
-        ENV_DB_FILE,
-        RUNTIME_DESCRIPTOR_FILE,
-        MIGRATIONS_IR_FILE,
-      ]);
+      assert.deepEqual([...res.files], [ENV_DB_FILE, RUNTIME_DESCRIPTOR_FILE]);
+      // THE RECORDED MIGRATION SET IS NOT AN ARTIFACT. It is built in memory
+      // when `zeroship migrate` asks for it and never lands on disk. Asserted
+      // over the directory rather than over `res.files`, because a writer that
+      // stopped reporting the file would still be writing it. The two names
+      // above are the control: they came out of this same directory listing.
+      assert.deepEqual(
+        (await fs.readdir(outDir)).sort(),
+        [ENV_DB_FILE, RUNTIME_DESCRIPTOR_FILE].sort(),
+        "gen-types must emit the two schema artifacts and nothing else",
+      );
 
       const json = JSON.parse(await fs.readFile(join(outDir, RUNTIME_DESCRIPTOR_FILE), "utf8"));
       assertRuntimeDescriptorV2(json);

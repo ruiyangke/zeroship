@@ -4,7 +4,7 @@
 //!   zeroship serve   <file-or-dir> [--port=3000] [--workers=0]
 //!   zeroship db      create|list|bind|unbind|bindings|delete
 //!   zeroship deploy  [<path-to-.zship>] [--app=<id>] [--app-name=<name>] [--control=URL] [--token=TOKEN] [--no-create] [--command-id=<id>] [--config=PATH] [--env=NAME]
-//!   zeroship migrate [<path-to-migrations.ir.json>] [--app=<id>] [--app-name=<name>]
+//!   zeroship migrate [<path-to-migrations-dir>] [--app=<id>] [--app-name=<name>]
 //!                    [--control=URL] [--token=TOKEN] [--config=PATH] [--env=NAME] [--yes]
 //!   zeroship config show [--config=PATH] [--env=NAME]
 //!   zeroship config path [--config=PATH]
@@ -778,7 +778,7 @@ fn record_created_app(
 /// migrations to apply.
 ///
 /// DELIBERATELY A CLIENT-SIDE HINT, and a weak one. It fires on the presence of
-/// the build's own artifact beside the selected project config, including when
+/// authored migrations beside the selected project config, including when
 /// deploy was invoked from another directory. It does not know whether the
 /// app's migrations are already applied. It cannot tell you that you FORGOT;
 /// only that there is something to run.
@@ -796,10 +796,10 @@ fn print_migrate_reminder(
     label: Option<&str>,
     resolved: Option<&project_config::Resolved>,
 ) {
-    // The reminder reads the SAME `out` directories the build wrote to, one
-    // per database this app declares. Before this it read a hardcoded const,
-    // so a project that moved its generated dir got silence from the one hint
-    // it had.
+    // The reminder reads the SAME `migrations` directories `zeroship migrate`
+    // records from, one per database this app declares. Before this it read a
+    // hardcoded const, so a project that moved its generated dir got silence
+    // from the one hint it had.
     let Some(cfg) = resolved else {
         return;
     };
@@ -810,8 +810,8 @@ fn print_migrate_reminder(
         .app_databases(label)
         .into_iter()
         .filter(|database| {
-            cfg.database_path(database, "out")
-                .is_ok_and(|out| out.join(migrate::IR_FILENAME).is_file())
+            cfg.database_path(database, "migrations")
+                .is_ok_and(|dir| declares_migrations(&dir))
         })
         .collect();
     if pending.is_empty() {
@@ -823,6 +823,20 @@ fn print_migrate_reminder(
         eprintln!("  zeroship migrate --app={app} --database={database} --control={control_url}");
     }
     eprintln!("Deploy does not check this: an unmigrated column fails at query time.");
+}
+
+/// Does `dir` hold at least one authored migration?
+///
+/// The `.ts` extension alone, deliberately: `zeroship migrate` refuses a
+/// filename that violates the version grammar rather than skipping it, so a
+/// misnamed migration must still make this hint fire - a creator whose typo
+/// hides the reminder learns about it from `42703 undefined_column`.
+fn declares_migrations(dir: &std::path::Path) -> bool {
+    std::fs::read_dir(dir).is_ok_and(|entries| {
+        entries.flatten().any(|entry| {
+            entry.path().extension().is_some_and(|ext| ext == "ts") && entry.path().is_file()
+        })
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1451,10 +1465,11 @@ fn print_usage() {
     eprintln!("                   --app takes the app's ID; --app-name its routing label.");
     eprintln!("                   --command-id resumes a deploy whose outcome was not reported.");
     eprintln!("                   Token source: --token, ZEROSHIP_TOKEN, or zeroship login.");
-    eprintln!("  zeroship migrate  [<path-to-migrations.ir.json>] [--app=<id>] [--app-name=<name>] [--control=URL] [--token=TOKEN] [--config=PATH] [--env=NAME] [--yes]");
+    eprintln!("  zeroship migrate  [<path-to-migrations-dir>] [--app=<id>] [--app-name=<name>] [--control=URL] [--token=TOKEN] [--config=PATH] [--env=NAME] [--yes]");
     eprintln!("                   Apply the app's committed migrations to its DEPLOYED database.");
-    eprintln!("                   Without a path, reads <migrations.out>/migrations.ir.json from");
-    eprintln!("                   zeroship.jsonc; without either, the command errors.");
+    eprintln!("                   Records the migrations/*.ts itself (needs Node, as the build");
+    eprintln!("                   does). Without a path, reads the selected database's");
+    eprintln!("                   `migrations` from zeroship.jsonc; without either, it errors.");
     eprintln!("                   An app that uses env.db needs this after deploy,");
     eprintln!("                   or its first database call fails with a missing-role error.");
     eprintln!("  zeroship config   show [--config=PATH] [--env=NAME]");

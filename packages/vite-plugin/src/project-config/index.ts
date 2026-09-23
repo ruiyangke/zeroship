@@ -620,9 +620,9 @@ function assertWritablePathsAreSafe(
   assertWritablePathIsSafe(root, configPath, "build.dist", config.build.dist);
   assertWritablePathIsSafe(root, configPath, "build.output", config.build.output, ".zship");
   // Every database's gen-types directory is a real write target, and no two
-  // may share one: `env.db.ts`, `schema.runtime.json` and `migrations.ir.json`
-  // have fixed names, so a shared directory is one database's schema silently
-  // standing in for another's.
+  // may share one: `env.db.ts` and `schema.runtime.json` have fixed names, so a
+  // shared directory is one database's schema silently standing in for
+  // another's.
   const claimed = new Map<string, string>();
   for (const [label, database] of Object.entries(declaredDatabases(config))) {
     assertWritablePathIsSafe(root, configPath, `databases.${label}.out`, database.out);

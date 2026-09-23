@@ -1,9 +1,9 @@
 // zeroship.jsonc - tooling configuration for examples/db-todos. COMMITTED.
 //
 // This example is the migration-first one: `migrations/*.ts` are folded into
-// `generated/zeroship/{env.db.ts,schema.runtime.json,migrations.ir.json}`, and
-// `zeroship migrate` posts that last file. Both directories are stated under
-// the database that owns them, so the build, the dev server,
+// `generated/zeroship/{env.db.ts,schema.runtime.json}`, and `zeroship migrate`
+// records those same `.ts` into the request it posts. Both directories are
+// stated under the database that owns them, so the build, the dev server,
 // `zeroship-dev-migrate`, the repo-wide gen-types runner and the Rust CLI all
 // read ONE spelling of them.
 

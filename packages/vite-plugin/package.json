@@ -15,6 +15,10 @@
     },
     "./types": {
       "types": "./dist/client-manifest.d.ts"
+    },
+    "./migrations-ir": {
+      "types": "./dist/gen-types/apply-request.d.ts",
+      "import": "./dist/gen-types/apply-request.js"
     }
   },
   "files": [

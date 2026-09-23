@@ -2,27 +2,39 @@
 //! database that app is bound to.
 //!
 //! Shape:
-//!   zeroship migrate [path-to-migrations.ir.json] [--app=<id>] [--app-name=<name>]
+//!   zeroship migrate [path-to-migrations-dir] [--app=<id>] [--app-name=<name>]
 //!                    [--database=<label>] [--control=URL] [--token=TOKEN]
 //!                    [--config=PATH] [--env=NAME] [--yes]
 //!
-//! The path comes from that database's `out` in `zeroship.jsonc` unless a
-//! positional overrides it. There is NO compiled default: the build decides
-//! where it writes the recorded migration set, and a Rust constant guessing the
-//! same string is how the two came to disagree in the first place.
+//! The directory comes from that database's `migrations` in `zeroship.jsonc`
+//! unless a positional overrides it. There is NO compiled default: the workspace
+//! decides where its migrations live, and a Rust constant guessing the same
+//! string is how the two came to disagree in the first place.
 //!
-//! The file is the request body verbatim - the CLI
-//! does not build, parse or rewrite it, because recording a `.ts` migration
-//! means EVALUATING it, which needs Node, esbuild and the installed
-//! `zero-migrate` engine (`packages/vite-plugin/src/gen-types/recorder.ts`). That
-//! work belongs to the build; shipping the result belongs here. Same division
-//! as `zeroship deploy`, which uploads a `.zship` it did not build.
+//! # The IR exists on the wire and nowhere else
+//!
+//! The command reads the creator's `.ts` migrations and RECORDS them, here, at
+//! apply time. There is no pre-built file to read and nothing produces one: a
+//! creator's migrations exist once, as the `.ts` they wrote, and a second
+//! encoding of them on disk would be hand-editable, independently stale, and
+//! one more thing to regenerate before every apply.
+//!
+//! **The recording runs in Node, not in this process**, and that is forced
+//! twice over. The migration service is Rust and holds the privileged
+//! credential, so it must never evaluate creator TypeScript; and nothing in
+//! `crates/` transpiles TypeScript at all - a creator's `.ts` is stripped by
+//! esbuild in the JavaScript toolchain, and the recorder drains a module-level
+//! singleton inside `@zeroship/migrate`, so a Rust recorder would be a SECOND
+//! implementation of the authoring DSL. So this spawns the one recorder the
+//! build already uses ([`record_apply_request`]) and posts what comes back off
+//! its pipe, in memory. Node is already required to produce the `.zship` this
+//! app deploys, so nothing new is required of the machine.
 //!
 //! **The target is the DATABASE, and it is in the URL rather than the body**,
-//! precisely because the body is posted verbatim. `--database` names one of the
-//! labels this app declares, and the CLI dereferences it to a `dbs_` id here,
-//! before the request: a label is local to one `zeroship.jsonc` and must never
-//! travel as an identifier.
+//! precisely because the body is posted as the recorder produced it. `--database`
+//! names one of the labels this app declares, and the CLI dereferences it to a
+//! `dbs_` id here, before the request: a label is local to one `zeroship.jsonc`
+//! and must never travel as an identifier.
 //!
 //! WHY THIS COMMAND EXISTS. Applying migrations is what puts a creator's tables
 //! in their database. Deploy an app that uses `env.db` without applying its
@@ -36,7 +48,7 @@
 //! in the request path. Reusing one creator-facing URL keeps project config from
 //! needing a second endpoint for the same deployment.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use zeroship_core::{AppId, DatabaseId};
 
@@ -46,31 +58,115 @@ use crate::{
     AppTarget, ControlResponse,
 };
 
-/// The migration set to post: a positional path, else `<migrations.out>/<IR_FILENAME>`.
+/// The migrations to record: a positional directory, else that database's own
+/// `migrations` from `zeroship.jsonc`.
 ///
-/// There is deliberately no third arm. Before this change the fallback was a
-/// hardcoded `generated/zeroship/migrations.ir.json` while the build wrote
-/// wherever `genTypesOut` said - two spellings of one fact, and the one the CLI
-/// held could not see the one the build used.
-fn resolve_ir_path(
+/// There is deliberately no third arm, and no arm for a pre-built IR file. The
+/// recorded set is never written to disk, so a path to one names a shape nothing
+/// in the toolchain produces; a positional that IS a file is refused by name
+/// rather than read, because its documents are whatever was put in it rather
+/// than what this app's `.ts` declare.
+///
+/// **A relative positional is resolved against `cwd` HERE**, before it can be
+/// handed to a child process whose own working directory is the recording
+/// target: re-resolving `migrations` inside `.../migrations` would name a
+/// directory that does not exist and report an app with no migrations.
+fn resolve_migrations_dir(
     args: &[String],
+    cwd: &Path,
     cfg: Option<&Resolved>,
     database_label: Option<&str>,
 ) -> Result<PathBuf, String> {
     if let Some(p) = positional_path(args) {
-        return Ok(PathBuf::from(p));
+        // `join` with an absolute right-hand side yields that side, so this is
+        // "make relative absolute" and not "prefix everything".
+        return Ok(cwd.join(p));
     }
     let (Some(cfg), Some(label)) = (cfg, database_label) else {
         return Err(format!(
-            "no migration set to apply. Pass the path written by the build \
-             (`<out>/{IR_FILENAME}`), or add a {} declaring the database under `databases`.",
+            "no migrations to apply. Pass the directory holding this database's \
+             `migrations/*.ts`, or add a {} declaring the database under `databases`.",
             project_config::CONFIG_FILENAME
         ));
     };
-    // THE IR COMES FROM THE DATABASE'S OWN `out`, so the file posted and the
-    // schema it lands in are two readings of ONE label. A path taken from any
-    // other database's `out` would be a build for a different set of tables.
-    Ok(cfg.database_path(label, "out")?.join(IR_FILENAME))
+    // THE MIGRATIONS COME FROM THE DATABASE'S OWN `migrations`, so what is
+    // recorded and the schema it lands in are two readings of ONE label. A
+    // directory taken from any other database's entry would be a different set
+    // of tables.
+    cfg.database_path(label, "migrations")
+}
+
+/// The ESM one-liner `node` evaluates to hand back the apply-request body.
+///
+/// The recorder is the build's own (`@zeroship/vite-plugin`), reached by its
+/// published subpath rather than by a path into the package, so the resolution
+/// is the package's `exports` contract and not a guess about its layout.
+const RECORD_APPLY_REQUEST_EVAL: &str = "process.stdout.write(await (await \
+     import(\"@zeroship/vite-plugin/migrations-ir\")).recordApplyRequest(process.argv[1]));";
+
+/// Record `migrations_dir` into the migration service's apply-request body.
+///
+/// # The pipe is the contract
+///
+/// `node` runs with its working directory set to `migrations_dir`, so the bare
+/// specifier above resolves by walking UP from the migrations themselves: the
+/// recorder that runs is the one the app whose migrations these are has
+/// installed, never a different workspace's. On success the body is the whole of
+/// stdout and nothing else - the recorder writes exactly one string there, and
+/// Node's own warnings go to stderr. On failure the exit status is non-zero and
+/// stderr carries the creator-facing message, which is forwarded whole: a
+/// migration that fails to record names the file and the DSL guard that refused
+/// it, and replacing that with a generic message would cost the creator the
+/// diagnostic.
+fn record_apply_request(migrations_dir: &Path) -> Result<String, String> {
+    if migrations_dir.is_file() {
+        return Err(format!(
+            "{} is a file. `zeroship migrate` takes the DIRECTORY holding your \
+             `migrations/*.ts`: it records them itself and posts the result, so there is no \
+             recorded-migration file for it to read.",
+            migrations_dir.display()
+        ));
+    }
+    if !migrations_dir.is_dir() {
+        return Err(format!(
+            "no migrations directory at {}. An app with no migrations has none to apply.",
+            migrations_dir.display()
+        ));
+    }
+    // ABSOLUTE BEFORE IT CROSSES THE PROCESS BOUNDARY. `current_dir` moves the
+    // child into this directory, so a relative path handed on as an argument
+    // would be re-resolved against the directory it already names.
+    let dir = migrations_dir.canonicalize().map_err(|e| {
+        format!(
+            "cannot resolve the migrations directory {}: {e}",
+            migrations_dir.display()
+        )
+    })?;
+    let output = std::process::Command::new("node")
+        .arg("--input-type=module")
+        .arg("--eval")
+        .arg(RECORD_APPLY_REQUEST_EVAL)
+        .arg(&dir)
+        .current_dir(&dir)
+        .output()
+        .map_err(|e| {
+            format!(
+                "cannot run `node` to record {}: {e}\n\
+                 `zeroship migrate` records your `migrations/*.ts` the same way the build \
+                 does, which needs Node and the app's installed @zeroship/vite-plugin. \
+                 Node already builds the .zship this app deploys.",
+                migrations_dir.display()
+            )
+        })?;
+    if !output.status.success() {
+        return Err(format!(
+            "recording the migrations under {} failed:\n{}",
+            migrations_dir.display(),
+            String::from_utf8_lossy(&output.stderr).trim_end()
+        ));
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|e| format!("the recorder produced a non-UTF-8 apply request: {e}"))
 }
 
 /// The database this apply targets, as the `dbs_` id that will be sent.
@@ -122,14 +218,6 @@ fn resolve_migrate_database(
     Ok((Some(label), id))
 }
 
-/// The filename the build writes inside `migrations.out`.
-///
-/// This is a fact about the EMITTER's layout, not a path: `generated/zeroship/`
-/// already holds the other two artifacts the migration fold produces
-/// (`env.db.ts`, `schema.runtime.json`), all three are written by the same emit
-/// step, and the directory that holds them is read from `zeroship.jsonc`.
-pub const IR_FILENAME: &str = "migrations.ir.json";
-
 /// Known flags accepted by `zeroship migrate` (bare names, no `=`).
 ///
 /// Read off the call sites, not off the usage string - same discipline as
@@ -167,7 +255,8 @@ pub fn cmd_migrate(args: &[String]) -> Result<(), String> {
 
     let (database_label, database) =
         resolve_migrate_database(args, resolved.as_ref(), label.as_deref())?;
-    let input = resolve_ir_path(args, resolved.as_ref(), database_label.as_deref())?;
+    let migrations =
+        resolve_migrations_dir(args, &cwd, resolved.as_ref(), database_label.as_deref())?;
 
     // BEFORE the POST, always. Applying a migration set to the wrong database
     // "is not something an error message afterwards can undo", and with a
@@ -176,7 +265,7 @@ pub fn cmd_migrate(args: &[String]) -> Result<(), String> {
         "migrate",
         &[("app", &app), ("control", &control_url)],
     );
-    eprintln!("zeroship migrate: migrations = {}", input.display());
+    eprintln!("zeroship migrate: migrations = {}", migrations.display());
     // The LABEL and the id it dereferenced to, side by side. The label is local
     // to this file and never travels; the id is what a server sees, and seeing
     // both is what tells a creator the dereference landed where they meant.
@@ -202,15 +291,9 @@ pub fn cmd_migrate(args: &[String]) -> Result<(), String> {
     }
 
     let (app, control_url) = (app.value, control_url.value);
-    let body = std::fs::read_to_string(&input).map_err(|e| {
-        format!(
-            "failed to read {}: {e}\n\
-             This file is written by the build (`pnpm build` / `vite build` with \
-             @zeroship/vite-plugin) from the app's `migrations/*.ts`. An app with no \
-             migrations has none to apply.",
-            input.display()
-        )
-    })?;
+    // RECORDED AFTER the protected-environment refusal, so a run that is about
+    // to be refused does not first evaluate the creator's migrations.
+    let body = record_apply_request(&migrations)?;
 
     let mut client = CurlMigrateClient;
     let outcome = apply_migrations(&mut client, &control_url, &target, &database, &token, &body)?;
@@ -230,8 +313,8 @@ pub fn cmd_migrate(args: &[String]) -> Result<(), String> {
 
 /// The first non-flag argument after the subcommand, if any.
 ///
-/// `zeroship migrate --app=x` must NOT read `--app=x` as the path; the default
-/// applies instead.
+/// `zeroship migrate --app=x` must NOT read `--app=x` as the directory; the
+/// default applies instead.
 fn positional_path(args: &[String]) -> Option<String> {
     args.get(2)
         .filter(|arg| !arg.starts_with("--"))
@@ -239,7 +322,7 @@ fn positional_path(args: &[String]) -> Option<String> {
 }
 
 pub(crate) fn check_unknown_migrate_flags(args: &[String]) -> Result<(), String> {
-    // args[0] = binary, args[1] = "migrate", args[2] = optional path.
+    // args[0] = binary, args[1] = "migrate", args[2] = optional migrations dir.
     for arg in args.iter().skip(2) {
         if !arg.starts_with("--") {
             continue;
@@ -253,7 +336,7 @@ pub(crate) fn check_unknown_migrate_flags(args: &[String]) -> Result<(), String>
                 "unknown flag `{flag_name}`; a typo here is silent - `--control` \
                  falling back to its default would apply migrations to \
                  http://localhost:9090 instead of the control plane you named. \
-                 Usage: zeroship migrate [path-to-migrations.ir.json] \
+                 Usage: zeroship migrate [path-to-migrations-dir] \
                  [--app=<id>] [--app-name=<name>] [--control=<url>] [--token=<token>] \
                  [--config=<path>] [--env=<name>] [--yes]"
             ));
@@ -671,7 +754,7 @@ mod tests {
         let args = s(&[
             "zeroship",
             "migrate",
-            "generated/zeroship/migrations.ir.json",
+            "migrations",
             "--app=todos",
             "--control=http://localhost:9090",
             "--token=pat",
@@ -690,7 +773,7 @@ mod tests {
     }
 
     /// A NON-PRIMARY label is a legal target, and it resolves to ITS OWN id and
-    /// ITS OWN `out`.
+    /// ITS OWN `migrations`.
     ///
     /// The apply names the database, so `primary` decides only which handle is
     /// `env.db`; it does not decide which schema a migration set can reach. The
@@ -698,7 +781,7 @@ mod tests {
     /// silently fell back to it would produce a legal-looking id and land the
     /// analytics tables in the main database.
     #[test]
-    fn a_non_primary_database_label_resolves_to_its_own_id_and_out_path() {
+    fn a_non_primary_database_label_resolves_to_its_own_id_and_migrations_path() {
         let cfg = fixture();
         let args = s(&[
             "zeroship",
@@ -718,16 +801,17 @@ mod tests {
             "the control: the primary is a different database from the one named"
         );
 
-        let path = resolve_ir_path(&args, Some(&cfg), label.as_deref()).expect("the IR path");
+        let path = resolve_migrations_dir(&args, Path::new("/workspace"), Some(&cfg), label.as_deref())
+            .expect("the migrations dir");
         assert!(
-            path.ends_with("generated/zeroship/analytics/migrations.ir.json"),
-            "the IR must come from the named database's own out: {}",
+            path.ends_with("migrations/analytics"),
+            "the migrations must come from the named database's own entry: {}",
             path.display()
         );
     }
 
     /// The control, differing in one variable: no `--database` at all resolves
-    /// the primary, and its `out` is a different directory.
+    /// the primary, and its `migrations` is a different directory.
     #[test]
     fn no_database_flag_resolves_the_primary() {
         let cfg = fixture();
@@ -738,10 +822,12 @@ mod tests {
         assert_eq!(label.as_deref(), Some("main"));
         assert_eq!(id.as_str(), "dbs_03evr3oqx1200yyd6zj2cebfw");
 
-        let path = resolve_ir_path(&args, Some(&cfg), label.as_deref()).expect("the IR path");
+        let path = resolve_migrations_dir(&args, Path::new("/workspace"), Some(&cfg), label.as_deref())
+            .expect("the migrations dir");
+        assert!(path.ends_with("migrations"), "{}", path.display());
         assert!(
-            path.ends_with("generated/zeroship/main/migrations.ir.json"),
-            "{}",
+            !path.ends_with("migrations/analytics"),
+            "the control: the primary's migrations are not the non-primary's: {}",
             path.display()
         );
     }
@@ -787,9 +873,138 @@ mod tests {
             None
         );
         assert_eq!(
-            positional_path(&s(&["zeroship", "migrate", "custom.ir.json", "--app=todos"])),
-            Some("custom.ir.json".to_string())
+            positional_path(&s(&["zeroship", "migrate", "db/migrations", "--app=todos"])),
+            Some("db/migrations".to_string())
         );
         assert_eq!(positional_path(&s(&["zeroship", "migrate"])), None);
+    }
+
+    /// A RELATIVE positional is anchored to the CLI's working directory.
+    ///
+    /// The recorder runs with its working directory set to the migrations, so a
+    /// relative path still spelled `migrations` when it reaches that child names
+    /// `<migrations>/migrations` - a directory that does not exist, reported as
+    /// an app with no migrations to apply. An absolute positional is the control:
+    /// it must pass through untouched rather than be prefixed.
+    #[test]
+    fn a_relative_positional_is_anchored_to_the_working_directory() {
+        let cwd = Path::new("/home/me/app");
+        let relative = s(&["zeroship", "migrate", "db/migrations", "--app=todos"]);
+        assert_eq!(
+            resolve_migrations_dir(&relative, cwd, None, None).expect("a positional needs no file"),
+            PathBuf::from("/home/me/app/db/migrations"),
+        );
+
+        let absolute = s(&["zeroship", "migrate", "/srv/app/migrations", "--app=todos"]);
+        assert_eq!(
+            resolve_migrations_dir(&absolute, cwd, None, None).expect("a positional needs no file"),
+            PathBuf::from("/srv/app/migrations"),
+        );
+    }
+
+    /// The repo root, from this crate's own manifest dir.
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("the crate sits two levels under the repo root")
+    }
+
+    /// The recorded migration set for `examples/db-todos`, as it goes on the
+    /// wire.
+    ///
+    /// It is not free-floating. [`recording_db_todos_reproduces_the_posted_ir`]
+    /// binds its `documents` to `examples/db-todos/migrations/*.ts` by recording
+    /// them, and its `descriptor_sha256` to the committed `schema.runtime.json`
+    /// by hashing that file - so a migration change that is not reflected here
+    /// fails this suite by name instead of ageing quietly.
+    const DB_TODOS_IR: &str = include_str!("../../../tests/fixtures/migrations-ir/db-todos.ir.json");
+
+    /// The committed descriptor for the same app - the bytes the packer hashes.
+    const DB_TODOS_RUNTIME_JSON: &str =
+        include_str!("../../../examples/db-todos/generated/zeroship/schema.runtime.json");
+
+    /// **The apply body is RECORDED from the creator's `.ts`, and it is exactly
+    /// the pinned set - byte for byte.**
+    ///
+    /// This is what binds the recorder to the fold the build runs. If the two
+    /// drift - a different serialisation, a dropped filename stem, ops in
+    /// another order - the migration service journals different versions under
+    /// different names, and nothing else in the tree would notice.
+    ///
+    /// It runs the REAL path: [`record_apply_request`] spawns the same Node
+    /// recorder the CLI spawns, against a real app's real migrations, and that
+    /// app carries no recorded set on disk for it to read instead. It needs a
+    /// built `packages/vite-plugin/dist` (`pnpm build`); without one it fails
+    /// naming what is missing, which is the correct outcome for a fixture that
+    /// cannot reach its dependency.
+    #[test]
+    fn recording_db_todos_reproduces_the_posted_ir() {
+        let app = repo_root().join("examples/db-todos");
+        let migrations = app.join("migrations");
+        assert!(
+            migrations.is_dir(),
+            "the db-todos example must still author migrations: {}",
+            migrations.display()
+        );
+        // THE PRECONDITION, asserted rather than assumed: the recording cannot
+        // be reading a file, because the app holds none for it to read.
+        let on_disk = app.join("generated/zeroship/migrations.ir.json");
+        assert!(
+            !on_disk.exists(),
+            "the recorded migration set must exist only on the wire: {}",
+            on_disk.display()
+        );
+
+        let body = record_apply_request(&migrations).expect("record the db-todos migrations");
+        assert_eq!(
+            body, DB_TODOS_IR,
+            "the recorded apply body must be the pinned bytes"
+        );
+
+        // The SECOND binding, and it is not a restatement of the first: the
+        // fixture could be internally consistent and still name a descriptor no
+        // build produces. This hashes the committed `schema.runtime.json` - the
+        // same bytes `zship.ts` hashes into the manifest - and requires the
+        // recorded body to declare it.
+        let posted: serde_json::Value =
+            serde_json::from_str(&body).expect("the apply body is JSON");
+        assert_eq!(posted["kind"], "ir");
+        assert_eq!(
+            posted["descriptor_sha256"].as_str(),
+            Some(zeroship_bundle::blob::sha256_hex(DB_TODOS_RUNTIME_JSON.as_bytes()).as_str()),
+            "the recorded descriptor hash must name the committed schema.runtime.json"
+        );
+        assert_eq!(
+            posted["documents"]
+                .as_array()
+                .expect("documents is an array")
+                .len(),
+            std::fs::read_dir(&migrations)
+                .expect("read the migrations dir")
+                .filter(|e| e.as_ref().is_ok_and(|e| e.path().extension().is_some_and(|x| x == "ts")))
+                .count(),
+            "every authored .ts migration must reach the wire"
+        );
+    }
+
+    /// A recorded-migration FILE is not an input, and a positional naming one is
+    /// refused rather than posted: its documents are whatever was in it, not
+    /// what the app's `.ts` say today, so posting it would apply a schema
+    /// nothing in the checkout derived.
+    #[test]
+    fn a_positional_file_is_refused_rather_than_posted() {
+        let recorded = repo_root().join("tests/fixtures/migrations-ir/db-todos.ir.json");
+        assert!(recorded.is_file(), "{}", recorded.display());
+        let error = record_apply_request(&recorded).expect_err("a file must be refused");
+        assert!(error.contains("is a file"), "{error}");
+        assert!(error.contains("DIRECTORY"), "{error}");
+
+        // The control, differing in one variable: the same call against a
+        // DIRECTORY that does not exist fails for the other reason, so the
+        // refusal above is about the file-ness and not about every bad path.
+        let missing = repo_root().join("tests/fixtures/migrations-ir/does-not-exist");
+        let error = record_apply_request(&missing).expect_err("a missing dir must be refused");
+        assert!(error.contains("no migrations directory"), "{error}");
     }
 }

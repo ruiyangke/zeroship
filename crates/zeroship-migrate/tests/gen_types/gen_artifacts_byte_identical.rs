@@ -256,7 +256,7 @@ fn raw_ops(documents: &[IrDocumentFixture]) -> Vec<Op> {
 ///
 /// This follows the service's real seams: filename order, app id schema, exact
 /// app-bound default confined policy, then the op renderer's production policy-
-/// resolution seam. A normal Vite-produced migrations.ir.json has no optional policy
+/// resolution seam. A normal recorded migration set has no optional policy
 /// draft, so the default/no-draft branch is the production build-to-server path.
 fn render_as_migration_service(
     mut documents: Vec<IrDocumentFixture>,

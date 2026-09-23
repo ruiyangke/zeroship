@@ -208,9 +208,9 @@ pub async fn readyz(state: State<Arc<MigrationServiceState>>) -> web::HttpRespon
 /// The DATABASE is the target: its schema is what the DDL writes, and an app
 /// may hold several databases, so a target derived from the app could only
 /// address one of them. It rides in the path rather than the body because the
-/// CLI posts the build's `migrations.ir.json` VERBATIM - it does not parse or
-/// rewrite that file, and a target it had to splice in would be a target it
-/// could get wrong.
+/// CLI posts the recorded migration set VERBATIM - it does not parse or rewrite
+/// what the recorder handed it, and a target it had to splice in would be a
+/// target it could get wrong.
 ///
 /// The APP is the authorization subject: the bearer is checked for
 /// [`Action::AppsDeploy`] on it, exactly as every other mutation here is. It is

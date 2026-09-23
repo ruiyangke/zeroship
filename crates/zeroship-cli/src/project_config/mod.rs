@@ -261,9 +261,9 @@ impl ProjectConfig {
     }
 
     /// Every database's gen-types output directory is a real write target, and
-    /// no two databases may share one: `env.db.ts`, `schema.runtime.json` and
-    /// `migrations.ir.json` have fixed names, so a shared directory is one
-    /// database's schema silently standing in for another's.
+    /// no two databases may share one: `env.db.ts` and `schema.runtime.json`
+    /// have fixed names, so a shared directory is one database's schema
+    /// silently standing in for another's.
     fn check_database_outputs(&self) -> Result<(), String> {
         let mut claimed: Vec<(&str, &str)> = Vec::new();
         for (label, entry) in self.labelled(&self.root, "databases") {

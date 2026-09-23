@@ -134,12 +134,12 @@
         "migrations": {
           "type": "string",
           "x-cli-read": true,
-          "description": "This database's migration sources, relative to the project root."
+          "description": "This database's migration sources, relative to the project root. The build folds them into <out>, and `zeroship migrate` records them into the request it posts."
         },
         "out": {
           "type": "string",
           "x-cli-read": true,
-          "description": "The gen-types output dir holding env.db.ts, schema.runtime.json and migrations.ir.json for THIS database. `zeroship migrate` posts <out>/migrations.ir.json. Both readers resolve it and reject the project root or an ancestor; the emitter refuses to overwrite unknown existing targets. Two databases may not share one, because the three filenames are fixed."
+          "description": "The gen-types output dir holding env.db.ts and schema.runtime.json for THIS database. Both readers resolve it and reject the project root or an ancestor; the emitter refuses to overwrite unknown existing targets. Two databases may not share one, because the two filenames are fixed."
         }
       }
     },

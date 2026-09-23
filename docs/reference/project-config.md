@@ -83,8 +83,8 @@ operationally identical, so both tools apply its empty default.
 | `name` | string, `^[a-z0-9][a-z0-9-]{0,62}$` | required | CLI `deploy`, and only as the app name on a first push (see [The writeback, and starting a project with no app yet](#the-writeback-and-starting-a-project-with-no-app-yet)). The build validates it and otherwise ignores it. |
 | `databases.<label>` | object | — | see [Labels](#labels). One entry per database this workspace uses. |
 | `databases.<label>.id` | string, `^dbs_[0-9a-z]{25}$` | required | CLI. The database's id, as `zeroship db create` printed it. The CLI dereferences the label to this before any request. |
-| `databases.<label>.migrations` | string | required | build (production and dev). This database's migration sources. |
-| `databases.<label>.out` | string | required | build (writes this database's generated artifacts) and CLI `migrate` (posts `<out>/migrations.ir.json`, the migration set's intermediate representation, or IR). It cannot resolve to the project root or an ancestor, generation overwrites only the artifacts it recognizes, and two databases may not share one — the three filenames in it are fixed. |
+| `databases.<label>.migrations` | string | required | build (production and dev) and CLI `migrate`, which records the `.ts` here into the request it posts. This database's migration sources. |
+| `databases.<label>.out` | string | required | build (writes this database's generated artifacts). It cannot resolve to the project root or an ancestor, generation overwrites only the artifacts it recognizes, and two databases may not share one — the two filenames in it are fixed. |
 | `apps.<label>` | object | — | see [Labels](#labels). One entry per app this workspace deploys. |
 | `apps.<label>.app` | string | none | CLI: `deploy`, `migrate`, `secret`, `var`. The app's id. Absent on a fresh project; see [The writeback](#the-writeback-and-starting-a-project-with-no-app-yet). |
 | `apps.<label>.databases` | string[] | required | build and CLI. The database LABELS this app uses. Each becomes a member of `env.databases`. |
@@ -244,7 +244,7 @@ it resolved and where it came from, on stderr, before it acts:
 $ zeroship migrate --env=prod
 zeroship migrate: app = app_034klb07lrb9jgma6imvmx000 (from zeroship.jsonc environments.prod apps.storefront)
 zeroship migrate: control = https://control.example (from zeroship.jsonc environments.prod)
-zeroship migrate: migrations = /home/me/app/generated/zeroship/migrations.ir.json
+zeroship migrate: migrations = /home/me/app/migrations
 zeroship migrate: database = main (dbs_03evr3oqx1200yyd6zj2cebfw)
 ```
 
@@ -564,7 +564,7 @@ The whole flow, with no target flags anywhere:
 ```bash
 pnpm build                       # writes build.output and each database's out
 zeroship deploy                  # reads the app entry, control, build.output
-zeroship migrate                 # posts <out>/migrations.ir.json for the primary
+zeroship migrate                 # records the primary's migrations/*.ts and applies them
 
 zeroship deploy --env=staging    # the staging app and control
 zeroship migrate --env=prod --yes   # protected: --yes is required

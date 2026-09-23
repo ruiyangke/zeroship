@@ -104,13 +104,13 @@ database's migrations into generated artifacts under that database's own `out`:
   and declares `Env.db` as that entry when the app names it `primary`.
 - `schema.runtime.json` - the runtime schema descriptor carried into the
   `.zship`.
-- `migrations.ir.json` - the recorded migration set that `zeroship migrate`
-  posts.
 
-Commit that directory. The `.zship` does not carry migration documents:
-`zeroship migrate` posts the recorded set, and the artifact carries only the
-generated descriptor (see [the project config](project-config.md) and
-[the deploy contract](zeroship-standard.md)).
+Commit that directory. Those two files are the whole of it: the migrations
+themselves are never rewritten into a generated file. The `.zship` does not
+carry migration documents either - it carries only the generated descriptor, and
+`zeroship migrate` records your `migrations/*.ts` when you run it (see [the CLI
+reference](cli.md), [the project config](project-config.md) and [the deploy
+contract](zeroship-standard.md)).
 
 When it runs:
 

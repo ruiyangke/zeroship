@@ -53,10 +53,11 @@ project `name`, creates that app, and writes its id back into the file.
 
 This is the single most common deployment failure. The artifact carries the
 app's code and the generated schema typing. It does **not** carry the
-migrations, and deploying does not apply them. `zeroship migrate` posts
-`generated/zeroship/migrations.ir.json` to the migration service, which creates
-the app's schema, its tables, and the per-app database role the runtime assumes
-on every `env.db` call.
+migrations, and deploying does not apply them. `zeroship migrate` reads this
+app's `migrations/*.ts`, records them, and posts the result to the migration
+service, which creates the app's schema, its tables, and the per-app database
+role the runtime assumes on every `env.db` call. Run it from the app directory
+with `node_modules` installed: the recording is the same one the build does.
 
 Skip it and the app deploys clean, serves its static assets, dispatches its
 RPCs, and then fails the first database call because that role does not exist.
