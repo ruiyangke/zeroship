@@ -17,12 +17,16 @@ import {
   DEV_RUNTIME_FRESH_REQUIRED,
 } from "../src/constants.js";
 import { devServerPlugin } from "../src/dev-server.js";
+import { DEV_APP_ID } from "../src/gen-types/dev-apply.js";
 import { readGeneratedRuntimeDescriptorAt } from "../src/gen-types/read-descriptor.js";
 import { createProjectConfigHolder } from "../src/project-config/index.js";
 import type { TransformState } from "../src/transform.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BOOTSTRAP_SHIM_PATH = resolve(__dirname, "../src/dev-bootstrap.js");
+
+/** A typed app id that is NOT the shared local one, so the two can be told apart. */
+const DECLARED_APP_ID = "app_034klb07lrb9jgma6imvmx000";
 
 /** A real op.* migration creating `<table>` with one text `<column>`. The
  *  in-process recorder resolves `@zeroship/migrate` and the fold materialises
@@ -86,6 +90,7 @@ interface RuntimeLog {
   pid: number;
   argv: string[];
   env: {
+    APP_ID?: string;
     DATABASE_URL?: string;
     ZEROSHIP_DEV?: string;
     ZEROSHIP_ENTRY?: string;
@@ -409,6 +414,35 @@ describe("devServerPlugin", () => {
     assert.equal(process.listenerCount("SIGTERM"), beforeSigtermListeners);
   });
 
+  // WHAT THESE TWO PIN. The dev host runs one process per app and namespaces
+  // everything it owns - the app schema, the workflow deployment and
+  // activation rows - on the id in APP_ID. Handing every app the same id makes
+  // two dev apps on one database indistinguishable to those tables, which
+  // surfaces as an activation-identity conflict rather than as a
+  // configuration error. The pair differs in ONE variable, the declaration, so
+  // the fallback staying put is measured rather than assumed.
+  test("spawns the runtime under the app id the workspace declares", async () => {
+    const harness = await startHarness({
+      devServerPort: 3910,
+      declaredAppId: DECLARED_APP_ID,
+    });
+    try {
+      assert.equal((await harness.runtimeLog()).env.APP_ID, DECLARED_APP_ID);
+      assert.notEqual(DECLARED_APP_ID, DEV_APP_ID);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("spawns the runtime under the shared local app id when the workspace declares none", async () => {
+    const harness = await startHarness({ devServerPort: 3911 });
+    try {
+      assert.equal((await harness.runtimeLog()).env.APP_ID, DEV_APP_ID);
+    } finally {
+      await harness.close();
+    }
+  });
+
   test("restarts the app runtime after publishing changed dependencies", async () => {
     const harness = await startHarness();
     try {
@@ -648,6 +682,8 @@ async function startHarness(options: {
   dotenv?: string;
   parentDatabaseUrl?: string;
   devServerPort?: number;
+  /** `apps.app.app` for the fixture's one app. Omitted means the file states none. */
+  declaredAppId?: string;
   migrations?: {
     migrationSource: string;
     updateAtListen?: string;
@@ -693,9 +729,13 @@ async function startHarness(options: {
       resolve(root, "migrations/20240617123000_notes.ts"),
       options.migrations.migrationSource,
     );
-    // A database's migration sources and its fold have NO default: the file is
-    // their one holder, so a fixture that wants the dev tier to fold anything
-    // has to declare the database.
+  }
+  // A database's migration sources and its fold have NO default: the file is
+  // their one holder, so a fixture that wants the dev tier to fold anything has
+  // to declare the database. A fixture that wants the runtime spawned under a
+  // declared identity has to declare the app id for the same reason, and a
+  // migrations directory that does not exist is simply not watched.
+  if (options.migrations || options.declaredAppId) {
     await fs.writeFile(
       resolve(root, "zeroship.jsonc"),
       JSON.stringify({
@@ -710,7 +750,13 @@ async function startHarness(options: {
             out: "generated/zeroship",
           },
         },
-        apps: { app: { databases: ["main"], primary: "main" } },
+        apps: {
+          app: {
+            ...(options.declaredAppId ? { app: options.declaredAppId } : {}),
+            databases: ["main"],
+            primary: "main",
+          },
+        },
       }),
     );
   }
@@ -735,6 +781,7 @@ async function startHarness(options: {
       "  pid: process.pid,",
       "  argv: process.argv.slice(2),",
       "  env: {",
+      "    APP_ID: process.env.APP_ID,",
       "    DATABASE_URL: process.env.DATABASE_URL,",
       "    ZEROSHIP_DEV: process.env.ZEROSHIP_DEV,",
       "    ZEROSHIP_ENTRY: process.env.ZEROSHIP_ENTRY,",

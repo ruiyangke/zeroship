@@ -42,6 +42,7 @@ import {
   parseProjectConfig,
   readProjectConfig,
   resolveProjectConfig,
+  selectBuildTarget,
 } from "../src/project-config/index.js";
 
 const FULL = `{
@@ -55,13 +56,13 @@ const FULL = `{
     "main": { "id": "dbs_03evr3oqx1200yyd6zj2cebfw", "migrations": "migrations", "out": "generated/zeroship" }
   },
   "apps": {
-    "storefront": { "app": "11111111-1111-4111-8111-111111111111", "databases": ["main"], "primary": "main" }
+    "storefront": { "app": "app_034klb07lrb9jgma6imvmx000", "databases": ["main"], "primary": "main" }
   },
   "secrets": ["STRIPE_SECRET_KEY"],
   "environments": {
     "staging": {
       "control": "https://control.staging.zeroship.ai",
-      "apps": { "storefront": { "app": "22222222-2222-4222-8222-222222222222" } },
+      "apps": { "storefront": { "app": "app_034klb07lrb9jgma6imvmx001" } },
       "databases": { "main": { "id": "dbs_03evr3oqx1200uzh8k6gycpgg" } },
       "protected": true
     }
@@ -263,7 +264,7 @@ describe("validation", () => {
   // database id lands WRITES in the wrong data.
   test("an environment missing any of apps, control or databases is refused", () => {
     for (const removed of [
-      '"apps": { "storefront": { "app": "22222222-2222-4222-8222-222222222222" } },\n      ',
+      '"apps": { "storefront": { "app": "app_034klb07lrb9jgma6imvmx001" } },\n      ',
       '"databases": { "main": { "id": "dbs_03evr3oqx1200uzh8k6gycpgg" } },\n      ',
       '"control": "https://control.staging.zeroship.ai",\n      ',
     ]) {
@@ -460,7 +461,7 @@ describe("validation", () => {
 describe("resolution", () => {
   test("the root resolution drops $schema and environments", () => {
     const r = resolveProjectConfig(parsed());
-    assert.equal(r.apps!.storefront.app, "11111111-1111-4111-8111-111111111111");
+    assert.equal(r.apps!.storefront.app, "app_034klb07lrb9jgma6imvmx000");
     assert.equal(r.databases!.main.out, "generated/zeroship");
     assert.ok(!("environments" in (r as unknown as Record<string, unknown>)));
     assert.ok(!("$schema" in (r as unknown as Record<string, unknown>)));
@@ -468,7 +469,7 @@ describe("resolution", () => {
 
   test("an environment replaces control and overrides the id under each label", () => {
     const r = resolveProjectConfig(parsed(), "staging");
-    assert.equal(r.apps!.storefront.app, "22222222-2222-4222-8222-222222222222");
+    assert.equal(r.apps!.storefront.app, "app_034klb07lrb9jgma6imvmx001");
     assert.equal(r.control, "https://control.staging.zeroship.ai");
     assert.equal(r.databases!.main.id, "dbs_03evr3oqx1200uzh8k6gycpgg");
     // The label, the build-time paths and the app wiring are the same artifact
@@ -518,6 +519,47 @@ describe("resolution", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("app selection", () => {
+  // The id a workspace declares is what the dev host runs under and what every
+  // namespace the runtime derives is keyed on, so the selection carries it and
+  // refuses one that is not an identity. The schema types the field as a plain
+  // string, so nothing upstream of here has looked at its shape.
+  test("the selected target carries the declared app id", () => {
+    const target = selectBuildTarget(resolveProjectConfig(parsed()), "storefront");
+    assert.equal(target.label, "storefront");
+    assert.equal(target.appId, "app_034klb07lrb9jgma6imvmx000");
+  });
+
+  test("an environment's app id is the one the selection carries", () => {
+    const target = selectBuildTarget(resolveProjectConfig(parsed(), "staging"));
+    assert.equal(target.appId, "app_034klb07lrb9jgma6imvmx001");
+  });
+
+  test("a declared app id that is not a typed app id is refused", () => {
+    const body = FULL.replace(
+      '"app": "app_034klb07lrb9jgma6imvmx000"',
+      '"app": "11111111-1111-4111-8111-111111111111"',
+    );
+    assert.notEqual(body, FULL, "the fixture must still carry the id this rewrites");
+    assert.throws(
+      () => selectBuildTarget(resolveProjectConfig(parsed(body))),
+      (error: Error) => {
+        assert.match(error.message, /zeroship\.jsonc/);
+        assert.match(error.message, /apps\.storefront\.app/);
+        assert.match(error.message, /11111111-1111-4111-8111-111111111111/);
+        assert.match(error.message, /\^app_\[0-9a-z\]\{25\}\$/);
+        return true;
+      },
+    );
+  });
+
+  test("an app declaring no id selects with none, which is a fresh project", () => {
+    const body = FULL.replace('"app": "app_034klb07lrb9jgma6imvmx000", ', "");
+    assert.notEqual(body, FULL, "the fixture must still carry the id this removes");
+    assert.equal(selectBuildTarget(resolveProjectConfig(parsed(body))).appId, undefined);
   });
 });
 

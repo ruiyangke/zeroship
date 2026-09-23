@@ -85,10 +85,28 @@ export interface TargetDatabase extends ResolvedDatabase {
   primary: boolean;
 }
 
+/**
+ * The typed-id shape an app id takes: the one `zeroship-id` mints and the one
+ * Rust's `AppId::parse` accepts.
+ *
+ * The schema types `apps.<label>.app` as a plain string, so the generated
+ * FIELD_RULES carry no pattern for it and a declaration reaches the resolved
+ * config unexamined. It is not an ordinary string once it is selected: the dev
+ * host runs under it, and the app schema, the workflow deployment rows and the
+ * activation rows are all keyed on it. A malformed one would name an identity
+ * that is not this app's, so the selection below refuses it by shape.
+ */
+const APP_ID_PATTERN = /^app_[0-9a-z]{25}$/;
+
 /** Which declared app this build is for, and the databases it uses. */
 export interface BuildTarget {
   /** `null` only when no file declares any app: a scratch directory. */
   label: string | null;
+  /**
+   * The app's declared identity, checked against `APP_ID_PATTERN`. Absent when
+   * the workspace declares none, which is a fresh project: the first
+   * `zeroship deploy` auto-creates the app and writes its id into the file.
+   */
   appId?: string;
   databases: TargetDatabase[];
 }
@@ -126,6 +144,14 @@ export function selectBuildTarget(
   }
 
   const entry = apps[label]!;
+  if (entry.app != null && !APP_ID_PATTERN.test(entry.app)) {
+    throw new Error(
+      `zeroship: ${CONFIG_FILENAME} declares \`apps.${label}.app\` as \`${entry.app}\`, which ` +
+        `is not an app id - it must match ${APP_ID_PATTERN.source}. An app's id is the identity ` +
+        `every deploy, migration and workflow activation keys on; \`zeroship deploy\` writes the ` +
+        `one it creates into this file.`,
+    );
+  }
   const known = declaredDatabases(config);
   const databases = (entry.databases ?? []).map((name) => {
     const database = known[name];
