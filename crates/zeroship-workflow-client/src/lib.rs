@@ -29,6 +29,7 @@ use zeroship_core::{
     service_assertion::ServiceIssuer,
     service_identity::endpoints,
     service_peers::{service_issuer, ServiceAuth, WORKER_SERVICE_NAME},
+    workflow_policy::{MAX_INPUT_BYTES_CEILING, MAX_JOURNAL_BYTES_CEILING},
 };
 
 /// Bounds the complete exchange, including streamed error bodies.
@@ -40,11 +41,16 @@ pub struct Options {
 }
 
 impl Default for Options {
+    /// The byte bounds derive from the platform ceilings for the quantities
+    /// this transport carries: a request carries what `max_input_bytes`
+    /// governs, and a response carries what `max_journal_bytes` governs. A
+    /// host that takes these defaults can therefore carry anything admission
+    /// admits, without a second literal to keep in step.
     fn default() -> Self {
         Self {
             timeout: Duration::from_secs(5),
-            max_request_bytes: 64 * 1024,
-            max_response_bytes: 1024 * 1024,
+            max_request_bytes: MAX_INPUT_BYTES_CEILING,
+            max_response_bytes: MAX_JOURNAL_BYTES_CEILING,
         }
     }
 }

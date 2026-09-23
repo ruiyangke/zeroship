@@ -11,6 +11,46 @@ pub use lease::{EstablishIngress, PolicyLease, PolicyLeaseRequest};
 /// Hard ceiling shared by policy validation and signal capability verification.
 pub const SIGNAL_CAPABILITY_MAX_LIFETIME_SECONDS: i64 = 604_800;
 
+// Platform ceilings for the quantities a policy shares with a host or transport
+// budget. Each names one quantity and is the single authority for it: a policy
+// above its ceiling is refused at admission, and a host or client budget that
+// must carry the quantity derives its default from the same constant rather
+// than repeating a literal. Neither side is silently authoritative, so a
+// default changed on one side cannot drift away from the other.
+//
+// The two halves are observable at different times. Startup knows the
+// configured host budgets and has observed no policy; admission knows the
+// policy and cannot re-read what the host was configured with. Both compare
+// against these constants, which is what makes the pair one invariant.
+
+/// Largest run input, signal payload or step checkpoint the platform admits,
+/// and the request bound a transport carrying one derives from.
+pub const MAX_INPUT_BYTES_CEILING: usize = 1024 * 1024;
+
+/// Largest replay journal the platform admits for one run generation, and the
+/// response bound a transport carrying one derives from.
+pub const MAX_JOURNAL_BYTES_CEILING: usize = 16 * 1024 * 1024;
+
+/// Largest single payload the platform admits at staging, and the read budget a
+/// host that must materialize one derives from. A host budget below this would
+/// admit a payload that can never be read back.
+pub const MAX_PAYLOAD_BYTES_CEILING: usize = 64 * 1024 * 1024;
+
+/// [`MAX_PAYLOAD_BYTES_CEILING`] in the signed representation [`AppPolicy`]
+/// stores. One authority, two representations: the conversion is proved when
+/// the crate is compiled, so raising the ceiling beyond what the policy field
+/// can hold stops the build instead of wrapping.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "the assertion proves the ceiling fits the signed field; where the \
+              bound it compares against narrows, every usize fits that field anyway"
+)]
+const PAYLOAD_CEILING_SIGNED: i64 = {
+    assert!(MAX_PAYLOAD_BYTES_CEILING < i64::MAX as usize);
+    MAX_PAYLOAD_BYTES_CEILING as i64
+};
+
 /// The complete policy violates an admission or resource constraint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("invalid workflow admission policy")]
@@ -109,14 +149,20 @@ impl AppPolicy {
     ///
     /// # Errors
     /// Rejects invalid limits and signal lifetimes beyond the capability ceiling.
+    /// Rejects a bound above the platform ceiling for the quantity it shares
+    /// with a host or transport budget, so admission cannot grant authority
+    /// over more than the hosts carrying it were built to handle.
     pub const fn validate(&self) -> Result<(), InvalidPolicy> {
         if self.max_live_runs < 0
             || self.max_child_depth < 0
             || self.max_running < 0
             || self.max_input_bytes == 0
+            || self.max_input_bytes > MAX_INPUT_BYTES_CEILING
             || self.max_frontier == 0
             || self.max_journal_bytes == 0
+            || self.max_journal_bytes > MAX_JOURNAL_BYTES_CEILING
             || self.max_payload_bytes <= 0
+            || self.max_payload_bytes > PAYLOAD_CEILING_SIGNED
             || self.max_payload_objects <= 0
             || self.max_payload_storage_bytes < self.max_payload_bytes
             || self.payload_staging_retention_ms <= 0
