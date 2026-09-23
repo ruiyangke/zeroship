@@ -17,7 +17,7 @@ server functions and a client; `pnpm build` produces `dist/app.zship`;
 | `src/App.tsx`, `src/main.tsx` | The React client. Imports server functions and calls them like local async functions. |
 | `migrations/` | Committed `.ts` schema migrations. The schema source of truth. |
 | `generated/zeroship/` | Generated and committed: `env.db.ts` (typing) and `schema.runtime.json` (runtime descriptor). Do not hand-edit. |
-| `zeroship.jsonc` | Deploy target and paths. Read by the build, the dev server and the CLI. |
+| `zeroship.jsonc` | The workspace's apps and databases by local label, plus their paths. Read by the build, the dev server and the CLI. |
 | `vite.config.ts` | `react()` plus `zeroship()` from `@zeroship/vite-plugin`. |
 
 ## The one rule that decides where code runs
