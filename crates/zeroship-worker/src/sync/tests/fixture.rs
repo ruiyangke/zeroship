@@ -77,6 +77,13 @@ impl DeployedApp {
             "worker": { "entry": "index.js", "modules": { "index.js": blob_hash } },
         }))
         .expect("deployment manifest");
+        // The binding set the app's isolate is built against is the one the
+        // host has already resolved, exactly as control would be reporting it
+        // for a converged app: a fixture that started them apart would make
+        // every case below reload for the binding reason.
+        let live_bindings = crate::cache::app_bindings()
+            .map(|bindings| bindings.live_bindings_for(worker.app_id.as_str()))
+            .unwrap_or_default();
         let case = Self {
             control_url: worker.config.control_url.clone(),
             worker,
@@ -87,6 +94,7 @@ impl DeployedApp {
                 env_version: 1,
                 manifest: Some(manifest),
                 net_policy: AppNetPolicy::default(),
+                live_bindings: live_bindings.clone(),
             },
         };
         case.set_environment(1, "var-old", "sec-old");
@@ -109,6 +117,7 @@ impl DeployedApp {
                 deploy_hash: case.version.deploy_hash.clone(),
                 env_version: case.version.env_version,
                 net_policy: case.version.net_policy.clone(),
+                live_bindings,
             },
         );
         case
@@ -149,6 +158,37 @@ impl DeployedApp {
             shutdown_timeout_secs: self.worker.config.shutdown_timeout_secs,
             blob_store: self.worker.config.blob_store.clone(),
         }
+    }
+
+    /// The binding set the host's store holds for this app - what an isolate
+    /// built now would narrow with.
+    pub fn installed_bindings(
+        &self,
+    ) -> std::collections::BTreeMap<
+        zeroship_core::DatabaseId,
+        zeroship_core::database_role::DatabaseCapability,
+    > {
+        binding_store().live_bindings_for(self.worker.app_id.as_str())
+    }
+
+    /// Every edge the host has resolved for this app, by database.
+    pub fn resolved_edges(
+        &self,
+    ) -> std::collections::BTreeMap<
+        zeroship_core::DatabaseId,
+        zeroship_data_orm::resolved_bindings::ResolvedBinding,
+    > {
+        binding_store()
+            .bindings_for(self.worker.app_id.as_str(), "d")
+            .iter()
+            .map(|binding| {
+                let edge: zeroship_data_orm::resolved_bindings::ResolvedBinding = binding
+                    .edge()
+                    .expect("a resolved binding carries its edge")
+                    .into();
+                (edge.database.clone(), edge)
+            })
+            .collect()
     }
 
     /// The single edge the host has resolved for this app.

@@ -117,6 +117,85 @@ impl SuppliedAppBindings {
         Ok(())
     }
 
+    /// Replace every binding this app holds with the set a host just resolved.
+    ///
+    /// The ISOLATE-REPLACEMENT path, where [`Self::supply`] is the resolution
+    /// path. `supply` refuses an edge that disagrees with the one installed,
+    /// and that refusal is what keeps a rebind away from an isolate already
+    /// running on the edge before it; here the isolate is being replaced, so
+    /// the set it was built from goes with it and the one its successor is
+    /// built from takes its place whole. A database the app has stopped
+    /// binding leaves, a rebound database follows its new edge, and a narrowed
+    /// capability takes effect - none of which `supply` can express.
+    ///
+    /// The whole set is swapped under ONE write, so no reader ever observes
+    /// the app between its old bindings and its new ones. An app resolved to
+    /// an EMPTY set holds no bindings at all, the state it was in before any
+    /// host resolved one: control serves no live binding for it, and an
+    /// `env.db` composed from a withdrawn edge is worse than an absent one.
+    ///
+    /// # Errors
+    ///
+    /// `invalid_app_binding` on an empty app id, or on a set naming one
+    /// database twice - two edges for one database disagree about which edge
+    /// the app has, and this call cannot choose between them.
+    /// `app_binding_store_unavailable` when the lock is poisoned.
+    pub fn replace_app(&self, app_id: &str, resolved: Vec<ResolvedBinding>) -> Result<(), DbError> {
+        if app_id.is_empty() {
+            return Err(DbError::validation(
+                "invalid_app_binding",
+                "an app binding needs an app id",
+            ));
+        }
+        for (position, edge) in resolved.iter().enumerate() {
+            if resolved[..position]
+                .iter()
+                .any(|earlier| earlier.database == edge.database)
+            {
+                return Err(DbError::validation(
+                    "invalid_app_binding",
+                    "app bindings name one database twice",
+                ));
+            }
+        }
+        {
+            let mut apps = self.apps.write().map_err(|_| store_unavailable())?;
+            if resolved.is_empty() {
+                apps.remove(app_id);
+            } else {
+                apps.insert(app_id.to_owned(), resolved);
+            }
+        }
+        Ok(())
+    }
+
+    /// The capability this store holds for each of an app's databases.
+    ///
+    /// The comparable projection of the set, and the same shape
+    /// `zeroship_core::types::AppVersionInfo::live_bindings` carries: a host
+    /// that knows which set control now serves reads this to decide whether the
+    /// store already agrees, and re-resolves only when it does not. An app the
+    /// store holds nothing for answers with the empty map, which is the same
+    /// answer as an app control serves no live binding for - the two are the
+    /// same state.
+    #[must_use]
+    pub fn live_bindings_for(
+        &self,
+        app_id: &str,
+    ) -> std::collections::BTreeMap<DatabaseId, DatabaseCapability> {
+        let Ok(apps) = self.apps.read() else {
+            return std::collections::BTreeMap::new();
+        };
+        apps.get(app_id)
+            .map(|edges| {
+                edges
+                    .iter()
+                    .map(|edge| (edge.database.clone(), edge.capability))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Whether this app's binding has been resolved.
     ///
     /// # Errors
@@ -438,5 +517,184 @@ mod tests {
             Some(DatabaseCapability::ReadWrite),
             "the refusal must leave the installed capability standing"
         );
+    }
+
+    /// Replacing an app's set installs a gained database, drops a withdrawn
+    /// one, and follows a rebound database onto its new edge - the three things
+    /// `supply` cannot express.
+    ///
+    /// Its control is the binding that did NOT move: it must still compose the
+    /// same role afterwards, so this cannot pass over a `replace_app` that
+    /// simply cleared the app.
+    #[test]
+    fn replacing_an_apps_set_installs_gains_drops_withdrawals_and_follows_a_rebind() {
+        let store = SuppliedAppBindings::new();
+        let kept = resolved();
+        let withdrawn = resolved();
+        let rebound = resolved();
+        store.supply("app_x", kept.clone()).expect("supply kept");
+        store
+            .supply("app_x", withdrawn.clone())
+            .expect("supply withdrawn");
+        store
+            .supply("app_x", rebound.clone())
+            .expect("supply rebound");
+        let kept_binding = store
+            .binding_for("app_x", "d1", &kept.database)
+            .expect("the kept edge composes a binding");
+        let kept_role = kept_binding.session_role();
+
+        let gained = resolved();
+        let moved = ResolvedBinding {
+            binding: BindingId::mint(),
+            ..rebound.clone()
+        };
+        assert_ne!(moved.binding, rebound.binding, "the control: two mints");
+        store
+            .replace_app("app_x", vec![kept.clone(), moved.clone(), gained.clone()])
+            .expect("the isolate-replacement path installs the whole set");
+
+        assert_eq!(
+            store.live_bindings_for("app_x"),
+            std::collections::BTreeMap::from([
+                (kept.database.clone(), kept.capability),
+                (moved.database.clone(), moved.capability),
+                (gained.database.clone(), gained.capability),
+            ]),
+            "the store holds exactly the set the host resolved"
+        );
+        assert!(
+            store
+                .binding_for("app_x", "d1", &withdrawn.database)
+                .is_none(),
+            "a withdrawn database has no binding at all"
+        );
+        assert_eq!(
+            store
+                .binding_for("app_x", "d1", &gained.database)
+                .expect("the gained database composes a binding")
+                .database(),
+            Some(&gained.database)
+        );
+        assert_ne!(
+            store
+                .binding_for("app_x", "d1", &moved.database)
+                .expect("the rebound database composes a binding")
+                .session_role(),
+            DbBinding::to_database(
+                "app_x",
+                "d1",
+                rebound.database.clone(),
+                rebound.binding.clone(),
+                rebound.capability,
+            )
+            .expect("the retired edge composes a role")
+            .session_role(),
+            "a rebound database narrows to the NEW edge's role, which is the \
+             thing `supply` refuses rather than follows"
+        );
+        assert_eq!(
+            store
+                .binding_for("app_x", "d1", &kept.database)
+                .expect("the control: the untouched edge still composes")
+                .session_role(),
+            kept_role,
+        );
+    }
+
+    /// An app resolved to the EMPTY set holds nothing, which is the state it
+    /// was in before any host resolved a binding for it.
+    ///
+    /// This is how a withdrawn last binding reaches the store. Its control is
+    /// the populated store before the call - without it, this would pass over a
+    /// `replace_app` that had never installed anything.
+    #[test]
+    fn replacing_an_app_with_the_empty_set_unbinds_it() {
+        let store = SuppliedAppBindings::new();
+        let edge = resolved();
+        store.supply("app_x", edge.clone()).expect("supply");
+        assert!(store.is_bound("app_x").expect("read the store"));
+        assert_eq!(store.live_bindings_for("app_x").len(), 1);
+
+        store
+            .replace_app("app_x", Vec::new())
+            .expect("control serves no live binding for this app");
+
+        assert!(
+            !store.is_bound("app_x").expect("read the store"),
+            "an app control serves no live binding for is unresolved here, so \
+             the next resolution reads for it again"
+        );
+        assert!(store.live_bindings_for("app_x").is_empty());
+        assert!(store.binding_for("app_x", "d1", &edge.database).is_none());
+    }
+
+    /// A set naming one database twice is refused, and the store keeps what it
+    /// had: two edges for one database disagree about which edge the app holds
+    /// and this call cannot choose between them.
+    ///
+    /// Its control is the same set with the duplicate removed, which installs.
+    #[test]
+    fn replacing_an_app_with_one_database_twice_is_refused() {
+        let store = SuppliedAppBindings::new();
+        let installed = resolved();
+        store.supply("app_x", installed.clone()).expect("supply");
+
+        let database = DatabaseId::mint();
+        let first = ResolvedBinding {
+            database: database.clone(),
+            ..resolved()
+        };
+        let second = ResolvedBinding {
+            database,
+            ..resolved()
+        };
+        let error = store
+            .replace_app("app_x", vec![first.clone(), second])
+            .expect_err("one database cannot hold two edges");
+        assert_eq!(error.code(), "invalid_app_binding");
+        assert_eq!(
+            store.live_bindings_for("app_x"),
+            std::collections::BTreeMap::from([(installed.database, installed.capability)]),
+            "the refusal leaves the store serving what it had"
+        );
+
+        store
+            .replace_app("app_x", vec![first.clone()])
+            .expect("the control: the same set without the duplicate installs");
+        assert_eq!(
+            store.live_bindings_for("app_x"),
+            std::collections::BTreeMap::from([(first.database, first.capability)])
+        );
+    }
+
+    /// The projection carries each database's OWN capability, and an app the
+    /// store holds nothing for projects the empty map.
+    ///
+    /// The empty answer is the control: the map is what a host compares against
+    /// control's feed, so a projection that answered empty for everything would
+    /// leave every comparison reading "control serves none".
+    #[test]
+    fn the_projection_carries_each_databases_own_capability() {
+        let store = SuppliedAppBindings::new();
+        let writes = ResolvedBinding {
+            capability: DatabaseCapability::ReadWrite,
+            ..resolved()
+        };
+        let reads = ResolvedBinding {
+            capability: DatabaseCapability::ReadOnly,
+            ..resolved()
+        };
+        store.supply("app_x", writes.clone()).expect("supply rw");
+        store.supply("app_x", reads.clone()).expect("supply ro");
+
+        assert_eq!(
+            store.live_bindings_for("app_x"),
+            std::collections::BTreeMap::from([
+                (writes.database, DatabaseCapability::ReadWrite),
+                (reads.database, DatabaseCapability::ReadOnly),
+            ]),
+        );
+        assert!(store.live_bindings_for("app_absent").is_empty());
     }
 }
