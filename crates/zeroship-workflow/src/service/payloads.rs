@@ -3,8 +3,8 @@ use super::{
     models,
     policy::PolicyAuthority,
     store::{Row, Transaction},
-    tasks::authorized_task,
-    AppWorkflows, RequestId, TaskToken, WorkerIdentity, WorkflowService,
+    tasks::{authorized_task, AuthorizedTask},
+    AppPolicy, AppWorkflows, RequestId, TaskToken, WorkerIdentity, WorkflowService,
 };
 use crate::service::policy::admit;
 use crate::{engine::WorkflowOutputRef, validation, WorkflowServiceError};
@@ -71,7 +71,7 @@ pub struct PayloadTarget<'a> {
 #[async_trait::async_trait(?Send)]
 pub trait PayloadWriter {
     /// Write the target and verify it against its descriptor. `budget` is what
-    /// remains of the shorter of the task lease and the staging window.
+    /// remains of the staging window, and of the task lease when one holds it.
     ///
     /// # Errors
     /// Reports a refused, interrupted, oversized or unverifiable write.
@@ -110,6 +110,134 @@ pub enum StepOutput<R> {
     Object(R),
 }
 
+/// How a staging call proves it may write for an app, resolved fresh inside
+/// every transaction the call opens.
+enum StagingAuthority<'a> {
+    /// A worker holding a live task lease.
+    Task {
+        worker: &'a WorkerIdentity,
+        task_id: &'a str,
+        token: &'a TaskToken,
+    },
+    /// The app itself, with no run and no task anywhere in the picture.
+    App(&'a AppId),
+}
+
+impl StagingAuthority<'_> {
+    async fn open(&self, tx: &mut Transaction) -> Result<StagingScope, WorkflowServiceError> {
+        match *self {
+            Self::Task {
+                worker,
+                task_id,
+                token,
+            } => Ok(StagingScope::Leased(Box::new(
+                authorized_task(tx, worker, task_id, token).await?,
+            ))),
+            Self::App(app) => {
+                // The same two steps `TaskInspection::authorize` takes once it
+                // has a task, minus the task. `capture_mutation` and `policy`
+                // both run `check_app`, so a service bound to another app is
+                // refused here exactly as a foreign task is refused above.
+                tx.capture_mutation(app)?;
+                let policy = tx.policy(app)?;
+                Ok(StagingScope::Unowned {
+                    app: app.clone(),
+                    policy,
+                    now: tx.now().await?,
+                })
+            }
+        }
+    }
+}
+
+/// What one staging call proved, and where its bytes therefore land.
+///
+/// The lease arm names the run, generation and task the bytes stage into and
+/// keeps revalidating that lease across the upload. The app arm proves only
+/// that the caller may act for the app, so it names no location at all: the
+/// row's `run_id`, `generation` and `task_id` are NULL and an edge in
+/// `payload_refs` is what will own the bytes once a run attaches them.
+enum StagingScope {
+    Leased(Box<AuthorizedTask>),
+    Unowned {
+        app: AppId,
+        policy: AppPolicy,
+        now: i64,
+    },
+}
+
+/// The staging LOCATION columns, which say where a row waits for an owner.
+struct StagingLocation {
+    run_id: Option<String>,
+    generation: Option<i64>,
+    task_id: Option<String>,
+}
+
+impl StagingScope {
+    fn app(&self) -> &AppId {
+        match self {
+            Self::Leased(claim) => &claim.app,
+            Self::Unowned { app, .. } => app,
+        }
+    }
+    fn policy(&self) -> &AppPolicy {
+        match self {
+            Self::Leased(claim) => &claim.policy,
+            Self::Unowned { policy, .. } => policy,
+        }
+    }
+    fn now(&self) -> i64 {
+        match self {
+            Self::Leased(claim) => claim.now,
+            Self::Unowned { now, .. } => *now,
+        }
+    }
+    /// The task this staging holds, for the lookup that deduplicates a retry.
+    /// `None` makes that lookup drop the term entirely: an ownerless staging is
+    /// identified by `(app_id, request_id)` and by nothing else.
+    fn task_id(&self) -> Option<&str> {
+        match self {
+            Self::Leased(claim) => Some(claim.task.id.as_str()),
+            Self::Unowned { .. } => None,
+        }
+    }
+    /// Recheck a lease after an awaited write; an ownerless staging holds none
+    /// to go stale, and its `expires_at` is what bounds it instead -- the
+    /// writer's budget is computed from that column and collection fences on
+    /// the same one.
+    fn validate_at(&self, now: i64) -> Result<(), WorkflowServiceError> {
+        match self {
+            Self::Leased(claim) => claim.validate_at(now),
+            Self::Unowned { .. } => Ok(()),
+        }
+    }
+    fn validate_live(&self) -> Result<(), WorkflowServiceError> {
+        self.validate_at(self.now())
+    }
+    fn location(&self) -> Result<StagingLocation, WorkflowServiceError> {
+        match self {
+            Self::Leased(claim) => Ok(StagingLocation {
+                run_id: Some(claim.run.text("id")?),
+                generation: Some(claim.run.integer("generation")?),
+                task_id: Some(claim.task.id.clone()),
+            }),
+            Self::Unowned { .. } => Ok(StagingLocation {
+                run_id: None,
+                generation: None,
+                task_id: None,
+            }),
+        }
+    }
+    /// How long the writer has: the staging window, and for a leased staging
+    /// the shorter of that and the lease.
+    fn budget_until(&self, expires_at: i64) -> i64 {
+        match self {
+            Self::Leased(claim) => claim.task.deadline.min(expires_at) - claim.now,
+            Self::Unowned { now, .. } => expires_at - now,
+        }
+    }
+}
+
 impl WorkflowService {
     /// Upload against current task ownership. The upload identity is durable
     /// before object I/O, so an interrupted writer leaves a collectible record.
@@ -126,6 +254,51 @@ impl WorkflowService {
         reference: WorkflowOutputRef,
         writer: W,
     ) -> Result<StagedPayload, WorkflowServiceError> {
+        self.guarded_stage(
+            StagingAuthority::Task {
+                worker,
+                task_id,
+                token,
+            },
+            request,
+            reference,
+            writer,
+        )
+        .await
+    }
+
+    /// Upload bytes that belong to an app and to no run.
+    ///
+    /// A payload's run, generation and task are staging LOCATION: they say
+    /// where a row waits, not who owns it. Durable ownership is an edge in
+    /// `payload_refs`, which a run creates when it attaches the payload. So
+    /// bytes whose run does not exist yet -- a continuation seed, a child run's
+    /// input, the input of a root run a request handler or the cron sweep is
+    /// about to start -- stage here with those columns NULL and acquire an
+    /// owner afterwards.
+    ///
+    /// # Errors
+    /// Rejects an app this service may not act for, withdrawn admission,
+    /// invalid content, exhausted payload quota, and a write the caller could
+    /// not complete.
+    pub async fn stage_app_payload<W: PayloadWriter>(
+        &self,
+        app: &AppId,
+        request: &RequestId,
+        reference: WorkflowOutputRef,
+        writer: W,
+    ) -> Result<StagedPayload, WorkflowServiceError> {
+        self.guarded_stage(StagingAuthority::App(app), request, reference, writer)
+            .await
+    }
+
+    async fn guarded_stage<W: PayloadWriter>(
+        &self,
+        staging: StagingAuthority<'_>,
+        request: &RequestId,
+        reference: WorkflowOutputRef,
+        writer: W,
+    ) -> Result<StagedPayload, WorkflowServiceError> {
         let authority = payload_authority(self)?;
         let service = match authority.as_deref() {
             Some(authority) => self.with_authority(authority.clone())?,
@@ -133,33 +306,39 @@ impl WorkflowService {
         };
         guarded_payload(
             authority.as_deref(),
-            Box::pin(service.stage_payload_inner(
-                worker, task_id, token, request, reference, writer,
-            )),
+            Box::pin(service.stage_inner(staging, request, reference, writer)),
         )
         .await
     }
 
-    async fn stage_payload_inner<W: PayloadWriter>(
+    async fn stage_inner<W: PayloadWriter>(
         &self,
-        worker: &WorkerIdentity,
-        task_id: &str,
-        token: &TaskToken,
+        staging: StagingAuthority<'_>,
         request: &RequestId,
         reference: WorkflowOutputRef,
         writer: W,
     ) -> Result<StagedPayload, WorkflowServiceError> {
         validate_reference(&reference)?;
         let mut tx = self.begin().await?;
-        let claim = authorized_task(&mut tx, worker, task_id, token).await?;
+        let scope = staging.open(&mut tx).await?;
+        // `request_id` is the idempotency key: `RequestId::mint()` runs once per
+        // upload and rides the prepared execution across every retry, so
+        // (app_id, request_id) already names the upload on its own. A leased
+        // staging narrows further with the task it holds. An ownerless one has
+        // no task to narrow by and drops the term -- a term that named any
+        // particular task would miss the row staged with none, and the retry
+        // would stage a second one and stop deduplicating without ever failing.
+        let mut lookup = models::payloads::app_id
+            .eq(scope.app().as_str())?
+            .and(models::payloads::request_id.eq(request.as_str())?);
+        if let Some(task) = scope.task_id() {
+            lookup = lookup.and(models::payloads::task_id.eq(Some(task))?);
+        }
         let existing = tx
             .database()
             .entity::<models::payloads::Entity>()?
             .find::<models::PayloadRecord>(
-                models::payloads::app_id
-                    .eq(claim.app.as_str())?
-                    .and(models::payloads::task_id.eq(Some(task_id))?)
-                    .and(models::payloads::request_id.eq(request.as_str())?),
+                lookup,
                 FindOptions {
                     limit: Some(1),
                     ..Default::default()
@@ -177,65 +356,66 @@ impl WorkflowService {
                 tx.commit().await?;
                 return Ok(StagedPayload { id, reference });
             }
-            claim.validate_live()?;
-            if row.state != "uploading" || row.expires_at <= claim.now {
+            scope.validate_live()?;
+            if row.state != "uploading" || row.expires_at <= scope.now() {
                 return Err(WorkflowServiceError::Conflict(
                     "payload upload has expired".into(),
                 ));
             }
             id
         } else {
-            claim.validate_live()?;
-            admit(&claim.policy)?;
-            if reference.size > claim.policy.max_payload_bytes {
+            scope.validate_live()?;
+            admit(scope.policy())?;
+            if reference.size > scope.policy().max_payload_bytes {
                 return Err(WorkflowServiceError::PayloadTooLarge);
             }
-            let (total, objects) = payload_usage(&tx, &claim.app).await?;
-            if objects >= claim.policy.max_payload_objects
+            let (total, objects) = payload_usage(&tx, scope.app()).await?;
+            if objects >= scope.policy().max_payload_objects
                 || total
                     .checked_add(reference.size)
-                    .is_none_or(|total| total > claim.policy.max_payload_storage_bytes)
+                    .is_none_or(|total| total > scope.policy().max_payload_storage_bytes)
             {
                 return Err(WorkflowServiceError::ResourceExhausted(
                     "workflow payload storage limit reached".into(),
                 ));
             }
             let id = typed_id::generate(typed_id::WORKFLOW_PAYLOAD_PREFIX);
+            let at = scope.location()?;
             tx.database().collection(models::payloads::Entity::COLLECTION)?.insert(value!({
-                "app_id":claim.app.as_str(), "run_id":claim.run.text("id")?, "generation":claim.run.integer("generation")?,
-                "id":id.clone(), "task_id":task_id, "request_id":request.as_str(), "hash":reference.hash.clone(),
+                "app_id":scope.app().as_str(), "run_id":at.run_id, "generation":at.generation,
+                "id":id.clone(), "task_id":at.task_id, "request_id":request.as_str(), "hash":reference.hash.clone(),
                 "size":reference.size, "content_type":reference.content_type.clone(), "state":"uploading",
-                "created_at":claim.now, "expires_at":deadline(claim.now,claim.policy.payload_staging_retention_ms)?,
+                "created_at":scope.now(), "expires_at":deadline(scope.now(),scope.policy().payload_staging_retention_ms)?,
             })).await?;
             id
         };
-        claim.validate_at(tx.now().await?)?;
+        scope.validate_at(tx.now().await?)?;
         tx.commit().await?;
 
         // Lock in the same order as completion and GC. A bounded upload holds
         // this lock until the store finishes, so GC cannot race a live writer.
         let mut tx = self.begin().await?;
-        let claim = authorized_task(&mut tx, worker, task_id, token).await?;
-        claim.validate_live()?;
-        admit(&claim.policy)?;
-        let row = payload(&tx, &claim.app, &id).await?;
+        let scope = staging.open(&mut tx).await?;
+        scope.validate_live()?;
+        admit(scope.policy())?;
+        let row = payload(&tx, scope.app(), &id).await?;
         match row.state.as_str() {
             "staged" | "referenced" => {
                 tx.commit().await?;
                 return Ok(StagedPayload { id, reference });
             }
-            "uploading" if row.expires_at > claim.now => {}
+            "uploading" if row.expires_at > scope.now() => {}
             _ => {
                 return Err(WorkflowServiceError::Conflict(
                     "payload upload has expired".into(),
                 ));
             }
         }
-        let remaining = claim.task.deadline.min(row.expires_at) - claim.now;
+        let remaining = scope.budget_until(row.expires_at);
         writer
             .write(
                 PayloadTarget {
-                    app: &claim.app,
+                    app: scope.app(),
                     id: &id,
                     reference: &reference,
                     authority: None,
@@ -243,15 +423,15 @@ impl WorkflowService {
                 Duration::from_millis(remaining as u64),
             )
             .await?;
-        claim.validate_at(tx.now().await?)?;
+        scope.validate_at(tx.now().await?)?;
         tx.database()
             .collection(models::payloads::Entity::COLLECTION)?
             .update(
-                value!({"app_id":claim.app.as_str(), "id":id.clone()}),
+                value!({"app_id":scope.app().as_str(), "id":id.clone()}),
                 value!({"state":"staged"}),
             )
             .await?;
-        claim.validate_at(tx.now().await?)?;
+        scope.validate_at(tx.now().await?)?;
         tx.commit().await?;
         Ok(StagedPayload { id, reference })
     }
@@ -659,11 +839,28 @@ async fn owned_reference(
         ownership = ownership.or(object
             .column(models::payloads::state)
             .eq("staged")?
-            .and(object.column(models::payloads::run_id).eq(id.as_str())?)
-            .and(object.column(models::payloads::generation).eq(generation)?)
+            .and(object.column(models::payloads::run_id).eq(Some(id.as_str()))?)
+            .and(object.column(models::payloads::generation).eq(Some(generation))?)
             .and(object.column(models::payloads::task_id).eq(Some(task.as_str()))?)
             .and(object.column(models::payloads::expires_at).gt(now)?));
     }
+    // Staged, and staged for nobody: the row was written before any run
+    // existed, so it names no run to compare against and expiry is the whole
+    // remaining eligibility test. Every staged row carries a NOT NULL
+    // `expires_at`, so that test is always answerable.
+    //
+    // A reviewer will ask what stops one run from reaching another's bytes.
+    // Two things already in the outer filter do, and neither is weakened here:
+    // `app_id` scopes the row to this tenant, and the hash triple identifies it
+    // by content the caller had to name exactly. So the widest thing this arm
+    // can do is let two runs OF THE SAME APP that converge on byte-identical
+    // content share one object -- deduplication, not disclosure, because the
+    // bytes were already this app's and the caller already held their digest.
+    ownership = ownership.or(object
+        .column(models::payloads::state)
+        .eq("staged")?
+        .and(object.column(models::payloads::run_id).is_null())
+        .and(object.column(models::payloads::expires_at).gt(now)?));
     let rows = db
         .from(&object)
         .left_join(

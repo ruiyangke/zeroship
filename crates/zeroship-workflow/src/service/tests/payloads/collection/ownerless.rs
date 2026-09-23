@@ -1,12 +1,12 @@
 use super::*;
 
-/// A staged payload's `task_id` is its staging-lease owner, not its durable
-/// one. Durable ownership is an edge in `payload_refs`, and the ownership
-/// disjunction in `payloads::owned_reference` consults `task_id` only for the
-/// `staged` half and only while the run still holds a task. So for a staged
-/// payload that names no task, expiry is the whole eligibility test -- and
-/// every staged row carries a NOT NULL `expires_at`, so that test is always
-/// answerable.
+/// A staged payload's `run_id`, `generation` and `task_id` are its staging
+/// LOCATION, not its durable owner. Durable ownership is an edge in
+/// `payload_refs`, and the ownership disjunction in
+/// `payloads::owned_reference` consults the location columns only for the
+/// `staged` half. So for a staged payload that names no location at all,
+/// expiry is the whole eligibility test -- and every staged row carries a NOT
+/// NULL `expires_at`, so that test is always answerable.
 ///
 /// One collection sweep over five payloads that differ in exactly two
 /// variables, owner and expiry. What the sweep must delete and what it must
@@ -50,19 +50,21 @@ pub(super) async fn ownerless(store: Rc<OrmStore>) {
         fixture.disown(id).await;
     }
     for id in [&referenced, &ownerless_expired, &ownerless_live] {
+        let row = fixture.payload(id).await;
         assert_eq!(
-            fixture.payload(id).await.task_id,
-            None,
-            "{id} must carry no staging-lease owner"
+            (row.run_id, row.generation, row.task_id),
+            (None, None, None),
+            "{id} must name no staging location at all"
         );
     }
-    // The control half really is task-owned, so a sweep that ignored the owner
-    // entirely would still have to answer for it.
+    // The control half really is located and task-owned, so a sweep that
+    // ignored the location entirely would still have to answer for it.
     for id in [&owned_expired, &owned_live] {
+        let row = fixture.payload(id).await;
         assert_eq!(
-            fixture.payload(id).await.task_id.as_deref(),
-            Some(fixture.task.id.as_str()),
-            "{id} must still name the task that staged it"
+            (row.run_id.is_some(), row.generation, row.task_id.as_deref()),
+            (true, Some(0), Some(fixture.task.id.as_str())),
+            "{id} must still name the run and task that staged it"
         );
     }
 
