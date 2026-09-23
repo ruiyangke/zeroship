@@ -164,10 +164,8 @@ impl DeployedApp {
     /// built now would narrow with.
     pub fn installed_bindings(
         &self,
-    ) -> std::collections::BTreeMap<
-        zeroship_core::DatabaseId,
-        zeroship_core::database_role::DatabaseCapability,
-    > {
+    ) -> std::collections::BTreeMap<zeroship_core::DatabaseId, zeroship_core::types::LiveBinding>
+    {
         binding_store().live_bindings_for(self.worker.app_id.as_str())
     }
 

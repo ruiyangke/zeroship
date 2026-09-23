@@ -13,10 +13,9 @@
 
 use super::*;
 use crate::control_fixture::{route, ControlPlane};
-use zeroship_core::database_role::DatabaseCapability;
 use zeroship_core::service_identity::endpoints;
-use zeroship_core::types::{AppNetPolicy, AppVersionInfo};
-use zeroship_core::DatabaseId;
+use zeroship_core::types::{AppNetPolicy, AppVersionInfo, LiveBinding};
+use zeroship_core::{BindingId, DatabaseId};
 
 /// A worker whose kernel installed a database service, so the app has a
 /// resolved binding and a store to compare against.
@@ -52,10 +51,7 @@ fn addressing(worker: &Worker, control_url: &str) -> crate::WorkerConfig {
 
 /// The version feed entry control serves for this app, carrying the live
 /// binding set the case wants it to report.
-async fn version_body(
-    worker: &Worker,
-    live_bindings: &[(&DatabaseId, DatabaseCapability)],
-) -> String {
+async fn version_body(worker: &Worker, live_bindings: &[(&DatabaseId, &LiveBinding)]) -> String {
     use sha2::{Digest, Sha256};
     let source = br#"export default { fetch() { return new Response("cold"); } }"#;
     let hash = hex::encode(Sha256::digest(source));
@@ -79,7 +75,7 @@ async fn version_body(
         net_policy: AppNetPolicy::default(),
         live_bindings: live_bindings
             .iter()
-            .map(|(database, capability)| ((*database).clone(), *capability))
+            .map(|(database, live)| ((*database).clone(), (*live).clone()))
             .collect(),
     })
     .expect("a version feed entry serializes")
@@ -97,19 +93,23 @@ async fn a_cold_start_re_resolves_a_binding_set_the_store_disagrees_with() {
     let worker = worker_with_database();
     let bindings = crate::cache::app_bindings().expect("the kernel installed a database service");
     let installed = bindings.live_bindings_for(worker.app_id.as_str());
-    let [(database, capability)] = installed.iter().collect::<Vec<_>>()[..] else {
+    let [(database, live)] = installed.iter().collect::<Vec<_>>()[..] else {
         panic!("this case's app holds exactly one binding");
     };
-    let (database, capability) = (database.clone(), *capability);
+    let (database, live) = (database.clone(), live.clone());
 
     // Control reports a SECOND database, and serves only the version read: the
     // call after it is the one under test, and its failure is what names it.
     let gained = DatabaseId::mint();
+    let gained_live = LiveBinding {
+        binding: BindingId::mint(),
+        capability: live.capability,
+    };
     let control = ControlPlane::serving(
         1,
         vec![(
             route(endpoints::CONTROL_APP, &worker.app_id),
-            version_body(&worker, &[(&database, capability), (&gained, capability)]).await,
+            version_body(&worker, &[(&database, &live), (&gained, &gained_live)]).await,
         )],
     );
     let mut config = addressing(&worker, &control.base_url);
@@ -142,7 +142,7 @@ async fn a_cold_start_re_resolves_a_binding_set_the_store_disagrees_with() {
         1,
         vec![(
             route(endpoints::CONTROL_APP, &worker.app_id),
-            version_body(&worker, &[(&database, capability)]).await,
+            version_body(&worker, &[(&database, &live)]).await,
         )],
     );
     config = addressing(&worker, &control.base_url);

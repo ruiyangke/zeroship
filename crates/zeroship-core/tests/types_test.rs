@@ -5,12 +5,24 @@ use zeroship_bundle::{
 use zeroship_core::net_policy::Verdict;
 use zeroship_core::types::{
     AccountState, AppNetPolicy, AppRuntimeLimits, AppUsage, AppVersionInfo, ControlEvent,
-    NetEgressEntry, RouteEntry, SpendState,
+    LiveBinding, NetEgressEntry, RouteEntry, SpendState,
 };
 use std::collections::{BTreeMap, HashMap};
 use zeroship_core::app_id::AppId;
 use zeroship_core::database_role::DatabaseCapability;
-use zeroship_core::DatabaseId;
+use zeroship_core::{BindingId, DatabaseId};
+
+/// One live binding, as a case that only cares about the capability spells it.
+///
+/// The edge is minted rather than passed in: a case testing the wire shape or a
+/// capability needs a well-formed one and does not care which, and a case that
+/// DOES care about the edge names it itself.
+fn live_binding(capability: DatabaseCapability) -> LiveBinding {
+    LiveBinding {
+        binding: BindingId::mint(),
+        capability,
+    }
+}
 
 #[test]
 fn control_event_deploy_json() {
@@ -483,6 +495,8 @@ fn worker_round_trips_through_json() {
 fn app_version_info_serializes_with_manifest() {
     let main = DatabaseId::mint();
     let analytics = DatabaseId::mint();
+    let main_binding = live_binding(DatabaseCapability::ReadWrite);
+    let analytics_binding = live_binding(DatabaseCapability::ReadOnly);
     let info = AppVersionInfo {
         deploy_hash: Some(SHA_A.to_string()),
         plan_id: "pro".into(),
@@ -512,8 +526,8 @@ fn app_version_info_serializes_with_manifest() {
             egress_ceiling_bytes: 1024 * 1024,
         },
         live_bindings: BTreeMap::from([
-            (main.clone(), DatabaseCapability::ReadWrite),
-            (analytics.clone(), DatabaseCapability::ReadOnly),
+            (main.clone(), main_binding.clone()),
+            (analytics.clone(), analytics_binding.clone()),
         ]),
     };
     let json = serde_json::to_string(&info).unwrap();
@@ -539,16 +553,30 @@ fn app_version_info_serializes_with_manifest() {
     assert_eq!(decoded.net_policy.egress[0].verdict, Verdict::Accept);
     assert_eq!(decoded.net_policy.egress[1].destination, "93.184.216.0/24");
     assert_eq!(decoded.net_policy.egress[1].verdict, Verdict::Reject);
-    // Each database keeps its OWN capability across the wire. A feed that
-    // carried one value for the app - or only a count of them - would arrive
-    // here unable to say which database moved, and a worker comparing it could
-    // not see a capability narrowed under a set whose size never changed.
+    // Each database keeps its OWN edge and capability across the wire. A feed
+    // that carried one value for the app - or only a count of them - would
+    // arrive here unable to say which database moved, and a worker comparing it
+    // could not see a capability narrowed under a set whose size never changed.
     assert_eq!(
         decoded.live_bindings,
         BTreeMap::from([
-            (main, DatabaseCapability::ReadWrite),
-            (analytics, DatabaseCapability::ReadOnly),
+            (main, main_binding.clone()),
+            (analytics, analytics_binding.clone()),
         ])
+    );
+    // The EDGE specifically survives, and each database keeps its own. It is
+    // what the session role is derived from, so a feed that carried the
+    // capability alone would report a rebind of one database at the same
+    // capability as no change at all. Both, because one alone passes against a
+    // codec that emits a constant.
+    assert!(
+        json.contains(main_binding.binding.as_str())
+            && json.contains(analytics_binding.binding.as_str()),
+        "each live binding carries the edge its role is derived from: {json}"
+    );
+    assert_ne!(
+        main_binding.binding, analytics_binding.binding,
+        "the premise of the arm above: two distinct edges"
     );
 }
 
@@ -621,15 +649,20 @@ fn app_version_info_fills_its_defaulted_fields_but_refuses_an_absent_binding_set
 #[test]
 fn app_version_info_keys_its_binding_set_by_database_id() {
     let database = DatabaseId::mint();
+    let binding = BindingId::mint();
     let json = format!(
         r#"{{"deploy_hash":null,"plan_id":"free","runtime":{{}},"env_version":0,
-             "live_bindings":{{"{}":"readonly"}}}}"#,
-        database.as_str()
+             "live_bindings":{{"{}":{{"binding":"{}","capability":"readonly"}}}}}}"#,
+        database.as_str(),
+        binding.as_str()
     );
     let info: AppVersionInfo = serde_json::from_str(&json).expect("a database-keyed set decodes");
     assert_eq!(
         info.live_bindings.get(&database),
-        Some(&DatabaseCapability::ReadOnly)
+        Some(&LiveBinding {
+            binding: binding.clone(),
+            capability: DatabaseCapability::ReadOnly,
+        })
     );
 
     // The rejection control: a key outside the typed-id grammar names no
@@ -645,6 +678,30 @@ fn app_version_info_keys_its_binding_set_by_database_id() {
     let unreadable = json.replace("readonly", "read_only");
     serde_json::from_str::<AppVersionInfo>(&unreadable)
         .expect_err("a capability spelling nothing writes is refused");
+
+    // So is an edge outside the binding grammar. `zs_bind_<binding>` is derived
+    // from this value, so text no `BindingId` parse accepts is text no session
+    // role can be composed from, and carrying it would defer the failure to the
+    // first dispatch.
+    let malformed_edge = json.replace(binding.as_str(), "not-a-binding-id");
+    serde_json::from_str::<AppVersionInfo>(&malformed_edge)
+        .expect_err("an edge that is not a binding id is refused");
+
+    // And an entry with NO edge at all: the two fields are independent facts
+    // about one binding, so neither is derivable from the other and a default
+    // for either would be a guess. Its control is the complete entry above,
+    // which decodes - the one variable here is the missing field.
+    let without_edge = format!(
+        r#"{{"deploy_hash":null,"plan_id":"free","runtime":{{}},"env_version":0,
+             "live_bindings":{{"{}":{{"capability":"readonly"}}}}}}"#,
+        database.as_str()
+    );
+    let error = serde_json::from_str::<AppVersionInfo>(&without_edge)
+        .expect_err("a live binding with no edge is refused");
+    assert!(
+        error.to_string().contains("binding"),
+        "the refusal must name the missing field: {error}"
+    );
 }
 
 // -- AssetEntry variants (Tier 4b: pre-compressed encoding variants) -----

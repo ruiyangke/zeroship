@@ -71,6 +71,7 @@ use zeroship_control::organizations::{self, CreateOrganizationBody};
 use zeroship_control::publication::{Acceptance, CatalogError};
 use zeroship_control::Registry;
 use zeroship_core::database_role::DatabaseCapability;
+use zeroship_core::types::LiveBinding;
 use zeroship_core::{database_derivation, AppId, BindingId, DatabaseId, UserId};
 use zeroship_data_orm::connection::ConnectionFactory;
 use zeroship_data_orm::encryption::SuppliedProjectKeys;
@@ -376,7 +377,7 @@ impl World {
     async fn version_bindings(
         &self,
         app: &AppId,
-    ) -> std::collections::BTreeMap<DatabaseId, DatabaseCapability> {
+    ) -> std::collections::BTreeMap<DatabaseId, LiveBinding> {
         self.registry
             .get_versions()
             .await
@@ -1494,10 +1495,19 @@ async fn the_whole_decoupled_path_runs_in_one_exercise() {
             world.version_bindings(app).await,
             bindings
                 .iter()
-                .map(|resolved| (resolved.database.clone(), resolved.capability))
+                .map(|resolved| (
+                    resolved.database.clone(),
+                    LiveBinding {
+                        binding: resolved.binding.clone(),
+                        capability: resolved.capability,
+                    }
+                ))
                 .collect::<std::collections::BTreeMap<_, _>>(),
             "the version feed and the binding endpoint must not disagree about \
-             which databases this app binds"
+             which databases this app binds, nor about the EDGE it binds each \
+             of them through - the edge is what the session role is derived \
+             from, so a feed reporting another one would ask the worker to \
+             install a set the endpoint does not serve"
         );
     }
 

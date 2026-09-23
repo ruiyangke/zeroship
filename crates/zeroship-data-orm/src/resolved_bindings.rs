@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 
 use zeroship_core::database_role::DatabaseCapability;
+use zeroship_core::types::LiveBinding;
 use zeroship_core::{BindingId, DatabaseId};
 
 use crate::binding::{DatabaseEdge, DbBinding};
@@ -169,7 +170,7 @@ impl SuppliedAppBindings {
         Ok(())
     }
 
-    /// The capability this store holds for each of an app's databases.
+    /// The edge and capability this store holds for each of an app's databases.
     ///
     /// The comparable projection of the set, and the same shape
     /// `zeroship_core::types::AppVersionInfo::live_bindings` carries: a host
@@ -178,11 +179,16 @@ impl SuppliedAppBindings {
     /// store holds nothing for answers with the empty map, which is the same
     /// answer as an app control serves no live binding for - the two are the
     /// same state.
+    ///
+    /// The EDGE is in the projection because it is what the session role is
+    /// derived from, so a database rebound onto a fresh edge at the same
+    /// capability is a store that no longer agrees - and a projection that
+    /// dropped the edge would report agreement across exactly that move.
     #[must_use]
     pub fn live_bindings_for(
         &self,
         app_id: &str,
-    ) -> std::collections::BTreeMap<DatabaseId, DatabaseCapability> {
+    ) -> std::collections::BTreeMap<DatabaseId, LiveBinding> {
         let Ok(apps) = self.apps.read() else {
             return std::collections::BTreeMap::new();
         };
@@ -190,7 +196,15 @@ impl SuppliedAppBindings {
             .map(|edges| {
                 edges
                     .iter()
-                    .map(|edge| (edge.database.clone(), edge.capability))
+                    .map(|edge| {
+                        (
+                            edge.database.clone(),
+                            LiveBinding {
+                                binding: edge.binding.clone(),
+                                capability: edge.capability,
+                            },
+                        )
+                    })
                     .collect()
             })
             .unwrap_or_default()
@@ -304,6 +318,18 @@ mod tests {
             binding: BindingId::mint(),
             capability: DatabaseCapability::ReadWrite,
         }
+    }
+
+    /// The entry [`SuppliedAppBindings::live_bindings_for`] projects one edge
+    /// to, keyed by its database.
+    fn projected(edge: &ResolvedBinding) -> (DatabaseId, LiveBinding) {
+        (
+            edge.database.clone(),
+            LiveBinding {
+                binding: edge.binding.clone(),
+                capability: edge.capability,
+            },
+        )
     }
 
     /// A resolved app composes the binding its sessions narrow with, for the
@@ -557,11 +583,12 @@ mod tests {
         assert_eq!(
             store.live_bindings_for("app_x"),
             std::collections::BTreeMap::from([
-                (kept.database.clone(), kept.capability),
-                (moved.database.clone(), moved.capability),
-                (gained.database.clone(), gained.capability),
+                projected(&kept),
+                projected(&moved),
+                projected(&gained),
             ]),
-            "the store holds exactly the set the host resolved"
+            "the store holds exactly the set the host resolved, each database at \
+             the EDGE the host resolved for it"
         );
         assert!(
             store
@@ -655,7 +682,7 @@ mod tests {
         assert_eq!(error.code(), "invalid_app_binding");
         assert_eq!(
             store.live_bindings_for("app_x"),
-            std::collections::BTreeMap::from([(installed.database, installed.capability)]),
+            std::collections::BTreeMap::from([projected(&installed)]),
             "the refusal leaves the store serving what it had"
         );
 
@@ -664,18 +691,22 @@ mod tests {
             .expect("the control: the same set without the duplicate installs");
         assert_eq!(
             store.live_bindings_for("app_x"),
-            std::collections::BTreeMap::from([(first.database, first.capability)])
+            std::collections::BTreeMap::from([projected(&first)])
         );
     }
 
-    /// The projection carries each database's OWN capability, and an app the
-    /// store holds nothing for projects the empty map.
+    /// The projection carries each database's OWN edge and capability, and an
+    /// app the store holds nothing for projects the empty map.
+    ///
+    /// The edge is asserted against the edge that was SUPPLIED, per database: a
+    /// projection that carried one app-wide edge, or dropped it, would report a
+    /// store that agrees with control across a rebind it does not hold.
     ///
     /// The empty answer is the control: the map is what a host compares against
     /// control's feed, so a projection that answered empty for everything would
     /// leave every comparison reading "control serves none".
     #[test]
-    fn the_projection_carries_each_databases_own_capability() {
+    fn the_projection_carries_each_databases_own_edge_and_capability() {
         let store = SuppliedAppBindings::new();
         let writes = ResolvedBinding {
             capability: DatabaseCapability::ReadWrite,
@@ -685,14 +716,30 @@ mod tests {
             capability: DatabaseCapability::ReadOnly,
             ..resolved()
         };
+        assert_ne!(
+            writes.binding, reads.binding,
+            "the premise: two databases, two edges"
+        );
         store.supply("app_x", writes.clone()).expect("supply rw");
         store.supply("app_x", reads.clone()).expect("supply ro");
 
         assert_eq!(
             store.live_bindings_for("app_x"),
             std::collections::BTreeMap::from([
-                (writes.database, DatabaseCapability::ReadWrite),
-                (reads.database, DatabaseCapability::ReadOnly),
+                (
+                    writes.database,
+                    LiveBinding {
+                        binding: writes.binding,
+                        capability: DatabaseCapability::ReadWrite,
+                    }
+                ),
+                (
+                    reads.database,
+                    LiveBinding {
+                        binding: reads.binding,
+                        capability: DatabaseCapability::ReadOnly,
+                    }
+                ),
             ]),
         );
         assert!(store.live_bindings_for("app_absent").is_empty());
