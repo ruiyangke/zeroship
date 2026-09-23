@@ -1,0 +1,66 @@
+// zeroship.jsonc - tooling configuration for examples/meal-kit. COMMITTED.
+//
+// ONE workspace, ONE database, TWO apps. The storefront sells boxes and the
+// back office runs them, and they reach each other's writes by binding the
+// same database rather than by calling each other over HTTP: `env.db` in
+// either app is `databases.main`.
+//
+// The apps live in `apps/<label>/`, one directory below this file, and the
+// config loader does NO upward directory walk - a build run in a subdirectory
+// would otherwise silently pick up a sibling app's target. So each app names
+// this file explicitly: `zeroship({ configPath, app })` in its vite.config.ts,
+// and `ZEROSHIP_CONFIG` for the runtime the dev server spawns. Both come from
+// `zeroship.workspace.ts`.
+//
+// `migrations` and `out` are stated once, under the database that owns them,
+// because they describe the schema rather than either app.
+
+{
+  "$schema": "https://zeroship.ai/schema/project-v1.json",
+
+  "name": "meal-kit",
+  "control": "http://localhost:9090",
+  "runtime_date": "2026-09-11",
+
+  // `dist` is the ONE directory the packer walks and Vite fills; each app
+  // overrides it to its own through the build-only `config` option, because a
+  // workspace has one build block and two client bundles.
+  "build": {
+    "mode": "full",
+    "dist": "dist",
+    "output": "dist/app.zship"
+  },
+
+  // The shared database, by LOCAL LABEL. The id is what the CLI sends; the
+  // label is what this file, the manifest and `env.databases` use.
+  "databases": {
+    "main": {
+      "id": "dbs_03gx5mjoin9l5wdadst4gzi91",
+      "migrations": "migrations",
+      "out": "generated/zeroship"
+    }
+  },
+
+  // `primary` is each app's `env.db`. Both name the same one: that is the
+  // whole point of this example.
+  //
+  // `app` is each app's own identity, and a workspace of several apps has to
+  // state it. The app schema, the deploy rows and the workflow activation rows
+  // are all keyed on it, and those rows live in the database the two apps now
+  // share - so two apps left to take the same id are one app to them, and the
+  // second to boot revokes the first's activation.
+  "apps": {
+    "storefront": {
+      "app": "app_03gx5yc0hjelwqq5ui29c1urw",
+      "databases": ["main"],
+      "primary": "main"
+    },
+    "backoffice": {
+      "app": "app_03gx5yc0hot7wd6qfevba2be3",
+      "databases": ["main"],
+      "primary": "main"
+    }
+  },
+
+  "secrets": []
+}

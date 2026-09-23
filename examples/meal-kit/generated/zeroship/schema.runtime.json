@@ -1,0 +1,3893 @@
+{
+  "version": 2,
+  "collections": {
+    "meal_addresses": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true,
+          "assign": {
+            "by": "typedId",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "created_at": {
+          "type": "timestamp",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "updated_at": {
+          "type": "timestamp",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          },
+          "assign": {
+            "by": "increment(1)",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "deleted_at": {
+          "type": "timestamp",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "delete"
+          },
+          "writable": false
+        },
+        "owner_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "owner_id"
+          }
+        },
+        "market": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "market"
+          }
+        },
+        "label": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "label"
+          }
+        },
+        "address": {
+          "type": "json",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "address"
+          }
+        },
+        "is_default": {
+          "type": "boolean",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "is_default"
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "meal_addresses_owner_market",
+          "fields": [
+            "owner_id",
+            "market"
+          ]
+        },
+        {
+          "name": "meal_addresses_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "meal_addresses_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "meal_addresses_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "meal_carts": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true,
+          "assign": {
+            "by": "typedId",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "created_at": {
+          "type": "timestamp",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "updated_at": {
+          "type": "timestamp",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          },
+          "assign": {
+            "by": "increment(1)",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "deleted_at": {
+          "type": "timestamp",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "delete"
+          },
+          "writable": false
+        },
+        "principal": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "principal"
+          }
+        },
+        "market": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "market"
+          }
+        },
+        "cart": {
+          "type": "json",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "cart"
+          }
+        },
+        "expires_at": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "expires_at"
+          }
+        },
+        "last_request_key": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "last_request_key"
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "meal_carts_principal_market",
+          "fields": [
+            "principal",
+            "market"
+          ],
+          "unique": true
+        },
+        {
+          "name": "meal_carts_expiry",
+          "fields": [
+            "expires_at"
+          ]
+        },
+        {
+          "name": "meal_carts_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "meal_carts_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "meal_carts_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "meal_cases": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true,
+          "assign": {
+            "by": "typedId",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "created_at": {
+          "type": "timestamp",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "updated_at": {
+          "type": "timestamp",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          },
+          "assign": {
+            "by": "increment(1)",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "deleted_at": {
+          "type": "timestamp",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "delete"
+          },
+          "writable": false
+        },
+        "owner_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "owner_id"
+          }
+        },
+        "order_id": {
+          "type": "string",
+          "refTarget": "meal_orders",
+          "refColumn": "id",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "order_id"
+          }
+        },
+        "category": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "category"
+          }
+        },
+        "message": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "message"
+          }
+        },
+        "status": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "status"
+          }
+        },
+        "resolution": {
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "resolution"
+          }
+        },
+        "attachment": {
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "attachment"
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "meal_cases_owner",
+          "fields": [
+            "owner_id"
+          ]
+        },
+        {
+          "name": "meal_cases_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "meal_cases_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "meal_cases_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "meal_checkout_attempts": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true,
+          "assign": {
+            "by": "typedId",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "created_at": {
+          "type": "timestamp",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "updated_at": {
+          "type": "timestamp",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          },
+          "assign": {
+            "by": "increment(1)",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "deleted_at": {
+          "type": "timestamp",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "delete"
+          },
+          "writable": false
+        },
+        "order_id": {
+          "type": "string",
+          "refTarget": "meal_orders",
+          "refColumn": "id",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "order_id"
+          }
+        },
+        "owner_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "owner_id"
+          }
+        },
+        "market": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "market"
+          }
+        },
+        "payment": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "payment"
+          }
+        },
+        "reservation": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "reservation"
+          }
+        },
+        "expires_at": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "expires_at"
+          }
+        },
+        "cart": {
+          "type": "json",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "cart"
+          }
+        },
+        "total": {
+          "type": "int",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "total"
+          }
+        },
+        "currency": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "currency"
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "meal_checkout_order",
+          "fields": [
+            "order_id"
+          ]
+        },
+        {
+          "name": "meal_checkout_expiry",
+          "fields": [
+            "market",
+            "reservation",
+            "expires_at"
+          ]
+        },
+        {
+          "name": "meal_checkout_attempts_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "meal_checkout_attempts_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "meal_checkout_attempts_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "meal_events": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true,
+          "assign": {
+            "by": "typedId",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "created_at": {
+          "type": "timestamp",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "updated_at": {
+          "type": "timestamp",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          },
+          "assign": {
+            "by": "increment(1)",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "deleted_at": {
+          "type": "timestamp",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "delete"
+          },
+          "writable": false
+        },
+        "event_key": {
+          "type": "string",
+          "required": true,
+          "unique": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "event_key"
+          }
+        },
+        "kind": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "kind"
+          }
+        },
+        "payload": {
+          "type": "json",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "payload"
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "meal_events_event_key_key",
+          "fields": [
+            "event_key"
+          ],
+          "unique": true
+        },
+        {
+          "name": "meal_events_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "meal_events_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "meal_events_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "meal_inventory": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true,
+          "assign": {
+            "by": "typedId",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "created_at": {
+          "type": "timestamp",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "updated_at": {
+          "type": "timestamp",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          },
+          "assign": {
+            "by": "increment(1)",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "deleted_at": {
+          "type": "timestamp",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "delete"
+          },
+          "writable": false
+        },
+        "stock_key": {
+          "type": "string",
+          "required": true,
+          "unique": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "stock_key"
+          }
+        },
+        "market": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "market"
+          }
+        },
+        "recipe_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "recipe_id"
+          }
+        },
+        "available": {
+          "type": "int",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "available"
+          }
+        },
+        "published": {
+          "type": "boolean",
+          "required": true,
+          "default": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "published"
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "meal_inventory_stock_key_key",
+          "fields": [
+            "stock_key"
+          ],
+          "unique": true
+        },
+        {
+          "name": "meal_inventory_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "meal_inventory_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "meal_inventory_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "meal_menu_versions": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true,
+          "assign": {
+            "by": "typedId",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "created_at": {
+          "type": "timestamp",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "updated_at": {
+          "type": "timestamp",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          },
+          "assign": {
+            "by": "increment(1)",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "deleted_at": {
+          "type": "timestamp",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "delete"
+          },
+          "writable": false
+        },
+        "menu_id": {
+          "type": "string",
+          "refTarget": "meal_menus",
+          "refColumn": "id",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "menu_id"
+          }
+        },
+        "market": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "market"
+          }
+        },
+        "revision": {
+          "type": "int",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "revision"
+          }
+        },
+        "content": {
+          "type": "json",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "content"
+          }
+        },
+        "published_by": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "published_by"
+          }
+        },
+        "published_at": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "published_at"
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "meal_menu_revision",
+          "fields": [
+            "menu_id",
+            "revision"
+          ],
+          "unique": true
+        },
+        {
+          "name": "meal_menu_versions_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "meal_menu_versions_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "meal_menu_versions_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "meal_menus": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true,
+          "assign": {
+            "by": "typedId",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "created_at": {
+          "type": "timestamp",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "updated_at": {
+          "type": "timestamp",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          },
+          "assign": {
+            "by": "increment(1)",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "deleted_at": {
+          "type": "timestamp",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "delete"
+          },
+          "writable": false
+        },
+        "menu_key": {
+          "type": "string",
+          "required": true,
+          "unique": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "menu_key"
+          }
+        },
+        "market": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "market"
+          }
+        },
+        "delivery_date": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "delivery_date"
+          }
+        },
+        "draft": {
+          "type": "json",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "draft"
+          }
+        },
+        "published_version_id": {
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "published_version_id"
+          }
+        },
+        "status": {
+          "type": "string",
+          "required": true,
+          "default": "draft",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "status"
+          }
+        },
+        "history": {
+          "type": "json",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "history"
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "meal_menus_menu_key_key",
+          "fields": [
+            "menu_key"
+          ],
+          "unique": true
+        },
+        {
+          "name": "meal_menus_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "meal_menus_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "meal_menus_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "meal_orders": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true,
+          "assign": {
+            "by": "typedId",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "created_at": {
+          "type": "timestamp",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "updated_at": {
+          "type": "timestamp",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          },
+          "assign": {
+            "by": "increment(1)",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "deleted_at": {
+          "type": "timestamp",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "delete"
+          },
+          "writable": false
+        },
+        "owner_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "owner_id"
+          }
+        },
+        "market": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "market"
+          }
+        },
+        "request_key": {
+          "type": "string",
+          "required": true,
+          "unique": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "request_key"
+          }
+        },
+        "status": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "status"
+          }
+        },
+        "payment": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "payment"
+          }
+        },
+        "fulfillment": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "fulfillment"
+          }
+        },
+        "total": {
+          "type": "int",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "total"
+          }
+        },
+        "refunded": {
+          "type": "int",
+          "required": true,
+          "default": 0,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "refunded"
+          }
+        },
+        "snapshot": {
+          "type": "json",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "snapshot"
+          }
+        },
+        "timeline": {
+          "type": "json",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "timeline"
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "meal_orders_request_key_key",
+          "fields": [
+            "request_key"
+          ],
+          "unique": true
+        },
+        {
+          "name": "meal_orders_owner",
+          "fields": [
+            "owner_id"
+          ]
+        },
+        {
+          "name": "meal_orders_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "meal_orders_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "meal_orders_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "meal_plans": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true,
+          "assign": {
+            "by": "typedId",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "created_at": {
+          "type": "timestamp",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "updated_at": {
+          "type": "timestamp",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          },
+          "assign": {
+            "by": "increment(1)",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "deleted_at": {
+          "type": "timestamp",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "delete"
+          },
+          "writable": false
+        },
+        "owner_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "owner_id"
+          }
+        },
+        "market": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "market"
+          }
+        },
+        "status": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "status"
+          }
+        },
+        "configuration": {
+          "type": "json",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "configuration"
+          }
+        },
+        "next_date": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "next_date"
+          }
+        },
+        "skipped": {
+          "type": "json",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "skipped"
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "meal_plans_owner_market",
+          "fields": [
+            "owner_id",
+            "market"
+          ],
+          "unique": true
+        },
+        {
+          "name": "meal_plans_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "meal_plans_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "meal_plans_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "meal_privacy_requests": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true,
+          "assign": {
+            "by": "typedId",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "created_at": {
+          "type": "timestamp",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "updated_at": {
+          "type": "timestamp",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          },
+          "assign": {
+            "by": "increment(1)",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "deleted_at": {
+          "type": "timestamp",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "delete"
+          },
+          "writable": false
+        },
+        "owner_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "owner_id"
+          }
+        },
+        "request_key": {
+          "type": "string",
+          "required": true,
+          "unique": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "request_key"
+          }
+        },
+        "kind": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "kind"
+          }
+        },
+        "status": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "status"
+          }
+        },
+        "history": {
+          "type": "json",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "history"
+          }
+        },
+        "object_key": {
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "object_key"
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "meal_privacy_requests_request_key_key",
+          "fields": [
+            "request_key"
+          ],
+          "unique": true
+        },
+        {
+          "name": "meal_privacy_owner",
+          "fields": [
+            "owner_id"
+          ]
+        },
+        {
+          "name": "meal_privacy_requests_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "meal_privacy_requests_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "meal_privacy_requests_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "meal_profiles": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true,
+          "assign": {
+            "by": "typedId",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "created_at": {
+          "type": "timestamp",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "updated_at": {
+          "type": "timestamp",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          },
+          "assign": {
+            "by": "increment(1)",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "deleted_at": {
+          "type": "timestamp",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "delete"
+          },
+          "writable": false
+        },
+        "owner_id": {
+          "type": "string",
+          "required": true,
+          "unique": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "owner_id"
+          }
+        },
+        "preferences": {
+          "type": "json",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "preferences"
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "meal_profiles_owner_id_key",
+          "fields": [
+            "owner_id"
+          ],
+          "unique": true
+        },
+        {
+          "name": "meal_profiles_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "meal_profiles_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "meal_profiles_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "meal_recipe_feedback": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true,
+          "assign": {
+            "by": "typedId",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "created_at": {
+          "type": "timestamp",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "updated_at": {
+          "type": "timestamp",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          },
+          "assign": {
+            "by": "increment(1)",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "deleted_at": {
+          "type": "timestamp",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "delete"
+          },
+          "writable": false
+        },
+        "owner_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "owner_id"
+          }
+        },
+        "order_id": {
+          "type": "string",
+          "refTarget": "meal_orders",
+          "refColumn": "id",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "order_id"
+          }
+        },
+        "market": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "market"
+          }
+        },
+        "recipe_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "recipe_id"
+          }
+        },
+        "recipe_version_id": {
+          "type": "string",
+          "refTarget": "meal_recipe_versions",
+          "refColumn": "id",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "recipe_version_id"
+          }
+        },
+        "rating": {
+          "type": "int",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "rating"
+          }
+        },
+        "cook_again": {
+          "type": "boolean",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "cook_again"
+          }
+        },
+        "comment": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "comment"
+          }
+        },
+        "last_request_key": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "last_request_key"
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "meal_feedback_order_recipe",
+          "fields": [
+            "order_id",
+            "recipe_version_id"
+          ],
+          "unique": true
+        },
+        {
+          "name": "meal_feedback_owner",
+          "fields": [
+            "owner_id"
+          ]
+        },
+        {
+          "name": "meal_feedback_market",
+          "fields": [
+            "market"
+          ]
+        },
+        {
+          "name": "meal_recipe_feedback_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "meal_recipe_feedback_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "meal_recipe_feedback_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "meal_recipe_versions": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true,
+          "assign": {
+            "by": "typedId",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "created_at": {
+          "type": "timestamp",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "updated_at": {
+          "type": "timestamp",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          },
+          "assign": {
+            "by": "increment(1)",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "deleted_at": {
+          "type": "timestamp",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "delete"
+          },
+          "writable": false
+        },
+        "recipe_id": {
+          "type": "string",
+          "refTarget": "meal_recipes",
+          "refColumn": "id",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "recipe_id"
+          }
+        },
+        "revision": {
+          "type": "int",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "revision"
+          }
+        },
+        "content": {
+          "type": "json",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "content"
+          }
+        },
+        "approved_by": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "approved_by"
+          }
+        },
+        "approval_note": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "approval_note"
+          }
+        },
+        "approved_at": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "approved_at"
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "meal_recipe_revision",
+          "fields": [
+            "recipe_id",
+            "revision"
+          ],
+          "unique": true
+        },
+        {
+          "name": "meal_recipe_versions_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "meal_recipe_versions_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "meal_recipe_versions_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "meal_recipes": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true,
+          "assign": {
+            "by": "typedId",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "created_at": {
+          "type": "timestamp",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "updated_at": {
+          "type": "timestamp",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          },
+          "assign": {
+            "by": "increment(1)",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "deleted_at": {
+          "type": "timestamp",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "delete"
+          },
+          "writable": false
+        },
+        "slug": {
+          "type": "string",
+          "required": true,
+          "unique": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "slug"
+          }
+        },
+        "draft": {
+          "type": "json",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "draft"
+          }
+        },
+        "archived": {
+          "type": "boolean",
+          "required": true,
+          "default": false,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "archived"
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "meal_recipes_slug_key",
+          "fields": [
+            "slug"
+          ],
+          "unique": true
+        },
+        {
+          "name": "meal_recipes_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "meal_recipes_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "meal_recipes_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "meal_staff_events": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true,
+          "assign": {
+            "by": "typedId",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "created_at": {
+          "type": "timestamp",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "updated_at": {
+          "type": "timestamp",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          },
+          "assign": {
+            "by": "increment(1)",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "deleted_at": {
+          "type": "timestamp",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "delete"
+          },
+          "writable": false
+        },
+        "event_key": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "event_key"
+          }
+        },
+        "actor_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "actor_id"
+          }
+        },
+        "subject": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "subject"
+          }
+        },
+        "command": {
+          "type": "json",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "command"
+          }
+        },
+        "before": {
+          "type": "json",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "before"
+          }
+        },
+        "after": {
+          "type": "json",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "after"
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "meal_staff_event_key",
+          "fields": [
+            "event_key"
+          ],
+          "unique": true
+        },
+        {
+          "name": "meal_staff_event_subject",
+          "fields": [
+            "subject"
+          ]
+        },
+        {
+          "name": "meal_staff_events_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "meal_staff_events_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "meal_staff_events_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "meal_staff_members": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true,
+          "assign": {
+            "by": "typedId",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "created_at": {
+          "type": "timestamp",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "updated_at": {
+          "type": "timestamp",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          },
+          "assign": {
+            "by": "increment(1)",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "deleted_at": {
+          "type": "timestamp",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "delete"
+          },
+          "writable": false
+        },
+        "subject": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "subject"
+          }
+        },
+        "settings": {
+          "type": "json",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "settings"
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "meal_staff_subject",
+          "fields": [
+            "subject"
+          ],
+          "unique": true
+        },
+        {
+          "name": "meal_staff_members_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "meal_staff_members_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "meal_staff_members_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    },
+    "meal_waitlist": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true,
+          "assign": {
+            "by": "typedId",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "created_at": {
+          "type": "timestamp",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "updated_at": {
+          "type": "timestamp",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "created_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "insert"
+          },
+          "writable": false
+        },
+        "updated_by": {
+          "type": "string",
+          "maxLength": 255,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "updated_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "version": {
+          "type": "int",
+          "required": true,
+          "default": 1,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "version"
+          },
+          "assign": {
+            "by": "increment(1)",
+            "on": "write"
+          },
+          "writable": false
+        },
+        "deleted_at": {
+          "type": "timestamp",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deleted_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "delete"
+          },
+          "writable": false
+        },
+        "contact_key": {
+          "type": "string",
+          "required": true,
+          "unique": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "contact_key"
+          }
+        },
+        "email": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "email"
+          }
+        },
+        "market": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "market"
+          }
+        },
+        "postal": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "postal"
+          }
+        },
+        "area": {
+          "type": "json",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "area"
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "meal_waitlist_contact_key_key",
+          "fields": [
+            "contact_key"
+          ],
+          "unique": true
+        },
+        {
+          "name": "meal_waitlist_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "meal_waitlist_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "meal_waitlist_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "name": "zeroship-meal-kit-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "migrate": "node scripts/migrate.mjs",
+    "dev": "node scripts/dev.mjs",
+    "build": "pnpm --dir apps/backoffice build && pnpm --dir apps/storefront build",
+    "typecheck": "pnpm --dir apps/backoffice typecheck && pnpm --dir apps/storefront typecheck && tsc --noEmit -p tests/tsconfig.json",
+    "test": "pnpm --dir apps/backoffice test && pnpm --dir apps/storefront test",
+    "test:browser": "playwright test",
+    "i18n:extract": "pnpm --dir packages/shared i18n:extract",
+    "i18n:check": "pnpm --dir packages/shared i18n:check",
+    "i18n:compile": "pnpm --dir packages/shared i18n:compile"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.11.0",
+    "@gather/meal-kit": "workspace:*",
+    "@playwright/test": "1.58.2",
+    "@types/node": "catalog:",
+    "@zeroship/db": "workspace:*",
+    "@zeroship/migrate": "workspace:*",
+    "@zeroship/types": "workspace:*",
+    "@zeroship/vite-plugin": "workspace:*",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "zeroship": "workspace:*"
+  }
+}

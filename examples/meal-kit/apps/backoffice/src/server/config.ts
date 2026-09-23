@@ -1,0 +1,31 @@
+import { defineApp } from "@zeroship/server";
+export default defineApp({
+  resources: {
+    "rpc:gather.session": {
+      auth: "anonymous",
+      publiclyAccessible: true,
+      cache: { maxAge: 0 },
+    },
+    "rpc:gather.operations": { auth: "user", cache: { maxAge: 0 } },
+    "rpc:gather.prepareMenu": { auth: "user" },
+    "rpc:gather.advance": { auth: "user" },
+    "rpc:gather.inventory": { auth: "user" },
+    "rpc:gather.resolve": { auth: "user" },
+    "rpc:gather.paymentScenario": { auth: "user" },
+    "rpc:gather.catalogWorkspace": { auth: "user", cache: { maxAge: 0 } },
+    "rpc:gather.saveRecipeDraft": { auth: "user" },
+    "rpc:gather.approveRecipe": { auth: "user" },
+    "rpc:gather.archiveRecipe": { auth: "user" },
+    "rpc:gather.saveMenuDraft": { auth: "user" },
+    "rpc:gather.publishMenu": { auth: "user" },
+    "rpc:gather.withdrawMenu": { auth: "user" },
+    "rpc:gather.loadSampleMenus": { auth: "user" },
+    "rpc:gather.recipeFeedback": { auth: "user", cache: { maxAge: 0 } },
+    "rpc:gather.staffTeam": { auth: "user", cache: { maxAge: 0 } },
+    "rpc:gather.saveStaffMember": { auth: "user", maxInputBytes: 8192 },
+    "rpc:gather.settleDemoPayment": { auth: "user" },
+    "rpc:gather.expireDemoCheckout": { auth: "user" },
+    "rpc:gather.sweepCheckouts": { auth: "user" },
+    "rpc:gather.refundRecoveredPayment": { auth: "user" },
+  },
+});

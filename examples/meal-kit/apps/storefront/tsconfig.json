@@ -1,0 +1,37 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "jsx": "react-jsx",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": [
+        "src/*"
+      ]
+    },
+    "types": [
+      "vite/client",
+      "node",
+      "@zeroship/types"
+    ]
+  },
+  "include": [
+    "src",
+    "../../generated",
+    "*.ts",
+    "../../zeroship.workspace.ts",
+    "../../packages/shared/src/lingui.d.ts",
+    "tests"
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "extends": "../apps/backoffice/tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": ".."
+  },
+  "include": [
+    ".",
+    "../generated",
+    "../packages/shared/src/lingui.d.ts"
+  ]
+}
