@@ -358,10 +358,12 @@ protocol. This extends a working client rather than inventing one.
 7. **Drop `zeroship-data-orm` from the crate the worker links.** The last step of moving the
    `service/` tree, not a deletion available earlier.
 
-**Measure the latency question before step 1, not after step 4.** Open 1 decides whether this is
-viable under load, and it is answerable now: transitions already batch, so a dispatch's outcome
-count can be measured against a round trip on today's code. That is the cheapest de-risking
-available and it gates the whole design rather than one step.
+**Latency is not the gate; payload is, and its bound is settled.** Open 1 holds the answer and
+names `crates/zeroship-workflow-client/tests/round_trip_cost.rs` as the instrument: re-run it
+rather than trusting a paragraph. The bounds a crossing payload meets answer to the ceiling
+constants in `crates/zeroship-core/src/workflow_policy.rs`, so step 4 plans against a bound
+instead of choosing one. Read Open 4 alongside it, because every reading behind Open 1 was taken
+over loopback.
 
 **The fence is a separate track, not a gate.** Under this design only the service reaches the
 journal, so the `app_id` filter sits inside a trusted process and is defensible without
