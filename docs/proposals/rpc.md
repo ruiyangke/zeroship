@@ -21,7 +21,7 @@ zeroship apps need a server-function story that:
 3. Validates args at the gateway boundary; the worker handler never sees malformed input.
 4. Treats auth, rate-limit, idempotency, caching, metering as **declarative metadata** the gateway enforces before the worker runs.
 5. Streams without an SDK fork — modern AI SDK 5 UI message streams, NDJSON, and raw `ReadableStream` all sit on the same content-negotiated transport.
-6. Composes cleanly with the **primitives the platform already has** — native `AsyncLocalStorage`, native `Request`/`Response`/`FormData`/`Blob`/`File`, native `AbortSignal`, `#[v8_class]`/`#[v8_method(fastcall)]`, HMAC-signed `ZeroShip-User`, the `env.{db,kv,storage,meter}` plugin surface.
+6. Composes cleanly with the **primitives the platform already has** — native `AsyncLocalStorage`, native `Request`/`Response`/`FormData`/`Blob`/`File`, native `AbortSignal`, `#[v8_class]`/`#[v8_method(fastcall)]`, ed25519-signed `ZeroShip-User`, the `env.{db,kv,storage,meter}` plugin surface.
 
 This proposal is the second iteration. The round-01 critique identified the v1 sketch's six structural mistakes:
 
@@ -259,7 +259,7 @@ The TS surface narrows `ctx.user`'s type based on the wrapper's `auth` policy:
 
 | Field | Type | Populated from | Notes |
 | --- | --- | --- | --- |
-| `ctx.user` | `User \| null` | Gateway-injected `ZeroShip-User` HMAC-signed header → exposed via `env.auth.getUser()` (the existing kernel primitive); `ctx.user` is the const-time accessor. | `null` for `auth: "anonymous"`; throws `UNAUTHENTICATED` if read by an `auth: "user"` procedure that didn't authenticate (defense-in-depth). |
+| `ctx.user` | `User \| null` | Gateway-injected `ZeroShip-User` ed25519-signed header → exposed via `env.auth.getUser()` (the existing kernel primitive); `ctx.user` is the const-time accessor. | `null` for `auth: "anonymous"`; throws `UNAUTHENTICATED` if read by an `auth: "user"` procedure that didn't authenticate (defense-in-depth). |
 | `ctx.requestId` | `TypedId<"req">` | Gateway generates UUIDv7 typed_id | Echoed in `X-Request-Id` response header; matches `typed_id` invariant. |
 | `ctx.traceId` | `string` (32-char hex) | W3C `traceparent` header (gateway creates if absent) | Used for OTel correlation. |
 | `ctx.signal` | `AbortSignal` | `AbortSignal.any([clientDisconnect, gatewayDeadline, isolateEviction])` (native, `crates/zeroship-runtime/src/web/dom/abort_signal.rs`) | Aborts on any of the three (see "Abort source plumbing" below). Auto-passed to `fetch`, `db.*`, `kv.*`, `storage.*`. |
@@ -556,7 +556,7 @@ export const webhookHandler = action(async (req: Request) => {
 
 `kind: "raw"` keeps:
 
-- Auth (the gateway still validates ZeroShip-User HMAC; `ctx.user` is populated).
+- Auth (the gateway still verifies the ZeroShip-User signature; `ctx.user` is populated).
 - Rate limit, CSRF, max_input_bytes, max_output_bytes (gateway-enforced).
 - Idempotency (when `idempotent: true` is set; the gateway-side cache stores the entire `Response` body + headers).
 - `ctx` (full surface: `user`, `signal`, `requestId`, `traceId`, `idempotencyKey`, `waitUntil`, `log`, `meter`).
@@ -748,7 +748,7 @@ Client                                          Gateway                         
 list({ limit: 50 })  →  __rpcCallJson(...)
                          GET /__zeroship/v1/todos.list?input=eyJqc29uIjp7...}
                                               →  Lookup "rpc:todos.list" in EffectivePolicy map
-                                                 Auth check (ZeroShip-User HMAC)
+                                                 Auth check (ZeroShip-User signature)
                                                  Rate limit (per user)
                                                  max_input_bytes guard
                                                  traceparent inject (if absent)
@@ -1401,7 +1401,7 @@ When the gateway receives `manifest.json`, it pre-computes for every resource an
    - URL:  walk path-segment Trie
 3. Look up precomputed EffectivePolicy.
 4. Enforce pre-dispatch policy:
-   - auth check (ZeroShip-User HMAC + JWT)  → 401 / 403 if rejected
+   - auth check (ZeroShip-User signature + JWT)  → 401 / 403 if rejected
    - rate-limit bucket                       → 429 if exceeded
    - csrf origin check                       → 403 if mutation + Origin not allowed
    - max_input_bytes guard                   → 413 if exceeded
@@ -1423,7 +1423,7 @@ The gateway never walks a tree at runtime — `EffectivePolicy` is precomputed o
 
 - Pre-404 unknown resources.
 - Reject wrong HTTP method (procedure `kind: "mutation"` via `GET` → 405).
-- Validate auth (ZeroShip-User HMAC + JWT) for `auth: "user"` — 401 before forwarding.
+- Validate auth (ZeroShip-User signature + JWT) for `auth: "user"` — 401 before forwarding.
 - Enforce `rate_limit` per the declared bucket — 429 with `Retry-After` and `X-RateLimit-Reset`.
 - Reject oversized inputs (`max_input_bytes`) — 413.
 - Reject oversized outputs (`max_output_bytes`) — 502 + structured log.
@@ -1432,7 +1432,7 @@ The gateway never walks a tree at runtime — `EffectivePolicy` is precomputed o
 - Set `Cache-Control` and `ETag` for queries on the response path.
 - Emit Prometheus + meter events keyed by resource id.
 - Inject `traceparent` if absent; thread through.
-- Verify HMAC on `ZeroShip-User` header before forwarding to worker.
+- Verify the `ZeroShip-User` signature before forwarding to worker.
 
 The worker only sees pre-validated, pre-authenticated, pre-rate-limited, pre-idempotency-checked requests. **One source of truth** for routing AND policy: the `resources` block.
 
@@ -2187,11 +2187,18 @@ Round-01 High-8 noted that the v1 draft mixed two auth surfaces (Bearer JWT and 
 
 ### Gateway → worker handoff
 
-The gateway never sends raw credentials to the worker. Instead it signs an HMAC-protected payload and forwards via headers:
+The gateway never sends raw credentials to the worker. Instead it signs the payload with an ed25519
+private key it alone holds, and forwards via headers:
 
 ```
-ZeroShip-User: <base64url(payload)>.<base64url(hmac_sha256(payload, secret))>
+ZeroShip-User: <base64(user_json)>.<request_id>.<issued_at_unix_secs>.<kid>.<base64url(signature)>
 ```
+
+The signature covers the first FOUR segments, `kid` included. The asymmetry is the point: the
+worker holds only the published public half, so a worker able to VERIFY an envelope is not thereby
+able to MINT one. A symmetric MAC keyed by the secret that already authenticates the dispatch hop
+would make that guarantee circular. The authority is
+`crates/zeroship-core/src/user_envelope.rs`.
 
 Where `payload` is JSON:
 
@@ -2206,10 +2213,12 @@ Where `payload` is JSON:
 }
 ```
 
-The worker verifies HMAC on receipt — see `crates/zeroship-gateway/src/proxy.rs:378` and `crates/zeroship-gateway/src/user_auth.rs`. On verification:
+The worker verifies the signature on receipt under the gateway's published public key — see
+`verified_user_json` in `crates/zeroship-worker/src/handler.rs`, against `encode_user_header` in
+`crates/zeroship-gateway/src/oidc_rp.rs` on the signing side. On verification:
 
 - Verified payload → `ctx.user = User { id, email, role, scopes, sessionId }`.
-- HMAC mismatch → connection drop + log (gateway misconfigured or attempted spoof).
+- Signature mismatch → connection drop + log (gateway misconfigured or attempted spoof).
 - Header absent + `auth: "anonymous"` → `ctx.user = null`.
 - Header absent + `auth: "user"` → gateway pre-rejected with 401 before forwarding (defense-in-depth: worker also checks).
 
@@ -2235,7 +2244,7 @@ export async function add({ text }: { text: string }) {
 ### Auth on streaming / WebSocket
 
 - Streaming HTTP: same `ZeroShip-User` chain as request/response.
-- WebSocket upgrade: cookie + HMAC validated on the upgrade handshake; subsequent frames inherit the session.
+- WebSocket upgrade: cookie + envelope signature validated on the upgrade handshake; subsequent frames inherit the session.
 - **Re-validation on long-lived sockets**: the gateway re-checks session validity every `min(session.ttl / 4, 5 minutes)` (configurable via `defineApp.auth.wsRevalidateMs`). The 5-min default mirrors the typical session refresh interval used by Cloudflare Workers' Durable Objects auth; the `session.ttl / 4` floor ensures the check fires at least 4 times per session lifetime even for short-TTL sessions (so a 1-min temp session re-validates every 15 s). On a failed re-check the gateway sends:
 
   ```
@@ -2316,7 +2325,7 @@ The intent of the layered check: in the common case (browser; same origin), chec
 
 ## Bottom line
 
-The v1 draft sketched a tRPC-meets-Server-Actions design before the platform's native primitives shipped. This rewrite slots the proposal into the platform that exists today: ALS as the foundation primitive for ambient context; `#[v8_class]` for `RpcError`; `#[v8_method(fastcall)]` for dispatch; native FormData / Blob / File on the wire; AI SDK 5 (not the deprecated v4) for streaming; gateway-side SETNX for distributed idempotency; HMAC-signed `ZeroShip-User` for the auth chain; RSC-style file-level + function-level `"use server"` with reference-graph detection; one wire envelope (superjson) shared by every emitter and parser; `meter.*` events on every RPC call by construction.
+The v1 draft sketched a tRPC-meets-Server-Actions design before the platform's native primitives shipped. This rewrite slots the proposal into the platform that exists today: ALS as the foundation primitive for ambient context; `#[v8_class]` for `RpcError`; `#[v8_method(fastcall)]` for dispatch; native FormData / Blob / File on the wire; AI SDK 5 (not the deprecated v4) for streaming; gateway-side SETNX for distributed idempotency; ed25519-signed `ZeroShip-User` for the auth chain; RSC-style file-level + function-level `"use server"` with reference-graph detection; one wire envelope (superjson) shared by every emitter and parser; `meter.*` events on every RPC call by construction.
 
 The proposal is shorter than it looks because every JS-side scaffolding from v1 ("we'll build this in TypeScript") has been replaced with "the kernel handles this" — and the kernel handles it faster, more correctly, and with better realm semantics than any JS-side equivalent could.
 </content>
