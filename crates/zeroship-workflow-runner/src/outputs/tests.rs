@@ -412,6 +412,42 @@ async fn output_contract(store: Rc<OrmStore>) {
     tasks.complete(&task.id, &task.token, result).await.unwrap();
 }
 
+/// The startup half of the ceiling invariant: a configured host budget that
+/// cannot carry what admission may grant a policy refuses before this host
+/// serves. The admission half, which refuses a policy above the same constant,
+/// lives with `AppPolicy`.
+#[test]
+fn configured_host_budget_refuses_a_payload_read_below_the_platform_ceiling() {
+    // The derived default is at the ceiling, which is what makes the worker's
+    // budget correct without a second literal to keep in step.
+    let default = TaskPayloadLimits::default();
+    assert_eq!(default.max_payload_bytes, MAX_PAYLOAD_BYTES_CEILING);
+    default.validate_configured().unwrap();
+    let at_ceiling = TaskPayloadLimits {
+        max_inline_bytes: 1024,
+        max_payload_bytes: MAX_PAYLOAD_BYTES_CEILING,
+        max_result_bytes: MAX_PAYLOAD_BYTES_CEILING,
+    };
+    at_ceiling.validate_configured().unwrap();
+    // A host may carry more than the platform admits; only less is refused.
+    TaskPayloadLimits {
+        max_payload_bytes: MAX_PAYLOAD_BYTES_CEILING + 1,
+        max_result_bytes: MAX_PAYLOAD_BYTES_CEILING + 1,
+        ..at_ceiling
+    }
+    .validate_configured()
+    .unwrap();
+    let below = TaskPayloadLimits {
+        max_payload_bytes: MAX_PAYLOAD_BYTES_CEILING - 1,
+        ..at_ceiling
+    };
+    // The control: this budget is internally consistent and passes every check
+    // that compares it against itself, so the ceiling comparison is the only
+    // thing that can account for the refusal.
+    below.validate().unwrap();
+    assert!(below.validate_configured().is_err());
+}
+
 #[test]
 fn output_budgets_reject_unusable_limits() {
     TaskPayloadLimits::default().validate().unwrap();

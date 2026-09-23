@@ -82,6 +82,33 @@ fn local_configuration_rejects_unknown_and_invalid_limits() {
     );
 }
 
+/// `[payloads]` configures the budget this host reads staged payloads through,
+/// so a value below the platform ceiling would start a host that cannot
+/// materialize what admission may let an app stage.
+#[test]
+fn local_configuration_refuses_a_payload_budget_below_the_platform_ceiling() {
+    let ceiling = zeroship_core::workflow_policy::MAX_PAYLOAD_BYTES_CEILING;
+    let at_ceiling = format!(
+        "[payloads]\nmax_inline_bytes = 1024\nmax_payload_bytes = {ceiling}\n\
+         max_result_bytes = {ceiling}"
+    );
+    let config: LocalConfig = toml::from_str(&at_ceiling).unwrap();
+    assert_eq!(
+        config.validate().unwrap().payloads.max_payload_bytes,
+        ceiling
+    );
+    let below = format!(
+        "[payloads]\nmax_inline_bytes = 1024\nmax_payload_bytes = {}\n\
+         max_result_bytes = {ceiling}",
+        ceiling - 1
+    );
+    let config: LocalConfig = toml::from_str(&below).unwrap();
+    // The control: the refused budget is internally consistent, so only the
+    // ceiling comparison can account for the refusal.
+    config.payloads.validate().unwrap();
+    assert!(config.validate().is_err());
+}
+
 fn publish(root: &Path, version: &str, cooldown: &str) -> PathBuf {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let workspace = manifest.parent().unwrap().parent().unwrap();

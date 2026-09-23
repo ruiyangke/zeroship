@@ -22,6 +22,17 @@ use zeroship_core::{
 };
 use zeroship_workflow_client::{Error, Options, WorkerCoordinator};
 
+/// The default exchange bounds derive from the platform ceilings for the
+/// quantities this transport carries, so a host taking them can carry anything
+/// admission admits without a literal repeated on either side.
+#[test]
+fn default_exchange_bounds_derive_from_the_platform_ceilings() {
+    use zeroship_core::workflow_policy::{MAX_INPUT_BYTES_CEILING, MAX_JOURNAL_BYTES_CEILING};
+    let options = Options::default();
+    assert_eq!(options.max_request_bytes, MAX_INPUT_BYTES_CEILING);
+    assert_eq!(options.max_response_bytes, MAX_JOURNAL_BYTES_CEILING);
+}
+
 fn worker_auth() -> Arc<ServiceAuth> {
     let issuer = ServiceIssuer::parse(&format!(
         "spiffe://zeroship.ai/svc/worker/{}",

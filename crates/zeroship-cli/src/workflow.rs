@@ -190,8 +190,10 @@ impl LocalConfig {
         {
             return Err("invalid local workflow limits".into());
         }
+        // `[payloads]` is a configured host budget, so this host refuses at
+        // startup one that cannot carry what admission may grant a policy.
         self.payloads
-            .validate()
+            .validate_configured()
             .map_err(|error| error.to_string())?;
         Ok(self)
     }
