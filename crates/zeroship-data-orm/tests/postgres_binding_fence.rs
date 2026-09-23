@@ -461,3 +461,152 @@ async fn one_app_holds_a_transaction_on_each_of_its_two_databases() {
     drop(fence);
     drain().await;
 }
+
+/// A change on one of an app's two databases reaches that database's
+/// subscriber and NOT the other's.
+///
+/// **This is the CDC routing key, measured as behaviour.** Both databases
+/// declare a collection of the same name (`orders`, per [`orders_schema`]) and
+/// both bindings carry the same tenant, so the app id and the collection are
+/// identical on the two subscriptions: the DATABASE is the only thing that can
+/// tell them apart. A broker keyed on `(app_id, collection)` alone puts both
+/// subscriptions in one bucket and delivers every change to both - and the
+/// design names this the one re-key whose omission is silent rather than loud,
+/// because an extra event is indistinguishable from a legitimate one at the
+/// subscriber.
+///
+/// **The absence is green for free unless the scenario really arose**, so
+/// nothing here is assumed:
+///
+/// - both bindings' app ids are compared TO EACH OTHER, not each found
+///   non-empty, and their database ids are compared to each other too;
+/// - both really reach their own database, proven by a read through the ORM
+///   under each binding, which is what "live binding" means on a cluster the
+///   reconciler converged - a binding whose grant is missing fails at session
+///   setup instead;
+/// - both really declare `orders`, proven by the read each one performs and by
+///   comparing the two subscriptions' collection names to each other;
+/// - the POSITIVE delivery is asserted in BOTH directions, so an arm where
+///   nothing was ever published cannot pass.
+#[compio::test]
+async fn one_app_s_two_databases_do_not_cross_deliver_a_shared_collection_name() {
+    use zeroship_data_orm::cdc::broker::{self, SubscriptionMessage};
+
+    let postgres = postgres_fixture::Postgres::start();
+    let fence = Fence::build(postgres.url()).await;
+
+    let to_mine = Database::connect(
+        fence.mine(),
+        zeroship_data_orm::ConnectOptions::new(&fence.url, ProjectKeySource::unavailable()),
+        orders_schema(),
+    )
+    .await
+    .expect("open the first database");
+    let to_theirs = Database::connect(
+        fence.theirs(),
+        zeroship_data_orm::ConnectOptions::new(&fence.url, ProjectKeySource::unavailable()),
+        orders_schema(),
+    )
+    .await
+    .expect("open the second database");
+
+    // PRECONDITION 1 - one tenant. Compared to each other; a pair of
+    // non-empty app ids would say nothing.
+    assert_eq!(
+        to_mine.binding().app_id(),
+        to_theirs.binding().app_id(),
+        "the arm is about ONE app reaching two databases"
+    );
+    // PRECONDITION 2 - two databases, and two physical schemas derived from
+    // them. Equal ids would make the whole arm vacuous.
+    assert_ne!(
+        to_mine.binding().database(),
+        to_theirs.binding().database(),
+        "the two bindings must address DIFFERENT databases"
+    );
+    assert_ne!(
+        to_mine.binding().schema().as_str(),
+        to_theirs.binding().schema().as_str(),
+        "two databases derive two physical schemas"
+    );
+
+    // PRECONDITION 3 - the app holds a LIVE binding to each, and each database
+    // really declares `orders`. A read through the ORM proves both at once: the
+    // session narrows with the binding role the reconciler granted, and the
+    // statement is qualified with that binding's own schema. The two seeded
+    // totals differ, so each read also proves it reached ITS OWN database.
+    assert_eq!(
+        read_total(&fence.url, fence.mine())
+            .await
+            .expect("the first binding is live and its database declares orders"),
+        42
+    );
+    assert_eq!(
+        read_total(&fence.url, fence.theirs())
+            .await
+            .expect("the second binding is live and its database declares orders"),
+        99
+    );
+
+    let my_route = to_mine.binding().route();
+    let their_route = to_theirs.binding().route();
+    let mine = broker::subscribe(&my_route, "orders");
+    let theirs = broker::subscribe(&their_route, "orders");
+    // PRECONDITION 4 - the two subscriptions name the SAME collection. Without
+    // this the databases would be separated by the collection rather than by
+    // the routing key, and the arm would measure nothing.
+    assert_eq!(
+        mine.collection(),
+        theirs.collection(),
+        "both databases declare a collection of the same name"
+    );
+
+    // A write on the FIRST database.
+    to_mine
+        .collection("orders")
+        .expect("the first database declares orders")
+        .insert(value!({ "id": 2, "total": 7 }))
+        .await
+        .expect("insert into the first database");
+
+    match mine.pop() {
+        Some(SubscriptionMessage::Change(event)) => {
+            assert_eq!(event.collection, "orders");
+            assert_eq!(event.route, my_route);
+            assert_eq!(event.pk.as_deref(), Some("2"));
+        }
+        other => panic!("the writing database's subscriber must receive its change; got {other:?}"),
+    }
+    assert!(
+        theirs.pop().is_none(),
+        "a change on the first database must NOT reach the second database's subscription"
+    );
+
+    // The mirror, so neither direction can be right by accident.
+    to_theirs
+        .collection("orders")
+        .expect("the second database declares orders")
+        .insert(value!({ "id": 3, "total": 11 }))
+        .await
+        .expect("insert into the second database");
+
+    match theirs.pop() {
+        Some(SubscriptionMessage::Change(event)) => {
+            assert_eq!(event.collection, "orders");
+            assert_eq!(event.route, their_route);
+            assert_eq!(event.pk.as_deref(), Some("3"));
+        }
+        other => panic!("the writing database's subscriber must receive its change; got {other:?}"),
+    }
+    assert!(
+        mine.pop().is_none(),
+        "a change on the second database must NOT reach the first database's subscription"
+    );
+
+    mine.close();
+    theirs.close();
+    drop(to_mine);
+    drop(to_theirs);
+    drop(fence);
+    drain().await;
+}

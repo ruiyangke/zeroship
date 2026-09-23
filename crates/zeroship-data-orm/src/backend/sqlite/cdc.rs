@@ -21,6 +21,7 @@ use rusqlite::Connection;
 use zeroship_data_orm::cdc::{ChangeEvent, ChangeOp};
 
 use crate::backend::sqlite::session::SqliteSession;
+use crate::binding::DbRoute;
 use crate::cdc::{ChangeSink, DeliveryDisposition};
 use zeroship_data_orm::error::DbError;
 
@@ -60,15 +61,15 @@ pub(crate) struct PendingEvent {
     /// binding addresses, which on this tier is one file per DATABASE.
     ///
     /// It is the schema-qualifier for the column-name PRAGMA, and it is not
-    /// the tenant: the broker routes on the app id, and one database may be
-    /// bound by several apps.
+    /// the routing key: the broker routes on the tenant AND the database, and
+    /// one database may be bound by several apps.
     pub(crate) db_name: String,
-    /// The tenant this event is published under.
+    /// The route this event is published under: the tenant and the database.
     ///
     /// Filled at the commit boundary by expanding one physical change into one
-    /// event per app bound to that alias, which is the dev tier's form of the
+    /// event per route bound to that alias, which is the dev tier's form of the
     /// fan-out the relay does from a datastore.
-    pub(crate) app_id: String,
+    pub(crate) route: DbRoute,
     pub(crate) table: String,
     /// Positional values for the new tuple (INSERT / UPDATE). `None`
     /// for DELETE.
@@ -231,8 +232,8 @@ fn preupdate_callback(
             op: ChangeOp::Insert,
             db_name: db_name.to_string(),
             // The commit boundary fills this by expanding the change into one
-            // event per app bound to this alias; the hook knows no tenant.
-            app_id: String::new(),
+            // event per route bound to this alias; the hook knows no tenant.
+            route: DbRoute::platform(""),
             table: table.to_string(),
             new_values: Some(materialise_new(new_acc)),
             old_values: None,
@@ -241,8 +242,8 @@ fn preupdate_callback(
             op: ChangeOp::Delete,
             db_name: db_name.to_string(),
             // The commit boundary fills this by expanding the change into one
-            // event per app bound to this alias; the hook knows no tenant.
-            app_id: String::new(),
+            // event per route bound to this alias; the hook knows no tenant.
+            route: DbRoute::platform(""),
             table: table.to_string(),
             new_values: None,
             old_values: Some(materialise_old(old_acc)),
@@ -254,8 +255,8 @@ fn preupdate_callback(
             op: ChangeOp::Update,
             db_name: db_name.to_string(),
             // The commit boundary fills this by expanding the change into one
-            // event per app bound to this alias; the hook knows no tenant.
-            app_id: String::new(),
+            // event per route bound to this alias; the hook knows no tenant.
+            route: DbRoute::platform(""),
             table: table.to_string(),
             new_values: Some(materialise_new(new_value_accessor)),
             old_values: Some(materialise_old(old_value_accessor)),
@@ -322,31 +323,32 @@ fn commit_callback(
     // Sample the delivery disposition HERE — this is the commit boundary, and
     // sampling it here is what makes a suppression guard cover the commits made
     // in its scope rather than the packets the publisher has yet to drain (see
-    // the module rustdoc's "Delivery-window semantics"). Memoised by app id:
-    // the writer is single-threaded and a commit is one app in practice, so
+    // the module rustdoc's "Delivery-window semantics"). Memoised by route:
+    // the writer is single-threaded and a commit is one route in practice, so
     // this is one `disposition` call per commit, not per row.
-    let mut sampled: HashMap<String, DeliveryDisposition> = HashMap::new();
+    let mut sampled: HashMap<DbRoute, DeliveryDisposition> = HashMap::new();
     let events: Vec<DispositionedEvent> = events
         .into_iter()
         .flat_map(|event| {
-            // One physical change becomes one event per app bound to that
+            // One physical change becomes one event per route bound to that
             // alias. A database with no recorded binding publishes nothing:
-            // the broker routes on the app id, and stamping the alias as a
-            // tenant would deliver to a subscription nobody holds.
-            super::tenants_for_alias(&event.db_name)
+            // the broker routes on the tenant AND the database, and stamping
+            // the alias as a route would deliver to a subscription nobody
+            // holds.
+            super::routes_for_alias(&event.db_name)
                 .into_iter()
-                .map(|app_id| {
-                    let disposition = match sampled.get(&app_id) {
+                .map(|route| {
+                    let disposition = match sampled.get(&route) {
                         Some(d) => *d,
                         None => {
-                            let d = packet_tx.sink.disposition(&app_id);
-                            sampled.insert(app_id.clone(), d);
+                            let d = packet_tx.sink.disposition(&route);
+                            sampled.insert(route.clone(), d);
                             d
                         }
                     };
                     DispositionedEvent {
                         event: PendingEvent {
-                            app_id,
+                            route,
                             ..event.clone()
                         },
                         disposition,
@@ -605,7 +607,7 @@ async fn publisher_loop(
             });
 
             let event = ChangeEvent {
-                app_id: pending.app_id,
+                route: pending.route,
                 collection: pending.table,
                 op: pending.op,
                 pk,
@@ -725,13 +727,27 @@ mod tests {
     }
 
     impl ChangeSink for GuardSink {
-        fn disposition(&self, _app_id: &str) -> DeliveryDisposition {
+        fn disposition(&self, _route: &DbRoute) -> DeliveryDisposition {
             *self.disposition.lock().expect("GuardSink mutex")
         }
 
         fn publish(&self, _event: &ChangeEvent) {
             self.published.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    /// The ONE route the window fixture records against its alias.
+    ///
+    /// **Process-wide and minted once**, because `ALIAS_ROUTES` is a set that
+    /// accumulates: a route minted per call would leave the alias carrying one
+    /// more route on each arm, the commit boundary would fan one physical
+    /// change out to all of them, and the delivery counts below would grow with
+    /// the number of arms that ran before them.
+    fn window_route() -> &'static DbRoute {
+        static ROUTE: std::sync::OnceLock<DbRoute> = std::sync::OnceLock::new();
+        ROUTE.get_or_init(|| {
+            DbRoute::new("app_window_tenant", Some(zeroship_core::DatabaseId::mint()))
+        })
     }
 
     /// Drive one commit through the real hooks with `at_commit` in force, then
@@ -749,10 +765,10 @@ mod tests {
         // The preupdate hook drops writes to `main` (that is the control
         // session's own file), so the fixture writes through an ATTACHed alias
         // exactly as a binding does. The commit boundary publishes one event
-        // per app recorded against that alias, so the fixture records one.
+        // per ROUTE recorded against that alias, so the fixture records one.
         let app_path = dir.path().join("zs-app_window.sqlite");
         let app_path = app_path.to_string_lossy().into_owned();
-        super::super::record_alias_tenant("app_window", "app_window_tenant");
+        super::super::record_alias_route("app_window", window_route().clone());
 
         let (tx, rx) = flume::unbounded::<CommitPacket>();
         let sink = Arc::new(GuardSink::new(at_commit));

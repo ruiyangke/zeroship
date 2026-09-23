@@ -100,7 +100,7 @@ async fn concurrent_upsert(identity: IdentityMode, masked: bool, nested: bool) {
         .await
         .unwrap());
     assert_eq!(control["secret"], value!("control plaintext"));
-    let subscription = crate::cdc::broker::subscribe(db.binding.app_id(), "records");
+    let subscription = crate::cdc::broker::subscribe(&db.binding.route(), "records");
 
     let (inserted_tx, inserted_rx) = futures::channel::oneshot::channel();
     let (commit_tx, commit_rx) = futures::channel::oneshot::channel();
@@ -218,7 +218,7 @@ async fn cancelling_a_waiting_protected_upsert_rolls_back_its_internal_frame() {
         Schema::new([("records".into(), CollectionSchema::new(fields))]),
     )
     .unwrap();
-    let subscription = crate::cdc::broker::subscribe(db.binding.app_id(), "records");
+    let subscription = crate::cdc::broker::subscribe(&db.binding.route(), "records");
     let (upsert_ready_tx, upsert_ready_rx) = futures::channel::oneshot::channel();
     let (observer_ready_tx, observer_ready_rx) = futures::channel::oneshot::channel();
     let (commit_tx, commit_rx) = futures::channel::oneshot::channel();

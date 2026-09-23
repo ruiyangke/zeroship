@@ -35,6 +35,7 @@ use zeroship_runtime_macros::v8_class;
 use zeroship_runtime_macros::{v8_async_method, v8_constructor, v8_method};
 
 use crate::broker::{self, Subscription as BrokerSubscription, SubscriptionMessage};
+use zeroship_data_orm::binding::DbRoute;
 
 // ---------------------------------------------------------------------------
 // CDC readiness - the adapter half
@@ -44,9 +45,12 @@ use crate::broker::{self, Subscription as BrokerSubscription, SubscriptionMessag
 ///
 /// The ORM owns process-wide readiness and teardown. The adapter supplies its
 /// backend and the worker's authenticated relay configuration.
-async fn ensure_cdc_ready(app_id: &str) -> Result<(), zeroship_data_orm::error::DbError> {
+///
+/// Keyed on the ROUTE: readiness is per `(app, database)` because one relay
+/// connection carries one database's stream.
+async fn ensure_cdc_ready(route: &DbRoute) -> Result<(), zeroship_data_orm::error::DbError> {
     let backend = crate::tx_scope::ensure_backend().await?;
-    zeroship_data_orm::cdc::lifecycle::ensure_ready(app_id, backend, crate::tx_scope::cdc_relay())
+    zeroship_data_orm::cdc::lifecycle::ensure_ready(route, backend, crate::tx_scope::cdc_relay())
         .await
 }
 
@@ -69,9 +73,9 @@ pub struct Subscription {
     /// macro stores the Box behind a `*const Self` recovered as `&Self`).
     inner: RefCell<Option<BrokerSubscription>>,
     /// Process-wide CDC claim paired one-to-one with `inner`. Dropping the
-    /// last claim shuts down the ORM relay client for this app.
+    /// last claim shuts down the ORM relay client for this route.
     cdc_lease: RefCell<Option<zeroship_data_orm::cdc::lifecycle::CdcLease>>,
-    app_id: String,
+    route: DbRoute,
 }
 
 impl Drop for Subscription {
@@ -116,7 +120,7 @@ impl Subscription {
                 None::<String>,
             ));
         }
-        ensure_cdc_ready(&self.app_id)
+        ensure_cdc_ready(&self.route)
             .await
             .map_err(crate::op_error::ToOpError::to_op_error)
     }
@@ -144,7 +148,7 @@ impl Subscription {
 
         // Direct native callers receive the same fail-loud contract as the
         // TypeScript wrapper even if they skip the explicit ready() call.
-        ensure_cdc_ready(&self.app_id)
+        ensure_cdc_ready(&self.route)
             .await
             .map_err(crate::op_error::ToOpError::to_op_error)?;
 
@@ -197,8 +201,8 @@ impl Subscription {
 static FAIL_MINT_ALLOC: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// Mint a `Subscription` JS wrapper for the given `(app_id,
-/// collection)` pair.
+/// Mint a `Subscription` JS wrapper for the given `(route, collection)` pair,
+/// where the route is the tenant AND the database the binding addresses.
 ///
 /// Allocates the JS object, looks up the class template and prototype,
 /// and only THEN subscribes on the process-wide broker, so a `?`-
@@ -222,7 +226,7 @@ static FAIL_MINT_ALLOC: std::sync::atomic::AtomicBool =
 /// `crates/zeroship-runtime/src/rpc/ctx_holder.rs`.
 pub fn mint_subscription<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    app_id: &str,
+    route: &DbRoute,
     collection: &str,
 ) -> Result<v8::Local<'s, v8::Object>, OpError> {
     // Test-only failure injection: stands in for the first fallible V8
@@ -269,7 +273,7 @@ pub fn mint_subscription<'s>(
     // `Subscription::install`), and `with_guaranteed_finalizer` is
     // documented as infallible. So no `?` can run between here and the
     // wrapper being live.
-    let broker_sub = match broker::try_subscribe(app_id, collection) {
+    let broker_sub = match broker::try_subscribe(route, collection) {
         Ok(subscription) => subscription,
         Err(error) => return Err(error.to_op_error()),
     };
@@ -292,12 +296,12 @@ pub fn mint_subscription<'s>(
         broker_sub.set_read_set(entries);
     }
 
-    let cdc_lease = zeroship_data_orm::cdc::lifecycle::acquire(app_id);
+    let cdc_lease = zeroship_data_orm::cdc::lifecycle::acquire(route);
 
     let state = Subscription {
         inner: RefCell::new(Some(broker_sub)),
         cdc_lease: RefCell::new(Some(cdc_lease)),
-        app_id: app_id.to_string(),
+        route: route.clone(),
     };
     let boxed: Box<Subscription> = Box::new(state);
     let raw = Box::into_raw(boxed);
@@ -359,6 +363,7 @@ mod tests {
         // the armed call subscribes first and the count assertion fails.
         let handle = std::thread::spawn(|| {
             const APP_ID: &str = "test_app_alloc_fail";
+            let route = crate::tests::fixtures::harness_route(APP_ID);
             assert_eq!(broker::app_subscription_count(APP_ID), 0);
             zeroship_runtime::init_v8();
             let mut isolate = v8::Isolate::new(v8::CreateParams::default());
@@ -368,7 +373,7 @@ mod tests {
             {
                 v8::scope!(let inner, scope);
                 super::FAIL_MINT_ALLOC.store(true, std::sync::atomic::Ordering::SeqCst);
-                let result = super::mint_subscription(inner, APP_ID, "messages");
+                let result = super::mint_subscription(inner, &route, "messages");
                 super::FAIL_MINT_ALLOC.store(false, std::sync::atomic::Ordering::SeqCst);
                 assert!(
                     result.is_err(),
@@ -392,6 +397,7 @@ mod tests {
         // altogether). Run in a fresh thread so we don't race with
         // other broker users on this test runner thread.
         let handle = std::thread::spawn(|| {
+            let route = crate::tests::fixtures::harness_route("test_app_unit");
             assert_eq!(broker::app_subscription_count("test_app_unit"), 0);
             zeroship_runtime::init_v8();
             let mut isolate = v8::Isolate::new(v8::CreateParams::default());
@@ -400,7 +406,7 @@ mod tests {
             let scope = &mut v8::ContextScope::new(handle_scope, context);
             {
                 v8::scope!(let inner, scope);
-                let _obj = super::mint_subscription(inner, "test_app_unit", "messages")
+                let _obj = super::mint_subscription(inner, &route, "messages")
                     .expect("mint_subscription should succeed");
                 assert_eq!(
                     broker::app_subscription_count("test_app_unit"),

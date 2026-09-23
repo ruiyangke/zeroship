@@ -182,9 +182,9 @@ async fn a_root_handle_refuses_a_top_level_transaction_inside_a_callback() {
 async fn an_independent_handle_commits_while_the_original_holds_a_row_lock() {
     let owner = postgres_fixture().await;
     seed(&owner, &["held", "free"]).await;
-    let app = owner.database.binding.app_id().to_owned();
+    let route = owner.database.binding.route();
     crate::cdc::broker::drain_current_thread_subscriptions();
-    let sub = crate::cdc::broker::subscribe(&app, "lane_rows");
+    let sub = crate::cdc::broker::subscribe(&route, "lane_rows");
 
     let fork = owner
         .database

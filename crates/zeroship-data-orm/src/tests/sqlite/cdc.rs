@@ -43,9 +43,12 @@ fn drain(sub: &Subscription) -> Vec<SubscriptionMessage> {
     out
 }
 
-/// Subscribe to this fixture's `(app_id, collection)` on the process broker.
+/// Subscribe to this fixture's `(route, collection)` on the process broker.
+///
+/// The route is the harness binding's own, so a subscription and the write
+/// that should reach it cannot disagree about which database they mean.
 fn subscribe_local(app_id: &str, collection: &str) -> Subscription {
-    subscribe(app_id, collection)
+    subscribe(&crate::tests::fixtures::harness_route(app_id), collection)
 }
 
 #[test]
@@ -99,7 +102,10 @@ fn insert_publishes_via_preupdate_hook() {
             match &msgs[0] {
                 SubscriptionMessage::Change(ev) => {
                     assert_eq!(ev.op, ChangeOp::Insert);
-                    assert_eq!(ev.app_id, "cdc_insert");
+                    assert_eq!(
+                        ev.route,
+                        crate::tests::fixtures::harness_route("cdc_insert")
+                    );
                     assert_eq!(ev.collection, "items");
                     assert!(
                         !ev.new_tuple.is_empty(),
@@ -557,7 +563,7 @@ fn subscription_fanout_under_load() {
                 .await
                 .expect("CREATE TABLE items");
 
-            // Subscribe 10 times to the same (app, collection). Each
+            // Subscribe 10 times to the same (route, collection). Each
             // returned `Subscription` is a fresh routing-table entry — the
             // broker fans the same Rc<ChangeEvent> out to each.
             let subs: Vec<Subscription> = (0..10)
@@ -859,8 +865,9 @@ fn backfill_run_pauses_broker_and_emits_one_resync() {
             let sub = subscribe_local("app_backfill", "items");
 
             // Engage the backfill pause before issuing writes.
-            let guard =
-                zeroship_data_orm::cdc::broker::BrokerPauseGuard::new("app_backfill".to_string());
+            let guard = zeroship_data_orm::cdc::broker::BrokerPauseGuard::new(
+                crate::tests::fixtures::harness_route("app_backfill"),
+            );
 
             // Queue writes inside the suppression window.
             for i in 0..100 {
@@ -970,7 +977,10 @@ fn schema_pending_decoder_drops_then_resyncs() {
 
             // New subscriptions receive the typed schema-pending refusal.
             let attempt =
-                zeroship_data_orm::cdc::broker::try_subscribe("app_pending", "other_collection");
+                zeroship_data_orm::cdc::broker::try_subscribe(
+                    &crate::tests::fixtures::harness_route("app_pending"),
+                    "other_collection",
+                );
             match &attempt {
                 Err(DbError::Coded { code, .. }) => {
                     assert_eq!(
@@ -1082,8 +1092,9 @@ fn backfill_pauses_broker_for_a_type_erased_backend_and_resyncs() {
             let sub = subscribe_local("app_orch", "items");
 
             // The ORM owns pause state independently of driver dispatch.
-            let guard =
-                zeroship_data_orm::cdc::broker::BrokerPauseGuard::new("app_orch".to_string());
+            let guard = zeroship_data_orm::cdc::broker::BrokerPauseGuard::new(
+                crate::tests::fixtures::harness_route("app_orch"),
+            );
 
             // Borrow the concrete backend from its type-erased owner.
             let backend_ref = handle

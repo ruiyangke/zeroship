@@ -1,4 +1,10 @@
-//! Route committed changes to process-wide subscriptions by app and collection.
+//! Route committed changes to process-wide subscriptions by route and
+//! collection, where a route is the TENANT and the DATABASE together.
+//!
+//! **The database half of the key is what keeps one app's two databases
+//! apart.** Two databases may each declare `users`, and a key carrying only the
+//! app would deliver one database's change to a subscription held on the other
+//! with nothing raising.
 //!
 //! SQLite capture and PostgreSQL relay notifications feed the same broker.
 //! Read sets narrow events when row data is available; collection invalidations
@@ -15,6 +21,7 @@ use std::task::Waker;
 use serde_json::Value;
 
 use super::{ChangeEvent, ChangeOp, ChangeSink, DeliveryDisposition};
+use crate::binding::DbRoute;
 use crate::cdc::read_set::ReadSetEntry;
 use crate::error::DbError;
 
@@ -23,10 +30,10 @@ use crate::error::DbError;
 pub(crate) struct BrokerChangeSink;
 
 impl ChangeSink for BrokerChangeSink {
-    fn disposition(&self, app_id: &str) -> DeliveryDisposition {
-        if is_app_suppressed(app_id) {
+    fn disposition(&self, route: &DbRoute) -> DeliveryDisposition {
+        if is_route_suppressed(route) {
             DeliveryDisposition::Suppressed
-        } else if is_schema_pending(app_id) {
+        } else if is_schema_pending(route.app_id()) {
             DeliveryDisposition::SchemaPending
         } else {
             DeliveryDisposition::Deliver
@@ -71,7 +78,7 @@ impl std::fmt::Debug for Subscription {
         let inner = self.lock_inner();
         f.debug_struct("Subscription")
             .field("id", &inner.id)
-            .field("app_id", &inner.app_id)
+            .field("route", &inner.route)
             .field("collection", &inner.collection)
             .field("queue_len", &inner.queue.len())
             .field("closed", &inner.closed)
@@ -80,10 +87,10 @@ impl std::fmt::Debug for Subscription {
 }
 
 struct SubscriptionInner {
-    /// Monotonic id within the broker's per-(app, collection) bucket.
+    /// Monotonic id within the broker's per-(route, collection) bucket.
     /// Used for fast removal from the routing table.
     id: u64,
-    app_id: String,
+    route: DbRoute,
     collection: String,
     /// Pending events not yet drained by the iterator.
     queue: std::collections::VecDeque<SubscriptionMessage>,
@@ -103,7 +110,7 @@ struct SubscriptionInner {
     /// Read-set narrowing.
     ///
     /// `None` → coarse-grained: every change on this subscription's
-    /// `(app_id, collection)` is delivered. This is what the
+    /// `(route, collection)` is delivered. This is what the
     /// subscribe/subscribePoll callers that haven't been routed
     /// through useQuery still get.
     ///
@@ -138,10 +145,10 @@ impl Subscription {
     /// register it with the broker via [`Broker::subscribe`] — this
     /// constructor doesn't take the broker because tests construct
     /// subscriptions standalone.
-    pub fn new(id: u64, app_id: String, collection: String, max_queue: usize) -> Self {
+    pub fn new(id: u64, route: DbRoute, collection: String, max_queue: usize) -> Self {
         Self(Arc::new(Mutex::new(SubscriptionInner {
             id,
-            app_id,
+            route,
             collection,
             queue: std::collections::VecDeque::new(),
             max_queue,
@@ -217,8 +224,9 @@ impl Subscription {
     pub fn id(&self) -> u64 {
         self.lock_inner().id
     }
-    pub fn app_id(&self) -> String {
-        self.lock_inner().app_id.clone()
+    /// The tenant AND database half of this subscription's routing key.
+    pub fn route(&self) -> DbRoute {
+        self.lock_inner().route.clone()
     }
     pub fn collection(&self) -> String {
         self.lock_inner().collection.clone()
@@ -315,15 +323,22 @@ impl Subscription {
 
 /// The routing table.
 ///
-/// Indexed as a two-level map: `app_id → collection → Vec<Subscription>`.
-/// Borrowed lookups avoid constructing an owned tuple on the publish path.
+/// Indexed as a two-level map: `route → collection → Vec<Subscription>`, where
+/// the route is [`DbRoute`] - the tenant and the database together. Borrowed
+/// lookups avoid constructing an owned tuple on the publish path.
+///
+/// **The route, not the app.** One app may hold a binding to two databases and
+/// both may declare a collection of the same name. Keyed on the app alone the
+/// two buckets would be one, and a change committed on either would be
+/// delivered to subscribers of both - silently, because a subscriber that
+/// receives an extra event cannot tell it came from elsewhere.
 pub struct Broker {
     /// Counter for [`Subscription::id`].
     next_id: u64,
-    /// Subscribers indexed by app, then collection. Insertion-order
+    /// Subscribers indexed by route, then collection. Insertion-order
     /// `Vec` so publish iterates in subscribe order — keeps test
     /// output deterministic.
-    by_key: HashMap<String, HashMap<String, Vec<Subscription>>>,
+    by_key: HashMap<DbRoute, HashMap<String, Vec<Subscription>>>,
 }
 
 impl Broker {
@@ -334,7 +349,7 @@ impl Broker {
         }
     }
 
-    /// Register a fresh subscription on `(app_id, collection)`.
+    /// Register a fresh subscription on `(route, collection)`.
     ///
     /// Returns the subscription handle. Drop the handle (or call
     /// [`Subscription::close`]) to unsubscribe; the broker GC's its
@@ -344,20 +359,20 @@ impl Broker {
     /// tests that construct a broker in isolation. Creator-facing mint sites
     /// must use [`Self::try_subscribe`] so schema-pending and per-app resource
     /// limits reach JavaScript as typed errors.
-    pub fn subscribe(&mut self, app_id: &str, collection: &str) -> Subscription {
+    pub fn subscribe(&mut self, route: &DbRoute, collection: &str) -> Subscription {
         self.next_id += 1;
         let sub = Subscription::new(
             self.next_id,
-            app_id.to_string(),
+            route.clone(),
             collection.to_string(),
             DEFAULT_QUEUE_DEPTH,
         );
         // `entry` requires owned keys; that's fine — subscribe is the
         // cold path (one call per `db.subscribe(...)`), and the inner
         // HashMap is allocated lazily on first subscription for a
-        // given app.
+        // given route.
         self.by_key
-            .entry(app_id.to_string())
+            .entry(route.clone())
             .or_default()
             .entry(collection.to_string())
             .or_default()
@@ -381,9 +396,10 @@ impl Broker {
     /// there because backfill is internally driven.
     pub fn try_subscribe(
         &mut self,
-        app_id: &str,
+        route: &DbRoute,
         collection: &str,
     ) -> Result<Subscription, DbError> {
+        let app_id = route.app_id();
         if is_schema_pending(app_id) {
             return Err(DbError::Coded {
                 code: "schema_pending".to_string(),
@@ -404,18 +420,23 @@ impl Broker {
         // those entries here would let an open/close loop grow the global
         // routing table without bound even though the live count stays below
         // the cap.
-        let mut remove_app = false;
-        let live = self.by_key.get_mut(app_id).map_or(0, |collections| {
+        //
+        // **The cap stays per APP while the key is per ROUTE.** What it bounds
+        // is the isolate's memory and per-event fan-out cost, and an app pays
+        // that across every database it reaches; a per-route cap would let one
+        // app hold the limit once per binding.
+        let mut live = 0usize;
+        self.by_key.retain(|key, collections| {
+            if key.app_id() != app_id {
+                return true;
+            }
             collections.retain(|_, subscriptions| {
                 subscriptions.retain(|subscription| !subscription.is_closed());
                 !subscriptions.is_empty()
             });
-            remove_app = collections.is_empty();
-            collections.values().map(Vec::len).sum()
+            live += collections.values().map(Vec::len).sum::<usize>();
+            !collections.is_empty()
         });
-        if remove_app {
-            self.by_key.remove(app_id);
-        }
         if live >= MAX_SUBSCRIPTIONS_PER_APP {
             return Err(DbError::Coded {
                 code: "subscription_limit".to_string(),
@@ -426,17 +447,17 @@ impl Broker {
                 hint: Some("close unused subscriptions before opening new ones".to_string()),
             });
         }
-        Ok(self.subscribe(app_id, collection))
+        Ok(self.subscribe(route, collection))
     }
 
-    /// Fast probe: does any subscriber exist for `(app_id, collection)`?
+    /// Fast probe: does any subscriber exist for `(route, collection)`?
     ///
-    /// Zero allocations on the lookup path — both arguments are `&str`
-    /// and the two-level `HashMap` uses native `Borrow<str>` lookups.
-    /// Designed for callers on the WAL fan-out path that want to skip
-    /// the more expensive event-shape work when nothing is subscribed.
+    /// Zero allocations on the lookup path — the route is borrowed and the
+    /// collection is a `&str` the inner `HashMap` looks up through
+    /// `Borrow<str>`. Designed for callers on the WAL fan-out path that want
+    /// to skip the more expensive event-shape work when nothing is subscribed.
     ///
-    /// Returns `false` if the app has no subscribers, or the app has
+    /// Returns `false` if the route has no subscribers, or the route has
     /// subscribers on other collections but not this one, or the
     /// `Vec<Subscription>` exists but contains only closed entries.
     /// Closed entries are NOT pruned here — that happens lazily in
@@ -444,8 +465,8 @@ impl Broker {
     /// publish on the same key may still return `true`. This is a
     /// safe over-approximation: callers that act on `true` will fall
     /// through to `publish`, which is the canonical drop point.
-    pub fn has_subscribers(&self, app_id: &str, collection: &str) -> bool {
-        let Some(by_collection) = self.by_key.get(app_id) else {
+    pub fn has_subscribers(&self, route: &DbRoute, collection: &str) -> bool {
+        let Some(by_collection) = self.by_key.get(route) else {
             return false;
         };
         let Some(subs) = by_collection.get(collection) else {
@@ -455,13 +476,14 @@ impl Broker {
     }
 
     /// Publish a change event. All subscribers on the matching
-    /// `(app_id, collection)` whose read-set accepts the event tuple
+    /// `(route, collection)` whose read-set accepts the event tuple
     /// receive it; closed subscribers are pruned in the same pass.
     ///
     /// Filtering happens per-subscriber via
-    /// `Subscription::accepts`. The bucket index by `(app_id,
+    /// `Subscription::accepts`. The bucket index by `(route,
     /// collection)` is still the primary fan-in — subscribers on
-    /// unrelated collections never enter the predicate-eval path. The
+    /// unrelated collections and on the app's other databases never enter the
+    /// predicate-eval path. The
     /// hot inner check is `O(entries_in_read_set)` per event per
     /// matching subscriber and short-circuits on the first match.
     pub fn publish(&mut self, event: &ChangeEvent) {
@@ -473,11 +495,10 @@ impl Broker {
     /// routing entries. The process-wide accessor releases the broker
     /// lock before it pushes messages and wakes tasks.
     fn matching_subscriptions(&mut self, event: &ChangeEvent) -> Vec<Subscription> {
-        // Two-level lookup via `&str` — no `(String, String)`
-        // allocation per call. Borrow-based `HashMap::get_mut` lookup
-        // (`Borrow<str>` impl on the `String` key) keeps the hot path
-        // alloc-free.
-        let Some(by_collection) = self.by_key.get_mut(event.app_id.as_str()) else {
+        // Two-level lookup through borrowed keys — no owned tuple is built per
+        // call. The outer key is the event's own route; the inner one is a
+        // `&str` the `String` key resolves through `Borrow<str>`.
+        let Some(by_collection) = self.by_key.get_mut(&event.route) else {
             return Vec::new();
         };
         let Some(subs) = by_collection.get_mut(event.collection.as_str()) else {
@@ -494,13 +515,13 @@ impl Broker {
         // Drop the bucket if pruning emptied it, so iteration stays
         // bounded. Done after the scan so the `&mut subs` borrow
         // has been released by the time we touch `self.by_key`. If
-        // the per-app map empties out as a result, drop it too — keeps
-        // `has_subscribers` cheap on apps that churn through ephemeral
+        // the per-route map empties out as a result, drop it too — keeps
+        // `has_subscribers` cheap on routes that churn through ephemeral
         // collections.
         if is_empty {
             by_collection.remove(event.collection.as_str());
             if by_collection.is_empty() {
-                self.by_key.remove(event.app_id.as_str());
+                self.by_key.remove(&event.route);
             }
         }
         matching
@@ -521,14 +542,17 @@ impl Broker {
     /// observable, so the drop defers (or, under `--force`, the broker
     /// is drained first).
     ///
+    /// **Summed across every database the app reaches**, because what the gate
+    /// asks is whether the APP is still observable anywhere, and a subscriber
+    /// on any one of its bindings answers yes.
+    ///
     /// The control plane aggregates across worker processes via the
     /// admin endpoint; this is the process-local source.
     pub fn app_subscription_count(&self, app_id: &str) -> usize {
-        let Some(by_collection) = self.by_key.get(app_id) else {
-            return 0;
-        };
-        by_collection
-            .values()
+        self.by_key
+            .iter()
+            .filter(|(route, _)| route.app_id() == app_id)
+            .flat_map(|(_, by_collection)| by_collection.values())
             .map(|v| v.iter().filter(|s| !s.is_closed()).count())
             .sum()
     }
@@ -536,6 +560,8 @@ impl Broker {
     /// Drop subscribers for a given app — used by the per-app slot GC
     /// when the app is deleted. Each affected subscription is sent a
     /// `Closed` message.
+    ///
+    /// The app is deleted, so every route it holds goes with it.
     pub fn drop_app(&mut self, app_id: &str) {
         for subscription in self.take_app_subscriptions(app_id) {
             subscription.close();
@@ -543,8 +569,22 @@ impl Broker {
     }
 
     fn take_app_subscriptions(&mut self, app_id: &str) -> Vec<Subscription> {
+        let mut taken = Vec::new();
+        self.by_key.retain(|route, by_collection| {
+            if route.app_id() != app_id {
+                return true;
+            }
+            for subscriptions in by_collection.values() {
+                taken.extend(subscriptions.iter().cloned());
+            }
+            false
+        });
+        taken
+    }
+
+    fn take_route_subscriptions(&mut self, route: &DbRoute) -> Vec<Subscription> {
         self.by_key
-            .remove(app_id)
+            .remove(route)
             .into_iter()
             .flat_map(|by_collection| by_collection.into_values().flatten())
             .collect()
@@ -588,7 +628,16 @@ impl Broker {
 
     fn app_subscriptions(&self, app_id: &str) -> Vec<Subscription> {
         self.by_key
-            .get(app_id)
+            .iter()
+            .filter(|(route, _)| route.app_id() == app_id)
+            .flat_map(|(_, by_collection)| by_collection.values().flatten())
+            .cloned()
+            .collect()
+    }
+
+    fn route_subscriptions(&self, route: &DbRoute) -> Vec<Subscription> {
+        self.by_key
+            .get(route)
             .into_iter()
             .flat_map(|by_collection| by_collection.values().flatten())
             .cloned()
@@ -596,8 +645,23 @@ impl Broker {
     }
 
     /// Push a resync marker to every active subscription for the app.
+    ///
+    /// App-wide, because its callers are app-wide windows: a deploy's
+    /// schema-pending window and a backfill pause both span whatever databases
+    /// the app reaches. A consumer restart is per stream and uses
+    /// [`Self::resume_route_with_resync`].
     pub fn resume_app_with_resync(&mut self, app_id: &str) {
         for subscription in self.app_subscriptions(app_id) {
+            subscription.push(SubscriptionMessage::Resync);
+        }
+    }
+
+    /// Push a resync marker to every active subscription on one route.
+    ///
+    /// One relay connection carries one `(app, database)` stream, so a
+    /// reconnect invalidates that route's snapshots and no others.
+    pub fn resume_route_with_resync(&mut self, route: &DbRoute) {
+        for subscription in self.route_subscriptions(route) {
             subscription.push(SubscriptionMessage::Resync);
         }
     }
@@ -623,12 +687,12 @@ impl Default for Broker {
 
 impl std::fmt::Debug for Broker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // `buckets` matches the prior single-level meaning: total
-        // `(app, collection)` pairs, NOT the number of distinct apps.
+        // `buckets` is the total `(route, collection)` pairs, NOT the number
+        // of distinct routes.
         let buckets: usize = self.by_key.values().map(|m| m.len()).sum();
         f.debug_struct("Broker")
             .field("next_id", &self.next_id)
-            .field("apps", &self.by_key.len())
+            .field("routes", &self.by_key.len())
             .field("buckets", &buckets)
             .field("subscriptions", &self.subscription_count())
             .finish()
@@ -649,7 +713,7 @@ impl std::fmt::Debug for Broker {
 static BROKER: LazyLock<Mutex<Broker>> = LazyLock::new(|| Mutex::new(Broker::new()));
 
 // ---------------------------------------------------------------------------
-// Per-app emit suppression
+// Per-route emit suppression
 // ---------------------------------------------------------------------------
 //
 // Moved here from `wal_consumer.rs` on 2026-08-31. None of it decodes WAL:
@@ -667,95 +731,101 @@ static BROKER: LazyLock<Mutex<Broker>> = LazyLock::new(|| Mutex::new(Broker::new
 // single module's API rather than a cross-tier dependency.
 
 // ---------------------------------------------------------------------------
-// Per-app emit-suppression
+// Per-route emit-suppression
 // ---------------------------------------------------------------------------
 //
-// When a WAL consumer is active for app A in this process, local-emit
-// for app A must become a no-op — the consumer publishes the same
+// When a relay consumer is active for route R in this process, local-emit
+// for R must become a no-op — the consumer publishes the same
 // event on the cross-worker path and emitting locally too would
-// double-deliver. Other apps on the same thread must continue to use
+// double-deliver. Other routes on the same thread must continue to use
 // local-emit; a coarse thread-wide flag would silence their events as
 // well.
+//
+// **Keyed on the route and not the tenant.** One relay connection consumes one
+// `(app, database)` stream, so a consumer running for one of an app's
+// databases says nothing about who delivers the other's. Suppressing by app
+// would silence local emit for a database that has no consumer at all, and the
+// events would be lost with nothing raising.
 //
 // Counts are process-wide because consumer and mutation tasks can run
 // on different isolate threads.
 
-/// Process-wide suppression counts keyed by app id.
+/// Process-wide suppression counts keyed by route.
 ///
-/// A WAL consumer and mutations for the same app can run on different
+/// A relay consumer and mutations for the same route can run on different
 /// compio threads. Process scope is therefore required for the local
-/// fast path to see that WAL is authoritative. Counts, rather than a
+/// fast path to see that the relay is authoritative. Counts, rather than a
 /// set, prevent one overlapping guard from unsuppressing another.
-static SUPPRESSED_APPS: LazyLock<Mutex<HashMap<String, usize>>> =
+static SUPPRESSED_ROUTES: LazyLock<Mutex<HashMap<DbRoute, usize>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn suppressed_apps() -> std::sync::MutexGuard<'static, HashMap<String, usize>> {
-    SUPPRESSED_APPS
+fn suppressed_routes() -> std::sync::MutexGuard<'static, HashMap<DbRoute, usize>> {
+    SUPPRESSED_ROUTES
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Suppress local-emit for `app_id` in this process. Mutation callbacks
-/// that produce events for this app will become no-ops until
-/// [`unsuppress_app`] is called (typically via the Drop guard returned
+/// Suppress local-emit for `route` in this process. Mutation callbacks
+/// that produce events for this route will become no-ops until
+/// [`unsuppress_route`] is called (typically via the Drop guard returned
 /// by [`SuppressGuard::activate`]).
-pub fn suppress_app(app_id: &str) {
-    *suppressed_apps().entry(app_id.to_string()).or_default() += 1;
+pub fn suppress_route(route: &DbRoute) {
+    *suppressed_routes().entry(route.clone()).or_default() += 1;
 }
 
 /// Release a suppression reference. Delivery remains suppressed while references remain.
-pub fn unsuppress_app(app_id: &str) {
-    let mut apps = suppressed_apps();
-    if let Some(count) = apps.get_mut(app_id) {
+pub fn unsuppress_route(route: &DbRoute) {
+    let mut routes = suppressed_routes();
+    if let Some(count) = routes.get_mut(route) {
         *count -= 1;
         if *count == 0 {
-            apps.remove(app_id);
+            routes.remove(route);
         }
     }
 }
 
-/// Whether local delivery is suppressed for the app anywhere in this process.
-pub fn is_app_suppressed(app_id: &str) -> bool {
-    suppressed_apps().contains_key(app_id)
+/// Whether local delivery is suppressed for the route anywhere in this process.
+pub fn is_route_suppressed(route: &DbRoute) -> bool {
+    suppressed_routes().contains_key(route)
 }
 
 /// Hold a process-wide local-delivery suppression reference until drop.
 #[derive(Debug)]
 pub struct SuppressGuard {
-    app_id: String,
+    route: DbRoute,
 }
 
 impl SuppressGuard {
-    /// Acquire a suppression reference for the app and release it on drop.
-    pub fn activate(app_id: &str) -> Self {
-        suppress_app(app_id);
+    /// Acquire a suppression reference for the route and release it on drop.
+    pub fn activate(route: &DbRoute) -> Self {
+        suppress_route(route);
         Self {
-            app_id: app_id.to_string(),
+            route: route.clone(),
         }
     }
 }
 
 impl Drop for SuppressGuard {
     fn drop(&mut self) {
-        unsuppress_app(&self.app_id);
+        unsuppress_route(&self.route);
     }
 }
 
 /// Emit a local row change unless delivery is suppressed. Missing row images
 /// leave read-set matching coarse; available images can narrow delivery.
 pub fn emit_local(
-    app_id: &str,
+    route: &DbRoute,
     collection: &str,
     op: ChangeOp,
     pk: Option<String>,
     changed_columns: Vec<String>,
     new_tuple: std::collections::HashMap<String, String>,
 ) {
-    if is_app_suppressed(app_id) {
+    if is_route_suppressed(route) {
         return;
     }
     publish(&ChangeEvent {
-        app_id: app_id.to_string(),
+        route: route.clone(),
         collection: collection.to_string(),
         op,
         pk,
@@ -814,26 +884,26 @@ pub fn publish(event: &ChangeEvent) {
 }
 
 /// Convenience accessor - query the process-wide broker for whether
-/// any subscriber is registered on `(app_id, collection)`. See
+/// any subscriber is registered on `(route, collection)`. See
 /// [`Broker::has_subscribers`] for the conservative-true semantics.
 ///
 /// `pub` rather than `pub(crate)` since the 2026-09-03 move out of
 /// `zeroship-data-v8`: both callers are above this crate - `exec`'s
 /// local-emit gate (ENGINE) and `wal_consumer`'s per-relation filter (CDC).
-pub fn has_subscribers(app_id: &str, collection: &str) -> bool {
-    lock_broker().has_subscribers(app_id, collection)
+pub fn has_subscribers(route: &DbRoute, collection: &str) -> bool {
+    lock_broker().has_subscribers(route, collection)
 }
 
 /// Convenience accessor — subscribe without locating the broker
 /// manually.
-pub fn subscribe(app_id: &str, collection: &str) -> Subscription {
-    lock_broker().subscribe(app_id, collection)
+pub fn subscribe(route: &DbRoute, collection: &str) -> Subscription {
+    lock_broker().subscribe(route, collection)
 }
 
 /// Fallible variant of [`subscribe`] — surfaces the schema-pending
 /// rejection branch. See [`Broker::try_subscribe`].
-pub fn try_subscribe(app_id: &str, collection: &str) -> Result<Subscription, DbError> {
-    lock_broker().try_subscribe(app_id, collection)
+pub fn try_subscribe(route: &DbRoute, collection: &str) -> Result<Subscription, DbError> {
+    lock_broker().try_subscribe(route, collection)
 }
 
 /// Count live subscriptions owned by the calling test thread.
@@ -872,9 +942,35 @@ pub(crate) fn resume_app_with_resync(app_id: &str) {
     }
 }
 
+/// Push a resync marker to every live subscription on one route.
+///
+/// The relay client's reconnect path: one connection carries one
+/// `(app, database)` stream, so resyncing the app would tell subscribers on a
+/// database whose stream never broke to throw away a valid snapshot.
+pub(crate) fn resume_route_with_resync(route: &DbRoute) {
+    let subscriptions = lock_broker().route_subscriptions(route);
+    for subscription in subscriptions {
+        subscription.push(SubscriptionMessage::Resync);
+    }
+}
+
 /// Close and remove every subscription for the app across worker threads.
+///
+/// App-wide because its caller is app-wide: the app is being deprovisioned, so
+/// every database it reached goes with it.
 pub fn drop_app(app_id: &str) {
     let subscriptions = lock_broker().take_app_subscriptions(app_id);
+    for subscription in subscriptions {
+        subscription.close();
+    }
+}
+
+/// Close and remove every subscription on one route across worker threads.
+///
+/// The consumer-failure path: one `(app, database)` stream stopped, and only
+/// the subscribers reading THAT stream have a snapshot that is now unsound.
+pub fn drop_route(route: &DbRoute) {
+    let subscriptions = lock_broker().take_route_subscriptions(route);
     for subscription in subscriptions {
         subscription.close();
     }
@@ -954,36 +1050,39 @@ pub fn ws_frame(handle: &str, msg: &SubscriptionMessage) -> String {
     .to_string()
 }
 
-/// Suppress local delivery for an app until the last overlapping pause is released.
+/// Suppress local delivery for one route until the last overlapping pause is
+/// released. A backfill runs against one database, so the pause names the
+/// database it writes and leaves the app's other bindings delivering.
 /// The process-wide reference count coordinates pauses across worker threads.
 /// SQLite stamps suppression at commit, so publisher scheduling cannot move the window.
 /// Dropping a guard requests resynchronization for active subscribers.
 #[must_use = "BrokerPauseGuard releases the pause on Drop — bind it to a name to keep the broker paused for the surrounding scope"]
 #[derive(Debug)]
 pub struct BrokerPauseGuard {
-    app_id: String,
+    route: DbRoute,
 }
 
 impl BrokerPauseGuard {
-    /// Increment the app’s process-wide suppression count; release it on drop.
-    pub fn new(app_id: String) -> Self {
-        self::suppress_app(&app_id);
-        Self { app_id }
+    /// Increment the route’s process-wide suppression count; release it on drop.
+    pub fn new(route: DbRoute) -> Self {
+        self::suppress_route(&route);
+        Self { route }
     }
 }
 
 impl Drop for BrokerPauseGuard {
     fn drop(&mut self) {
         // Release this pause; overlapping guards keep delivery suppressed.
-        self::unsuppress_app(&self.app_id);
-        // 2. Push one `Resync` per active subscription on `app_id`.
+        self::unsuppress_route(&self.route);
+        // 2. Push one `Resync` per active subscription on `route`.
         //    Subscribers refetch + continue catching up. The broker
         //    primitive is idempotent on closed entries (skipped) and
-        //    fast-noop on apps with zero subscribers.
-        self::resume_app_with_resync(&self.app_id);
+        //    fast-noop on routes with zero subscribers.
+        self::resume_route_with_resync(&self.route);
         tracing::trace!(
-            app_id = %self.app_id,
-            "BrokerPauseGuard dropped: unsuppress + resume_app_with_resync emitted"
+            app_id = %self.route.app_id(),
+            database = %self.route.database_text(),
+            "BrokerPauseGuard dropped: unsuppress + resume_route_with_resync emitted"
         );
     }
 }
@@ -1031,9 +1130,25 @@ impl Drop for SchemaPendingGuard {
 mod tests {
     use super::*;
 
+    /// The route an arm's subscribe and its publish have to agree on.
+    ///
+    /// Memoised by the arm's app name so both calls compose the SAME database:
+    /// a freshly minted id per call would make every publish miss its
+    /// subscriber, and the arms would fail for a reason that is not theirs.
+    fn route(app: &str) -> DbRoute {
+        static ROUTES: LazyLock<Mutex<HashMap<String, DbRoute>>> =
+            LazyLock::new(|| Mutex::new(HashMap::new()));
+        ROUTES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(app.to_owned())
+            .or_insert_with(|| DbRoute::new(app, Some(zeroship_core::DatabaseId::mint())))
+            .clone()
+    }
+
     fn ev(app: &str, col: &str, op: ChangeOp, pk: Option<&str>) -> ChangeEvent {
         ChangeEvent {
-            app_id: app.to_string(),
+            route: route(app),
             collection: col.to_string(),
             op,
             pk: pk.map(str::to_string),
@@ -1051,7 +1166,7 @@ mod tests {
         tuple: &[(&str, &str)],
     ) -> ChangeEvent {
         ChangeEvent {
-            app_id: app.to_string(),
+            route: route(app),
             collection: col.to_string(),
             op,
             pk: pk.map(str::to_string),
@@ -1067,7 +1182,7 @@ mod tests {
     #[test]
     fn subscribe_and_publish_delivers_event() {
         let mut b = Broker::new();
-        let s = b.subscribe("a", "messages");
+        let s = b.subscribe(&route("a"), "messages");
         b.publish(&ev("a", "messages", ChangeOp::Insert, Some("1")));
         let msg = s.pop().expect("expected a message");
         let SubscriptionMessage::Change(c) = msg else {
@@ -1086,14 +1201,14 @@ mod tests {
 
         for _ in 0..attempts {
             let subscription = broker
-                .try_subscribe("close-loop-app", "users")
+                .try_subscribe(&route("close-loop-app"), "users")
                 .expect("a closed handle must not consume the live cap");
             subscription.close();
         }
 
         let stored = broker
             .by_key
-            .get("close-loop-app")
+            .get(&route("close-loop-app"))
             .and_then(|collections| collections.get("users"))
             .map_or(0, Vec::len);
         assert_eq!(
@@ -1120,7 +1235,7 @@ mod tests {
         let (published_tx, published_rx) = std::sync::mpsc::channel();
 
         let subscriber = std::thread::spawn(move || {
-            let sub = subscribe(APP, COLLECTION);
+            let sub = subscribe(&route(APP), COLLECTION);
             let wake_flag = Arc::new(WakeFlag(std::sync::atomic::AtomicBool::new(false)));
             sub.register_waker(std::task::Waker::from(Arc::clone(&wake_flag)));
             registered_tx.send(()).expect("signal subscription ready");
@@ -1162,7 +1277,7 @@ mod tests {
     #[test]
     fn other_app_events_isolated() {
         let mut b = Broker::new();
-        let s = b.subscribe("a", "messages");
+        let s = b.subscribe(&route("a"), "messages");
         b.publish(&ev("b", "messages", ChangeOp::Insert, Some("1")));
         assert!(s.pop().is_none());
     }
@@ -1170,7 +1285,7 @@ mod tests {
     #[test]
     fn other_collection_events_isolated() {
         let mut b = Broker::new();
-        let s = b.subscribe("a", "messages");
+        let s = b.subscribe(&route("a"), "messages");
         b.publish(&ev("a", "channels", ChangeOp::Insert, Some("1")));
         assert!(s.pop().is_none());
     }
@@ -1178,8 +1293,8 @@ mod tests {
     #[test]
     fn multiple_subscribers_receive_event() {
         let mut b = Broker::new();
-        let s1 = b.subscribe("a", "messages");
-        let s2 = b.subscribe("a", "messages");
+        let s1 = b.subscribe(&route("a"), "messages");
+        let s2 = b.subscribe(&route("a"), "messages");
         b.publish(&ev("a", "messages", ChangeOp::Update, Some("7")));
         assert!(matches!(s1.pop(), Some(SubscriptionMessage::Change(_))));
         assert!(matches!(s2.pop(), Some(SubscriptionMessage::Change(_))));
@@ -1188,7 +1303,7 @@ mod tests {
     #[test]
     fn delivers_insert_update_delete() {
         let mut b = Broker::new();
-        let s = b.subscribe("a", "messages");
+        let s = b.subscribe(&route("a"), "messages");
         b.publish(&ev("a", "messages", ChangeOp::Insert, Some("1")));
         b.publish(&ev("a", "messages", ChangeOp::Update, Some("1")));
         b.publish(&ev("a", "messages", ChangeOp::Delete, Some("1")));
@@ -1207,7 +1322,7 @@ mod tests {
     #[test]
     fn close_terminates_iterator() {
         let mut b = Broker::new();
-        let s = b.subscribe("a", "messages");
+        let s = b.subscribe(&route("a"), "messages");
         b.publish(&ev("a", "messages", ChangeOp::Insert, Some("1")));
         s.close();
         // Pending change is preserved until drained.
@@ -1220,7 +1335,7 @@ mod tests {
     #[test]
     fn dropped_subscription_pruned_on_next_publish() {
         let mut b = Broker::new();
-        let s = b.subscribe("a", "messages");
+        let s = b.subscribe(&route("a"), "messages");
         assert_eq!(b.subscription_count(), 1);
         s.close();
         b.publish(&ev("a", "messages", ChangeOp::Insert, Some("1")));
@@ -1230,7 +1345,7 @@ mod tests {
     #[test]
     fn overflow_collapses_to_resync() {
         // Tiny queue so we can overflow it in the test.
-        let s = Subscription::new(1, "a".into(), "m".into(), 2);
+        let s = Subscription::new(1, route("a"), "m".into(), 2);
         s.push(SubscriptionMessage::Change(Arc::new(ev(
             "a",
             "m",
@@ -1257,7 +1372,7 @@ mod tests {
     #[test]
     fn message_to_json_change_shape() {
         let m = SubscriptionMessage::Change(Arc::new(ChangeEvent {
-            app_id: "a".into(),
+            route: route("a"),
             collection: "messages".into(),
             op: ChangeOp::Insert,
             pk: Some("7".to_string()),
@@ -1294,12 +1409,12 @@ mod tests {
     #[test]
     fn value_free_invalidations_reach_filtered_subscriptions_in_their_collection() {
         let mut broker = Broker::new();
-        let matching = broker.subscribe("app", "orders");
+        let matching = broker.subscribe(&route("app"), "orders");
         matching.set_read_set(vec![rs_entry(
             "orders",
             serde_json::json!({"owner": "alice"}),
         )]);
-        let other = broker.subscribe("app", "messages");
+        let other = broker.subscribe(&route("app"), "messages");
         broker.publish(&ev_with_tuple("app", "orders", ChangeOp::Update, None, &[]));
         assert!(matches!(
             matching.pop(),
@@ -1311,7 +1426,7 @@ mod tests {
     #[test]
     fn b8b_read_set_narrowing_filters_irrelevant_events() {
         let mut b = Broker::new();
-        let s = b.subscribe("a", "messages");
+        let s = b.subscribe(&route("a"), "messages");
         s.set_read_set(vec![rs_entry(
             "messages",
             serde_json::json!({ "userId": 42 }),
@@ -1349,14 +1464,14 @@ mod tests {
         // Row updates userId from 42 to 99. Subscriber on {userId: 42}
         // should still see the event — the row "left the view".
         let mut b = Broker::new();
-        let s = b.subscribe("a", "messages");
+        let s = b.subscribe(&route("a"), "messages");
         s.set_read_set(vec![rs_entry(
             "messages",
             serde_json::json!({ "userId": 42 }),
         )]);
 
         let ev = ChangeEvent {
-            app_id: "a".into(),
+            route: route("a"),
             collection: "messages".into(),
             op: ChangeOp::Update,
             pk: Some("1".to_string()),
@@ -1368,7 +1483,7 @@ mod tests {
         assert!(matches!(s.pop(), Some(SubscriptionMessage::Change(_))));
 
         // A subscriber on {userId: 7} sees neither side of the update.
-        let s2 = b.subscribe("a", "messages");
+        let s2 = b.subscribe(&route("a"), "messages");
         s2.set_read_set(vec![rs_entry(
             "messages",
             serde_json::json!({ "userId": 7 }),
@@ -1380,7 +1495,7 @@ mod tests {
     #[test]
     fn b8b_read_set_range_query() {
         let mut b = Broker::new();
-        let s = b.subscribe("a", "events");
+        let s = b.subscribe(&route("a"), "events");
         s.set_read_set(vec![rs_entry(
             "events",
             serde_json::json!({ "createdAt": { "$gt": 1000 } }),
@@ -1413,7 +1528,7 @@ mod tests {
     fn b8b_read_set_complex_falls_back_to_coarse() {
         // $or normalises to None ⇒ coarse-grained ⇒ every collection event fires.
         let mut b = Broker::new();
-        let s = b.subscribe("a", "messages");
+        let s = b.subscribe(&route("a"), "messages");
         s.set_read_set(vec![rs_entry(
             "messages",
             serde_json::json!({ "$or": [ { "a": 1 }, { "b": 2 } ] }),
@@ -1434,10 +1549,10 @@ mod tests {
         // A read-set that is `Some(empty_vec)` — explicitly attached
         // but with zero entries on the matching collection — should
         // accept nothing. (Distinct from `None` which means coarse.)
-        let s = Subscription::new(1, "a".into(), "messages".into(), 8);
+        let s = Subscription::new(1, route("a"), "messages".into(), 8);
         s.set_read_set(vec![]);
         let event = ChangeEvent {
-            app_id: "a".into(),
+            route: route("a"),
             collection: "messages".into(),
             op: ChangeOp::Insert,
             pk: Some("1".to_string()),
@@ -1453,13 +1568,13 @@ mod tests {
         // Subscription bucket is keyed by collection so this case
         // is mostly redundant with the bucket index, but we exercise
         // the entry.collection != event.collection branch explicitly.
-        let s = Subscription::new(1, "a".into(), "messages".into(), 8);
+        let s = Subscription::new(1, route("a"), "messages".into(), 8);
         s.set_read_set(vec![rs_entry(
             "channels",
             serde_json::json!({ "userId": 42 }),
         )]);
         let event = ChangeEvent {
-            app_id: "a".into(),
+            route: route("a"),
             collection: "messages".into(),
             op: ChangeOp::Insert,
             pk: Some("1".to_string()),
@@ -1475,7 +1590,7 @@ mod tests {
         // Subscriptions that don't set a read-set fall back to a
         // coarse-grained collection match.
         let mut b = Broker::new();
-        let s = b.subscribe("a", "messages");
+        let s = b.subscribe(&route("a"), "messages");
         // No set_read_set call.
         b.publish(&ev_with_tuple(
             "a",
@@ -1495,7 +1610,7 @@ mod tests {
         tuple.insert("userId".into(), "42".into());
         tuple.insert("body".into(), "hi".into());
         let ev = ChangeEvent {
-            app_id: "a".into(),
+            route: route("a"),
             collection: "messages".into(),
             op: ChangeOp::Insert,
             pk: Some("7".to_string()),
@@ -1544,12 +1659,12 @@ mod tests {
         // it (i.e. the broker's accept gate fired). The test asserts
         // that only the matching client's frame buffer has an event.
         let mut b = Broker::new();
-        let s_alice = b.subscribe("app", "messages");
+        let s_alice = b.subscribe(&route("app"), "messages");
         s_alice.set_read_set(vec![rs_entry(
             "messages",
             serde_json::json!({ "userId": 1 }),
         )]);
-        let s_bob = b.subscribe("app", "messages");
+        let s_bob = b.subscribe(&route("app"), "messages");
         s_bob.set_read_set(vec![rs_entry(
             "messages",
             serde_json::json!({ "userId": 2 }),
@@ -1597,28 +1712,28 @@ mod tests {
     fn has_subscribers_lifecycle() {
         // No registration → false.
         let mut b = Broker::new();
-        assert!(!b.has_subscribers("a", "messages"));
+        assert!(!b.has_subscribers(&route("a"), "messages"));
 
         // After subscribe → true.
-        let s = b.subscribe("a", "messages");
-        assert!(b.has_subscribers("a", "messages"));
+        let s = b.subscribe(&route("a"), "messages");
+        assert!(b.has_subscribers(&route("a"), "messages"));
         // Isolation: other app / other collection still false.
-        assert!(!b.has_subscribers("b", "messages"));
-        assert!(!b.has_subscribers("a", "channels"));
+        assert!(!b.has_subscribers(&route("b"), "messages"));
+        assert!(!b.has_subscribers(&route("a"), "channels"));
 
         // Close the only subscriber → publish prunes the bucket →
         // has_subscribers returns false.
         s.close();
         b.publish(&ev("a", "messages", ChangeOp::Insert, Some("1")));
-        assert!(!b.has_subscribers("a", "messages"));
+        assert!(!b.has_subscribers(&route("a"), "messages"));
     }
 
     #[test]
     fn drop_app_closes_all_subscribers() {
         let mut b = Broker::new();
-        let s1 = b.subscribe("a", "messages");
-        let s2 = b.subscribe("a", "channels");
-        let s3 = b.subscribe("b", "messages");
+        let s1 = b.subscribe(&route("a"), "messages");
+        let s2 = b.subscribe(&route("a"), "channels");
+        let s3 = b.subscribe(&route("b"), "messages");
         b.drop_app("a");
         assert!(s1.is_closed());
         assert!(s2.is_closed());
@@ -1638,7 +1753,7 @@ mod tests {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let neighbour = std::thread::spawn(move || {
-            let sub = subscribe(THEIRS, "messages");
+            let sub = subscribe(&route(THEIRS), "messages");
             // A neighbour's subscription is invisible to OUR count.
             assert_eq!(live_subscription_count(), 1);
             ready_tx.send(()).expect("signal neighbour ready");
@@ -1647,7 +1762,7 @@ mod tests {
         });
         ready_rx.recv().expect("wait for neighbour");
 
-        let mine = subscribe(MINE, "messages");
+        let mine = subscribe(&route(MINE), "messages");
         assert_eq!(
             live_subscription_count(),
             1,
@@ -1677,9 +1792,9 @@ mod tests {
         // primitive after their window closes. Every active
         // subscription on the app should observe a single Resync.
         let mut b = Broker::new();
-        let s1 = b.subscribe("a", "messages");
-        let s2 = b.subscribe("a", "channels");
-        let s3 = b.subscribe("b", "messages"); // other app — unaffected.
+        let s1 = b.subscribe(&route("a"), "messages");
+        let s2 = b.subscribe(&route("a"), "channels");
+        let s3 = b.subscribe(&route("b"), "messages"); // other app — unaffected.
 
         b.resume_app_with_resync("a");
 
@@ -1693,7 +1808,7 @@ mod tests {
     fn resume_app_with_resync_is_idempotent_pushes_multiple_resyncs() {
         // Each resume request emits a resync. Consumers may coalesce them.
         let mut b = Broker::new();
-        let s = b.subscribe("a", "messages");
+        let s = b.subscribe(&route("a"), "messages");
         b.resume_app_with_resync("a");
         b.resume_app_with_resync("a");
         b.resume_app_with_resync("a");
@@ -1710,8 +1825,8 @@ mod tests {
         // table still contains the closed entry (only `publish` GCs it),
         // but the push path bails out.
         let mut b = Broker::new();
-        let s1 = b.subscribe("a", "messages");
-        let s2 = b.subscribe("a", "messages");
+        let s1 = b.subscribe(&route("a"), "messages");
+        let s2 = b.subscribe(&route("a"), "messages");
         s1.close();
         // Drain s1's `Closed` message so the only thing left to observe
         // would be the Resync push (which must be skipped on closed).
@@ -1730,7 +1845,7 @@ mod tests {
         // routing table lookup misses and the function returns
         // immediately — no panic, no allocation.
         let mut b = Broker::new();
-        let _s = b.subscribe("a", "messages");
+        let _s = b.subscribe(&route("a"), "messages");
         // App "missing" has no entry — must not panic.
         b.resume_app_with_resync("missing");
         // The unrelated app's subscription is untouched.
@@ -1745,23 +1860,23 @@ mod tests {
         let mut b = Broker::new();
         // Subscribe on a different app so the broker is non-empty —
         // we want to assert the negative result is NOT "broker is empty".
-        let _s = b.subscribe("other_app", "messages");
-        assert!(!b.has_subscribers("missing_app", "messages"));
+        let _s = b.subscribe(&route("other_app"), "messages");
+        assert!(!b.has_subscribers(&route("missing_app"), "messages"));
     }
 
     #[test]
     fn has_subscribers_false_when_collection_unknown() {
         let mut b = Broker::new();
-        let _s = b.subscribe("a", "messages");
+        let _s = b.subscribe(&route("a"), "messages");
         // Same app, different collection — must not bleed across.
-        assert!(!b.has_subscribers("a", "channels"));
+        assert!(!b.has_subscribers(&route("a"), "channels"));
     }
 
     #[test]
     fn has_subscribers_true_for_registered_pair() {
         let mut b = Broker::new();
-        let _s = b.subscribe("a", "messages");
-        assert!(b.has_subscribers("a", "messages"));
+        let _s = b.subscribe(&route("a"), "messages");
+        assert!(b.has_subscribers(&route("a"), "messages"));
     }
 
     #[test]
@@ -1772,57 +1887,104 @@ mod tests {
         // After publish drains the closed entry the bucket is removed
         // and the probe must return false.
         let mut b = Broker::new();
-        let s = b.subscribe("a", "messages");
-        assert!(b.has_subscribers("a", "messages"));
+        let s = b.subscribe(&route("a"), "messages");
+        assert!(b.has_subscribers(&route("a"), "messages"));
         s.close();
         b.publish(&ev("a", "messages", ChangeOp::Insert, Some("1")));
-        assert!(!b.has_subscribers("a", "messages"));
-        // The per-app bucket was emptied — probing other collections on
-        // the same app also returns false (no stale inner HashMap).
-        assert!(!b.has_subscribers("a", "channels"));
+        assert!(!b.has_subscribers(&route("a"), "messages"));
+        // The per-route bucket was emptied — probing other collections on
+        // the same route also returns false (no stale inner HashMap).
+        assert!(!b.has_subscribers(&route("a"), "channels"));
     }
 
     #[test]
-    fn has_subscribers_takes_str_no_string_alloc_at_call_site() {
-        // Compile-time check: the API accepts `&str` arguments so
-        // callers on the WAL fan-out path can probe without
-        // constructing owned `String`s. If this signature ever
-        // regresses to `&String` or `String` the test will fail to
-        // compile.
+    fn has_subscribers_takes_borrowed_keys_no_alloc_at_call_site() {
+        // Compile-time check: the API accepts a BORROWED route and a `&str`
+        // collection, so callers on the fan-out path can probe without
+        // constructing an owned key. If either ever regresses to an owned
+        // parameter this test will fail to compile.
         let mut b = Broker::new();
-        let _s = b.subscribe("a", "messages");
-        let app: &str = "a";
+        let _s = b.subscribe(&route("a"), "messages");
+        let probe: &DbRoute = &route("a");
         let collection: &str = "messages";
-        assert!(b.has_subscribers(app, collection));
-        // Also exercise lookup with literal `&'static str`s through
-        // the same borrowed-key shape used by the global accessor.
-        assert!(b.has_subscribers("a", "messages"));
+        assert!(b.has_subscribers(probe, collection));
+        // Also exercise lookup with a literal `&'static str` collection
+        // through the same borrowed-key shape used by the global accessor.
+        assert!(b.has_subscribers(&route("a"), "messages"));
     }
 
     #[test]
     fn has_subscribers_isolated_across_apps_and_collections() {
         let mut b = Broker::new();
-        let _s1 = b.subscribe("app_a", "messages");
-        let _s2 = b.subscribe("app_b", "channels");
-        assert!(b.has_subscribers("app_a", "messages"));
-        assert!(b.has_subscribers("app_b", "channels"));
+        let _s1 = b.subscribe(&route("app_a"), "messages");
+        let _s2 = b.subscribe(&route("app_b"), "channels");
+        assert!(b.has_subscribers(&route("app_a"), "messages"));
+        assert!(b.has_subscribers(&route("app_b"), "channels"));
         // Cross-product entries do not exist.
-        assert!(!b.has_subscribers("app_a", "channels"));
-        assert!(!b.has_subscribers("app_b", "messages"));
-        assert!(!b.has_subscribers("app_c", "anything"));
+        assert!(!b.has_subscribers(&route("app_a"), "channels"));
+        assert!(!b.has_subscribers(&route("app_b"), "messages"));
+        assert!(!b.has_subscribers(&route("app_c"), "anything"));
+    }
+
+    /// **The database half of the key separates one app's two databases.**
+    ///
+    /// Both routes carry the same tenant and both declare `users`, so the app
+    /// id and the collection are identical on the two subscriptions and the
+    /// database is the only thing that can tell them apart. The positive arm is
+    /// the control: without it a broker that dropped every event would satisfy
+    /// the absence.
+    #[test]
+    fn one_app_s_two_databases_do_not_share_a_collection_bucket() {
+        let mine = DbRoute::new("shared_tenant", Some(zeroship_core::DatabaseId::mint()));
+        let theirs = DbRoute::new("shared_tenant", Some(zeroship_core::DatabaseId::mint()));
+        assert_eq!(mine.app_id(), theirs.app_id(), "the control: one tenant");
+        assert_ne!(mine.database(), theirs.database(), "two databases");
+
+        let mut b = Broker::new();
+        let my_sub = b.subscribe(&mine, "users");
+        let their_sub = b.subscribe(&theirs, "users");
+        assert_eq!(
+            my_sub.collection(),
+            their_sub.collection(),
+            "the control: both databases declare the SAME collection name"
+        );
+        assert!(b.has_subscribers(&mine, "users"));
+        assert!(b.has_subscribers(&theirs, "users"));
+
+        b.publish(&ChangeEvent {
+            route: mine.clone(),
+            collection: "users".to_string(),
+            op: ChangeOp::Insert,
+            pk: Some("usr_1".to_string()),
+            changed_columns: vec![],
+            new_tuple: HashMap::new(),
+            old_tuple: None,
+        });
+
+        match my_sub.pop() {
+            Some(SubscriptionMessage::Change(event)) => {
+                assert_eq!(event.pk.as_deref(), Some("usr_1"));
+                assert_eq!(event.route, mine);
+            }
+            other => panic!("the database that produced the change must deliver it; got {other:?}"),
+        }
+        assert!(
+            their_sub.pop().is_none(),
+            "a change on one database must not reach a subscription on the other"
+        );
     }
 
     #[test]
-    fn publish_drops_per_app_map_when_last_collection_empties() {
-        // Whitebox-ish: confirms the per-app inner HashMap is dropped
+    fn publish_drops_per_route_map_when_last_collection_empties() {
+        // Whitebox-ish: confirms the per-route inner HashMap is dropped
         // once it has no live collections — keeps `has_subscribers` /
-        // `publish` cheap on apps that churn ephemeral collections.
+        // `publish` cheap on routes that churn ephemeral collections.
         let mut b = Broker::new();
-        let s = b.subscribe("a", "messages");
+        let s = b.subscribe(&route("a"), "messages");
         assert_eq!(b.by_key.len(), 1);
         s.close();
         b.publish(&ev("a", "messages", ChangeOp::Insert, Some("1")));
-        // Per-app entry collapsed away — no leaked inner HashMap.
+        // Per-route entry collapsed away — no leaked inner HashMap.
         assert_eq!(b.by_key.len(), 0);
     }
 
@@ -1876,13 +2038,13 @@ mod tests {
     #[test]
     fn try_subscribe_succeeds_when_not_schema_pending() {
         let mut b = Broker::new();
-        let result = b.try_subscribe("happy_app", "messages");
+        let result = b.try_subscribe(&route("happy_app"), "messages");
         assert!(
             result.is_ok(),
             "try_subscribe should succeed when not schema_pending; got {result:?}"
         );
         let sub = result.unwrap();
-        assert_eq!(sub.app_id(), "happy_app");
+        assert_eq!(sub.route(), route("happy_app"));
         assert_eq!(sub.collection(), "messages");
     }
 
@@ -1890,7 +2052,7 @@ mod tests {
     fn try_subscribe_rejects_with_schema_pending_code_when_engaged() {
         let _g = SchemaPendingTestGuard::engage("pending_app");
         let mut b = Broker::new();
-        let result = b.try_subscribe("pending_app", "messages");
+        let result = b.try_subscribe(&route("pending_app"), "messages");
         match result {
             Err(DbError::Coded { code, .. }) => {
                 assert_eq!(
@@ -1906,7 +2068,7 @@ mod tests {
     fn try_subscribe_carries_hint_in_rejection() {
         let _g = SchemaPendingTestGuard::engage("hint_app");
         let mut b = Broker::new();
-        let result = b.try_subscribe("hint_app", "messages");
+        let result = b.try_subscribe(&route("hint_app"), "messages");
         match result {
             Err(DbError::Coded { hint, .. }) => {
                 assert!(
@@ -1923,10 +2085,10 @@ mod tests {
         let _g = SchemaPendingTestGuard::engage("blocked_app");
         let mut b = Broker::new();
         // Sibling app is unaffected.
-        assert!(b.try_subscribe("sibling_app", "messages").is_ok());
+        assert!(b.try_subscribe(&route("sibling_app"), "messages").is_ok());
         // Engaged app is rejected.
         assert!(matches!(
-            b.try_subscribe("blocked_app", "messages"),
+            b.try_subscribe(&route("blocked_app"), "messages"),
             Err(DbError::Coded { .. })
         ));
     }
@@ -1954,7 +2116,7 @@ mod tests {
         tuple.insert(raw_col.clone(), raw_ciphertext_text.into());
 
         let ev = ChangeEvent {
-            app_id: "app".into(),
+            route: route("app"),
             collection: "users".into(),
             op: ChangeOp::Insert,
             pk: Some("42".to_string()),

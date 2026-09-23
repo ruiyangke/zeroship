@@ -704,7 +704,7 @@ impl Collection {
         scope: &mut v8::PinScope<'s, '_>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
         self.check_transaction_scope()?;
-        let obj = super::subscription::mint_subscription(scope, self.binding.app_id(), &self.name)?;
+        let obj = super::subscription::mint_subscription(scope, &self.binding.route(), &self.name)?;
         Ok(obj.into())
     }
 }

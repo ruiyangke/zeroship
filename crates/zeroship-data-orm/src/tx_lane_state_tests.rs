@@ -4,7 +4,7 @@ use crate::tx_lanes::TxLanes;
 use std::collections::HashMap;
 fn dummy_event(collection: &str) -> ChangeEvent {
     ChangeEvent {
-        app_id: "app_t".into(),
+        route: crate::tests::fixtures::harness_route("app_t"),
         collection: collection.into(),
         op: ChangeOp::Insert,
         pk: Some("1".to_string()),
@@ -91,7 +91,7 @@ fn pending_emits_start_empty() {
 
 #[test]
 fn push_pending_emit_allocates_slot_lazily() {
-    // dummy_event tags app_id "app_t"; the queue keys on that.
+    // dummy_event tags the route for "app_t"; the queue keys on that.
     let mut lanes = TxLanes::new();
     assert!(
         lanes
@@ -289,9 +289,9 @@ fn sec1_frame_watermarks_are_scoped_per_app() {
 fn sec1_pending_emits_drain_is_scoped_per_app() {
     let mut lanes = TxLanes::new();
     let mut ev_a = dummy_event("orders");
-    ev_a.app_id = "app_a".to_string();
+    ev_a.route = crate::tests::fixtures::harness_route("app_a");
     let mut ev_b = dummy_event("messages");
-    ev_b.app_id = "app_b".to_string();
+    ev_b.route = crate::tests::fixtures::harness_route("app_b");
     lanes.push_pending_emit(&crate::tests::fixtures::harness_route("app_a"), ev_a);
     lanes.push_pending_emit(&crate::tests::fixtures::harness_route("app_b"), ev_b);
 
@@ -301,7 +301,10 @@ fn sec1_pending_emits_drain_is_scoped_per_app() {
         1,
         "SEC-1: app_b's commit drain must only fire app_b's queued events",
     );
-    assert_eq!(drained_b[0].app_id, "app_b");
+    assert_eq!(
+        drained_b[0].route,
+        crate::tests::fixtures::harness_route("app_b")
+    );
 
     let drained_a = lanes.drain_pending_emits_for(&crate::tests::fixtures::harness_route("app_a"));
     assert_eq!(
@@ -310,5 +313,8 @@ fn sec1_pending_emits_drain_is_scoped_per_app() {
         "SEC-1: app_a's queued events must survive app_b's drain \
              (firing them early breaks the Gap-B pre-commit fence)",
     );
-    assert_eq!(drained_a[0].app_id, "app_a");
+    assert_eq!(
+        drained_a[0].route,
+        crate::tests::fixtures::harness_route("app_a")
+    );
 }
