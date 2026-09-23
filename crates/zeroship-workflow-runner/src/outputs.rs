@@ -15,9 +15,12 @@ use zeroship_workflow::{
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use zeroship_core::workflow_policy::MAX_PAYLOAD_BYTES_CEILING;
 use zeroship_storage::backend::OnceChunk;
 
-/// Host memory and inline-journal budgets. Service policy remains authoritative.
+/// Host memory and inline-journal budgets. `max_payload_bytes` and the policy
+/// bound of the same name describe one quantity and answer to one platform
+/// ceiling; the other two are this host's own.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskPayloadLimits {
@@ -26,10 +29,18 @@ pub struct TaskPayloadLimits {
     pub max_result_bytes: usize,
 }
 impl Default for TaskPayloadLimits {
+    /// Only `max_payload_bytes` derives from a platform ceiling, because it is
+    /// the only one of these three that describes the same quantity as a policy
+    /// bound: it is the budget a staged payload is read back through, and
+    /// `AppPolicy::max_payload_bytes` is the budget the same payload was
+    /// admitted under. `max_inline_bytes` chooses between storing a value
+    /// inline and storing it by reference, and `max_result_bytes` bounds the
+    /// runtime's whole result text; neither has a policy bound measuring the
+    /// same thing, so neither derives from one.
     fn default() -> Self {
         Self {
             max_inline_bytes: 1024 * 1024,
-            max_payload_bytes: 64 * 1024 * 1024,
+            max_payload_bytes: MAX_PAYLOAD_BYTES_CEILING,
             max_result_bytes: 128 * 1024 * 1024,
         }
     }
@@ -44,6 +55,32 @@ impl TaskPayloadLimits {
             || i64::try_from(self.max_payload_bytes).is_err()
         {
             return Err(invalid("invalid workflow payload limits"));
+        }
+        Ok(())
+    }
+
+    /// Refuse a configured host budget that cannot carry what the platform
+    /// admits, before this host starts serving.
+    ///
+    /// This is the startup half of one invariant whose other half is
+    /// [`zeroship_core::workflow_policy::AppPolicy::validate`]. Startup knows
+    /// the configured budget and has observed no policy; admission knows the
+    /// policy and cannot re-read what this host was configured with. Either
+    /// check alone leaves one direction open.
+    ///
+    /// Distinct from [`Self::validate`], which compares a budget against
+    /// itself and runs on every execution, including the deliberately narrow
+    /// budgets that exercise the limit outcomes.
+    ///
+    /// # Errors
+    /// Rejects an unusable budget, and one whose payload read budget is below
+    /// the platform ceiling.
+    pub fn validate_configured(self) -> Result<(), WorkflowServiceError> {
+        self.validate()?;
+        if self.max_payload_bytes < MAX_PAYLOAD_BYTES_CEILING {
+            return Err(invalid(
+                "workflow payload read budget is below the platform ceiling",
+            ));
         }
         Ok(())
     }
