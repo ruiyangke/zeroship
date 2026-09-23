@@ -410,8 +410,9 @@ stall the defect fixes that motivate the move.
    journal ceiling and the client's `max_response_bytes` default derives from it;
    `max_input_bytes` and `max_request_bytes` stand the same way to the input ceiling. So
    `client_options` in `crates/zeroship-worker/src/workflow_host.rs`, returning
-   `ClientOptions::default()`, carries what admission admits without a configuration surface of
-   its own to keep the two in step.
+   `ClientOptions::default()`, needs no configuration surface of its own to keep the two in
+   step: it will not refuse, on its own account, something admission admitted. What a peer
+   accepts stays that peer's own bound, which is the next paragraph.
 
    **The request path is three numbers, not two.** The client's `Options::max_request_bytes`
    default, the server's `DEFAULT_MAX_REQUEST_BYTES` in
@@ -477,6 +478,15 @@ stall the defect fixes that motivate the move.
    single HTTP message, and `replay` in `crates/zeroship-workflow/src/service/journal.rs`
    narrows `StepCheckpoint` to `JournalStep` and drops retrying rows, so a policy bound is an
    upper bound on wire bytes rather than a measure of them.
+
+   **What this does not cover.** A ceiling serves a pair that measures the same bytes.
+   `TaskPayloadLimits::max_inline_bytes` and `AppPolicy::max_input_bytes` do not: an inline
+   value rides inside the checkpoint the policy bound measures, so the host bound is a part of
+   the policy bound rather than the same quantity, separated by the checkpoint's own framing
+   and, in `apply` in `crates/zeroship-workflow/src/service/frontier.rs`, by however many
+   outcomes one batch carries. They are equal today, so a value at the host's inline threshold
+   is refused by `journal.rs` rather than referenced by the host. Deciding what separation they
+   need is its own item, not this one.
 
    It was one decision, not two, and it closes this item and Open 1 together.
 
