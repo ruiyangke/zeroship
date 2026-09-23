@@ -1,0 +1,2745 @@
+msgid ""
+msgstr ""
+"POT-Creation-Date: 2026-09-11 17:50-0700\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"X-Generator: @lingui/cli\n"
+"Language: en\n"
+"Project-Id-Version: \n"
+"Report-Msgid-Bugs-To: \n"
+"PO-Revision-Date: \n"
+"Last-Translator: \n"
+"Language-Team: \n"
+"Plural-Forms: \n"
+
+#. js-lingui-explicit-id
+msgid "Lemon & herb chicken"
+msgstr "Lemon & herb chicken"
+
+#. js-lingui-explicit-id
+msgid "with golden potatoes & broccolini"
+msgstr "with golden potatoes & broccolini"
+
+#. js-lingui-explicit-id
+msgid "A little comfort"
+msgstr "A little comfort"
+
+#. js-lingui-explicit-id
+msgid "Oven, baking tray, frying pan"
+msgstr "Oven, baking tray, frying pan"
+
+#. js-lingui-explicit-id
+msgid "Chicken breast"
+msgstr "Chicken breast"
+
+#. js-lingui-explicit-id
+msgid "Baby potatoes"
+msgstr "Baby potatoes"
+
+#. js-lingui-explicit-id
+msgid "Broccolini"
+msgstr "Broccolini"
+
+#. js-lingui-explicit-id
+msgid "Lemon, garlic & herb butter"
+msgstr "Lemon, garlic & herb butter"
+
+#. js-lingui-explicit-id
+msgid "Heat the oven to 200°C. Halve the potatoes and toss with oil, salt and pepper on a baking tray."
+msgstr "Heat the oven to 200°C. Halve the potatoes and toss with oil, salt and pepper on a baking tray."
+
+#. js-lingui-explicit-id
+msgid "Roast the potatoes until golden and tender. Season the chicken with the supplied herbs."
+msgstr "Roast the potatoes until golden and tender. Season the chicken with the supplied herbs."
+
+#. js-lingui-explicit-id
+msgid "Sear the chicken, then finish in the oven until cooked through. Check the thickest part reaches a safe cooking temperature."
+msgstr "Sear the chicken, then finish in the oven until cooked through. Check the thickest part reaches a safe cooking temperature."
+
+#. js-lingui-explicit-id
+msgid "Sauté the broccolini. Rest and slice the chicken, then serve with lemon and herb butter."
+msgstr "Sauté the broccolini. Rest and slice the chicken, then serve with lemon and herb butter."
+
+#. js-lingui-explicit-id
+msgid "Garden pesto rigatoni"
+msgstr "Garden pesto rigatoni"
+
+#. js-lingui-explicit-id
+msgid "with roasted tomatoes & parmesan"
+msgstr "with roasted tomatoes & parmesan"
+
+#. js-lingui-explicit-id
+msgid "Plant-forward favorite"
+msgstr "Plant-forward favorite"
+
+#. js-lingui-explicit-id
+msgid "Saucepan, frying pan"
+msgstr "Saucepan, frying pan"
+
+#. js-lingui-explicit-id
+msgid "Rigatoni"
+msgstr "Rigatoni"
+
+#. js-lingui-explicit-id
+msgid "Cherry tomatoes"
+msgstr "Cherry tomatoes"
+
+#. js-lingui-explicit-id
+msgid "Basil pesto"
+msgstr "Basil pesto"
+
+#. js-lingui-explicit-id
+msgid "Parmesan & fresh basil"
+msgstr "Parmesan & fresh basil"
+
+#. js-lingui-explicit-id
+msgid "Bring salted water to a boil and cook the rigatoni until just tender."
+msgstr "Bring salted water to a boil and cook the rigatoni until just tender."
+
+#. js-lingui-explicit-id
+msgid "Sauté the cherry tomatoes in a little oil until blistered."
+msgstr "Sauté the cherry tomatoes in a little oil until blistered."
+
+#. js-lingui-explicit-id
+msgid "Reserve some pasta water, then drain. Toss pasta with pesto and tomatoes, loosening with cooking water."
+msgstr "Reserve some pasta water, then drain. Toss pasta with pesto and tomatoes, loosening with cooking water."
+
+#. js-lingui-explicit-id
+msgid "Finish with parmesan and torn basil. Taste and season to your liking."
+msgstr "Finish with parmesan and torn basil. Taste and season to your liking."
+
+#. js-lingui-explicit-id
+msgid "Miso-glazed salmon"
+msgstr "Miso-glazed salmon"
+
+#. js-lingui-explicit-id
+msgid "with jasmine rice & crunchy greens"
+msgstr "with jasmine rice & crunchy greens"
+
+#. js-lingui-explicit-id
+msgid "Something special"
+msgstr "Something special"
+
+#. js-lingui-explicit-id
+msgid "Frying pan, saucepan"
+msgstr "Frying pan, saucepan"
+
+#. js-lingui-explicit-id
+msgid "Salmon fillet"
+msgstr "Salmon fillet"
+
+#. js-lingui-explicit-id
+msgid "Jasmine rice"
+msgstr "Jasmine rice"
+
+#. js-lingui-explicit-id
+msgid "Cucumber & edamame"
+msgstr "Cucumber & edamame"
+
+#. js-lingui-explicit-id
+msgid "Miso glaze & sesame"
+msgstr "Miso glaze & sesame"
+
+#. js-lingui-explicit-id
+msgid "Rinse the rice and cook according to the supplied recipe card."
+msgstr "Rinse the rice and cook according to the supplied recipe card."
+
+#. js-lingui-explicit-id
+msgid "Brush salmon with miso glaze and pan-cook until cooked through."
+msgstr "Brush salmon with miso glaze and pan-cook until cooked through."
+
+#. js-lingui-explicit-id
+msgid "Slice cucumber into ribbons. Warm the edamame."
+msgstr "Slice cucumber into ribbons. Warm the edamame."
+
+#. js-lingui-explicit-id
+msgid "Serve salmon over rice with greens and the remaining sauce. Sprinkle with sesame."
+msgstr "Serve salmon over rice with greens and the remaining sauce. Sprinkle with sesame."
+
+#. js-lingui-explicit-id
+msgid "Sunshine harvest bowl"
+msgstr "Sunshine harvest bowl"
+
+#. js-lingui-explicit-id
+msgid "with harissa cauliflower & chickpeas"
+msgstr "with harissa cauliflower & chickpeas"
+
+#. js-lingui-explicit-id
+msgid "Feel-good food"
+msgstr "Feel-good food"
+
+#. js-lingui-explicit-id
+msgid "Oven, baking tray, bowl"
+msgstr "Oven, baking tray, bowl"
+
+#. js-lingui-explicit-id
+msgid "Cauliflower"
+msgstr "Cauliflower"
+
+#. js-lingui-explicit-id
+msgid "Chickpeas & couscous"
+msgstr "Chickpeas & couscous"
+
+#. js-lingui-explicit-id
+msgid "Harissa spice blend"
+msgstr "Harissa spice blend"
+
+#. js-lingui-explicit-id
+msgid "Yogurt & herbs"
+msgstr "Yogurt & herbs"
+
+#. js-lingui-explicit-id
+msgid "Heat the oven to 200°C. Toss cauliflower and chickpeas with oil and harissa."
+msgstr "Heat the oven to 200°C. Toss cauliflower and chickpeas with oil and harissa."
+
+#. js-lingui-explicit-id
+msgid "Roast until the cauliflower is tender with crisp edges."
+msgstr "Roast until the cauliflower is tender with crisp edges."
+
+#. js-lingui-explicit-id
+msgid "Cover couscous with hot water, let stand, then fluff with a fork."
+msgstr "Cover couscous with hot water, let stand, then fluff with a fork."
+
+#. js-lingui-explicit-id
+msgid "Build your bowl and finish with yogurt, lemon and herbs."
+msgstr "Build your bowl and finish with yogurt, lemon and herbs."
+
+#. js-lingui-explicit-id
+msgid "Creamy woodland orzo"
+msgstr "Creamy woodland orzo"
+
+#. js-lingui-explicit-id
+msgid "with baby spinach & fresh thyme"
+msgstr "with baby spinach & fresh thyme"
+
+#. js-lingui-explicit-id
+msgid "Cozy nights in"
+msgstr "Cozy nights in"
+
+#. js-lingui-explicit-id
+msgid "Deep frying pan"
+msgstr "Deep frying pan"
+
+#. js-lingui-explicit-id
+msgid "Orzo pasta"
+msgstr "Orzo pasta"
+
+#. js-lingui-explicit-id
+msgid "Mixed mushrooms"
+msgstr "Mixed mushrooms"
+
+#. js-lingui-explicit-id
+msgid "Baby spinach"
+msgstr "Baby spinach"
+
+#. js-lingui-explicit-id
+msgid "Parmesan, cream & thyme"
+msgstr "Parmesan, cream & thyme"
+
+#. js-lingui-explicit-id
+msgid "Slice the mushrooms. Sauté in oil until golden, then add the thyme."
+msgstr "Slice the mushrooms. Sauté in oil until golden, then add the thyme."
+
+#. js-lingui-explicit-id
+msgid "Stir in the orzo and supplied stock. Simmer, stirring, until tender."
+msgstr "Stir in the orzo and supplied stock. Simmer, stirring, until tender."
+
+#. js-lingui-explicit-id
+msgid "Fold in spinach and cream, letting the spinach wilt."
+msgstr "Fold in spinach and cream, letting the spinach wilt."
+
+#. js-lingui-explicit-id
+msgid "Finish with parmesan, black pepper and a little fresh thyme."
+msgstr "Finish with parmesan, black pepper and a little fresh thyme."
+
+#. js-lingui-explicit-id
+msgid "Sticky ginger tofu"
+msgstr "Sticky ginger tofu"
+
+#. js-lingui-explicit-id
+msgid "with rainbow vegetables & rice"
+msgstr "with rainbow vegetables & rice"
+
+#. js-lingui-explicit-id
+msgid "Big flavor, little effort"
+msgstr "Big flavor, little effort"
+
+#. js-lingui-explicit-id
+msgid "Firm tofu"
+msgstr "Firm tofu"
+
+#. js-lingui-explicit-id
+msgid "Rice"
+msgstr "Rice"
+
+#. js-lingui-explicit-id
+msgid "Broccoli & carrots"
+msgstr "Broccoli & carrots"
+
+#. js-lingui-explicit-id
+msgid "Ginger sesame sauce"
+msgstr "Ginger sesame sauce"
+
+#. js-lingui-explicit-id
+msgid "Rinse and cook the rice. Pat the tofu dry and cut into cubes."
+msgstr "Rinse and cook the rice. Pat the tofu dry and cut into cubes."
+
+#. js-lingui-explicit-id
+msgid "Pan-fry tofu in a little oil until crisp on all sides."
+msgstr "Pan-fry tofu in a little oil until crisp on all sides."
+
+#. js-lingui-explicit-id
+msgid "Add the vegetables and stir-fry until tender. Add the ginger sesame sauce."
+msgstr "Add the vegetables and stir-fry until tender. Add the ginger sesame sauce."
+
+#. js-lingui-explicit-id
+msgid "Toss gently until glossy, then serve over rice."
+msgstr "Toss gently until glossy, then serve over rice."
+
+#. js-lingui-explicit-id
+msgid "Cooking oil, salt and pepper"
+msgstr "Cooking oil, salt and pepper"
+
+#. js-lingui-explicit-id
+msgid "Follow the storage instructions and use-by date on each ingredient label."
+msgstr "Follow the storage instructions and use-by date on each ingredient label."
+
+#. js-lingui-explicit-id
+msgid "Illustrative values per serving, prepared as directed."
+msgstr "Illustrative values per serving, prepared as directed."
+
+#. js-lingui-explicit-id
+msgid "Choose an available delivery date."
+msgstr "Choose an available delivery date."
+
+#. js-lingui-explicit-id
+msgid "Order not found."
+msgstr "Order not found."
+
+#. js-lingui-explicit-id
+msgid "Delivery status updated"
+msgstr "Delivery status updated"
+
+#. js-lingui-explicit-id
+msgid "Inventory not found."
+msgstr "Inventory not found."
+
+#. js-lingui-explicit-id
+msgid "Case not found."
+msgstr "Case not found."
+
+#. js-lingui-explicit-id
+msgid "Refund exceeds the remaining paid amount."
+msgstr "Refund exceeds the remaining paid amount."
+
+#. js-lingui-explicit-id
+msgid "Resolution key already used."
+msgstr "Resolution key already used."
+
+#. js-lingui-explicit-id
+msgid "Recipe not found."
+msgstr "Recipe not found."
+
+#. js-lingui-explicit-id
+msgid "Restore this recipe before editing it."
+msgstr "Restore this recipe before editing it."
+
+#. js-lingui-explicit-id
+msgid "This recipe link is already in use. Choose another."
+msgstr "This recipe link is already in use. Choose another."
+
+#. js-lingui-explicit-id
+msgid "Restore this recipe before approving it."
+msgstr "Restore this recipe before approving it."
+
+#. js-lingui-explicit-id
+msgid "Complete both languages, ingredient quantities and cooking steps before approval."
+msgstr "Complete both languages, ingredient quantities and cooking steps before approval."
+
+#. js-lingui-explicit-id
+msgid "Menu not found."
+msgstr "Menu not found."
+
+#. js-lingui-explicit-id
+msgid "Payment not found. Refresh the order and try again."
+msgstr "Payment not found. Refresh the order and try again."
+
+#. js-lingui-explicit-id
+msgid "This order does not have a late payment to refund."
+msgstr "This order does not have a late payment to refund."
+
+#. js-lingui-explicit-id
+msgid "Your late payment has been refunded. This box will not be delivered."
+msgstr "Your late payment has been refunded. This box will not be delivered."
+
+#. js-lingui-explicit-id
+msgid "Administrator access is managed in the deployment settings."
+msgstr "Administrator access is managed in the deployment settings."
+
+#. js-lingui-explicit-id
+msgid "These details have changed. Refresh the page and try again."
+msgstr "These details have changed. Refresh the page and try again."
+
+#. js-lingui-explicit-id
+msgid "This team member's access changed. Reload the team before saving."
+msgstr "This team member's access changed. Reload the team before saving."
+
+#. js-lingui-explicit-id
+msgid "We couldn't load your saved box. Your choices on this page are still here."
+msgstr "We couldn't load your saved box. Your choices on this page are still here."
+
+#. js-lingui-explicit-id
+msgid "We couldn't save your box. Your choices are still here."
+msgstr "We couldn't save your box. Your choices are still here."
+
+#. js-lingui-explicit-id
+msgid "Refresh your total before placing this order."
+msgstr "Refresh your total before placing this order."
+
+#. js-lingui-explicit-id
+msgid "We couldn't prepare your download. Please contact us."
+msgstr "We couldn't prepare your download. Please contact us."
+
+#. js-lingui-explicit-id
+msgid "Your download isn't ready yet. Please try again."
+msgstr "Your download isn't ready yet. Please try again."
+
+#. js-lingui-explicit-id
+msgid "Please wait a moment, then try refreshing your total."
+msgstr "Please wait a moment, then try refreshing your total."
+
+#. js-lingui-explicit-id
+msgid "Please review and accept the order terms."
+msgstr "Please review and accept the order terms."
+
+#. js-lingui-explicit-id
+msgid "Your delivery area changed. Review your box and total again."
+msgstr "Your delivery area changed. Review your box and total again."
+
+#. js-lingui-explicit-id
+msgid "This checkout has already been used. Please start again from your box."
+msgstr "This checkout has already been used. Please start again from your box."
+
+#. js-lingui-explicit-id
+msgid "Box created"
+msgstr "Box created"
+
+#. js-lingui-explicit-id
+msgid "Waiting for payment confirmation"
+msgstr "Waiting for payment confirmation"
+
+#. js-lingui-explicit-id
+msgid "We're checking your payment. Please wait for an update before trying again."
+msgstr "We're checking your payment. Please wait for an update before trying again."
+
+#. js-lingui-explicit-id
+msgid "Review the current total before trying payment again."
+msgstr "Review the current total before trying payment again."
+
+#. js-lingui-explicit-id
+msgid "Box canceled and payment refunded"
+msgstr "Box canceled and payment refunded"
+
+#. js-lingui-explicit-id
+msgid "Box canceled"
+msgstr "Box canceled"
+
+#. js-lingui-explicit-id
+msgid "The order changed. Reload and try again."
+msgstr "The order changed. Reload and try again."
+
+#. js-lingui-explicit-id
+msgid "Resolve the payment before editing this box."
+msgstr "Resolve the payment before editing this box."
+
+#. js-lingui-explicit-id
+msgid "Contact support to change a box that has a refund."
+msgstr "Contact support to change a box that has a refund."
+
+#. js-lingui-explicit-id
+msgid "Meals updated; price adjustment {amount, number} {currency}"
+msgstr "Meals updated; price adjustment {amount, number} {currency}"
+
+#. js-lingui-explicit-id
+msgid "No recurring plan found."
+msgstr "No recurring plan found."
+
+#. js-lingui-explicit-id
+msgid "Your plan changed. Please retry."
+msgstr "Your plan changed. Please retry."
+
+#. js-lingui-explicit-id
+msgid "An active plan is required."
+msgstr "An active plan is required."
+
+#. js-lingui-explicit-id
+msgid "Your plan changed. Review the next delivery again."
+msgstr "Your plan changed. Review the next delivery again."
+
+#. js-lingui-explicit-id
+msgid "The total changed. Review the next delivery again."
+msgstr "The total changed. Review the next delivery again."
+
+#. js-lingui-explicit-id
+msgid "Recurring box created"
+msgstr "Recurring box created"
+
+#. js-lingui-explicit-id
+msgid "Payment confirmed for your next box"
+msgstr "Payment confirmed for your next box"
+
+#. js-lingui-explicit-id
+msgid "Address not found."
+msgstr "Address not found."
+
+#. js-lingui-explicit-id
+msgid "Remove an unused address before adding another."
+msgstr "Remove an unused address before adding another."
+
+#. js-lingui-explicit-id
+msgid "This recipe is no longer available to save."
+msgstr "This recipe is no longer available to save."
+
+#. js-lingui-explicit-id
+msgid "This request key belongs to another action."
+msgstr "This request key belongs to another action."
+
+#. js-lingui-explicit-id
+msgid "Privacy request not found."
+msgstr "Privacy request not found."
+
+#. js-lingui-explicit-id
+msgid "This request is already being processed."
+msgstr "This request is already being processed."
+
+#. js-lingui-explicit-id
+msgid "Your export is unavailable. Please request a new export."
+msgstr "Your export is unavailable. Please request a new export."
+
+#. js-lingui-explicit-id
+msgid "You can review this meal after your box is delivered."
+msgstr "You can review this meal after your box is delivered."
+
+#. js-lingui-explicit-id
+msgid "Your feedback changed on another device. Load the saved feedback before editing it."
+msgstr "Your feedback changed on another device. Load the saved feedback before editing it."
+
+#. js-lingui-explicit-id
+msgid "Your sign-in has changed. Reload your saved box to continue."
+msgstr "Your sign-in has changed. Reload your saved box to continue."
+
+#. js-lingui-explicit-id
+msgid "Choose a box for this delivery country."
+msgstr "Choose a box for this delivery country."
+
+#. js-lingui-explicit-id
+msgid "This save has already been used. Reload your saved box to continue."
+msgstr "This save has already been used. Reload your saved box to continue."
+
+#. js-lingui-explicit-id
+msgid "Sign in to continue."
+msgstr "Sign in to continue."
+
+#. js-lingui-explicit-id
+msgid "Your saved box session has ended. Reload this page to continue."
+msgstr "Your saved box session has ended. Reload this page to continue."
+
+#. js-lingui-explicit-id
+msgid "Choose a new box to restart weekly deliveries."
+msgstr "Choose a new box to restart weekly deliveries."
+
+#. js-lingui-explicit-id
+msgid "Resume your plan before skipping a delivery."
+msgstr "Resume your plan before skipping a delivery."
+
+#. js-lingui-explicit-id
+msgid "No longer on this menu"
+msgstr "No longer on this menu"
+
+#. js-lingui-explicit-id
+msgid "Contains an ingredient you excluded"
+msgstr "Contains an ingredient you excluded"
+
+#. js-lingui-explicit-id
+msgid "Sold out for this delivery"
+msgstr "Sold out for this delivery"
+
+#. js-lingui-explicit-id
+msgid "Add approved recipes before publishing this menu."
+msgstr "Add approved recipes before publishing this menu."
+
+#. js-lingui-explicit-id
+msgid "Choose a sale window that ends before the delivery cutoff."
+msgstr "Choose a sale window that ends before the delivery cutoff."
+
+#. js-lingui-explicit-id
+msgid "Choose each recipe only once."
+msgstr "Choose each recipe only once."
+
+#. js-lingui-explicit-id
+msgid "Milk"
+msgstr "Milk"
+
+#. js-lingui-explicit-id
+msgid "Wheat"
+msgstr "Wheat"
+
+#. js-lingui-explicit-id
+msgid "Nuts"
+msgstr "Nuts"
+
+#. js-lingui-explicit-id
+msgid "Fish"
+msgstr "Fish"
+
+#. js-lingui-explicit-id
+msgid "Soy"
+msgstr "Soy"
+
+#. js-lingui-explicit-id
+msgid "Sesame"
+msgstr "Sesame"
+
+#. js-lingui-explicit-id
+msgid "United States"
+msgstr "United States"
+
+#. js-lingui-explicit-id
+msgid "New York"
+msgstr "New York"
+
+#. js-lingui-explicit-id
+msgid "United Kingdom"
+msgstr "United Kingdom"
+
+#. js-lingui-explicit-id
+msgid "London"
+msgstr "London"
+
+#. js-lingui-explicit-id
+msgid "China"
+msgstr "China"
+
+#. js-lingui-explicit-id
+msgid "Shanghai"
+msgstr "Shanghai"
+
+#. js-lingui-explicit-id
+msgid "Ordering has closed for this delivery. Choose another date."
+msgstr "Ordering has closed for this delivery. Choose another date."
+
+#. js-lingui-explicit-id
+msgid "Recipe not found in this order."
+msgstr "Recipe not found in this order."
+
+#. js-lingui-explicit-id
+msgid "Huangpu"
+msgstr "Huangpu"
+
+#. js-lingui-explicit-id
+msgid "Xuhui"
+msgstr "Xuhui"
+
+#. js-lingui-explicit-id
+msgid "Changning"
+msgstr "Changning"
+
+#. js-lingui-explicit-id
+msgid "Jing'an"
+msgstr "Jing'an"
+
+#. js-lingui-explicit-id
+msgid "Pudong"
+msgstr "Pudong"
+
+#. js-lingui-explicit-id
+msgid "ZIP code"
+msgstr "ZIP code"
+
+#. js-lingui-explicit-id
+msgid "Postcode"
+msgstr "Postcode"
+
+#. js-lingui-explicit-id
+msgid "Postal code (optional)"
+msgstr "Postal code (optional)"
+
+#. js-lingui-explicit-id
+msgid "Enter the recipient's full name."
+msgstr "Enter the recipient's full name."
+
+#. js-lingui-explicit-id
+msgid "Enter a valid email address."
+msgstr "Enter a valid email address."
+
+#. js-lingui-explicit-id
+msgid "Enter the street address, including the building or apartment."
+msgstr "Enter the street address, including the building or apartment."
+
+#. js-lingui-explicit-id
+msgid "Choose or enter your city."
+msgstr "Choose or enter your city."
+
+#. js-lingui-explicit-id
+msgid "Choose or enter your province or state."
+msgstr "Choose or enter your province or state."
+
+#. js-lingui-explicit-id
+msgid "Choose your district."
+msgstr "Choose your district."
+
+#. js-lingui-explicit-id
+msgid "Enter a valid postal code."
+msgstr "Enter a valid postal code."
+
+#. js-lingui-explicit-id
+msgid "Enter a valid phone number."
+msgstr "Enter a valid phone number."
+
+#. js-lingui-explicit-id
+msgid "Check your address and contact details, then try again."
+msgstr "Check your address and contact details, then try again."
+
+#. js-lingui-explicit-id
+msgid "Choose an address in the selected delivery country."
+msgstr "Choose an address in the selected delivery country."
+
+#. js-lingui-explicit-id
+msgid "We don't deliver to this address yet."
+msgstr "We don't deliver to this address yet."
+
+#. js-lingui-explicit-id
+msgid "Finish choosing your meals before continuing."
+msgstr "Finish choosing your meals before continuing."
+
+#. js-lingui-explicit-id
+msgid "This menu is no longer available. Choose another delivery date."
+msgstr "This menu is no longer available. Choose another delivery date."
+
+#. js-lingui-explicit-id
+msgid "This meal is unavailable in your delivery area."
+msgstr "This meal is unavailable in your delivery area."
+
+#. js-lingui-explicit-id
+msgid "One of your meals contains an ingredient you chose to avoid."
+msgstr "One of your meals contains an ingredient you chose to avoid."
+
+#. js-lingui-explicit-id
+msgid "Your box has changed. Review the updated total."
+msgstr "Your box has changed. Review the updated total."
+
+#. js-lingui-explicit-id
+msgid "Payment must be confirmed before fulfillment."
+msgstr "Payment must be confirmed before fulfillment."
+
+#. js-lingui-explicit-id
+msgid "That fulfillment transition is not available."
+msgstr "That fulfillment transition is not available."
+
+#. js-lingui-explicit-id
+msgid "This box is locked for preparation. Please contact support."
+msgstr "This box is locked for preparation. Please contact support."
+
+#. js-lingui-explicit-id
+msgid "Choose an approved recipe version."
+msgstr "Choose an approved recipe version."
+
+#. js-lingui-explicit-id
+msgid "Remove archived recipes before publishing."
+msgstr "Remove archived recipes before publishing."
+
+#. js-lingui-explicit-id
+msgid "You have a payment in progress. Open My deliveries to finish it before starting another order."
+msgstr "You have a payment in progress. Open My deliveries to finish it before starting another order."
+
+#. js-lingui-explicit-id
+msgid "The time to complete payment has ended. Your meals are no longer reserved."
+msgstr "The time to complete payment has ended. Your meals are no longer reserved."
+
+#. js-lingui-explicit-id
+msgid "This payment already has a final result. Refresh the order."
+msgstr "This payment already has a final result. Refresh the order."
+
+#. js-lingui-explicit-id
+msgid "This payment needs review. Please contact support."
+msgstr "This payment needs review. Please contact support."
+
+#. js-lingui-explicit-id
+msgid "Payment arrived after your meals were released. Your order needs review before it can be prepared."
+msgstr "Payment arrived after your meals were released. Your order needs review before it can be prepared."
+
+#. js-lingui-explicit-id
+msgid "Payment confirmed"
+msgstr "Payment confirmed"
+
+#. js-lingui-explicit-id
+msgid "Payment was declined. No payment was taken."
+msgstr "Payment was declined. No payment was taken."
+
+#. js-lingui-explicit-id
+msgid "Checkout is unavailable right now. Please try again later."
+msgstr "Checkout is unavailable right now. Please try again later."
+
+#. js-lingui-explicit-id
+msgid "A meal or delivery slot just sold out. Please update your box."
+msgstr "A meal or delivery slot just sold out. Please update your box."
+
+#. js-lingui-explicit-id
+msgid "Availability changed. Please retry."
+msgstr "Availability changed. Please retry."
+
+#. js-lingui-explicit-id
+msgid "Your staff account does not have access to this action in this country."
+msgstr "Your staff account does not have access to this action in this country."
+
+#. placeholder {0}: r.minutes
+msgid "{0, plural, one {# minute} other {# minutes}}"
+msgstr "{0, plural, one {# minute} other {# minutes}}"
+
+#. placeholder {0}: converted.amount
+msgid "{0, plural, one {# piece} other {# pieces}}"
+msgstr "{0, plural, one {# piece} other {# pieces}}"
+
+#. placeholder {0}: feedback.rating
+msgid "{0, plural, one {# star} other {# stars}}"
+msgstr "{0, plural, one {# star} other {# stars}}"
+
+#. placeholder {0}: cart.mealCount - cart.recipeIds.length
+msgid "{0, plural, one {Choose # more meal} other {Choose # more meals}}"
+msgstr "{0, plural, one {Choose # more meal} other {Choose # more meals}}"
+
+#. placeholder {0}: cart.recipeIds.length
+msgid "{0, plural, one {Your box, # meal} other {Your box, # meals}}"
+msgstr "{0, plural, one {Your box, # meal} other {Your box, # meals}}"
+
+#. placeholder {0}: deliveryLabel(o.snapshot.cart.deliveryDate, o.market, locale)
+#. placeholder {1}: t(boxSizeMessage(o.snapshot.cart.mealCount, o.snapshot.cart.servings))
+msgid "{0} · {1}"
+msgstr "{0} · {1}"
+
+#. placeholder {0}: r.calories
+#. placeholder {0}: recipe.calories
+msgid "{0} kcal"
+msgstr "{0} kcal"
+
+#. placeholder {0}: recipe.minutes
+msgid "{0} min"
+msgstr "{0} min"
+
+#. placeholder {0}: cart.recipeIds.length
+#. placeholder {1}: cart.mealCount
+msgid "{0}/{1} meals selected"
+msgstr "{0}/{1} meals selected"
+
+#. placeholder {0}: r.protein
+msgid "{0}g protein"
+msgstr "{0}g protein"
+
+msgid "{amount} g"
+msgstr "{amount} g"
+
+msgid "{amount} ml"
+msgstr "{amount} ml"
+
+msgid "{amount} oz"
+msgstr "{amount} oz"
+
+msgid "{amount} UK fl oz"
+msgstr "{amount} UK fl oz"
+
+msgid "{amount} US fl oz"
+msgstr "{amount} US fl oz"
+
+msgid "{day}, available for delivery"
+msgstr "{day}, available for delivery"
+
+msgid "{day}, selected"
+msgstr "{day}, selected"
+
+msgid "{day}, unavailable"
+msgstr "{day}, unavailable"
+
+msgid "{meals} meals for {people, plural, one {# person} other {# people}}"
+msgstr "{meals} meals for {people, plural, one {# person} other {# people}}"
+
+msgid "{purchasedServings, plural, one {Ingredients for # person} other {Ingredients for # people}}"
+msgstr "{purchasedServings, plural, one {Ingredients for # person} other {Ingredients for # people}}"
+
+msgid "{value, plural, one {# person} other {# people}}"
+msgstr "{value, plural, one {# person} other {# people}}"
+
+msgid "{value, plural, one {# star} other {# stars}}"
+msgstr "{value, plural, one {# star} other {# stars}}"
+
+msgid "/ serving"
+msgstr "/ serving"
+
+msgid "2 meals"
+msgstr "2 meals"
+
+msgid "3 meals"
+msgstr "3 meals"
+
+msgid "4 meals"
+msgstr "4 meals"
+
+msgid "A delicious mix of everyday favorites and new discoveries. Pick what you love."
+msgstr "A delicious mix of everyday favorites and new discoveries. Pick what you love."
+
+msgid "A fresh start to your week"
+msgstr "A fresh start to your week"
+
+msgid "A LITTLE HELP"
+msgstr "A LITTLE HELP"
+
+msgid "A TASTE OF WHAT'S COOKING"
+msgstr "A TASTE OF WHAT'S COOKING"
+
+msgid "Access history"
+msgstr "Access history"
+
+msgid "Access suspended"
+msgstr "Access suspended"
+
+msgid "Account deletion"
+msgstr "Account deletion"
+
+msgid "Account ID"
+msgstr "Account ID"
+
+msgid "Account navigation"
+msgstr "Account navigation"
+
+msgid "Account sections"
+msgstr "Account sections"
+
+msgid "Action"
+msgstr "Action"
+
+msgid "Active"
+msgstr "Active"
+
+#. placeholder {0}: recipeText(recipe, locale).name
+msgid "Add {0}"
+msgstr "Add {0}"
+
+msgid "Add a colleague and choose what they can manage."
+msgstr "Add a colleague and choose what they can manage."
+
+msgid "Add a delivery address to use at checkout."
+msgstr "Add a delivery address to use at checkout."
+
+msgid "Add address"
+msgstr "Add address"
+
+msgid "Add cooking step"
+msgstr "Add cooking step"
+
+msgid "Add ingredient"
+msgstr "Add ingredient"
+
+msgid "Add team member"
+msgstr "Add team member"
+
+msgid "Add timer"
+msgstr "Add timer"
+
+msgid "Add to my box"
+msgstr "Add to my box"
+
+msgid "Add your delivery area"
+msgstr "Add your delivery area"
+
+msgid "Added to your box."
+msgstr "Added to your box."
+
+msgid "Additional authentication required"
+msgstr "Additional authentication required"
+
+msgid "Address book"
+msgstr "Address book"
+
+msgid "Address label"
+msgstr "Address label"
+
+msgid "Address saved."
+msgstr "Address saved."
+
+msgid "All recipes"
+msgstr "All recipes"
+
+msgid "Allergen preferences"
+msgstr "Allergen preferences"
+
+msgid "Allergens"
+msgstr "Allergens"
+
+msgid "Allow staff access"
+msgstr "Allow staff access"
+
+msgid "ALMOST AT YOUR TABLE"
+msgstr "ALMOST AT YOUR TABLE"
+
+msgid "Already in your box."
+msgstr "Already in your box."
+
+msgid "American"
+msgstr "American"
+
+msgid "Amount"
+msgstr "Amount"
+
+msgid "Another tab or device updated your box. Review both versions before continuing."
+msgstr "Another tab or device updated your box. Review both versions before continuing."
+
+msgid "Anything you'd change? (optional)"
+msgstr "Anything you'd change? (optional)"
+
+msgid "Apply these exclusions to my current box"
+msgstr "Apply these exclusions to my current box"
+
+msgid "Approval creates a fixed version. Publish that version in a menu when it is ready to sell."
+msgstr "Approval creates a fixed version. Publish that version in a menu when it is ready to sell."
+
+msgid "Approve recipe"
+msgstr "Approve recipe"
+
+msgid "Approve saved recipe"
+msgstr "Approve saved recipe"
+
+msgid "Approved version"
+msgstr "Approved version"
+
+msgid "Approved versions"
+msgstr "Approved versions"
+
+msgid "Archive recipe"
+msgstr "Archive recipe"
+
+msgid "Archived"
+msgstr "Archived"
+
+msgid "Arriving"
+msgstr "Arriving"
+
+msgid "Ask us to delete your account data. Cancel your plans and upcoming orders separately. Some order records may need to be kept."
+msgstr "Ask us to delete your account data. Cancel your plans and upcoming orders separately. Some order records may need to be kept."
+
+msgid "At your table"
+msgstr "At your table"
+
+msgid "Authentication required"
+msgstr "Authentication required"
+
+msgid "Available"
+msgstr "Available"
+
+msgid "Available to order"
+msgstr "Available to order"
+
+msgid "Awaiting preparation"
+msgstr "Awaiting preparation"
+
+msgid "Back"
+msgstr "Back"
+
+msgid "Back to menu"
+msgstr "Back to menu"
+
+msgid "Back to my meals"
+msgstr "Back to my meals"
+
+msgid "Back to order"
+msgstr "Back to order"
+
+msgid "Base price per serving"
+msgstr "Base price per serving"
+
+msgid "Based on your box size and selected extras. Confirm the final total at checkout."
+msgstr "Based on your box size and selected extras. Confirm the final total at checkout."
+
+msgid "Be the first to know"
+msgstr "Be the first to know"
+
+msgid "Blender"
+msgstr "Blender"
+
+msgid "Box"
+msgstr "Box"
+
+msgid "Box created"
+msgstr "Box created"
+
+msgid "Box size"
+msgstr "Box size"
+
+msgid "Bright flavors, comforting classics, and something a little unexpected."
+msgstr "Bright flavors, comforting classics, and something a little unexpected."
+
+msgid "Build another box"
+msgstr "Build another box"
+
+msgid "Build your box"
+msgstr "Build your box"
+
+msgid "Calendar navigation"
+msgstr "Calendar navigation"
+
+msgid "Calories per serving"
+msgstr "Calories per serving"
+
+msgid "Can I skip, pause or cancel?"
+msgstr "Can I skip, pause or cancel?"
+
+msgid "Cancel plan"
+msgstr "Cancel plan"
+
+msgid "Cancel request"
+msgstr "Cancel request"
+
+msgid "Cancel this box"
+msgstr "Cancel this box"
+
+msgid "Cancel this box?"
+msgstr "Cancel this box?"
+
+msgid "Cancel your weekly plan?"
+msgstr "Cancel your weekly plan?"
+
+msgid "Canceled"
+msgstr "Canceled"
+
+msgid "Catalog sections"
+msgstr "Catalog sections"
+
+msgid "Change"
+msgstr "Change"
+
+msgid "Change by"
+msgstr "Change by"
+
+msgid "Change delivery or box size"
+msgstr "Change delivery or box size"
+
+#. placeholder {0}: entry.actor
+msgid "Changed by {0}"
+msgstr "Changed by {0}"
+
+msgid "Check payment status"
+msgstr "Check payment status"
+
+msgid "Check supplier labels for cross-contact information."
+msgstr "Check supplier labels for cross-contact information."
+
+msgid "Check the current total. We'll confirm availability when you pay."
+msgstr "Check the current total. We'll confirm availability when you pay."
+
+msgid "Check the meals marked in your box and finish your selection before checkout."
+msgstr "Check the meals marked in your box and finish your selection before checkout."
+
+msgid "Check the recipe link, field lengths and ingredient quantities."
+msgstr "Check the recipe link, field lengths and ingredient quantities."
+
+msgid "Check your meals, delivery address and total."
+msgstr "Check your meals, delivery address and total."
+
+msgid "Checkout"
+msgstr "Checkout"
+
+msgid "Chicken"
+msgstr "Chicken"
+
+msgid "Choose a box"
+msgstr "Choose a box"
+
+msgid "Choose a country for your workspace"
+msgstr "Choose a country for your workspace"
+
+msgid "Choose a delivery date"
+msgstr "Choose a delivery date"
+
+msgid "Choose a delivery day. Your ingredients arrive ready to cook."
+msgstr "Choose a delivery day. Your ingredients arrive ready to cook."
+
+msgid "Choose a highlighted day for your delivery."
+msgstr "Choose a highlighted day for your delivery."
+
+msgid "Choose a meal"
+msgstr "Choose a meal"
+
+msgid "Choose a plan that feels right, starting at"
+msgstr "Choose a plan that feels right, starting at"
+
+msgid "Choose an available delivery date to see prices."
+msgstr "Choose an available delivery date to see prices."
+
+msgid "Choose another delivery date to explore available meals."
+msgstr "Choose another delivery date to explore available meals."
+
+msgid "Choose another delivery date to see available meals."
+msgstr "Choose another delivery date to see available meals."
+
+msgid "Choose delivery details"
+msgstr "Choose delivery details"
+
+msgid "Choose how many people you're cooking for, your meals and a delivery day. Manage your next box from My deliveries."
+msgstr "Choose how many people you're cooking for, your meals and a delivery day. Manage your next box from My deliveries."
+
+msgid "Choose meals and a delivery date to get started."
+msgstr "Choose meals and a delivery date to get started."
+
+msgid "Choose meals or manage your deliveries."
+msgstr "Choose meals or manage your deliveries."
+
+msgid "Choose which box to keep in your account. Your existing orders won't change."
+msgstr "Choose which box to keep in your account. Your existing orders won't change."
+
+msgid "Choose your box."
+msgstr "Choose your box."
+
+msgid "Choose your delivery area and meals to continue."
+msgstr "Choose your delivery area and meals to continue."
+
+msgid "Choose your delivery country to explore local meals and delivery options."
+msgstr "Choose your delivery country to explore local meals and delivery options."
+
+msgid "Choose your delivery country to return to Gather."
+msgstr "Choose your delivery country to return to Gather."
+
+msgid "Choose your first box"
+msgstr "Choose your first box"
+
+msgid "Choose your portions, delivery day and how often you'd like to order."
+msgstr "Choose your portions, delivery day and how often you'd like to order."
+
+msgid "City"
+msgstr "City"
+
+msgid "Clear search and category"
+msgstr "Clear search and category"
+
+msgid "Close"
+msgstr "Close"
+
+msgid "Colleague's name"
+msgstr "Colleague's name"
+
+msgid "Comfort classics"
+msgstr "Comfort classics"
+
+msgid "Complete payment verification to confirm your order."
+msgstr "Complete payment verification to confirm your order."
+
+msgid "Complete verification"
+msgstr "Complete verification"
+
+msgid "Complete verification by"
+msgstr "Complete verification by"
+
+msgid "Completed"
+msgstr "Completed"
+
+msgid "Confirm approval"
+msgstr "Confirm approval"
+
+msgid "Confirm cancellation"
+msgstr "Confirm cancellation"
+
+msgid "Confirm change"
+msgstr "Confirm change"
+
+msgid "Confirm meals and price"
+msgstr "Confirm meals and price"
+
+msgid "Confirm payment"
+msgstr "Confirm payment"
+
+msgid "Confirmed"
+msgstr "Confirmed"
+
+msgid "Confirmed boxes"
+msgstr "Confirmed boxes"
+
+msgid "Confirming payment"
+msgstr "Confirming payment"
+
+msgid "Contains"
+msgstr "Contains"
+
+msgid "Contains allergens"
+msgstr "Contains allergens"
+
+msgid "Content language"
+msgstr "Content language"
+
+msgid "Continue choosing meals"
+msgstr "Continue choosing meals"
+
+msgid "Continue to box size"
+msgstr "Continue to box size"
+
+msgid "Continue to checkout"
+msgstr "Continue to checkout"
+
+msgid "Cook. Gather. Enjoy."
+msgstr "Cook. Gather. Enjoy."
+
+msgid "Cooking steps"
+msgstr "Cooking steps"
+
+msgid "Cooking units"
+msgstr "Cooking units"
+
+msgid "Country manager"
+msgstr "Country manager"
+
+msgid "Country roles control operational access. Editing the shared recipe library is a separate permission."
+msgstr "Country roles control operational access. Editing the shared recipe library is a separate permission."
+
+msgid "Cuisines you enjoy"
+msgstr "Cuisines you enjoy"
+
+msgid "Customer"
+msgstr "Customer"
+
+msgid "Customer account ID"
+msgstr "Customer account ID"
+
+msgid "Customer feedback will appear here after delivery."
+msgstr "Customer feedback will appear here after delivery."
+
+msgid "Customer support"
+msgstr "Customer support"
+
+msgid "Customer support requests will appear here."
+msgstr "Customer support requests will appear here."
+
+msgid "Data export"
+msgstr "Data export"
+
+msgid "Date"
+msgstr "Date"
+
+msgid "Dated menus"
+msgstr "Dated menus"
+
+msgid "Declined"
+msgstr "Declined"
+
+msgid "Default address"
+msgstr "Default address"
+
+msgid "Delivered"
+msgstr "Delivered"
+
+msgid "Delivered and canceled orders will appear here."
+msgstr "Delivered and canceled orders will appear here."
+
+msgid "Delivery"
+msgstr "Delivery"
+
+msgid "Delivery & box size"
+msgstr "Delivery & box size"
+
+msgid "Delivery & FAQs"
+msgstr "Delivery & FAQs"
+
+msgid "Delivery address"
+msgstr "Delivery address"
+
+msgid "Delivery area"
+msgstr "Delivery area"
+
+msgid "Delivery capacity"
+msgstr "Delivery capacity"
+
+msgid "Delivery country"
+msgstr "Delivery country"
+
+msgid "Delivery date"
+msgstr "Delivery date"
+
+msgid "Delivery details"
+msgstr "Delivery details"
+
+msgid "Delivery fee"
+msgstr "Delivery fee"
+
+msgid "Delivery frequency"
+msgstr "Delivery frequency"
+
+msgid "Delivery instructions (optional)"
+msgstr "Delivery instructions (optional)"
+
+msgid "Delivery needs attention"
+msgstr "Delivery needs attention"
+
+msgid "Delivery problem"
+msgstr "Delivery problem"
+
+#. placeholder {0}: deliveryLabel(value, market, locale)
+msgid "Delivery: {0}"
+msgstr "Delivery: {0}"
+
+msgid "Demo fulfillment workspace"
+msgstr "Demo fulfillment workspace"
+
+msgid "Deployment administrators"
+msgstr "Deployment administrators"
+
+msgid "Description"
+msgstr "Description"
+
+msgid "Details"
+msgstr "Details"
+
+msgid "Dismiss timer for step {step}"
+msgstr "Dismiss timer for step {step}"
+
+msgid "District"
+msgstr "District"
+
+msgid "Download data"
+msgstr "Download data"
+
+msgid "Download order details"
+msgstr "Download order details"
+
+msgid "Download your data"
+msgstr "Download your data"
+
+msgid "Draft"
+msgstr "Draft"
+
+msgid "East Asian"
+msgstr "East Asian"
+
+msgid "Edit"
+msgstr "Edit"
+
+msgid "Edit access"
+msgstr "Edit access"
+
+#. placeholder {0}: member.name
+msgid "Edit access for {0}"
+msgstr "Edit access for {0}"
+
+msgid "Edit address"
+msgstr "Edit address"
+
+msgid "Edit and approve the shared recipe library"
+msgstr "Edit and approve the shared recipe library"
+
+msgid "Edit available inventory"
+msgstr "Edit available inventory"
+
+msgid "Edit meals"
+msgstr "Edit meals"
+
+msgid "Edit team access"
+msgstr "Edit team access"
+
+msgid "Editable draft"
+msgstr "Editable draft"
+
+msgid "Email"
+msgstr "Email"
+
+msgid "Email address"
+msgstr "Email address"
+
+msgid "Email me when delivery is available in my area."
+msgstr "Email me when delivery is available in my area."
+
+msgid "Enter another address"
+msgstr "Enter another address"
+
+msgid "Enter the address where you'd like your box delivered."
+msgstr "Enter the address where you'd like your box delivered."
+
+msgid "Enter your delivery area on Our plans to see whether we deliver to you and which days are available."
+msgstr "Enter your delivery area on Our plans to see whether we deliver to you and which days are available."
+
+msgid "Equipment"
+msgstr "Equipment"
+
+msgid "Equipment in your kitchen"
+msgstr "Equipment in your kitchen"
+
+msgid "Estimated total"
+msgstr "Estimated total"
+
+msgid "Exclude meals containing"
+msgstr "Exclude meals containing"
+
+msgid "Exclude meals containing ingredients you want to avoid."
+msgstr "Exclude meals containing ingredients you want to avoid."
+
+msgid "Explore Gather"
+msgstr "Explore Gather"
+
+msgid "Explore the menu"
+msgstr "Explore the menu"
+
+msgid "Export packing list"
+msgstr "Export packing list"
+
+msgid "Extra per serving"
+msgstr "Extra per serving"
+
+msgid "Fill in the delivery details below."
+msgstr "Fill in the delivery details below."
+
+msgid "Filters do not guarantee absence of cross-contact. Review each recipe and supplier labels before cooking."
+msgstr "Filters do not guarantee absence of cross-contact. Review each recipe and supplier labels before cooking."
+
+msgid "Find something delicious…"
+msgstr "Find something delicious…"
+
+msgid "Find your first box"
+msgstr "Find your first box"
+
+msgid "Find your plan"
+msgstr "Find your plan"
+
+msgid "Finish your box"
+msgstr "Finish your box"
+
+msgid "First, find your delivery options. Then choose the meals you look forward to cooking."
+msgstr "First, find your delivery options. Then choose the meals you look forward to cooking."
+
+msgid "Fish"
+msgstr "Fish"
+
+msgid "Flexible plans. Skip or pause before your order deadline."
+msgstr "Flexible plans. Skip or pause before your order deadline."
+
+msgid "Follow a few simple steps and make dinnertime your favorite time."
+msgstr "Follow a few simple steps and make dinnertime your favorite time."
+
+msgid "Food preferences"
+msgstr "Food preferences"
+
+msgid "For example, home or work"
+msgstr "For example, home or work"
+
+msgid "FRESH INGREDIENTS. EVERYDAY JOY."
+msgstr "FRESH INGREDIENTS. EVERYDAY JOY."
+
+msgid "Fresh, thoughtfully sourced"
+msgstr "Fresh, thoughtfully sourced"
+
+msgid "Freshly prepared chicken, vegetables and colorful bowls on a dinner table"
+msgstr "Freshly prepared chicken, vegetables and colorful bowls on a dinner table"
+
+msgid "From our kitchen to yours."
+msgstr "From our kitchen to yours."
+
+msgid "From your kitchen"
+msgstr "From your kitchen"
+
+msgid "Fulfillment"
+msgstr "Fulfillment"
+
+msgid "Future deliveries will stop. Any confirmed boxes will still arrive unless you cancel them separately before their deadline."
+msgstr "Future deliveries will stop. Any confirmed boxes will still arrive unless you cancel them separately before their deadline."
+
+msgid "Gather — good food, closer to home"
+msgstr "Gather — good food, closer to home"
+
+msgid "Gather back office"
+msgstr "Gather back office"
+
+msgid "Gather home"
+msgstr "Gather home"
+
+msgid "GATHER OPERATIONS"
+msgstr "GATHER OPERATIONS"
+
+msgid "Get a copy of your profile, addresses, subscriptions, orders and support history."
+msgstr "Get a copy of your profile, addresses, subscriptions, orders and support history."
+
+msgid "Give each colleague access to the countries and work they manage. Changes apply to their next request."
+msgstr "Give each colleague access to the countries and work they manage. Changes apply to their next request."
+
+msgid "Give this address a name, such as Home or Work."
+msgstr "Give this address a name, such as Home or Work."
+
+msgid "Go to my deliveries"
+msgstr "Go to my deliveries"
+
+msgid "Good dinners start here."
+msgstr "Good dinners start here."
+
+msgid "GOOD DINNERS, SIMPLY DONE"
+msgstr "GOOD DINNERS, SIMPLY DONE"
+
+msgid "Good food, thoughtfully delivered."
+msgstr "Good food, thoughtfully delivered."
+
+msgid "Good food. A little more together."
+msgstr "Good food. A little more together."
+
+msgid "Good questions. Simple answers."
+msgstr "Good questions. Simple answers."
+
+msgid "Harvest bowl"
+msgstr "Harvest bowl"
+
+msgid "Here to help"
+msgstr "Here to help"
+
+msgid "How does a weekly plan work?"
+msgstr "How does a weekly plan work?"
+
+msgid "How it works"
+msgstr "How it works"
+
+msgid "How was this meal?"
+msgstr "How was this meal?"
+
+msgid "I agree to the order terms for this one-time purchase."
+msgstr "I agree to the order terms for this one-time purchase."
+
+msgid "I agree to this order and saving my choices for a weekly plan. I will review and confirm each future box before ordering."
+msgstr "I agree to this order and saving my choices for a weekly plan. I will review and confirm each future box before ordering."
+
+msgid "In preparation"
+msgstr "In preparation"
+
+msgid "Included in your plan"
+msgstr "Included in your plan"
+
+#. placeholder {0}: index + 1
+msgid "Ingredient {0}"
+msgstr "Ingredient {0}"
+
+msgid "Ingredient quality"
+msgstr "Ingredient quality"
+
+msgid "Ingredient units"
+msgstr "Ingredient units"
+
+msgid "Ingredients"
+msgstr "Ingredients"
+
+msgid "Ingredients and quantities"
+msgstr "Ingredients and quantities"
+
+msgid "Ingredients to avoid"
+msgstr "Ingredients to avoid"
+
+msgid "Inventory & menu"
+msgstr "Inventory & menu"
+
+msgid "Item"
+msgstr "Item"
+
+msgid "Keep Gather open to see timer alerts."
+msgstr "Keep Gather open to see timer alerts."
+
+msgid "Keep my plan"
+msgstr "Keep my plan"
+
+msgid "Keep this box"
+msgstr "Keep this box"
+
+msgid "Kitchen timers"
+msgstr "Kitchen timers"
+
+msgid "Language"
+msgstr "Language"
+
+msgid "Let us make it right."
+msgstr "Let us make it right."
+
+msgid "Let's check delivery to your area. Your full address comes later."
+msgstr "Let's check delivery to your area. Your full address comes later."
+
+msgid "Let's get cooking"
+msgstr "Let's get cooking"
+
+msgid "Let's try that again"
+msgstr "Let's try that again"
+
+msgid "Load sample menus for this country"
+msgstr "Load sample menus for this country"
+
+msgid "Load saved feedback"
+msgstr "Load saved feedback"
+
+msgid "Loading your saved box…"
+msgstr "Loading your saved box…"
+
+msgid "Loading…"
+msgstr "Loading…"
+
+msgid "Log in"
+msgstr "Log in"
+
+msgid "Main navigation"
+msgstr "Main navigation"
+
+msgid "Make default"
+msgstr "Make default"
+
+msgid "Make it yours"
+msgstr "Make it yours"
+
+msgid "MAKE IT YOURS"
+msgstr "MAKE IT YOURS"
+
+msgid "Make room for a good dinner. Discover delicious recipes, build your box, and enjoy ingredients ready for your kitchen."
+msgstr "Make room for a good dinner. Discover delicious recipes, build your box, and enjoy ingredients ready for your kitchen."
+
+msgid "Make room for a new favorite."
+msgstr "Make room for a new favorite."
+
+msgid "Make room for<0/><1>good food.</1>"
+msgstr "Make room for<0/><1>good food.</1>"
+
+msgid "Make this my default address"
+msgstr "Make this my default address"
+
+msgid "Manage box"
+msgstr "Manage box"
+
+msgid "Manage your plan"
+msgstr "Manage your plan"
+
+msgid "Managers can issue refunds and manage all operations in their countries. Support colleagues can respond to requests; refunds require a manager."
+msgstr "Managers can issue refunds and manage all operations in their countries. Support colleagues can respond to requests; refunds require a manager."
+
+#. placeholder {0}: i + 1
+msgid "Mark step {0} complete"
+msgstr "Mark step {0} complete"
+
+#. placeholder {0}: i + 1
+msgid "Mark step {0} incomplete"
+msgstr "Mark step {0} incomplete"
+
+msgid "Meal rating"
+msgstr "Meal rating"
+
+msgid "Meals"
+msgstr "Meals"
+
+msgid "Meals per box"
+msgstr "Meals per box"
+
+msgid "Meals updated"
+msgstr "Meals updated"
+
+msgid "Mediterranean"
+msgstr "Mediterranean"
+
+msgid "Meet your next favorite."
+msgstr "Meet your next favorite."
+
+msgid "Menu delivery date"
+msgstr "Menu delivery date"
+
+msgid "Menu draft saved."
+msgstr "Menu draft saved."
+
+msgid "Menu editor"
+msgstr "Menu editor"
+
+msgid "Menu published."
+msgstr "Menu published."
+
+msgid "Menu withdrawn. Existing orders are unchanged."
+msgstr "Menu withdrawn. Existing orders are unchanged."
+
+msgid "Menus & recipes"
+msgstr "Menus & recipes"
+
+msgid "Metric"
+msgstr "Metric"
+
+msgid "Microwave"
+msgstr "Microwave"
+
+msgid "Middle Eastern"
+msgstr "Middle Eastern"
+
+msgid "Milk"
+msgstr "Milk"
+
+msgid "Minutes"
+msgstr "Minutes"
+
+msgid "Missing item"
+msgstr "Missing item"
+
+msgid "Mobile number"
+msgstr "Mobile number"
+
+msgid "Mushrooms"
+msgstr "Mushrooms"
+
+msgid "My account"
+msgstr "My account"
+
+msgid "My deliveries"
+msgstr "My deliveries"
+
+msgid "Need help with a delivery? Open the order and tell us what happened."
+msgstr "Need help with a delivery? Open the order and tell us what happened."
+
+msgid "New recipe"
+msgstr "New recipe"
+
+msgid "New team member"
+msgstr "New team member"
+
+msgid "Next action"
+msgstr "Next action"
+
+msgid "Next box to review"
+msgstr "Next box to review"
+
+msgid "Next month"
+msgstr "Next month"
+
+msgid "No"
+msgstr "No"
+
+msgid "No access changes yet"
+msgstr "No access changes yet"
+
+msgid "No meals match just yet"
+msgstr "No meals match just yet"
+
+msgid "No meals selected yet."
+msgstr "No meals selected yet."
+
+msgid "No menu for this date"
+msgstr "No menu for this date"
+
+msgid "No menu is available for this date. Please choose another delivery day."
+msgstr "No menu is available for this date. Please choose another delivery day."
+
+msgid "No past orders yet"
+msgstr "No past orders yet"
+
+msgid "No recipe feedback yet"
+msgstr "No recipe feedback yet"
+
+msgid "No requests yet."
+msgstr "No requests yet."
+
+msgid "No saved addresses yet"
+msgstr "No saved addresses yet"
+
+msgid "No support requests"
+msgstr "No support requests"
+
+msgid "No upcoming boxes"
+msgstr "No upcoming boxes"
+
+msgid "No workspace access"
+msgstr "No workspace access"
+
+msgid "Not sure"
+msgstr "Not sure"
+
+msgid "Nothing waiting on you."
+msgstr "Nothing waiting on you."
+
+msgid "Notify me"
+msgstr "Notify me"
+
+msgid "Nutrition basis"
+msgstr "Nutrition basis"
+
+msgid "Nuts"
+msgstr "Nuts"
+
+msgid "ON THE MENU"
+msgstr "ON THE MENU"
+
+msgid "On the road"
+msgstr "On the road"
+
+msgid "On the way"
+msgstr "On the way"
+
+msgid "One fewer person"
+msgstr "One fewer person"
+
+msgid "One more person"
+msgstr "One more person"
+
+msgid "One-time box"
+msgstr "One-time box"
+
+msgid "One-time purchase. No recurring deliveries."
+msgstr "One-time purchase. No recurring deliveries."
+
+msgid "Open"
+msgstr "Open"
+
+msgid "Open navigation"
+msgstr "Open navigation"
+
+msgid "Open support cases"
+msgstr "Open support cases"
+
+msgid "Open your order in My deliveries and choose Report an issue. Tell us what happened and we'll reply through your account."
+msgstr "Open your order in My deliveries and choose Report an issue. Tell us what happened and we'll reply through your account."
+
+msgid "Operations"
+msgstr "Operations"
+
+msgid "Operations sections"
+msgstr "Operations sections"
+
+msgid "Order history"
+msgstr "Order history"
+
+msgid "Order reference"
+msgstr "Order reference"
+
+msgid "Order summary"
+msgstr "Order summary"
+
+msgid "Order this box"
+msgstr "Order this box"
+
+msgid "Order updates"
+msgstr "Order updates"
+
+msgid "Orders & fulfillment"
+msgstr "Orders & fulfillment"
+
+msgid "Other city"
+msgstr "Other city"
+
+msgid "Other district"
+msgstr "Other district"
+
+msgid "Other province or municipality"
+msgstr "Other province or municipality"
+
+msgid "Our plans"
+msgstr "Our plans"
+
+msgid "Oven"
+msgstr "Oven"
+
+msgid "Packing"
+msgstr "Packing"
+
+msgid "Paid"
+msgstr "Paid"
+
+msgid "Pantry essentials"
+msgstr "Pantry essentials"
+
+msgid "Pasta"
+msgstr "Pasta"
+
+msgid "Pause plan"
+msgstr "Pause plan"
+
+msgid "Pause timer"
+msgstr "Pause timer"
+
+msgid "Pause your weekly plan?"
+msgstr "Pause your weekly plan?"
+
+msgid "Paused"
+msgstr "Paused"
+
+msgid "Payment"
+msgstr "Payment"
+
+msgid "Payment confirmation delayed"
+msgstr "Payment confirmation delayed"
+
+msgid "Payment declined"
+msgstr "Payment declined"
+
+msgid "Payment needs attention"
+msgstr "Payment needs attention"
+
+msgid "Payment question"
+msgstr "Payment question"
+
+msgid "Payment scenario"
+msgstr "Payment scenario"
+
+msgid "Payment succeeds"
+msgstr "Payment succeeds"
+
+msgid "Payment time ended"
+msgstr "Payment time ended"
+
+msgid "Payment under review"
+msgstr "Payment under review"
+
+msgid "People per meal"
+msgstr "People per meal"
+
+msgid "per serving, plus delivery."
+msgstr "per serving, plus delivery."
+
+msgid "Phone number"
+msgstr "Phone number"
+
+msgid "Photo"
+msgstr "Photo"
+
+msgid "Pick the meals and portions that fit your table."
+msgstr "Pick the meals and portions that fit your table."
+
+msgid "pieces"
+msgstr "pieces"
+
+msgid "Place a demo order from the storefront to see it here."
+msgstr "Place a demo order from the storefront to see it here."
+
+msgid "Place order"
+msgstr "Place order"
+
+msgid "Placing your order…"
+msgstr "Placing your order…"
+
+msgid "Plan changes apply to future deliveries. Manage confirmed boxes below."
+msgstr "Plan changes apply to future deliveries. Manage confirmed boxes below."
+
+msgid "Preferences saved."
+msgstr "Preferences saved."
+
+msgid "Premium selections"
+msgstr "Premium selections"
+
+msgid "Preparation time (minutes)"
+msgstr "Preparation time (minutes)"
+
+msgid "Prepare menu inventory"
+msgstr "Prepare menu inventory"
+
+msgid "Preview tools"
+msgstr "Preview tools"
+
+msgid "Previous access"
+msgstr "Previous access"
+
+msgid "Previous month"
+msgstr "Previous month"
+
+msgid "Print recipe"
+msgstr "Print recipe"
+
+msgid "Privacy & data"
+msgstr "Privacy & data"
+
+msgid "Privacy and data"
+msgstr "Privacy and data"
+
+msgid "Protein per serving (g)"
+msgstr "Protein per serving (g)"
+
+msgid "Province or municipality"
+msgstr "Province or municipality"
+
+msgid "Publish saved menu"
+msgstr "Publish saved menu"
+
+msgid "Published"
+msgstr "Published"
+
+msgid "Quantities serve"
+msgstr "Quantities serve"
+
+msgid "Quick & easy"
+msgstr "Quick & easy"
+
+msgid "Ready for collection"
+msgstr "Ready for collection"
+
+msgid "Ready for the first box."
+msgstr "Ready for the first box."
+
+msgid "Recent recipe feedback"
+msgstr "Recent recipe feedback"
+
+msgid "Recipe"
+msgstr "Recipe"
+
+msgid "Recipe approved."
+msgstr "Recipe approved."
+
+msgid "Recipe categories"
+msgstr "Recipe categories"
+
+msgid "Recipe category"
+msgstr "Recipe category"
+
+msgid "Recipe draft saved."
+msgstr "Recipe draft saved."
+
+msgid "Recipe feedback"
+msgstr "Recipe feedback"
+
+msgid "Recipe library"
+msgstr "Recipe library"
+
+msgid "Recipe link"
+msgstr "Recipe link"
+
+msgid "Recipe name"
+msgstr "Recipe name"
+
+msgid "Recipe tag"
+msgstr "Recipe tag"
+
+msgid "Recipes you'll want again"
+msgstr "Recipes you'll want again"
+
+msgid "Recipient name"
+msgstr "Recipient name"
+
+msgid "Record a response and an optional simulated refund. Refunds cannot exceed the remaining paid balance."
+msgstr "Record a response and an optional simulated refund. Refunds cannot exceed the remaining paid balance."
+
+msgid "Refresh"
+msgstr "Refresh"
+
+msgid "Refresh total"
+msgstr "Refresh total"
+
+msgid "Refund"
+msgstr "Refund"
+
+msgid "Refund amount"
+msgstr "Refund amount"
+
+msgid "Refund late payment"
+msgstr "Refund late payment"
+
+msgid "Refunded"
+msgstr "Refunded"
+
+msgid "Reload and retry"
+msgstr "Reload and retry"
+
+msgid "Remaining quantity"
+msgstr "Remaining quantity"
+
+msgid "Remove"
+msgstr "Remove"
+
+#. placeholder {0}: recipeText(recipe, locale).name
+msgid "Remove {0}"
+msgstr "Remove {0}"
+
+msgid "Remove address"
+msgstr "Remove address"
+
+#. placeholder {0}: index + 1
+msgid "Remove ingredient {0}"
+msgstr "Remove ingredient {0}"
+
+#. placeholder {0}: index + 1
+msgid "Remove step {0}"
+msgstr "Remove step {0}"
+
+msgid "Remove this saved address?"
+msgstr "Remove this saved address?"
+
+msgid "Remove unavailable meal"
+msgstr "Remove unavailable meal"
+
+msgid "Report an issue"
+msgstr "Report an issue"
+
+msgid "Request account deletion"
+msgstr "Request account deletion"
+
+msgid "Request data export"
+msgstr "Request data export"
+
+msgid "Request deletion"
+msgstr "Request deletion"
+
+msgid "Request sent. You can follow our reply in your account."
+msgstr "Request sent. You can follow our reply in your account."
+
+msgid "Requested"
+msgstr "Requested"
+
+msgid "Reset timer"
+msgstr "Reset timer"
+
+msgid "Resolve request"
+msgstr "Resolve request"
+
+msgid "Resolve support request"
+msgstr "Resolve support request"
+
+msgid "Resolved"
+msgstr "Resolved"
+
+msgid "Response"
+msgstr "Response"
+
+msgid "Restore recipe"
+msgstr "Restore recipe"
+
+msgid "Resume plan"
+msgstr "Resume plan"
+
+msgid "Resume timer"
+msgstr "Resume timer"
+
+msgid "Retry"
+msgstr "Retry"
+
+msgid "Review"
+msgstr "Review"
+
+msgid "Review and confirm each future box in My deliveries."
+msgstr "Review and confirm each future box in My deliveries."
+
+msgid "Review ingredients, allergens, quantities, nutrition and both languages. Approved versions cannot be edited."
+msgstr "Review ingredients, allergens, quantities, nutrition and both languages. Approved versions cannot be edited."
+
+msgid "Review next box"
+msgstr "Review next box"
+
+msgid "Review notes"
+msgstr "Review notes"
+
+msgid "Review your box"
+msgstr "Review your box"
+
+msgid "Review your next box"
+msgstr "Review your next box"
+
+msgid "Review your order"
+msgstr "Review your order"
+
+msgid "Review your payment"
+msgstr "Review your payment"
+
+msgid "Sale closes (UTC)"
+msgstr "Sale closes (UTC)"
+
+msgid "Sale opens (UTC)"
+msgstr "Sale opens (UTC)"
+
+msgid "Salmon"
+msgstr "Salmon"
+
+msgid "Sample menus are ready. Reload the menu to browse."
+msgstr "Sample menus are ready. Reload the menu to browse."
+
+msgid "Save access"
+msgstr "Save access"
+
+msgid "Save address"
+msgstr "Save address"
+
+msgid "Save an address for faster checkout. Updating it won't change existing deliveries."
+msgstr "Save an address for faster checkout. Updating it won't change existing deliveries."
+
+msgid "Save changes before publishing. Customers see the last published version until you publish again or withdraw the menu."
+msgstr "Save changes before publishing. Customers see the last published version until you publish again or withdraw the menu."
+
+msgid "Save feedback"
+msgstr "Save feedback"
+
+msgid "Save inventory"
+msgstr "Save inventory"
+
+msgid "Save menu draft"
+msgstr "Save menu draft"
+
+msgid "Save preferences"
+msgstr "Save preferences"
+
+msgid "Save recipe"
+msgstr "Save recipe"
+
+msgid "Save recipe draft"
+msgstr "Save recipe draft"
+
+msgid "Save resolution"
+msgstr "Save resolution"
+
+msgid "Save what you like and what you'd prefer to avoid. Always check each recipe's allergen information."
+msgstr "Save what you like and what you'd prefer to avoid. Always check each recipe's allergen information."
+
+msgid "Save your choices for each week. Review and confirm each box before ordering."
+msgstr "Save your choices for each week. Review and confirm each box before ordering."
+
+msgid "Saved access"
+msgstr "Saved access"
+
+msgid "Saved addresses"
+msgstr "Saved addresses"
+
+msgid "Saved box"
+msgstr "Saved box"
+
+msgid "Saving…"
+msgstr "Saving…"
+
+msgid "Search recipes"
+msgstr "Search recipes"
+
+msgid "Seasonal inspiration, delivered"
+msgstr "Seasonal inspiration, delivered"
+
+msgid "Seconds"
+msgstr "Seconds"
+
+msgid "See available meals"
+msgstr "See available meals"
+
+msgid "See the full menu"
+msgstr "See the full menu"
+
+msgid "Select a delivery day to continue."
+msgstr "Select a delivery day to continue."
+
+msgid "Select approved recipes and set any extra charge per serving. New offerings need available inventory before customers can order."
+msgstr "Select approved recipes and set any extra charge per serving. New offerings need available inventory before customers can order."
+
+msgid "Select city"
+msgstr "Select city"
+
+msgid "Select district"
+msgstr "Select district"
+
+msgid "Select province"
+msgstr "Select province"
+
+msgid "Send me optional news and offers"
+msgstr "Send me optional news and offers"
+
+msgid "Send request"
+msgstr "Send request"
+
+msgid "Servings"
+msgstr "Servings"
+
+msgid "Sesame"
+msgstr "Sesame"
+
+msgid "Set next checkout"
+msgstr "Set next checkout"
+
+msgid "Set remaining servings and delivery capacity for each published menu before taking orders. The delivery row counts boxes."
+msgstr "Set remaining servings and delivery capacity for each published menu before taking orders. The delivery row counts boxes."
+
+msgid "Shanghai"
+msgstr "Shanghai"
+
+msgid "Share your feedback with our kitchen."
+msgstr "Share your feedback with our kitchen."
+
+msgid "Shared recipe library editor"
+msgstr "Shared recipe library editor"
+
+msgid "Show meals"
+msgstr "Show meals"
+
+msgid "Sign in to continue"
+msgstr "Sign in to continue"
+
+msgid "Sign in to Gather"
+msgstr "Sign in to Gather"
+
+msgid "Sign in to keep your deliveries, recipes and preferences together."
+msgstr "Sign in to keep your deliveries, recipes and preferences together."
+
+msgid "Sign in to save your favorite recipes."
+msgstr "Sign in to save your favorite recipes."
+
+msgid "Sign out"
+msgstr "Sign out"
+
+msgid "Simulate checkout expiry"
+msgstr "Simulate checkout expiry"
+
+msgid "Simulate payment confirmation"
+msgstr "Simulate payment confirmation"
+
+msgid "Simulate payment decline"
+msgstr "Simulate payment decline"
+
+msgid "Skip next week"
+msgstr "Skip next week"
+
+msgid "Skip to content"
+msgstr "Skip to content"
+
+msgid "Sold out"
+msgstr "Sold out"
+
+msgid "Something went wrong. Please try again."
+msgstr "Something went wrong. Please try again."
+
+msgid "Something wrong with a delivery?"
+msgstr "Something wrong with a delivery?"
+
+msgid "South Asian"
+msgstr "South Asian"
+
+msgid "Soy"
+msgstr "Soy"
+
+msgid "Staff only. Set the payment result for a customer's next checkout in this market. No real payment is taken."
+msgstr "Staff only. Set the payment result for a customer's next checkout in this market. No real payment is taken."
+
+msgid "Staff workspace"
+msgstr "Staff workspace"
+
+msgid "Start a new plan"
+msgstr "Start a new plan"
+
+msgid "Start timer"
+msgstr "Start timer"
+
+msgid "State"
+msgstr "State"
+
+#. placeholder {0}: i + 1
+#. placeholder {0}: index + 1
+msgid "Step {0}"
+msgstr "Step {0}"
+
+msgid "Step {step}"
+msgstr "Step {step}"
+
+msgid "Storage"
+msgstr "Storage"
+
+msgid "Store preview · No charges or deliveries"
+msgstr "Store preview · No charges or deliveries"
+
+msgid "Stovetop"
+msgstr "Stovetop"
+
+msgid "Street address"
+msgstr "Street address"
+
+msgid "Street, building and apartment"
+msgstr "Street, building and apartment"
+
+msgid "Submit a deletion request?"
+msgstr "Submit a deletion request?"
+
+msgid "Submit request"
+msgstr "Submit request"
+
+msgid "Support & refunds"
+msgstr "Support & refunds"
+
+msgid "Support request resolved"
+msgstr "Support request resolved"
+
+msgid "Support requests"
+msgstr "Support requests"
+
+msgid "Suspending staff access leaves the customer's orders and personal account available."
+msgstr "Suspending staff access leaves the customer's orders and personal account available."
+
+msgid "Swap your meals and review the updated total before saving."
+msgstr "Swap your meals and review the updated total before saving."
+
+msgid "Team access"
+msgstr "Team access"
+
+msgid "Tell us what happened. Your request and our response will appear in your account."
+msgstr "Tell us what happened. Your request and our response will appear in your account."
+
+msgid "Tell us which meal or delivery was affected and what happened."
+msgstr "Tell us which meal or delivery was affected and what happened."
+
+msgid "Thank you. Your feedback is saved."
+msgstr "Thank you. Your feedback is saved."
+
+msgid "The link may have changed. Explore the menu or return to your deliveries."
+msgstr "The link may have changed. Explore the menu or return to your deliveries."
+
+msgid "The menu is being prepared"
+msgstr "The menu is being prepared"
+
+msgid "The next checkout will use this payment scenario."
+msgstr "The next checkout will use this payment scenario."
+
+msgid "These accounts manage the team and all countries. Change them in the deployment settings."
+msgstr "These accounts manage the team and all countries. Change them in the deployment settings."
+
+msgid "These choices will update your weekly plan here. Your other plans and confirmed orders stay as they are."
+msgstr "These choices will update your weekly plan here. Your other plans and confirmed orders stay as they are."
+
+msgid "This area is available to authorized operators. Sign in with your staff account."
+msgstr "This area is available to authorized operators. Sign in with your staff account."
+
+msgid "This box"
+msgstr "This box"
+
+msgid "This box uses your saved meals and address. Check the delivery date and total before confirming."
+msgstr "This box uses your saved meals and address. Check the delivery date and total before confirming."
+
+msgid "This box will be canceled and any payment refunded. Your weekly plan will continue."
+msgstr "This box will be canceled and any payment refunded. Your weekly plan will continue."
+
+msgid "This delivery date is no longer available. Choose a new date, then review your meals."
+msgstr "This delivery date is no longer available. Choose a new date, then review your meals."
+
+msgid "This meal is unavailable in your delivery area."
+msgstr "This meal is unavailable in your delivery area."
+
+msgid "This removes the saved address. Existing deliveries and your weekly plan keep their current address."
+msgstr "This removes the saved address. Existing deliveries and your weekly plan keep their current address."
+
+msgid "This week's menu"
+msgstr "This week's menu"
+
+msgid "Thoughtfully chosen recipes. Fresh ingredients at your door. A little less to do, a little more to enjoy."
+msgstr "Thoughtfully chosen recipes. Fresh ingredients at your door. A little less to do, a little more to enjoy."
+
+msgid "Time remaining"
+msgstr "Time remaining"
+
+msgid "Timer finished"
+msgstr "Timer finished"
+
+msgid "Timer for step {step}"
+msgstr "Timer for step {step}"
+
+msgid "Tofu"
+msgstr "Tofu"
+
+msgid "Total"
+msgstr "Total"
+
+msgid "Total due"
+msgstr "Total due"
+
+msgid "Try a box without a weekly plan."
+msgstr "Try a box without a weekly plan."
+
+msgid "Try again"
+msgstr "Try again"
+
+msgid "Try changing your filters or search."
+msgstr "Try changing your filters or search."
+
+msgid "Try payment again"
+msgstr "Try payment again"
+
+msgid "UK measures"
+msgstr "UK measures"
+
+msgid "Unavailable"
+msgstr "Unavailable"
+
+msgid "Unavailable meal"
+msgstr "Unavailable meal"
+
+msgid "Under review"
+msgstr "Under review"
+
+msgid "Unit"
+msgstr "Unit"
+
+msgid "Upcoming boxes"
+msgstr "Upcoming boxes"
+
+msgid "Update feedback"
+msgstr "Update feedback"
+
+msgid "Updated total"
+msgstr "Updated total"
+
+msgid "US measures"
+msgstr "US measures"
+
+msgid "Use a saved address"
+msgstr "Use a saved address"
+
+msgid "Use lowercase words separated by hyphens."
+msgstr "Use lowercase words separated by hyphens."
+
+msgid "Use saved box"
+msgstr "Use saved box"
+
+msgid "Use the menu filters and review each recipe's allergens. Shared facilities can introduce cross-contact; filters are preferences and do not certify a meal is safe for an allergy."
+msgstr "Use the menu filters and review each recipe's allergens. Shared facilities can introduce cross-contact; filters are preferences and do not certify a meal is safe for an allergy."
+
+msgid "Veggie favorites"
+msgstr "Veggie favorites"
+
+msgid "View delivery areas"
+msgstr "View delivery areas"
+
+msgid "View order"
+msgstr "View order"
+
+msgid "We couldn't find that page"
+msgstr "We couldn't find that page"
+
+msgid "We couldn't load this language. Please try again."
+msgstr "We couldn't load this language. Please try again."
+
+msgid "We'll bring the fresh"
+msgstr "We'll bring the fresh"
+
+msgid "We'll email you when delivery opens in your area."
+msgstr "We'll email you when delivery opens in your area."
+
+msgid "We'll review your request. Your plans and orders will continue until you cancel them separately."
+msgstr "We'll review your request. Your plans and orders will continue until you cancel them separately."
+
+msgid "We'll show meals available for your delivery area."
+msgstr "We'll show meals available for your delivery area."
+
+msgid "We're not delivering here yet. You can try another area or ask us to let you know when we arrive."
+msgstr "We're not delivering here yet. You can try another area or ask us to let you know when we arrive."
+
+msgid "We're waiting for your payment confirmation. Please don't pay again. You can leave this page and check your order later."
+msgstr "We're waiting for your payment confirmation. Please don't pay again. You can leave this page and check your order later."
+
+msgid "Weekly plan"
+msgstr "Weekly plan"
+
+msgid "What about food preferences and allergies?"
+msgstr "What about food preferences and allergies?"
+
+msgid "What sounds good this week?"
+msgstr "What sounds good this week?"
+
+msgid "What went wrong?"
+msgstr "What went wrong?"
+
+msgid "Wheat"
+msgstr "Wheat"
+
+msgid "Where do you deliver?"
+msgstr "Where do you deliver?"
+
+msgid "Where should we deliver?"
+msgstr "Where should we deliver?"
+
+msgid "Where will you be cooking?"
+msgstr "Where will you be cooking?"
+
+msgid "Withdraw menu"
+msgstr "Withdraw menu"
+
+msgid "Withdrawn"
+msgstr "Withdrawn"
+
+msgid "Would cook again"
+msgstr "Would cook again"
+
+msgid "Would not cook again"
+msgstr "Would not cook again"
+
+msgid "Would you cook it again?"
+msgstr "Would you cook it again?"
+
+msgid "Yes"
+msgstr "Yes"
+
+msgid "Yes. Manage your plan in My deliveries. To change or cancel a confirmed box, open that order before its deadline. After that, contact us for help."
+msgstr "Yes. Manage your plan in My deliveries. To change or cancel a confirmed box, open that order before its deadline. After that, contact us for help."
+
+msgid "You have a saved box"
+msgstr "You have a saved box"
+
+msgid "You're on the list."
+msgstr "You're on the list."
+
+msgid "Your allergen exclusions are still applied."
+msgstr "Your allergen exclusions are still applied."
+
+msgid "Your box"
+msgstr "Your box"
+
+msgid "Your box changed elsewhere"
+msgstr "Your box changed elsewhere"
+
+msgid "Your box is full. Remove a meal first."
+msgstr "Your box is full. Remove a meal first."
+
+msgid "Your box is full. Remove a meal or choose a larger box."
+msgstr "Your box is full. Remove a meal or choose a larger box."
+
+msgid "Your box size changed. Remove a meal or choose a larger box to keep all your selections."
+msgstr "Your box size changed. Remove a meal or choose a larger box to keep all your selections."
+
+msgid "Your choices are saved for next week. Review and confirm each future box in My deliveries before ordering."
+msgstr "Your choices are saved for next week. Review and confirm each future box in My deliveries before ordering."
+
+msgid "YOUR DELIVERY"
+msgstr "YOUR DELIVERY"
+
+msgid "Your download is being prepared. Please try again shortly."
+msgstr "Your download is being prepared. Please try again shortly."
+
+msgid "Your food preferences"
+msgstr "Your food preferences"
+
+msgid "YOUR GATHER"
+msgstr "YOUR GATHER"
+
+msgid "Your meals are no longer reserved. We're checking the payment result before you can try again."
+msgstr "Your meals are no longer reserved. We're checking the payment result before you can try again."
+
+msgid "Your meals are still selected. Review your box to choose which ones to keep."
+msgstr "Your meals are still selected. Review your box to choose which ones to keep."
+
+msgid "Your meals, your delivery, all in one place."
+msgstr "Your meals, your delivery, all in one place."
+
+msgid "Your next box needs confirmation. Review the meals and total before ordering."
+msgstr "Your next box needs confirmation. Review the meals and total before ordering."
+
+msgid "Your order is confirmed."
+msgstr "Your order is confirmed."
+
+msgid "Your past orders are in Order history. Build a box when you are ready for another delivery."
+msgstr "Your past orders are in Order history. Build a box when you are ready for another delivery."
+
+msgid "Your payment arrived after your meals were released. This box is not confirmed. Our team needs to review your payment; please don't pay again."
+msgstr "Your payment arrived after your meals were released. This box is not confirmed. Our team needs to review your payment; please don't pay again."
+
+msgid "Your payment didn't go through. Your meals are saved so you can try again."
+msgstr "Your payment didn't go through. Your meals are saved so you can try again."
+
+msgid "Your plan is"
+msgstr "Your plan is"
+
+msgid "Your previous delivery date is no longer available. Choose a new date to continue."
+msgstr "Your previous delivery date is no longer available. Choose a new date to continue."
+
+msgid "Your requests"
+msgstr "Your requests"
+
+msgid "Your saved box is empty."
+msgstr "Your saved box is empty."
+
+msgid "Your staff access is available in the countries below."
+msgstr "Your staff access is available in the countries below."
+
+msgid "Your table. Your kind of good."
+msgstr "Your table. Your kind of good."
+
+msgid "Your team starts here"
+msgstr "Your team starts here"
+
+msgid "Your total will appear when it is ready."
+msgstr "Your total will appear when it is ready."
+
+msgid "Your week, your way"
+msgstr "Your week, your way"

@@ -1,0 +1,2745 @@
+msgid ""
+msgstr ""
+"POT-Creation-Date: 2026-09-11 23:28-0700\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"X-Generator: @lingui/cli\n"
+"Language: zh\n"
+"Project-Id-Version: \n"
+"Report-Msgid-Bugs-To: \n"
+"PO-Revision-Date: \n"
+"Last-Translator: \n"
+"Language-Team: \n"
+"Plural-Forms: \n"
+
+#. js-lingui-explicit-id
+msgid "Lemon & herb chicken"
+msgstr "柠檬香草烤鸡"
+
+#. js-lingui-explicit-id
+msgid "with golden potatoes & broccolini"
+msgstr "搭配金黄土豆与西兰花苗"
+
+#. js-lingui-explicit-id
+msgid "A little comfort"
+msgstr "暖心家常"
+
+#. js-lingui-explicit-id
+msgid "Oven, baking tray, frying pan"
+msgstr "烤箱、烤盘、平底锅"
+
+#. js-lingui-explicit-id
+msgid "Chicken breast"
+msgstr "鸡胸肉"
+
+#. js-lingui-explicit-id
+msgid "Baby potatoes"
+msgstr "小土豆"
+
+#. js-lingui-explicit-id
+msgid "Broccolini"
+msgstr "西兰花苗"
+
+#. js-lingui-explicit-id
+msgid "Lemon, garlic & herb butter"
+msgstr "柠檬、大蒜与香草黄油"
+
+#. js-lingui-explicit-id
+msgid "Heat the oven to 200°C. Halve the potatoes and toss with oil, salt and pepper on a baking tray."
+msgstr "将烤箱预热至200°C。土豆切半，加入油、盐和胡椒，放入烤盘。"
+
+#. js-lingui-explicit-id
+msgid "Roast the potatoes until golden and tender. Season the chicken with the supplied herbs."
+msgstr "将土豆烤至金黄软糯。用香草为鸡肉调味。"
+
+#. js-lingui-explicit-id
+msgid "Sear the chicken, then finish in the oven until cooked through. Check the thickest part reaches a safe cooking temperature."
+msgstr "煎香鸡肉后放入烤箱烤熟。检查最厚处温度，确保熟透。"
+
+#. js-lingui-explicit-id
+msgid "Sauté the broccolini. Rest and slice the chicken, then serve with lemon and herb butter."
+msgstr "炒熟西兰花苗。鸡肉静置后切片，搭配柠檬和香草黄油。"
+
+#. js-lingui-explicit-id
+msgid "Garden pesto rigatoni"
+msgstr "罗勒青酱通心粉"
+
+#. js-lingui-explicit-id
+msgid "with roasted tomatoes & parmesan"
+msgstr "搭配烤番茄与帕尔玛奶酪"
+
+#. js-lingui-explicit-id
+msgid "Plant-forward favorite"
+msgstr "缤纷素食"
+
+#. js-lingui-explicit-id
+msgid "Saucepan, frying pan"
+msgstr "煮锅、平底锅"
+
+#. js-lingui-explicit-id
+msgid "Rigatoni"
+msgstr "通心粉"
+
+#. js-lingui-explicit-id
+msgid "Cherry tomatoes"
+msgstr "樱桃番茄"
+
+#. js-lingui-explicit-id
+msgid "Basil pesto"
+msgstr "罗勒青酱"
+
+#. js-lingui-explicit-id
+msgid "Parmesan & fresh basil"
+msgstr "帕尔玛奶酪与新鲜罗勒"
+
+#. js-lingui-explicit-id
+msgid "Bring salted water to a boil and cook the rigatoni until just tender."
+msgstr "烧开盐水，将通心粉煮至适口。"
+
+#. js-lingui-explicit-id
+msgid "Sauté the cherry tomatoes in a little oil until blistered."
+msgstr "少许油煎樱桃番茄至表皮起皱。"
+
+#. js-lingui-explicit-id
+msgid "Reserve some pasta water, then drain. Toss pasta with pesto and tomatoes, loosening with cooking water."
+msgstr "保留一些煮面水。将面、青酱和番茄拌匀，加入煮面水调整稠度。"
+
+#. js-lingui-explicit-id
+msgid "Finish with parmesan and torn basil. Taste and season to your liking."
+msgstr "撒上奶酪和罗勒叶，按喜好调味。"
+
+#. js-lingui-explicit-id
+msgid "Miso-glazed salmon"
+msgstr "味噌照烧三文鱼"
+
+#. js-lingui-explicit-id
+msgid "with jasmine rice & crunchy greens"
+msgstr "搭配茉莉香米与爽脆蔬菜"
+
+#. js-lingui-explicit-id
+msgid "Something special"
+msgstr "犒赏自己"
+
+#. js-lingui-explicit-id
+msgid "Frying pan, saucepan"
+msgstr "平底锅、煮锅"
+
+#. js-lingui-explicit-id
+msgid "Salmon fillet"
+msgstr "三文鱼排"
+
+#. js-lingui-explicit-id
+msgid "Jasmine rice"
+msgstr "茉莉香米"
+
+#. js-lingui-explicit-id
+msgid "Cucumber & edamame"
+msgstr "黄瓜与毛豆"
+
+#. js-lingui-explicit-id
+msgid "Miso glaze & sesame"
+msgstr "味噌酱与芝麻"
+
+#. js-lingui-explicit-id
+msgid "Rinse the rice and cook according to the supplied recipe card."
+msgstr "淘洗大米，按照食谱卡煮熟。"
+
+#. js-lingui-explicit-id
+msgid "Brush salmon with miso glaze and pan-cook until cooked through."
+msgstr "三文鱼刷上味噌酱，煎至熟透。"
+
+#. js-lingui-explicit-id
+msgid "Slice cucumber into ribbons. Warm the edamame."
+msgstr "将黄瓜切成薄片，煮热毛豆。"
+
+#. js-lingui-explicit-id
+msgid "Serve salmon over rice with greens and the remaining sauce. Sprinkle with sesame."
+msgstr "将三文鱼放在米饭上，配上蔬菜、酱汁和芝麻。"
+
+#. js-lingui-explicit-id
+msgid "Sunshine harvest bowl"
+msgstr "阳光烤蔬谷物碗"
+
+#. js-lingui-explicit-id
+msgid "with harissa cauliflower & chickpeas"
+msgstr "搭配哈里萨花椰菜与鹰嘴豆"
+
+#. js-lingui-explicit-id
+msgid "Feel-good food"
+msgstr "轻盈好滋味"
+
+#. js-lingui-explicit-id
+msgid "Oven, baking tray, bowl"
+msgstr "烤箱、烤盘、碗"
+
+#. js-lingui-explicit-id
+msgid "Cauliflower"
+msgstr "花椰菜"
+
+#. js-lingui-explicit-id
+msgid "Chickpeas & couscous"
+msgstr "鹰嘴豆与库斯库斯"
+
+#. js-lingui-explicit-id
+msgid "Harissa spice blend"
+msgstr "哈里萨香料"
+
+#. js-lingui-explicit-id
+msgid "Yogurt & herbs"
+msgstr "酸奶与香草"
+
+#. js-lingui-explicit-id
+msgid "Heat the oven to 200°C. Toss cauliflower and chickpeas with oil and harissa."
+msgstr "预热烤箱至200°C。花椰菜和鹰嘴豆拌入油与哈里萨香料。"
+
+#. js-lingui-explicit-id
+msgid "Roast until the cauliflower is tender with crisp edges."
+msgstr "烤至花椰菜软嫩、边缘焦脆。"
+
+#. js-lingui-explicit-id
+msgid "Cover couscous with hot water, let stand, then fluff with a fork."
+msgstr "库斯库斯加入热水焖熟，用叉子拨松。"
+
+#. js-lingui-explicit-id
+msgid "Build your bowl and finish with yogurt, lemon and herbs."
+msgstr "将食材装碗，搭配酸奶、柠檬与香草。"
+
+#. js-lingui-explicit-id
+msgid "Creamy woodland orzo"
+msgstr "奶油蘑菇米形意面"
+
+#. js-lingui-explicit-id
+msgid "with baby spinach & fresh thyme"
+msgstr "搭配嫩菠菜与新鲜百里香"
+
+#. js-lingui-explicit-id
+msgid "Cozy nights in"
+msgstr "家的温暖"
+
+#. js-lingui-explicit-id
+msgid "Deep frying pan"
+msgstr "深平底锅"
+
+#. js-lingui-explicit-id
+msgid "Orzo pasta"
+msgstr "米形意面"
+
+#. js-lingui-explicit-id
+msgid "Mixed mushrooms"
+msgstr "混合蘑菇"
+
+#. js-lingui-explicit-id
+msgid "Baby spinach"
+msgstr "嫩菠菜"
+
+#. js-lingui-explicit-id
+msgid "Parmesan, cream & thyme"
+msgstr "奶酪、奶油与百里香"
+
+#. js-lingui-explicit-id
+msgid "Slice the mushrooms. Sauté in oil until golden, then add the thyme."
+msgstr "蘑菇切片，煎至金黄后加入百里香。"
+
+#. js-lingui-explicit-id
+msgid "Stir in the orzo and supplied stock. Simmer, stirring, until tender."
+msgstr "加入意面和高汤，小火煮至软熟，期间搅拌。"
+
+#. js-lingui-explicit-id
+msgid "Fold in spinach and cream, letting the spinach wilt."
+msgstr "加入菠菜和奶油，煮至菠菜变软。"
+
+#. js-lingui-explicit-id
+msgid "Finish with parmesan, black pepper and a little fresh thyme."
+msgstr "最后撒上奶酪、黑胡椒和百里香。"
+
+#. js-lingui-explicit-id
+msgid "Sticky ginger tofu"
+msgstr "姜香芝麻豆腐"
+
+#. js-lingui-explicit-id
+msgid "with rainbow vegetables & rice"
+msgstr "搭配彩虹蔬菜与米饭"
+
+#. js-lingui-explicit-id
+msgid "Big flavor, little effort"
+msgstr "简单又有滋味"
+
+#. js-lingui-explicit-id
+msgid "Firm tofu"
+msgstr "老豆腐"
+
+#. js-lingui-explicit-id
+msgid "Rice"
+msgstr "大米"
+
+#. js-lingui-explicit-id
+msgid "Broccoli & carrots"
+msgstr "西兰花与胡萝卜"
+
+#. js-lingui-explicit-id
+msgid "Ginger sesame sauce"
+msgstr "姜香芝麻酱"
+
+#. js-lingui-explicit-id
+msgid "Rinse and cook the rice. Pat the tofu dry and cut into cubes."
+msgstr "淘米煮饭。豆腐擦干后切块。"
+
+#. js-lingui-explicit-id
+msgid "Pan-fry tofu in a little oil until crisp on all sides."
+msgstr "用少许油将豆腐煎至各面金黄。"
+
+#. js-lingui-explicit-id
+msgid "Add the vegetables and stir-fry until tender. Add the ginger sesame sauce."
+msgstr "加入蔬菜炒熟，再加入姜香芝麻酱。"
+
+#. js-lingui-explicit-id
+msgid "Toss gently until glossy, then serve over rice."
+msgstr "轻轻拌匀至酱汁包裹食材，搭配米饭享用。"
+
+#. js-lingui-explicit-id
+msgid "Cooking oil, salt and pepper"
+msgstr "食用油、盐和胡椒"
+
+#. js-lingui-explicit-id
+msgid "Follow the storage instructions and use-by date on each ingredient label."
+msgstr "请按各食材包装上的说明保存，并在标注的食用期限内使用。"
+
+#. js-lingui-explicit-id
+msgid "Illustrative values per serving, prepared as directed."
+msgstr "每人份参考营养值，按食谱制作计算。"
+
+#. js-lingui-explicit-id
+msgid "Choose an available delivery date."
+msgstr "请选择可用的配送日期。"
+
+#. js-lingui-explicit-id
+msgid "Order not found."
+msgstr "未找到订单。"
+
+#. js-lingui-explicit-id
+msgid "Delivery status updated"
+msgstr "配送状态已更新"
+
+#. js-lingui-explicit-id
+msgid "Inventory not found."
+msgstr "未找到库存。"
+
+#. js-lingui-explicit-id
+msgid "Case not found."
+msgstr "未找到这条售后申请。"
+
+#. js-lingui-explicit-id
+msgid "Refund exceeds the remaining paid amount."
+msgstr "退款金额超过剩余实付金额。"
+
+#. js-lingui-explicit-id
+msgid "Resolution key already used."
+msgstr "此申请已处理，请刷新页面查看。"
+
+#. js-lingui-explicit-id
+msgid "Recipe not found."
+msgstr "未找到这份食谱。"
+
+#. js-lingui-explicit-id
+msgid "Restore this recipe before editing it."
+msgstr "请先恢复这份食谱，再进行编辑。"
+
+#. js-lingui-explicit-id
+msgid "This recipe link is already in use. Choose another."
+msgstr "此食谱链接已被使用，请换一个名称。"
+
+#. js-lingui-explicit-id
+msgid "Restore this recipe before approving it."
+msgstr "请先恢复这份食谱，再提交审核。"
+
+#. js-lingui-explicit-id
+msgid "Complete both languages, ingredient quantities and cooking steps before approval."
+msgstr "请补全中英文内容、食材用量和烹饪步骤后再审核。"
+
+#. js-lingui-explicit-id
+msgid "Menu not found."
+msgstr "未找到该菜单。"
+
+#. js-lingui-explicit-id
+msgid "Payment not found. Refresh the order and try again."
+msgstr "未找到支付记录，请刷新订单后重试。"
+
+#. js-lingui-explicit-id
+msgid "This order does not have a late payment to refund."
+msgstr "此订单没有需要退还的超时付款。"
+
+#. js-lingui-explicit-id
+msgid "Your late payment has been refunded. This box will not be delivered."
+msgstr "超时到账的款项已退还，此食材箱将不再配送。"
+
+#. js-lingui-explicit-id
+msgid "Administrator access is managed in the deployment settings."
+msgstr "管理员权限请在部署设置中修改。"
+
+#. js-lingui-explicit-id
+msgid "These details have changed. Refresh the page and try again."
+msgstr "信息已更新，请刷新页面后重试。"
+
+#. js-lingui-explicit-id
+msgid "This team member's access changed. Reload the team before saving."
+msgstr "这位同事的权限已更新。请刷新团队列表后重新编辑。"
+
+#. js-lingui-explicit-id
+msgid "We couldn't load your saved box. Your choices on this page are still here."
+msgstr "暂时无法读取已保存的食材箱。你在此页选择的菜品仍然保留。"
+
+#. js-lingui-explicit-id
+msgid "We couldn't save your box. Your choices are still here."
+msgstr "暂时无法保存食材箱。你选择的菜品仍在此页，请重试。"
+
+#. js-lingui-explicit-id
+msgid "Refresh your total before placing this order."
+msgstr "请刷新订单金额后再提交。"
+
+#. js-lingui-explicit-id
+msgid "We couldn't prepare your download. Please contact us."
+msgstr "暂时无法准备下载文件，请联系我们。"
+
+#. js-lingui-explicit-id
+msgid "Your download isn't ready yet. Please try again."
+msgstr "下载文件尚未准备好，请稍后重试。"
+
+#. js-lingui-explicit-id
+msgid "Please wait a moment, then try refreshing your total."
+msgstr "请稍等片刻，再刷新订单金额。"
+
+#. js-lingui-explicit-id
+msgid "Please review and accept the order terms."
+msgstr "请阅读并同意订单条款。"
+
+#. js-lingui-explicit-id
+msgid "Your delivery area changed. Review your box and total again."
+msgstr "收货地区已变更，请重新核对食材箱和金额。"
+
+#. js-lingui-explicit-id
+msgid "This checkout has already been used. Please start again from your box."
+msgstr "本次结算已完成，请返回食材箱重新结算。"
+
+#. js-lingui-explicit-id
+msgid "Box created"
+msgstr "食材箱已创建"
+
+#. js-lingui-explicit-id
+msgid "Waiting for payment confirmation"
+msgstr "正在等待支付结果"
+
+#. js-lingui-explicit-id
+msgid "We're checking your payment. Please wait for an update before trying again."
+msgstr "我们正在核实支付结果，请等待更新，暂勿重复付款。"
+
+#. js-lingui-explicit-id
+msgid "Review the current total before trying payment again."
+msgstr "重新付款前，请先确认最新金额。"
+
+#. js-lingui-explicit-id
+msgid "Box canceled and payment refunded"
+msgstr "食材箱已取消，款项已退回"
+
+#. js-lingui-explicit-id
+msgid "Box canceled"
+msgstr "食材箱已取消"
+
+#. js-lingui-explicit-id
+msgid "The order changed. Reload and try again."
+msgstr "订单已变更，请刷新后重试。"
+
+#. js-lingui-explicit-id
+msgid "Resolve the payment before editing this box."
+msgstr "请先完成支付，再修改食材箱。"
+
+#. js-lingui-explicit-id
+msgid "Contact support to change a box that has a refund."
+msgstr "如需修改已退款的订单，请联系客服。"
+
+#. js-lingui-explicit-id
+msgid "Meals updated; price adjustment {amount, number} {currency}"
+msgstr "菜品已更新；金额调整 {amount, number} {currency}"
+
+#. js-lingui-explicit-id
+msgid "No recurring plan found."
+msgstr "未找到订阅套餐。"
+
+#. js-lingui-explicit-id
+msgid "Your plan changed. Please retry."
+msgstr "套餐已变更，请重试。"
+
+#. js-lingui-explicit-id
+msgid "An active plan is required."
+msgstr "请先开启订阅套餐。"
+
+#. js-lingui-explicit-id
+msgid "Your plan changed. Review the next delivery again."
+msgstr "套餐已变更，请重新确认下次配送。"
+
+#. js-lingui-explicit-id
+msgid "The total changed. Review the next delivery again."
+msgstr "总价已变更，请重新确认下次配送。"
+
+#. js-lingui-explicit-id
+msgid "Recurring box created"
+msgstr "订阅食材箱已创建"
+
+#. js-lingui-explicit-id
+msgid "Payment confirmed for your next box"
+msgstr "下一份食材箱的支付已确认"
+
+#. js-lingui-explicit-id
+msgid "Address not found."
+msgstr "找不到该地址。"
+
+#. js-lingui-explicit-id
+msgid "Remove an unused address before adding another."
+msgstr "请先删除不再使用的地址，再添加新地址。"
+
+#. js-lingui-explicit-id
+msgid "This recipe is no longer available to save."
+msgstr "这份食谱暂时无法收藏。"
+
+#. js-lingui-explicit-id
+msgid "This request key belongs to another action."
+msgstr "本次操作无法继续，请刷新页面后重试。"
+
+#. js-lingui-explicit-id
+msgid "Privacy request not found."
+msgstr "找不到该隐私请求。"
+
+#. js-lingui-explicit-id
+msgid "This request is already being processed."
+msgstr "此请求已开始处理。"
+
+#. js-lingui-explicit-id
+msgid "Your export is unavailable. Please request a new export."
+msgstr "导出文件暂不可用，请重新申请导出。"
+
+#. js-lingui-explicit-id
+msgid "You can review this meal after your box is delivered."
+msgstr "食材箱送达后，就可以评价这道菜了。"
+
+#. js-lingui-explicit-id
+msgid "Your feedback changed on another device. Load the saved feedback before editing it."
+msgstr "你在另一台设备上更新了评价。请先载入已保存的评价，再进行修改。"
+
+#. js-lingui-explicit-id
+msgid "Your sign-in has changed. Reload your saved box to continue."
+msgstr "登录状态已变化，请重新载入已保存的食材箱。"
+
+#. js-lingui-explicit-id
+msgid "Choose a box for this delivery country."
+msgstr "请选择配送至当前国家的食材箱。"
+
+#. js-lingui-explicit-id
+msgid "This save has already been used. Reload your saved box to continue."
+msgstr "此操作已完成，请重新载入已保存的食材箱。"
+
+#. js-lingui-explicit-id
+msgid "Sign in to continue."
+msgstr "请登录后继续。"
+
+#. js-lingui-explicit-id
+msgid "Your saved box session has ended. Reload this page to continue."
+msgstr "请刷新页面，重新载入已选菜品。"
+
+#. js-lingui-explicit-id
+msgid "Choose a new box to restart weekly deliveries."
+msgstr "请重新选择菜品并下单，开启每周配送。"
+
+#. js-lingui-explicit-id
+msgid "Resume your plan before skipping a delivery."
+msgstr "请先恢复每周配送，再选择跳过。"
+
+#. js-lingui-explicit-id
+msgid "No longer on this menu"
+msgstr "本次菜单已不提供这道菜"
+
+#. js-lingui-explicit-id
+msgid "Contains an ingredient you excluded"
+msgstr "含有你选择避开的食材"
+
+#. js-lingui-explicit-id
+msgid "Sold out for this delivery"
+msgstr "本次配送已售罄"
+
+#. js-lingui-explicit-id
+msgid "Add approved recipes before publishing this menu."
+msgstr "请先添加已通过审核的食谱，再发布菜单。"
+
+#. js-lingui-explicit-id
+msgid "Choose a sale window that ends before the delivery cutoff."
+msgstr "销售时段须在配送截止时间前结束，请重新设置。"
+
+#. js-lingui-explicit-id
+msgid "Choose each recipe only once."
+msgstr "每道菜只能选择一次。"
+
+#. js-lingui-explicit-id
+msgid "Milk"
+msgstr "奶类"
+
+#. js-lingui-explicit-id
+msgid "Wheat"
+msgstr "小麦"
+
+#. js-lingui-explicit-id
+msgid "Nuts"
+msgstr "坚果"
+
+#. js-lingui-explicit-id
+msgid "Fish"
+msgstr "鱼"
+
+#. js-lingui-explicit-id
+msgid "Soy"
+msgstr "大豆"
+
+#. js-lingui-explicit-id
+msgid "Sesame"
+msgstr "芝麻"
+
+#. js-lingui-explicit-id
+msgid "United States"
+msgstr "美国"
+
+#. js-lingui-explicit-id
+msgid "New York"
+msgstr "纽约"
+
+#. js-lingui-explicit-id
+msgid "United Kingdom"
+msgstr "英国"
+
+#. js-lingui-explicit-id
+msgid "London"
+msgstr "伦敦"
+
+#. js-lingui-explicit-id
+msgid "China"
+msgstr "中国"
+
+#. js-lingui-explicit-id
+msgid "Shanghai"
+msgstr "上海"
+
+#. js-lingui-explicit-id
+msgid "Ordering has closed for this delivery. Choose another date."
+msgstr "这次配送已截止下单，请选择其他日期。"
+
+#. js-lingui-explicit-id
+msgid "Recipe not found in this order."
+msgstr "此订单中没有这道菜。"
+
+#. js-lingui-explicit-id
+msgid "Huangpu"
+msgstr "黄浦区"
+
+#. js-lingui-explicit-id
+msgid "Xuhui"
+msgstr "徐汇区"
+
+#. js-lingui-explicit-id
+msgid "Changning"
+msgstr "长宁区"
+
+#. js-lingui-explicit-id
+msgid "Jing'an"
+msgstr "静安区"
+
+#. js-lingui-explicit-id
+msgid "Pudong"
+msgstr "浦东新区"
+
+#. js-lingui-explicit-id
+msgid "ZIP code"
+msgstr "邮政编码"
+
+#. js-lingui-explicit-id
+msgid "Postcode"
+msgstr "邮编"
+
+#. js-lingui-explicit-id
+msgid "Postal code (optional)"
+msgstr "邮编（选填）"
+
+#. js-lingui-explicit-id
+msgid "Enter the recipient's full name."
+msgstr "请填写收货人姓名。"
+
+#. js-lingui-explicit-id
+msgid "Enter a valid email address."
+msgstr "请填写有效的邮箱地址。"
+
+#. js-lingui-explicit-id
+msgid "Enter the street address, including the building or apartment."
+msgstr "请填写街道、楼栋及门牌号等详细地址。"
+
+#. js-lingui-explicit-id
+msgid "Choose or enter your city."
+msgstr "请选择或填写所在城市。"
+
+#. js-lingui-explicit-id
+msgid "Choose or enter your province or state."
+msgstr "请选择或填写所在省份或州。"
+
+#. js-lingui-explicit-id
+msgid "Choose your district."
+msgstr "请选择所在区县。"
+
+#. js-lingui-explicit-id
+msgid "Enter a valid postal code."
+msgstr "请填写有效的邮编。"
+
+#. js-lingui-explicit-id
+msgid "Enter a valid phone number."
+msgstr "请填写有效的联系电话。"
+
+#. js-lingui-explicit-id
+msgid "Check your address and contact details, then try again."
+msgstr "请检查收货地址和联系方式后重试。"
+
+#. js-lingui-explicit-id
+msgid "Choose an address in the selected delivery country."
+msgstr "请选择当前配送国家内的地址。"
+
+#. js-lingui-explicit-id
+msgid "We don't deliver to this address yet."
+msgstr "这个地址暂时还无法配送。"
+
+#. js-lingui-explicit-id
+msgid "Finish choosing your meals before continuing."
+msgstr "请先选齐菜品，再继续。"
+
+#. js-lingui-explicit-id
+msgid "This menu is no longer available. Choose another delivery date."
+msgstr "该日期的菜单已停止接单，请选择其他配送日期。"
+
+#. js-lingui-explicit-id
+msgid "This meal is unavailable in your delivery area."
+msgstr "你所在的配送地区暂不提供这道菜。"
+
+#. js-lingui-explicit-id
+msgid "One of your meals contains an ingredient you chose to avoid."
+msgstr "有一道菜含有你选择避开的食材，请更换菜品。"
+
+#. js-lingui-explicit-id
+msgid "Your box has changed. Review the updated total."
+msgstr "食材箱已变更，请确认更新后的总价。"
+
+#. js-lingui-explicit-id
+msgid "Payment must be confirmed before fulfillment."
+msgstr "确认支付后才能开始备餐配送。"
+
+#. js-lingui-explicit-id
+msgid "That fulfillment transition is not available."
+msgstr "无法切换至此配送状态。"
+
+#. js-lingui-explicit-id
+msgid "This box is locked for preparation. Please contact support."
+msgstr "食材箱已开始备货，暂时无法修改。如需帮助，请联系客服。"
+
+#. js-lingui-explicit-id
+msgid "Choose an approved recipe version."
+msgstr "请选择已审核通过的食谱版本。"
+
+#. js-lingui-explicit-id
+msgid "Remove archived recipes before publishing."
+msgstr "请先从菜单中移除已归档的食谱，再发布。"
+
+#. js-lingui-explicit-id
+msgid "You have a payment in progress. Open My deliveries to finish it before starting another order."
+msgstr "你有一笔支付尚未完成，请先在“我的配送”中处理，再提交新订单。"
+
+#. js-lingui-explicit-id
+msgid "The time to complete payment has ended. Your meals are no longer reserved."
+msgstr "支付已超时，所选餐食已不再为你保留。"
+
+#. js-lingui-explicit-id
+msgid "This payment already has a final result. Refresh the order."
+msgstr "此笔支付已有最终结果，请刷新订单查看。"
+
+#. js-lingui-explicit-id
+msgid "This payment needs review. Please contact support."
+msgstr "这笔支付需要核实，请联系客服。"
+
+#. js-lingui-explicit-id
+msgid "Payment arrived after your meals were released. Your order needs review before it can be prepared."
+msgstr "款项在餐食保留时间结束后到账，需要核实后才能安排备餐。"
+
+#. js-lingui-explicit-id
+msgid "Payment confirmed"
+msgstr "支付已确认"
+
+#. js-lingui-explicit-id
+msgid "Payment was declined. No payment was taken."
+msgstr "支付未成功，未扣款。"
+
+#. js-lingui-explicit-id
+msgid "Checkout is unavailable right now. Please try again later."
+msgstr "结算暂时不可用，请稍后再试。"
+
+#. js-lingui-explicit-id
+msgid "A meal or delivery slot just sold out. Please update your box."
+msgstr "某道菜或配送时段已售罄，请更新食材箱。"
+
+#. js-lingui-explicit-id
+msgid "Availability changed. Please retry."
+msgstr "库存已变更，请重试。"
+
+#. js-lingui-explicit-id
+msgid "Your staff account does not have access to this action in this country."
+msgstr "你没有在该国家执行此操作的权限。"
+
+#. placeholder {0}: r.minutes
+msgid "{0, plural, one {# minute} other {# minutes}}"
+msgstr "{0, plural, other {# 分钟}}"
+
+#. placeholder {0}: converted.amount
+msgid "{0, plural, one {# piece} other {# pieces}}"
+msgstr "{0, plural, other {# 个}}"
+
+#. placeholder {0}: feedback.rating
+msgid "{0, plural, one {# star} other {# stars}}"
+msgstr "{0, plural, other {# 星}}"
+
+#. placeholder {0}: cart.mealCount - cart.recipeIds.length
+msgid "{0, plural, one {Choose # more meal} other {Choose # more meals}}"
+msgstr "{0, plural, other {再选 # 道菜}}"
+
+#. placeholder {0}: cart.recipeIds.length
+msgid "{0, plural, one {Your box, # meal} other {Your box, # meals}}"
+msgstr "{0, plural, other {我的食材箱，# 道菜}}"
+
+#. placeholder {0}: deliveryLabel(o.snapshot.cart.deliveryDate, o.market, locale)
+#. placeholder {1}: t(boxSizeMessage(o.snapshot.cart.mealCount, o.snapshot.cart.servings))
+msgid "{0} · {1}"
+msgstr "{0} · {1}"
+
+#. placeholder {0}: r.calories
+#. placeholder {0}: recipe.calories
+msgid "{0} kcal"
+msgstr "{0} 千卡"
+
+#. placeholder {0}: recipe.minutes
+msgid "{0} min"
+msgstr "{0} 分钟"
+
+#. placeholder {0}: cart.recipeIds.length
+#. placeholder {1}: cart.mealCount
+msgid "{0}/{1} meals selected"
+msgstr "已选 {0}/{1} 道菜"
+
+#. placeholder {0}: r.protein
+msgid "{0}g protein"
+msgstr "{0}克蛋白质"
+
+msgid "{amount} g"
+msgstr "{amount} 克"
+
+msgid "{amount} ml"
+msgstr "{amount} 毫升"
+
+msgid "{amount} oz"
+msgstr "{amount} 盎司"
+
+msgid "{amount} UK fl oz"
+msgstr "{amount} 英制液体盎司"
+
+msgid "{amount} US fl oz"
+msgstr "{amount} 美制液体盎司"
+
+msgid "{day}, available for delivery"
+msgstr "{day}，可配送"
+
+msgid "{day}, selected"
+msgstr "{day}，已选择"
+
+msgid "{day}, unavailable"
+msgstr "{day}，不可配送"
+
+msgid "{meals} meals for {people, plural, one {# person} other {# people}}"
+msgstr "{meals} 道菜，每道 {people} 人份"
+
+msgid "{purchasedServings, plural, one {Ingredients for # person} other {Ingredients for # people}}"
+msgstr "{purchasedServings, plural, other {# 人份食材}}"
+
+msgid "{value, plural, one {# person} other {# people}}"
+msgstr "{value} 人份"
+
+msgid "{value, plural, one {# star} other {# stars}}"
+msgstr "{value, plural, other {# 星}}"
+
+msgid "/ serving"
+msgstr "/ 份"
+
+msgid "2 meals"
+msgstr "2 道菜"
+
+msgid "3 meals"
+msgstr "3 道菜"
+
+msgid "4 meals"
+msgstr "4 道菜"
+
+msgid "A delicious mix of everyday favorites and new discoveries. Pick what you love."
+msgstr "熟悉的家常滋味，遇见新鲜的美食灵感。选择你喜欢的。"
+
+msgid "A fresh start to your week"
+msgstr "每周，新鲜开始"
+
+msgid "A LITTLE HELP"
+msgstr "服务支持"
+
+msgid "A TASTE OF WHAT'S COOKING"
+msgstr "尝尝本周新鲜滋味"
+
+msgid "Access history"
+msgstr "权限变更记录"
+
+msgid "Access suspended"
+msgstr "权限已停用"
+
+msgid "Account deletion"
+msgstr "注销账户"
+
+msgid "Account ID"
+msgstr "账号 ID"
+
+msgid "Account navigation"
+msgstr "账户导航"
+
+msgid "Account sections"
+msgstr "账户栏目"
+
+msgid "Action"
+msgstr "操作"
+
+msgid "Active"
+msgstr "已开启"
+
+#. placeholder {0}: recipeText(recipe, locale).name
+msgid "Add {0}"
+msgstr "添加{0}"
+
+msgid "Add a colleague and choose what they can manage."
+msgstr "添加同事，并选择他们可以管理的国家和业务。"
+
+msgid "Add a delivery address to use at checkout."
+msgstr "添加配送地址，结算时即可使用。"
+
+msgid "Add address"
+msgstr "添加地址"
+
+msgid "Add cooking step"
+msgstr "添加烹饪步骤"
+
+msgid "Add ingredient"
+msgstr "添加食材"
+
+msgid "Add team member"
+msgstr "添加成员"
+
+msgid "Add timer"
+msgstr "添加计时器"
+
+msgid "Add to my box"
+msgstr "加入食材箱"
+
+msgid "Add your delivery area"
+msgstr "选择配送地区"
+
+msgid "Added to your box."
+msgstr "已加入食材箱。"
+
+msgid "Additional authentication required"
+msgstr "需要额外验证"
+
+msgid "Address book"
+msgstr "地址管理"
+
+msgid "Address label"
+msgstr "地址名称"
+
+msgid "Address saved."
+msgstr "地址已保存。"
+
+msgid "All recipes"
+msgstr "全部菜品"
+
+msgid "Allergen preferences"
+msgstr "过敏原筛选"
+
+msgid "Allergens"
+msgstr "过敏原"
+
+msgid "Allow staff access"
+msgstr "启用员工权限"
+
+msgid "ALMOST AT YOUR TABLE"
+msgstr "即将抵达你的餐桌"
+
+msgid "Already in your box."
+msgstr "已在食材箱中。"
+
+msgid "American"
+msgstr "美式"
+
+msgid "Amount"
+msgstr "用量"
+
+msgid "Another tab or device updated your box. Review both versions before continuing."
+msgstr "你在其他页面或设备上修改了食材箱。请比较后选择要保留的内容。"
+
+msgid "Anything you'd change? (optional)"
+msgstr "有什么改进建议？（选填）"
+
+msgid "Apply these exclusions to my current box"
+msgstr "也应用于当前食材箱"
+
+msgid "Approval creates a fixed version. Publish that version in a menu when it is ready to sell."
+msgstr "审核通过后将保存不可修改的版本。准备上架时，请将该版本加入菜单并发布。"
+
+msgid "Approve recipe"
+msgstr "审核食谱"
+
+msgid "Approve saved recipe"
+msgstr "审核已保存的食谱"
+
+msgid "Approved version"
+msgstr "已通过审核的版本"
+
+msgid "Approved versions"
+msgstr "已通过审核的版本"
+
+msgid "Archive recipe"
+msgstr "归档食谱"
+
+msgid "Archived"
+msgstr "已归档"
+
+msgid "Arriving"
+msgstr "送达日期"
+
+msgid "Ask us to delete your account data. Cancel your plans and upcoming orders separately. Some order records may need to be kept."
+msgstr "申请删除账户数据。订阅和待配送订单需另行取消，部分订单记录可能仍需保留。"
+
+msgid "At your table"
+msgstr "每一餐"
+
+msgid "Authentication required"
+msgstr "需要验证"
+
+msgid "Available"
+msgstr "可用"
+
+msgid "Available to order"
+msgstr "允许下单"
+
+msgid "Awaiting preparation"
+msgstr "等待备餐"
+
+msgid "Back"
+msgstr "返回"
+
+msgid "Back to menu"
+msgstr "返回菜单"
+
+msgid "Back to my meals"
+msgstr "返回选择菜品"
+
+msgid "Back to order"
+msgstr "返回订单"
+
+msgid "Base price per serving"
+msgstr "每人份基础价格"
+
+msgid "Based on your box size and selected extras. Confirm the final total at checkout."
+msgstr "按所选餐盒规格及加价菜品估算，结算时确认最终金额。"
+
+msgid "Be the first to know"
+msgstr "有新消息，第一时间告诉你"
+
+msgid "Blender"
+msgstr "搅拌机"
+
+msgid "Box"
+msgstr "食材箱"
+
+msgid "Box created"
+msgstr "食材箱已创建"
+
+msgid "Box size"
+msgstr "餐盒规格"
+
+msgid "Bright flavors, comforting classics, and something a little unexpected."
+msgstr "清新滋味、经典家常，还有一些意想不到的惊喜。"
+
+msgid "Build another box"
+msgstr "再选一箱"
+
+msgid "Build your box"
+msgstr "搭配餐盒"
+
+msgid "Calendar navigation"
+msgstr "切换月份"
+
+msgid "Calories per serving"
+msgstr "每人份热量（千卡）"
+
+msgid "Can I skip, pause or cancel?"
+msgstr "可以跳过、暂停或取消吗？"
+
+msgid "Cancel plan"
+msgstr "停止每周配送"
+
+msgid "Cancel request"
+msgstr "撤回申请"
+
+msgid "Cancel this box"
+msgstr "取消本次配送"
+
+msgid "Cancel this box?"
+msgstr "取消本次配送？"
+
+msgid "Cancel your weekly plan?"
+msgstr "停止每周配送？"
+
+msgid "Canceled"
+msgstr "已取消"
+
+msgid "Catalog sections"
+msgstr "菜单管理"
+
+msgid "Change"
+msgstr "修改"
+
+msgid "Change by"
+msgstr "修改截止时间"
+
+msgid "Change delivery or box size"
+msgstr "修改配送信息或餐盒规格"
+
+#. placeholder {0}: entry.actor
+msgid "Changed by {0}"
+msgstr "修改人：{0}"
+
+msgid "Check payment status"
+msgstr "查看支付结果"
+
+msgid "Check supplier labels for cross-contact information."
+msgstr "请查看食材标签，确认是否可能接触其他过敏原。"
+
+msgid "Check the current total. We'll confirm availability when you pay."
+msgstr "请确认最新金额，付款时将再次确认餐食和配送名额。"
+
+msgid "Check the meals marked in your box and finish your selection before checkout."
+msgstr "请查看餐盒中的提示，调整并选齐菜品后再结算。"
+
+msgid "Check the recipe link, field lengths and ingredient quantities."
+msgstr "请检查食谱链接名称、文字长度和食材用量。"
+
+msgid "Check your meals, delivery address and total."
+msgstr "请核对菜品、收货地址和订单金额。"
+
+msgid "Checkout"
+msgstr "结算"
+
+msgid "Chicken"
+msgstr "鸡肉"
+
+msgid "Choose a box"
+msgstr "选择食材箱"
+
+msgid "Choose a country for your workspace"
+msgstr "选择要管理的国家"
+
+msgid "Choose a delivery date"
+msgstr "选择配送日期"
+
+msgid "Choose a delivery day. Your ingredients arrive ready to cook."
+msgstr "选好配送日期，食材送到家，即可开始烹饪。"
+
+msgid "Choose a highlighted day for your delivery."
+msgstr "请选择标有绿色的配送日期。"
+
+msgid "Choose a meal"
+msgstr "选择一道菜"
+
+msgid "Choose a plan that feels right, starting at"
+msgstr "选择适合自己的套餐，每份起价"
+
+msgid "Choose an available delivery date to see prices."
+msgstr "选择可配送的日期后即可查看价格。"
+
+msgid "Choose another delivery date to explore available meals."
+msgstr "换个配送日期，看看有哪些可选菜品。"
+
+msgid "Choose another delivery date to see available meals."
+msgstr "请选择其他配送日期，查看可选菜品。"
+
+msgid "Choose delivery details"
+msgstr "选择配送信息"
+
+msgid "Choose how many people you're cooking for, your meals and a delivery day. Manage your next box from My deliveries."
+msgstr "选择用餐人数、菜品和配送日期，之后可在“配送安排”中管理下一份食材箱。"
+
+msgid "Choose meals and a delivery date to get started."
+msgstr "选好菜品和配送日期，就可以下单了。"
+
+msgid "Choose meals or manage your deliveries."
+msgstr "挑选菜品，或查看和管理配送。"
+
+msgid "Choose which box to keep in your account. Your existing orders won't change."
+msgstr "请选择要在账户中保留的食材箱。已下单的订单不受影响。"
+
+msgid "Choose your box."
+msgstr "搭配你的食材箱"
+
+msgid "Choose your delivery area and meals to continue."
+msgstr "请选择收货地区和菜品后继续。"
+
+msgid "Choose your delivery country to explore local meals and delivery options."
+msgstr "选择配送国家，查看当地菜单和配送服务。"
+
+msgid "Choose your delivery country to return to Gather."
+msgstr "选择配送国家，返回 Gather。"
+
+msgid "Choose your first box"
+msgstr "搭配你的第一份餐盒"
+
+msgid "Choose your portions, delivery day and how often you'd like to order."
+msgstr "选择份量、配送日期和订购方式。"
+
+msgid "City"
+msgstr "城市"
+
+msgid "Clear search and category"
+msgstr "清除搜索和分类筛选"
+
+msgid "Close"
+msgstr "关闭"
+
+msgid "Colleague's name"
+msgstr "同事姓名"
+
+msgid "Comfort classics"
+msgstr "经典家常"
+
+msgid "Complete payment verification to confirm your order."
+msgstr "请完成支付验证，确认订单。"
+
+msgid "Complete verification"
+msgstr "完成验证"
+
+msgid "Complete verification by"
+msgstr "请在此时间前完成支付验证"
+
+msgid "Completed"
+msgstr "已完成"
+
+msgid "Confirm approval"
+msgstr "确认审核通过"
+
+msgid "Confirm cancellation"
+msgstr "确认取消"
+
+msgid "Confirm change"
+msgstr "确认变更"
+
+msgid "Confirm meals and price"
+msgstr "确认菜品与金额"
+
+msgid "Confirm payment"
+msgstr "确认付款"
+
+msgid "Confirmed"
+msgstr "已确认"
+
+msgid "Confirmed boxes"
+msgstr "已确认食材箱"
+
+msgid "Confirming payment"
+msgstr "正在确认支付"
+
+msgid "Contains"
+msgstr "含有"
+
+msgid "Contains allergens"
+msgstr "含有的过敏原"
+
+msgid "Content language"
+msgstr "内容语言"
+
+msgid "Continue choosing meals"
+msgstr "继续选菜"
+
+msgid "Continue to box size"
+msgstr "继续选择餐盒规格"
+
+msgid "Continue to checkout"
+msgstr "继续结算"
+
+msgid "Cook. Gather. Enjoy."
+msgstr "下厨，相聚，享用"
+
+msgid "Cooking steps"
+msgstr "烹饪步骤"
+
+msgid "Cooking units"
+msgstr "烹饪计量单位"
+
+msgid "Country manager"
+msgstr "国家业务负责人"
+
+msgid "Country roles control operational access. Editing the shared recipe library is a separate permission."
+msgstr "按国家分配业务权限。共享食谱库的编辑权限需单独开启。"
+
+msgid "Cuisines you enjoy"
+msgstr "喜欢的菜系"
+
+msgid "Customer"
+msgstr "顾客"
+
+msgid "Customer account ID"
+msgstr "客户账户 ID"
+
+msgid "Customer feedback will appear here after delivery."
+msgstr "食材箱送达后，顾客的菜品评价会显示在这里。"
+
+msgid "Customer support"
+msgstr "客户服务"
+
+msgid "Customer support requests will appear here."
+msgstr "顾客提交的售后申请会显示在这里。"
+
+msgid "Data export"
+msgstr "数据导出"
+
+msgid "Date"
+msgstr "日期"
+
+msgid "Dated menus"
+msgstr "配送菜单"
+
+msgid "Declined"
+msgstr "支付失败"
+
+msgid "Default address"
+msgstr "默认地址"
+
+msgid "Delivered"
+msgstr "已送达"
+
+msgid "Delivered and canceled orders will appear here."
+msgstr "已送达和已取消的订单会显示在这里。"
+
+msgid "Delivery"
+msgstr "配送日期"
+
+msgid "Delivery & box size"
+msgstr "配送与餐盒规格"
+
+msgid "Delivery & FAQs"
+msgstr "配送与常见问题"
+
+msgid "Delivery address"
+msgstr "收货地址"
+
+msgid "Delivery area"
+msgstr "配送地区"
+
+msgid "Delivery capacity"
+msgstr "配送容量"
+
+msgid "Delivery country"
+msgstr "配送国家"
+
+msgid "Delivery date"
+msgstr "配送日期"
+
+msgid "Delivery details"
+msgstr "配送信息"
+
+msgid "Delivery fee"
+msgstr "配送费"
+
+msgid "Delivery frequency"
+msgstr "配送频率"
+
+msgid "Delivery instructions (optional)"
+msgstr "送货备注（选填）"
+
+msgid "Delivery needs attention"
+msgstr "配送异常"
+
+msgid "Delivery problem"
+msgstr "配送问题"
+
+#. placeholder {0}: deliveryLabel(value, market, locale)
+msgid "Delivery: {0}"
+msgstr "配送日期：{0}"
+
+msgid "Demo fulfillment workspace"
+msgstr "演示履约工作台"
+
+msgid "Deployment administrators"
+msgstr "部署管理员"
+
+msgid "Description"
+msgstr "菜品介绍"
+
+msgid "Details"
+msgstr "详细说明"
+
+msgid "Dismiss timer for step {step}"
+msgstr "关闭第 {step} 步的计时器"
+
+msgid "District"
+msgstr "区／县"
+
+msgid "Download data"
+msgstr "下载数据"
+
+msgid "Download order details"
+msgstr "下载订单详情"
+
+msgid "Download your data"
+msgstr "下载我的数据"
+
+msgid "Draft"
+msgstr "草稿"
+
+msgid "East Asian"
+msgstr "东亚风味"
+
+msgid "Edit"
+msgstr "编辑"
+
+msgid "Edit access"
+msgstr "编辑权限"
+
+#. placeholder {0}: member.name
+msgid "Edit access for {0}"
+msgstr "编辑{0}的权限"
+
+msgid "Edit address"
+msgstr "编辑地址"
+
+msgid "Edit and approve the shared recipe library"
+msgstr "编辑和审核共享食谱库"
+
+msgid "Edit available inventory"
+msgstr "编辑可用库存"
+
+msgid "Edit meals"
+msgstr "修改菜品"
+
+msgid "Edit team access"
+msgstr "编辑成员权限"
+
+msgid "Editable draft"
+msgstr "可编辑草稿"
+
+msgid "Email"
+msgstr "邮箱"
+
+msgid "Email address"
+msgstr "邮箱"
+
+msgid "Email me when delivery is available in my area."
+msgstr "所在地区开通配送时，通过邮件通知我。"
+
+msgid "Enter another address"
+msgstr "填写其他地址"
+
+msgid "Enter the address where you'd like your box delivered."
+msgstr "填写你希望收到食材箱的地址。"
+
+msgid "Enter your delivery area on Our plans to see whether we deliver to you and which days are available."
+msgstr "在“选择套餐”页面填写收货地区，即可查看是否可配送及可选日期。"
+
+msgid "Equipment"
+msgstr "所需厨具"
+
+msgid "Equipment in your kitchen"
+msgstr "厨房设备"
+
+msgid "Estimated total"
+msgstr "预计合计"
+
+msgid "Exclude meals containing"
+msgstr "排除含以下成分的菜品"
+
+msgid "Exclude meals containing ingredients you want to avoid."
+msgstr "选择需要避开的食材，筛掉含有这些食材的菜品。"
+
+msgid "Explore Gather"
+msgstr "逛逛 Gather"
+
+msgid "Explore the menu"
+msgstr "查看菜单"
+
+msgid "Export packing list"
+msgstr "导出打包清单"
+
+msgid "Extra per serving"
+msgstr "每人份加价"
+
+msgid "Fill in the delivery details below."
+msgstr "在下方填写收货信息。"
+
+msgid "Filters do not guarantee absence of cross-contact. Review each recipe and supplier labels before cooking."
+msgstr "筛选无法排除食材在生产或包装时接触其他过敏原的可能。烹饪前请核对菜谱和食材标签。"
+
+msgid "Find something delicious…"
+msgstr "搜索想吃的菜…"
+
+msgid "Find your first box"
+msgstr "开启你的第一份食材箱"
+
+msgid "Find your plan"
+msgstr "选择套餐"
+
+msgid "Finish your box"
+msgstr "完善食材箱"
+
+msgid "First, find your delivery options. Then choose the meals you look forward to cooking."
+msgstr "先确认配送地区，再挑选想做、想吃的菜。"
+
+msgid "Fish"
+msgstr "鱼"
+
+msgid "Flexible plans. Skip or pause before your order deadline."
+msgstr "灵活订阅，可在订单截止时间前跳过或暂停。"
+
+msgid "Follow a few simple steps and make dinnertime your favorite time."
+msgstr "跟着简单步骤做菜，让晚餐成为一天中最期待的时刻。"
+
+msgid "Food preferences"
+msgstr "饮食偏好"
+
+msgid "For example, home or work"
+msgstr "例如：家或公司"
+
+msgid "FRESH INGREDIENTS. EVERYDAY JOY."
+msgstr "新鲜食材，轻松下厨。"
+
+msgid "Fresh, thoughtfully sourced"
+msgstr "新鲜食材，用心挑选"
+
+msgid "Freshly prepared chicken, vegetables and colorful bowls on a dinner table"
+msgstr "餐桌上的香草鸡肉、新鲜蔬菜与缤纷餐碗"
+
+msgid "From our kitchen to yours."
+msgstr "从灵感到餐桌。"
+
+msgid "From your kitchen"
+msgstr "自备工具"
+
+msgid "Fulfillment"
+msgstr "履约"
+
+msgid "Future deliveries will stop. Any confirmed boxes will still arrive unless you cancel them separately before their deadline."
+msgstr "后续配送将停止。已确认的食材箱仍会配送，如需取消，请在各自的截止时间前单独操作。"
+
+msgid "Gather — good food, closer to home"
+msgstr "Gather — 让好好吃饭更简单"
+
+msgid "Gather back office"
+msgstr "Gather 运营工作台"
+
+msgid "Gather home"
+msgstr "Gather 首页"
+
+msgid "GATHER OPERATIONS"
+msgstr "GATHER 运营"
+
+msgid "Get a copy of your profile, addresses, subscriptions, orders and support history."
+msgstr "获取个人资料、地址、订阅、订单及售后记录的副本。"
+
+msgid "Give each colleague access to the countries and work they manage. Changes apply to their next request."
+msgstr "按同事负责的国家和业务分配权限。修改后，下次操作即按新权限执行。"
+
+msgid "Give this address a name, such as Home or Work."
+msgstr "请给地址起个名字，例如“家”或“公司”。"
+
+msgid "Go to my deliveries"
+msgstr "查看配送安排"
+
+msgid "Good dinners start here."
+msgstr "好好吃饭，从这里开始。"
+
+msgid "GOOD DINNERS, SIMPLY DONE"
+msgstr "好好吃饭，就这么简单"
+
+msgid "Good food, thoughtfully delivered."
+msgstr "把每一份美味，认真送达。"
+
+msgid "Good food. A little more together."
+msgstr "好好吃饭，好好相聚。"
+
+msgid "Good questions. Simple answers."
+msgstr "关于订餐，你想了解的。"
+
+msgid "Harvest bowl"
+msgstr "蔬食碗"
+
+msgid "Here to help"
+msgstr "服务支持"
+
+msgid "How does a weekly plan work?"
+msgstr "每周配送怎么订？"
+
+msgid "How it works"
+msgstr "如何订餐"
+
+msgid "How was this meal?"
+msgstr "这道菜怎么样？"
+
+msgid "I agree to the order terms for this one-time purchase."
+msgstr "我同意本次单次购买的订单条款。"
+
+msgid "I agree to this order and saving my choices for a weekly plan. I will review and confirm each future box before ordering."
+msgstr "我同意本次订单，并保存所选菜品用于每周计划。之后每份餐盒均需由我确认后下单。"
+
+msgid "In preparation"
+msgstr "准备中"
+
+msgid "Included in your plan"
+msgstr "套餐内任选"
+
+#. placeholder {0}: index + 1
+msgid "Ingredient {0}"
+msgstr "食材 {0}"
+
+msgid "Ingredient quality"
+msgstr "食材质量"
+
+msgid "Ingredient units"
+msgstr "食材计量单位"
+
+msgid "Ingredients"
+msgstr "食材清单"
+
+msgid "Ingredients and quantities"
+msgstr "食材与用量"
+
+msgid "Ingredients to avoid"
+msgstr "需要避开的食材"
+
+msgid "Inventory & menu"
+msgstr "库存与菜单"
+
+msgid "Item"
+msgstr "项目"
+
+msgid "Keep Gather open to see timer alerts."
+msgstr "请保持 Gather 打开，以便查看计时提醒。"
+
+msgid "Keep my plan"
+msgstr "继续每周配送"
+
+msgid "Keep this box"
+msgstr "保留当前选择"
+
+msgid "Kitchen timers"
+msgstr "厨房计时器"
+
+msgid "Language"
+msgstr "语言"
+
+msgid "Let us make it right."
+msgstr "让我们帮你解决。"
+
+msgid "Let's check delivery to your area. Your full address comes later."
+msgstr "先看看能否送到你所在的地区，详细地址稍后填写。"
+
+msgid "Let's get cooking"
+msgstr "开始下厨"
+
+msgid "Let's try that again"
+msgstr "请重试"
+
+msgid "Load sample menus for this country"
+msgstr "载入当前国家的示例菜单"
+
+msgid "Load saved feedback"
+msgstr "载入已保存的评价"
+
+msgid "Loading your saved box…"
+msgstr "正在读取已保存的食材箱…"
+
+msgid "Loading…"
+msgstr "加载中…"
+
+msgid "Log in"
+msgstr "登录"
+
+msgid "Main navigation"
+msgstr "主导航"
+
+msgid "Make default"
+msgstr "设为默认"
+
+msgid "Make it yours"
+msgstr "选你喜欢"
+
+msgid "MAKE IT YOURS"
+msgstr "按你的喜好搭配"
+
+msgid "Make room for a good dinner. Discover delicious recipes, build your box, and enjoy ingredients ready for your kitchen."
+msgstr "好好吃饭，从这里开始。发现美味食谱，定制食材箱，新鲜食材送到家。"
+
+msgid "Make room for a new favorite."
+msgstr "换一道新心头好。"
+
+msgid "Make room for<0/><1>good food.</1>"
+msgstr "让生活多一点<0/><1>好滋味。</1>"
+
+msgid "Make this my default address"
+msgstr "设为默认地址"
+
+msgid "Manage box"
+msgstr "管理本次配送"
+
+msgid "Manage your plan"
+msgstr "管理配送"
+
+msgid "Managers can issue refunds and manage all operations in their countries. Support colleagues can respond to requests; refunds require a manager."
+msgstr "国家业务负责人可管理所负责国家的全部业务并办理退款。客服可处理客户问题，退款需由负责人办理。"
+
+#. placeholder {0}: i + 1
+msgid "Mark step {0} complete"
+msgstr "标记步骤{0}完成"
+
+#. placeholder {0}: i + 1
+msgid "Mark step {0} incomplete"
+msgstr "取消完成第 {0} 步"
+
+msgid "Meal rating"
+msgstr "菜品评分"
+
+msgid "Meals"
+msgstr "菜品"
+
+msgid "Meals per box"
+msgstr "每箱几道菜"
+
+msgid "Meals updated"
+msgstr "菜品已更新"
+
+msgid "Mediterranean"
+msgstr "地中海风味"
+
+msgid "Meet your next favorite."
+msgstr "发现下一道心头好。"
+
+msgid "Menu delivery date"
+msgstr "菜单配送日期"
+
+msgid "Menu draft saved."
+msgstr "菜单草稿已保存。"
+
+msgid "Menu editor"
+msgstr "菜单编辑"
+
+msgid "Menu published."
+msgstr "菜单已发布。"
+
+msgid "Menu withdrawn. Existing orders are unchanged."
+msgstr "菜单已下架，已有订单不受影响。"
+
+msgid "Menus & recipes"
+msgstr "菜单与食谱"
+
+msgid "Metric"
+msgstr "公制"
+
+msgid "Microwave"
+msgstr "微波炉"
+
+msgid "Middle Eastern"
+msgstr "中东风味"
+
+msgid "Milk"
+msgstr "奶类"
+
+msgid "Minutes"
+msgstr "分钟"
+
+msgid "Missing item"
+msgstr "缺少食材"
+
+msgid "Mobile number"
+msgstr "手机号码"
+
+msgid "Mushrooms"
+msgstr "蘑菇"
+
+msgid "My account"
+msgstr "我的账户"
+
+msgid "My deliveries"
+msgstr "配送安排"
+
+msgid "Need help with a delivery? Open the order and tell us what happened."
+msgstr "配送遇到问题？打开对应订单，告诉我们具体情况。"
+
+msgid "New recipe"
+msgstr "新建食谱"
+
+msgid "New team member"
+msgstr "新成员"
+
+msgid "Next action"
+msgstr "下一步"
+
+msgid "Next box to review"
+msgstr "下一份待确认餐盒"
+
+msgid "Next month"
+msgstr "下个月"
+
+msgid "No"
+msgstr "否"
+
+msgid "No access changes yet"
+msgstr "暂无权限变更"
+
+msgid "No meals match just yet"
+msgstr "暂时没有匹配的菜品"
+
+msgid "No meals selected yet."
+msgstr "还没有选择菜品。"
+
+msgid "No menu for this date"
+msgstr "该日期暂无菜单"
+
+msgid "No menu is available for this date. Please choose another delivery day."
+msgstr "这个日期还没有可选菜单，请换个配送日期。"
+
+msgid "No past orders yet"
+msgstr "暂无历史订单"
+
+msgid "No recipe feedback yet"
+msgstr "还没有菜品评价"
+
+msgid "No requests yet."
+msgstr "暂无申请记录。"
+
+msgid "No saved addresses yet"
+msgstr "还没有保存地址"
+
+msgid "No support requests"
+msgstr "暂无售后申请"
+
+msgid "No upcoming boxes"
+msgstr "暂无待配送餐盒"
+
+msgid "No workspace access"
+msgstr "未分配工作台权限"
+
+msgid "Not sure"
+msgstr "还不确定"
+
+msgid "Nothing waiting on you."
+msgstr "暂无待处理请求。"
+
+msgid "Notify me"
+msgstr "开通后通知我"
+
+msgid "Nutrition basis"
+msgstr "营养值计算依据"
+
+msgid "Nuts"
+msgstr "坚果"
+
+msgid "ON THE MENU"
+msgstr "本周菜单"
+
+msgid "On the road"
+msgstr "配送中"
+
+msgid "On the way"
+msgstr "配送中"
+
+msgid "One fewer person"
+msgstr "减少一人份"
+
+msgid "One more person"
+msgstr "增加一人份"
+
+msgid "One-time box"
+msgstr "单次购买"
+
+msgid "One-time purchase. No recurring deliveries."
+msgstr "仅购买这一次，后续不会自动配送。"
+
+msgid "Open"
+msgstr "待处理"
+
+msgid "Open navigation"
+msgstr "打开导航"
+
+msgid "Open support cases"
+msgstr "待处理售后"
+
+msgid "Open your order in My deliveries and choose Report an issue. Tell us what happened and we'll reply through your account."
+msgstr "在“配送安排”中打开订单，点击“申请售后”并说明情况。我们会通过你的账户回复。"
+
+msgid "Operations"
+msgstr "运营后台"
+
+msgid "Operations sections"
+msgstr "运营管理"
+
+msgid "Order history"
+msgstr "历史订单"
+
+msgid "Order reference"
+msgstr "订单编号"
+
+msgid "Order summary"
+msgstr "订单明细"
+
+msgid "Order this box"
+msgstr "确认订购"
+
+msgid "Order updates"
+msgstr "订单动态"
+
+msgid "Orders & fulfillment"
+msgstr "订单与履约"
+
+msgid "Other city"
+msgstr "其他城市"
+
+msgid "Other district"
+msgstr "其他区县"
+
+msgid "Other province or municipality"
+msgstr "其他省份"
+
+msgid "Our plans"
+msgstr "选择套餐"
+
+msgid "Oven"
+msgstr "烤箱"
+
+msgid "Packing"
+msgstr "打包中"
+
+msgid "Paid"
+msgstr "已支付"
+
+msgid "Pantry essentials"
+msgstr "需要自备"
+
+msgid "Pasta"
+msgstr "意面"
+
+msgid "Pause plan"
+msgstr "暂停每周配送"
+
+msgid "Pause timer"
+msgstr "暂停计时"
+
+msgid "Pause your weekly plan?"
+msgstr "暂停每周配送？"
+
+msgid "Paused"
+msgstr "已暂停"
+
+msgid "Payment"
+msgstr "支付方式"
+
+msgid "Payment confirmation delayed"
+msgstr "支付结果延迟"
+
+msgid "Payment declined"
+msgstr "支付失败"
+
+msgid "Payment needs attention"
+msgstr "支付待处理"
+
+msgid "Payment question"
+msgstr "支付问题"
+
+msgid "Payment scenario"
+msgstr "支付场景"
+
+msgid "Payment succeeds"
+msgstr "支付成功"
+
+msgid "Payment time ended"
+msgstr "支付已超时"
+
+msgid "Payment under review"
+msgstr "支付待核实"
+
+msgid "People per meal"
+msgstr "用餐人数"
+
+msgid "per serving, plus delivery."
+msgstr "，另加配送费。"
+
+msgid "Phone number"
+msgstr "电话号码"
+
+msgid "Photo"
+msgstr "菜品照片"
+
+msgid "Pick the meals and portions that fit your table."
+msgstr "选择适合你家餐桌的菜品与份量。"
+
+msgid "pieces"
+msgstr "个"
+
+msgid "Place a demo order from the storefront to see it here."
+msgstr "在商店提交演示订单后，即可在这里查看。"
+
+msgid "Place order"
+msgstr "提交订单"
+
+msgid "Placing your order…"
+msgstr "正在提交…"
+
+msgid "Plan changes apply to future deliveries. Manage confirmed boxes below."
+msgstr "订阅调整将用于后续配送。已确认的食材箱请在下方单独管理。"
+
+msgid "Preferences saved."
+msgstr "偏好已保存。"
+
+msgid "Premium selections"
+msgstr "升级菜品"
+
+msgid "Preparation time (minutes)"
+msgstr "烹饪时间（分钟）"
+
+msgid "Prepare menu inventory"
+msgstr "准备菜单库存"
+
+msgid "Preview tools"
+msgstr "预览工具"
+
+msgid "Previous access"
+msgstr "修改前"
+
+msgid "Previous month"
+msgstr "上个月"
+
+msgid "Print recipe"
+msgstr "打印食谱"
+
+msgid "Privacy & data"
+msgstr "隐私与数据"
+
+msgid "Privacy and data"
+msgstr "隐私与数据"
+
+msgid "Protein per serving (g)"
+msgstr "每人份蛋白质（克）"
+
+msgid "Province or municipality"
+msgstr "省份"
+
+msgid "Publish saved menu"
+msgstr "发布已保存的菜单"
+
+msgid "Published"
+msgstr "已上架"
+
+msgid "Quantities serve"
+msgstr "用量对应人数"
+
+msgid "Quick & easy"
+msgstr "快手好菜"
+
+msgid "Ready for collection"
+msgstr "待揽收"
+
+msgid "Ready for the first box."
+msgstr "准备迎接第一份食材箱。"
+
+msgid "Recent recipe feedback"
+msgstr "近期菜品评价"
+
+msgid "Recipe"
+msgstr "食谱"
+
+msgid "Recipe approved."
+msgstr "食谱已通过审核。"
+
+msgid "Recipe categories"
+msgstr "菜品分类"
+
+msgid "Recipe category"
+msgstr "菜品分类"
+
+msgid "Recipe draft saved."
+msgstr "食谱草稿已保存。"
+
+msgid "Recipe feedback"
+msgstr "菜品评价"
+
+msgid "Recipe library"
+msgstr "食谱库"
+
+msgid "Recipe link"
+msgstr "食谱链接名称"
+
+msgid "Recipe name"
+msgstr "菜品名称"
+
+msgid "Recipe tag"
+msgstr "菜品标签"
+
+msgid "Recipes you'll want again"
+msgstr "值得再次品尝的好菜"
+
+msgid "Recipient name"
+msgstr "收货人"
+
+msgid "Record a response and an optional simulated refund. Refunds cannot exceed the remaining paid balance."
+msgstr "记录回复及可选模拟退款。退款不能超过剩余已付款。"
+
+msgid "Refresh"
+msgstr "刷新"
+
+msgid "Refresh total"
+msgstr "刷新金额"
+
+msgid "Refund"
+msgstr "退款"
+
+msgid "Refund amount"
+msgstr "退款金额"
+
+msgid "Refund late payment"
+msgstr "退还超时付款"
+
+msgid "Refunded"
+msgstr "已退款"
+
+msgid "Reload and retry"
+msgstr "刷新后重试"
+
+msgid "Remaining quantity"
+msgstr "剩余数量"
+
+msgid "Remove"
+msgstr "移除"
+
+#. placeholder {0}: recipeText(recipe, locale).name
+msgid "Remove {0}"
+msgstr "移除{0}"
+
+msgid "Remove address"
+msgstr "删除地址"
+
+#. placeholder {0}: index + 1
+msgid "Remove ingredient {0}"
+msgstr "移除食材 {0}"
+
+#. placeholder {0}: index + 1
+msgid "Remove step {0}"
+msgstr "移除步骤 {0}"
+
+msgid "Remove this saved address?"
+msgstr "删除这个已保存的地址？"
+
+msgid "Remove unavailable meal"
+msgstr "移除不可选菜品"
+
+msgid "Report an issue"
+msgstr "申请售后"
+
+msgid "Request account deletion"
+msgstr "申请注销账户"
+
+msgid "Request data export"
+msgstr "申请导出数据"
+
+msgid "Request deletion"
+msgstr "申请注销"
+
+msgid "Request sent. You can follow our reply in your account."
+msgstr "申请已提交，可在账户中查看回复。"
+
+msgid "Requested"
+msgstr "已提交"
+
+msgid "Reset timer"
+msgstr "重新设置"
+
+msgid "Resolve request"
+msgstr "处理请求"
+
+msgid "Resolve support request"
+msgstr "处理售后申请"
+
+msgid "Resolved"
+msgstr "已处理"
+
+msgid "Response"
+msgstr "处理回复"
+
+msgid "Restore recipe"
+msgstr "恢复食谱"
+
+msgid "Resume plan"
+msgstr "恢复每周配送"
+
+msgid "Resume timer"
+msgstr "继续计时"
+
+msgid "Retry"
+msgstr "重试"
+
+msgid "Review"
+msgstr "确认餐盒"
+
+msgid "Review and confirm each future box in My deliveries."
+msgstr "之后每份餐盒都需在“我的配送”中确认后下单。"
+
+msgid "Review ingredients, allergens, quantities, nutrition and both languages. Approved versions cannot be edited."
+msgstr "请核对食材、过敏原、用量、营养信息及中英文内容。通过审核的版本将无法修改。"
+
+msgid "Review next box"
+msgstr "查看下次配送"
+
+msgid "Review notes"
+msgstr "审核备注"
+
+msgid "Review your box"
+msgstr "查看餐盒"
+
+msgid "Review your next box"
+msgstr "确认下一份餐盒"
+
+msgid "Review your order"
+msgstr "确认订单"
+
+msgid "Review your payment"
+msgstr "确认付款金额"
+
+msgid "Sale closes (UTC)"
+msgstr "停止接单时间（UTC）"
+
+msgid "Sale opens (UTC)"
+msgstr "开始接单时间（UTC）"
+
+msgid "Salmon"
+msgstr "三文鱼"
+
+msgid "Sample menus are ready. Reload the menu to browse."
+msgstr "示例菜单已就绪，刷新菜单页面即可查看。"
+
+msgid "Save access"
+msgstr "保存权限"
+
+msgid "Save address"
+msgstr "保存地址"
+
+msgid "Save an address for faster checkout. Updating it won't change existing deliveries."
+msgstr "保存地址，下次结算更方便。修改地址不会影响已有配送。"
+
+msgid "Save changes before publishing. Customers see the last published version until you publish again or withdraw the menu."
+msgstr "请先保存修改，再发布。在重新发布或下架前，顾客看到的仍是上次发布的菜单。"
+
+msgid "Save feedback"
+msgstr "提交评价"
+
+msgid "Save inventory"
+msgstr "保存库存"
+
+msgid "Save menu draft"
+msgstr "保存菜单草稿"
+
+msgid "Save preferences"
+msgstr "保存偏好"
+
+msgid "Save recipe"
+msgstr "收藏食谱"
+
+msgid "Save recipe draft"
+msgstr "保存食谱草稿"
+
+msgid "Save resolution"
+msgstr "保存处理结果"
+
+msgid "Save what you like and what you'd prefer to avoid. Always check each recipe's allergen information."
+msgstr "保存你的口味和饮食偏好。选择菜品时，请留意每道菜的过敏原信息。"
+
+msgid "Save your choices for each week. Review and confirm each box before ordering."
+msgstr "保存你的每周选择，每份餐盒均需确认后下单。"
+
+msgid "Saved access"
+msgstr "修改后"
+
+msgid "Saved addresses"
+msgstr "收货地址"
+
+msgid "Saved box"
+msgstr "已保存的选择"
+
+msgid "Saving…"
+msgstr "保存中…"
+
+msgid "Search recipes"
+msgstr "搜索菜品"
+
+msgid "Seasonal inspiration, delivered"
+msgstr "时令灵感，送到家中"
+
+msgid "Seconds"
+msgstr "秒"
+
+msgid "See available meals"
+msgstr "查看可选菜品"
+
+msgid "See the full menu"
+msgstr "查看完整菜单"
+
+msgid "Select a delivery day to continue."
+msgstr "选择配送日期后即可继续。"
+
+msgid "Select approved recipes and set any extra charge per serving. New offerings need available inventory before customers can order."
+msgstr "选择已通过审核的食谱，设置每人份加价。新上架的菜品需设置可售库存后，顾客才能下单。"
+
+msgid "Select city"
+msgstr "请选择城市"
+
+msgid "Select district"
+msgstr "请选择区县"
+
+msgid "Select province"
+msgstr "请选择省份"
+
+msgid "Send me optional news and offers"
+msgstr "接收新品和优惠消息"
+
+msgid "Send request"
+msgstr "提交申请"
+
+msgid "Servings"
+msgstr "用餐人数"
+
+msgid "Sesame"
+msgstr "芝麻"
+
+msgid "Set next checkout"
+msgstr "设置下次结算"
+
+msgid "Set remaining servings and delivery capacity for each published menu before taking orders. The delivery row counts boxes."
+msgstr "接单前，请设置各菜单的剩余可售份数和配送容量。配送容量按食材箱数量计算。"
+
+msgid "Shanghai"
+msgstr "上海"
+
+msgid "Share your feedback with our kitchen."
+msgstr "把你的想法告诉我们的厨房团队。"
+
+msgid "Shared recipe library editor"
+msgstr "共享食谱库编辑"
+
+msgid "Show meals"
+msgstr "查看菜品"
+
+msgid "Sign in to continue"
+msgstr "登录并继续"
+
+msgid "Sign in to Gather"
+msgstr "登录 Gather"
+
+msgid "Sign in to keep your deliveries, recipes and preferences together."
+msgstr "登录以保存配送、食谱与个人偏好。"
+
+msgid "Sign in to save your favorite recipes."
+msgstr "登录后即可收藏食谱。"
+
+msgid "Sign out"
+msgstr "退出登录"
+
+msgid "Simulate checkout expiry"
+msgstr "模拟支付超时"
+
+msgid "Simulate payment confirmation"
+msgstr "模拟支付成功"
+
+msgid "Simulate payment decline"
+msgstr "模拟支付失败"
+
+msgid "Skip next week"
+msgstr "跳过下次配送"
+
+msgid "Skip to content"
+msgstr "跳至内容"
+
+msgid "Sold out"
+msgstr "已售罄"
+
+msgid "Something went wrong. Please try again."
+msgstr "操作失败，请重试。"
+
+msgid "Something wrong with a delivery?"
+msgstr "配送出了问题怎么办？"
+
+msgid "South Asian"
+msgstr "南亚风味"
+
+msgid "Soy"
+msgstr "大豆"
+
+msgid "Staff only. Set the payment result for a customer's next checkout in this market. No real payment is taken."
+msgstr "仅供工作人员使用，设置该客户在当前市场的下一次结算结果，不会产生真实扣款。"
+
+msgid "Staff workspace"
+msgstr "运营工作台"
+
+msgid "Start a new plan"
+msgstr "开启每周配送"
+
+msgid "Start timer"
+msgstr "开始计时"
+
+msgid "State"
+msgstr "州"
+
+#. placeholder {0}: i + 1
+#. placeholder {0}: index + 1
+msgid "Step {0}"
+msgstr "步骤 {0}"
+
+msgid "Step {step}"
+msgstr "第 {step} 步"
+
+msgid "Storage"
+msgstr "保存方式"
+
+msgid "Store preview · No charges or deliveries"
+msgstr "体验预览 · 不会扣款或配送"
+
+msgid "Stovetop"
+msgstr "炉灶"
+
+msgid "Street address"
+msgstr "详细地址"
+
+msgid "Street, building and apartment"
+msgstr "街道、小区、楼栋及门牌号"
+
+msgid "Submit a deletion request?"
+msgstr "提交账户注销请求？"
+
+msgid "Submit request"
+msgstr "提交请求"
+
+msgid "Support & refunds"
+msgstr "售后与退款"
+
+msgid "Support request resolved"
+msgstr "售后申请已处理"
+
+msgid "Support requests"
+msgstr "售后记录"
+
+msgid "Suspending staff access leaves the customer's orders and personal account available."
+msgstr "停用员工权限后，该账号仍可查看个人订单并使用客户功能。"
+
+msgid "Swap your meals and review the updated total before saving."
+msgstr "更换菜品后，请核对新的金额再保存。"
+
+msgid "Team access"
+msgstr "团队权限"
+
+msgid "Tell us what happened. Your request and our response will appear in your account."
+msgstr "请描述问题。请求和处理结果会显示在你的账户中。"
+
+msgid "Tell us which meal or delivery was affected and what happened."
+msgstr "请说明哪道菜或哪次配送出了问题，以及具体情况。"
+
+msgid "Thank you. Your feedback is saved."
+msgstr "谢谢，评价已保存。"
+
+msgid "The link may have changed. Explore the menu or return to your deliveries."
+msgstr "链接可能已变更。你可以浏览菜单，或返回“我的配送”。"
+
+msgid "The menu is being prepared"
+msgstr "菜单准备中"
+
+msgid "The next checkout will use this payment scenario."
+msgstr "下一次结算将使用此支付场景。"
+
+msgid "These accounts manage the team and all countries. Change them in the deployment settings."
+msgstr "这些账号可管理团队及所有国家的业务，请在部署设置中修改。"
+
+msgid "These choices will update your weekly plan here. Your other plans and confirmed orders stay as they are."
+msgstr "本次选择将更新当前地区的每周配送，其他订阅和已确认订单不受影响。"
+
+msgid "This area is available to authorized operators. Sign in with your staff account."
+msgstr "此区域仅向授权运营人员开放，请使用员工账户登录。"
+
+msgid "This box"
+msgstr "当前选择"
+
+msgid "This box uses your saved meals and address. Check the delivery date and total before confirming."
+msgstr "这份食材箱将使用已保存的菜品和地址，请确认配送日期和金额。"
+
+msgid "This box will be canceled and any payment refunded. Your weekly plan will continue."
+msgstr "这份食材箱将被取消，已支付的款项将退回。每周配送仍会继续。"
+
+msgid "This delivery date is no longer available. Choose a new date, then review your meals."
+msgstr "这个日期已无法配送。请选择新日期，再确认菜品。"
+
+msgid "This meal is unavailable in your delivery area."
+msgstr "你所在的配送地区暂不提供这道菜。"
+
+msgid "This removes the saved address. Existing deliveries and your weekly plan keep their current address."
+msgstr "此操作仅删除已保存的地址，已有配送和每周配送的地址不会改变。"
+
+msgid "This week's menu"
+msgstr "本周菜单"
+
+msgid "Thoughtfully chosen recipes. Fresh ingredients at your door. A little less to do, a little more to enjoy."
+msgstr "用心挑选的食谱，新鲜食材送到家。少一些忙碌，多一些餐桌上的美好。"
+
+msgid "Time remaining"
+msgstr "剩余时间"
+
+msgid "Timer finished"
+msgstr "计时结束"
+
+msgid "Timer for step {step}"
+msgstr "第 {step} 步计时器"
+
+msgid "Tofu"
+msgstr "豆腐"
+
+msgid "Total"
+msgstr "总计"
+
+msgid "Total due"
+msgstr "应付合计"
+
+msgid "Try a box without a weekly plan."
+msgstr "先尝一份，无需开启每周计划。"
+
+msgid "Try again"
+msgstr "重试"
+
+msgid "Try changing your filters or search."
+msgstr "请调整筛选条件或搜索关键词。"
+
+msgid "Try payment again"
+msgstr "重新支付"
+
+msgid "UK measures"
+msgstr "英制"
+
+msgid "Unavailable"
+msgstr "不可选"
+
+msgid "Unavailable meal"
+msgstr "不可选菜品"
+
+msgid "Under review"
+msgstr "审核中"
+
+msgid "Unit"
+msgstr "单位"
+
+msgid "Upcoming boxes"
+msgstr "即将配送"
+
+msgid "Update feedback"
+msgstr "更新评价"
+
+msgid "Updated total"
+msgstr "更新后合计"
+
+msgid "US measures"
+msgstr "美制"
+
+msgid "Use a saved address"
+msgstr "使用已保存的地址"
+
+msgid "Use lowercase words separated by hyphens."
+msgstr "请使用小写英文字母或数字，单词之间以连字符分隔。"
+
+msgid "Use saved box"
+msgstr "使用已保存的选择"
+
+msgid "Use the menu filters and review each recipe's allergens. Shared facilities can introduce cross-contact; filters are preferences and do not certify a meal is safe for an allergy."
+msgstr "可按饮食偏好筛选菜品，但仍需查看每道菜的过敏原说明。食材在同一场所处理时可能接触其他过敏原，筛选结果并不代表完全没有过敏风险。"
+
+msgid "Veggie favorites"
+msgstr "缤纷素食"
+
+msgid "View delivery areas"
+msgstr "查看配送范围"
+
+msgid "View order"
+msgstr "查看订单"
+
+msgid "We couldn't find that page"
+msgstr "找不到这个页面"
+
+msgid "We couldn't load this language. Please try again."
+msgstr "暂时无法加载此语言，请重试。"
+
+msgid "We'll bring the fresh"
+msgstr "新鲜送到"
+
+msgid "We'll email you when delivery opens in your area."
+msgstr "你的地区开通配送后，我们会发邮件通知你。"
+
+msgid "We'll review your request. Your plans and orders will continue until you cancel them separately."
+msgstr "我们会审核你的申请。订阅和订单仍会继续，请按需另行取消。"
+
+msgid "We'll show meals available for your delivery area."
+msgstr "查看你所在地区的可选菜品。"
+
+msgid "We're not delivering here yet. You can try another area or ask us to let you know when we arrive."
+msgstr "这里暂未开通配送。你可以换个地区，或留下邮箱等待开通通知。"
+
+msgid "We're waiting for your payment confirmation. Please don't pay again. You can leave this page and check your order later."
+msgstr "正在等待支付结果，请勿重复付款。你可以先离开此页，稍后在订单中查看。"
+
+msgid "Weekly plan"
+msgstr "每周配送"
+
+msgid "What about food preferences and allergies?"
+msgstr "饮食偏好与过敏原怎么办？"
+
+msgid "What sounds good this week?"
+msgstr "这周想吃点什么？"
+
+msgid "What went wrong?"
+msgstr "问题类型"
+
+msgid "Wheat"
+msgstr "小麦"
+
+msgid "Where do you deliver?"
+msgstr "支持哪些配送区域？"
+
+msgid "Where should we deliver?"
+msgstr "配送到哪里？"
+
+msgid "Where will you be cooking?"
+msgstr "你的厨房在哪里？"
+
+msgid "Withdraw menu"
+msgstr "下架菜单"
+
+msgid "Withdrawn"
+msgstr "已下架"
+
+msgid "Would cook again"
+msgstr "愿意再做"
+
+msgid "Would not cook again"
+msgstr "不想再做"
+
+msgid "Would you cook it again?"
+msgstr "你愿意再做这道菜吗？"
+
+msgid "Yes"
+msgstr "是"
+
+msgid "Yes. Manage your plan in My deliveries. To change or cancel a confirmed box, open that order before its deadline. After that, contact us for help."
+msgstr "可以。在“配送安排”中管理订阅；如需修改或取消已确认的食材箱，请在订单显示的截止时间前操作。超过截止时间，可联系客服。"
+
+msgid "You have a saved box"
+msgstr "账户中已有食材箱"
+
+msgid "You're on the list."
+msgstr "已为你登记。"
+
+msgid "Your allergen exclusions are still applied."
+msgstr "你设置的过敏原筛选仍然有效。"
+
+msgid "Your box"
+msgstr "我的食材箱"
+
+msgid "Your box changed elsewhere"
+msgstr "食材箱已在其他页面更新"
+
+msgid "Your box is full. Remove a meal first."
+msgstr "食材箱已满，请先移除一道菜。"
+
+msgid "Your box is full. Remove a meal or choose a larger box."
+msgstr "食材箱已满，请移除一道菜或选择更大的食材箱。"
+
+msgid "Your box size changed. Remove a meal or choose a larger box to keep all your selections."
+msgstr "餐盒规格已更改。请移除多余菜品，或选大一号餐盒以保留全部菜品。"
+
+msgid "Your choices are saved for next week. Review and confirm each future box in My deliveries before ordering."
+msgstr "已为下周保存你的选择。之后每份餐盒都需在“我的配送”中确认后下单。"
+
+msgid "YOUR DELIVERY"
+msgstr "你的配送"
+
+msgid "Your download is being prepared. Please try again shortly."
+msgstr "文件正在准备中，请稍后重试。"
+
+msgid "Your food preferences"
+msgstr "饮食偏好"
+
+msgid "YOUR GATHER"
+msgstr "我的 GATHER"
+
+msgid "Your meals are no longer reserved. We're checking the payment result before you can try again."
+msgstr "所选餐食已不再保留。我们正在核实支付结果，请暂勿重新付款。"
+
+msgid "Your meals are still selected. Review your box to choose which ones to keep."
+msgstr "已选菜品都还在。请查看餐盒，选择要保留的菜品。"
+
+msgid "Your meals, your delivery, all in one place."
+msgstr "菜品和配送信息，一起确认。"
+
+msgid "Your next box needs confirmation. Review the meals and total before ordering."
+msgstr "下一份食材箱等待确认。请先核对菜品和金额，再提交订单。"
+
+msgid "Your order is confirmed."
+msgstr "订单已确认"
+
+msgid "Your past orders are in Order history. Build a box when you are ready for another delivery."
+msgstr "之前的订单可在“历史订单”中查看。想再来一份时，随时挑选菜品。"
+
+msgid "Your payment arrived after your meals were released. This box is not confirmed. Our team needs to review your payment; please don't pay again."
+msgstr "款项在餐食保留时间结束后到账，订单尚未确认。我们将核实这笔付款，请勿重复付款。"
+
+msgid "Your payment didn't go through. Your meals are saved so you can try again."
+msgstr "支付未成功，所选菜品已保留，请重试。"
+
+msgid "Your plan is"
+msgstr "当前配送计划"
+
+msgid "Your previous delivery date is no longer available. Choose a new date to continue."
+msgstr "之前选择的日期已无法配送，请重新选择。"
+
+msgid "Your requests"
+msgstr "申请记录"
+
+msgid "Your saved box is empty."
+msgstr "已保存的食材箱中没有菜品。"
+
+msgid "Your staff access is available in the countries below."
+msgstr "你可以管理以下国家的业务。"
+
+msgid "Your table. Your kind of good."
+msgstr "你的餐桌，你的好滋味。"
+
+msgid "Your team starts here"
+msgstr "开始组建团队"
+
+msgid "Your total will appear when it is ready."
+msgstr "正在确认订单金额。"
+
+msgid "Your week, your way"
+msgstr "按你的节奏订餐"
