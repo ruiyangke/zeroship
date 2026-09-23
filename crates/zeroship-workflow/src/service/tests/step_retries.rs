@@ -506,7 +506,7 @@ async fn attempt_outruns_a_wait(store: Rc<OrmStore>) {
             &task.token,
             execution(json!([
                 {"kind":"Child", "ordinal":0, "name":"Example", "nameOccurrence":0,
-                 "childWorkflowName":"Example", "input":null, "options":{}},
+                 "childWorkflowName":"Example", "options":{}},
                 {"kind":"RunFailed", "ordinal":1, "name":"charge", "nameOccurrence":0,
                  "maxAttempts":3, "error":{"type":"Error","message":"intentional failure"}},
             ])),

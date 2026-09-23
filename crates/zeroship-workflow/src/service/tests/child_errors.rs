@@ -96,7 +96,7 @@ async fn parent_awaiting_child(
             &task.token,
             execution(json!([{
                 "kind":"Child", "ordinal":0, "name":"join", "childWorkflowName":"Child",
-                "options":options, "input":{}
+                "options":options
             }])),
         )
         .await
@@ -396,9 +396,9 @@ async fn failed_child(store: Rc<OrmStore>) {
             &task.token,
             execution(json!([
                 {"kind":"Child", "ordinal":0, "name":"join-0", "childWorkflowName":"Child",
-                 "options":{}, "input":{}},
+                 "options":{}},
                 {"kind":"Child", "ordinal":1, "name":"join-1", "childWorkflowName":"Child",
-                 "options":{}, "input":{}},
+                 "options":{}},
             ])),
         )
         .await

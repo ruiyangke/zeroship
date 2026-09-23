@@ -89,6 +89,66 @@ fn a_run_that_returned_nothing_folds_to_an_absent_output() {
     );
 }
 
+/// A child's input reaches the fold as a DESCRIPTOR or not at all.
+///
+/// A child's input is a run's input, and a generation row keeps no inline slot
+/// for one, so a value here is a child this journal could not admit. The runner
+/// stages every value a body passes a child, which is why no executor reaches
+/// the refusal; an executor that did would otherwise have its value silently
+/// dropped and the child started from nothing.
+///
+/// The refusal names the child's input rather than the batch, because that is
+/// the creator-facing thing that has to change.
+#[test]
+fn an_inline_child_input_is_refused_by_name() {
+    let refused = fold(json!({"outcomes": [{
+        "kind": "Child", "ordinal": 0, "name": "risk",
+        "childWorkflowName": "Risk", "input": {"orderId": "ord_1"}
+    }]}))
+    .expect_err("an inline child input must not fold");
+    assert!(
+        matches!(
+            &refused,
+            WorkflowServiceError::InvalidRequest(message)
+                if message == "workflow child input must be a staged reference"
+        ),
+        "{refused:?}"
+    );
+
+    // The controls. The same batch naming an OBJECT folds and carries the
+    // descriptor, and the same batch naming nothing folds to no descriptor, so
+    // the refusal above is the inline value and not the `Child` arm refusing
+    // every child handed to it.
+    let reference = json!({
+        "hash": "a".repeat(64), "size": 17, "contentType": "application/json"
+    });
+    let (checkpoints, _) = fold(json!({"outcomes": [{
+        "kind": "Child", "ordinal": 0, "name": "risk",
+        "childWorkflowName": "Risk", "inputRef": reference
+    }]}))
+    .unwrap();
+    assert_eq!(
+        checkpoints[0]
+            .child_input_ref
+            .as_ref()
+            .map(|carried| carried.hash.as_str()),
+        Some("a".repeat(64).as_str()),
+    );
+    let (bare, _) = fold(json!({"outcomes": [{
+        "kind": "Child", "ordinal": 0, "name": "risk", "childWorkflowName": "Risk"
+    }]}))
+    .unwrap();
+    assert!(bare[0].child_input_ref.is_none());
+    // A JSON null is how a body that passed nothing arrives, and it is the same
+    // child as the bare batch above rather than an inline value to refuse.
+    let (empty, _) = fold(json!({"outcomes": [{
+        "kind": "Child", "ordinal": 0, "name": "risk",
+        "childWorkflowName": "Risk", "input": null
+    }]}))
+    .unwrap();
+    assert!(empty[0].child_input_ref.is_none());
+}
+
 /// The pair a completion actually runs through: the shared runtime decoder, then
 /// the shared fold `frontier::apply` applies to an authorized claim's run.
 fn fold(value: Value) -> Result<(Vec<StepCheckpoint>, RunUpdate), WorkflowServiceError> {

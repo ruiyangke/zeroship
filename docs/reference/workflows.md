@@ -811,11 +811,14 @@ const bytes = await run.readOutput();
 
 The inline threshold is 1 MiB, and it applies to step outputs: a step output at
 or under it is journaled inline, and anything larger, or explicitly
-by-reference, becomes a workflow blob. A run's final output takes no threshold.
-Whatever a workflow returns is staged as a blob, so a result costs an object
-against the app's payload budget however small it is. A single blob may not
-exceed 64 MiB; an output over that cap fails the `step.run` that produced it
-with `LimitExceededError`, which a `catch` around that step can handle.
+by-reference, becomes a workflow blob. A run's input and its final output take
+no threshold. Whatever starts a run and whatever it returns are staged as blobs,
+so each costs an object against the app's payload budget however small it is —
+a run started through `start()`, a child started by `step.call` or
+`step.startMany`, a successor seeded by `step.continueAsNew`, and every firing
+of a schedule alike. A single blob may not exceed 64 MiB; an output over that
+cap fails the `step.run` that produced it with `LimitExceededError`, which a
+`catch` around that step can handle, and an input over it fails the start.
 
 ## Compensation
 

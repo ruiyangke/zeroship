@@ -197,44 +197,77 @@ async fn journal_is_installed_and_unread(fixture: &platform::Platform) {
 ///
 /// The set is closed, so a new json, jsonb or bytea column anywhere in
 /// `workflow_manager`, or a new column named for a payload, fails here. The
-/// predicate still names `output`, which is how a reintroduced inline run result
-/// fails here rather than passing unnoticed. The one column it does name is the
-/// journal's inline generation input;
-/// `docs/proposals/2026-09-19-workflow-journal-relocation.md` settles that it
-/// leaves, and emptying this list is what that change looks like from here.
+/// predicate still names `input` and `output`, which is how a reintroduced
+/// inline run input or result fails here rather than passing unnoticed: both
+/// are payload objects now, and the journal holds only their descriptors.
+///
+/// The expected set is EMPTY, so the control above it is what keeps this from
+/// passing over a schema the query never reached. It runs the same predicate
+/// with the payload names dropped, and the journal's own columns are what it
+/// must find.
 ///
 /// WHAT THIS DOES NOT SEE. The predicate matches a column's TYPE or its NAME, so
 /// creator payload carried in a text column under another name passes it. The
 /// `record` column of `__zeroship_workflow_steps` is a serialized
 /// `StoredCheckpoint` wrapping the `StepCheckpoint` declared in
-/// `crates/zeroship-workflow/src/engine.rs`, whose `output`, `error` and
-/// `child_input` are creator values; `finish_run`
+/// `crates/zeroship-workflow/src/engine.rs`, whose `output` and `error` are
+/// creator values; `finish_run`
 /// (`crates/zeroship-workflow/src/service/frontier.rs`) writes a creator error
-/// into `__zeroship_workflow_generations.error` beside the column named below;
-/// the `payload` columns of `__zeroship_workflow_signals` and
-/// `__zeroship_workflow_broadcasts` take `options.payload` from the caller; and
+/// into `__zeroship_workflow_generations.error`; the `payload` columns of
+/// `__zeroship_workflow_signals` and `__zeroship_workflow_broadcasts` take
+/// `options.payload` from the caller; and
 /// `__zeroship_workflow_deploys.manifest` carries every `ScheduleRegistration`
 /// input the deployment declared. An empty list here is not the same claim as a
 /// payload-free journal.
 async fn journal_payload_columns_are_a_closed_set(fixture: &platform::Platform) {
-    let columns = fixture
+    // The check below reads a NEGATIVE, so it is only worth the ink if the
+    // query producing it can produce a positive. The control runs first, over
+    // the same schema and the same shape of predicate, naming columns the
+    // journal certainly has; the two calls differ in the column list alone.
+    let present = payload_columns(fixture, &["state", "error"]).await;
+    assert!(
+        !present.is_empty(),
+        "no column of workflow_manager matches a name the journal declares, so the \
+         closed-set check below is reading an empty result out of a query that reaches \
+         nothing rather than out of a journal that holds no creator payload"
+    );
+    assert_eq!(
+        payload_columns(
+            fixture,
+            &[
+                "input",
+                "output",
+                "history",
+                "payload_url",
+                "database_url",
+                "task_token",
+            ],
+        )
+        .await,
+        Vec::new(),
+    );
+}
+
+/// Every column of the corpus-installed `workflow_manager` that carries a
+/// payload type or is named in `names`.
+async fn payload_columns(
+    fixture: &platform::Platform,
+    names: &[&str],
+) -> Vec<(String, String)> {
+    fixture
         .admin
         .query(
             "SELECT table_name,column_name FROM information_schema.columns \
              WHERE table_schema='workflow_manager' AND (data_type IN ('json','jsonb','bytea') \
-             OR column_name IN ('input','output','history','payload_url','database_url','task_token')) \
+             OR column_name = ANY($1)) \
              ORDER BY table_name,column_name",
-            &[],
+            &[&names],
         )
         .await
-        .unwrap();
-    assert_eq!(
-        columns
-            .iter()
-            .map(|row| (row.get::<_, String>(0), row.get::<_, String>(1)))
-            .collect::<Vec<_>>(),
-        vec![(format!("{JOURNAL_PREFIX}generations"), "input".to_owned())],
-    );
+        .unwrap()
+        .iter()
+        .map(|row| (row.get::<_, String>(0), row.get::<_, String>(1)))
+        .collect()
 }
 
 #[ntex::test]

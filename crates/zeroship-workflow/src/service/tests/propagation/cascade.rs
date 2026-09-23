@@ -246,6 +246,6 @@ pub(super) async fn restarted_source(store: Rc<OrmStore>) {
 pub(super) fn child_call(name: &str) -> crate::WorkflowExecution {
     execution(json!([{
         "kind":"Child", "ordinal":0, "name":name, "childWorkflowName":"Child",
-        "options":{"cascade":true}, "input":{}
+        "options":{"cascade":true}
     }]))
 }

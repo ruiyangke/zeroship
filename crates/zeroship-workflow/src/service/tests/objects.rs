@@ -87,6 +87,18 @@ impl Objects {
         self.get(app, id).is_some()
     }
 
+    /// Every object this app holds, by the payload id it is keyed under.
+    pub fn stored_for(&self, app: &AppId) -> Vec<(String, Vec<u8>)> {
+        self.0
+            .lock()
+            .unwrap()
+            .stored
+            .iter()
+            .filter(|((owner, _), _)| owner == app.as_str())
+            .map(|((_, id), body)| (id.clone(), body.clone()))
+            .collect()
+    }
+
     /// Every payload a deletion was attempted for, in order.
     pub fn deletes(&self) -> Vec<String> {
         self.0.lock().unwrap().deletes.clone()

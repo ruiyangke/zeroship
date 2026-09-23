@@ -234,6 +234,39 @@ async fn assert_unaccepted(service: &WorkflowService, scope: &AppWorkflows, gran
     tx.commit().await.unwrap();
 }
 
+/// What the run of this generation starts from, read back out of the object its
+/// row names. A generation keeps no inline input, so the descriptor and the
+/// store together are the whole record of it.
+fn started_from(
+    objects: &objects::Objects,
+    app: &AppId,
+    generation: &crate::service::store::Row,
+) -> serde_json::Value {
+    let reference: crate::engine::WorkflowOutputRef =
+        serde_json::from_str(&generation.text("input_ref").unwrap()).unwrap();
+    let id = payload_id(objects, app, &reference);
+    serde_json::from_slice(&objects.get(app, &id).unwrap()).unwrap()
+}
+
+/// The object in this app's store whose bytes match `reference`. Objects are
+/// keyed by the payload row that admitted them, and a test that holds only a
+/// descriptor finds its object by the content the descriptor names.
+fn payload_id(
+    objects: &objects::Objects,
+    app: &AppId,
+    reference: &crate::engine::WorkflowOutputRef,
+) -> String {
+    objects
+        .stored_for(app)
+        .into_iter()
+        .find(|(_, body)| {
+            i64::try_from(body.len()).is_ok_and(|size| size == reference.size)
+                && crate::service::hash(body) == reference.hash
+        })
+        .map(|(id, _)| id)
+        .expect("the staged run input must be in this app's store")
+}
+
 async fn replay(store: Rc<OrmStore>) {
     let objects = objects::Objects::new();
     let (service, app, _, platform) = registered_service(store.clone()).await;
@@ -261,7 +294,7 @@ async fn replay(store: Rc<OrmStore>) {
     )
     .await;
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&generations[0].text("input").unwrap()).unwrap(),
+        started_from(&objects, &app, &generations[0]),
         json!({"creator":"input"})
     );
     assert_eq!(
@@ -334,10 +367,7 @@ async fn historical(store: Rc<OrmStore>) {
             json!({"app_id":app.as_str(), "run_id":grant.run_id()}),
         )
         .await;
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&rows[0].text("input").unwrap()).unwrap(),
-            json!(input)
-        );
+        assert_eq!(started_from(&objects, &app, &rows[0]), json!(input));
     }
     assert_eq!(
         journal_count(&tx, "occurrences", json!({"app_id":app.as_str()})).await,
@@ -448,7 +478,7 @@ async fn finish_run(service: &WorkflowService, app: &AppId, continuation: bool) 
         panic!("published Advance job must claim its exact run");
     };
     let outcome = if continuation {
-        json!([{"kind":"ContinueAsNew", "input":"continued"}])
+        json!([{"kind":"ContinueAsNew"}])
     } else {
         json!([{"kind":"RunCompleted"}])
     };

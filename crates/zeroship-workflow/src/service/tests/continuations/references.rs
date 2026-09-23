@@ -10,6 +10,83 @@ paired!(
     postgres_consumed_checkpoints_pin_their_continuation_members,
     pinned_members
 );
+paired!(
+    sqlite_a_continuation_seeded_inline_is_refused_by_name,
+    postgres_a_continuation_seeded_inline_is_refused_by_name,
+    inline_seed
+);
+
+/// A successor starts from an OBJECT, so a seed the executor never staged is a
+/// run this journal cannot admit and the frontier says so by name.
+///
+/// The runner stages every value a body hands `continueAsNew`, which is why no
+/// executor reaches this. What the refusal prevents is the silent alternative:
+/// a successor admitted with no input at all, started from nothing, with the
+/// creator's seed dropped on the floor.
+async fn inline_seed(store: Rc<OrmStore>) {
+    let (service, app_id, _, _deployments) = registered_service(store).await;
+    let scope = service.fixture_app(app_id.clone());
+    let objects = Objects::new();
+    let worker = WorkerIdentity::new("continuation-inline-seed".into()).unwrap();
+    let run = scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let task = service.poll(&worker).await.unwrap().unwrap();
+    let refused = service
+        .complete(
+            &worker,
+            &task.id,
+            &task.token,
+            execution(json!([{"kind":"ContinueAsNew", "input":{"page":2}}])),
+        )
+        .await
+        .expect_err("an unstaged continuation seed must not be admitted");
+    assert!(
+        matches!(
+            &refused,
+            WorkflowServiceError::InvalidRequest(message)
+                if message == "workflow continuation input must be a staged reference"
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(
+        scope.status(&run.id).await.unwrap().state,
+        RunState::Running,
+        "a refused completion leaves the run on its lease"
+    );
+
+    // The control: the SAME seed, staged first, is admitted, and the successor
+    // starts from the object. So the refusal above is the missing staging and
+    // not this frontier refusing every continuation.
+    let seed = super::super::staged(&service, &objects, &worker, &task, &json!({"page":2})).await;
+    service
+        .complete(
+            &worker,
+            &task.id,
+            &task.token,
+            execution(json!([{"kind":"ContinueAsNew", "inputRef":seed}])),
+        )
+        .await
+        .unwrap();
+    let successor = service.poll(&worker).await.unwrap().unwrap();
+    assert_ne!(successor.invocation.run_id, run.id);
+    assert!(successor.invocation.trigger.input.is_none());
+    assert_eq!(successor.invocation.trigger.input_ref, Some(seed.clone()));
+    assert_eq!(
+        service
+            .read_task_payload(
+                &worker,
+                &successor.id,
+                &successor.token,
+                &seed,
+                objects.open()
+            )
+            .await
+            .unwrap(),
+        serde_json::to_vec(&json!({"page":2})).unwrap()
+    );
+}
 
 async fn purge(
     tx: &Transaction,

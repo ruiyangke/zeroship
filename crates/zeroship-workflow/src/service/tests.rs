@@ -719,6 +719,35 @@ pub(super) fn output_reference(data: &[u8]) -> crate::engine::WorkflowOutputRef 
     }
 }
 
+/// Stage `value` under the task whose outcome is about to name it, and return
+/// the descriptor the outcome carries in its place.
+///
+/// This is what the runner does to every value a body hands a child or a
+/// continuation: a generation row keeps no inline slot for a run's input, so
+/// what reaches the journal is always a descriptor.
+pub(super) async fn staged(
+    service: &WorkflowService,
+    objects: &objects::Objects,
+    worker: &super::WorkerIdentity,
+    task: &super::TaskAssignment,
+    value: &serde_json::Value,
+) -> crate::engine::WorkflowOutputRef {
+    let bytes = serde_json::to_vec(value).unwrap();
+    let reference = output_reference(&bytes);
+    service
+        .stage_payload(
+            worker,
+            &task.id,
+            &task.token,
+            &RequestId::mint(),
+            reference.clone(),
+            objects.upload(&bytes),
+        )
+        .await
+        .unwrap();
+    reference
+}
+
 async fn task_contract(store: Rc<OrmStore>) {
     use super::{TaskToken, WorkerIdentity};
     use crate::operations::RunState;
@@ -1138,8 +1167,9 @@ async fn behavior_contract(store: Rc<OrmStore>) {
         .activate(&service, &app, &new_deploy)
         .await
         .unwrap();
+    let child_input = staged(&service, &objects, &worker, &task, &json!({"task":true})).await;
     let invalid = execution(json!([
-        {"kind":"Child","ordinal":0,"name":"child","childWorkflowName":"Child","input":{"task":true}},
+        {"kind":"Child","ordinal":0,"name":"child","childWorkflowName":"Child","inputRef":child_input},
         {"kind":"StepCompleted","ordinal":9,"name":"invalid"}
     ]));
     assert!(matches!(
@@ -1157,16 +1187,28 @@ async fn behavior_contract(store: Rc<OrmStore>) {
     .await
     .is_empty());
     tx.commit().await.unwrap();
-    service.complete(&worker,&task.id,&task.token,execution(json!([{ "kind":"Child","ordinal":0,"name":"child","childWorkflowName":"Child","input":{"task":true}}]))).await.unwrap();
+    service.complete(&worker,&task.id,&task.token,execution(json!([{ "kind":"Child","ordinal":0,"name":"child","childWorkflowName":"Child","inputRef":child_input}]))).await.unwrap();
     let child = service.poll(&worker).await.unwrap().unwrap();
     assert_eq!(child.invocation.workflow_name, "Child");
     assert_eq!(child.invocation.deploy_id, old_deploy);
+    // The child starts from the object its parent staged, and owns it: the
+    // parent's task is long gone by the time the child's own task reads it.
+    assert!(child.invocation.trigger.input.is_none());
+    assert_eq!(child.invocation.trigger.input_ref, Some(child_input.clone()));
+    assert_eq!(
+        service
+            .read_task_payload(&worker, &child.id, &child.token, &child_input, objects.open())
+            .await
+            .unwrap(),
+        serde_json::to_vec(&json!({"task":true})).unwrap()
+    );
     service
         .complete(
             &worker,
             &child.id,
             &child.token,
-            execution(json!([{"kind":"ContinueAsNew","input":"child continuation"}])),
+            execution(json!([{"kind":"ContinueAsNew","inputRef":
+                staged(&service, &objects, &worker, &child, &json!("child continuation")).await}])),
         )
         .await
         .unwrap();
@@ -1211,21 +1253,27 @@ async fn behavior_contract(store: Rc<OrmStore>) {
             .unwrap(),
         CHILD_RESULT
     );
+    let seed = staged(&service, &objects, &worker, &resumed, &json!({"next":true})).await;
     service
         .complete(
             &worker,
             &resumed.id,
             &resumed.token,
-            execution(json!([{"kind":"ContinueAsNew","input":{"next":true}}])),
+            execution(json!([{"kind":"ContinueAsNew","inputRef":seed}])),
         )
         .await
         .unwrap();
     let successor = service.poll(&worker).await.unwrap().unwrap();
     assert_ne!(successor.invocation.run_id, parent.id);
     assert_eq!(successor.invocation.deploy_id, new_deploy.id);
+    assert!(successor.invocation.trigger.input.is_none());
+    assert_eq!(successor.invocation.trigger.input_ref, Some(seed.clone()));
     assert_eq!(
-        successor.invocation.trigger.input,
-        Some(json!({"next":true}))
+        service
+            .read_task_payload(&worker, &successor.id, &successor.token, &seed, objects.open())
+            .await
+            .unwrap(),
+        serde_json::to_vec(&json!({"next":true})).unwrap()
     );
     service
         .complete(

@@ -196,7 +196,7 @@ async fn continuation_contract(store: Rc<OrmStore>) {
             &worker,
             &task.id,
             &task.token,
-            execution(json!([{"kind":"ContinueAsNew", "input":"next"}])),
+            execution(json!([{"kind":"ContinueAsNew"}])),
         )
         .await
         .unwrap();
@@ -266,7 +266,7 @@ async fn seed_run(tx: &mut Transaction, app_id: &AppId, id: &str, name: &str) {
         .unwrap()
         .insert(value!({
             "id":storage_id(), "app_id":app_id.as_str(), "run_id":id, "generation":1, "deploy_id":deploy.id,
-            "input":"null", "state":"queued", "started_at":now,
+            "state":"queued", "started_at":now,
         }))
         .await
         .unwrap();

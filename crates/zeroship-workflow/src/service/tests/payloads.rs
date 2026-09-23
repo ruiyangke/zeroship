@@ -33,6 +33,100 @@ async fn postgres_payload_ownership_and_retention() {
 }
 
 #[compio::test]
+async fn sqlite_siblings_started_from_one_object_each_own_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("zs-workflow.sqlite");
+    schema::initialize_sqlite(&path).unwrap();
+    shared_child_input(Rc::new(sqlite_store(&path).await)).await;
+}
+
+#[compio::test]
+async fn postgres_siblings_started_from_one_object_each_own_it() {
+    let fixture = PostgresFixture::start().await;
+    shared_child_input(Rc::new(fixture.store.clone())).await;
+}
+
+/// Two children started from byte-identical inputs share one object, and each
+/// one owns it.
+///
+/// Preparation deduplicates uploads by descriptor, so a `startMany` over
+/// identical items stages the bytes once. The first child's acceptance then
+/// puts that object's only edge on the CHILD, where no edge of the parent's
+/// reaches it -- so what proves the second child may take it is the staging the
+/// parent's own task did, which the object's columns still record.
+async fn shared_child_input(store: Rc<OrmStore>) {
+    let (service, app, _, _deployments) = registered_service(store).await;
+    let scope = service.fixture_app(app.clone());
+    let objects = Objects::new();
+    let worker = WorkerIdentity::new("shared-child-input".into()).unwrap();
+    scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let parent = service.poll(&worker).await.unwrap().unwrap();
+    let data = br#"{"item":1}"#;
+    let input = reference(data);
+    service
+        .stage_payload(
+            &worker,
+            &parent.id,
+            &parent.token,
+            &RequestId::mint(),
+            input.clone(),
+            objects.upload(data),
+        )
+        .await
+        .unwrap();
+    service
+        .complete(
+            &worker,
+            &parent.id,
+            &parent.token,
+            execution(json!([
+                {"kind":"Child","ordinal":0,"name":"item-0","childWorkflowName":"Child",
+                 "inputRef":input, "options":{}},
+                {"kind":"Child","ordinal":1,"name":"item-1","childWorkflowName":"Child",
+                 "inputRef":input, "options":{}},
+            ])),
+        )
+        .await
+        .unwrap();
+    let mut started = Vec::new();
+    while let Some(child) = service.poll(&worker).await.unwrap() {
+        assert_eq!(child.invocation.workflow_name, "Child");
+        assert!(child.invocation.trigger.input.is_none());
+        assert_eq!(child.invocation.trigger.input_ref, Some(input.clone()));
+        assert_eq!(
+            service
+                .read_task_payload(&worker, &child.id, &child.token, &input, objects.open())
+                .await
+                .unwrap(),
+            data
+        );
+        started.push(child.invocation.run_id.clone());
+    }
+    assert_eq!(started.len(), 2, "both children must start: {started:?}");
+
+    // Each child owns the object in its own right, so retiring one leaves the
+    // other's input intact. Without both edges the shared object would belong
+    // to whichever sibling happened to be admitted first.
+    let tx = service.begin().await.unwrap();
+    let mut owners: Vec<String> = journal_rows(
+        &tx,
+        "payload_refs",
+        json!({"app_id":app.as_str(), "slot":"input"}),
+    )
+    .await
+    .iter()
+    .map(|row| row.text("run_id").unwrap())
+    .collect();
+    tx.commit().await.unwrap();
+    owners.sort();
+    started.sort();
+    assert_eq!(owners, started);
+}
+
+#[compio::test]
 async fn postgres_payload_record_write_that_outlives_its_lease_rolls_back() {
     delayed_payload_write("INSERT").await;
 }
@@ -546,7 +640,7 @@ async fn continuation_and_child(
         .await
         .unwrap();
     let task = service.poll(worker).await.unwrap().unwrap();
-    service.complete(worker, &task.id, &task.token, execution(json!([{"kind":"Child","ordinal":0,"name":"child","childWorkflowName":"Child","input":{},"options":{}}]))).await.unwrap();
+    service.complete(worker, &task.id, &task.token, execution(json!([{"kind":"Child","ordinal":0,"name":"child","childWorkflowName":"Child","options":{}}]))).await.unwrap();
     let child = service.poll(worker).await.unwrap().unwrap();
     let data = br#"{"continued":true}"#;
     let output = reference(data);
